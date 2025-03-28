@@ -1,3 +1,4 @@
 /target
 image.ppm
 Cargo.lock
+output.exr
