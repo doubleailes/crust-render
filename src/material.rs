@@ -37,6 +37,7 @@ impl Material for Lambertian {
         if scatter_direction.near_zero() {
             scatter_direction = rec.normal;
         }
+
         *attenuation = self.albedo;
         *scattered = Ray::new(rec.p, scatter_direction);
         true
@@ -45,15 +46,18 @@ impl Material for Lambertian {
 
 pub struct Metal {
     albedo: Color,
-    roughness: f32,
+    fuzz: f32,
 }
- 
+
 impl Metal {
-    pub fn new(a: Color, r:f32) -> Metal {
-        Metal { albedo: a, roughness:if r < 1.0 { r } else { 1.0 }, }
+    pub fn new(a: Color, f: f32) -> Metal {
+        Metal {
+            albedo: a,
+            fuzz: if f < 1.0 { f } else { 1.0 },
+        }
     }
 }
- 
+
 impl Material for Metal {
     fn scatter(
         &self,
@@ -63,24 +67,24 @@ impl Material for Metal {
         scattered: &mut Ray,
     ) -> bool {
         let reflected = vec3::reflect(vec3::unit_vector(r_in.direction()), rec.normal);
- 
+
         *attenuation = self.albedo;
-        *scattered = Ray::new(rec.p, reflected + self.roughness * vec3::random_in_unit_sphere());
+        *scattered = Ray::new(rec.p, reflected + self.fuzz * vec3::random_in_unit_sphere());
         vec3::dot(scattered.direction(), rec.normal) > 0.0
     }
 }
 
-
 pub struct Dielectric {
     ir: f32, // Index of refraction
 }
- 
+
 impl Dielectric {
     pub fn new(index_of_refraction: f32) -> Dielectric {
         Dielectric {
             ir: index_of_refraction,
         }
     }
+
     fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
         // Use Schlick's approximation for reflectance
         let mut r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
@@ -88,7 +92,7 @@ impl Dielectric {
         r0 + (1.0 - r0) * f32::powf(1.0 - cosine, 5.0)
     }
 }
- 
+
 impl Material for Dielectric {
     fn scatter(
         &self,
@@ -102,11 +106,11 @@ impl Material for Dielectric {
         } else {
             self.ir
         };
- 
+
         let unit_direction = vec3::unit_vector(r_in.direction());
         let cos_theta = f32::min(vec3::dot(-unit_direction, rec.normal), 1.0);
         let sin_theta = f32::sqrt(1.0 - cos_theta * cos_theta);
- 
+
         let cannot_refract = refraction_ratio * sin_theta > 1.0;
         let direction = if cannot_refract
             || Self::reflectance(cos_theta, refraction_ratio) > common::random()
@@ -115,7 +119,7 @@ impl Material for Dielectric {
         } else {
             vec3::refract(unit_direction, rec.normal, refraction_ratio)
         };
- 
+
         *attenuation = Color::new(1.0, 1.0, 1.0);
         *scattered = Ray::new(rec.p, direction);
         true
