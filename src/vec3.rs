@@ -13,13 +13,9 @@ impl Vec3 {
         Vec3 { e: [x, y, z] }
     }
     pub fn random() -> Vec3 {
-        Vec3::new(
-            common::random(),
-            common::random(),
-            common::random(),
-        )
+        Vec3::new(common::random(), common::random(), common::random())
     }
- 
+
     pub fn random_range(min: f32, max: f32) -> Vec3 {
         Vec3::new(
             common::random_range(min, max),
@@ -46,6 +42,11 @@ impl Vec3 {
     // This is the square of the length of the vector
     pub fn length_squared(&self) -> f32 {
         self.e[0] * self.e[0] + self.e[1] * self.e[1] + self.e[2] * self.e[2]
+    }
+    pub fn near_zero(&self) -> bool {
+        const EPS: f32 = 1.0e-8;
+        // Return true if the vector is close to zero in all dimensions
+        self.e[0].abs() < EPS && self.e[1].abs() < EPS && self.e[2].abs() < EPS
     }
 }
 
@@ -171,4 +172,8 @@ pub fn random_in_unit_sphere() -> Vec3 {
 
 pub fn random_unit_vector() -> Vec3 {
     unit_vector(random_in_unit_sphere())
+}
+
+pub fn reflect(v: Vec3, n: Vec3) -> Vec3 {
+    v - 2.0 * dot(v, n) * n
 }

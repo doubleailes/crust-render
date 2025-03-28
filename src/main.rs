@@ -1,12 +1,13 @@
 mod camera;
 mod color;
 mod common;
+mod convert;
 mod hittable;
 mod hittable_list;
+mod material;
 mod ray;
 mod sphere;
 mod vec3;
-mod convert;
 
 use camera::Camera;
 use color::Color;
@@ -16,6 +17,9 @@ use hittable_list::HittableList;
 use ray::Ray;
 use sphere::Sphere;
 use vec3::{Point3, Vec3};
+use material::{Lambertian, Metal};
+use std::sync::Arc;
+
 
 // Constants
 
@@ -31,9 +35,18 @@ fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Color {
         return Color::new(0.0, 0.0, 0.0);
     }
     let mut rec = HitRecord::new();
-    if world.hit(r, 0.0001, common::INFINITY, &mut rec) {
-        let direction = rec.normal + vec3::random_unit_vector();
-        return 0.5 * ray_color(&Ray::new(rec.p, direction), world, depth - 1);
+    if world.hit(r, 0.001, common::INFINITY, &mut rec) {
+        let mut attenuation = Color::default();
+        let mut scattered = Ray::default();
+        if rec
+            .mat
+            .as_ref()
+            .unwrap()
+            .scatter(r, &rec, &mut attenuation, &mut scattered)
+        {
+            return attenuation * ray_color(&scattered, world, depth - 1);
+        }
+        return Color::new(0.0, 0.0, 0.0);
     }
     let unit_direction: Vec3 = vec3::unit_vector(r.direction());
     let t: f32 = 0.5 * (unit_direction.y() + 1.0);
@@ -51,8 +64,8 @@ fn get_color(
 ) -> (f32, f32, f32, f32) {
     let mut pixel_color = Color::new(0.0, 0.0, 0.0);
     for _ in 0..SAMPLES_PER_PIXEL {
-        let u = ( x as f32 + common::random()) / (IMAGE_WIDTH - 1) as f32;
-        let v = (y as f32 + common::random() ) / (IMAGE_HEIGHT - 1) as f32;
+        let u = (x as f32 + common::random()) / (IMAGE_WIDTH - 1) as f32;
+        let v = (y as f32 + common::random()) / (IMAGE_HEIGHT - 1) as f32;
         let r = Ray::new(
             origin,
             lower_left_corner + u * horizontal + v * vertical - origin,
@@ -70,8 +83,31 @@ fn main() {
     // World
 
     let mut world = HittableList::new();
-    world.add(Box::new(Sphere::new(Point3::new(0.0, 0.0, -1.0), 0.5)));
-    world.add(Box::new(Sphere::new(Point3::new(0.0, -100.5, -1.0), 100.0)));
+    let material_ground = Arc::new(Lambertian::new(Color::new(0.8, 0.8, 0.0)));
+    let material_center = Arc::new(Lambertian::new(Color::new(0.7, 0.3, 0.3)));
+    let material_left = Arc::new(Metal::new(Color::new(0.8, 0.8, 0.8), 0.2));
+    let material_right = Arc::new(Metal::new(Color::new(0.8, 0.6, 0.2), 1.0));
+ 
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, -100.5, -1.0),
+        100.0,
+        material_ground,
+    )));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, 0.0, -1.0),
+        0.5,
+        material_center,
+    )));
+    world.add(Box::new(Sphere::new(
+        Point3::new(-1.0, 0.0, -1.0),
+        0.5,
+        material_left,
+    )));
+    world.add(Box::new(Sphere::new(
+        Point3::new(1.0, 0.0, -1.0),
+        0.5,
+        material_right,
+    )));
 
     // Camera
 
