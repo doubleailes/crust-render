@@ -1,0 +1,7 @@
+[package]
+name = "ray-tracing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+exr = "1.73.0"
