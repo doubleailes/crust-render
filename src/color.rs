@@ -13,4 +13,7 @@ impl Color {
     pub fn b(&self) -> f32 {
         self.z()
     }
+    pub fn rgb(&self) -> (f32, f32, f32) {
+        (self.r(), self.g(), self.b())
+    }
 }
