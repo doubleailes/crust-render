@@ -17,9 +17,8 @@ use hittable_list::HittableList;
 use ray::Ray;
 use sphere::Sphere;
 use vec3::{Point3, Vec3};
-use material::{Lambertian, Metal};
+use material::{Lambertian, Metal, Dielectric};
 use std::sync::Arc;
-
 
 // Constants
 
@@ -62,7 +61,7 @@ fn get_color(
     horizontal: Vec3,
     vertical: Vec3,
 ) -> (f32, f32, f32, f32) {
-    let mut pixel_color = Color::new(0.0, 0.0, 0.0);
+    let mut pixel_color:Vec3  = Color::new(0.0, 0.0, 0.0);
     for _ in 0..SAMPLES_PER_PIXEL {
         let u = (x as f32 + common::random()) / (IMAGE_WIDTH - 1) as f32;
         let v = (y as f32 + common::random()) / (IMAGE_HEIGHT - 1) as f32;
@@ -84,9 +83,9 @@ fn main() {
 
     let mut world = HittableList::new();
     let material_ground = Arc::new(Lambertian::new(Color::new(0.8, 0.8, 0.0)));
-    let material_center = Arc::new(Lambertian::new(Color::new(0.7, 0.3, 0.3)));
-    let material_left = Arc::new(Metal::new(Color::new(0.8, 0.8, 0.8), 0.2));
-    let material_right = Arc::new(Metal::new(Color::new(0.8, 0.6, 0.2), 1.0));
+    let material_center = Arc::new(Lambertian::new(Color::new(0.1, 0.2, 0.5)));
+    let material_left = Arc::new(Dielectric::new(1.5));
+    let material_right = Arc::new(Metal::new(Color::new(0.8, 0.6, 0.2), 0.0));
  
     world.add(Box::new(Sphere::new(
         Point3::new(0.0, -100.5, -1.0),
