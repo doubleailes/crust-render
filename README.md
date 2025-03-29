@@ -1,6 +1,7 @@
 # 🎯 Path Tracing in Rust
 
-A modular, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
+A toy, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
+Completly in a vibe coding mood.
 
 ![preview](./images/rgb.png)
 
