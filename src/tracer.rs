@@ -103,7 +103,7 @@ impl RenderSettings {
     
 }
 
-fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
+pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
     if depth <= 0 {
         return Color::zero();
     }
