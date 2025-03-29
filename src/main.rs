@@ -37,7 +37,7 @@ fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Color {
     }
 
     let mut rec = HitRecord::new();
-    if world.hit(r, 0.001, common::INFINITY, &mut rec) {
+    if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
         let mut attenuation = Color::default();
         let mut scattered = Ray::default();
         if rec

@@ -1,8 +1,5 @@
-use rand;
-
 // Constants
 
-pub use std::f32::INFINITY;
 pub use std::f32::consts::PI;
 
 // Utility functions
@@ -21,6 +18,7 @@ pub fn random_range(min: f32, max: f32) -> f32 {
     min + (max - min) * random()
 }
 
+#[allow(dead_code)]
 pub fn clamp(x: f32, min: f32, max: f32) -> f32 {
     if x < min {
         return min;
