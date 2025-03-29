@@ -12,6 +12,8 @@ pub mod sphere;
 pub mod vec3;
 pub mod tracer;
 pub mod world;
+mod vec3x8;
+mod rayx8;
 
 pub use buffer::Buffer;
 pub use camera::Camera;
@@ -22,3 +24,4 @@ pub use vec3::{Vec3, Point3};
 pub use material::*;
 pub use light::{Light, LightList};
 pub use world::random_scene;
+pub use vec3x8::Vec3x8;

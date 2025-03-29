@@ -6,6 +6,7 @@ use crate::ray::Ray;
 use crate::vec3;
 use rayon::prelude::*;
 use crate::{camera::Camera, hittable_list::HittableList, LightList};
+use crate::rayx8::Rayx8;
 
 pub struct Renderer {
     pub camera: Camera,
@@ -26,51 +27,58 @@ impl Renderer{
 
     pub fn render(&self) -> Buffer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+    
         for j in (0..self.settings.height).rev() {
             eprint!("\rScanlines remaining: {} ", j);
-            let pixel_colors: Vec<_> = (0..self.settings.width)
+    
+            let row_pixels: Vec<_> = (0..self.settings.width)
+                .step_by(8)
                 .into_par_iter()
-                .map(|i| {
-                    let mut sum = Color::new(0.0, 0.0, 0.0);
-                    let mut sum_sq = Color::new(0.0, 0.0, 0.0);
-                    let mut samples = 0;
+                .map(|i_start| {
+                    let mut colors = [Color::zero(); 8];
     
-                    let final_color = loop {
-                        let u = ((i as f32) + common::random()) / (self.settings.width - 1) as f32;
-                        let v = ((j as f32) + common::random()) / (self.settings.height - 1) as f32;
-                        let r = self.camera.get_ray(u, v);
-                        let col = ray_color(&r, &self.world, &self.lights, self.settings.max_depth as i32);
+                    // Prepare batch of 8 rays
+                    let mut origins = [vec3::Point3::default(); 8];
+                    let mut directions = [vec3::Vec3::default(); 8];
     
-                        sum += col;
-                        sum_sq += col * col;
-                        samples += 1;
-    
-                        if samples >= self.settings.min_samples_per_pixel {
-                            let mean = sum / samples as f32;
-                            let mean_sq = sum_sq / samples as f32;
-                            let variance = mean_sq - mean * mean;
-    
-                            if variance.max_component() < self.settings.variance_threshold
-                                || samples >= self.settings.samples_per_pixel
-                            {
-                                break mean; // Use `mean` as final_color and break early
-                            }
+                    for k in 0..8 {
+                        let i = i_start + k;
+                        if i >= self.settings.width {
+                            continue; // padding
                         }
     
-                        if samples >= self.settings.samples_per_pixel {
-                            break sum / samples as f32;
-                        }
-                    };
+                        let u = (i as f32 + 0.5) / (self.settings.width - 1) as f32;
+                        let v = (j as f32 + 0.5) / (self.settings.height - 1) as f32;
+                        let ray = self.camera.get_ray(u, v);
+                        origins[k] = ray.origin();
+                        directions[k] = ray.direction();
+                    }
     
-                    final_color
+                    // Convert to Vec3x8
+                    let origin_x8 = Vec3x8::from_array(origins);
+                    let direction_x8 = Vec3x8::from_array(directions);
+                    let rayx8 = Rayx8::new(origin_x8, direction_x8);
+    
+                    // Trace all 8 rays
+                    let result_x8 = ray_color_x8(&rayx8, &self.world, &self.lights, self.settings.max_depth as i32);
+    
+                    // Unpack Vec3x8 into colors
+                    result_x8.to_array()
                 })
+                .flatten()
                 .collect();
-            for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
-                buffer.set_pixel(i, j, pixel_color);
+    
+            // Write results
+            for (i, pixel_color) in row_pixels.into_iter().enumerate() {
+                if i < self.settings.width {
+                    buffer.set_pixel(i, j, pixel_color);
+                }
             }
         }
+    
         buffer
     }
+    
 }
 
 pub struct RenderSettings {
@@ -178,4 +186,79 @@ fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> C
     let unit_direction = vec3::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
+}
+
+pub fn ray_color_x8(ray: &Rayx8, world: &dyn Hittable, lights: &LightList, depth: i32) -> Vec3x8 {
+    use wide::CmpGt;
+
+    if depth <= 0 {
+        return Vec3x8::zero();
+    }
+
+    // Perform 8-ray intersection
+    let mut recs = HitRecordx8::new();
+    let hits = world.hit_x8(ray, 0.001, f32::INFINITY, &mut recs);
+
+    // Initialize result colors to background
+    let background = Vec3::new(0.5, 0.7, 1.0);
+    let mut result = Vec3x8::splat(background);
+
+    for i in 0..8 {
+        if !hits[i] {
+            continue;
+        }
+
+        let rec = recs.get(i);
+        let emitted = rec.mat.as_ref().unwrap().emitted();
+        let mut total_light = emitted;
+
+        // === Direct Lighting ===
+        for light in &lights.lights {
+            let light_point = light.sample();
+            let light_dir = light_point - rec.p;
+            let light_distance = light_dir.length();
+            let light_dir_unit = unit_vector_x8(Vec3x8::splat(light_dir));
+            let shadow_ray = Rayx8::new(Vec3x8::splat(rec.p), light_dir_unit);
+
+            let mut shadow_recs = HitRecordx8::new();
+            let shadow_hits = world.hit_x8(&shadow_ray, 0.001, light_distance - 0.001, &mut shadow_recs);
+
+            if !shadow_hits[i] {
+                let cosine = f32::max(dot_x8(Vec3x8::splat(rec.normal), light_dir_unit).extract(i), 0.0);
+                let light_pdf = light.pdf(rec.p, light_point);
+
+                if let Some((_, brdf_val, brdf_pdf)) = rec.mat.as_ref().unwrap().scatter_importance(&ray.get(i), &rec) {
+                    let weight = crate::common::balance_heuristic(light_pdf, brdf_pdf);
+                    total_light += light.color() * brdf_val * cosine * weight / light_pdf;
+                }
+            }
+        }
+
+        // === BRDF Sampling ===
+        if let Some((scattered, brdf_val, brdf_pdf)) = rec.mat.as_ref().unwrap().scatter_importance(&ray.get(i), &rec) {
+            let cosine = f32::max(dot_x8(Vec3x8::splat(rec.normal), unit_vector_x8(Vec3x8::splat(scattered.direction()))).extract(i), 0.0);
+            let mut light_hit = HitRecordx8::new();
+
+            let single_ray = Rayx8::splat(scattered);
+            let light_hits = world.hit_x8(&single_ray, 0.001, f32::INFINITY, &mut light_hit);
+
+            if light_hits[i] {
+                let light_rec = light_hit.get(i);
+                let emitted = light_rec.mat.as_ref().unwrap().emitted();
+
+                if emitted.length_squared() > 0.0 {
+                    let light_pdf_sum: f32 = lights.lights.iter().map(|l| l.pdf(rec.p, light_rec.p)).sum();
+                    let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
+                    let weight = crate::common::balance_heuristic(brdf_pdf, light_pdf);
+                    total_light += emitted * brdf_val * cosine * weight / brdf_pdf;
+                }
+            } else {
+                total_light += brdf_val * ray_color_x8(&Rayx8::splat(scattered), world, lights, depth - 1).extract(i) * cosine / brdf_pdf;
+            }
+        }
+
+        result.set(i, total_light);
+    }
+
+    result
 }
