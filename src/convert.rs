@@ -31,10 +31,15 @@ pub fn convert() {
     /// compress any possible f32 into the range of [0,1].
     /// and then convert it to an unsigned byte.
     fn tone_map(linear: f32) -> u8 {
-        // TODO does the `image` crate expect gamma corrected data?
-        let clamped = (linear - 0.5).tanh() * 0.5 + 0.5;
-        (clamped * 255.0) as u8
+        let clamped = linear.clamp(0.0, 1.0);
+        let srgb = if clamped <= 0.0031308 {
+            12.92 * clamped
+        } else {
+            1.055 * clamped.powf(1.0 / 2.4) - 0.055
+        };
+        (srgb * 255.0 + 0.5).floor() as u8
     }
+    
 
     // save the png buffer to a png file
     let png_buffer = &image.layer_data.channel_data.pixels;
