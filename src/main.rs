@@ -1,7 +1,7 @@
 use clap::Parser;
 use exr::prelude::*;
 use ray_tracing::vec3::Point3;
-use ray_tracing::world::random_scene;
+use ray_tracing::world::simple_scene;
 use ray_tracing::camera::Camera;
 use ray_tracing::tracer::{RenderSettings,Renderer};
 use ray_tracing::convert;
@@ -35,7 +35,7 @@ fn main() {
     let max_depth: u32 = cli.max_depth;
     // World
 
-    let (world, lights) = random_scene();
+    let (world, lights) = simple_scene();
     // Camera
 
     let lookfrom = Point3::new(13.0, 2.0, 3.0);
