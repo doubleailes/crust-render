@@ -1,6 +1,8 @@
 use crate::color::Color;
 use crate::hittable::HitRecord;
+use crate::light::Light;
 use crate::ray::Ray;
+use crate::vec3::{Point3, Vec3};
 use crate::{common, vec3};
 
 pub trait Material: Send + Sync {
@@ -12,24 +14,24 @@ pub trait Material: Send + Sync {
         scattered: &mut Ray,
     ) -> bool;
 
-    fn scatter_importance(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-    ) -> Option<(Ray, Color, f32)> {
+    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Color, f32)> {
         // Default fallback for materials that don't support importance sampling
         let mut attenuation = Color::default();
         let mut scattered = Ray::default();
         if self.scatter(r_in, rec, &mut attenuation, &mut scattered) {
-            let cosine = f32::max(vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())), 0.0);
+            let cosine = f32::max(
+                vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())),
+                0.0,
+            );
             let pdf = 1.0; // uniform sampling (fake)
             return Some((scattered, attenuation * cosine, pdf));
         }
         None
     }
+    fn emitted(&self) -> Color {
+        Color::new(0.0, 0.0, 0.0)
+    }
 }
-
-
 
 pub struct Lambertian {
     albedo: Color,
@@ -235,7 +237,6 @@ impl CookTorrance {
     }
 }
 
-
 impl Material for CookTorrance {
     fn scatter(
         &self,
@@ -265,11 +266,7 @@ impl Material for CookTorrance {
         true
     }
 
-    fn scatter_importance(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-    ) -> Option<(Ray, Color, f32)> {
+    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Color, f32)> {
         let n = rec.normal;
         let v = -vec3::unit_vector(r_in.direction());
 
@@ -290,5 +287,72 @@ impl Material for CookTorrance {
         let pdf = Self::pdf_ggx(n, h, self.roughness).max(0.001);
 
         Some((scattered, attenuation, pdf))
+    }
+}
+
+pub struct Emissive {
+    color: Color,
+    position: Point3,
+    radius: f32,
+}
+
+impl Emissive {
+    pub fn new(color: Color, position: Point3, radius: f32) -> Self {
+        Emissive {
+            color,
+            position,
+            radius,
+        }
+    }
+    pub fn color(&self) -> Color {
+        self.color
+    }
+    pub fn position(&self) -> Point3 {
+        self.position
+    }
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+}
+
+impl Material for Emissive {
+    fn scatter(
+        &self,
+        _r_in: &Ray,
+        _rec: &HitRecord,
+        _attenuation: &mut Color,
+        _scattered: &mut Ray,
+    ) -> bool {
+        false // Emissive materials do not scatter
+    }
+
+    fn emitted(&self) -> Color {
+        self.color
+    }
+
+    fn scatter_importance(&self, _r_in: &Ray, _rec: &HitRecord) -> Option<(Ray, Color, f32)> {
+        None
+    }
+}
+
+impl Light for Emissive {
+    fn sample(&self) -> Point3 {
+        self.position + self.radius * crate::vec3::random_unit_vector()
+    }
+
+    fn pdf(&self, hit_point: Point3, light_point: Point3) -> f32 {
+        let direction = light_point - hit_point;
+        let distance_squared = direction.length_squared();
+        let normal = vec3::unit_vector(direction);
+        let cosine = f32::max(
+            vec3::dot(normal, vec3::unit_vector(light_point - hit_point)),
+            0.0,
+        );
+        let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
+        distance_squared / (cosine * area + 1e-4)
+    }
+
+    fn color(&self) -> Color {
+        self.color
     }
 }

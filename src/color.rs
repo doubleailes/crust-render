@@ -16,4 +16,10 @@ impl Color {
     pub fn rgb(&self) -> (f32, f32, f32) {
         (self.r(), self.g(), self.b())
     }
+    pub fn zero() -> Self {
+        Self::new(0.0, 0.0, 0.0)
+    }
+    pub fn max_component(&self) -> f32 {
+        self.x().max(self.y()).max(self.z())
+    }
 }

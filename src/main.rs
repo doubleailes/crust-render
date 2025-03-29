@@ -5,54 +5,149 @@ mod common;
 mod convert;
 mod hittable;
 mod hittable_list;
+mod light;
 mod material;
 mod ray;
 mod sphere;
 mod vec3;
 
 use camera::Camera;
+use clap::Parser;
 use color::Color;
 use exr::prelude::*;
 use hittable::{HitRecord, Hittable};
 use hittable_list::HittableList;
-use material::{Dielectric, Lambertian, Metal, CookTorrance};
+use light::Light;
+use material::{CookTorrance, Dielectric, Emissive, Lambertian, Metal};
 use ray::Ray;
+use rayon::prelude::*;
 use sphere::Sphere;
 use std::sync::Arc;
 use vec3::Point3;
-use rayon::prelude::*;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// The number of samples per pixel
+    #[arg(short, long, default_value_t = 100)]
+    samples_per_pixel: i32,
+
+    /// The maximum depth of the ray tracing
+    #[arg(short, long, default_value_t = 50)]
+    max_depth: i32,
+}
 
 // Constants
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
 const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
-const SAMPLES_PER_PIXEL: i32 = 100;
-const MAX_DEPTH: i32 = 50;
+const MIN_SAMPLES: i32 = 8;
+const VARIANCE_THRESHOLD: f32 = 0.0005; // You can tweak this!
 
-fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Color {
+pub struct LightList {
+    pub lights: Vec<Arc<dyn Light>>,
+}
+
+impl LightList {
+    pub fn new() -> Self {
+        Self { lights: Vec::new() }
+    }
+
+    pub fn add(&mut self, light: Arc<dyn Light>) {
+        self.lights.push(light);
+    }
+
+    pub fn sample(&self) -> Option<&Arc<dyn Light>> {
+        if self.lights.is_empty() {
+            None
+        } else {
+            let i = (crate::common::random() * self.lights.len() as f32) as usize;
+            self.lights.get(i)
+        }
+    }
+}
+
+fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
     if depth <= 0 {
-        return Color::new(0.0, 0.0, 0.0);
+        return Color::zero();
     }
 
     let mut rec = HitRecord::new();
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
-        if let Some((scattered, attenuation, pdf)) = rec.mat.as_ref().unwrap().scatter_importance(r, &rec) {
-            let cosine = f32::max(vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())), 0.0);
-            return attenuation * ray_color(&scattered, world, depth - 1) * cosine / pdf;
-        } else {
-            return Color::new(0.0, 0.0, 0.0);
+        let emitted = rec.mat.as_ref().unwrap().emitted();
+        let mut total_light = emitted;
+
+        // === 1. Light sampling for direct lighting ===
+        for light in &lights.lights {
+            let light_point = light.sample();
+            let light_dir = light_point - rec.p;
+            let light_distance = light_dir.length();
+            let light_dir_unit = vec3::unit_vector(light_dir);
+
+            let shadow_ray = Ray::new(rec.p, light_dir_unit);
+            let mut shadow_hit = HitRecord::new();
+
+            if !world.hit(&shadow_ray, 0.001, light_distance - 0.001, &mut shadow_hit) {
+                let cosine = f32::max(vec3::dot(rec.normal, light_dir_unit), 0.0);
+                let light_pdf = light.pdf(rec.p, light_point);
+
+                if let Some((_, brdf_value, brdf_pdf)) =
+                    rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
+                {
+                    let weight = common::balance_heuristic(light_pdf, brdf_pdf);
+                    total_light += light.color() * brdf_value * cosine * weight / light_pdf;
+                }
+            }
         }
+
+        // === 2. BRDF sampling ===
+        if let Some((scattered, brdf_value, brdf_pdf)) =
+            rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
+        {
+            let cosine = f32::max(
+                vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())),
+                0.0,
+            );
+
+            // Check if the BRDF sample hits any light
+            let mut light_hit = HitRecord::new();
+            if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
+                let emitted = light_hit.mat.as_ref().unwrap().emitted();
+
+                if emitted.length_squared() > 0.0 {
+                    // Compute light PDF at the hit point across all lights
+                    let light_pdf_sum: f32 = lights
+                        .lights
+                        .iter()
+                        .map(|light| light.pdf(rec.p, light_hit.p))
+                        .sum();
+
+                    let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
+                    let weight = common::balance_heuristic(brdf_pdf, light_pdf);
+
+                    total_light += emitted * brdf_value * cosine * weight / brdf_pdf;
+                    return total_light;
+                }
+            }
+
+            // If not hitting a light, keep bouncing
+            total_light +=
+                brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
+        }
+
+        return total_light;
     }
 
-    // Background gradient
+    // Background
     let unit_direction = vec3::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
 }
 
-fn random_scene() -> HittableList {
+fn random_scene() -> (HittableList, LightList) {
     let mut world = HittableList::new();
+    let mut lights = LightList::new();
 
     let ground_material = Arc::new(Lambertian::new(Color::new(0.5, 0.5, 0.5)));
     world.add(Box::new(Sphere::new(
@@ -76,7 +171,6 @@ fn random_scene() -> HittableList {
                     let albedo = Color::random() * Color::random();
                     let sphere_material = Arc::new(Lambertian::new(albedo));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
-
                 } else if choose_mat < 0.8 {
                     // Cook-Torrance
                     let albedo = Color::random_range(0.5, 1.0);
@@ -84,7 +178,6 @@ fn random_scene() -> HittableList {
                     let metallic = common::random_range(0.0, 1.0);
                     let sphere_material = Arc::new(CookTorrance::new(albedo, roughness, metallic));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
-
                 } else if choose_mat < 0.95 {
                     // Metal
                     let albedo = Color::random_range(0.5, 1.0);
@@ -121,12 +214,39 @@ fn random_scene() -> HittableList {
         material3,
     )));
 
-    world
+    let light = Arc::new(Emissive::new(
+        Color::new(10.0, 10.0, 10.0),
+        Point3::new(0.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light.position(),
+        light.radius(),
+        light.clone(),
+    )));
+
+    lights.add(light);
+    let light2 = Arc::new(Emissive::new(
+        Color::new(20.0, 10.0, 7.0),
+        Point3::new(-4.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light2.position(),
+        light2.radius(),
+        light2.clone(),
+    )));
+    lights.add(light2);
+
+    (world, lights)
 }
 fn main() {
+    let cli = Cli::parse();
+    let samples_per_pixel: i32 = cli.samples_per_pixel;
+    let max_depth: i32 = cli.max_depth;
     // World
 
-    let world = random_scene();
+    let (world, lights) = random_scene();
 
     // Camera
 
@@ -151,22 +271,42 @@ fn main() {
         let pixel_colors: Vec<_> = (0..IMAGE_WIDTH)
             .into_par_iter()
             .map(|i| {
-                let mut pixel_color = Color::new(0.0, 0.0, 0.0);
-                for _ in 0..SAMPLES_PER_PIXEL {
+                let mut sum = Color::new(0.0, 0.0, 0.0);
+                let mut sum_sq = Color::new(0.0, 0.0, 0.0);
+                let mut samples = 0;
+
+                let final_color = loop {
                     let u = ((i as f32) + common::random()) / (IMAGE_WIDTH - 1) as f32;
                     let v = ((j as f32) + common::random()) / (IMAGE_HEIGHT - 1) as f32;
                     let r = cam.get_ray(u, v);
-                    pixel_color += ray_color(&r, &world, MAX_DEPTH);
-                }
-                pixel_color
+                    let col = ray_color(&r, &world, &lights, max_depth);
+
+                    sum += col;
+                    sum_sq += col * col;
+                    samples += 1;
+
+                    if samples >= MIN_SAMPLES {
+                        let mean = sum / samples as f32;
+                        let mean_sq = sum_sq / samples as f32;
+                        let variance = mean_sq - mean * mean;
+
+                        if variance.max_component() < VARIANCE_THRESHOLD
+                            || samples >= samples_per_pixel
+                        {
+                            break mean; // Use `mean` as final_color and break early
+                        }
+                    }
+
+                    if samples >= samples_per_pixel {
+                        break sum / samples as f32;
+                    }
+                };
+
+                final_color
             })
             .collect();
         for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
-            buffer.set_pixel(
-                i,
-                j,
-                pixel_color / SAMPLES_PER_PIXEL as f32,
-            );
+            buffer.set_pixel(i, j, pixel_color);
         }
     }
     // Render
