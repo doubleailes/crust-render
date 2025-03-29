@@ -19,7 +19,7 @@ use material::{Dielectric, Lambertian, Metal};
 use ray::Ray;
 use sphere::Sphere;
 use std::sync::Arc;
-use vec3::{Point3, Vec3};
+use vec3::Point3;
 use rayon::prelude::*;
 
 // Constants
