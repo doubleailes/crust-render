@@ -1,12 +1,107 @@
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::common;
-use crate::scene::Scene;
 use crate::hittable::{HitRecord, Hittable};
-use crate::light::LightList;
 use crate::ray::Ray;
 use crate::vec3;
 use rayon::prelude::*;
+use crate::{camera::Camera, hittable_list::HittableList, LightList};
+
+pub struct Renderer {
+    pub camera: Camera,
+    pub world: HittableList,
+    pub lights: LightList,
+    pub settings: RenderSettings,
+}
+
+impl Renderer{
+    pub fn new(camera: Camera, world: HittableList, lights: LightList, settings: RenderSettings) -> Self {
+        Renderer {
+            camera,
+            world,
+            lights,
+            settings,
+        }
+    }
+
+    pub fn render(&self) -> Buffer {
+        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        for j in (0..self.settings.height).rev() {
+            eprint!("\rScanlines remaining: {} ", j);
+            let pixel_colors: Vec<_> = (0..self.settings.width)
+                .into_par_iter()
+                .map(|i| {
+                    let mut sum = Color::new(0.0, 0.0, 0.0);
+                    let mut sum_sq = Color::new(0.0, 0.0, 0.0);
+                    let mut samples = 0;
+    
+                    let final_color = loop {
+                        let u = ((i as f32) + common::random()) / (self.settings.width - 1) as f32;
+                        let v = ((j as f32) + common::random()) / (self.settings.height - 1) as f32;
+                        let r = self.camera.get_ray(u, v);
+                        let col = ray_color(&r, &self.world, &self.lights, self.settings.max_depth as i32);
+    
+                        sum += col;
+                        sum_sq += col * col;
+                        samples += 1;
+    
+                        if samples >= self.settings.min_samples_per_pixel {
+                            let mean = sum / samples as f32;
+                            let mean_sq = sum_sq / samples as f32;
+                            let variance = mean_sq - mean * mean;
+    
+                            if variance.max_component() < self.settings.variance_threshold
+                                || samples >= self.settings.samples_per_pixel
+                            {
+                                break mean; // Use `mean` as final_color and break early
+                            }
+                        }
+    
+                        if samples >= self.settings.samples_per_pixel {
+                            break sum / samples as f32;
+                        }
+                    };
+    
+                    final_color
+                })
+                .collect();
+            for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
+                buffer.set_pixel(i, j, pixel_color);
+            }
+        }
+        buffer
+    }
+}
+
+pub struct RenderSettings {
+    samples_per_pixel: u32,
+    max_depth: u32,
+    width: usize,
+    height: usize,
+    min_samples_per_pixel: u32,
+    variance_threshold: f32,
+    
+}
+impl RenderSettings {
+    pub fn new(
+        samples_per_pixel: u32,
+        max_depth: u32,
+        width: usize,
+        height: usize,
+        min_samples_per_pixel: u32,
+        variance_threshold: f32,
+    ) -> Self {
+        RenderSettings {
+            samples_per_pixel,
+            max_depth,
+            width,
+            height,
+            min_samples_per_pixel,
+            variance_threshold,
+        }
+    }
+    
+}
 
 fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
     if depth <= 0 {
@@ -83,53 +178,4 @@ fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> C
     let unit_direction = vec3::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
-}
-
-pub fn run(scene: Scene)->Buffer{
-    let lights = scene.get_lights();
-    let mut buffer = Buffer::new(scene.get_width(), scene.get_height());
-    for j in (0..scene.get_height()).rev() {
-        eprint!("\rScanlines remaining: {} ", j);
-        let pixel_colors: Vec<_> = (0..scene.get_width())
-            .into_par_iter()
-            .map(|i| {
-                let mut sum = Color::new(0.0, 0.0, 0.0);
-                let mut sum_sq = Color::new(0.0, 0.0, 0.0);
-                let mut samples = 0;
-
-                let final_color = loop {
-                    let u = ((i as f32) + common::random()) / (scene.get_width() - 1) as f32;
-                    let v = ((j as f32) + common::random()) / (scene.get_height() - 1) as f32;
-                    let r = scene.get_camera().get_ray(u, v);
-                    let col = ray_color(&r, scene.get_hitables(), &lights, scene.get_max_depth());
-
-                    sum += col;
-                    sum_sq += col * col;
-                    samples += 1;
-
-                    if samples >= scene.get_min_samples_per_pixel() {
-                        let mean = sum / samples as f32;
-                        let mean_sq = sum_sq / samples as f32;
-                        let variance = mean_sq - mean * mean;
-
-                        if variance.max_component() < scene.get_variance_threshold()
-                            || samples >= scene.get_samples_per_pixel()
-                        {
-                            break mean; // Use `mean` as final_color and break early
-                        }
-                    }
-
-                    if samples >= scene.get_samples_per_pixel() {
-                        break sum / samples as f32;
-                    }
-                };
-
-                final_color
-            })
-            .collect();
-        for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
-            buffer.set_pixel(i, j, pixel_color);
-        }
-    }
-    buffer
 }
