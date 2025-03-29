@@ -15,7 +15,7 @@ use color::Color;
 use exr::prelude::*;
 use hittable::{HitRecord, Hittable};
 use hittable_list::HittableList;
-use material::{Dielectric, Lambertian, Metal};
+use material::{Dielectric, Lambertian, Metal, CookTorrance};
 use ray::Ray;
 use sphere::Sphere;
 use std::sync::Arc;
@@ -76,11 +76,20 @@ fn random_scene() -> HittableList {
             );
 
             if (center - Point3::new(4.0, 0.2, 0.0)).length() > 0.9 {
-                if choose_mat < 0.8 {
+                if choose_mat < 0.3 {
                     // Diffuse
                     let albedo = Color::random() * Color::random();
                     let sphere_material = Arc::new(Lambertian::new(albedo));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+
+                } else if choose_mat < 0.8 {
+                    // Cook-Torrance
+                    let albedo = Color::random_range(0.5, 1.0);
+                    let roughness = common::random_range(0.0, 0.5);
+                    let metallic = common::random_range(0.0, 1.0);
+                    let sphere_material = Arc::new(CookTorrance::new(albedo, roughness, metallic));
+                    world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+
                 } else if choose_mat < 0.95 {
                     // Metal
                     let albedo = Color::random_range(0.5, 1.0);

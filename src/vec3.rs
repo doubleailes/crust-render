@@ -48,6 +48,10 @@ impl Vec3 {
         // Return true if the vector is close to zero in all dimensions
         self.e[0].abs() < EPS && self.e[1].abs() < EPS && self.e[2].abs() < EPS
     }
+    // Linear interpolation between two Vec3s: self and other, by t ∈ [0,1]
+    pub fn lerp(self, other: Vec3, t: f32) -> Vec3 {
+        self * (1.0 - t) + other * t
+    }
 }
 
 // Type alias
