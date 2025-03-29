@@ -2,4 +2,4 @@
 image.ppm
 Cargo.lock
 output.exr
-./rgb.png
+rgb.png
