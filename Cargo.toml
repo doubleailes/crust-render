@@ -16,3 +16,7 @@ clap = { version = "4.5.34", features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.5"
+
+[[bench]]
+name = "integrator"
+harness = false
