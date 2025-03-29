@@ -1,0 +1,104 @@
+use crate::hittable_list::HittableList;
+use crate::light::LightList;
+use std::sync::Arc;
+use crate::material::{CookTorrance, Dielectric, Emissive, Lambertian, Metal};
+use crate::sphere::Sphere;
+use crate::vec3::Point3;
+use crate::common;
+use crate::color::Color;
+
+pub fn random_scene() -> (HittableList, LightList) {
+    let mut world = HittableList::new();
+    let mut lights = LightList::new();
+
+    let ground_material = Arc::new(Lambertian::new(Color::new(0.5, 0.5, 0.5)));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, -1000.0, 0.0),
+        1000.0,
+        ground_material,
+    )));
+
+    for a in -11..11 {
+        for b in -11..11 {
+            let choose_mat = common::random();
+            let center = Point3::new(
+                a as f32 + 0.9 * common::random(),
+                0.2,
+                b as f32 + 0.9 * common::random(),
+            );
+
+            if (center - Point3::new(4.0, 0.2, 0.0)).length() > 0.9 {
+                if choose_mat < 0.3 {
+                    // Diffuse
+                    let albedo = Color::random() * Color::random();
+                    let sphere_material = Arc::new(Lambertian::new(albedo));
+                    world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+                } else if choose_mat < 0.8 {
+                    // Cook-Torrance
+                    let albedo = Color::random_range(0.5, 1.0);
+                    let roughness = common::random_range(0.0, 0.5);
+                    let metallic = common::random_range(0.0, 1.0);
+                    let sphere_material = Arc::new(CookTorrance::new(albedo, roughness, metallic));
+                    world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+                } else if choose_mat < 0.95 {
+                    // Metal
+                    let albedo = Color::random_range(0.5, 1.0);
+                    let fuzz = common::random_range(0.0, 0.5);
+                    let sphere_material = Arc::new(Metal::new(albedo, fuzz));
+                    world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+                } else {
+                    // Glass
+                    let sphere_material = Arc::new(Dielectric::new(1.5));
+                    world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+                }
+            }
+        }
+    }
+
+    let material1 = Arc::new(Dielectric::new(1.5));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, 1.0, 0.0),
+        1.0,
+        material1,
+    )));
+
+    let material2 = Arc::new(Lambertian::new(Color::new(0.4, 0.2, 0.1)));
+    world.add(Box::new(Sphere::new(
+        Point3::new(-4.0, 1.0, 0.0),
+        1.0,
+        material2,
+    )));
+
+    let material3 = Arc::new(Metal::new(Color::new(0.7, 0.6, 0.5), 0.0));
+    world.add(Box::new(Sphere::new(
+        Point3::new(4.0, 1.0, 0.0),
+        1.0,
+        material3,
+    )));
+
+    let light = Arc::new(Emissive::new(
+        Color::new(10.0, 10.0, 10.0),
+        Point3::new(0.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light.position(),
+        light.radius(),
+        light.clone(),
+    )));
+
+    lights.add(light);
+    let light2 = Arc::new(Emissive::new(
+        Color::new(20.0, 10.0, 7.0),
+        Point3::new(-4.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light2.position(),
+        light2.radius(),
+        light2.clone(),
+    )));
+    lights.add(light2);
+
+    (world, lights)
+}
