@@ -11,7 +11,25 @@ pub trait Material: Send + Sync {
         attenuation: &mut Color,
         scattered: &mut Ray,
     ) -> bool;
+
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+    ) -> Option<(Ray, Color, f32)> {
+        // Default fallback for materials that don't support importance sampling
+        let mut attenuation = Color::default();
+        let mut scattered = Ray::default();
+        if self.scatter(r_in, rec, &mut attenuation, &mut scattered) {
+            let cosine = f32::max(vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())), 0.0);
+            let pdf = 1.0; // uniform sampling (fake)
+            return Some((scattered, attenuation * cosine, pdf));
+        }
+        None
+    }
 }
+
+
 
 pub struct Lambertian {
     albedo: Color,
@@ -178,39 +196,45 @@ pub struct CookTorrance {
 
 impl CookTorrance {
     pub fn new(albedo: Color, roughness: f32, metallic: f32) -> Self {
-        CookTorrance {
+        Self {
             albedo,
-            roughness: roughness.clamp(0.05, 1.0),
-            metallic,
+            roughness: roughness.clamp(0.05, 1.0), // Clamp to avoid degenerate values
+            metallic: metallic.clamp(0.0, 1.0),
         }
     }
-
     fn fresnel_schlick(cos_theta: f32, f0: Color) -> Color {
         f0 + (Color::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
     }
 
-    fn distribution_ggx(n: vec3::Vec3, h: vec3::Vec3, roughness: f32) -> f32 {
+    // GGX sample (based on spherical coordinates)
+    fn sample_ggx(normal: vec3::Vec3, roughness: f32) -> vec3::Vec3 {
+        let u1 = common::random();
+        let u2 = common::random();
+
+        let a = roughness * roughness;
+
+        let theta = f32::acos(f32::sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1)));
+        let phi = 2.0 * std::f32::consts::PI * u2;
+
+        let sin_theta = f32::sin(theta);
+        let x = sin_theta * f32::cos(phi);
+        let y = sin_theta * f32::sin(phi);
+        let z = f32::cos(theta);
+
+        let h_local = vec3::Vec3::new(x, y, z);
+        vec3::align_to_normal(h_local, normal)
+    }
+
+    fn pdf_ggx(normal: vec3::Vec3, h: vec3::Vec3, roughness: f32) -> f32 {
         let a = roughness * roughness;
         let a2 = a * a;
-        let n_dot_h = f32::max(vec3::dot(n, h), 0.0);
-        let n_dot_h2 = n_dot_h * n_dot_h;
-
-        let denom = n_dot_h2 * (a2 - 1.0) + 1.0;
-        a2 / (std::f32::consts::PI * denom * denom)
-    }
-
-    fn geometry_smith(n: vec3::Vec3, v: vec3::Vec3, l: vec3::Vec3, roughness: f32) -> f32 {
-        fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
-            let r = roughness + 1.0;
-            let k = (r * r) / 8.0;
-            n_dot_v / (n_dot_v * (1.0 - k) + k)
-        }
-
-        let n_dot_v = f32::max(vec3::dot(n, v), 0.0);
-        let n_dot_l = f32::max(vec3::dot(n, l), 0.0);
-        geometry_schlick_ggx(n_dot_v, roughness) * geometry_schlick_ggx(n_dot_l, roughness)
+        let n_dot_h = f32::max(vec3::dot(normal, h), 0.0);
+        let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+        let d = a2 / (std::f32::consts::PI * denom * denom);
+        d * n_dot_h / (4.0 * vec3::dot(h, vec3::unit_vector(h)).abs())
     }
 }
+
 
 impl Material for CookTorrance {
     fn scatter(
@@ -220,13 +244,11 @@ impl Material for CookTorrance {
         attenuation: &mut Color,
         scattered: &mut Ray,
     ) -> bool {
+        // Keep this if you want compatibility with existing code
+        // Or remove once you're fully using scatter_importance()
         let normal = rec.normal;
         let v = -vec3::unit_vector(r_in.direction());
-
-        // Sample halfway vector for microfacet reflection
         let mut reflect_dir = vec3::reflect(v, normal);
-        
-        // Add roughness via GGX-style fuzz (approximated)
         reflect_dir += self.roughness * vec3::random_in_unit_sphere();
 
         if reflect_dir.near_zero() {
@@ -234,19 +256,39 @@ impl Material for CookTorrance {
         }
 
         *scattered = Ray::new(rec.p, vec3::unit_vector(reflect_dir));
-
-        // Approximate Fresnel reflectance
         let cos_theta = f32::max(vec3::dot(normal, v), 0.0);
         let f0 = Color::new(0.04, 0.04, 0.04).lerp(self.albedo, self.metallic);
         let fresnel = CookTorrance::fresnel_schlick(cos_theta, f0);
-
-        let kd = Color::new(1.0, 1.0, 1.0) - fresnel;
-        let kd = kd * (1.0 - self.metallic);
-
+        let kd = (Color::new(1.0, 1.0, 1.0) - fresnel) * (1.0 - self.metallic);
         let diffuse = self.albedo / std::f32::consts::PI;
-
         *attenuation = kd * diffuse + fresnel;
-
         true
+    }
+
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+    ) -> Option<(Ray, Color, f32)> {
+        let n = rec.normal;
+        let v = -vec3::unit_vector(r_in.direction());
+
+        let h = Self::sample_ggx(n, self.roughness);
+        let l = vec3::reflect(-v, h);
+
+        if vec3::dot(l, n) <= 0.0 {
+            return None;
+        }
+
+        let f0 = Color::new(0.04, 0.04, 0.04).lerp(self.albedo, self.metallic);
+        let fresnel = Self::fresnel_schlick(f32::max(vec3::dot(h, v), 0.0), f0);
+        let kd = (Color::new(1.0, 1.0, 1.0) - fresnel) * (1.0 - self.metallic);
+        let diffuse = self.albedo / std::f32::consts::PI;
+        let attenuation = kd * diffuse + fresnel;
+
+        let scattered = Ray::new(rec.p, l);
+        let pdf = Self::pdf_ggx(n, h, self.roughness).max(0.001);
+
+        Some((scattered, attenuation, pdf))
     }
 }

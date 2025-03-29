@@ -31,26 +31,21 @@ const SAMPLES_PER_PIXEL: i32 = 100;
 const MAX_DEPTH: i32 = 50;
 
 fn ray_color(r: &Ray, world: &dyn Hittable, depth: i32) -> Color {
-    // If we've exceeded the ray bounce limit, no more light is gathered
     if depth <= 0 {
         return Color::new(0.0, 0.0, 0.0);
     }
 
     let mut rec = HitRecord::new();
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
-        let mut attenuation = Color::default();
-        let mut scattered = Ray::default();
-        if rec
-            .mat
-            .as_ref()
-            .unwrap()
-            .scatter(r, &rec, &mut attenuation, &mut scattered)
-        {
-            return attenuation * ray_color(&scattered, world, depth - 1);
+        if let Some((scattered, attenuation, pdf)) = rec.mat.as_ref().unwrap().scatter_importance(r, &rec) {
+            let cosine = f32::max(vec3::dot(rec.normal, vec3::unit_vector(scattered.direction())), 0.0);
+            return attenuation * ray_color(&scattered, world, depth - 1) * cosine / pdf;
+        } else {
+            return Color::new(0.0, 0.0, 0.0);
         }
-        return Color::new(0.0, 0.0, 0.0);
     }
 
+    // Background gradient
     let unit_direction = vec3::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)

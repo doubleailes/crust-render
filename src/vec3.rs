@@ -53,6 +53,19 @@ impl Vec3 {
         self * (1.0 - t) + other * t
     }
 }
+pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
+    // Assume Z-up in local, rotate to match `normal`
+    let up = if normal.z().abs() < 0.999 {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+
+    let tangent = unit_vector(cross(up, normal));
+    let bitangent = cross(normal, tangent);
+
+    local.x() * tangent + local.y() * bitangent + local.z() * normal
+}
 
 // Type alias
 pub type Point3 = Vec3;
