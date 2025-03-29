@@ -3,6 +3,10 @@ name = "ray-tracing"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "ray_tracing"
+path = "src/lib.rs"
+
 [dependencies]
 exr = "1.73.0"
 rand = "0.9.0"
