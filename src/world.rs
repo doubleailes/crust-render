@@ -6,6 +6,7 @@ use crate::sphere::Sphere;
 use crate::vec3::Point3;
 use crate::common;
 use crate::color::Color;
+use crate::material::Material;
 
 pub fn random_scene() -> (HittableList, LightList) {
     let mut world = HittableList::new();
@@ -88,6 +89,82 @@ pub fn random_scene() -> (HittableList, LightList) {
     )));
 
     lights.add(light);
+    let light2 = Arc::new(Emissive::new(
+        Color::new(20.0, 10.0, 7.0),
+        Point3::new(-4.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light2.position(),
+        light2.radius(),
+        light2.clone(),
+    )));
+    lights.add(light2);
+
+    (world, lights)
+}
+
+pub fn simple_scene() -> (HittableList, LightList) {
+    let mut world = HittableList::new();
+    let mut lights = LightList::new();
+
+    let ground_material = Arc::new(Lambertian::new(Color::new(0.5, 0.5, 0.5)));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, -1000.0, 0.0),
+        1000.0,
+        ground_material,
+    )));
+
+    // Deterministic grid of spheres with preset materials
+    for a in -2..3 {
+        for b in -2..3 {
+            let center = Point3::new(a as f32, 0.2, b as f32);
+            let material: Arc<dyn Material> = match (a + b) % 4 {
+                0 => Arc::new(Lambertian::new(Color::new(0.8, 0.3, 0.3))),
+                1 => Arc::new(Metal::new(Color::new(0.7, 0.6, 0.5), 0.1)),
+                2 => Arc::new(Dielectric::new(1.5)),
+                _ => Arc::new(CookTorrance::new(Color::new(0.9, 0.9, 0.9), 0.2, 0.5)),
+            };
+
+            world.add(Box::new(Sphere::new(center, 0.2, material)));
+        }
+    }
+
+    // Center spheres
+    let material1 = Arc::new(Dielectric::new(1.5));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, 1.0, 0.0),
+        1.0,
+        material1,
+    )));
+
+    let material2 = Arc::new(Lambertian::new(Color::new(0.4, 0.2, 0.1)));
+    world.add(Box::new(Sphere::new(
+        Point3::new(-4.0, 1.0, 0.0),
+        1.0,
+        material2,
+    )));
+
+    let material3 = Arc::new(Metal::new(Color::new(0.7, 0.6, 0.5), 0.0));
+    world.add(Box::new(Sphere::new(
+        Point3::new(4.0, 1.0, 0.0),
+        1.0,
+        material3,
+    )));
+
+    // Lights
+    let light1 = Arc::new(Emissive::new(
+        Color::new(10.0, 10.0, 10.0),
+        Point3::new(0.0, 7.0, 0.0),
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        light1.position(),
+        light1.radius(),
+        light1.clone(),
+    )));
+    lights.add(light1);
+
     let light2 = Arc::new(Emissive::new(
         Color::new(20.0, 10.0, 7.0),
         Point3::new(-4.0, 7.0, 0.0),
