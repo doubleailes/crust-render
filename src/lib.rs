@@ -12,6 +12,7 @@ pub mod ray;
 pub mod tracer;
 pub mod vec3;
 pub mod world;
+mod sampler;
 
 pub use buffer::Buffer;
 pub use camera::Camera;
@@ -22,3 +23,4 @@ pub use material::*;
 pub use ray::Ray;
 pub use vec3::{Point3, Vec3};
 pub use world::random_scene;
+pub use sampler::generate_cmj_2d;

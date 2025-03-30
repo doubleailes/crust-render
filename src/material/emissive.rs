@@ -5,6 +5,7 @@ use crate::material::Material;
 use crate::ray::Ray;
 use crate::vec3;
 use crate::vec3::Point3;
+use crate::vec3::*;
 
 pub struct Emissive {
     color: Color,
@@ -54,6 +55,16 @@ impl Material for Emissive {
 impl Light for Emissive {
     fn sample(&self) -> Point3 {
         self.position + self.radius * crate::vec3::random_unit_vector()
+    }
+    fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
+        // Map (u, v) on a sphere (uniform sphere sampling)
+        let theta = 2.0 * std::f32::consts::PI * u;
+        let phi = (1.0 - v).acos();
+        let x = phi.sin() * theta.cos();
+        let y = phi.sin() * theta.sin();
+        let z = phi.cos();
+    
+        self.position + self.radius * Vec3::new(x, y, z)
     }
 
     fn pdf(&self, hit_point: Point3, light_point: Point3) -> f32 {
