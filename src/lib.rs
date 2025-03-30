@@ -8,7 +8,7 @@ pub mod hittable_list;
 pub mod light;
 pub mod material;
 pub mod ray;
-pub mod sphere;
+pub mod primitives;
 pub mod tracer;
 pub mod vec3;
 pub mod world;
