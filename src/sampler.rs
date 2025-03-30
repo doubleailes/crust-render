@@ -19,7 +19,7 @@ pub fn generate_cmj_2d(samples_per_side: usize) -> Vec<(f32, f32)> {
     for j in 0..n {
         for i in 0..n {
             let x = (i as f32 + (j as f32 + random()) / n_f32) / n_f32;
-            let y = (ys[i] as f32 + (xs[j] as f32 + random()) / n_f32) / n_f32;
+            let y = (j as f32 + (i as f32 + random()) / n_f32) / n_f32;
             samples.push((x, y));
         }
     }
