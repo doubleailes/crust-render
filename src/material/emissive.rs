@@ -59,7 +59,7 @@ impl Light for Emissive {
     fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
         // Map (u, v) on a sphere (uniform sphere sampling)
         let theta = 2.0 * std::f32::consts::PI * u;
-        let phi = (1.0 - v).acos();
+        let phi = (1.0 - 2.0 * v).acos();
         let x = phi.sin() * theta.cos();
         let y = phi.sin() * theta.sin();
         let z = phi.cos();
