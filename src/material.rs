@@ -274,14 +274,9 @@ impl Material for CookTorrance {
         let denom = (n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2);
         let D = a2 / (std::f32::consts::PI * denom);
     
-        fn geometry_schlick_ggx(n_dot: f32, roughness: f32) -> f32 {
-            let k = (roughness + 1.0).powi(2) / 8.0;
-            n_dot / (n_dot * (1.0 - k) + k)
-        }
     
-        let G = geometry_schlick_ggx(n_dot_v, self.roughness)
-              * geometry_schlick_ggx(n_dot_l, self.roughness);
-    
+        let G = CookTorrance::geometry_schlick_ggx(n_dot_v, self.roughness)
+              * CookTorrance::geometry_schlick_ggx(n_dot_l, self.roughness);
         let specular = (F * D * G) / (4.0 * n_dot_v * n_dot_l + 1e-4);
         let kd = (Color::new(1.0, 1.0, 1.0) - F) * (1.0 - self.metallic);
         let diffuse = self.albedo / std::f32::consts::PI;
