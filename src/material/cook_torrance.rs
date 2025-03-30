@@ -128,10 +128,6 @@ impl Material for CookTorrance {
             let d = a2 / (std::f32::consts::PI * denom);
 
             // Geometry term
-            fn geometry_schlick_ggx(n_dot: f32, roughness: f32) -> f32 {
-                let k = (roughness + 1.0).powi(2) / 8.0;
-                n_dot / (n_dot * (1.0 - k) + k)
-            }
             let g = geometry_schlick_ggx(vec3::dot(n, v), self.roughness)
                 * geometry_schlick_ggx(vec3::dot(n, l), self.roughness);
 
