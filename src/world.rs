@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::common;
+use crate::{common, material};
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::material::Material;
@@ -157,6 +157,23 @@ pub fn simple_scene() -> (HittableList, LightList) {
         Point3::new(0.0, 1.0, 4.0),
         1.0,
         material4,
+    )));
+
+    let material5 = Arc::new(Disney::new(
+        Color::new(0.5, 0.5, 0.5),
+        0.0,
+        0.2,
+        0.5,
+        0.5,
+        0.0,
+        0.5,
+        0.0,
+        1.0,
+    ));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, 1.0, -4.0),
+        1.0,
+        material5,
     )));
 
     // Lights
