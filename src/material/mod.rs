@@ -1,0 +1,14 @@
+mod mat_trait;
+pub use mat_trait::Material;
+mod lambert;
+pub use lambert::Lambertian;
+mod metal;
+pub use metal::Metal;
+mod dielectric;
+pub use dielectric::Dielectric;
+mod blinn_phong;
+pub use blinn_phong::BlinnPhong;
+mod cook_torrance;
+pub use cook_torrance::CookTorrance;
+mod emissive;
+pub use emissive::Emissive;

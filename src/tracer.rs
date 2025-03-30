@@ -4,8 +4,8 @@ use crate::common;
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use crate::vec3;
+use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
-use crate::{camera::Camera, hittable_list::HittableList, LightList};
 
 pub struct Renderer {
     pub camera: Camera,
@@ -14,8 +14,13 @@ pub struct Renderer {
     pub settings: RenderSettings,
 }
 
-impl Renderer{
-    pub fn new(camera: Camera, world: HittableList, lights: LightList, settings: RenderSettings) -> Self {
+impl Renderer {
+    pub fn new(
+        camera: Camera,
+        world: HittableList,
+        lights: LightList,
+        settings: RenderSettings,
+    ) -> Self {
         Renderer {
             camera,
             world,
@@ -34,34 +39,39 @@ impl Renderer{
                     let mut sum = Color::new(0.0, 0.0, 0.0);
                     let mut sum_sq = Color::new(0.0, 0.0, 0.0);
                     let mut samples = 0;
-    
+
                     let final_color = loop {
                         let u = ((i as f32) + common::random()) / (self.settings.width - 1) as f32;
                         let v = ((j as f32) + common::random()) / (self.settings.height - 1) as f32;
                         let r = self.camera.get_ray(u, v);
-                        let col = ray_color(&r, &self.world, &self.lights, self.settings.max_depth as i32);
-    
+                        let col = ray_color(
+                            &r,
+                            &self.world,
+                            &self.lights,
+                            self.settings.max_depth as i32,
+                        );
+
                         sum += col;
                         sum_sq += col * col;
                         samples += 1;
-    
+
                         if samples >= self.settings.min_samples_per_pixel {
                             let mean = sum / samples as f32;
                             let mean_sq = sum_sq / samples as f32;
                             let variance = mean_sq - mean * mean;
-    
+
                             if variance.max_component() < self.settings.variance_threshold
                                 || samples >= self.settings.samples_per_pixel
                             {
                                 break mean; // Use `mean` as final_color and break early
                             }
                         }
-    
+
                         if samples >= self.settings.samples_per_pixel {
                             break sum / samples as f32;
                         }
                     };
-    
+
                     final_color
                 })
                 .collect();
@@ -80,7 +90,6 @@ pub struct RenderSettings {
     height: usize,
     min_samples_per_pixel: u32,
     variance_threshold: f32,
-    
 }
 impl RenderSettings {
     pub fn new(
@@ -100,7 +109,6 @@ impl RenderSettings {
             variance_threshold,
         }
     }
-    
 }
 
 pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
@@ -167,7 +175,8 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
 
             // Add both direct hit on light and recursive bounce
             total_light += add_emission;
-            total_light += brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
+            total_light +=
+                brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
         }
 
         return total_light;

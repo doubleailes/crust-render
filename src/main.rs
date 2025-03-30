@@ -1,10 +1,10 @@
 use clap::Parser;
 use exr::prelude::*;
+use ray_tracing::camera::Camera;
+use ray_tracing::convert;
+use ray_tracing::tracer::{RenderSettings, Renderer};
 use ray_tracing::vec3::Point3;
 use ray_tracing::world::simple_scene;
-use ray_tracing::camera::Camera;
-use ray_tracing::tracer::{RenderSettings,Renderer};
-use ray_tracing::convert;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -25,9 +25,6 @@ const IMAGE_WIDTH: usize = 400;
 const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
 const MIN_SAMPLES: u32 = 32;
 const VARIANCE_THRESHOLD: f32 = 0.0; // You can tweak this!
-
-
-
 
 fn main() {
     let cli = Cli::parse();
@@ -53,7 +50,14 @@ fn main() {
         aperture,
         dist_to_focus,
     );
-    let render_settings = RenderSettings::new(samples_per_pixel, max_depth, IMAGE_WIDTH, IMAGE_HEIGHT, MIN_SAMPLES, VARIANCE_THRESHOLD);
+    let render_settings = RenderSettings::new(
+        samples_per_pixel,
+        max_depth,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        MIN_SAMPLES,
+        VARIANCE_THRESHOLD,
+    );
     let renderer = Renderer::new(cam, world, lights, render_settings);
     let buffer = renderer.render();
     // Render
