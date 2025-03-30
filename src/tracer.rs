@@ -40,7 +40,7 @@ impl Renderer {
                     let mut sum_sq = Color::new(0.0, 0.0, 0.0);
                     let mut samples = 0;
 
-                    let final_color = loop {
+                    loop {
                         let u = ((i as f32) + common::random()) / (self.settings.width - 1) as f32;
                         let v = ((j as f32) + common::random()) / (self.settings.height - 1) as f32;
                         let r = self.camera.get_ray(u, v);
@@ -70,9 +70,7 @@ impl Renderer {
                         if samples >= self.settings.samples_per_pixel {
                             break sum / samples as f32;
                         }
-                    };
-
-                    final_color
+                    }
                 })
                 .collect();
             for (i, pixel_color) in pixel_colors.into_iter().enumerate() {

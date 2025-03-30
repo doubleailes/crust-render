@@ -12,6 +12,12 @@ pub struct LightList {
     pub lights: Vec<Arc<dyn Light>>,
 }
 
+impl Default for LightList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LightList {
     pub fn new() -> Self {
         Self { lights: Vec::new() }
