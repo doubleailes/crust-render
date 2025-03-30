@@ -39,7 +39,6 @@ pub fn convert() {
         };
         (srgb * 255.0 + 0.5).floor() as u8
     }
-    
 
     // save the png buffer to a png file
     let png_buffer = &image.layer_data.channel_data.pixels;

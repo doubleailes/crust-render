@@ -1,12 +1,12 @@
+use crate::color::Color;
+use crate::common;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
-use std::sync::Arc;
+use crate::material::Material;
 use crate::material::{CookTorrance, Dielectric, Emissive, Lambertian, Metal};
 use crate::sphere::Sphere;
 use crate::vec3::Point3;
-use crate::common;
-use crate::color::Color;
-use crate::material::Material;
+use std::sync::Arc;
 
 pub fn random_scene() -> (HittableList, LightList) {
     let mut world = HittableList::new();
@@ -152,7 +152,7 @@ pub fn simple_scene() -> (HittableList, LightList) {
         material3,
     )));
 
-    let material4 = Arc::new(CookTorrance::new(Color::new(0.5, 0.5, 0.5), 0.2 , 0.0));
+    let material4 = Arc::new(CookTorrance::new(Color::new(0.5, 0.5, 0.5), 0.2, 0.0));
     world.add(Box::new(Sphere::new(
         Point3::new(0.0, 1.0, 4.0),
         1.0,

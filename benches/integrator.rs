@@ -1,9 +1,9 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use ray_tracing::vec3::Vec3;
-use ray_tracing::world::simple_scene;
+use criterion::{Criterion, criterion_group, criterion_main};
 use ray_tracing::camera::Camera;
 use ray_tracing::tracer::{RenderSettings, Renderer};
 use ray_tracing::vec3::Point3;
+use ray_tracing::vec3::Vec3;
+use ray_tracing::world::simple_scene;
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
@@ -31,7 +31,7 @@ fn bench_simple_world(c: &mut Criterion) {
             let vup = Point3::new(0.0, 1.0, 0.0);
             let dist_to_focus = 10.0;
             let aperture = 0.1;
-        
+
             let cam = Camera::new(
                 lookfrom,
                 lookat,
@@ -41,7 +41,14 @@ fn bench_simple_world(c: &mut Criterion) {
                 aperture,
                 dist_to_focus,
             );
-            let render_settings = RenderSettings::new(10, 20, IMAGE_WIDTH, IMAGE_HEIGHT, MIN_SAMPLES, VARIANCE_THRESHOLD);
+            let render_settings = RenderSettings::new(
+                10,
+                20,
+                IMAGE_WIDTH,
+                IMAGE_HEIGHT,
+                MIN_SAMPLES,
+                VARIANCE_THRESHOLD,
+            );
             let renderer = Renderer::new(cam, world, lights, render_settings);
             let _ = renderer.render();
         })
