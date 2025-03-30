@@ -6,6 +6,7 @@ use crate::ray::Ray;
 use crate::vec3;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
+use crate::sampler::generate_cmj_2d;
 
 pub struct Renderer {
     pub camera: Camera,
@@ -31,6 +32,8 @@ impl Renderer {
 
     pub fn render(&self) -> Buffer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
+        let cmj_samples = generate_cmj_2d(samples_sqrt);
         for j in (0..self.settings.height).rev() {
             eprint!("\rScanlines remaining: {} ", j);
             let pixel_colors: Vec<_> = (0..self.settings.width)
@@ -41,8 +44,13 @@ impl Renderer {
                     let mut samples = 0;
 
                     loop {
-                        let u = ((i as f32) + common::random()) / (self.settings.width - 1) as f32;
-                        let v = ((j as f32) + common::random()) / (self.settings.height - 1) as f32;
+                        let (u_offset, v_offset) = if samples < cmj_samples.len() {
+                            cmj_samples[samples]
+                        } else {
+                            (common::random(), common::random())
+                        };
+                        let u = ((i as f32) + u_offset) / (self.settings.width - 1) as f32;
+                        let v = ((j as f32) + v_offset) / (self.settings.height - 1) as f32;
                         let r = self.camera.get_ray(u, v);
                         let col = ray_color(
                             &r,
@@ -55,19 +63,19 @@ impl Renderer {
                         sum_sq += col * col;
                         samples += 1;
 
-                        if samples >= self.settings.min_samples_per_pixel {
+                        if samples >= self.settings.min_samples_per_pixel as usize {
                             let mean = sum / samples as f32;
                             let mean_sq = sum_sq / samples as f32;
                             let variance = mean_sq - mean * mean;
 
                             if variance.max_component() < self.settings.variance_threshold
-                                || samples >= self.settings.samples_per_pixel
+                                || samples >= self.settings.samples_per_pixel as usize
                             {
                                 break mean; // Use `mean` as final_color and break early
                             }
                         }
 
-                        if samples >= self.settings.samples_per_pixel {
+                        if samples >= self.settings.samples_per_pixel as usize {
                             break sum / samples as f32;
                         }
                     }
@@ -115,14 +123,16 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     }
 
     let mut rec = HitRecord::new();
+    let cmj_samples = generate_cmj_2d(1);
 
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
         let emitted = rec.mat.as_ref().unwrap().emitted();
         let mut total_light = emitted;
 
         // === 1. Direct Lighting via Light Sampling ===
-        for light in &lights.lights {
-            let light_point = light.sample();
+        for (light_idx, light) in lights.lights.iter().enumerate() {
+            let (u, v) = cmj_samples[light_idx % cmj_samples.len()];
+            let light_point = light.sample_cmj(u, v);
             let light_dir = light_point - rec.p;
             let light_distance = light_dir.length();
             let light_dir_unit = vec3::unit_vector(light_dir);
