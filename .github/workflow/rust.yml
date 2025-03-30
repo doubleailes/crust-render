@@ -20,12 +20,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: 🔨 Build
+        run: cargo build --verbose
 
   release:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
     if: github.event_name == 'release' && github.event.action == 'created'
-    needs: [dry_publish,build_test,build-doc-draft]
     strategy:
       fail-fast: false
       matrix:
