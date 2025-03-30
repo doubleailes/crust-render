@@ -105,15 +105,16 @@ impl RenderSettings {
 
 pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
     if depth <= 0 {
-        return Color::zero();
+        return Color::zero(); // recursion limit
     }
 
     let mut rec = HitRecord::new();
+
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
         let emitted = rec.mat.as_ref().unwrap().emitted();
         let mut total_light = emitted;
 
-        // === 1. Light sampling for direct lighting ===
+        // === 1. Direct Lighting via Light Sampling ===
         for light in &lights.lights {
             let light_point = light.sample();
             let light_dir = light_point - rec.p;
@@ -136,7 +137,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
             }
         }
 
-        // === 2. BRDF sampling ===
+        // === 2. Indirect Lighting via BRDF Sampling ===
         if let Some((scattered, brdf_value, brdf_pdf)) =
             rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
         {
@@ -145,36 +146,34 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
                 0.0,
             );
 
-            // Check if the BRDF sample hits any light
             let mut light_hit = HitRecord::new();
+            let mut add_emission = Color::zero();
+
             if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
                 let emitted = light_hit.mat.as_ref().unwrap().emitted();
-
                 if emitted.length_squared() > 0.0 {
-                    // Compute light PDF at the hit point across all lights
                     let light_pdf_sum: f32 = lights
                         .lights
                         .iter()
                         .map(|light| light.pdf(rec.p, light_hit.p))
                         .sum();
-
                     let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
                     let weight = common::balance_heuristic(brdf_pdf, light_pdf);
 
-                    total_light += emitted * brdf_value * cosine * weight / brdf_pdf;
-                    return total_light;
+                    // Add the contribution of hitting the light via BRDF
+                    add_emission = emitted * brdf_value * cosine * weight / brdf_pdf;
                 }
             }
 
-            // If not hitting a light, keep bouncing
-            total_light +=
-                brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
+            // Add both direct hit on light and recursive bounce
+            total_light += add_emission;
+            total_light += brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
         }
 
         return total_light;
     }
 
-    // Background
+    // === Background ===
     let unit_direction = vec3::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
