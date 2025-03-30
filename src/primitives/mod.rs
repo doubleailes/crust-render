@@ -1,2 +1,2 @@
 mod sphere;
-pub use sphere::Sphere as Sphere;
+pub use sphere::Sphere;

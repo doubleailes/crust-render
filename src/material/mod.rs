@@ -12,3 +12,5 @@ mod cook_torrance;
 pub use cook_torrance::CookTorrance;
 mod emissive;
 pub use emissive::Emissive;
+mod brdf;
+pub use brdf::{fresnel_schlick, geometry_schlick_ggx, pdf_vndf_ggx, sample_vndf_ggx};
