@@ -52,6 +52,13 @@ impl Vec3 {
     pub fn lerp(self, other: Vec3, t: f32) -> Vec3 {
         self * (1.0 - t) + other * t
     }
+    pub fn clamp(self, min: f32, max: f32) -> Vec3 {
+        Vec3::new(
+            common::clamp(self.x(), min, max),
+            common::clamp(self.y(), min, max),
+            common::clamp(self.z(), min, max),
+        )
+    }
 }
 pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
     // Assume Z-up in local, rotate to match `normal`
@@ -214,4 +221,16 @@ pub fn refract(uv: Vec3, n: Vec3, etai_over_etat: f32) -> Vec3 {
     let r_out_perp = etai_over_etat * (uv + cos_theta * n);
     let r_out_parallel = -f32::sqrt(f32::abs(1.0 - r_out_perp.length_squared())) * n;
     r_out_perp + r_out_parallel
+}
+
+pub fn random_cosine_direction() -> Vec3 {
+    let r1 = common::random();
+    let r2 = common::random();
+    let z = f32::sqrt(1.0 - r2);
+
+    let phi = 2.0 * std::f32::consts::PI * r1;
+    let x = f32::cos(phi) * f32::sqrt(r2);
+    let y = f32::sin(phi) * f32::sqrt(r2);
+
+    Vec3::new(x, y, z)
 }

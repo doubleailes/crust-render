@@ -30,5 +30,11 @@ pub fn clamp(x: f32, min: f32, max: f32) -> f32 {
 }
 
 pub fn balance_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
-    pdf_a / (pdf_a + pdf_b + 1e-4)
+    let pdf_a2 = pdf_a * pdf_a;
+    let pdf_b2 = pdf_b * pdf_b;
+    pdf_a2 / (pdf_a2 + pdf_b2 + 1e-6)
+}
+
+pub fn random2() -> (f32, f32) {
+    (random(), random())
 }
