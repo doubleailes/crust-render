@@ -63,7 +63,7 @@ impl Light for Emissive {
         let x = phi.sin() * theta.cos();
         let y = phi.sin() * theta.sin();
         let z = phi.cos();
-    
+
         self.position + self.radius * Vec3::new(x, y, z)
     }
 
