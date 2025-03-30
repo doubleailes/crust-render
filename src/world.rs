@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::{common, material};
+use crate::common;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::material::Material;
