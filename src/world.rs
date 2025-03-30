@@ -108,7 +108,7 @@ pub fn simple_scene() -> (HittableList, LightList) {
     let mut world = HittableList::new();
     let mut lights = LightList::new();
 
-    let ground_material = Arc::new(Lambertian::new(Color::new(0.5, 0.5, 0.5)));
+    let ground_material = Arc::new(Lambertian::new(Color::new(0.8, 0.5, 0.5)));
     world.add(Box::new(Sphere::new(
         Point3::new(0.0, -1000.0, 0.0),
         1000.0,
