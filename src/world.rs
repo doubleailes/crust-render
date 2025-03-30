@@ -152,6 +152,13 @@ pub fn simple_scene() -> (HittableList, LightList) {
         material3,
     )));
 
+    let material4 = Arc::new(CookTorrance::new(Color::new(0.5, 0.5, 0.5), 0.2 , 0.0));
+    world.add(Box::new(Sphere::new(
+        Point3::new(0.0, 1.0, 4.0),
+        1.0,
+        material4,
+    )));
+
     // Lights
     let light1 = Arc::new(Emissive::new(
         Color::new(10.0, 10.0, 10.0),
