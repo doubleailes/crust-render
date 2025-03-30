@@ -3,6 +3,8 @@ use crate::material::Material;
 use crate::ray::Ray;
 use crate::vec3::{self, Point3};
 use std::sync::Arc;
+use crate::rayx8::Rayx8;
+use crate::hitrecordx8::HitRecordx8;
 
 pub struct Sphere {
     center: Point3,
@@ -17,6 +19,21 @@ impl Sphere {
             radius: r,
             mat: m,
         }
+    }
+    pub fn hit_x8(&self, ray: &Rayx8, t_min: f32, t_max: f32, recs: &mut HitRecordx8) -> [bool; 8] {
+        // Per-lane intersection logic
+        let mut hits = [false; 8];
+
+        for i in 0..8 {
+            let r = ray.get(i);
+            let mut rec = HitRecord::new();
+            if self.hit(&r, t_min, t_max, &mut rec) {
+                recs.update_lane(i, rec.p, rec.normal, rec.t, rec.front_face, rec.mat.unwrap().clone());
+                hits[i] = true;
+            }
+        }
+
+        hits
     }
 }
 

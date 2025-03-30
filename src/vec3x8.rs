@@ -104,3 +104,17 @@ impl Div<f32x8> for Vec3x8 {
         }
     }
 }
+
+pub fn dot_vec3x8(a: Vec3x8, b: Vec3x8) -> f32x8 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+pub fn unit_vector_x8(v: Vec3x8) -> Vec3x8 {
+    let length_squared = v.x * v.x + v.y * v.y + v.z * v.z;
+    let inv_length = length_squared.rsqrt(); // Or 1.0 / sqrt
+    Vec3x8 {
+        x: v.x * inv_length,
+        y: v.y * inv_length,
+        z: v.z * inv_length,
+    }
+}
