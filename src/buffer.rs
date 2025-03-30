@@ -29,7 +29,7 @@ impl Buffer {
         }
     }
     pub fn get_rgb(&self, x: usize, y: usize) -> (f32, f32, f32) {
-        let pixel: Color = self.get_pixel(x, self.height - y);
+        let pixel: Color = self.get_pixel(x, self.height - 1 - y);
         // Flip the y-coordinate to match the image coordinate system
         // and convert to RGB format
         pixel.rgb()
