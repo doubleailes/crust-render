@@ -23,8 +23,8 @@ struct Cli {
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
 const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
-const MIN_SAMPLES: u32 = 8;
-const VARIANCE_THRESHOLD: f32 = 0.0005; // You can tweak this!
+const MIN_SAMPLES: u32 = 32;
+const VARIANCE_THRESHOLD: f32 = 0.0; // You can tweak this!
 
 
 
