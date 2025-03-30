@@ -2,6 +2,7 @@ use crate::color::Color;
 use crate::common;
 use crate::vec3;
 use crate::vec3::Vec3;
+use std::f32::consts::PI;
 
 pub fn fresnel_schlick(cos_theta: f32, f0: Color) -> Color {
     f0 + (Color::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
@@ -63,4 +64,33 @@ pub fn pdf_vndf_ggx(view: Vec3, half: Vec3, normal: Vec3, roughness: f32) -> f32
 
     let d = a2 / (std::f32::consts::PI * (n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2));
     d * n_dot_h / (4.0 * v_dot_h)
+}
+
+pub fn schlick_weight(cos_theta: f32) -> f32 {
+    (1.0 - cos_theta).powf(5.0)
+}
+
+// Disney Diffuse
+pub fn disney_diffuse(base_color: Color, roughness: f32, n: Vec3, v: Vec3, l: Vec3, h: Vec3) -> Color {
+    let n_dot_l = vec3::dot(n, l).max(0.0);
+    let n_dot_v = vec3::dot(n, v).max(0.0);
+    let l_dot_h = vec3::dot(l, h).max(0.0);
+
+    let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
+    let light_scatter = schlick_weight(n_dot_l);
+    let view_scatter = schlick_weight(n_dot_v);
+
+    base_color * (1.0 / PI) * (1.0 + (fd90 - 1.0) * light_scatter) * (1.0 + (fd90 - 1.0) * view_scatter)
+}
+
+// GTR1 distribution for clearcoat
+pub fn gtr1(n_dot_h: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let denom = PI * ((n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2));
+    (a2 - 1.0) / denom.max(1e-4)
+}
+
+// Clearcoat Fresnel approx
+pub fn fresnel_schlick_scalar(cos_theta: f32, f0: f32) -> f32 {
+    f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
 }

@@ -38,3 +38,13 @@ pub fn balance_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
 pub fn random2() -> (f32, f32) {
     (random(), random())
 }
+
+pub trait Lerp {
+    fn lerp(self, b: Self, t: Self) -> Self;
+}
+
+impl Lerp for f32 {
+    fn lerp(self, b: f32, t: f32) -> f32 {
+        self * (1.0 - t) + b * t
+    }
+}
