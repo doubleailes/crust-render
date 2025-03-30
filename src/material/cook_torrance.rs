@@ -84,17 +84,17 @@ impl Material for CookTorrance {
         let v_dot_h = vec3::dot(v, h).max(1e-4);
 
         let f0 = Color::new(0.04, 0.04, 0.04).lerp(self.albedo, self.metallic);
-        let F = CookTorrance::fresnel_schlick(v_dot_h, f0);
+        let f = CookTorrance::fresnel_schlick(v_dot_h, f0);
 
         let a = self.roughness * self.roughness;
         let a2 = a * a;
         let denom = (n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2);
-        let D = a2 / (std::f32::consts::PI * denom);
+        let d = a2 / (std::f32::consts::PI * denom);
 
-        let G = CookTorrance::geometry_schlick_ggx(n_dot_v, self.roughness)
+        let g = CookTorrance::geometry_schlick_ggx(n_dot_v, self.roughness)
             * CookTorrance::geometry_schlick_ggx(n_dot_l, self.roughness);
-        let specular = (F * D * G) / (4.0 * n_dot_v * n_dot_l + 1e-4);
-        let kd = (Color::new(1.0, 1.0, 1.0) - F) * (1.0 - self.metallic);
+        let specular = (f * d * g) / (4.0 * n_dot_v * n_dot_l + 1e-4);
+        let kd = (Color::new(1.0, 1.0, 1.0) - f) * (1.0 - self.metallic);
         let diffuse = self.albedo / std::f32::consts::PI;
 
         *attenuation = kd * diffuse + specular;
@@ -224,7 +224,7 @@ pub fn sample_vndf_ggx(view: Vec3, roughness: f32) -> Vec3 {
     let phi = 2.0 * std::f32::consts::PI * u2;
     let t1_coeff = r * phi.cos();
     let t2_coeff = r * phi.sin();
-    let s = 0.5 * (1.0 + v.z());
+    let _s = 0.5 * (1.0 + v.z());
     let t3 = (1.0 - u1).sqrt();
 
     let h = t1 * t1_coeff + t2 * t2_coeff + v * t3;
