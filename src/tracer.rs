@@ -3,10 +3,10 @@ use crate::color::Color;
 use crate::common;
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
+use crate::sampler::generate_cmj_2d;
 use crate::vec3;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
-use crate::sampler::generate_cmj_2d;
 
 pub struct Renderer {
     pub camera: Camera,

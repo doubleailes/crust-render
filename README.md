@@ -23,7 +23,7 @@ Completely in a vibe coding mood.
   - Early stop based on variance threshold
 - 🧪 **Modular Design**
   - Clean separation between renderer, integrator, materials, scene
-- **Disney Principel Shader**
+- **Disney Principled Shader**
   - A basic integration of the animation standard shader
 - **Correlated Multi-Jittered (CMJ)**
   - Use CMJ for camera and light rays

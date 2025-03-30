@@ -1,12 +1,12 @@
+use crate::color::Color;
+use crate::common::Lerp;
+use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf::*;
-use crate::vec3::{dot, reflect, unit_vector};
-use crate::color::Color;
 use crate::ray::Ray;
-use crate::hittable::HitRecord;
 use crate::vec3;
+use crate::vec3::{dot, unit_vector};
 use std::f32::consts::PI;
-use crate::common::Lerp;
 
 pub struct Disney {
     pub base_color: Color,
@@ -66,9 +66,7 @@ impl Material for Disney {
         } else {
             Color::new(1.0, 1.0, 1.0)
         };
-        let f0 = Color::new(0.04, 0.04, 0.04)
-            .lerp(tint, self.specular_tint)
-            * self.specular;
+        let f0 = Color::new(0.04, 0.04, 0.04).lerp(tint, self.specular_tint) * self.specular;
 
         let F = fresnel_schlick(v_dot_h, f0.lerp(self.base_color, self.metallic));
 
@@ -86,7 +84,7 @@ impl Material for Disney {
         let denom = (n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2);
         let D = a2 / (PI * denom.max(1e-4));
         let G = (2.0 * n_dot_h * n_dot_v / v_dot_h).min(1.0)
-              * (2.0 * n_dot_h * n_dot_l / v_dot_h).min(1.0);
+            * (2.0 * n_dot_h * n_dot_l / v_dot_h).min(1.0);
         let specular = F * D * G / (4.0 * n_dot_v * n_dot_l + 1e-4);
 
         // Clearcoat lobe

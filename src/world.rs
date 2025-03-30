@@ -3,7 +3,7 @@ use crate::common;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::material::Material;
-use crate::material::{CookTorrance, Dielectric, Emissive, Lambertian, Metal,Disney};
+use crate::material::{CookTorrance, Dielectric, Disney, Emissive, Lambertian, Metal};
 use crate::primitives::Sphere;
 use crate::vec3::Point3;
 use std::sync::Arc;

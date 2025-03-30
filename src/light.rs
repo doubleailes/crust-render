@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 pub trait Light: Send + Sync {
     fn sample(&self) -> Point3;
+    #[allow(unused_variables)]
     fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
         self.sample() // fallback if not overridden
     }

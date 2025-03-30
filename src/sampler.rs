@@ -1,6 +1,5 @@
 use crate::common::random;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 
 /// Generate a 2D CMJ sample grid
 pub fn generate_cmj_2d(samples_per_side: usize) -> Vec<(f32, f32)> {
@@ -11,8 +10,8 @@ pub fn generate_cmj_2d(samples_per_side: usize) -> Vec<(f32, f32)> {
     let mut ys: Vec<usize> = (0..n).collect();
 
     // Shuffle for jittering
-    xs.shuffle(&mut thread_rng());
-    ys.shuffle(&mut thread_rng());
+    xs.shuffle(&mut rand::rng());
+    ys.shuffle(&mut rand::rng());
 
     let mut samples = Vec::with_capacity(n * n);
 

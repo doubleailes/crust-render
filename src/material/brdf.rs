@@ -71,7 +71,14 @@ pub fn schlick_weight(cos_theta: f32) -> f32 {
 }
 
 // Disney Diffuse
-pub fn disney_diffuse(base_color: Color, roughness: f32, n: Vec3, v: Vec3, l: Vec3, h: Vec3) -> Color {
+pub fn disney_diffuse(
+    base_color: Color,
+    roughness: f32,
+    n: Vec3,
+    v: Vec3,
+    l: Vec3,
+    h: Vec3,
+) -> Color {
     let n_dot_l = vec3::dot(n, l).max(0.0);
     let n_dot_v = vec3::dot(n, v).max(0.0);
     let l_dot_h = vec3::dot(l, h).max(0.0);
@@ -80,7 +87,10 @@ pub fn disney_diffuse(base_color: Color, roughness: f32, n: Vec3, v: Vec3, l: Ve
     let light_scatter = schlick_weight(n_dot_l);
     let view_scatter = schlick_weight(n_dot_v);
 
-    base_color * (1.0 / PI) * (1.0 + (fd90 - 1.0) * light_scatter) * (1.0 + (fd90 - 1.0) * view_scatter)
+    base_color
+        * (1.0 / PI)
+        * (1.0 + (fd90 - 1.0) * light_scatter)
+        * (1.0 + (fd90 - 1.0) * view_scatter)
 }
 
 // GTR1 distribution for clearcoat
