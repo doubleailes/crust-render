@@ -1,4 +1,10 @@
-# 🎯 Path Tracing in Rust
+# Crust Render
+
+<p align="center">
+    <img src="logo/curst-render-logo.png" width="70%" title="Crust Render Logo"/>
+</p>
+
+<br/>
 
 A toy, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
 Completely in a vibe coding mood.
