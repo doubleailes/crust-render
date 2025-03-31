@@ -15,9 +15,7 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
     - name: Build
@@ -28,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
     if: github.event_name == 'release' && github.event.action == 'created'
-    needs: [dry_publish,build_test,build-doc-draft]
+    needs: [build]
     strategy:
       fail-fast: false
       matrix:
