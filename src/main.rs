@@ -1,10 +1,10 @@
 use clap::Parser;
+use crust_render::camera::Camera;
+use crust_render::convert;
+use crust_render::tracer::{RenderSettings, Renderer};
+use crust_render::vec3::Point3;
+use crust_render::world::simple_scene;
 use exr::prelude::*;
-use ray_tracing::camera::Camera;
-use ray_tracing::convert;
-use ray_tracing::tracer::{RenderSettings, Renderer};
-use ray_tracing::vec3::Point3;
-use ray_tracing::world::simple_scene;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

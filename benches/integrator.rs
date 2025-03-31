@@ -1,9 +1,9 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use ray_tracing::camera::Camera;
-use ray_tracing::tracer::{RenderSettings, Renderer};
-use ray_tracing::vec3::Point3;
-use ray_tracing::vec3::Vec3;
-use ray_tracing::world::simple_scene;
+use crust_render::camera::Camera;
+use crust_render::tracer::{RenderSettings, Renderer};
+use crust_render::vec3::Point3;
+use crust_render::vec3::Vec3;
+use crust_render::world::simple_scene;
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
@@ -17,7 +17,7 @@ fn bench_dot(c: &mut Criterion) {
 
     c.bench_function("vec3 dot", |b| {
         b.iter(|| {
-            let _ = ray_tracing::vec3::dot(vec1, vec2);
+            let _ = crust_render::vec3::dot(vec1, vec2);
         })
     });
 }

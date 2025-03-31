@@ -1,10 +1,10 @@
 [package]
-name = "ray-tracing"
+name = "crust-render"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "ray_tracing"
+name = "crust_render"
 path = "src/lib.rs"
 
 [dependencies]
