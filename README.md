@@ -8,6 +8,9 @@
 
 A toy, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
 Completely in a vibe coding mood.
+
+## 📸 Preview
+
 ![preview](./images/rgb.png)
 
 ---
