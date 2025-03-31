@@ -1,0 +1,42 @@
+use std::sync::Arc;
+use utils::Color;
+use utils::Point3;
+
+pub trait Light: Send + Sync {
+    fn sample(&self) -> Point3;
+    #[allow(unused_variables)]
+    fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
+        self.sample() // fallback if not overridden
+    }
+    fn pdf(&self, hit_point: Point3, light_point: Point3) -> f32;
+    fn color(&self) -> Color;
+}
+
+pub struct LightList {
+    pub lights: Vec<Arc<dyn Light>>,
+}
+
+impl Default for LightList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LightList {
+    pub fn new() -> Self {
+        Self { lights: Vec::new() }
+    }
+
+    pub fn add(&mut self, light: Arc<dyn Light>) {
+        self.lights.push(light);
+    }
+
+    pub fn sample(&self) -> Option<&Arc<dyn Light>> {
+        if self.lights.is_empty() {
+            None
+        } else {
+            let i = (utils::random() * self.lights.len() as f32) as usize;
+            self.lights.get(i)
+        }
+    }
+}
