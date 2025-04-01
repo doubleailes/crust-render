@@ -4,6 +4,7 @@ use crust_render::convert;
 use crust_render::tracer::{RenderSettings, Renderer};
 use crust_render::world::simple_scene;
 use exr::prelude::*;
+use std::time::{Duration, Instant};
 use utils::Point3;
 
 #[derive(Parser)]
@@ -27,11 +28,13 @@ const MIN_SAMPLES: u32 = 32;
 const VARIANCE_THRESHOLD: f32 = 0.0; // You can tweak this!
 
 fn main() {
+    // CLI
     let cli = Cli::parse();
     let samples_per_pixel: u32 = cli.samples_per_pixel;
     let max_depth: u32 = cli.max_depth;
+    // Timer
+    let start = Instant::now();
     // World
-
     let (world, lights) = simple_scene();
     // Camera
 
@@ -60,6 +63,9 @@ fn main() {
     );
     let renderer = Renderer::new(cam, world, lights, render_settings);
     let buffer = renderer.render();
+    // Close Timer
+    let duration: Duration = start.elapsed();
+    println!("Time elapsed in rendering() is: {:?}", duration);
     // Render
     write_rgb_file("output.exr", IMAGE_WIDTH, IMAGE_HEIGHT, |x, y| {
         buffer.get_rgb(x, y)
