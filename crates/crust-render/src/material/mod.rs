@@ -5,7 +5,7 @@ pub use lambert::Lambertian;
 mod metal;
 pub use metal::Metal;
 mod dielectric;
-pub use dielectric::Dielectric;
+pub use dielectric::{ComplexDielectric, Dielectric};
 mod blinn_phong;
 pub use blinn_phong::BlinnPhong;
 mod cook_torrance;
