@@ -9,7 +9,11 @@ fn unique_timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards");
 
-    format!("{}{:03}.png", now.as_secs(), now.subsec_millis())
+    format!(
+        "./test_images/{}{:03}.png",
+        now.as_secs(),
+        now.subsec_millis()
+    )
 }
 
 /// compress any possible f32 into the range of [0,1].
