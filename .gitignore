@@ -2,3 +2,4 @@
 image.ppm
 Cargo.lock
 output.exr
+/test_images
