@@ -223,6 +223,18 @@ pub fn refract(uv: Vec3, n: Vec3, etai_over_etat: f32) -> Vec3 {
     r_out_perp + r_out_parallel
 }
 
+pub fn refract_standard(uv: Vec3, n: Vec3, eta: f32) -> Option<Vec3> {
+    let cos_theta = dot(-uv, n).min(1.0);
+    let r_out_perp = (uv + n * cos_theta) * eta;
+    let r_out_parallel_sq = 1.0 - r_out_perp.length_squared();
+    if r_out_parallel_sq < 0.0 {
+        None // TIR
+    } else {
+        let r_out_parallel = n * (-r_out_parallel_sq.sqrt());
+        Some(r_out_perp + r_out_parallel)
+    }
+}
+
 pub fn random_cosine_direction() -> Vec3 {
     let r1 = common::random();
     let r2 = common::random();
