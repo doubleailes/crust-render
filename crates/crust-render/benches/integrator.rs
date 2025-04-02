@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use crust_render::camera::Camera;
-use crust_render::tracer::{RenderSettings, Renderer};
-use crust_render::world::simple_scene;
+use crust_render::Camera;
+use crust_render::simple_scene;
+use crust_render::{RenderSettings, Renderer};
 use utils::{Point3, Vec3};
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;

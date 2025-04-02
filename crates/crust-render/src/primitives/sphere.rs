@@ -4,13 +4,27 @@ use crate::ray::Ray;
 use std::sync::Arc;
 use utils::Point3;
 
+/// The `Sphere` struct represents a 3D sphere primitive in the ray tracing system.
+/// It implements the `Hittable` trait, allowing it to be intersected by rays.
 pub struct Sphere {
+    /// The center of the sphere in 3D space.
     center: Point3,
+    /// The radius of the sphere.
     radius: f32,
+    /// The material of the sphere.
     mat: Arc<dyn Material>,
 }
 
 impl Sphere {
+    /// Creates a new `Sphere` with the specified center, radius, and material.
+    ///
+    /// # Parameters
+    /// - `cen`: The center of the sphere in 3D space.
+    /// - `r`: The radius of the sphere.
+    /// - `m`: An `Arc<dyn Material>` representing the material of the sphere.
+    ///
+    /// # Returns
+    /// - A new instance of `Sphere`.
     pub fn new(cen: Point3, r: f32, m: Arc<dyn Material>) -> Sphere {
         Sphere {
             center: cen,
@@ -21,6 +35,20 @@ impl Sphere {
 }
 
 impl Hittable for Sphere {
+    /// Determines if a ray intersects the sphere.
+    ///
+    /// # Parameters
+    /// - `r`: The ray to test for intersection.
+    /// - `t_min`: The minimum value of the parameter `t` to consider.
+    /// - `t_max`: The maximum value of the parameter `t` to consider.
+    /// - `rec`: A mutable reference to a `HitRecord` to store intersection details.
+    ///
+    /// # Returns
+    /// - `true` if the ray intersects the sphere, `false` otherwise.
+    ///
+    /// This method computes the intersection of the ray with the sphere using the quadratic formula.
+    /// If an intersection is found within the valid range, it updates the `HitRecord` with details
+    /// such as the intersection point, surface normal, and material.
     fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
         let oc = r.origin() - self.center;
         let a = r.direction().length_squared();

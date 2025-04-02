@@ -1,5 +1,5 @@
-mod mat_trait;
-pub use mat_trait::Material;
+mod material;
+pub use material::Material;
 mod lambert;
 pub use lambert::Lambertian;
 mod metal;

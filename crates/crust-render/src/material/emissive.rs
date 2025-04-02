@@ -1,8 +1,8 @@
-use utils::Color;
 use crate::hittable::HitRecord;
 use crate::light::Light;
 use crate::material::Material;
 use crate::ray::Ray;
+use utils::Color;
 use utils::{Point3, Vec3};
 
 pub struct Emissive {

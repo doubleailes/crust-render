@@ -1,8 +1,8 @@
 use clap::Parser;
-use crust_render::camera::Camera;
+use crust_render::Camera;
 use crust_render::convert;
-use crust_render::tracer::{RenderSettings, Renderer};
-use crust_render::world::simple_scene;
+use crust_render::simple_scene;
+use crust_render::{RenderSettings, Renderer};
 use exr::prelude::*;
 use std::time::{Duration, Instant};
 use utils::Point3;
@@ -71,5 +71,5 @@ fn main() {
         buffer.get_rgb(x, y)
     })
     .expect("writing image");
-    convert::convert();
+    convert();
 }
