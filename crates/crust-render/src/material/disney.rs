@@ -1,9 +1,9 @@
-use utils::Color;
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf::*;
 use crate::ray::Ray;
 use std::f32::consts::PI;
+use utils::Color;
 use utils::{Lerp, dot, unit_vector};
 
 pub struct Disney {
@@ -65,7 +65,7 @@ impl Material for Disney {
             Color::new(1.0, 1.0, 1.0)
         };
         let f0 = Color::new(0.04, 0.04, 0.04).lerp(tint, self.specular_tint) * self.specular;
-
+        #[allow(non_snake_case)]
         let F = fresnel_schlick(v_dot_h, f0.lerp(self.base_color, self.metallic));
 
         // Diffuse lobe
@@ -80,7 +80,9 @@ impl Material for Disney {
         let a = self.roughness * self.roughness;
         let a2 = a * a;
         let denom = (n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2);
+        #[allow(non_snake_case)]
         let D = a2 / (PI * denom.max(1e-4));
+        #[allow(non_snake_case)]
         let G = (2.0 * n_dot_h * n_dot_v / v_dot_h).min(1.0)
             * (2.0 * n_dot_h * n_dot_l / v_dot_h).min(1.0);
         let specular = F * D * G / (4.0 * n_dot_v * n_dot_l + 1e-4);
@@ -88,8 +90,11 @@ impl Material for Disney {
         // Clearcoat lobe
         let h_clear = unit_vector(v + l);
         let clear_alpha = (1.0 - self.clearcoat_gloss).lerp(0.1, 0.001);
+        #[allow(non_snake_case)]
         let Dc = gtr1(dot(n, h_clear).max(0.0), clear_alpha);
+        #[allow(non_snake_case)]
         let Fc = fresnel_schlick_scalar(dot(v, h_clear).max(0.0), 0.04);
+        #[allow(non_snake_case)]
         let Gc = 1.0; // simplified
 
         let clearcoat = self.clearcoat * Dc * Fc * Gc / (4.0 * n_dot_v * n_dot_l + 1e-4);

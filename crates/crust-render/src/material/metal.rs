@@ -1,7 +1,7 @@
-use utils::Color;
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
+use utils::Color;
 
 pub struct Metal {
     albedo: Color,
