@@ -24,3 +24,4 @@ pub use world::simple_scene;
 pub use document::{Document, ObjectList, DocObject};
 pub use primitives::Primitive;
 pub use material::MaterialType;
+pub use primitives::{UVSphere,UVTorus};

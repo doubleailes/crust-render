@@ -60,6 +60,28 @@ impl Vec3 {
             common::clamp(self.z(), min, max),
         )
     }
+    pub fn unit_vector(self) -> Vec3 {
+        self / self.length()
+    }
+    pub fn rotate(self, r_x: f32, r_y: f32, r_z: f32) -> Vec3 {
+        let cos_x = f32::cos(r_x);
+        let sin_x = f32::sin(r_x);
+        let cos_y = f32::cos(r_y);
+        let sin_y = f32::sin(r_y);
+        let cos_z = f32::cos(r_z);
+        let sin_z = f32::sin(r_z);
+
+        Vec3::new(
+            self.x() * (cos_y * cos_z) + self.y() * (cos_x * sin_z + sin_x * sin_y * cos_z)
+                - self.z() * (sin_x * sin_z - cos_x * sin_y * cos_z),
+            self.x() * (-cos_y * sin_z)
+                + self.y() * (cos_x * cos_z - sin_x * sin_y * sin_z)
+                + self.z() * (sin_x * cos_z + cos_x * sin_y * sin_z),
+            self.x() * (sin_y)
+                - self.y() * (sin_x * cos_y)
+                + self.z() * (cos_x * cos_y),
+        )
+    }
 }
 pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
     // Assume Z-up in local, rotate to match `normal`

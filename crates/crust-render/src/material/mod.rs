@@ -18,7 +18,7 @@ mod disney;
 pub use disney::Disney;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub enum MaterialType {
     Lambertian(
         Lambertian,
