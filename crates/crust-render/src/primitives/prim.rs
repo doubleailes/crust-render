@@ -95,7 +95,7 @@ impl Hittable for Object {
                 let f = 1.0 / a;
                 let s = r.origin() - *v0;
                 let u = f * utils::dot(s, h);
-                if u < 0.0 || u > 1.0 {
+                if !(0.0..=1.0).contains(&u) {
                     return false;
                 }
                 let q = utils::cross(s, edge1);

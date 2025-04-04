@@ -5,15 +5,15 @@ use crate::primitives::Primitive;
 use std::f32::consts::PI;
 use utils::Vec3;
 
+type Triangles = (
+    Vec<Vec3>,
+    Vec<Vec3>,
+    Vec<(f32, f32)>,
+    Vec<(usize, usize, usize)>,
+);
+
 trait Triangulable {
-    fn generate(
-        &self,
-    ) -> (
-        Vec<Vec3>,
-        Vec<Vec3>,
-        Vec<(f32, f32)>,
-        Vec<(usize, usize, usize)>,
-    );
+    fn generate(&self) -> Triangles;
     fn triangulate(&self, material: MaterialType) -> Vec<DocObject> {
         let (vertices, _normals, _uvs, indices) = self.generate();
         let mut objects = Vec::with_capacity(indices.len());
@@ -40,14 +40,7 @@ pub struct UVSphere {
     sectors: usize,
 }
 impl Triangulable for UVSphere {
-    fn generate(
-        &self,
-    ) -> (
-        Vec<Vec3>,
-        Vec<Vec3>,
-        Vec<(f32, f32)>,
-        Vec<(usize, usize, usize)>,
-    ) {
+    fn generate(&self) -> Triangles {
         let mut vertices = Vec::new();
         let mut normals = Vec::new();
         let mut uvs = Vec::new();
@@ -107,14 +100,7 @@ pub struct UVTorus {
     pub sides: usize,
 }
 impl Triangulable for UVTorus {
-    fn generate(
-        &self,
-    ) -> (
-        Vec<Vec3>,
-        Vec<Vec3>,
-        Vec<(f32, f32)>,
-        Vec<(usize, usize, usize)>,
-    ) {
+    fn generate(&self) -> Triangles {
         let mut vertices = Vec::new();
         let mut normals = Vec::new();
         let mut uvs = Vec::new();

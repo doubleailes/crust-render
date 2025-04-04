@@ -10,6 +10,8 @@ use crate::tracer::RenderSettings;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use tracing::error;
+use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -45,7 +47,16 @@ impl Document {
             let mat_type = object.material();
             let material: Arc<dyn Material> = mat_type.get_material();
             if mat_type.is_emissive() {
-                let emissive = mat_type.get_emissive().unwrap();
+                let emissive = match mat_type.get_emissive() {
+                    Some(emissive) => emissive,
+                    None => {
+                        warn!(
+                            "Emissive material is missing emissive value for object: {}",
+                            object.name
+                        );
+                        continue;
+                    }
+                };
                 let light: Arc<dyn light::Light> = Arc::new(emissive.clone());
                 lights.add(light);
             }
@@ -65,8 +76,16 @@ impl Document {
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
-        let r = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .expect("Failed to serialize Document");
+        let r = match ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()) {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to serialize Document: {}", e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to serialize Document",
+                ));
+            }
+        };
         writer.write_all(r.as_bytes())?;
         writer.flush()?;
         Ok(())
@@ -74,7 +93,16 @@ impl Document {
     pub fn read(path: &Path) -> std::io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
-        let doc: Document = ron::de::from_reader(reader).expect("Failed to deserialize Document");
+        let doc: Document = match ron::de::from_reader(reader) {
+            Ok(doc) => doc,
+            Err(e) => {
+                error!("Failed to deserialize Document: {}", e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to deserialize Document",
+                ));
+            }
+        };
         Ok(doc)
     }
 }
