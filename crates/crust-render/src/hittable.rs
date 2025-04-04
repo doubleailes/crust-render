@@ -3,6 +3,7 @@ use std::sync::Arc;
 use utils::{Point3, Vec3};
 
 use crate::material::Material;
+use crate::aabb::AABB;
 
 /// The `HitRecord` struct stores information about a ray-object intersection.
 /// It contains details such as the intersection point, surface normal, material, and more.
@@ -61,4 +62,5 @@ pub trait Hittable: Send + Sync {
     /// # Returns
     /// - `true` if the ray intersects the object, `false` otherwise.
     fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool;
+    fn bounding_box(&self) -> Option<AABB>;
 }

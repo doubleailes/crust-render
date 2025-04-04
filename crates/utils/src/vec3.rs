@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub};
-
+use std::ops::{Index, IndexMut};
 use crate::common;
 
 #[derive(Copy, Clone, Default, Deserialize, Serialize, Debug)]
@@ -107,6 +107,20 @@ pub type Point3 = Vec3;
 impl Display for Vec3 {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{} {} {}", self.e[0], self.e[1], self.e[2])
+    }
+}
+
+impl Index<usize> for Vec3 {
+    type Output = f32;
+
+    fn index(&self, i: usize) -> &Self::Output {
+        &self.e[i]
+    }
+}
+
+impl IndexMut<usize> for Vec3 {
+    fn index_mut(&mut self, i: usize) -> &mut Self::Output {
+        &mut self.e[i]
     }
 }
 

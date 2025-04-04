@@ -57,12 +57,21 @@ fn main() {
         object_list.add(obj);
     }
     let p = Primitive::new_obj("./samples/teapot.obj".to_string());
+    let teapot_material = crust_render::Disney::new(
+        utils::Color::new(0.8, 0.3, 0.3),
+        0.0,
+        0.2,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
     let teapot = DocObject::new(
         "teapot".to_string(),
         p,
-        MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
-            0.3, 0.3, 0.8,
-        ))),
+        MaterialType::Disney(teapot_material),
     );
     object_list.add(teapot);
     // Add a light source

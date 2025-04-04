@@ -1,5 +1,6 @@
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
+use crate::aabb::AABB;
 
 /// The `HittableList` struct represents a collection of objects that can be intersected by rays.
 /// It allows for managing multiple `Hittable` objects and testing for ray intersections with all of them.
@@ -55,5 +56,25 @@ impl Hittable for HittableList {
         }
 
         hit_anything
+    }
+    fn bounding_box(&self) -> Option<AABB> {
+        if self.objects.is_empty() {
+            return None;
+        }
+
+        let mut temp_box: Option<AABB> = None;
+
+        for object in &self.objects {
+            if let Some(bbox) = object.bounding_box() {
+                temp_box = Some(match temp_box {
+                    Some(existing) => AABB::surrounding_box(existing, bbox),
+                    None => bbox,
+                });
+            } else {
+                return None; // fail if any object doesn't have a bounding box
+            }
+        }
+
+        temp_box
     }
 }
