@@ -11,6 +11,7 @@ mod ray;
 mod sampler;
 mod tracer;
 mod world;
+mod aabb;
 
 pub use camera::Camera;
 pub use convert::convert;
