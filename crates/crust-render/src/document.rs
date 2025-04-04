@@ -58,6 +58,15 @@ impl Document {
                     );
                     world.add(Box::new(obj));
                 }
+                Primitive::Triangle { v0, v1, v2 } => {
+                    let obj = Object::new_triangle(
+                        *v0,
+                        *v1,
+                        *v2,
+                        material,
+                    );
+                    world.add(Box::new(obj));
+                }
             }
         }
         (world, lights)

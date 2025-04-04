@@ -7,6 +7,7 @@ use std::sync::Arc;
 use utils::Color;
 use utils::Point3;
 
+#[allow(dead_code)]
 pub fn random_scene() -> (HittableList, LightList) {
     let mut world = HittableList::new();
     let mut lights = LightList::new();
