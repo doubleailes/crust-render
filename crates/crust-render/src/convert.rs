@@ -1,8 +1,8 @@
 use exr::prelude as exrs;
 use exr::prelude::*;
 use image as png;
-
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{error, info};
 
 fn unique_timestamp() -> String {
     let now = SystemTime::now()
@@ -57,6 +57,13 @@ pub fn convert() {
 
     // save the png buffer to a png file
     let png_buffer = &image.layer_data.channel_data.pixels;
-    png_buffer.save(unique_timestamp()).unwrap();
-    println!("created image rgb.png")
+    match png_buffer.save(unique_timestamp()) {
+        Ok(_) => {
+            info!("Image saved successfully in tmp rgb.png");
+        }
+        Err(e) => {
+            error!("Error saving image: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

@@ -43,10 +43,7 @@ impl MaterialType {
         }
     }
     pub fn is_emissive(&self) -> bool {
-        match self {
-            MaterialType::Emissive(_) => true,
-            _ => false,
-        }
+        matches!(self, MaterialType::Emissive(_))
     }
     pub fn get_emissive(&self) -> Option<Emissive> {
         match self {
