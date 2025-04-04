@@ -56,6 +56,15 @@ fn main() {
     for obj in torus {
         object_list.add(obj);
     }
+    let p = Primitive::new_obj("./samples/teapot.obj".to_string());
+    let teapot = DocObject::new(
+        "teapot".to_string(),
+        p,
+        MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
+            0.3, 0.3, 0.8,
+        ))),
+    );
+    object_list.add(teapot);
     // Add a light source
     let light_center = Point3::new(0.0, 7.0, 0.0);
     let light_radius = 1.0;

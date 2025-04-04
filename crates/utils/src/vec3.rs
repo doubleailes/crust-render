@@ -81,6 +81,11 @@ impl Vec3 {
         )
     }
 }
+impl From<[f32; 3]> for Vec3 {
+    fn from(arr: [f32; 3]) -> Self {
+        Vec3::new(arr[0], arr[1], arr[2])
+    }
+}
 pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
     // Assume Z-up in local, rotate to match `normal`
     let up = if normal.z().abs() < 0.999 {

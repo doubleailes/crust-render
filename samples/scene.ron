@@ -59013,6 +59013,17 @@
                 )),
             ),
             (
+                name: "teapot",
+                object: Obj(
+                    path: "./samples/teapot.obj",
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.3, 0.3, 0.8),
+                    ),
+                )),
+            ),
+            (
                 name: "light_1",
                 object: Sphere(
                     center: (
@@ -59051,11 +59062,11 @@
         ],
     ),
     settings: (
-        samples_per_pixel: 10,
+        samples_per_pixel: 1,
         max_depth: 32,
         width: 400,
         height: 225,
-        min_samples_per_pixel: 2,
-        variance_threshold: 0.05,
+        min_samples_per_pixel: 32,
+        variance_threshold: 0.00,
     ),
 )
