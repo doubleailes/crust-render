@@ -69,6 +69,14 @@ impl Document {
                     let obj = Object::new_triangle(*v0, *v1, *v2, material);
                     world.add(Box::new(obj));
                 }
+                Primitive::Mesh { vertices, indices } => {
+                    let obj = Object::new_mesh(vertices.clone(), indices.clone(), material);
+                    world.add(Box::new(obj));
+                }
+                Primitive::Obj { path } => {
+                    let obj = Object::new_obj(path.clone(), material);
+                    world.add(Box::new(obj));
+                }
             }
         }
         (world, lights)
