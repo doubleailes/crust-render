@@ -4,6 +4,8 @@ use crate::material::brdf;
 use crate::ray::Ray;
 use utils::Color;
 
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Dielectric {
     ir: f32, // Index of refraction
 }

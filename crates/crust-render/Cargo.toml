@@ -10,12 +10,15 @@ path = "src/lib.rs"
 
 [dependencies]
 utils = { path = "../utils" }
-
 exr = "1.73.0"
 rand = "0.9.0"
 image = { version = "0.25.6", default-features = false, features = ["png"] }
 rayon = "1.10.0"
 clap = { version = "4.5.34", features = ["derive"] }
+serde.workspace = true
+ron = "0.9.0"
+
+
 [dev-dependencies]
 criterion = "0.5"
 

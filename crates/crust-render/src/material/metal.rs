@@ -3,6 +3,8 @@ use crate::material::Material;
 use crate::ray::Ray;
 use utils::Color;
 
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Metal {
     albedo: Color,
     fuzz: f32,

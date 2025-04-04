@@ -1,9 +1,10 @@
 use std::fmt::{Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub};
+use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Deserialize, Serialize, Debug)]
 pub struct Vec3 {
     e: [f32; 3],
 }

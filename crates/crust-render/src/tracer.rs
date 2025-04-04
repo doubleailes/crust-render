@@ -5,6 +5,7 @@ use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
 use utils::Color;
+use serde::{Deserialize, Serialize};
 
 pub struct Renderer {
     pub camera: Camera,
@@ -87,6 +88,7 @@ impl Renderer {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RenderSettings {
     samples_per_pixel: u32,
     max_depth: u32,
@@ -112,6 +114,9 @@ impl RenderSettings {
             min_samples_per_pixel,
             variance_threshold,
         }
+    }
+    pub fn get_dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
     }
 }
 

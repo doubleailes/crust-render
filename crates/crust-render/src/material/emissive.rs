@@ -4,7 +4,9 @@ use crate::material::Material;
 use crate::ray::Ray;
 use utils::Color;
 use utils::{Point3, Vec3};
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emissive {
     color: Color,
     position: Point3,
