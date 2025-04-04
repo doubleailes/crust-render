@@ -18,6 +18,14 @@ clap = { version = "4.5.34", features = ["derive"] }
 serde.workspace = true
 ron = "0.9.0"
 
+[dependencies.tracing]
+version = "0.1.41"
+default-features = false
+
+[dependencies.tracing-subscriber]
+version = "0.3.19"
+features = ["fmt"]
+
 
 [dev-dependencies]
 criterion = "0.5"
