@@ -6,6 +6,8 @@ use std::f32::consts::PI;
 use utils::Color;
 use utils::{Lerp, dot, unit_vector};
 
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Disney {
     pub base_color: Color,
     pub metallic: f32,

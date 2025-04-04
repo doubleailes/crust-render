@@ -7,6 +7,8 @@ use crate::material::sample_vndf_ggx;
 use crate::ray::Ray;
 use utils::Color;
 
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CookTorrance {
     pub albedo: Color,
     pub roughness: f32,

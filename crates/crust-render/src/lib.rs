@@ -10,6 +10,7 @@ mod ray;
 mod sampler;
 mod tracer;
 mod world;
+mod document;
 
 pub use camera::Camera;
 pub use convert::convert;
@@ -19,4 +20,7 @@ pub use material::*;
 pub use ray::Ray;
 pub use sampler::generate_cmj_2d;
 pub use tracer::{RenderSettings, Renderer};
-pub use world::{random_scene, simple_scene};
+pub use world::simple_scene;
+pub use document::{Document, ObjectList, DocObject};
+pub use primitives::Primitive;
+pub use material::MaterialType;

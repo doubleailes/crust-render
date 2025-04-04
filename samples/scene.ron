@@ -1,0 +1,534 @@
+(
+    camera: (
+        origin: (
+            e: (13.0, 2.0, 3.0),
+        ),
+        lower_left_corner: (
+            e: (2.9136019, -1.2262843, 3.8894577),
+        ),
+        horizontal: (
+            e: (1.4097352, 0.0, -6.1088524),
+        ),
+        vertical: (
+            e: (-0.5094205, 3.4875712, -0.11755858),
+        ),
+        u: (
+            e: (0.2248595, 0.0, -0.97439116),
+        ),
+        v: (
+            e: (-0.14445336, 0.9889499, -0.03333539),
+        ),
+        lens_radius: 0.05,
+    ),
+    object_list: (
+        objects: [
+            (
+                name: "ground",
+                object: Sphere(
+                    center: (
+                        e: (0.0, -1000.0, 0.0),
+                    ),
+                    radius: 1000.0,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.5, 0.5, 0.5),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_-2_-2",
+                object: Sphere(
+                    center: (
+                        e: (-2.0, 0.2, -2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_-2_-1",
+                object: Sphere(
+                    center: (
+                        e: (-2.0, 0.2, -1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-2_0",
+                object: Sphere(
+                    center: (
+                        e: (-2.0, 0.2, 0.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-2_1",
+                object: Sphere(
+                    center: (
+                        e: (-2.0, 0.2, 1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-2_2",
+                object: Sphere(
+                    center: (
+                        e: (-2.0, 0.2, 2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_-1_-2",
+                object: Sphere(
+                    center: (
+                        e: (-1.0, 0.2, -2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-1_-1",
+                object: Sphere(
+                    center: (
+                        e: (-1.0, 0.2, -1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-1_0",
+                object: Sphere(
+                    center: (
+                        e: (-1.0, 0.2, 0.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_-1_1",
+                object: Sphere(
+                    center: (
+                        e: (-1.0, 0.2, 1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_-1_2",
+                object: Sphere(
+                    center: (
+                        e: (-1.0, 0.2, 2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Metal((
+                    albedo: (
+                        e: (0.7, 0.6, 0.5),
+                    ),
+                    fuzz: 0.1,
+                )),
+            ),
+            (
+                name: "sphere_0_-2",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 0.2, -2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_0_-1",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 0.2, -1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_0_0",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 0.2, 0.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_0_1",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 0.2, 1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Metal((
+                    albedo: (
+                        e: (0.7, 0.6, 0.5),
+                    ),
+                    fuzz: 0.1,
+                )),
+            ),
+            (
+                name: "sphere_0_2",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 0.2, 2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Dielectric((
+                    ir: 1.5,
+                )),
+            ),
+            (
+                name: "sphere_1_-2",
+                object: Sphere(
+                    center: (
+                        e: (1.0, 0.2, -2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_1_-1",
+                object: Sphere(
+                    center: (
+                        e: (1.0, 0.2, -1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_1_0",
+                object: Sphere(
+                    center: (
+                        e: (1.0, 0.2, 0.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Metal((
+                    albedo: (
+                        e: (0.7, 0.6, 0.5),
+                    ),
+                    fuzz: 0.1,
+                )),
+            ),
+            (
+                name: "sphere_1_1",
+                object: Sphere(
+                    center: (
+                        e: (1.0, 0.2, 1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Dielectric((
+                    ir: 1.5,
+                )),
+            ),
+            (
+                name: "sphere_1_2",
+                object: Sphere(
+                    center: (
+                        e: (1.0, 0.2, 2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_2_-2",
+                object: Sphere(
+                    center: (
+                        e: (2.0, 0.2, -2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "sphere_2_-1",
+                object: Sphere(
+                    center: (
+                        e: (2.0, 0.2, -1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Metal((
+                    albedo: (
+                        e: (0.7, 0.6, 0.5),
+                    ),
+                    fuzz: 0.1,
+                )),
+            ),
+            (
+                name: "sphere_2_0",
+                object: Sphere(
+                    center: (
+                        e: (2.0, 0.2, 0.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Dielectric((
+                    ir: 1.5,
+                )),
+            ),
+            (
+                name: "sphere_2_1",
+                object: Sphere(
+                    center: (
+                        e: (2.0, 0.2, 1.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.9, 0.9, 0.9),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.5,
+                )),
+            ),
+            (
+                name: "sphere_2_2",
+                object: Sphere(
+                    center: (
+                        e: (2.0, 0.2, 2.0),
+                    ),
+                    radius: 0.2,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.8, 0.3, 0.3),
+                    ),
+                )),
+            ),
+            (
+                name: "center_sphere_1",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 1.0, 0.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Dielectric((
+                    ir: 1.5,
+                )),
+            ),
+            (
+                name: "center_sphere_2",
+                object: Sphere(
+                    center: (
+                        e: (-4.0, 1.0, 0.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Lambertian((
+                    albedo: (
+                        e: (0.4, 0.2, 0.1),
+                    ),
+                )),
+            ),
+            (
+                name: "center_sphere_3",
+                object: Sphere(
+                    center: (
+                        e: (4.0, 1.0, 0.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Metal((
+                    albedo: (
+                        e: (0.7, 0.6, 0.5),
+                    ),
+                    fuzz: 0.0,
+                )),
+            ),
+            (
+                name: "center_sphere_4",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 1.0, 4.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: CookTorrance((
+                    albedo: (
+                        e: (0.5, 0.5, 0.5),
+                    ),
+                    roughness: 0.2,
+                    metallic: 0.0,
+                )),
+            ),
+            (
+                name: "center_sphere_5",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 1.0, -4.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Disney((
+                    base_color: (
+                        e: (0.5, 0.5, 0.5),
+                    ),
+                    metallic: 0.0,
+                    roughness: 0.2,
+                    specular: 0.5,
+                    specular_tint: 0.5,
+                    sheen: 0.0,
+                    sheen_tint: 0.5,
+                    clearcoat: 0.0,
+                    clearcoat_gloss: 1.0,
+                )),
+            ),
+            (
+                name: "light_1",
+                object: Sphere(
+                    center: (
+                        e: (0.0, 7.0, 0.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Emissive((
+                    color: (
+                        e: (10.0, 10.0, 10.0),
+                    ),
+                    position: (
+                        e: (0.0, 7.0, 0.0),
+                    ),
+                    radius: 1.0,
+                )),
+            ),
+            (
+                name: "light_2",
+                object: Sphere(
+                    center: (
+                        e: (-4.0, 7.0, 0.0),
+                    ),
+                    radius: 1.0,
+                ),
+                material: Emissive((
+                    color: (
+                        e: (20.0, 10.0, 7.0),
+                    ),
+                    position: (
+                        e: (-4.0, 7.0, 0.0),
+                    ),
+                    radius: 1.0,
+                )),
+            ),
+        ],
+    ),
+    settings: (
+        samples_per_pixel: 100,
+        max_depth: 32,
+        width: 400,
+        height: 225,
+        min_samples_per_pixel: 32,
+        variance_threshold: 0.05,
+    ),
+)
