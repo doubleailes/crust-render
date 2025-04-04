@@ -4,10 +4,10 @@ use crust_render::Renderer;
 use crust_render::convert;
 use exr::prelude::*;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, Level, error};
+use tracing::{Level, debug, error, info};
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
-enum LogerLevel {
+enum LoggerLevel {
     Debug,
     Info,
     Warn,
@@ -28,16 +28,16 @@ struct Cli {
     output: String,
     /// Verbose level
     #[arg(short, long, default_value = "info")]
-    level: LogerLevel,
+    level: LoggerLevel,
 }
 
-fn get_loger_level(level: LogerLevel) -> Level {
+fn get_logger_level(level: LoggerLevel) -> Level {
     match level {
-        LogerLevel::Debug => Level::DEBUG,
-        LogerLevel::Info => Level::INFO,
-        LogerLevel::Warn => Level::WARN,
-        LogerLevel::Error => Level::ERROR,
-        LogerLevel::Trace => Level::TRACE,
+        LoggerLevel::Debug => Level::DEBUG,
+        LoggerLevel::Info => Level::INFO,
+        LoggerLevel::Warn => Level::WARN,
+        LoggerLevel::Error => Level::ERROR,
+        LoggerLevel::Trace => Level::TRACE,
     }
 }
 
@@ -46,8 +46,8 @@ fn main() {
     let cli = Cli::parse();
     // Add tracing
     tracing_subscriber::fmt()
-    .with_max_level(get_loger_level(cli.level))
-    .init();
+        .with_max_level(get_logger_level(cli.level))
+        .init();
     let input = cli.input;
     let input_path = std::path::Path::new(&input);
     let output = cli.output;
@@ -66,7 +66,7 @@ fn main() {
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Render
     let (img_width, img_height) = doc.settings().get_dimensions();
-    match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)){
+    match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
             error!("Error writing image: {}", e);
