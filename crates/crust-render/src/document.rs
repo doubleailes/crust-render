@@ -1,13 +1,13 @@
 use std::io::Write;
 
+use crate::Material;
+use crate::MaterialType;
+use crate::camera::Camera;
 use crate::hittable_list::HittableList;
 use crate::light::{self, LightList};
-use crate::camera::Camera;
-use crate::primitives::{Primitive, Object};
+use crate::primitives::{Object, Primitive};
 use crate::tracer::RenderSettings;
 use serde::{Deserialize, Serialize};
-use crate::MaterialType;
-use crate::Material;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -49,22 +49,13 @@ impl Document {
                 let light: Arc<dyn light::Light> = Arc::new(emissive.clone());
                 lights.add(light);
             }
-            match object.object(){
+            match object.object() {
                 Primitive::Sphere { center, radius } => {
-                    let obj = Object::new_sphere(
-                        *center,
-                        *radius,
-                        material,
-                    );
+                    let obj = Object::new_sphere(*center, *radius, material);
                     world.add(Box::new(obj));
                 }
                 Primitive::Triangle { v0, v1, v2 } => {
-                    let obj = Object::new_triangle(
-                        *v0,
-                        *v1,
-                        *v2,
-                        material,
-                    );
+                    let obj = Object::new_triangle(*v0, *v1, *v2, material);
                     world.add(Box::new(obj));
                 }
             }
@@ -74,7 +65,8 @@ impl Document {
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
-        let r = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()).expect("Failed to serialize Document");
+        let r = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .expect("Failed to serialize Document");
         writer.write_all(r.as_bytes())?;
         writer.flush()?;
         Ok(())
@@ -101,18 +93,22 @@ impl ObjectList {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct DocObject{
+pub struct DocObject {
     name: String,
     object: Primitive,
     material: MaterialType,
 }
 impl DocObject {
-    pub fn new(name: String , object: Primitive, material: MaterialType) -> Self {
-        Self {name, object, material }
+    pub fn new(name: String, object: Primitive, material: MaterialType) -> Self {
+        Self {
+            name,
+            object,
+            material,
+        }
     }
 
     pub fn object(&self) -> &Primitive {
-        &self.object    
+        &self.object
     }
 
     pub fn material(&self) -> &MaterialType {
