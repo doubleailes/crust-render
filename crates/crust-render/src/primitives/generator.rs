@@ -1,13 +1,20 @@
 use crate::MaterialType;
-use crate::primitives::Primitive;
 use crate::document::DocObject;
+use crate::primitives::Primitive;
 
-use utils::Vec3;
 use std::f32::consts::PI;
+use utils::Vec3;
 
 trait Triangulable {
-    fn generate(&self) -> (Vec<Vec3>, Vec<Vec3>, Vec<(f32, f32)>, Vec<(usize, usize, usize)>);
-    fn triangulate(&self, material: MaterialType) -> Vec<DocObject>{
+    fn generate(
+        &self,
+    ) -> (
+        Vec<Vec3>,
+        Vec<Vec3>,
+        Vec<(f32, f32)>,
+        Vec<(usize, usize, usize)>,
+    );
+    fn triangulate(&self, material: MaterialType) -> Vec<DocObject> {
         let (vertices, _normals, _uvs, indices) = self.generate();
         let mut objects = Vec::with_capacity(indices.len());
 
@@ -27,57 +34,68 @@ trait Triangulable {
     }
 }
 
-pub struct UVSphere {   
+pub struct UVSphere {
     radius: f32,
     stacks: usize,
     sectors: usize,
 }
 impl Triangulable for UVSphere {
-    fn generate(&self) -> (Vec<Vec3>, Vec<Vec3>, Vec<(f32, f32)>, Vec<(usize, usize, usize)>) {
+    fn generate(
+        &self,
+    ) -> (
+        Vec<Vec3>,
+        Vec<Vec3>,
+        Vec<(f32, f32)>,
+        Vec<(usize, usize, usize)>,
+    ) {
         let mut vertices = Vec::new();
         let mut normals = Vec::new();
         let mut uvs = Vec::new();
         let mut indices = Vec::new();
-    
+
         for i in 0..=self.stacks {
             let stack_angle = PI / 2.0 - i as f32 * PI / self.stacks as f32; // from +pi/2 to -pi/2
             let xy = self.radius * stack_angle.cos();
             let z = self.radius * stack_angle.sin();
-    
+
             for j in 0..=self.sectors {
                 let sector_angle = j as f32 * 2.0 * PI / self.sectors as f32; // from 0 to 2pi
-    
+
                 let x = xy * sector_angle.cos();
                 let y = xy * sector_angle.sin();
                 let position = Vec3::new(x, y, z);
                 vertices.push(position);
                 normals.push(position.unit_vector());
-    
+
                 let u = j as f32 / self.sectors as f32;
                 let v = i as f32 / self.stacks as f32;
                 uvs.push((u, v));
             }
         }
-    
+
         // Indexing
         for i in 0..self.stacks {
             for j in 0..self.sectors {
                 let first = i * (self.sectors + 1) + j;
                 let second = first + self.sectors + 1;
-    
+
                 indices.push((first, second, first + 1));
                 indices.push((first + 1, second, second + 1));
             }
         }
-    
+
         (vertices, normals, uvs, indices)
     }
 }
 impl UVSphere {
     pub fn new(radius: f32, stacks: usize, sectors: usize) -> Self {
-        UVSphere { radius, stacks, sectors }
+        UVSphere {
+            radius,
+            stacks,
+            sectors,
+        }
     }
-    pub fn get_doc_object(&self, material: MaterialType) ->Vec<DocObject>{
+    pub fn get_doc_object(&self, material: MaterialType) -> Vec<DocObject> {
         self.triangulate(material)
     }
 }
@@ -89,7 +107,14 @@ pub struct UVTorus {
     pub sides: usize,
 }
 impl Triangulable for UVTorus {
-    fn generate(&self) -> (Vec<Vec3>, Vec<Vec3>, Vec<(f32, f32)>, Vec<(usize, usize, usize)>) {
+    fn generate(
+        &self,
+    ) -> (
+        Vec<Vec3>,
+        Vec<Vec3>,
+        Vec<(f32, f32)>,
+        Vec<(usize, usize, usize)>,
+    ) {
         let mut vertices = Vec::new();
         let mut normals = Vec::new();
         let mut uvs = Vec::new();
@@ -137,7 +162,13 @@ impl Triangulable for UVTorus {
     }
 }
 impl UVTorus {
-    pub fn new(position: Vec3, major_radius: f32, minor_radius: f32, segments: usize, sides: usize) -> Self {
+    pub fn new(
+        position: Vec3,
+        major_radius: f32,
+        minor_radius: f32,
+        segments: usize,
+        sides: usize,
+    ) -> Self {
         UVTorus {
             position,
             major_radius,

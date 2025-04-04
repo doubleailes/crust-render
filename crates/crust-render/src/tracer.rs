@@ -4,8 +4,8 @@ use crate::ray::Ray;
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
-use utils::Color;
 use serde::{Deserialize, Serialize};
+use utils::Color;
 
 pub struct Renderer {
     pub camera: Camera,

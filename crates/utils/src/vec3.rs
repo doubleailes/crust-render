@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub};
-use serde::{Deserialize, Serialize};
 
 use crate::common;
 
@@ -77,9 +77,7 @@ impl Vec3 {
             self.x() * (-cos_y * sin_z)
                 + self.y() * (cos_x * cos_z - sin_x * sin_y * sin_z)
                 + self.z() * (sin_x * cos_z + cos_x * sin_y * sin_z),
-            self.x() * (sin_y)
-                - self.y() * (sin_x * cos_y)
-                + self.z() * (cos_x * cos_y),
+            self.x() * (sin_y) - self.y() * (sin_x * cos_y) + self.z() * (cos_x * cos_y),
         )
     }
 }

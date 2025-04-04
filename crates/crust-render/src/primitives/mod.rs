@@ -1,5 +1,5 @@
-mod prim;
 mod generator;
-pub use prim::Primitive;
+mod prim;
+pub use generator::{UVSphere, UVTorus};
 pub use prim::Object;
-pub use generator::{UVSphere,UVTorus};
+pub use prim::Primitive;

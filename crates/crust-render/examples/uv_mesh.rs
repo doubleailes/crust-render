@@ -1,9 +1,11 @@
 use std::path;
 
-use crust_render::{Camera, DocObject, Document, MaterialType, ObjectList, Primitive, UVSphere, UVTorus};
+use crust_render::{
+    Camera, DocObject, Document, MaterialType, ObjectList, Primitive, UVSphere, UVTorus,
+};
 use utils::Point3;
 
-fn main(){
+fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
     const IMAGE_WIDTH: usize = 400;
     const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
@@ -22,14 +24,8 @@ fn main(){
         aperture,
         dist_to_focus,
     );
-    let render_settings = crust_render::RenderSettings::new(
-        64,
-        32,
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        32,
-        0.05,
-    );
+    let render_settings =
+        crust_render::RenderSettings::new(64, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05);
     let mut object_list = ObjectList::new(vec![]);
     // Add objects to the object_list here
     let ground: DocObject = DocObject::new(
@@ -38,24 +34,25 @@ fn main(){
             center: Point3::new(0.0, -1000.0, 0.0),
             radius: 1000.0,
         },
-        MaterialType::Lambertian(
-            crust_render::Lambertian::new(utils::Color::new(0.5, 0.5, 0.5)),
-        ),
+        MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
+            0.5, 0.5, 0.5,
+        ))),
     );
     object_list.add(ground);
     // Add a UV sphere
-    let uv_sphere_material = MaterialType::Lambertian(
-        crust_render::Lambertian::new(utils::Color::new(0.8, 0.3, 0.3)),
-    );
+    let uv_sphere_material = MaterialType::Lambertian(crust_render::Lambertian::new(
+        utils::Color::new(0.8, 0.3, 0.3),
+    ));
     let uv_sphere_objects = UVSphere::new(1.0, 20, 20).get_doc_object(uv_sphere_material);
     for obj in uv_sphere_objects {
         object_list.add(obj);
     }
     // Add a Torus
-    let torus_material = MaterialType::Lambertian(
-        crust_render::Lambertian::new(utils::Color::new(0.3, 0.8, 0.3)),
-    );
-    let torus = UVTorus::new(Point3::new(1.0, 1.0, -1.0), 1.0, 0.3, 48, 24).get_doc_object(torus_material);
+    let torus_material = MaterialType::Lambertian(crust_render::Lambertian::new(
+        utils::Color::new(0.3, 0.8, 0.3),
+    ));
+    let torus =
+        UVTorus::new(Point3::new(1.0, 1.0, -1.0), 1.0, 0.3, 48, 24).get_doc_object(torus_material);
     for obj in torus {
         object_list.add(obj);
     }
@@ -68,13 +65,11 @@ fn main(){
             center: light_center,
             radius: light_radius,
         },
-        MaterialType::Emissive(
-            crust_render::Emissive::new(
-                utils::Color::new(10.0, 10.0, 10.0),
-                light_center,
-                light_radius,
-            ),
-        ),
+        MaterialType::Emissive(crust_render::Emissive::new(
+            utils::Color::new(10.0, 10.0, 10.0),
+            light_center,
+            light_radius,
+        )),
     );
     object_list.add(light_1);
     let light_center = Point3::new(-4.0, 7.0, 0.0);
@@ -84,21 +79,15 @@ fn main(){
             center: light_center,
             radius: light_radius,
         },
-        MaterialType::Emissive(
-            crust_render::Emissive::new(
-                utils::Color::new(20.0, 10.0, 7.0),
-                light_center,
-                light_radius,
-            ),
-        ),
+        MaterialType::Emissive(crust_render::Emissive::new(
+            utils::Color::new(20.0, 10.0, 7.0),
+            light_center,
+            light_radius,
+        )),
     );
     object_list.add(light_2);
     // Create a new document
-    let doc = Document::new(
-        cam,
-        object_list,
-        render_settings,
-    );
+    let doc = Document::new(cam, object_list, render_settings);
     let path = path::Path::new("samples/scene.ron");
     doc.write(path).unwrap();
 }

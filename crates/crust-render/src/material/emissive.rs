@@ -2,9 +2,9 @@ use crate::hittable::HitRecord;
 use crate::light::Light;
 use crate::material::Material;
 use crate::ray::Ray;
+use serde::{Deserialize, Serialize};
 use utils::Color;
 use utils::{Point3, Vec3};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emissive {

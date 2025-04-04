@@ -1,7 +1,7 @@
 use clap::Parser;
-use crust_render::convert;
 use crust_render::Document;
-use crust_render:: Renderer;
+use crust_render::Renderer;
+use crust_render::convert;
 use exr::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -36,9 +36,7 @@ fn main() {
     println!("Time elapsed in rendering() is: {:?}", duration);
     // Render
     let (img_width, img_height) = doc.settings().get_dimensions();
-    write_rgb_file(output, img_width, img_height, |x, y| {
-        buffer.get_rgb(x, y)
-    })
-    .expect("writing image");
+    write_rgb_file(output, img_width, img_height, |x, y| buffer.get_rgb(x, y))
+        .expect("writing image");
     convert();
 }

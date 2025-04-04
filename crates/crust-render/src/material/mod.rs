@@ -20,25 +20,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub enum MaterialType {
-    Lambertian(
-        Lambertian,
-    ),
-    Metal(
-        Metal,
-    ),
+    Lambertian(Lambertian),
+    Metal(Metal),
     Dielectric(Dielectric),
-    BlinnPhong(
-        BlinnPhong,
-    ),
-    CookTorrance(
-        CookTorrance,
-    ),
-    Emissive(
-        Emissive,
-    ),
-    Disney(
-        Disney,
-    ),
+    BlinnPhong(BlinnPhong),
+    CookTorrance(CookTorrance),
+    Emissive(Emissive),
+    Disney(Disney),
 }
 use std::sync::Arc;
 

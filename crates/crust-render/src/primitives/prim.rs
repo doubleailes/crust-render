@@ -1,9 +1,9 @@
 use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utils::Point3;
-use serde::{Serialize, Deserialize};
 
 /// Geometric primitives that can be serialized.
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,19 +20,15 @@ impl Primitive {
     }
     pub fn rotate(&self, r_x: f32, r_y: f32, r_z: f32) -> Self {
         match self {
-            Primitive::Sphere { center, radius } => {
-                Primitive::Sphere {
-                    center: center.rotate(r_x, r_y, r_z),
-                    radius: *radius,
-                }
-            }
-            Primitive::Triangle { v0, v1, v2 } => {
-                Primitive::Triangle {
-                    v0: v0.rotate(r_x, r_y, r_z),
-                    v1: v1.rotate(r_x, r_y, r_z),
-                    v2: v2.rotate(r_x, r_y, r_z),
-                }
-            }
+            Primitive::Sphere { center, radius } => Primitive::Sphere {
+                center: center.rotate(r_x, r_y, r_z),
+                radius: *radius,
+            },
+            Primitive::Triangle { v0, v1, v2 } => Primitive::Triangle {
+                v0: v0.rotate(r_x, r_y, r_z),
+                v1: v1.rotate(r_x, r_y, r_z),
+                v2: v2.rotate(r_x, r_y, r_z),
+            },
         }
     }
 }
@@ -49,7 +45,7 @@ impl Object {
             material,
         }
     }
-    pub fn new_triangle(v0: Point3, v1: Point3, v2: Point3,material:Arc<dyn Material>) -> Self {
+    pub fn new_triangle(v0: Point3, v1: Point3, v2: Point3, material: Arc<dyn Material>) -> Self {
         Object {
             primitive: Primitive::new_triangle(v0, v1, v2),
             material,
@@ -87,7 +83,7 @@ impl Hittable for Object {
                 rec.set_face_normal(r, outward_normal);
                 rec.mat = Some(self.material.clone());
                 true
-            },
+            }
             Primitive::Triangle { v0, v1, v2 } => {
                 let edge1 = *v1 - *v0;
                 let edge2 = *v2 - *v0;
@@ -107,12 +103,12 @@ impl Hittable for Object {
                 if v < 0.0 || u + v > 1.0 {
                     return false;
                 }
-            
+
                 let t = f * utils::dot(edge2, q);
                 if t < t_min || t > t_max {
                     return false;
                 }
-            
+
                 rec.t = t;
                 rec.p = r.at(t);
                 let normal = utils::cross(edge1, edge2).unit_vector();

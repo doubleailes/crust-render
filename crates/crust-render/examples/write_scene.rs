@@ -1,9 +1,9 @@
 use std::path;
 
-use crust_render::{Document, ObjectList, Camera, DocObject, Primitive, MaterialType};
+use crust_render::{Camera, DocObject, Document, MaterialType, ObjectList, Primitive};
 use utils::Point3;
 
-fn main(){
+fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
     const IMAGE_WIDTH: usize = 400;
     const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
@@ -22,14 +22,8 @@ fn main(){
         aperture,
         dist_to_focus,
     );
-    let render_settings = crust_render::RenderSettings::new(
-        100,
-        32,
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        32,
-        0.05,
-    );
+    let render_settings =
+        crust_render::RenderSettings::new(100, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05);
     let mut object_list = ObjectList::new(vec![]);
     // Add objects to the object_list here
     let ground: DocObject = DocObject::new(
@@ -38,9 +32,9 @@ fn main(){
             center: Point3::new(0.0, -1000.0, 0.0),
             radius: 1000.0,
         },
-        MaterialType::Lambertian(
-            crust_render::Lambertian::new(utils::Color::new(0.5, 0.5, 0.5)),
-        ),
+        MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
+            0.5, 0.5, 0.5,
+        ))),
     );
     object_list.add(ground);
     // Deterministic grid of spheres with preset materials
@@ -48,25 +42,19 @@ fn main(){
         for b in -2..3 {
             let center = Point3::new(a as f32, 0.2, b as f32);
             let material: MaterialType = match (a + b) % 4 {
-                0 => MaterialType::Lambertian(
-                    crust_render::Lambertian::new(utils::Color::new(0.8, 0.3, 0.3)),
-                ),
-                1 => MaterialType::Metal(
-                    crust_render::Metal::new(
-                        utils::Color::new(0.7, 0.6, 0.5),
-                        0.1,
-                    ),
-                ),
-                2 => MaterialType::Dielectric(
-                    crust_render::Dielectric::new(1.5),
-                ),
-                _ => MaterialType::CookTorrance(
-                    crust_render::CookTorrance::new(
-                        utils::Color::new(0.9, 0.9, 0.9),
-                        0.2,
-                        0.5,
-                    ),
-                ),
+                0 => MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
+                    0.8, 0.3, 0.3,
+                ))),
+                1 => MaterialType::Metal(crust_render::Metal::new(
+                    utils::Color::new(0.7, 0.6, 0.5),
+                    0.1,
+                )),
+                2 => MaterialType::Dielectric(crust_render::Dielectric::new(1.5)),
+                _ => MaterialType::CookTorrance(crust_render::CookTorrance::new(
+                    utils::Color::new(0.9, 0.9, 0.9),
+                    0.2,
+                    0.5,
+                )),
             };
             let doc_object = DocObject::new(
                 format!("sphere_{}_{}", a, b),
@@ -85,9 +73,7 @@ fn main(){
             center: Point3::new(0.0, 1.0, 0.0),
             radius: 1.0,
         },
-        MaterialType::Dielectric(
-            crust_render::Dielectric::new(1.5),
-        ),
+        MaterialType::Dielectric(crust_render::Dielectric::new(1.5)),
     );
     object_list.add(doc_o1);
     let doc_o2 = DocObject::new(
@@ -96,9 +82,9 @@ fn main(){
             center: Point3::new(-4.0, 1.0, 0.0),
             radius: 1.0,
         },
-        MaterialType::Lambertian(
-            crust_render::Lambertian::new(utils::Color::new(0.4, 0.2, 0.1)),
-        ),
+        MaterialType::Lambertian(crust_render::Lambertian::new(utils::Color::new(
+            0.4, 0.2, 0.1,
+        ))),
     );
     object_list.add(doc_o2);
     let doc_o3 = DocObject::new(
@@ -107,9 +93,10 @@ fn main(){
             center: Point3::new(4.0, 1.0, 0.0),
             radius: 1.0,
         },
-        MaterialType::Metal(
-            crust_render::Metal::new(utils::Color::new(0.7, 0.6, 0.5), 0.0),
-        ),
+        MaterialType::Metal(crust_render::Metal::new(
+            utils::Color::new(0.7, 0.6, 0.5),
+            0.0,
+        )),
     );
     object_list.add(doc_o3);
     let doc_o4 = DocObject::new(
@@ -118,13 +105,11 @@ fn main(){
             center: Point3::new(0.0, 1.0, 4.0),
             radius: 1.0,
         },
-        MaterialType::CookTorrance(
-            crust_render::CookTorrance::new(
-                utils::Color::new(0.5, 0.5, 0.5),
-                0.2,
-                0.0,
-            ),
-        ),
+        MaterialType::CookTorrance(crust_render::CookTorrance::new(
+            utils::Color::new(0.5, 0.5, 0.5),
+            0.2,
+            0.0,
+        )),
     );
     object_list.add(doc_o4);
     let doc_o5 = DocObject::new(
@@ -133,19 +118,17 @@ fn main(){
             center: Point3::new(0.0, 1.0, -4.0),
             radius: 1.0,
         },
-        MaterialType::Disney(
-            crust_render::Disney::new(
-                utils::Color::new(0.5, 0.5, 0.5),
-                0.0,
-                0.2,
-                0.5,
-                0.5,
-                0.0,
-                0.5,
-                0.0,
-                1.0,
-            ),
-        ),
+        MaterialType::Disney(crust_render::Disney::new(
+            utils::Color::new(0.5, 0.5, 0.5),
+            0.0,
+            0.2,
+            0.5,
+            0.5,
+            0.0,
+            0.5,
+            0.0,
+            1.0,
+        )),
     );
     object_list.add(doc_o5);
     // Add a light source
@@ -157,13 +140,11 @@ fn main(){
             center: light_center,
             radius: light_radius,
         },
-        MaterialType::Emissive(
-            crust_render::Emissive::new(
-                utils::Color::new(10.0, 10.0, 10.0),
-                light_center,
-                light_radius,
-            ),
-        ),
+        MaterialType::Emissive(crust_render::Emissive::new(
+            utils::Color::new(10.0, 10.0, 10.0),
+            light_center,
+            light_radius,
+        )),
     );
     object_list.add(light_1);
     let light_center = Point3::new(-4.0, 7.0, 0.0);
@@ -173,21 +154,15 @@ fn main(){
             center: light_center,
             radius: light_radius,
         },
-        MaterialType::Emissive(
-            crust_render::Emissive::new(
-                utils::Color::new(20.0, 10.0, 7.0),
-                light_center,
-                light_radius,
-            ),
-        ),
+        MaterialType::Emissive(crust_render::Emissive::new(
+            utils::Color::new(20.0, 10.0, 7.0),
+            light_center,
+            light_radius,
+        )),
     );
     object_list.add(light_2);
     // Create a new document
-    let doc = Document::new(
-        cam,
-        object_list,
-        render_settings,
-    );
+    let doc = Document::new(cam, object_list, render_settings);
     let path = path::Path::new("samples/scene.ron");
     doc.write(path).unwrap();
 }
