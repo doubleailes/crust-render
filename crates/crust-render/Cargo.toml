@@ -9,7 +9,6 @@ name = "crust_render"
 path = "src/lib.rs"
 
 [dependencies]
-usd_oxidized = { path = "../usd_oxidized" }
 utils = { path = "../utils" }
 
 exr = "1.73.0"
