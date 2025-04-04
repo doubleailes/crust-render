@@ -5,7 +5,6 @@ use crate::light::{self, LightList};
 use crate::camera::Camera;
 use crate::primitives::{Primitive, Object};
 use crate::tracer::RenderSettings;
-use rayon::str;
 use serde::{Deserialize, Serialize};
 use crate::MaterialType;
 use crate::Material;
@@ -47,7 +46,6 @@ impl Document {
             let material: Arc<dyn Material> = mat_type.get_material();
             if mat_type.is_emissive() {
                 let emissive = mat_type.get_emissive().unwrap();
-                println!("Emissive: {:?}", emissive);
                 let light: Arc<dyn light::Light> = Arc::new(emissive.clone());
                 lights.add(light);
             }

@@ -23,9 +23,6 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(primitive: Primitive, material: Arc<dyn Material>) -> Self {
-        Object { primitive, material }
-    }
     pub fn new_sphere(center: Point3, radius: f32, material: Arc<dyn Material>) -> Self {
         Object {
             primitive: Primitive::new_sphere(center, radius),
