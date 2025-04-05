@@ -349,21 +349,21 @@ impl Hittable for BVHNode {
         }
 
         let mut temp_rec = HitRecord::default();
-        let mut hit_left = false;
+        let mut hit_anything = false;
         let mut closest_so_far = t_max;
 
         if self.left.hit(ray, t_min, closest_so_far, &mut temp_rec) {
             closest_so_far = temp_rec.t;
-            *rec = temp_rec.clone(); // <- clone so we can reuse temp_rec
-            hit_left = true;
+            *rec = temp_rec.clone();
+            hit_anything = true;
         }
 
         if self.right.hit(ray, t_min, closest_so_far, &mut temp_rec) {
             *rec = temp_rec.clone();
-            return true;
+            hit_anything = true;
         }
 
-        hit_left
+        hit_anything
     }
 
     fn bounding_box(&self) -> Option<AABB> {
