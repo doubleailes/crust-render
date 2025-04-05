@@ -6,6 +6,7 @@ use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use utils::Color;
+use indicatif::ProgressBar;
 
 pub struct Renderer {
     pub camera: Camera,
@@ -33,8 +34,8 @@ impl Renderer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
         let cmj_samples = generate_cmj_2d(samples_sqrt);
+        let bar = ProgressBar::new(self.settings.height as u64);
         for j in (0..self.settings.height).rev() {
-            eprint!("\rScanlines remaining: {} ", j);
             let pixel_colors: Vec<_> = (0..self.settings.width)
                 .into_par_iter()
                 .map(|i| {
@@ -83,7 +84,9 @@ impl Renderer {
             for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
                 buffer.set_pixel(i, j, pixel_color);
             }
+            bar.inc(1);
         }
+        bar.finish();
         buffer
     }
 }
