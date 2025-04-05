@@ -1,3 +1,4 @@
+use crate::aabb::{AABB, triangle_aabb};
 use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::error;
 use utils::Point3;
-use crate::aabb::{AABB,triangle_aabb};
 
 use obj::{Obj, load_obj};
 
@@ -97,11 +97,9 @@ impl Hittable for Object {
                 let r_vec = Point3::new(*radius, *radius, *radius);
                 Some(AABB::new(*center - r_vec, *center + r_vec))
             }
-    
-            Primitive::Triangle { v0, v1, v2 } => {
-                Some(triangle_aabb(*v0, *v1, *v2))
-            }
-    
+
+            Primitive::Triangle { v0, v1, v2 } => Some(triangle_aabb(*v0, *v1, *v2)),
+
             Primitive::Mesh { .. } | Primitive::Obj { .. } => {
                 // These will be handled via BVH built at load time,
                 // so we don't compute a bounding box here.
@@ -156,19 +154,19 @@ impl Hittable for Object {
                         return bvh.hit(r, t_min, t_max, rec);
                     }
                 }
-            
+
                 // Step 2: Load the OBJ
                 use std::path::Path;
                 if !Path::new(path).exists() {
                     error!("OBJ file {} does not exist", path);
                     return false;
                 }
-            
+
                 let file = File::open(path).unwrap_or_else(|e| {
                     error!("Failed to open OBJ file {}: {}", path, e);
                     panic!("Cannot open OBJ file");
                 });
-            
+
                 let input = BufReader::new(file);
                 let obj: Obj = match load_obj(input) {
                     Ok(o) => o,
@@ -177,31 +175,33 @@ impl Hittable for Object {
                         return false;
                     }
                 };
-            
+
                 // Step 3: Convert to triangle Objects
-                let vertices: Vec<Point3> = obj.vertices.iter().map(|v| v.position.into()).collect();
+                let vertices: Vec<Point3> =
+                    obj.vertices.iter().map(|v| v.position.into()).collect();
                 let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
-            
-                let mut triangle_objs: Vec<Arc<dyn Hittable>> = Vec::with_capacity(indices.len() / 3);
-            
+
+                let mut triangle_objs: Vec<Arc<dyn Hittable>> =
+                    Vec::with_capacity(indices.len() / 3);
+
                 for i in (0..indices.len()).step_by(3) {
                     let v0 = vertices[indices[i] as usize];
                     let v1 = vertices[indices[i + 1] as usize];
                     let v2 = vertices[indices[i + 2] as usize];
-            
+
                     let tri = Arc::new(Object::new_triangle(v0, v1, v2, self.material.clone()));
                     triangle_objs.push(tri);
                 }
-            
+
                 // Step 4: Build BVH
                 let bvh = BVHNode::build(triangle_objs);
-            
+
                 // Step 5: Cache it
                 {
                     let mut cache = self.obj_cache.write().unwrap();
                     *cache = Some(bvh.clone());
                 }
-            
+
                 // Step 6: Intersect using the cached BVH
                 bvh.hit(r, t_min, t_max, rec)
             }
@@ -296,7 +296,6 @@ fn indexed_mesh_hit(
     hit_anything
 }
 
-
 pub struct BVHNode {
     pub left: Arc<dyn Hittable>,
     pub right: Arc<dyn Hittable>,
@@ -348,22 +347,22 @@ impl Hittable for BVHNode {
         if !self.bbox.hit(ray, t_min, t_max) {
             return false;
         }
-    
+
         let mut temp_rec = HitRecord::default();
         let mut hit_left = false;
         let mut closest_so_far = t_max;
-    
+
         if self.left.hit(ray, t_min, closest_so_far, &mut temp_rec) {
             closest_so_far = temp_rec.t;
             *rec = temp_rec.clone(); // <- clone so we can reuse temp_rec
             hit_left = true;
         }
-    
+
         if self.right.hit(ray, t_min, closest_so_far, &mut temp_rec) {
             *rec = temp_rec.clone();
             return true;
         }
-    
+
         hit_left
     }
 

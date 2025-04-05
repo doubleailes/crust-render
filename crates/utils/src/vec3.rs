@@ -1,8 +1,8 @@
+use crate::common;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub};
 use std::ops::{Index, IndexMut};
-use crate::common;
 
 #[derive(Copy, Clone, Default, Deserialize, Serialize, Debug)]
 pub struct Vec3 {

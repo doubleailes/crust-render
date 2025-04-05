@@ -1,6 +1,6 @@
+use crate::aabb::AABB;
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
-use crate::aabb::AABB;
 
 /// The `HittableList` struct represents a collection of objects that can be intersected by rays.
 /// It allows for managing multiple `Hittable` objects and testing for ray intersections with all of them.
