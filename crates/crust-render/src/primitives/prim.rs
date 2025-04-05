@@ -5,7 +5,7 @@ use crate::ray::Ray;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use rand::Rng;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::error;
@@ -301,12 +301,10 @@ pub struct BVHNode {
     pub right: Arc<dyn Hittable>,
     pub bbox: AABB,
 }
-use rand::Rng;
-use std::cmp::Ordering;
 
 impl BVHNode {
     pub fn build(mut objects: Vec<Arc<dyn Hittable>>) -> Arc<dyn Hittable> {
-        let axis = rand::thread_rng().gen_range(0..3);
+        let axis: i32 = rand::random_range(0..3);
         let comparator = match axis {
             0 => AABB::compare_x,
             1 => AABB::compare_y,
