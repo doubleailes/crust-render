@@ -11,3 +11,5 @@ pub use common::{balance_heuristic, clamp};
 pub use common::{degrees_to_radians, random, random_range, random2};
 mod color;
 pub use color::Color;
+pub mod mat4;
+pub use mat4::Mat4;
