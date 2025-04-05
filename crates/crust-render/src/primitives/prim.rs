@@ -5,7 +5,6 @@ use crate::ray::Ray;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
-use rand::Rng;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::error;
@@ -76,14 +75,6 @@ impl Object {
     pub fn new_mesh(vertices: Vec<Point3>, indices: Vec<u32>, material: Arc<dyn Material>) -> Self {
         Self {
             primitive: Primitive::Mesh { vertices, indices },
-            material,
-            obj_cache: RwLock::new(None),
-        }
-    }
-
-    pub fn new_obj(path: String, material: Arc<dyn Material>) -> Self {
-        Self {
-            primitive: Primitive::Obj { path },
             material,
             obj_cache: RwLock::new(None),
         }

@@ -5,11 +5,13 @@ mod convert;
 mod document;
 mod hittable;
 mod hittable_list;
+mod instance;
 mod light;
 mod material;
 mod primitives;
 mod ray;
 mod sampler;
+mod scene_cache;
 mod tracer;
 mod world;
 

@@ -1,17 +1,19 @@
-use std::io::Write;
-
 use crate::Material;
 use crate::MaterialType;
 use crate::camera::Camera;
+use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
+use crate::instance::Instance;
 use crate::light::{self, LightList};
 use crate::primitives::{Object, Primitive};
 use crate::tracer::RenderSettings;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::error;
 use tracing::warn;
+use utils::{Mat4, Point3};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -74,8 +76,14 @@ impl Document {
                     world.add(Box::new(obj));
                 }
                 Primitive::Obj { path } => {
-                    let obj = Object::new_obj(path.clone(), material);
-                    world.add(Box::new(obj));
+                    let shared_bvh = load_obj_bvh(&path, material.clone());
+                    let my_transform = Mat4::translate(0.0, 0.0, 0.0) * Mat4::scale(1.0);
+
+                    world.add(Box::new(Instance {
+                        object: shared_bvh,
+                        transform: my_transform,
+                        inverse_transform: my_transform.inverse(),
+                    }) as Box<dyn Hittable>);
                 }
             }
         }
@@ -150,4 +158,41 @@ impl DocObject {
     pub fn material(&self) -> &MaterialType {
         &self.material
     }
+}
+
+pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable> {
+    use crate::primitives::{BVHNode, Object}; // Your actual modules
+    use crate::scene_cache::GLOBAL_OBJ_CACHE;
+    use obj::{Obj, load_obj};
+    use std::{fs::File, io::BufReader};
+
+    {
+        let cache = GLOBAL_OBJ_CACHE.read().unwrap();
+        if let Some(bvh) = cache.get(path) {
+            return bvh.clone();
+        }
+    }
+
+    let file = File::open(path).expect("OBJ file not found");
+    let input = BufReader::new(file);
+    let obj: Obj = load_obj(input).expect("Failed to parse OBJ");
+
+    let vertices: Vec<Point3> = obj.vertices.iter().map(|v| v.position.into()).collect();
+    let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
+
+    let mut tris = Vec::with_capacity(indices.len() / 3);
+    for i in (0..indices.len()).step_by(3) {
+        let v0 = vertices[indices[i] as usize];
+        let v1 = vertices[indices[i + 1] as usize];
+        let v2 = vertices[indices[i + 2] as usize];
+        let tri = Arc::new(Object::new_triangle(v0, v1, v2, material.clone()));
+        tris.push(tri as Arc<dyn Hittable>);
+    }
+
+    let bvh = BVHNode::build(tris);
+
+    let mut cache = GLOBAL_OBJ_CACHE.write().unwrap();
+    cache.insert(path.to_string(), bvh.clone());
+
+    bvh
 }
