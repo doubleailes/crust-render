@@ -2,8 +2,8 @@ use crate::ray::Ray;
 use std::sync::Arc;
 use utils::{Point3, Vec3};
 
-use crate::material::Material;
 use crate::aabb::AABB;
+use crate::material::Material;
 
 /// The `HitRecord` struct stores information about a ray-object intersection.
 /// It contains details such as the intersection point, surface normal, material, and more.

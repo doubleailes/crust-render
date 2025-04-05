@@ -1,5 +1,5 @@
-use utils::Vec3;
 use crate::ray::Ray;
+use utils::Vec3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AABB {
@@ -23,7 +23,10 @@ impl AABB {
             box0.maximum.y().max(box1.maximum.y()),
             box0.maximum.z().max(box1.maximum.z()),
         );
-        AABB { minimum: small, maximum: big }
+        AABB {
+            minimum: small,
+            maximum: big,
+        }
     }
 
     pub fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
