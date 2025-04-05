@@ -35,6 +35,9 @@ impl Renderer {
         let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
         let cmj_samples = generate_cmj_2d(samples_sqrt);
         let bar = ProgressBar::new(self.settings.height as u64);
+        bar.set_style(indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap());
         for j in (0..self.settings.height).rev() {
             let pixel_colors: Vec<_> = (0..self.settings.width)
                 .into_par_iter()
