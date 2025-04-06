@@ -47,12 +47,10 @@ impl Renderer {
                 .into_par_iter()
                 .map(|i| {
                     let mut sum = Color::new(0.0, 0.0, 0.0);
-                    let mut sum_sq = Color::new(0.0, 0.0, 0.0);
-                    let mut samples = 0;
 
-                    loop {
-                        let (u_offset, v_offset) = if samples < cmj_samples.len() {
-                            cmj_samples[samples]
+                    for sample in 0..self.settings.samples_per_pixel {
+                        let (u_offset, v_offset) = if (sample as usize) < cmj_samples.len() {
+                            cmj_samples[sample as usize]
                         } else {
                             (utils::random(), utils::random())
                         };
@@ -67,25 +65,8 @@ impl Renderer {
                         );
 
                         sum += col;
-                        sum_sq += col * col;
-                        samples += 1;
-
-                        if samples >= self.settings.min_samples_per_pixel as usize {
-                            let mean = sum / samples as f32;
-                            let mean_sq = sum_sq / samples as f32;
-                            let variance = mean_sq - mean * mean;
-
-                            if variance.max_component() < self.settings.variance_threshold
-                                || samples >= self.settings.samples_per_pixel as usize
-                            {
-                                break mean; // Use `mean` as final_color and break early
-                            }
-                        }
-
-                        if samples >= self.settings.samples_per_pixel as usize {
-                            break sum / samples as f32;
-                        }
                     }
+                    sum / self.settings.samples_per_pixel as f32
                 })
                 .collect();
             for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
@@ -94,6 +75,59 @@ impl Renderer {
             bar.inc(1);
         }
         bar.finish();
+        buffer
+    }
+
+    pub fn render_with_tiles(&self) -> Buffer {
+    
+        let cmj_samples =
+            generate_cmj_2d((self.settings.samples_per_pixel as f32).sqrt().ceil() as usize);
+        let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 32x32
+    
+        // Collect all pixels in parallel from tiles
+        let pixels: Vec<(usize, usize, Color)> = tiles
+            .into_par_iter()
+            .flat_map(|tile| {
+                let mut local = Vec::with_capacity(tile.width * tile.height);
+    
+                for j in tile.y..tile.y + tile.height {
+                    for i in tile.x..tile.x + tile.width {
+                        let mut color = Color::zero();
+    
+                        for sample in 0..self.settings.samples_per_pixel {
+                            let (dx, dy) = if (sample as usize) < cmj_samples.len() {
+                                cmj_samples[sample as usize]
+                            } else {
+                                (utils::random(), utils::random())
+                            };
+    
+                            let u = (i as f32 + dx) / (self.settings.width - 1) as f32;
+                            let v = (j as f32 + dy) / (self.settings.height - 1) as f32;
+    
+                            let ray = self.camera.get_ray(u, v);
+                            color += ray_color(
+                                &ray,
+                                &self.world,
+                                &self.lights,
+                                self.settings.max_depth as i32,
+                            );
+                        }
+    
+                        let final_color = color / self.settings.samples_per_pixel as f32;
+                        local.push((i, j, final_color));
+                    }
+                }
+    
+                local
+            })
+            .collect();
+    
+        // Combine results into a buffer
+        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        for (i, j, color) in pixels {
+            buffer.set_pixel(i, j, color);
+        }
+    
         buffer
     }
 }
@@ -210,4 +244,28 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     let unit_direction = utils::unit_vector(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
     (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
+}
+
+struct Tile {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
+    let mut tiles = Vec::new();
+    for y in (0..image_height).step_by(tile_size) {
+        for x in (0..image_width).step_by(tile_size) {
+            let w = (x + tile_size).min(image_width) - x;
+            let h = (y + tile_size).min(image_height) - y;
+            tiles.push(Tile {
+                x,
+                y,
+                width: w,
+                height: h,
+            });
+        }
+    }
+    tiles
 }
