@@ -23,7 +23,7 @@ fn main() {
         dist_to_focus,
     );
     let render_settings =
-        crust_render::RenderSettings::new(100, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05);
+        crust_render::RenderSettings::new(100, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05, 0);
     let mut object_list = ObjectList::new(vec![]);
     // Add objects to the object_list here
     let ground: DocObject = DocObject::new(

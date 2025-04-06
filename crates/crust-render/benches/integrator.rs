@@ -47,6 +47,7 @@ fn bench_simple_world(c: &mut Criterion) {
                 IMAGE_HEIGHT,
                 MIN_SAMPLES,
                 VARIANCE_THRESHOLD,
+                0,
             );
             let renderer = Renderer::new(cam, world, lights, render_settings);
             let _ = renderer.render();

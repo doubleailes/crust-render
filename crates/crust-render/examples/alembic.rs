@@ -38,7 +38,7 @@ fn main() {
     );
     object_list.add(ground);
     let position: Mat4 = Mat4::identity();
-    let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position, true);
+    let p = Primitive::new_alembic("samples/TUNNEL.abc".to_string(), position, 0, false);
     let teapot_material = crust_render::Disney::new(
         utils::Color::new(0.8, 0.3, 0.3),
         0.0,
@@ -88,6 +88,6 @@ fn main() {
     object_list.add(light_2);
     // Create a new document
     let doc = Document::new(cam, object_list, render_settings);
-    let path = path::Path::new("samples/teapot.ron");
+    let path = path::Path::new("samples/box.ron");
     doc.write(path).unwrap();
 }

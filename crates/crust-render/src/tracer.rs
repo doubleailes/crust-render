@@ -106,6 +106,7 @@ pub struct RenderSettings {
     height: usize,
     min_samples_per_pixel: u32,
     variance_threshold: f32,
+    frame: isize,
 }
 impl RenderSettings {
     pub fn new(
@@ -115,6 +116,7 @@ impl RenderSettings {
         height: usize,
         min_samples_per_pixel: u32,
         variance_threshold: f32,
+        frame: isize,
     ) -> Self {
         RenderSettings {
             samples_per_pixel,
@@ -123,6 +125,7 @@ impl RenderSettings {
             height,
             min_samples_per_pixel,
             variance_threshold,
+            frame
         }
     }
     pub fn get_dimensions(&self) -> (usize, usize) {
