@@ -23,7 +23,7 @@ fn main() {
         dist_to_focus,
     );
     let render_settings =
-        crust_render::RenderSettings::new(64, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05,0);
+        crust_render::RenderSettings::new(10000, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05, 0);
     let mut object_list = ObjectList::new(vec![]);
     // Add objects to the object_list here
     let ground: DocObject = DocObject::new(
@@ -38,9 +38,9 @@ fn main() {
     );
     object_list.add(ground);
     let position: Mat4 = Mat4::identity();
-    let p = Primitive::new_alembic("samples/capsule.abc".to_string(), position, 0, false);
+    let p = Primitive::new_alembic("samples/capsule.abc".to_string(), position, 0, true);
     let teapot_material = crust_render::Disney::new(
-        utils::Color::new(0.8, 0.3, 0.3),
+        utils::Color::new(0.5, 0.5, 0.5),
         0.0,
         0.2,
         1.0,

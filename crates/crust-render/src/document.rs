@@ -15,8 +15,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fs::File, io::BufReader};
-use tracing::error;
-use tracing::warn;
+use tracing::{debug, error, warn};
 use utils::{Mat4, Point3, Vec3};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -84,9 +83,14 @@ impl Document {
                         inverse_transform: transform.inverse(),
                     }) as Box<dyn Hittable>);
                 }
-                Primitive::Alembic { path, transform,sample, smooth } => {
+                Primitive::Alembic {
+                    path,
+                    transform,
+                    sample,
+                    smooth,
+                } => {
                     let bvh = load_alembic_bvh(path, material.clone(), *sample as u32, *smooth);
-                
+
                     world.add(Box::new(Instance {
                         object: bvh,
                         transform: *transform,
@@ -183,7 +187,7 @@ pub enum Primitive {
         transform: Mat4,
         sample: isize,
         smooth: bool,
-    }
+    },
 }
 impl Primitive {
     pub fn new_sphere(center: Point3, radius: f32) -> Self {
@@ -264,7 +268,7 @@ pub fn load_alembic_bvh(
     use ogawa_rs::*;
     use std::fs::File;
     let cache_key = format!("{path}#{}", sample);
-    
+
     // 1. Try cache first
     {
         let cache = GLOBAL_OBJ_CACHE.read().unwrap();
@@ -272,8 +276,6 @@ pub fn load_alembic_bvh(
             return bvh.clone();
         }
     }
-
-   
 
     let file = File::open(path).expect("Alembic file not found");
     let mut reader = MemMappedReader::new(file).expect("Failed to map Alembic file");
@@ -283,12 +285,18 @@ pub fn load_alembic_bvh(
     let mut bvh_nodes: Vec<Arc<dyn Hittable>> = Vec::new();
 
     while let Some(current) = stack.pop() {
+        debug!("Current object: {:?}", &current.header.full_name);
         match Schema::parse(&current, &mut reader, &archive) {
             Ok(Schema::PolyMesh(mesh)) => {
-                let vertices: Vec<Point3> = mesh.load_vertices_sample(sample, &mut reader).unwrap().iter().map(|p| p.clone().into()).collect();
+                let vertices: Vec<Point3> = mesh
+                    .load_vertices_sample(sample, &mut reader)
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.clone().into())
+                    .collect();
 
                 let face_indices = mesh.load_faceindices_sample(0, &mut reader).unwrap();
-                let counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
+                let _counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
 
                 // Optional normals
                 let maybe_normals: Option<Vec<Vec3>> = if mesh.has_normals() {
@@ -306,13 +314,19 @@ pub fn load_alembic_bvh(
                     None
                 };
 
-                // Convert to triangles
-                let mut idx = 0;
-                for &n in &counts {
-                    if n == 3 {
-                        let i0 = face_indices[idx] as usize;
-                        let i1 = face_indices[idx + 1] as usize;
-                        let i2 = face_indices[idx + 2] as usize;
+                let mut index_offset = 0;
+                for &face_vertex_count in &_counts {
+                    // Ignore degenerate polygons
+                    if face_vertex_count < 3 {
+                        index_offset += face_vertex_count as usize;
+                        continue;
+                    }
+
+                    // Fan triangulation: (v0, vi, vi+1)
+                    for i in 1..(face_vertex_count - 1) {
+                        let i0 = face_indices[index_offset] as usize;
+                        let i1 = face_indices[index_offset + i as usize] as usize;
+                        let i2 = face_indices[index_offset + i as usize + 1] as usize;
 
                         let v0 = vertices[i0];
                         let v1 = vertices[i1];
@@ -323,19 +337,23 @@ pub fn load_alembic_bvh(
                                 let n0 = normals[i0];
                                 let n1 = normals[i1];
                                 let n2 = normals[i2];
-                                Arc::new(SmoothTriangle::new(v0, v1, v2, n0, n1, n2, material.clone()))
+                                Arc::new(SmoothTriangle::new(
+                                    v0,
+                                    v1,
+                                    v2,
+                                    n0,
+                                    n1,
+                                    n2,
+                                    material.clone(),
+                                ))
                             }
                             _ => Arc::new(Triangle::new(v0, v1, v2, material.clone())),
                         };
 
                         bvh_nodes.push(tri);
-                    } else {
-                        // Ignore non-triangle faces for now
-                        idx += n as usize;
-                        continue;
                     }
 
-                    idx += n as usize;
+                    index_offset += face_vertex_count as usize;
                 }
             }
             _ => {
@@ -360,5 +378,4 @@ pub fn load_alembic_bvh(
     cache.insert(cache_key.to_string(), bvh.clone());
 
     bvh
-
 }

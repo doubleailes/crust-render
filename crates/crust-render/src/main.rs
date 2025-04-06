@@ -58,6 +58,8 @@ fn main() {
     let start = Instant::now();
     // World
     let (world, lights) = doc.get_world();
+    debug!("World loaded with {} objects", world.count());
+    debug!("Lights loaded with {} objects", lights.count());
     // Camera
     let renderer = Renderer::new(doc.camera(), world, lights, doc.settings());
     info!("Let's start rendering...");

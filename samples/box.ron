@@ -44,11 +44,11 @@
                         data: ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
                     ),
                     sample: 0,
-                    smooth: false,
+                    smooth: true,
                 ),
                 material: Disney((
                     base_color: (
-                        e: (0.8, 0.3, 0.3),
+                        e: (0.5, 0.5, 0.5),
                     ),
                     metallic: 0.0,
                     roughness: 0.2,
@@ -99,7 +99,7 @@
         ],
     ),
     settings: (
-        samples_per_pixel: 64,
+        samples_per_pixel: 10000,
         max_depth: 32,
         width: 400,
         height: 225,
