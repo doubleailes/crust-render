@@ -5,7 +5,6 @@ use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::instance::Instance;
 use crate::light::{self, LightList};
-use crate::primitives::{BVHNode, Object, Primitive};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
 use obj::{Obj, load_obj};
@@ -17,6 +16,8 @@ use std::{fs::File, io::BufReader};
 use tracing::error;
 use tracing::warn;
 use utils::{Mat4, Point3};
+use crate::bvhnode::BVHNode;
+use crate::{Sphere, Triangle};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -67,25 +68,16 @@ impl Document {
             }
             match object.object() {
                 Primitive::Sphere { center, radius } => {
-                    let obj = Object::new_sphere(*center, *radius, material);
+                    let obj = Sphere::new(*center, *radius, material.clone());
                     world.add(Box::new(obj));
                 }
-                Primitive::Triangle { v0, v1, v2 } => {
-                    let obj = Object::new_triangle(*v0, *v1, *v2, material);
-                    world.add(Box::new(obj));
-                }
-                Primitive::Mesh { vertices, indices } => {
-                    let obj = Object::new_mesh(vertices.clone(), indices.clone(), material);
-                    world.add(Box::new(obj));
-                }
-                Primitive::Obj { path } => {
+                Primitive::Obj { path, transform } => {
                     let shared_bvh = load_obj_bvh(&path, material.clone());
-                    let my_transform = Mat4::identity();
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
-                        transform: my_transform,
-                        inverse_transform: my_transform, // Identity matrix is its own inverse
+                        transform: transform.clone(),
+                        inverse_transform: transform.clone(), // Identity matrix is its own inverse
                     }) as Box<dyn Hittable>);
                 }
             }
@@ -162,6 +154,21 @@ impl DocObject {
         &self.material
     }
 }
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Primitive {
+    Sphere { center: Point3, radius: f32 },
+    Obj { path: String, transform: Mat4 },
+}
+impl Primitive {
+    pub fn new_sphere(center: Point3, radius: f32) -> Self {
+        Self::Sphere { center, radius }
+    }
+
+    pub fn new_obj(path: String, transform: Mat4) -> Self {
+        Self::Obj { path, transform }
+    }
+}
+
 
 pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable> {
     {
@@ -183,7 +190,7 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable
         let v0 = vertices[indices[i] as usize];
         let v1 = vertices[indices[i + 1] as usize];
         let v2 = vertices[indices[i + 2] as usize];
-        let tri = Arc::new(Object::new_triangle(v0, v1, v2, material.clone()));
+        let tri = Arc::new(Triangle::new(v0, v1, v2, material.clone()));
         tris.push(tri as Arc<dyn Hittable>);
     }
 

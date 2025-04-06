@@ -1,6 +1,7 @@
 use crate::{Point3, Vec3};
 use std::ops::Mul;
-#[derive(Debug, Clone, Copy)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Mat4 {
     // 4x4 matrix as flat array or rows
     pub data: [[f32; 4]; 4],
