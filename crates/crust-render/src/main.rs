@@ -60,6 +60,7 @@ fn main() {
     let (world, lights) = doc.get_world();
     // Camera
     let renderer = Renderer::new(doc.camera(), world, lights, doc.settings());
+    info!("Let's start rendering...");
     let buffer = renderer.render();
     // Close Timer
     let duration: Duration = start.elapsed();
