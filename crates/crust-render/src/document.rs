@@ -296,7 +296,7 @@ pub fn load_alembic_bvh(
                     .map(|p| p.clone().into())
                     .collect();
 
-                let face_indices = mesh.load_faceindices_sample(0, &mut reader).unwrap();
+                let face_indices = mesh.load_faceindices_sample(sample, &mut reader).unwrap();
                 let _counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
 
                 // Optional normals
