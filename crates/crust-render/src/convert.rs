@@ -57,9 +57,10 @@ pub fn convert() {
 
     // save the png buffer to a png file
     let png_buffer = &image.layer_data.channel_data.pixels;
-    match png_buffer.save(unique_timestamp()) {
+    let name = unique_timestamp();
+    match png_buffer.save(&name) {
         Ok(_) => {
-            info!("Image saved successfully in tmp {}", unique_timestamp());
+            info!("Image saved successfully in tmp {}", name);
         }
         Err(e) => {
             error!("Error saving image: {}", e);
