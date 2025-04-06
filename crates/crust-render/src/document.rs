@@ -80,7 +80,7 @@ impl Document {
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
-                        transform: transform.clone(),
+                        transform: *transform,
                         inverse_transform: transform.inverse(),
                     }) as Box<dyn Hittable>);
                 }
@@ -200,7 +200,7 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Ar
     let normals: Vec<Vec3> = obj.vertices.iter().map(|n| n.normal.into()).collect();
     let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
 
-    let mut tris = Vec::with_capacity(indices.len() / 3);
+    let mut tris: Vec<Arc<dyn Hittable>> = Vec::with_capacity(indices.len() / 3);
     for i in (0..indices.len()).step_by(3) {
         let v0 = vertices[indices[i] as usize];
         let v1 = vertices[indices[i + 1] as usize];
@@ -218,8 +218,8 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Ar
                 n1,
                 n2,
                 material.clone(),
-            )) as Arc<dyn Hittable>,
-            false => Arc::new(Triangle::new(v0, v1, v2, material.clone())) as Arc<dyn Hittable>,
+            )),
+            false => Arc::new(Triangle::new(v0, v1, v2, material.clone())),
         };
         tris.push(tri);
     }
