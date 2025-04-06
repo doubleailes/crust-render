@@ -2,7 +2,7 @@ use crate::aabb::AABB;
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use std::sync::Arc;
-use utils::Mat4; // Adjust based on your math module
+use utils::{Mat4,Point3};
 
 pub struct Instance {
     pub object: Arc<dyn Hittable>,
