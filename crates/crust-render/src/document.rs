@@ -76,7 +76,7 @@ impl Document {
                     transform,
                     smooth,
                 } => {
-                    let shared_bvh = load_obj_bvh(&path, material.clone(), smooth);
+                    let shared_bvh = load_obj_bvh(&path, material.clone(), *smooth);
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
@@ -184,7 +184,7 @@ impl Primitive {
     }
 }
 
-pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: &bool) -> Arc<dyn Hittable> {
+pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Arc<dyn Hittable> {
     {
         let cache = GLOBAL_OBJ_CACHE.read().unwrap();
         if let Some(bvh) = cache.get(path) {
