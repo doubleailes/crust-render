@@ -1,4 +1,7 @@
-mod prim;
-pub use prim::BVHNode;
-pub use prim::Object;
-pub use prim::Primitive;
+mod sphere;
+pub use sphere::Sphere;
+mod triangle;
+pub use triangle::Triangle;
+mod mesh;
+#[allow(unused_imports)]
+pub use mesh::Mesh;

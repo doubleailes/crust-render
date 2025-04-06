@@ -1,14 +1,14 @@
 use std::path;
 
 use crust_render::{Camera, DocObject, Document, MaterialType, ObjectList, Primitive};
-use utils::Point3;
+use utils::{Point3,Mat4};
 
 fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
     const IMAGE_WIDTH: usize = 400;
     const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
-    let lookfrom = Point3::new(13.0, 2.0, 3.0);
-    let lookat = Point3::new(0.0, 0.0, 0.0);
+    let lookfrom = Point3::new(15.0, 3.0, 3.0);
+    let lookat = Point3::new(0.0, 1.0, 0.0);
     let vup = Point3::new(0.0, 1.0, 0.0);
     let dist_to_focus = 10.0;
     let aperture = 0.1;
@@ -37,7 +37,8 @@ fn main() {
         ))),
     );
     object_list.add(ground);
-    let p = Primitive::new_obj("./samples/teapot.obj".to_string());
+    let position: Mat4 =  Mat4::identity();
+    let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position);
     let teapot_material = crust_render::Disney::new(
         utils::Color::new(0.8, 0.3, 0.3),
         0.0,
