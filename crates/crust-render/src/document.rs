@@ -8,7 +8,7 @@ use crate::instance::Instance;
 use crate::light::{self, LightList};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
-use crate::{Sphere, SmoothTriangle, Triangle};
+use crate::{SmoothTriangle, Sphere, Triangle};
 use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -71,7 +71,11 @@ impl Document {
                     let obj = Sphere::new(*center, *radius, material.clone());
                     world.add(Box::new(obj));
                 }
-                Primitive::Obj { path, transform , smooth} => {
+                Primitive::Obj {
+                    path,
+                    transform,
+                    smooth,
+                } => {
                     let shared_bvh = load_obj_bvh(&path, material.clone(), smooth);
 
                     world.add(Box::new(Instance {
@@ -156,16 +160,27 @@ impl DocObject {
 }
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Primitive {
-    Sphere { center: Point3, radius: f32 },
-    Obj { path: String, transform: Mat4, smooth: bool },
+    Sphere {
+        center: Point3,
+        radius: f32,
+    },
+    Obj {
+        path: String,
+        transform: Mat4,
+        smooth: bool,
+    },
 }
 impl Primitive {
     pub fn new_sphere(center: Point3, radius: f32) -> Self {
         Self::Sphere { center, radius }
     }
 
-    pub fn new_obj(path: String, transform: Mat4, smooth: bool    ) -> Self {
-        Self::Obj { path, transform, smooth }
+    pub fn new_obj(path: String, transform: Mat4, smooth: bool) -> Self {
+        Self::Obj {
+            path,
+            transform,
+            smooth,
+        }
     }
 }
 
@@ -190,30 +205,21 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: &bool) -> A
         let v0 = vertices[indices[i] as usize];
         let v1 = vertices[indices[i + 1] as usize];
         let v2 = vertices[indices[i + 2] as usize];
-    
+
         let n0 = normals[indices[i] as usize];
         let n1 = normals[indices[i + 1] as usize];
         let n2 = normals[indices[i + 2] as usize];
-        let tri:Arc<dyn Hittable> =  match smooth {
-            true => {
-                Arc::new(SmoothTriangle::new(
-                    v0,
-                    v1,
-                    v2,
-                    n0,
-                    n1,
-                    n2,
-                    material.clone(),
-                )) as Arc<dyn Hittable>
-            }
-            false => {
-                Arc::new(Triangle::new(
-                    v0,
-                    v1,
-                    v2,
-                    material.clone(),
-                )) as Arc<dyn Hittable>
-            }
+        let tri: Arc<dyn Hittable> = match smooth {
+            true => Arc::new(SmoothTriangle::new(
+                v0,
+                v1,
+                v2,
+                n0,
+                n1,
+                n2,
+                material.clone(),
+            )) as Arc<dyn Hittable>,
+            false => Arc::new(Triangle::new(v0, v1, v2, material.clone())) as Arc<dyn Hittable>,
         };
         tris.push(tri);
     }
