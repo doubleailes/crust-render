@@ -38,7 +38,7 @@ fn main() {
     );
     object_list.add(ground);
     let position: Mat4 = Mat4::identity();
-    let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position);
+    let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position, true);
     let teapot_material = crust_render::Disney::new(
         utils::Color::new(0.8, 0.3, 0.3),
         0.0,
