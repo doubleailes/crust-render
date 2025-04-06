@@ -125,7 +125,7 @@ impl RenderSettings {
             height,
             min_samples_per_pixel,
             variance_threshold,
-            frame
+            frame,
         }
     }
     pub fn get_dimensions(&self) -> (usize, usize) {

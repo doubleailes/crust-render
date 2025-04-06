@@ -26,6 +26,13 @@ impl HittableList {
     pub fn add(&mut self, object: Box<dyn Hittable>) {
         self.objects.push(object);
     }
+    /// Returns the count of objects in the list.
+    ///
+    /// # Returns
+    /// - The number of objects in the list.
+    pub fn count(&self) -> usize {
+        self.objects.len()
+    }
 }
 
 impl Hittable for HittableList {

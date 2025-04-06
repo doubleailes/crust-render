@@ -87,4 +87,13 @@ impl LightList {
             self.lights.get(i)
         }
     }
+    /// Returns the number of lights in the `LightList`.
+    ///
+    /// # Returns
+    /// - The number of lights in the list.
+    ///
+    /// This method is useful for iterating over the lights or checking if the list is empty.
+    pub fn count(&self) -> usize {
+        self.lights.len()
+    }
 }
