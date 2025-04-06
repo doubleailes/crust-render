@@ -82,7 +82,7 @@ impl Renderer {
     
         let cmj_samples =
             generate_cmj_2d((self.settings.samples_per_pixel as f32).sqrt().ceil() as usize);
-        let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 32x32
+        let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
         let bar = ProgressBar::new(tiles.len() as u64);
         bar.set_style(
             indicatif::ProgressStyle::default_bar()
