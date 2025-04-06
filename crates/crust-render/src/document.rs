@@ -8,7 +8,7 @@ use crate::instance::Instance;
 use crate::light::{self, LightList};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
-use crate::{Sphere, Triangle};
+use crate::{Sphere, SmoothTriangle, Triangle};
 use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::{fs::File, io::BufReader};
 use tracing::error;
 use tracing::warn;
-use utils::{Mat4, Point3};
+use utils::{Mat4, Point3, Vec3};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -71,8 +71,8 @@ impl Document {
                     let obj = Sphere::new(*center, *radius, material.clone());
                     world.add(Box::new(obj));
                 }
-                Primitive::Obj { path, transform } => {
-                    let shared_bvh = load_obj_bvh(&path, material.clone());
+                Primitive::Obj { path, transform , smooth} => {
+                    let shared_bvh = load_obj_bvh(&path, material.clone(), smooth);
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
@@ -157,19 +157,19 @@ impl DocObject {
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Primitive {
     Sphere { center: Point3, radius: f32 },
-    Obj { path: String, transform: Mat4 },
+    Obj { path: String, transform: Mat4, smooth: bool },
 }
 impl Primitive {
     pub fn new_sphere(center: Point3, radius: f32) -> Self {
         Self::Sphere { center, radius }
     }
 
-    pub fn new_obj(path: String, transform: Mat4) -> Self {
-        Self::Obj { path, transform }
+    pub fn new_obj(path: String, transform: Mat4, smooth: bool    ) -> Self {
+        Self::Obj { path, transform, smooth }
     }
 }
 
-pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable> {
+pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: &bool) -> Arc<dyn Hittable> {
     {
         let cache = GLOBAL_OBJ_CACHE.read().unwrap();
         if let Some(bvh) = cache.get(path) {
@@ -182,6 +182,7 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable
     let obj: Obj = load_obj(input).expect("Failed to parse OBJ");
 
     let vertices: Vec<Point3> = obj.vertices.iter().map(|v| v.position.into()).collect();
+    let normals: Vec<Vec3> = obj.vertices.iter().map(|n| n.normal.into()).collect();
     let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
 
     let mut tris = Vec::with_capacity(indices.len() / 3);
@@ -189,8 +190,32 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable
         let v0 = vertices[indices[i] as usize];
         let v1 = vertices[indices[i + 1] as usize];
         let v2 = vertices[indices[i + 2] as usize];
-        let tri = Arc::new(Triangle::new(v0, v1, v2, material.clone()));
-        tris.push(tri as Arc<dyn Hittable>);
+    
+        let n0 = normals[indices[i] as usize];
+        let n1 = normals[indices[i + 1] as usize];
+        let n2 = normals[indices[i + 2] as usize];
+        let tri:Arc<dyn Hittable> =  match smooth {
+            true => {
+                Arc::new(SmoothTriangle::new(
+                    v0,
+                    v1,
+                    v2,
+                    n0,
+                    n1,
+                    n2,
+                    material.clone(),
+                )) as Arc<dyn Hittable>
+            }
+            false => {
+                Arc::new(Triangle::new(
+                    v0,
+                    v1,
+                    v2,
+                    material.clone(),
+                )) as Arc<dyn Hittable>
+            }
+        };
+        tris.push(tri);
     }
 
     let bvh = BVHNode::build(tris);

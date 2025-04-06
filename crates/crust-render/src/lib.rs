@@ -23,7 +23,7 @@ pub use hittable_list::HittableList;
 pub use light::{Light, LightList};
 pub use material::MaterialType;
 pub use material::*;
-pub use primitives::{Sphere, Triangle};
+pub use primitives::{Sphere, Triangle, SmoothTriangle};
 pub use ray::Ray;
 pub use sampler::generate_cmj_2d;
 pub use tracer::{RenderSettings, Renderer};
