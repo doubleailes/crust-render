@@ -1,10 +1,10 @@
-use utils::{Point3,Vec3};
-use crate::hittable::Hittable;
-use std::sync::Arc;
-use crate::material::Material;
 use crate::aabb::AABB;
-use crate::ray::Ray;
 use crate::hittable::HitRecord;
+use crate::hittable::Hittable;
+use crate::material::Material;
+use crate::ray::Ray;
+use std::sync::Arc;
+use utils::{Point3, Vec3};
 
 pub struct Sphere {
     center: Point3,
@@ -19,9 +19,8 @@ impl Sphere {
             material,
         }
     }
-    
 }
-impl Hittable for Sphere{
+impl Hittable for Sphere {
     fn bounding_box(&self) -> Option<AABB> {
         Some(AABB::new(
             self.center - Vec3::new(self.radius, self.radius, self.radius),

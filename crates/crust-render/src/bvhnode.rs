@@ -1,7 +1,7 @@
-use crate::hittable::{HitRecord, Hittable};
-use std::sync::Arc;
 use crate::aabb::AABB;
+use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
+use std::sync::Arc;
 pub struct BVHNode {
     pub left: Arc<dyn Hittable>,
     pub right: Arc<dyn Hittable>,

@@ -1,5 +1,6 @@
 use crate::Material;
 use crate::MaterialType;
+use crate::bvhnode::BVHNode;
 use crate::camera::Camera;
 use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
@@ -7,6 +8,7 @@ use crate::instance::Instance;
 use crate::light::{self, LightList};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
+use crate::{Sphere, Triangle};
 use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -16,8 +18,6 @@ use std::{fs::File, io::BufReader};
 use tracing::error;
 use tracing::warn;
 use utils::{Mat4, Point3};
-use crate::bvhnode::BVHNode;
-use crate::{Sphere, Triangle};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -168,7 +168,6 @@ impl Primitive {
         Self::Obj { path, transform }
     }
 }
-
 
 pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable> {
     {

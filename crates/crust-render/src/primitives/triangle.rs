@@ -1,9 +1,9 @@
-use utils::Point3;
-use crate::material::Material;
-use std::sync::Arc;
 use crate::aabb::{AABB, triangle_aabb};
-use crate::ray::Ray;
 use crate::hittable::{HitRecord, Hittable};
+use crate::material::Material;
+use crate::ray::Ray;
+use std::sync::Arc;
+use utils::Point3;
 
 pub struct Triangle {
     v0: Point3,
@@ -13,21 +13,34 @@ pub struct Triangle {
 }
 impl Triangle {
     pub fn new(v0: Point3, v1: Point3, v2: Point3, material: Arc<dyn Material>) -> Self {
-        Self { v0, v1, v2, material }
+        Self {
+            v0,
+            v1,
+            v2,
+            material,
+        }
     }
 }
 
-impl Hittable for Triangle{
+impl Hittable for Triangle {
     fn bounding_box(&self) -> Option<AABB> {
         Some(triangle_aabb(self.v0, self.v1, self.v2))
     }
     fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
-        triangle_hit(r, self.v0, self.v1, self.v2, t_min, t_max, rec, &self.material)
+        triangle_hit(
+            r,
+            self.v0,
+            self.v1,
+            self.v2,
+            t_min,
+            t_max,
+            rec,
+            &self.material,
+        )
     }
-
 }
 
-pub (crate) fn triangle_hit(
+pub(crate) fn triangle_hit(
     ray: &Ray,
     v0: Point3,
     v1: Point3,
