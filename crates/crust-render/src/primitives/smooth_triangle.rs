@@ -1,9 +1,9 @@
-use crate::hittable::{Hittable, HitRecord};
+use crate::aabb::{AABB, triangle_aabb};
+use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
-use crate::aabb::{AABB, triangle_aabb};
 use std::sync::Arc;
-use utils::{Vec3, Point3};
+use utils::{Point3, Vec3};
 
 pub struct SmoothTriangle {
     pub v0: Point3,
