@@ -1,5 +1,6 @@
 mod aabb;
 mod buffer;
+mod bvhnode;
 mod camera;
 mod convert;
 mod document;
@@ -14,7 +15,6 @@ mod sampler;
 mod scene_cache;
 mod tracer;
 mod world;
-mod bvhnode;
 
 pub use camera::Camera;
 pub use convert::convert;
@@ -23,7 +23,7 @@ pub use hittable_list::HittableList;
 pub use light::{Light, LightList};
 pub use material::MaterialType;
 pub use material::*;
-pub use primitives::{Sphere,Triangle};
+pub use primitives::{Sphere, Triangle};
 pub use ray::Ray;
 pub use sampler::generate_cmj_2d;
 pub use tracer::{RenderSettings, Renderer};

@@ -1,3 +1,4 @@
+use crate::Sphere;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::material::Material;
@@ -5,7 +6,6 @@ use crate::material::{CookTorrance, Dielectric, Disney, Emissive, Lambertian, Me
 use std::sync::Arc;
 use utils::Color;
 use utils::Point3;
-use crate::Sphere;
 
 #[allow(dead_code)]
 pub fn random_scene() -> (HittableList, LightList) {

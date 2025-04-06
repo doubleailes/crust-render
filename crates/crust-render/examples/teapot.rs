@@ -1,7 +1,7 @@
 use std::path;
 
 use crust_render::{Camera, DocObject, Document, MaterialType, ObjectList, Primitive};
-use utils::{Point3,Mat4};
+use utils::{Mat4, Point3};
 
 fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
@@ -37,7 +37,7 @@ fn main() {
         ))),
     );
     object_list.add(ground);
-    let position: Mat4 =  Mat4::identity();
+    let position: Mat4 = Mat4::identity();
     let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position);
     let teapot_material = crust_render::Disney::new(
         utils::Color::new(0.8, 0.3, 0.3),
