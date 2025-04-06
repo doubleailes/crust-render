@@ -39,6 +39,43 @@ impl Hittable for Instance {
     }
 
     fn bounding_box(&self) -> Option<AABB> {
-        self.object.bounding_box() // not transformed — OK for now
+        if let Some(bbox) = self.object.bounding_box() {
+            // Transform the bounding box corners
+            let min = bbox.minimum;
+            let max = bbox.maximum;
+        
+            // Transform all 8 corners of the box and find the new bounds
+            let corners = [
+                Point3::new(min.x(), min.y(), min.z()),
+                Point3::new(max.x(), min.y(), min.z()),
+                Point3::new(min.x(), max.y(), min.z()),
+                Point3::new(min.x(), min.y(), max.z()),
+                Point3::new(max.x(), max.y(), min.z()),
+                Point3::new(max.x(), min.y(), max.z()),
+                Point3::new(min.x(), max.y(), max.z()),
+                Point3::new(max.x(), max.y(), max.z()),
+            ];
+        
+            let mut new_min = self.transform.transform_point(corners[0]);
+            let mut new_max = new_min;
+        
+            for i in 1..8 {
+                let p = self.transform.transform_point(corners[i]);
+                new_min = Point3::new(
+                    new_min.x().min(p.x()),
+                    new_min.y().min(p.y()),
+                    new_min.z().min(p.z()),
+                );
+                new_max = Point3::new(
+                    new_max.x().max(p.x()),
+                    new_max.y().max(p.y()),
+                    new_max.z().max(p.z()),
+                );
+            }
+        
+            Some(AABB::new(new_min, new_max))
+        } else {
+            None
+        }
     }
 }
