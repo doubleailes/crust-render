@@ -38,7 +38,7 @@ fn main() {
     );
     object_list.add(ground);
     let position: Mat4 = Mat4::identity();
-    let p = Primitive::new_alembic("samples/TUNNEL.abc".to_string(), position, 0, false);
+    let p = Primitive::new_alembic("samples/capsule.abc".to_string(), position, 0, false);
     let teapot_material = crust_render::Disney::new(
         utils::Color::new(0.8, 0.3, 0.3),
         0.0,

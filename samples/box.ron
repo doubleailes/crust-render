@@ -39,7 +39,7 @@
             (
                 name: "teapot",
                 object: Alembic(
-                    path: "samples/TUNNEL.abc",
+                    path: "samples/capsule.abc",
                     transform: (
                         data: ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
                     ),

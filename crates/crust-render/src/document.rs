@@ -263,6 +263,17 @@ pub fn load_alembic_bvh(
 ) -> Arc<dyn Hittable> {
     use ogawa_rs::*;
     use std::fs::File;
+    let cache_key = format!("{path}#{}", sample);
+    
+    // 1. Try cache first
+    {
+        let cache = GLOBAL_OBJ_CACHE.read().unwrap();
+        if let Some(bvh) = cache.get(&cache_key) {
+            return bvh.clone();
+        }
+    }
+
+   
 
     let file = File::open(path).expect("Alembic file not found");
     let mut reader = MemMappedReader::new(file).expect("Failed to map Alembic file");
@@ -343,6 +354,11 @@ pub fn load_alembic_bvh(
         }
     }
 
-    BVHNode::build(bvh_nodes)
+    // 2. Cache result
+    let bvh = BVHNode::build(bvh_nodes);
+    let mut cache = GLOBAL_OBJ_CACHE.write().unwrap();
+    cache.insert(cache_key.to_string(), bvh.clone());
+
+    bvh
 
 }
