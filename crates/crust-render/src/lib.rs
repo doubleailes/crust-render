@@ -23,7 +23,6 @@ pub use light::{Light, LightList};
 pub use material::MaterialType;
 pub use material::*;
 pub use primitives::Primitive;
-pub use primitives::{UVSphere, UVTorus};
 pub use ray::Ray;
 pub use sampler::generate_cmj_2d;
 pub use tracer::{RenderSettings, Renderer};
