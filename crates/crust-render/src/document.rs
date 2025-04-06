@@ -84,6 +84,15 @@ impl Document {
                         inverse_transform: transform.inverse(),
                     }) as Box<dyn Hittable>);
                 }
+                Primitive::Alembic { path, transform,sample, smooth } => {
+                    let bvh = load_alembic_bvh(path, material.clone(), *sample as u32, *smooth);
+                
+                    world.add(Box::new(Instance {
+                        object: bvh,
+                        transform: *transform,
+                        inverse_transform: transform.inverse(),
+                    }) as Box<dyn Hittable>);
+                }
             }
         }
         (world, lights)
@@ -169,6 +178,12 @@ pub enum Primitive {
         transform: Mat4,
         smooth: bool,
     },
+    Alembic {
+        path: String,
+        transform: Mat4,
+        sample: isize,
+        smooth: bool,
+    }
 }
 impl Primitive {
     pub fn new_sphere(center: Point3, radius: f32) -> Self {
@@ -179,6 +194,14 @@ impl Primitive {
         Self::Obj {
             path,
             transform,
+            smooth,
+        }
+    }
+    pub fn new_alembic(path: String, transform: Mat4, sample: isize, smooth: bool) -> Self {
+        Self::Alembic {
+            path,
+            transform,
+            sample,
             smooth,
         }
     }
@@ -230,4 +253,96 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Ar
     cache.insert(path.to_string(), bvh.clone());
 
     bvh
+}
+
+pub fn load_alembic_bvh(
+    path: &str,
+    material: Arc<dyn Material>,
+    sample: u32,
+    smooth: bool,
+) -> Arc<dyn Hittable> {
+    use ogawa_rs::*;
+    use std::fs::File;
+
+    let file = File::open(path).expect("Alembic file not found");
+    let mut reader = MemMappedReader::new(file).expect("Failed to map Alembic file");
+    let archive = Archive::new(&mut reader).expect("Invalid Alembic archive");
+
+    let mut stack = vec![archive.load_root_object(&mut reader).unwrap()];
+    let mut bvh_nodes: Vec<Arc<dyn Hittable>> = Vec::new();
+
+    while let Some(current) = stack.pop() {
+        match Schema::parse(&current, &mut reader, &archive) {
+            Ok(Schema::PolyMesh(mesh)) => {
+                let vertices: Vec<Point3> = mesh.load_vertices_sample(sample, &mut reader).unwrap().iter().map(|p| p.clone().into()).collect();
+
+                let face_indices = mesh.load_faceindices_sample(0, &mut reader).unwrap();
+                let counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
+
+                // Optional normals
+                let maybe_normals: Option<Vec<Point3>> = if mesh.has_normals() {
+                    match mesh.has_normals() {
+                        true => {
+                            let normals = mesh.load_normals_sample(sample, &mut reader).unwrap();
+                            Some(normals.iter().map(|n| n.clone().into()).collect())
+                        }
+                        false => {
+                            warn!("Normals present but failed to load sample.");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Convert to triangles
+                let mut idx = 0;
+                for &n in &counts {
+                    if n == 3 {
+                        let i0 = face_indices[idx] as usize;
+                        let i1 = face_indices[idx + 1] as usize;
+                        let i2 = face_indices[idx + 2] as usize;
+
+                        let v0 = vertices[i0];
+                        let v1 = vertices[i1];
+                        let v2 = vertices[i2];
+
+                        let tri: Arc<dyn Hittable> = match (&maybe_normals, smooth) {
+                            (Some(normals), true) => {
+                                let n0 = normals[i0];
+                                let n1 = normals[i1];
+                                let n2 = normals[i2];
+                                Arc::new(SmoothTriangle::new(v0, v1, v2, n0, n1, n2, material.clone()))
+                            }
+                            _ => Arc::new(Triangle::new(v0, v1, v2, material.clone())),
+                        };
+
+                        bvh_nodes.push(tri);
+                    } else {
+                        // Ignore non-triangle faces for now
+                        idx += n as usize;
+                        continue;
+                    }
+
+                    idx += n as usize;
+                }
+            }
+            _ => {
+                for i in (0..current.child_count()).rev() {
+                    let child = current
+                        .load_child(
+                            i,
+                            &mut reader,
+                            &archive.indexed_meta_data,
+                            &archive.time_samplings,
+                        )
+                        .unwrap();
+                    stack.push(child);
+                }
+            }
+        }
+    }
+
+    BVHNode::build(bvh_nodes)
+
 }
