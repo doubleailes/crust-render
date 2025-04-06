@@ -77,7 +77,7 @@ impl Document {
                     world.add(Box::new(Instance {
                         object: shared_bvh,
                         transform: transform.clone(),
-                        inverse_transform: transform.clone(), // Identity matrix is its own inverse
+                        inverse_transform: transform.inverse(),
                     }) as Box<dyn Hittable>);
                 }
             }
