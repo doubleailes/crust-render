@@ -3,3 +3,4 @@ image.ppm
 Cargo.lock
 output.exr
 /test_images
+samples/vi_model.abc
