@@ -29,6 +29,9 @@ struct Cli {
     /// Verbose level
     #[arg(short, long, default_value = "info")]
     level: LoggerLevel,
+    /// Bucket rendering
+    #[arg(short, long, default_value_t = false)]
+    bucket: bool,
 }
 
 fn get_logger_level(level: LoggerLevel) -> Level {
@@ -63,7 +66,13 @@ fn main() {
     // Camera
     let renderer = Renderer::new(doc.camera(), world, lights, doc.settings());
     info!("Let's start rendering...");
-    let buffer = renderer.render();
+    let buffer = if cli.bucket{
+        info!("Bucket rendering is enabled");
+        renderer.render_with_tiles()
+    } else {
+        info!("Bucket rendering is disabled");
+        renderer.render()
+    };
     // Close Timer
     let duration: Duration = start.elapsed();
     info!("Time elapsed in rendering() is: {:?}", duration);
