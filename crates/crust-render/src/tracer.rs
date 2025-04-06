@@ -83,7 +83,14 @@ impl Renderer {
         let cmj_samples =
             generate_cmj_2d((self.settings.samples_per_pixel as f32).sqrt().ceil() as usize);
         let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 32x32
-    
+        let bar = ProgressBar::new(tiles.len() as u64);
+        bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )
+                .unwrap(),
+        );
         // Collect all pixels in parallel from tiles
         let pixels: Vec<(usize, usize, Color)> = tiles
             .into_par_iter()
@@ -118,10 +125,11 @@ impl Renderer {
                     }
                 }
     
+                bar.inc(1);
                 local
             })
             .collect();
-    
+        bar.finish();
         // Combine results into a buffer
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         for (i, j, color) in pixels {
