@@ -374,6 +374,10 @@ pub fn load_alembic_bvh(
     }
 
     // 2. Cache result
+    if bvh_nodes.is_empty() {
+        warn!("No valid geometry found in Alembic file: {}", path);
+        return Arc::new(HittableList::new(vec![]));
+    }
     let bvh = BVHNode::build(bvh_nodes);
     let mut cache = GLOBAL_OBJ_CACHE.write().unwrap();
     cache.insert(cache_key.to_string(), bvh.clone());
