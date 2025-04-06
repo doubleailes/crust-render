@@ -2,7 +2,7 @@ use crate::aabb::AABB;
 use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use std::sync::Arc;
-use utils::{Mat4,Point3};
+use utils::{Mat4, Point3};
 
 pub struct Instance {
     pub object: Arc<dyn Hittable>,
@@ -43,7 +43,7 @@ impl Hittable for Instance {
             // Transform the bounding box corners
             let min = bbox.minimum;
             let max = bbox.maximum;
-        
+
             // Transform all 8 corners of the box and find the new bounds
             let corners = [
                 Point3::new(min.x(), min.y(), min.z()),
@@ -55,10 +55,10 @@ impl Hittable for Instance {
                 Point3::new(min.x(), max.y(), max.z()),
                 Point3::new(max.x(), max.y(), max.z()),
             ];
-        
+
             let mut new_min = self.transform.transform_point(corners[0]);
             let mut new_max = new_min;
-        
+
             for i in 1..8 {
                 let p = self.transform.transform_point(corners[i]);
                 new_min = Point3::new(
@@ -72,7 +72,7 @@ impl Hittable for Instance {
                     new_max.z().max(p.z()),
                 );
             }
-        
+
             Some(AABB::new(new_min, new_max))
         } else {
             None
