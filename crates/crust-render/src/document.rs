@@ -5,7 +5,7 @@ use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::instance::Instance;
 use crate::light::{self, LightList};
-use crate::primitives::{Object, Primitive};
+use crate::primitives::{Object, Primitive, BVHNode};
 use crate::tracer::RenderSettings;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -14,6 +14,9 @@ use std::sync::Arc;
 use tracing::error;
 use tracing::warn;
 use utils::{Mat4, Point3};
+use crate::scene_cache::GLOBAL_OBJ_CACHE;
+use obj::{Obj, load_obj};
+use std::{fs::File, io::BufReader};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -161,11 +164,6 @@ impl DocObject {
 }
 
 pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>) -> Arc<dyn Hittable> {
-    use crate::primitives::{BVHNode, Object}; // Your actual modules
-    use crate::scene_cache::GLOBAL_OBJ_CACHE;
-    use obj::{Obj, load_obj};
-    use std::{fs::File, io::BufReader};
-
     {
         let cache = GLOBAL_OBJ_CACHE.read().unwrap();
         if let Some(bvh) = cache.get(path) {
