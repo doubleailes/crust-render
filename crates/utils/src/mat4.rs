@@ -69,6 +69,31 @@ impl Mat4 {
 
         inv
     }
+    /// Creates a rotation matrix from Euler angles (in radians).
+    /// Rotation order: Z (r_z) → Y (r_y) → X (r_x)
+    pub fn rotate(r_x: f32, r_y: f32, r_z: f32) -> Self {
+        let mut m = Self::identity();
+        let cos_x = r_x.cos();
+        let sin_x = r_x.sin();
+        let cos_y = r_y.cos();
+        let sin_y = r_y.sin();
+        let cos_z = r_z.cos();
+        let sin_z = r_z.sin();
+
+        m.data[0][0] = cos_y * cos_z;
+        m.data[0][1] = -cos_x * sin_z + sin_x * sin_y * cos_z;
+        m.data[0][2] = sin_x * sin_z + cos_x * sin_y * cos_z;
+
+        m.data[1][0] = cos_y * sin_z;
+        m.data[1][1] = cos_x * cos_z + sin_x * sin_y * sin_z;
+        m.data[1][2] = -sin_x * cos_z + cos_x * sin_y * sin_z;
+
+        m.data[2][0] = -sin_y;
+        m.data[2][1] = sin_x * cos_y;
+        m.data[2][2] = cos_x * cos_y;
+
+        m
+    }
 }
 
 impl Mul for Mat4 {

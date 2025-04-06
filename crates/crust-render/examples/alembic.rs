@@ -7,7 +7,7 @@ fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
     const IMAGE_WIDTH: usize = 400;
     const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
-    let lookfrom = Point3::new(15.0, 3.0, 3.0);
+    let lookfrom = Point3::new(0.0, 3.0, 13.0);
     let lookat = Point3::new(0.0, 1.0, 0.0);
     let vup = Point3::new(0.0, 1.0, 0.0);
     let dist_to_focus = 10.0;
@@ -17,13 +17,13 @@ fn main() {
         lookfrom,
         lookat,
         vup,
-        20.0,
+        45.0,
         ASPECT_RATIO,
         aperture,
         dist_to_focus,
     );
     let render_settings =
-        crust_render::RenderSettings::new(10000, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05, 0);
+        crust_render::RenderSettings::new(64, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.0, 0);
     let mut object_list = ObjectList::new(vec![]);
     // Add objects to the object_list here
     let ground: DocObject = DocObject::new(

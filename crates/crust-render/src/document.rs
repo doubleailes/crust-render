@@ -285,7 +285,8 @@ pub fn load_alembic_bvh(
     let mut bvh_nodes: Vec<Arc<dyn Hittable>> = Vec::new();
 
     while let Some(current) = stack.pop() {
-        debug!("Current object: {:?}", &current.header.full_name);
+        let current_name: &str = current.header.full_name.as_str();
+        debug!("Current object: {:?}", current_name);
         match Schema::parse(&current, &mut reader, &archive) {
             Ok(Schema::PolyMesh(mesh)) => {
                 let vertices: Vec<Point3> = mesh
