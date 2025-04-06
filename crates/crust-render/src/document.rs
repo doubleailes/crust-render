@@ -5,18 +5,18 @@ use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::instance::Instance;
 use crate::light::{self, LightList};
-use crate::primitives::{Object, Primitive, BVHNode};
+use crate::primitives::{BVHNode, Object, Primitive};
+use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
+use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs::File, io::BufReader};
 use tracing::error;
 use tracing::warn;
 use utils::{Mat4, Point3};
-use crate::scene_cache::GLOBAL_OBJ_CACHE;
-use obj::{Obj, load_obj};
-use std::{fs::File, io::BufReader};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
@@ -85,7 +85,7 @@ impl Document {
                     world.add(Box::new(Instance {
                         object: shared_bvh,
                         transform: my_transform,
-                        inverse_transform: my_transform,  // Identity matrix is its own inverse
+                        inverse_transform: my_transform, // Identity matrix is its own inverse
                     }) as Box<dyn Hittable>);
                 }
             }

@@ -35,9 +35,18 @@ impl Mat4 {
     }
 
     pub fn transform_point(&self, p: Point3) -> Point3 {
-        let x = self.data[0][0] * p.x() + self.data[0][1] * p.y() + self.data[0][2] * p.z() + self.data[0][3];
-        let y = self.data[1][0] * p.x() + self.data[1][1] * p.y() + self.data[1][2] * p.z() + self.data[1][3];
-        let z = self.data[2][0] * p.x() + self.data[2][1] * p.y() + self.data[2][2] * p.z() + self.data[2][3];
+        let x = self.data[0][0] * p.x()
+            + self.data[0][1] * p.y()
+            + self.data[0][2] * p.z()
+            + self.data[0][3];
+        let y = self.data[1][0] * p.x()
+            + self.data[1][1] * p.y()
+            + self.data[1][2] * p.z()
+            + self.data[1][3];
+        let z = self.data[2][0] * p.x()
+            + self.data[2][1] * p.y()
+            + self.data[2][2] * p.z()
+            + self.data[2][3];
         Point3::new(x, y, z)
     }
 
@@ -52,11 +61,11 @@ impl Mat4 {
         inv.data[0][0] = 1.0 / self.data[0][0]; // inverse scale
         inv.data[1][1] = 1.0 / self.data[1][1];
         inv.data[2][2] = 1.0 / self.data[2][2];
-    
+
         inv.data[0][3] = -self.data[0][3] * inv.data[0][0];
         inv.data[1][3] = -self.data[1][3] * inv.data[1][1];
         inv.data[2][3] = -self.data[2][3] * inv.data[2][2];
-    
+
         inv
     }
 }
