@@ -291,7 +291,7 @@ pub fn load_alembic_bvh(
                 let counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
 
                 // Optional normals
-                let maybe_normals: Option<Vec<Point3>> = if mesh.has_normals() {
+                let maybe_normals: Option<Vec<Vec3>> = if mesh.has_normals() {
                     match mesh.has_normals() {
                         true => {
                             let normals = mesh.load_normals_sample(sample, &mut reader).unwrap();
