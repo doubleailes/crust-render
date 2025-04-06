@@ -77,12 +77,12 @@ impl Document {
                 }
                 Primitive::Obj { path } => {
                     let shared_bvh = load_obj_bvh(&path, material.clone());
-                    let my_transform = Mat4::translate(0.0, 0.0, 0.0) * Mat4::scale(1.0);
+                    let my_transform = Mat4::identity();
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
                         transform: my_transform,
-                        inverse_transform: my_transform.inverse(),
+                        inverse_transform: my_transform,  // Identity matrix is its own inverse
                     }) as Box<dyn Hittable>);
                 }
             }
