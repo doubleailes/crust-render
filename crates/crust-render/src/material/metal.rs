@@ -3,7 +3,6 @@ use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3;
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Metal {
