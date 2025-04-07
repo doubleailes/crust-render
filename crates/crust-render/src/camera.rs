@@ -1,15 +1,16 @@
 use crate::ray::Ray;
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
-use utils::{Point3, Vec3};
+use utils::random_in_unit_disk;
 
 /// The `Camera` struct represents a virtual camera in the ray tracing system.
 /// It is responsible for generating rays that simulate the perspective view of a scene.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Camera {
     /// The origin of the camera (position in 3D space).
-    origin: Point3,
+    origin: Vec3,
     /// The lower-left corner of the viewport.
-    lower_left_corner: Point3,
+    lower_left_corner: Vec3,
     /// The horizontal vector of the viewport.
     horizontal: Vec3,
     /// The vertical vector of the viewport.
@@ -37,8 +38,8 @@ impl Camera {
     /// # Returns
     /// - A new instance of `Camera`.
     pub fn new(
-        lookfrom: Point3,
-        lookat: Point3,
+        lookfrom: Vec3,
+        lookat: Vec3,
         vup: Vec3,
         vfov: f32, // Vertical field-of-view in degrees
         aspect_ratio: f32,
@@ -49,9 +50,9 @@ impl Camera {
         let h = f32::tan(theta / 2.0);
         let viewport_height = 2.0 * h;
         let viewport_width = aspect_ratio * viewport_height;
-        let w = utils::unit_vector(lookfrom - lookat);
-        let u = utils::unit_vector(utils::cross(vup, w));
-        let v = utils::cross(w, u);
+        let w = (lookfrom - lookat).normalize();
+        let u = vup.cross(w).normalize();
+        let v = w.cross(u);
 
         let origin = lookfrom;
         let horizontal = focus_dist * viewport_width * u;
@@ -80,8 +81,8 @@ impl Camera {
     /// # Returns
     /// - A `Ray` that starts at the camera and passes through the specified point on the viewport.
     pub fn get_ray(&self, s: f32, t: f32) -> Ray {
-        let rd = self.lens_radius * utils::random_in_unit_disk();
-        let offset = self.u * rd.x() + self.v * rd.y();
+        let rd = self.lens_radius * random_in_unit_disk();
+        let offset = self.u * rd.x + self.v * rd.y;
         Ray::new(
             self.origin + offset,
             self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin - offset,
