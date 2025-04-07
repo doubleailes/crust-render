@@ -162,7 +162,7 @@ impl Material for CookTorrance {
             let g = geometry_schlick_ggx(n.dot(v), self.roughness)
                 * geometry_schlick_ggx(n.dot(l), self.roughness);
 
-            let spec = (f * d * g) / (4.0 * n.dot(v) * v.dot(l) + 1e-4);
+            let spec = (f * d * g) / (4.0 * n.dot(v) * n.dot(l) + 1e-4);
             let kd = (Vec3::new(1.0, 1.0, 1.0) - f) * (1.0 - self.metallic);
             let diffuse = self.albedo / std::f32::consts::PI;
 
