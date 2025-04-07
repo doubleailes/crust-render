@@ -3,10 +3,10 @@ use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
+use glam::Vec3;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use utils::Color;
 
 pub struct Renderer {
     pub camera: Camera,
@@ -46,7 +46,7 @@ impl Renderer {
             let pixel_colors: Vec<_> = (0..self.settings.width)
                 .into_par_iter()
                 .map(|i| {
-                    let mut sum = Color::new(0.0, 0.0, 0.0);
+                    let mut sum = Vec3::new(0.0, 0.0, 0.0);
 
                     for sample in 0..self.settings.samples_per_pixel {
                         let (u_offset, v_offset) = if (sample as usize) < cmj_samples.len() {
@@ -79,7 +79,6 @@ impl Renderer {
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-    
         let cmj_samples =
             generate_cmj_2d((self.settings.samples_per_pixel as f32).sqrt().ceil() as usize);
         let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
@@ -92,25 +91,25 @@ impl Renderer {
                 .unwrap(),
         );
         // Collect all pixels in parallel from tiles
-        let pixels: Vec<(usize, usize, Color)> = tiles
+        let pixels: Vec<(usize, usize, Vec3)> = tiles
             .into_par_iter()
             .flat_map(|tile| {
                 let mut local = Vec::with_capacity(tile.width * tile.height);
-    
+
                 for j in tile.y..tile.y + tile.height {
                     for i in tile.x..tile.x + tile.width {
-                        let mut color = Color::zero();
-    
+                        let mut color = Vec3::new(0.0, 0.0, 0.0);
+
                         for sample in 0..self.settings.samples_per_pixel {
                             let (dx, dy) = if (sample as usize) < cmj_samples.len() {
                                 cmj_samples[sample as usize]
                             } else {
                                 (utils::random(), utils::random())
                             };
-    
+
                             let u = (i as f32 + dx) / (self.settings.width - 1) as f32;
                             let v = (j as f32 + dy) / (self.settings.height - 1) as f32;
-    
+
                             let ray = self.camera.get_ray(u, v);
                             color += ray_color(
                                 &ray,
@@ -119,12 +118,12 @@ impl Renderer {
                                 self.settings.max_depth as i32,
                             );
                         }
-    
+
                         let final_color = color / self.settings.samples_per_pixel as f32;
                         local.push((i, j, final_color));
                     }
                 }
-    
+
                 bar.inc(1);
                 local
             })
@@ -135,7 +134,7 @@ impl Renderer {
         for (i, j, color) in pixels {
             buffer.set_pixel(i, j, color);
         }
-    
+
         buffer
     }
 }
@@ -175,9 +174,9 @@ impl RenderSettings {
     }
 }
 
-pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Color {
+pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Vec3 {
     if depth <= 0 {
-        return Color::zero(); // recursion limit
+        return Vec3::new(0.0, 0.0, 0.0); // recursion limit
     }
 
     let mut rec = HitRecord::new();
@@ -221,7 +220,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
             );
 
             let mut light_hit = HitRecord::new();
-            let mut add_emission = Color::zero();
+            let mut add_emission = Vec3::new(0.0, 0.0, 0.0);
 
             if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
                 let emitted = light_hit.mat.as_ref().unwrap().emitted();
@@ -249,9 +248,9 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     }
 
     // === Background ===
-    let unit_direction = utils::unit_vector(r.direction());
+    let unit_direction = Vec3::normalize(r.direction());
     let t = 0.5 * (unit_direction.y() + 1.0);
-    (1.0 - t) * Color::new(1.0, 1.0, 1.0) + t * Color::new(0.5, 0.7, 1.0)
+    (1.0 - t) * Vec3::new(1.0, 1.0, 1.0) + t * Vec3::new(0.5, 0.7, 1.0)
 }
 
 struct Tile {

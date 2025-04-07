@@ -1,5 +1,5 @@
 use crate::ray::Ray;
-use utils::Vec3;
+use glam::Vec3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AABB {
@@ -14,14 +14,14 @@ impl AABB {
 
     pub fn surrounding_box(box0: AABB, box1: AABB) -> AABB {
         let small = Vec3::new(
-            box0.minimum.x().min(box1.minimum.x()),
-            box0.minimum.y().min(box1.minimum.y()),
-            box0.minimum.z().min(box1.minimum.z()),
+            box0.minimum.x.min(box1.minimum.x),
+            box0.minimum.y.min(box1.minimum.y),
+            box0.minimum.z.min(box1.minimum.z),
         );
         let big = Vec3::new(
-            box0.maximum.x().max(box1.maximum.x()),
-            box0.maximum.y().max(box1.maximum.y()),
-            box0.maximum.z().max(box1.maximum.z()),
+            box0.maximum.x.max(box1.maximum.x),
+            box0.maximum.y.max(box1.maximum.y),
+            box0.maximum.z.max(box1.maximum.z),
         );
         AABB {
             minimum: small,
@@ -50,15 +50,15 @@ impl AABB {
     }
 
     pub fn compare_x(a: AABB, b: AABB) -> std::cmp::Ordering {
-        a.minimum.x().partial_cmp(&b.minimum.x()).unwrap()
+        a.minimum.x.partial_cmp(&b.minimum.x).unwrap()
     }
 
     pub fn compare_y(a: AABB, b: AABB) -> std::cmp::Ordering {
-        a.minimum.y().partial_cmp(&b.minimum.y()).unwrap()
+        a.minimum.y.partial_cmp(&b.minimum.y).unwrap()
     }
 
     pub fn compare_z(a: AABB, b: AABB) -> std::cmp::Ordering {
-        a.minimum.z().partial_cmp(&b.minimum.z()).unwrap()
+        a.minimum.z.partial_cmp(&b.minimum.z).unwrap()
     }
 }
 

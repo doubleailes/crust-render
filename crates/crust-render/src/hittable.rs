@@ -1,6 +1,6 @@
 use crate::ray::Ray;
+use glam::Vec3;
 use std::sync::Arc;
-use utils::{Point3, Vec3};
 
 use crate::aabb::AABB;
 use crate::material::Material;
@@ -10,7 +10,7 @@ use crate::material::Material;
 #[derive(Clone, Default)]
 pub struct HitRecord {
     /// The point of intersection.
-    pub p: Point3,
+    pub p: Vec3,
     /// The surface normal at the intersection point.
     pub normal: Vec3,
     /// The material of the object at the intersection point.
@@ -39,7 +39,7 @@ impl HitRecord {
     /// This method adjusts the normal to always point against the ray's direction
     /// and sets the `front_face` flag accordingly.
     pub fn set_face_normal(&mut self, r: &Ray, outward_normal: Vec3) {
-        self.front_face = utils::dot(r.direction(), outward_normal) < 0.0;
+        self.front_face = r.direction().dot(outward_normal) < 0.0;
         self.normal = if self.front_face {
             outward_normal
         } else {

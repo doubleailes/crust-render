@@ -9,6 +9,7 @@ use crate::light::{self, LightList};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
 use crate::{SmoothTriangle, Sphere, Triangle};
+use glam::{Mat4, Vec3};
 use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -16,7 +17,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{fs::File, io::BufReader};
 use tracing::{debug, error, warn};
-use utils::{Mat4, Point3, Vec3};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Document {
