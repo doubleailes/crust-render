@@ -1,19 +1,19 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlinnPhong {
-    pub diffuse: Vec3,
-    pub specular: Vec3,
+    pub diffuse: Vec3A,
+    pub specular: Vec3A,
     pub shininess: f32,
-    pub light_dir: Vec3, // Assume one directional light for now
+    pub light_dir: Vec3A, // Assume one directional light for now
 }
 
 impl BlinnPhong {
-    pub fn new(diffuse: Vec3, specular: Vec3, shininess: f32, light_dir: Vec3) -> Self {
+    pub fn new(diffuse: Vec3A, specular: Vec3A, shininess: f32, light_dir: Vec3A) -> Self {
         BlinnPhong {
             diffuse,
             specular,
@@ -28,7 +28,7 @@ impl Material for BlinnPhong {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
         let normal = rec.normal;

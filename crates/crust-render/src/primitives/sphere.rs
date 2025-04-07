@@ -3,16 +3,16 @@ use crate::hittable::HitRecord;
 use crate::hittable::Hittable;
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use std::sync::Arc;
 
 pub struct Sphere {
-    center: Vec3,
+    center: Vec3A,
     radius: f32,
     material: Arc<dyn Material>,
 }
 impl Sphere {
-    pub fn new(center: Vec3, radius: f32, material: Arc<dyn Material>) -> Self {
+    pub fn new(center: Vec3A, radius: f32, material: Arc<dyn Material>) -> Self {
         Self {
             center,
             radius,
@@ -23,8 +23,8 @@ impl Sphere {
 impl Hittable for Sphere {
     fn bounding_box(&self) -> Option<AABB> {
         Some(AABB::new(
-            self.center - Vec3::new(self.radius, self.radius, self.radius),
-            self.center + Vec3::new(self.radius, self.radius, self.radius),
+            self.center - Vec3A::new(self.radius, self.radius, self.radius),
+            self.center + Vec3A::new(self.radius, self.radius, self.radius),
         ))
     }
     fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {

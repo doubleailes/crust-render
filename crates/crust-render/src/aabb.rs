@@ -1,24 +1,24 @@
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AABB {
-    pub minimum: Vec3,
-    pub maximum: Vec3,
+    pub minimum: Vec3A,
+    pub maximum: Vec3A,
 }
 
 impl AABB {
-    pub fn new(minimum: Vec3, maximum: Vec3) -> Self {
+    pub fn new(minimum: Vec3A, maximum: Vec3A) -> Self {
         AABB { minimum, maximum }
     }
 
     pub fn surrounding_box(box0: AABB, box1: AABB) -> AABB {
-        let small = Vec3::new(
+        let small = Vec3A::new(
             box0.minimum.x.min(box1.minimum.x),
             box0.minimum.y.min(box1.minimum.y),
             box0.minimum.z.min(box1.minimum.z),
         );
-        let big = Vec3::new(
+        let big = Vec3A::new(
             box0.maximum.x.max(box1.maximum.x),
             box0.maximum.y.max(box1.maximum.y),
             box0.maximum.z.max(box1.maximum.z),
@@ -62,13 +62,13 @@ impl AABB {
     }
 }
 
-pub fn triangle_aabb(v0: Vec3, v1: Vec3, v2: Vec3) -> AABB {
-    let min = Vec3::new(
+pub fn triangle_aabb(v0: Vec3A, v1: Vec3A, v2: Vec3A) -> AABB {
+    let min = Vec3A::new(
         v0[0].min(v1[0]).min(v2[0]),
         v0[1].min(v1[1]).min(v2[1]),
         v0[2].min(v1[2]).min(v2[2]),
     );
-    let max = Vec3::new(
+    let max = Vec3A::new(
         v0[0].max(v1[0]).max(v2[0]),
         v0[1].max(v1[1]).max(v2[1]),
         v0[2].max(v1[2]).max(v2[2]),

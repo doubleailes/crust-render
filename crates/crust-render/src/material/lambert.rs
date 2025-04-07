@@ -1,16 +1,16 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use serde::{Deserialize, Serialize};
 use utils::random3;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Lambertian {
-    albedo: Vec3,
+    albedo: Vec3A,
 }
 
 impl Lambertian {
-    pub fn new(a: Vec3) -> Lambertian {
+    pub fn new(a: Vec3A) -> Lambertian {
         Lambertian { albedo: a }
     }
 }
@@ -20,7 +20,7 @@ impl Material for Lambertian {
         &self,
         _r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
         let mut scatter_direction = rec.normal + random3();
@@ -36,7 +36,7 @@ impl Material for Lambertian {
     }
 }
 
-fn is_near_zero(v: Vec3) -> bool {
+fn is_near_zero(v: Vec3A) -> bool {
     const EPS: f32 = 1.0e-8;
-    v.abs_diff_eq(Vec3::ZERO, EPS)
+    v.abs_diff_eq(Vec3A::ZERO, EPS)
 }

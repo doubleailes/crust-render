@@ -1,5 +1,5 @@
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use serde::{Deserialize, Serialize};
 use utils::random_in_unit_disk;
 
@@ -8,17 +8,17 @@ use utils::random_in_unit_disk;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Camera {
     /// The origin of the camera (position in 3D space).
-    origin: Vec3,
+    origin: Vec3A,
     /// The lower-left corner of the viewport.
-    lower_left_corner: Vec3,
+    lower_left_corner: Vec3A,
     /// The horizontal vector of the viewport.
-    horizontal: Vec3,
+    horizontal: Vec3A,
     /// The vertical vector of the viewport.
-    vertical: Vec3,
+    vertical: Vec3A,
     /// The camera's local horizontal axis.
-    u: Vec3,
+    u: Vec3A,
     /// The camera's local vertical axis.
-    v: Vec3,
+    v: Vec3A,
     /// The radius of the camera's lens (used for depth of field).
     lens_radius: f32,
 }
@@ -38,9 +38,9 @@ impl Camera {
     /// # Returns
     /// - A new instance of `Camera`.
     pub fn new(
-        lookfrom: Vec3,
-        lookat: Vec3,
-        vup: Vec3,
+        lookfrom: Vec3A,
+        lookat: Vec3A,
+        vup: Vec3A,
         vfov: f32, // Vertical field-of-view in degrees
         aspect_ratio: f32,
         aperture: f32,

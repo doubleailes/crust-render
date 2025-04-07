@@ -2,14 +2,14 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf::*;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use std::f32::consts::PI;
 use utils::{Lerp, random_cosine_direction};
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Disney {
-    pub base_color: Vec3,
+    pub base_color: Vec3A,
     pub metallic: f32,
     pub roughness: f32,
     pub specular: f32,
@@ -22,7 +22,7 @@ pub struct Disney {
 
 impl Disney {
     pub fn new(
-        base_color: Vec3,
+        base_color: Vec3A,
         metallic: f32,
         roughness: f32,
         specular: f32,
@@ -47,7 +47,7 @@ impl Disney {
 }
 
 impl Material for Disney {
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3, f32)> {
+    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
         let n = rec.normal;
         let v = -r_in.direction().normalize();
         let l_local = random_cosine_direction();
@@ -64,18 +64,18 @@ impl Material for Disney {
         let tint = if self.base_color.max_element() > 0.0 {
             self.base_color / self.base_color.max_element()
         } else {
-            Vec3::new(1.0, 1.0, 1.0)
+            Vec3A::new(1.0, 1.0, 1.0)
         };
-        let f0 = Vec3::new(0.04, 0.04, 0.04).lerp(tint, self.specular_tint) * self.specular;
+        let f0 = Vec3A::new(0.04, 0.04, 0.04).lerp(tint, self.specular_tint) * self.specular;
         #[allow(non_snake_case)]
         let F = fresnel_schlick(v_dot_h, f0.lerp(self.base_color, self.metallic));
 
         // Diffuse lobe
-        let kd = (Vec3::new(1.0, 1.0, 1.0) - F) * (1.0 - self.metallic);
+        let kd = (Vec3A::new(1.0, 1.0, 1.0) - F) * (1.0 - self.metallic);
         let diffuse = disney_diffuse(self.base_color, self.roughness, n, v, l, h);
 
         // Sheen
-        let sheen_color = Vec3::new(1.0, 1.0, 1.0).lerp(tint, self.sheen_tint);
+        let sheen_color = Vec3A::new(1.0, 1.0, 1.0).lerp(tint, self.sheen_tint);
         let sheen = sheen_color * schlick_weight(l_dot_h) * self.sheen;
 
         // Specular lobe
@@ -101,7 +101,7 @@ impl Material for Disney {
 
         let clearcoat = self.clearcoat * Dc * Fc * Gc / (4.0 * n_dot_v * n_dot_l + 1e-4);
 
-        let total = kd * diffuse + specular + sheen + Vec3::new(clearcoat, clearcoat, clearcoat);
+        let total = kd * diffuse + specular + sheen + Vec3A::new(clearcoat, clearcoat, clearcoat);
 
         let scattered = Ray::new(rec.p, l);
         let pdf = n_dot_l / PI;
@@ -109,11 +109,11 @@ impl Material for Disney {
         Some((scattered, total * n_dot_l, pdf.max(1e-4)))
     }
 
-    fn scatter(&self, _: &Ray, _: &HitRecord, _: &mut Vec3, _: &mut Ray) -> bool {
+    fn scatter(&self, _: &Ray, _: &HitRecord, _: &mut Vec3A, _: &mut Ray) -> bool {
         false // Only importance sampling supported
     }
 
-    fn emitted(&self) -> Vec3 {
-        Vec3::new(0.0, 0.0, 0.0)
+    fn emitted(&self) -> Vec3A {
+        Vec3A::new(0.0, 0.0, 0.0)
     }
 }

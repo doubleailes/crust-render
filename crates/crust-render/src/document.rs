@@ -9,7 +9,7 @@ use crate::light::{self, LightList};
 use crate::scene_cache::GLOBAL_OBJ_CACHE;
 use crate::tracer::RenderSettings;
 use crate::{SmoothTriangle, Sphere, Triangle};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3A};
 use obj::{Obj, load_obj};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -174,7 +174,7 @@ impl DocObject {
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Primitive {
     Sphere {
-        center: Vec3,
+        center: Vec3A,
         radius: f32,
     },
     Obj {
@@ -190,7 +190,7 @@ pub enum Primitive {
     },
 }
 impl Primitive {
-    pub fn new_sphere(center: Vec3, radius: f32) -> Self {
+    pub fn new_sphere(center: Vec3A, radius: f32) -> Self {
         Self::Sphere { center, radius }
     }
 
@@ -223,8 +223,8 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Ar
     let input = BufReader::new(file);
     let obj: Obj = load_obj(input).expect("Failed to parse OBJ");
 
-    let vertices: Vec<Vec3> = obj.vertices.iter().map(|v| v.position.into()).collect();
-    let normals: Vec<Vec3> = obj.vertices.iter().map(|n| n.normal.into()).collect();
+    let vertices: Vec<Vec3A> = obj.vertices.iter().map(|v| v.position.into()).collect();
+    let normals: Vec<Vec3A> = obj.vertices.iter().map(|n| n.normal.into()).collect();
     let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
 
     let mut tris: Vec<Arc<dyn Hittable>> = Vec::with_capacity(indices.len() / 3);
@@ -289,7 +289,7 @@ pub fn load_alembic_bvh(
         debug!("Current object: {:?}", current_name);
         match Schema::parse(&current, &mut reader, &archive) {
             Ok(Schema::PolyMesh(mesh)) => {
-                let vertices: Vec<Vec3> = mesh
+                let vertices: Vec<Vec3A> = mesh
                     .load_vertices_sample(sample, &mut reader)
                     .unwrap()
                     .iter()
@@ -300,7 +300,7 @@ pub fn load_alembic_bvh(
                 let _counts = mesh.load_facecounts_sample(sample, &mut reader).unwrap();
 
                 // Optional normals
-                let maybe_normals: Option<Vec<Vec3>> = if mesh.has_normals() {
+                let maybe_normals: Option<Vec<Vec3A>> = if mesh.has_normals() {
                     match mesh.has_normals() {
                         true => {
                             let normals = mesh.load_normals_sample(sample, &mut reader).unwrap();

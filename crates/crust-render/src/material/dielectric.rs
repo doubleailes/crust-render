@@ -2,7 +2,7 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -30,7 +30,7 @@ impl Material for Dielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
         let refraction_ratio = if rec.front_face {
@@ -51,7 +51,7 @@ impl Material for Dielectric {
                 unit_direction.refract(rec.normal, refraction_ratio)
             };
 
-        *attenuation = Vec3::new(1.0, 1.0, 1.0);
+        *attenuation = Vec3A::new(1.0, 1.0, 1.0);
         *scattered = Ray::new(rec.p, direction);
         true
     }
@@ -60,12 +60,12 @@ impl Material for Dielectric {
 pub struct ComplexDielectric {
     pub ior: f32,
     pub roughness: f32,
-    pub absorption: Option<Vec3>,
+    pub absorption: Option<Vec3A>,
     pub thin: bool,
 }
 
 impl ComplexDielectric {
-    pub fn new(ior: f32, roughness: f32, absorption: Option<Vec3>, thin: bool) -> Self {
+    pub fn new(ior: f32, roughness: f32, absorption: Option<Vec3A>, thin: bool) -> Self {
         Self {
             ior,
             roughness,
@@ -80,7 +80,7 @@ impl Material for ComplexDielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
         let normal = rec.normal;
@@ -92,7 +92,7 @@ impl Material for ComplexDielectric {
         let h = if h.dot(n) < 0.0 { -h } else { h };
 
         let cos_theta = view.dot(h).max(0.0);
-        let f0 = Vec3::new(1.0, 1.0, 1.0) * (((1.0 - self.ior) / (1.0 + self.ior)).powi(2));
+        let f0 = Vec3A::new(1.0, 1.0, 1.0) * (((1.0 - self.ior) / (1.0 + self.ior)).powi(2));
         let fresnel = brdf::fresnel_schlick(cos_theta, f0);
 
         // Decide between reflection and refraction
@@ -113,16 +113,16 @@ impl Material for ComplexDielectric {
 
         // Attenuation for transmission (Beer’s Law)
         if reflect || self.thin {
-            *attenuation = Vec3::new(1.0, 1.0, 1.0);
+            *attenuation = Vec3A::new(1.0, 1.0, 1.0);
         } else if let Some(abs) = self.absorption {
             let distance = 1.0; // Or distance inside medium, if available
-            *attenuation = Vec3::new(
+            *attenuation = Vec3A::new(
                 (-abs.x * distance).exp(),
                 (-abs.y * distance).exp(),
                 (-abs.z * distance).exp(),
             );
         } else {
-            *attenuation = Vec3::new(1.0, 1.0, 1.0);
+            *attenuation = Vec3A::new(1.0, 1.0, 1.0);
         }
 
         true

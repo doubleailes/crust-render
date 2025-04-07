@@ -3,7 +3,7 @@ use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
-use glam::Vec3;
+use glam::Vec3A;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ impl Renderer {
             let pixel_colors: Vec<_> = (0..self.settings.width)
                 .into_par_iter()
                 .map(|i| {
-                    let mut sum = Vec3::new(0.0, 0.0, 0.0);
+                    let mut sum = Vec3A::new(0.0, 0.0, 0.0);
 
                     for sample in 0..self.settings.samples_per_pixel {
                         let (u_offset, v_offset) = if (sample as usize) < cmj_samples.len() {
@@ -91,14 +91,14 @@ impl Renderer {
                 .unwrap(),
         );
         // Collect all pixels in parallel from tiles
-        let pixels: Vec<(usize, usize, Vec3)> = tiles
+        let pixels: Vec<(usize, usize, Vec3A)> = tiles
             .into_par_iter()
             .flat_map(|tile| {
                 let mut local = Vec::with_capacity(tile.width * tile.height);
 
                 for j in tile.y..tile.y + tile.height {
                     for i in tile.x..tile.x + tile.width {
-                        let mut color = Vec3::new(0.0, 0.0, 0.0);
+                        let mut color = Vec3A::new(0.0, 0.0, 0.0);
 
                         for sample in 0..self.settings.samples_per_pixel {
                             let (dx, dy) = if (sample as usize) < cmj_samples.len() {
@@ -174,9 +174,9 @@ impl RenderSettings {
     }
 }
 
-pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Vec3 {
+pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Vec3A {
     if depth <= 0 {
-        return Vec3::new(0.0, 0.0, 0.0); // recursion limit
+        return Vec3A::new(0.0, 0.0, 0.0); // recursion limit
     }
 
     let mut rec = HitRecord::new();
@@ -217,7 +217,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
 
             let mut light_hit = HitRecord::new();
-            let mut add_emission = Vec3::new(0.0, 0.0, 0.0);
+            let mut add_emission = Vec3A::new(0.0, 0.0, 0.0);
 
             if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
                 let emitted = light_hit.mat.as_ref().unwrap().emitted();
@@ -245,9 +245,9 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     }
 
     // === Background ===
-    let unit_direction = Vec3::normalize(r.direction());
+    let unit_direction = Vec3A::normalize(r.direction());
     let t = 0.5 * (unit_direction.y + 1.0);
-    (1.0 - t) * Vec3::new(1.0, 1.0, 1.0) + t * Vec3::new(0.5, 0.7, 1.0)
+    (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0)
 }
 
 struct Tile {

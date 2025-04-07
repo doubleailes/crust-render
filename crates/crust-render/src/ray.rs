@@ -1,13 +1,13 @@
-use glam::Vec3;
+use glam::Vec3A;
 
 /// The `Ray` struct represents a ray in 3D space, defined by an origin and a direction.
 /// Rays are used in ray tracing to determine intersections with objects in the scene.
 #[derive(Default)]
 pub struct Ray {
     /// The origin point of the ray.
-    orig: Vec3,
+    orig: Vec3A,
     /// The direction vector of the ray.
-    dir: Vec3,
+    dir: Vec3A,
 }
 
 impl Ray {
@@ -19,7 +19,7 @@ impl Ray {
     ///
     /// # Returns
     /// - A new instance of `Ray`.
-    pub fn new(origin: Vec3, direction: Vec3) -> Ray {
+    pub fn new(origin: Vec3A, direction: Vec3A) -> Ray {
         Ray {
             orig: origin,
             dir: direction,
@@ -29,16 +29,16 @@ impl Ray {
     /// Returns the origin of the ray.
     ///
     /// # Returns
-    /// - A `Vec3` representing the origin of the ray.
-    pub fn origin(&self) -> Vec3 {
+    /// - A `Vec3A` representing the origin of the ray.
+    pub fn origin(&self) -> Vec3A {
         self.orig
     }
 
     /// Returns the direction of the ray.
     ///
     /// # Returns
-    /// - A `Vec3` representing the direction of the ray.
-    pub fn direction(&self) -> Vec3 {
+    /// - A `Vec3A` representing the direction of the ray.
+    pub fn direction(&self) -> Vec3A {
         self.dir
     }
 
@@ -48,8 +48,8 @@ impl Ray {
     /// - `t`: The parameter along the ray's direction.
     ///
     /// # Returns
-    /// - A `Vec3` representing the point at parameter `t`.
-    pub fn at(&self, t: f32) -> Vec3 {
+    /// - A `Vec3A` representing the point at parameter `t`.
+    pub fn at(&self, t: f32) -> Vec3A {
         self.orig + t * self.dir
     }
 }

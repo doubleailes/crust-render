@@ -1,6 +1,6 @@
 use crate::hittable::HitRecord;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
 /// Materials determine how rays interact with surfaces, including scattering and emission.
@@ -19,7 +19,7 @@ pub trait Material: Send + Sync {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool;
 
@@ -36,9 +36,9 @@ pub trait Material: Send + Sync {
     /// # Returns
     /// - `Some((scattered_ray, attenuation, pdf))` if importance sampling is supported.
     /// - `None` if the material does not scatter the ray.
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3, f32)> {
+    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
         // Default fallback for materials that don't support importance sampling
-        let mut attenuation = Vec3::default();
+        let mut attenuation = Vec3A::default();
         let mut scattered = Ray::default();
         if self.scatter(r_in, rec, &mut attenuation, &mut scattered) {
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
@@ -54,8 +54,8 @@ pub trait Material: Send + Sync {
     /// By default, it returns black (no emission).
     ///
     /// # Returns
-    /// - A `Vec3` representing the emitted light.
-    fn emitted(&self) -> Vec3 {
-        Vec3::new(0.0, 0.0, 0.0)
+    /// - A `Vec3A` representing the emitted light.
+    fn emitted(&self) -> Vec3A {
+        Vec3A::new(0.0, 0.0, 0.0)
     }
 }

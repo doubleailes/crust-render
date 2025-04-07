@@ -1,9 +1,9 @@
-use glam::Vec3;
+use glam::Vec3A;
 use std::f32::consts::PI;
 use utils::random2;
 
-pub fn fresnel_schlick(cos_theta: f32, f0: Vec3) -> Vec3 {
-    f0 + (Vec3::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
+pub fn fresnel_schlick(cos_theta: f32, f0: Vec3A) -> Vec3A {
+    f0 + (Vec3A::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
 }
 
 pub fn geometry_schlick_ggx(n_dot: f32, roughness: f32) -> f32 {
@@ -11,9 +11,9 @@ pub fn geometry_schlick_ggx(n_dot: f32, roughness: f32) -> f32 {
     n_dot / (n_dot * (1.0 - k) + k)
 }
 
-pub fn sample_vndf_ggx(view: Vec3, roughness: f32) -> Vec3 {
+pub fn sample_vndf_ggx(view: Vec3A, roughness: f32) -> Vec3A {
     // Transform view direction to hemisphere aligned with normal (Z+)
-    let v = Vec3::new(roughness * view.x, roughness * view.y, view.z).normalize();
+    let v = Vec3A::new(roughness * view.x, roughness * view.y, view.z).normalize();
 
     // Generate 2D random numbers
     let (u1, u2) = random2();
@@ -23,12 +23,12 @@ pub fn sample_vndf_ggx(view: Vec3, roughness: f32) -> Vec3 {
     let (t1, t2) = if lensq > 0.0 {
         let inv_len = 1.0 / lensq.sqrt();
         (
-            Vec3::new(-v.y * inv_len, v.x * inv_len, 0.0),
-            Vec3::new(-v.z * v.x * inv_len, -v.z * v.y * inv_len, lensq * inv_len),
+            Vec3A::new(-v.y * inv_len, v.x * inv_len, 0.0),
+            Vec3A::new(-v.z * v.x * inv_len, -v.z * v.y * inv_len, lensq * inv_len),
         )
     } else {
         // view is aligned with z-axis
-        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0))
+        (Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(0.0, 1.0, 0.0))
     };
 
     // Sample point on hemisphere
@@ -40,10 +40,10 @@ pub fn sample_vndf_ggx(view: Vec3, roughness: f32) -> Vec3 {
     let t3 = (1.0 - u1).sqrt();
 
     let h = t1 * t1_coeff + t2 * t2_coeff + v * t3;
-    Vec3::new(roughness * h.x, roughness * h.y, h.z.max(1e-6)).normalize()
+    Vec3A::new(roughness * h.x, roughness * h.y, h.z.max(1e-6)).normalize()
 }
 
-pub fn pdf_vndf_ggx(view: Vec3, half: Vec3, normal: Vec3, roughness: f32) -> f32 {
+pub fn pdf_vndf_ggx(view: Vec3A, half: Vec3A, normal: Vec3A, roughness: f32) -> f32 {
     let a2 = roughness * roughness;
     let n_dot_h = normal.dot(half).max(1e-6);
     let v_dot_h = view.dot(half).max(1e-6);
@@ -58,13 +58,13 @@ pub fn schlick_weight(cos_theta: f32) -> f32 {
 
 // Disney Diffuse
 pub fn disney_diffuse(
-    base_color: Vec3,
+    base_color: Vec3A,
     roughness: f32,
-    n: Vec3,
-    v: Vec3,
-    l: Vec3,
-    h: Vec3,
-) -> Vec3 {
+    n: Vec3A,
+    v: Vec3A,
+    l: Vec3A,
+    h: Vec3A,
+) -> Vec3A {
     let n_dot_l = n.dot(l).max(0.0);
     let n_dot_v = n.dot(v).max(0.0);
     let l_dot_h = l.dot(h).max(0.0);
