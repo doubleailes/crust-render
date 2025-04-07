@@ -14,7 +14,7 @@ impl Hittable for Instance {
     fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
         let transformed_ray = Ray::new(
             self.inverse_transform.transform_point3(r.origin()),
-            self.inverse_transform.transform_point3(r.direction()),
+            self.inverse_transform.transform_vector3(r.direction()),
         );
 
         let mut temp_rec = HitRecord::default();
