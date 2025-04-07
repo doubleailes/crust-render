@@ -38,7 +38,7 @@ pub trait Light: Send + Sync {
     /// Returns the color of the light source.
     ///
     /// # Returns
-    /// - A `Color` representing the light's color.
+    /// - A `Vec3` representing the light's color.
     fn color(&self) -> Vec3;
 }
 

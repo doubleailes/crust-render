@@ -28,17 +28,17 @@ impl Material for BlinnPhong {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Color,
+        attenuation: &mut Vec3,
         scattered: &mut Ray,
     ) -> bool {
         let normal = rec.normal;
-        let view_dir = -utils::unit_vector(r_in.direction());
+        let view_dir = -r_in.direction().normalize(); // Ensure view_dir is normalized
         let light_dir = self.light_dir;
 
-        let halfway = utils::unit_vector(view_dir + light_dir);
+        let halfway = (view_dir + light_dir).normalize();
 
-        let diff = f32::max(utils::dot(normal, light_dir), 0.0);
-        let spec = f32::powf(f32::max(utils::dot(normal, halfway), 0.0), self.shininess);
+        let diff = f32::max(normal.dot(light_dir), 0.0);
+        let spec = f32::powf(f32::max(normal.dot(halfway), 0.0), self.shininess);
 
         let color = self.diffuse * diff + self.specular * spec;
 

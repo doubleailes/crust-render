@@ -19,6 +19,7 @@ mod world;
 pub use camera::Camera;
 pub use convert::convert;
 pub use document::{DocObject, Document, ObjectList, Primitive};
+pub use glam::{Mat4, Vec3};
 pub use hittable_list::HittableList;
 pub use light::{Light, LightList};
 pub use material::MaterialType;
