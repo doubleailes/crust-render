@@ -29,9 +29,7 @@ impl Hittable for Instance {
         temp_rec.p = self.transform.transform_point3(temp_rec.p);
         temp_rec.set_face_normal(
             r,
-            self.transform
-                .transform_point3(temp_rec.normal)
-                .unit_vector(),
+            self.transform.transform_point3(temp_rec.normal).normalize(),
         );
 
         *rec = temp_rec;
@@ -56,21 +54,13 @@ impl Hittable for Instance {
                 Vec3::new(max.x, max.y, max.z),
             ];
 
-            let mut new_min = self.transform.transform_point(corners[0]);
+            let mut new_min = self.transform.transform_point3(corners[0]);
             let mut new_max = new_min;
 
             for i in 1..8 {
-                let p = self.transform.transform_point(corners[i]);
-                new_min = Vec3::new(
-                    new_min.x().min(p.x()),
-                    new_min.y().min(p.y()),
-                    new_min.z().min(p.z()),
-                );
-                new_max = Point3::new(
-                    new_max.x().max(p.x()),
-                    new_max.y().max(p.y()),
-                    new_max.z().max(p.z()),
-                );
+                let p = self.transform.transform_point3(corners[i]);
+                new_min = Vec3::new(new_min.x.min(p.x), new_min.y.min(p.y), new_min.z.min(p.z));
+                new_max = Vec3::new(new_max.x.max(p.x), new_max.y.max(p.y), new_max.z.max(p.z));
             }
 
             Some(AABB::new(new_min, new_max))
