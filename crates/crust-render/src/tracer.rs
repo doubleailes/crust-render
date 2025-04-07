@@ -192,13 +192,13 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
             let light_point = light.sample_cmj(u, v);
             let light_dir = light_point - rec.p;
             let light_distance = light_dir.length();
-            let light_dir_unit = utils::unit_vector(light_dir);
+            let light_dir_unit = light_dir.normalize();
 
             let shadow_ray = Ray::new(rec.p, light_dir_unit);
             let mut shadow_hit = HitRecord::new();
 
             if !world.hit(&shadow_ray, 0.001, light_distance - 0.001, &mut shadow_hit) {
-                let cosine = f32::max(utils::dot(rec.normal, light_dir_unit), 0.0);
+                let cosine = f32::max(rec.normal.dot(light_dir_unit), 0.0);
                 let light_pdf = light.pdf(rec.p, light_point);
 
                 if let Some((_, brdf_value, brdf_pdf)) =
@@ -214,10 +214,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
         if let Some((scattered, brdf_value, brdf_pdf)) =
             rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
         {
-            let cosine = f32::max(
-                utils::dot(rec.normal, utils::unit_vector(scattered.direction())),
-                0.0,
-            );
+            let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
 
             let mut light_hit = HitRecord::new();
             let mut add_emission = Vec3::new(0.0, 0.0, 0.0);
@@ -249,7 +246,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
 
     // === Background ===
     let unit_direction = Vec3::normalize(r.direction());
-    let t = 0.5 * (unit_direction.y() + 1.0);
+    let t = 0.5 * (unit_direction.y + 1.0);
     (1.0 - t) * Vec3::new(1.0, 1.0, 1.0) + t * Vec3::new(0.5, 0.7, 1.0)
 }
 
