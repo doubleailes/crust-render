@@ -1,24 +1,24 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use utils::Color;
+use glam::Vec3;
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlinnPhong {
-    pub diffuse: Color,
-    pub specular: Color,
+    pub diffuse: Vec3,
+    pub specular: Vec3,
     pub shininess: f32,
-    pub light_dir: utils::Vec3, // Assume one directional light for now
+    pub light_dir: Vec3, // Assume one directional light for now
 }
 
 impl BlinnPhong {
-    pub fn new(diffuse: Color, specular: Color, shininess: f32, light_dir: utils::Vec3) -> Self {
+    pub fn new(diffuse: Vec3, specular: Vec3, shininess: f32, light_dir: Vec3) -> Self {
         BlinnPhong {
             diffuse,
             specular,
             shininess,
-            light_dir: utils::unit_vector(light_dir),
+            light_dir: light_dir.normalize(),
         }
     }
 }

@@ -7,3 +7,4 @@ license-file.workspace = true
 [dependencies]
 rand = "0.9.0"
 serde.workspace = true
+glam.workspace = true

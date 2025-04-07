@@ -1,4 +1,4 @@
-use utils::{Point3, Vec3};
+use glam::{Point3, Vec3};
 
 /// The `Ray` struct represents a ray in 3D space, defined by an origin and a direction.
 /// Rays are used in ray tracing to determine intersections with objects in the scene.
