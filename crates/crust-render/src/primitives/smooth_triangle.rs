@@ -2,13 +2,13 @@ use crate::aabb::{AABB, triangle_aabb};
 use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
+use glam::Vec3;
 use std::sync::Arc;
-use utils::{Point3, Vec3};
 
 pub struct SmoothTriangle {
-    pub v0: Point3,
-    pub v1: Point3,
-    pub v2: Point3,
+    pub v0: Vec3,
+    pub v1: Vec3,
+    pub v2: Vec3,
     pub n0: Vec3,
     pub n1: Vec3,
     pub n2: Vec3,
@@ -17,9 +17,9 @@ pub struct SmoothTriangle {
 
 impl SmoothTriangle {
     pub fn new(
-        v0: Point3,
-        v1: Point3,
-        v2: Point3,
+        v0: Vec3,
+        v1: Vec3,
+        v2: Vec3,
         n0: Vec3,
         n1: Vec3,
         n2: Vec3,
@@ -41,8 +41,8 @@ impl Hittable for SmoothTriangle {
     fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
         let edge1 = self.v1 - self.v0;
         let edge2 = self.v2 - self.v0;
-        let h = utils::cross(ray.direction(), edge2);
-        let a = utils::dot(edge1, h);
+        let h = ray.direction()().cross(edge2);
+        let a = edge1.dot(h);
 
         if a.abs() < 1e-6 {
             return false;
@@ -50,18 +50,18 @@ impl Hittable for SmoothTriangle {
 
         let f = 1.0 / a;
         let s = ray.origin() - self.v0;
-        let u = f * utils::dot(s, h);
+        let u = f * s.dot(h);
         if !(0.0..=1.0).contains(&u) {
             return false;
         }
 
-        let q = utils::cross(s, edge1);
-        let v = f * utils::dot(ray.direction(), q);
+        let q = s.cross(edge1);
+        let v = f * ray.direction().dot(q);
         if v < 0.0 || u + v > 1.0 {
             return false;
         }
 
-        let t = f * utils::dot(edge2, q);
+        let t = f * edge2.dot(q);
         if t < t_min || t > t_max {
             return false;
         }
