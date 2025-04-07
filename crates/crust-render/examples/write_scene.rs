@@ -1,7 +1,7 @@
 use std::path;
 
 use crust_render::{Camera, DocObject, Document, MaterialType, ObjectList, Primitive};
-use utils::Point3;
+use glam::Vec3
 
 fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
