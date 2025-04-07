@@ -2,17 +2,17 @@ use crate::aabb::{AABB, triangle_aabb};
 use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use std::sync::Arc;
 
 pub struct Triangle {
-    v0: Vec3,
-    v1: Vec3,
-    v2: Vec3,
+    v0: Vec3A,
+    v1: Vec3A,
+    v2: Vec3A,
     material: Arc<dyn Material>,
 }
 impl Triangle {
-    pub fn new(v0: Vec3, v1: Vec3, v2: Vec3, material: Arc<dyn Material>) -> Self {
+    pub fn new(v0: Vec3A, v1: Vec3A, v2: Vec3A, material: Arc<dyn Material>) -> Self {
         Self {
             v0,
             v1,
@@ -42,9 +42,9 @@ impl Hittable for Triangle {
 
 pub(crate) fn triangle_hit(
     ray: &Ray,
-    v0: Vec3,
-    v1: Vec3,
-    v2: Vec3,
+    v0: Vec3A,
+    v1: Vec3A,
+    v2: Vec3A,
     t_min: f32,
     t_max: f32,
     rec: &mut HitRecord,

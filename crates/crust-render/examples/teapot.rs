@@ -1,14 +1,14 @@
 use std::path;
 
-use crust_render::{Camera, DocObject, Document, Mat4, MaterialType, ObjectList, Primitive, Vec3};
+use crust_render::{Camera, DocObject, Document, Mat4, MaterialType, ObjectList, Primitive, Vec3A};
 
 fn main() {
     const ASPECT_RATIO: f32 = 16.0 / 9.0;
     const IMAGE_WIDTH: usize = 400;
     const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
-    let lookfrom = Vec3::new(15.0, 3.0, 3.0);
-    let lookat = Vec3::new(0.0, 1.0, 0.0);
-    let vup = Vec3::new(0.0, 1.0, 0.0);
+    let lookfrom = Vec3A::new(15.0, 3.0, 3.0);
+    let lookat = Vec3A::new(0.0, 1.0, 0.0);
+    let vup = Vec3A::new(0.0, 1.0, 0.0);
     let dist_to_focus = 10.0;
     let aperture = 0.1;
 
@@ -28,16 +28,16 @@ fn main() {
     let ground: DocObject = DocObject::new(
         "ground".to_string(),
         Primitive::Sphere {
-            center: Vec3::new(0.0, -1000.0, 0.0),
+            center: Vec3A::new(0.0, -1000.0, 0.0),
             radius: 1000.0,
         },
-        MaterialType::Lambertian(crust_render::Lambertian::new(Vec3::new(0.5, 0.5, 0.5))),
+        MaterialType::Lambertian(crust_render::Lambertian::new(Vec3A::new(0.5, 0.5, 0.5))),
     );
     object_list.add(ground);
     let position: Mat4 = Mat4::IDENTITY;
     let p = Primitive::new_obj("./samples/teapot.obj".to_string(), position, true);
     let teapot_material = crust_render::Disney::new(
-        Vec3::new(0.8, 0.3, 0.3),
+        Vec3A::new(0.8, 0.3, 0.3),
         0.0,
         0.2,
         1.0,
@@ -54,7 +54,7 @@ fn main() {
     );
     object_list.add(teapot);
     // Add a light source
-    let light_center = Vec3::new(0.0, 7.0, 0.0);
+    let light_center = Vec3A::new(0.0, 7.0, 0.0);
     let light_radius = 1.0;
     let light_1 = DocObject::new(
         "light_1".to_string(),
@@ -63,13 +63,13 @@ fn main() {
             radius: light_radius,
         },
         MaterialType::Emissive(crust_render::Emissive::new(
-            Vec3::new(10.0, 10.0, 10.0),
+            Vec3A::new(10.0, 10.0, 10.0),
             light_center,
             light_radius,
         )),
     );
     object_list.add(light_1);
-    let light_center = Vec3::new(-4.0, 7.0, 0.0);
+    let light_center = Vec3A::new(-4.0, 7.0, 0.0);
     let light_2 = DocObject::new(
         "light_2".to_string(),
         Primitive::Sphere {
@@ -77,7 +77,7 @@ fn main() {
             radius: light_radius,
         },
         MaterialType::Emissive(crust_render::Emissive::new(
-            Vec3::new(20.0, 10.0, 7.0),
+            Vec3A::new(20.0, 10.0, 7.0),
             light_center,
             light_radius,
         )),

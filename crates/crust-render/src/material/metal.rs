@@ -1,17 +1,17 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Metal {
-    albedo: Vec3,
+    albedo: Vec3A,
     fuzz: f32,
 }
 
 impl Metal {
-    pub fn new(a: Vec3, f: f32) -> Metal {
+    pub fn new(a: Vec3A, f: f32) -> Metal {
         Metal {
             albedo: a,
             fuzz: if f < 1.0 { f } else { 1.0 },
@@ -24,7 +24,7 @@ impl Material for Metal {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Vec3,
+        attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
         let mut rnd = rand::rng();

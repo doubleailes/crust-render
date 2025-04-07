@@ -1,6 +1,6 @@
 // Constants
 
-use glam::Vec3;
+use glam::Vec3A;
 use std::f32::consts::PI;
 // Utility functions
 
@@ -51,17 +51,17 @@ impl Lerp for f32 {
 
 use rand::Rng;
 
-// Function to generate a random Vec3 within a unit cube
-pub fn random_vec3_unit_cube(rng: &mut impl Rng) -> Vec3 {
-    Vec3::new(
+// Function to generate a random Vec3A within a unit cube
+pub fn random_vec3_unit_cube(rng: &mut impl Rng) -> Vec3A {
+    Vec3A::new(
         rng.random_range(-1.0..1.0),
         rng.random_range(-1.0..1.0),
         rng.random_range(-1.0..1.0),
     )
 }
 
-// Function to generate a random Vec3 within a unit sphere
-pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3 {
+// Function to generate a random Vec3A within a unit sphere
+pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3A {
     loop {
         let v = random_vec3_unit_cube(rng);
         if v.length_squared() < 1.0 {
@@ -70,28 +70,28 @@ pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3 {
     }
 }
 
-pub fn random_in_unit_disk() -> Vec3 {
+pub fn random_in_unit_disk() -> Vec3A {
     loop {
-        let p = Vec3::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
+        let p = Vec3A::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
         if p.length_squared() >= 1.0 {
             continue;
         }
         return p;
     }
 }
-pub fn random3() -> Vec3 {
-    Vec3::new(random(), random(), random())
+pub fn random3() -> Vec3A {
+    Vec3A::new(random(), random(), random())
 }
 
-pub fn random_range3(min: f32, max: f32) -> Vec3 {
-    Vec3::new(
+pub fn random_range3(min: f32, max: f32) -> Vec3A {
+    Vec3A::new(
         random_range(min, max),
         random_range(min, max),
         random_range(min, max),
     )
 }
 
-pub fn random_cosine_direction() -> Vec3 {
+pub fn random_cosine_direction() -> Vec3A {
     let r1 = random();
     let r2 = random();
     let z = f32::sqrt(1.0 - r2);
@@ -100,15 +100,15 @@ pub fn random_cosine_direction() -> Vec3 {
     let x = f32::cos(phi) * f32::sqrt(r2);
     let y = f32::sin(phi) * f32::sqrt(r2);
 
-    Vec3::new(x, y, z)
+    Vec3A::new(x, y, z)
 }
 
-pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
+pub fn align_to_normal(local: Vec3A, normal: Vec3A) -> Vec3A {
     // Assume Z-up in local, rotate to match `normal`
     let up = if normal.z.abs() < 0.999 {
-        Vec3::Z
+        Vec3A::Z
     } else {
-        Vec3::X
+        Vec3A::X
     };
 
     let tangent = normal.cross(up).normalize(); // Swapped cross order and normalized

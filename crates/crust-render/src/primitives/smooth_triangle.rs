@@ -2,27 +2,27 @@ use crate::aabb::{AABB, triangle_aabb};
 use crate::hittable::{HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
-use glam::Vec3;
+use glam::Vec3A;
 use std::sync::Arc;
 
 pub struct SmoothTriangle {
-    pub v0: Vec3,
-    pub v1: Vec3,
-    pub v2: Vec3,
-    pub n0: Vec3,
-    pub n1: Vec3,
-    pub n2: Vec3,
+    pub v0: Vec3A,
+    pub v1: Vec3A,
+    pub v2: Vec3A,
+    pub n0: Vec3A,
+    pub n1: Vec3A,
+    pub n2: Vec3A,
     pub material: Arc<dyn Material>,
 }
 
 impl SmoothTriangle {
     pub fn new(
-        v0: Vec3,
-        v1: Vec3,
-        v2: Vec3,
-        n0: Vec3,
-        n1: Vec3,
-        n2: Vec3,
+        v0: Vec3A,
+        v1: Vec3A,
+        v2: Vec3A,
+        n0: Vec3A,
+        n1: Vec3A,
+        n2: Vec3A,
         material: Arc<dyn Material>,
     ) -> Self {
         Self {
