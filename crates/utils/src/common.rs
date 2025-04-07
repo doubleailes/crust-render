@@ -91,3 +91,40 @@ pub fn random_in_unit_disk() -> Vec3 {
         return p;
     }
 }
+pub fn random3() -> Vec3 {
+    Vec3::new(random(), random(), random())
+}
+
+pub fn random_range3(min: f32, max: f32) -> Vec3 {
+    Vec3::new(
+        random_range(min, max),
+        random_range(min, max),
+        random_range(min, max),
+    )
+}
+
+pub fn random_cosine_direction() -> Vec3 {
+    let r1 = random();
+    let r2 = random();
+    let z = f32::sqrt(1.0 - r2);
+
+    let phi = 2.0 * std::f32::consts::PI * r1;
+    let x = f32::cos(phi) * f32::sqrt(r2);
+    let y = f32::sin(phi) * f32::sqrt(r2);
+
+    Vec3::new(x, y, z)
+}
+
+pub fn align_to_normal(local: Vec3, normal: Vec3) -> Vec3 {
+    // Assume Z-up in local, rotate to match `normal`
+    let up = if normal.z.abs() < 0.999 {
+        Vec3::Z
+    } else {
+        Vec3::X
+    };
+
+    let tangent = normal.cross(up).normalize(); // Swapped cross order and normalized
+    let bitangent = normal.cross(tangent);
+
+    local.x * tangent + local.y * bitangent + local.z * normal
+}

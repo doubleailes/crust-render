@@ -2,29 +2,29 @@ use crate::hittable::HitRecord;
 use crate::light::Light;
 use crate::material::Material;
 use crate::ray::Ray;
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
-use utils::Color;
-use utils::{Point3, Vec3};
+use utils::random3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emissive {
-    color: Color,
-    position: Point3,
+    color: Vec3,
+    position: Vec3,
     radius: f32,
 }
 
 impl Emissive {
-    pub fn new(color: Color, position: Point3, radius: f32) -> Self {
+    pub fn new(color: Vec3, position: Vec3, radius: f32) -> Self {
         Emissive {
             color,
             position,
             radius,
         }
     }
-    pub fn color(&self) -> Color {
+    pub fn color(&self) -> Vec3 {
         self.color
     }
-    pub fn position(&self) -> Point3 {
+    pub fn position(&self) -> Vec3 {
         self.position
     }
     pub fn radius(&self) -> f32 {
@@ -37,26 +37,26 @@ impl Material for Emissive {
         &self,
         _r_in: &Ray,
         _rec: &HitRecord,
-        _attenuation: &mut Color,
+        _attenuation: &mut Vec3,
         _scattered: &mut Ray,
     ) -> bool {
         false // Emissive materials do not scatter
     }
 
-    fn emitted(&self) -> Color {
+    fn emitted(&self) -> Vec3 {
         self.color
     }
 
-    fn scatter_importance(&self, _r_in: &Ray, _rec: &HitRecord) -> Option<(Ray, Color, f32)> {
+    fn scatter_importance(&self, _r_in: &Ray, _rec: &HitRecord) -> Option<(Ray, Vec3, f32)> {
         None
     }
 }
 
 impl Light for Emissive {
-    fn sample(&self) -> Point3 {
-        self.position + self.radius * utils::random_unit_vector()
+    fn sample(&self) -> Vec3 {
+        self.position + self.radius * random3()
     }
-    fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
+    fn sample_cmj(&self, u: f32, v: f32) -> Vec3 {
         // Map (u, v) on a sphere (uniform sphere sampling)
         let theta = 2.0 * std::f32::consts::PI * u;
         let phi = (1.0 - 2.0 * v).acos();
@@ -67,19 +67,16 @@ impl Light for Emissive {
         self.position + self.radius * Vec3::new(x, y, z)
     }
 
-    fn pdf(&self, hit_point: Point3, light_point: Point3) -> f32 {
+    fn pdf(&self, hit_point: Vec3, light_point: Vec3) -> f32 {
         let direction = light_point - hit_point;
         let distance_squared = direction.length_squared();
-        let normal = utils::unit_vector(direction);
-        let cosine = f32::max(
-            utils::dot(normal, utils::unit_vector(light_point - hit_point)),
-            0.0,
-        );
+        let normal = direction.normalize();
+        let cosine = f32::max(normal.dot((light_point - hit_point).normalize()), 0.0);
         let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
         distance_squared / (cosine * area + 1e-4)
     }
 
-    fn color(&self) -> Color {
+    fn color(&self) -> Vec3 {
         self.color
     }
 }

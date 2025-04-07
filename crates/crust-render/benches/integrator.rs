@@ -1,8 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use crust_render::Camera;
 use crust_render::simple_scene;
-use crust_render::{RenderSettings, Renderer};
-use utils::{Point3, Vec3};
+use crust_render::{RenderSettings, Renderer, Vec3};
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
@@ -16,7 +15,7 @@ fn bench_dot(c: &mut Criterion) {
 
     c.bench_function("vec3 dot", |b| {
         b.iter(|| {
-            let _ = utils::dot(vec1, vec2);
+            let _ = vec1.dot(vec2);
         })
     });
 }
@@ -25,9 +24,9 @@ fn bench_simple_world(c: &mut Criterion) {
     c.bench_function("simple world", |b| {
         b.iter(|| {
             let (world, lights) = simple_scene();
-            let lookfrom = Point3::new(13.0, 2.0, 3.0);
-            let lookat = Point3::new(0.0, 0.0, 0.0);
-            let vup = Point3::new(0.0, 1.0, 0.0);
+            let lookfrom = Vec3::new(13.0, 2.0, 3.0);
+            let lookat = Vec3::new(0.0, 0.0, 0.0);
+            let vup = Vec3::new(0.0, 1.0, 0.0);
             let dist_to_focus = 10.0;
             let aperture = 0.1;
 

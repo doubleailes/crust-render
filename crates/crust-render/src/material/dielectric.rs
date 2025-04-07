@@ -2,7 +2,7 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf;
 use crate::ray::Ray;
-use utils::Color;
+use glam::Vec3;
 
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -30,7 +30,7 @@ impl Material for Dielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Color,
+        attenuation: &mut Vec3,
         scattered: &mut Ray,
     ) -> bool {
         let refraction_ratio = if rec.front_face {
@@ -39,19 +39,19 @@ impl Material for Dielectric {
             self.ir
         };
 
-        let unit_direction = utils::unit_vector(r_in.direction());
-        let cos_theta = f32::min(utils::dot(-unit_direction, rec.normal), 1.0);
+        let unit_direction = r_in.direction().normalize();
+        let cos_theta = f32::min(-unit_direction.dot(rec.normal), 1.0);
         let sin_theta = f32::sqrt(1.0 - cos_theta * cos_theta);
 
         let cannot_refract = refraction_ratio * sin_theta > 1.0;
         let direction =
             if cannot_refract || Self::reflectance(cos_theta, refraction_ratio) > utils::random() {
-                utils::reflect(unit_direction, rec.normal)
+                unit_direction.reflect(rec.normal)
             } else {
-                utils::refract(unit_direction, rec.normal, refraction_ratio)
+                unit_direction.refract(rec.normal, refraction_ratio)
             };
 
-        *attenuation = Color::new(1.0, 1.0, 1.0);
+        *attenuation = Vec3::new(1.0, 1.0, 1.0);
         *scattered = Ray::new(rec.p, direction);
         true
     }
@@ -60,12 +60,12 @@ impl Material for Dielectric {
 pub struct ComplexDielectric {
     pub ior: f32,
     pub roughness: f32,
-    pub absorption: Option<Color>,
+    pub absorption: Option<Vec3>,
     pub thin: bool,
 }
 
 impl ComplexDielectric {
-    pub fn new(ior: f32, roughness: f32, absorption: Option<Color>, thin: bool) -> Self {
+    pub fn new(ior: f32, roughness: f32, absorption: Option<Vec3>, thin: bool) -> Self {
         Self {
             ior,
             roughness,
@@ -80,49 +80,49 @@ impl Material for ComplexDielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        attenuation: &mut Color,
+        attenuation: &mut Vec3,
         scattered: &mut Ray,
     ) -> bool {
         let normal = rec.normal;
-        let view = -utils::unit_vector(r_in.direction());
+        let view = -r_in.direction().normalize();
         let n = if rec.front_face { normal } else { -normal };
 
         // Sample half vector from GGX VNDF
         let h = brdf::sample_vndf_ggx(view, self.roughness);
-        let h = if utils::dot(h, n) < 0.0 { -h } else { h };
+        let h = if h.dot(n) < 0.0 { -h } else { h };
 
-        let cos_theta = utils::dot(view, h).max(0.0);
-        let f0 = Color::new(1.0, 1.0, 1.0) * (((1.0 - self.ior) / (1.0 + self.ior)).powi(2));
+        let cos_theta = view.dot(h).max(0.0);
+        let f0 = Vec3::new(1.0, 1.0, 1.0) * (((1.0 - self.ior) / (1.0 + self.ior)).powi(2));
         let fresnel = brdf::fresnel_schlick(cos_theta, f0);
 
         // Decide between reflection and refraction
-        let reflect = utils::random() < fresnel.x();
+        let reflect = utils::random() < fresnel.x;
 
         let direction = if reflect {
-            utils::reflect(view, h)
+            view.reflect(h)
         } else {
             let eta = if rec.front_face || self.thin {
                 1.0 / self.ior
             } else {
                 self.ior
             };
-            utils::refract(view, h, eta)
+            view.refract(h, eta)
         };
 
         *scattered = Ray::new(rec.p, direction);
 
         // Attenuation for transmission (Beer’s Law)
         if reflect || self.thin {
-            *attenuation = Color::new(1.0, 1.0, 1.0);
+            *attenuation = Vec3::new(1.0, 1.0, 1.0);
         } else if let Some(abs) = self.absorption {
             let distance = 1.0; // Or distance inside medium, if available
-            *attenuation = Color::new(
-                (-abs.x() * distance).exp(),
-                (-abs.y() * distance).exp(),
-                (-abs.z() * distance).exp(),
+            *attenuation = Vec3::new(
+                (-abs.x * distance).exp(),
+                (-abs.y * distance).exp(),
+                (-abs.z * distance).exp(),
             );
         } else {
-            *attenuation = Color::new(1.0, 1.0, 1.0);
+            *attenuation = Vec3::new(1.0, 1.0, 1.0);
         }
 
         true
