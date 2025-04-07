@@ -1,4 +1,4 @@
-use utils::Color;
+use glam::Vec3;
 
 /// The `Buffer` struct represents a 2D image buffer used to store pixel colors.
 /// It provides methods to set and retrieve pixel values, as well as access RGB data.
@@ -8,7 +8,7 @@ pub struct Buffer {
     /// The height of the buffer in pixels.
     height: usize,
     /// A flat vector storing the color data for each pixel.
-    data: Vec<Color>,
+    data: Vec<Vec3>,
 }
 
 impl Buffer {
@@ -21,7 +21,7 @@ impl Buffer {
     /// # Returns
     /// - A new instance of `Buffer` initialized with black pixels.
     pub fn new(width: usize, height: usize) -> Self {
-        let data = vec![Color::new(0.0, 0.0, 0.0); width * height];
+        let data = vec![Vec3::new(0.0, 0.0, 0.0); width * height];
         Buffer {
             width,
             height,
@@ -34,10 +34,10 @@ impl Buffer {
     /// # Parameters
     /// - `x`: The x-coordinate of the pixel.
     /// - `y`: The y-coordinate of the pixel.
-    /// - `color`: The `Color` to set for the pixel.
+    /// - `color`: The `Vec3` to set for the pixel.
     ///
     /// This method ensures that the coordinates are within bounds before setting the pixel.
-    pub fn set_pixel(&mut self, x: usize, y: usize, color: Color) {
+    pub fn set_pixel(&mut self, x: usize, y: usize, color: Vec3) {
         if x < self.width && y < self.height {
             self.data[y * self.width + x] = color;
         }
@@ -50,13 +50,13 @@ impl Buffer {
     /// - `y`: The y-coordinate of the pixel.
     ///
     /// # Returns
-    /// - The `Color` of the pixel at the specified coordinates.
-    /// - Returns black (`Color::new(0.0, 0.0, 0.0)`) if the coordinates are out of bounds.
-    pub fn get_pixel(&self, x: usize, y: usize) -> Color {
+    /// - The `Vec3` of the pixel at the specified coordinates.
+    /// - Returns black (`Vec3::new(0.0, 0.0, 0.0)`) if the coordinates are out of bounds.
+    pub fn get_pixel(&self, x: usize, y: usize) -> Vec3 {
         if x < self.width && y < self.height {
             self.data[y * self.width + x]
         } else {
-            Color::new(0.0, 0.0, 0.0)
+            Vec3::new(0.0, 0.0, 0.0)
         }
     }
 
@@ -72,7 +72,7 @@ impl Buffer {
     /// This method flips the y-coordinate to match the image coordinate system
     /// and converts the pixel color to RGB format.
     pub fn get_rgb(&self, x: usize, y: usize) -> (f32, f32, f32) {
-        let pixel: Color = self.get_pixel(x, self.height - 1 - y);
-        pixel.rgb()
+        let pixel: Vec3 = self.get_pixel(x, self.height - 1 - y);
+        (pixel.x, pixel.y, pixel.z)
     }
 }
