@@ -4,17 +4,17 @@ use crate::hittable::Hittable;
 use crate::material::Material;
 use crate::primitives::triangle::triangle_hit;
 use crate::ray::Ray;
+use glam::Vec3;
 use std::sync::Arc;
-use utils::Point3;
 
 pub struct Mesh {
-    vertices: Vec<Point3>,
+    vertices: Vec<Vec3>,
     indices: Vec<u32>,
     pub material: Arc<dyn Material>,
 }
 impl Mesh {
     #[allow(dead_code)]
-    pub fn new(vertices: Vec<Point3>, indices: Vec<u32>, material: Arc<dyn Material>) -> Self {
+    pub fn new(vertices: Vec<Vec3>, indices: Vec<u32>, material: Arc<dyn Material>) -> Self {
         Self {
             vertices,
             indices,
@@ -22,7 +22,7 @@ impl Mesh {
         }
     }
 
-    pub fn get_vertices(&self) -> &Vec<Point3> {
+    pub fn get_vertices(&self) -> &Vec<Vec3> {
         &self.vertices
     }
 
@@ -52,7 +52,7 @@ impl Hittable for Mesh {
 
 fn indexed_mesh_hit(
     ray: &Ray,
-    vertices: &[Point3],
+    vertices: &[Vec3],
     indices: &[u32],
     t_min: f32,
     t_max: f32,
