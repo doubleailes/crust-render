@@ -54,10 +54,16 @@ impl Material for Emissive {
 
 impl Light for Emissive {
     fn sample(&self) -> Vec3A {
-        self.position + self.radius * random3()
+        let uv = (utils::random(), utils::random());
+        let theta = 2.0 * std::f32::consts::PI * uv.0;
+        let phi = (1.0 - 2.0 * uv.1).acos();
+        let x = phi.sin() * theta.cos();
+        let y = phi.sin() * theta.sin();
+        let z = phi.cos();
+        self.position + self.radius * Vec3A::new(x, y, z)
     }
+
     fn sample_cmj(&self, u: f32, v: f32) -> Vec3A {
-        // Map (u, v) on a sphere (uniform sphere sampling)
         let theta = 2.0 * std::f32::consts::PI * u;
         let phi = (1.0 - 2.0 * v).acos();
         let x = phi.sin() * theta.cos();

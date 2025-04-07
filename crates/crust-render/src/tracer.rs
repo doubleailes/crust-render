@@ -180,7 +180,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     }
 
     let mut rec = HitRecord::new();
-    let cmj_samples = generate_cmj_2d(4);
+    let cmj_samples = generate_cmj_2d(4); // Fixed number of samples for now
 
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
         let emitted = rec.mat.as_ref().unwrap().emitted();
