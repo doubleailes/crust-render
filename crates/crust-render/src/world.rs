@@ -5,6 +5,7 @@ use crate::material::Material;
 use crate::material::{CookTorrance, Dielectric, Disney, Emissive, Lambertian, Metal};
 use glam::Vec3;
 use std::sync::Arc;
+use utils::{random_range3, random3};
 
 #[allow(dead_code)]
 pub fn random_scene() -> (HittableList, LightList) {
@@ -30,19 +31,19 @@ pub fn random_scene() -> (HittableList, LightList) {
             if (center - Vec3::new(4.0, 0.2, 0.0)).length() > 0.9 {
                 if choose_mat < 0.3 {
                     // Diffuse
-                    let albedo = Vec3::sam * Vec3::random();
+                    let albedo = random3() * random3();
                     let sphere_material = Arc::new(Lambertian::new(albedo));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
                 } else if choose_mat < 0.8 {
                     // Cook-Torrance
-                    let albedo = Vec3::random_range(0.5, 1.0);
+                    let albedo = random_range3(0.5, 1.0);
                     let roughness = utils::random_range(0.0, 0.5);
                     let metallic = utils::random_range(0.0, 1.0);
                     let sphere_material = Arc::new(CookTorrance::new(albedo, roughness, metallic));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
                 } else if choose_mat < 0.95 {
                     // Metal
-                    let albedo = Vec3::random_range(0.5, 1.0);
+                    let albedo = random_range3(0.5, 1.0);
                     let fuzz = utils::random_range(0.0, 0.5);
                     let sphere_material = Arc::new(Metal::new(albedo, fuzz));
                     world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
