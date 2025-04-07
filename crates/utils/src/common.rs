@@ -81,3 +81,13 @@ pub fn random_vec3_in_hemisphere(rng: &mut impl Rng, normal: Vec3) -> Vec3 {
     let v = random_vec3_unit_sphere_surface(rng);
     if v.dot(normal) > 0.0 { v } else { -v }
 }
+
+pub fn random_in_unit_disk() -> Vec3 {
+    loop {
+        let p = Vec3::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
+        if p.length_squared() >= 1.0 {
+            continue;
+        }
+        return p;
+    }
+}
