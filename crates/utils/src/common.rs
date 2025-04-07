@@ -70,18 +70,6 @@ pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3 {
     }
 }
 
-// Function to generate a random Vec3 on the surface of a unit sphere
-pub fn random_vec3_unit_sphere_surface(rng: &mut impl Rng) -> Vec3 {
-    let v = random_vec3_unit_sphere(rng).normalize();
-    v
-}
-
-// Function to generate a random Vec3 in a hemisphere (oriented by normal)
-pub fn random_vec3_in_hemisphere(rng: &mut impl Rng, normal: Vec3) -> Vec3 {
-    let v = random_vec3_unit_sphere_surface(rng);
-    if v.dot(normal) > 0.0 { v } else { -v }
-}
-
 pub fn random_in_unit_disk() -> Vec3 {
     loop {
         let p = Vec3::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
