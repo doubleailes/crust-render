@@ -41,7 +41,7 @@ impl Hittable for SmoothTriangle {
     fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
         let edge1 = self.v1 - self.v0;
         let edge2 = self.v2 - self.v0;
-        let h = ray.direction()().cross(edge2);
+        let h = ray.direction().cross(edge2);
         let a = edge1.dot(h);
 
         if a.abs() < 1e-6 {
@@ -71,7 +71,7 @@ impl Hittable for SmoothTriangle {
 
         // Interpolate normal using barycentric weights
         let w = 1.0 - u - v;
-        let interpolated_normal = (self.n0 * w + self.n1 * u + self.n2 * v).unit_vector();
+        let interpolated_normal = (self.n0 * w + self.n1 * u + self.n2 * v).normalize();
         rec.set_face_normal(ray, interpolated_normal);
         rec.mat = Some(self.material.clone());
 
