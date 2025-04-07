@@ -1,6 +1,5 @@
+use glam::Vec3;
 use std::sync::Arc;
-use utils::Color;
-use utils::Point3;
 
 /// The `Light` trait defines the behavior of light sources in the ray tracing system.
 /// Lights are responsible for illuminating the scene and providing sampling methods.
@@ -8,8 +7,8 @@ pub trait Light: Send + Sync {
     /// Samples a point on the light source.
     ///
     /// # Returns
-    /// - A `Point3` representing a sampled point on the light.
-    fn sample(&self) -> Point3;
+    /// - A `Vec3` representing a sampled point on the light.
+    fn sample(&self) -> Vec3;
 
     /// Samples a point on the light source using Correlated Multi-Jittered (CMJ) sampling.
     ///
@@ -20,9 +19,9 @@ pub trait Light: Send + Sync {
     /// - `v`: The second random parameter for sampling.
     ///
     /// # Returns
-    /// - A `Point3` representing a sampled point on the light.
+    /// - A `Vec3` representing a sampled point on the light.
     #[allow(unused_variables)]
-    fn sample_cmj(&self, u: f32, v: f32) -> Point3 {
+    fn sample_cmj(&self, u: f32, v: f32) -> Vec3 {
         self.sample() // fallback if not overridden
     }
 
@@ -34,13 +33,13 @@ pub trait Light: Send + Sync {
     ///
     /// # Returns
     /// - A `f32` representing the PDF value for the given sample.
-    fn pdf(&self, hit_point: Point3, light_point: Point3) -> f32;
+    fn pdf(&self, hit_point: Vec3, light_point: Vec3) -> f32;
 
     /// Returns the color of the light source.
     ///
     /// # Returns
     /// - A `Color` representing the light's color.
-    fn color(&self) -> Color;
+    fn color(&self) -> Vec3;
 }
 
 /// The `LightList` struct manages a collection of light sources in the scene.
