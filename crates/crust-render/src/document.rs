@@ -174,7 +174,7 @@ impl DocObject {
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Primitive {
     Sphere {
-        center: Point3,
+        center: Vec3,
         radius: f32,
     },
     Obj {
@@ -190,7 +190,7 @@ pub enum Primitive {
     },
 }
 impl Primitive {
-    pub fn new_sphere(center: Point3, radius: f32) -> Self {
+    pub fn new_sphere(center: Vec3, radius: f32) -> Self {
         Self::Sphere { center, radius }
     }
 
@@ -223,7 +223,7 @@ pub fn load_obj_bvh(path: &str, material: Arc<dyn Material>, smooth: bool) -> Ar
     let input = BufReader::new(file);
     let obj: Obj = load_obj(input).expect("Failed to parse OBJ");
 
-    let vertices: Vec<Point3> = obj.vertices.iter().map(|v| v.position.into()).collect();
+    let vertices: Vec<Vec3> = obj.vertices.iter().map(|v| v.position.into()).collect();
     let normals: Vec<Vec3> = obj.vertices.iter().map(|n| n.normal.into()).collect();
     let indices: Vec<u32> = obj.indices.iter().map(|&i| i as u32).collect();
 
@@ -289,7 +289,7 @@ pub fn load_alembic_bvh(
         debug!("Current object: {:?}", current_name);
         match Schema::parse(&current, &mut reader, &archive) {
             Ok(Schema::PolyMesh(mesh)) => {
-                let vertices: Vec<Point3> = mesh
+                let vertices: Vec<Vec3> = mesh
                     .load_vertices_sample(sample, &mut reader)
                     .unwrap()
                     .iter()
