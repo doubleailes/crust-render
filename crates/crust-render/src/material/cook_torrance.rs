@@ -75,8 +75,7 @@ impl Material for CookTorrance {
         let n_dot_v = n.dot(v).max(1e-4);
         let n_dot_l = n.dot(l).max(1e-4);
         let n_dot_h = n.dot(h).max(1e-4);
-        let v_dot_h = n.dot(h).max(1e-4);
-
+        let v_dot_h = v.dot(h).max(1e-4);
         let f0 = Vec3::new(0.04, 0.04, 0.04).lerp(self.albedo, self.metallic);
         let f = fresnel_schlick(v_dot_h, f0);
 
