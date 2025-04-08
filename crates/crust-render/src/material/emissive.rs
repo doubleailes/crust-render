@@ -4,7 +4,6 @@ use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
 use serde::{Deserialize, Serialize};
-use utils::random3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emissive {
@@ -77,9 +76,9 @@ impl Light for Emissive {
         let direction = light_point - hit_point;
         let distance_squared = direction.length_squared();
         let normal = direction.normalize();
-        let cosine = f32::max(normal.dot((light_point - hit_point).normalize()), 0.0);
+        let cosine: f32 = f32::max(normal.dot((light_point - self.position).normalize()), 0.0);
         let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
-        distance_squared / (cosine * area + 1e-4)
+        distance_squared / (cosine * area + 1e-8)
     }
 
     fn color(&self) -> Vec3A {
