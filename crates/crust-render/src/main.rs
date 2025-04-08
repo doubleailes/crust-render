@@ -2,6 +2,7 @@ use clap::Parser;
 use crust_render::Document;
 use crust_render::Renderer;
 use crust_render::convert;
+use crust_render::{get_settings, simple_scene};
 use exr::prelude::*;
 use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info};
@@ -20,7 +21,7 @@ enum LoggerLevel {
 struct Cli {
     /// Input Scene path should be a .ron file
     #[arg(short, long)]
-    input: String,
+    input: Option<String>,
     /// Output image path
     /// Default is output.exr
     /// If you want to use a different name, please specify it here
@@ -52,21 +53,30 @@ fn main() {
         .with_max_level(get_logger_level(cli.level))
         .init();
     let input = cli.input;
-    let input_path = std::path::Path::new(&input);
     let output = cli.output;
-    let doc: Document = Document::read(input_path).expect("Failed to read document");
-    debug!("Document loaded at path: {:?}", input_path);
-    debug!("Render Settings: {:#?}", doc.settings());
+    let (world, lights, settings, camera) = if input.is_some() {
+        let t = input.unwrap();
+        let input_path = std::path::Path::new(&t);
+        debug!("Document loaded at path: {:?}", input_path);
+        let doc: Document = Document::read(input_path).expect("Failed to read document");
+        let (world, lights) = doc.get_world();
+        (world, lights, doc.settings(), doc.camera())
+    } else {
+        let (world, lights) = simple_scene();
+        let (camera, settings) = get_settings();
+        (world, lights, settings, camera)
+    };
+    debug!("Render Settings: {:#?}", settings);
     // Timer
     let start = Instant::now();
     // World
-    let (world, lights) = doc.get_world();
+
     debug!("World loaded with {} objects", world.count());
     debug!("Lights loaded with {} objects", lights.count());
     // Camera
-    let renderer = Renderer::new(doc.camera(), world, lights, doc.settings());
+    let renderer = Renderer::new(camera, world, lights, settings);
     info!("Let's start rendering...");
-    let buffer = if cli.bucket{
+    let buffer = if cli.bucket {
         info!("Bucket rendering is enabled");
         renderer.render_with_tiles()
     } else {
@@ -77,7 +87,7 @@ fn main() {
     let duration: Duration = start.elapsed();
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Render
-    let (img_width, img_height) = doc.settings().get_dimensions();
+    let (img_width, img_height) = settings.get_dimensions();
     match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {

@@ -28,4 +28,4 @@ pub use primitives::{SmoothTriangle, Sphere, Triangle};
 pub use ray::Ray;
 pub use sampler::generate_cmj_2d;
 pub use tracer::{RenderSettings, Renderer};
-pub use world::simple_scene;
+pub use world::{get_settings, simple_scene};

@@ -29,7 +29,11 @@ impl Hittable for Instance {
         temp_rec.p = self.transform.transform_point3a(temp_rec.p);
         temp_rec.set_face_normal(
             r,
-            self.transform.inverse().transpose().transform_vector3a(temp_rec.normal).normalize(),
+            self.transform
+                .inverse()
+                .transpose()
+                .transform_vector3a(temp_rec.normal)
+                .normalize(),
         );
 
         *rec = temp_rec;
