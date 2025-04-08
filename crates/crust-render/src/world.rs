@@ -1,4 +1,6 @@
+use crate::RenderSettings;
 use crate::Sphere;
+use crate::camera::Camera;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::material::Material;
@@ -202,4 +204,28 @@ pub fn simple_scene() -> (HittableList, LightList) {
     lights.add(light2);
 
     (world, lights)
+}
+
+pub fn get_settings() -> (Camera, RenderSettings) {
+    const ASPECT_RATIO: f32 = 16.0 / 9.0;
+    const IMAGE_WIDTH: usize = 400;
+    const IMAGE_HEIGHT: usize = (IMAGE_WIDTH as f32 / ASPECT_RATIO) as usize;
+    let lookfrom = Vec3A::new(15.0, 3.0, 3.0);
+    let lookat = Vec3A::new(0.0, 1.0, 0.0);
+    let vup = Vec3A::new(0.0, 1.0, 0.0);
+    let dist_to_focus = 10.0;
+    let aperture = 0.1;
+
+    let cam = Camera::new(
+        lookfrom,
+        lookat,
+        vup,
+        20.0,
+        ASPECT_RATIO,
+        aperture,
+        dist_to_focus,
+    );
+    let render_settings = RenderSettings::new(64, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05, 0);
+
+    (cam, render_settings)
 }
