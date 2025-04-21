@@ -4,7 +4,6 @@ use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
 use serde::{Deserialize, Serialize};
-use utils::random3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Emissive {
