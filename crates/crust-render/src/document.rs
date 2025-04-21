@@ -75,7 +75,7 @@ impl Document {
                     transform,
                     smooth,
                 } => {
-                    let shared_bvh = load_obj_bvh(&path, material.clone(), *smooth);
+                    let shared_bvh = load_obj_bvh(path, material.clone(), *smooth);
 
                     world.add(Box::new(Instance {
                         object: shared_bvh,
@@ -293,7 +293,7 @@ pub fn load_alembic_bvh(
                     .load_vertices_sample(sample, &mut reader)
                     .unwrap()
                     .iter()
-                    .map(|p| p.clone().into())
+                    .map(|p| (*p).into())
                     .collect();
 
                 let face_indices = mesh.load_faceindices_sample(sample, &mut reader).unwrap();
@@ -304,7 +304,7 @@ pub fn load_alembic_bvh(
                     match mesh.has_normals() {
                         true => {
                             let normals = mesh.load_normals_sample(sample, &mut reader).unwrap();
-                            Some(normals.iter().map(|n| n.clone().into()).collect())
+                            Some(normals.iter().map(|n| (*n).into()).collect())
                         }
                         false => {
                             warn!("Normals present but failed to load sample.");

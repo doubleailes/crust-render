@@ -57,8 +57,8 @@ impl Hittable for Instance {
             let mut new_min = self.transform.transform_point3a(corners[0]);
             let mut new_max = new_min;
 
-            for i in 1..8 {
-                let p = self.transform.transform_point3a(corners[i]);
+            for i in corners.into_iter().skip(1) {
+                let p = self.transform.transform_point3a(i);
                 new_min = Vec3A::new(new_min.x.min(p.x), new_min.y.min(p.y), new_min.z.min(p.z));
                 new_max = Vec3A::new(new_max.x.max(p.x), new_max.y.max(p.y), new_max.z.max(p.z));
             }
