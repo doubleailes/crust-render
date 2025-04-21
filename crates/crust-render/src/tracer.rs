@@ -34,7 +34,8 @@ impl Renderer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
         let cmj_samples = generate_cmj_2d(samples_sqrt);
-        let pixels_count = self.settings.height * self.settings.width * self.settings.samples_per_pixel as usize;
+        let pixels_count =
+            self.settings.height * self.settings.width * self.settings.samples_per_pixel as usize;
         let bar = ProgressBar::new(pixels_count as u64);
         bar.set_style(
             indicatif::ProgressStyle::default_bar()
@@ -64,13 +65,18 @@ impl Renderer {
         let color: Vec<(usize, usize, Vec3A)> = d
             .into_par_iter()
             .map(|(i, j, r)| {
-                let col: Vec3A = ray_color(&r, &self.world, &self.lights, self.settings.max_depth as i32);
+                let col: Vec3A = ray_color(
+                    &r,
+                    &self.world,
+                    &self.lights,
+                    self.settings.max_depth as i32,
+                );
                 bar.inc(1);
                 (i, j, col)
             })
             .collect();
         for (i, j, col) in color {
-            buffer.set_mut_pixel(i, j, col/self.settings.samples_per_pixel as f32);
+            buffer.set_mut_pixel(i, j, col / self.settings.samples_per_pixel as f32);
         }
         bar.finish();
         buffer
