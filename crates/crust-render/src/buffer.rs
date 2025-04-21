@@ -43,6 +43,21 @@ impl Buffer {
         }
     }
 
+    /// Adds the provided color to the existing color of a specific pixel in the buffer.
+    ///
+    /// # Parameters
+    /// - `x`: The x-coordinate of the pixel.
+    /// - `y`: The y-coordinate of the pixel.
+    /// - `color`: The `Vec3A` color to add to the existing pixel color.
+    ///
+    /// This method ensures that the coordinates are within bounds before modifying the pixel.
+    pub fn set_mut_pixel(&mut self, x: usize, y: usize, color: Vec3A) {
+        if x < self.width && y < self.height {
+            let index = y * self.width + x;
+            self.data[index] += color;
+        }
+    }
+
     /// Retrieves the color of a specific pixel in the buffer.
     ///
     /// # Parameters
