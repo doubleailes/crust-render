@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::hittable::{HitRecord, Hittable};
-use crate::ray::{self, Ray};
+use crate::ray::Ray;
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
