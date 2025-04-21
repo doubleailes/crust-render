@@ -1,23 +1,11 @@
 (
     camera: (
-        origin: (
-            e: (15.0, 3.0, 3.0),
-        ),
-        lower_left_corner: (
-            e: (4.8863316, -0.044797063, 4.174048),
-        ),
-        horizontal: (
-            e: (1.2295314, 0.0, -6.147657),
-        ),
-        vertical: (
-            e: (-0.44830504, 3.4967792, -0.08966101),
-        ),
-        u: (
-            e: (0.19611613, 0.0, -0.9805807),
-        ),
-        v: (
-            e: (-0.1271232, 0.991561, -0.02542464),
-        ),
+        origin: (15.0, 3.0, 3.0),
+        lower_left_corner: (4.8863316, -0.044797063, 4.174048),
+        horizontal: (1.2295314, 0.0, -6.147657),
+        vertical: (-0.44830504, 3.4967792, -0.08966101),
+        u: (0.19611613, 0.0, -0.9805807),
+        v: (-0.1271232, 0.991561, -0.02542464),
         lens_radius: 0.05,
     ),
     object_list: (
@@ -25,29 +13,22 @@
             (
                 name: "ground",
                 object: Sphere(
-                    center: (
-                        e: (0.0, -1000.0, 0.0),
-                    ),
+                    center: (0.0, -1000.0, 0.0),
                     radius: 1000.0,
                 ),
                 material: Lambertian((
-                    albedo: (
-                        e: (0.5, 0.5, 0.5),
-                    ),
+                    albedo: (0.5, 0.5, 0.5),
                 )),
             ),
             (
                 name: "teapot",
                 object: Obj(
                     path: "./samples/teapot.obj",
-                    transform: (
-                        data: ((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
-                    ),
+                    transform: (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+                    smooth: true,
                 ),
                 material: Disney((
-                    base_color: (
-                        e: (0.8, 0.3, 0.3),
-                    ),
+                    base_color: (0.8, 0.3, 0.3),
                     metallic: 0.0,
                     roughness: 0.2,
                     specular: 1.0,
@@ -61,36 +42,24 @@
             (
                 name: "light_1",
                 object: Sphere(
-                    center: (
-                        e: (0.0, 7.0, 0.0),
-                    ),
+                    center: (0.0, 7.0, 0.0),
                     radius: 1.0,
                 ),
                 material: Emissive((
-                    color: (
-                        e: (10.0, 10.0, 10.0),
-                    ),
-                    position: (
-                        e: (0.0, 7.0, 0.0),
-                    ),
+                    color: (10.0, 10.0, 10.0),
+                    position: (0.0, 7.0, 0.0),
                     radius: 1.0,
                 )),
             ),
             (
                 name: "light_2",
                 object: Sphere(
-                    center: (
-                        e: (-4.0, 7.0, 0.0),
-                    ),
+                    center: (-4.0, 7.0, 0.0),
                     radius: 1.0,
                 ),
                 material: Emissive((
-                    color: (
-                        e: (20.0, 10.0, 7.0),
-                    ),
-                    position: (
-                        e: (-4.0, 7.0, 0.0),
-                    ),
+                    color: (20.0, 10.0, 7.0),
+                    position: (-4.0, 7.0, 0.0),
                     radius: 1.0,
                 )),
             ),
@@ -103,5 +72,6 @@
         height: 225,
         min_samples_per_pixel: 32,
         variance_threshold: 0.05,
+        frame: 0,
     ),
 )

@@ -66,7 +66,7 @@ fn main() {
     // Camera
     let renderer = Renderer::new(doc.camera(), world, lights, doc.settings());
     info!("Let's start rendering...");
-    let buffer = if cli.bucket{
+    let buffer = if cli.bucket {
         info!("Bucket rendering is enabled");
         renderer.render_with_tiles()
     } else {

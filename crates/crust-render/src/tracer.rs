@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::hittable::{HitRecord, Hittable};
-use crate::ray::Ray;
+use crate::ray::{self, Ray};
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
@@ -34,7 +34,8 @@ impl Renderer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
         let cmj_samples = generate_cmj_2d(samples_sqrt);
-        let bar = ProgressBar::new(self.settings.height as u64);
+        let pixels_count = self.settings.height * self.settings.width * self.settings.samples_per_pixel as usize;
+        let bar = ProgressBar::new(pixels_count as u64);
         bar.set_style(
             indicatif::ProgressStyle::default_bar()
                 .template(
@@ -42,37 +43,34 @@ impl Renderer {
                 )
                 .unwrap(),
         );
+        let mut d: Vec<(usize, usize, Ray)> = Vec::with_capacity(pixels_count);
         for j in (0..self.settings.height).rev() {
-            let pixel_colors: Vec<_> = (0..self.settings.width)
-                .into_par_iter()
-                .map(|i| {
-                    let mut sum = Vec3A::new(0.0, 0.0, 0.0);
+            for i in 0..self.settings.width {
+                for sample in 0..self.settings.samples_per_pixel {
+                    let (dx, dy) = if (sample as usize) < cmj_samples.len() {
+                        cmj_samples[sample as usize]
+                    } else {
+                        (utils::random(), utils::random())
+                    };
 
-                    for sample in 0..self.settings.samples_per_pixel {
-                        let (u_offset, v_offset) = if (sample as usize) < cmj_samples.len() {
-                            cmj_samples[sample as usize]
-                        } else {
-                            (utils::random(), utils::random())
-                        };
-                        let u = ((i as f32) + u_offset) / (self.settings.width - 1) as f32;
-                        let v = ((j as f32) + v_offset) / (self.settings.height - 1) as f32;
-                        let r = self.camera.get_ray(u, v);
-                        let col = ray_color(
-                            &r,
-                            &self.world,
-                            &self.lights,
-                            self.settings.max_depth as i32,
-                        );
+                    let u = (i as f32 + dx) / (self.settings.width - 1) as f32;
+                    let v = (j as f32 + dy) / (self.settings.height - 1) as f32;
 
-                        sum += col;
-                    }
-                    sum / self.settings.samples_per_pixel as f32
-                })
-                .collect();
-            for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
-                buffer.set_pixel(i, j, pixel_color);
+                    let ray = self.camera.get_ray(u, v);
+                    d.push((i, j, ray));
+                }
             }
-            bar.inc(1);
+        }
+        let color: Vec<(usize, usize, Vec3A)> = d
+            .into_par_iter()
+            .map(|(i, j, r)| {
+                let col: Vec3A = ray_color(&r, &self.world, &self.lights, self.settings.max_depth as i32);
+                bar.inc(1);
+                (i, j, col)
+            })
+            .collect();
+        for (i, j, col) in color {
+            buffer.set_mut_pixel(i, j, col/self.settings.samples_per_pixel as f32);
         }
         bar.finish();
         buffer
