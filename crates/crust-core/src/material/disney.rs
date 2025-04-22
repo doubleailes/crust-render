@@ -85,8 +85,9 @@ impl Material for Disney {
         #[allow(non_snake_case)]
         let D = a2 / (PI * denom.max(1e-4));
         #[allow(non_snake_case)]
-        let G = (2.0 * n_dot_h * n_dot_v / v_dot_h).min(1.0)
-            * (2.0 * n_dot_h * n_dot_l / v_dot_h).min(1.0);
+        let G = (2.0 * n_dot_l / (n_dot_l + f32::sqrt(a2 + (1.0 - a2) * n_dot_l * n_dot_l)))
+            .min(1.0)
+            * (2.0 * n_dot_v / (n_dot_v + f32::sqrt(a2 + (1.0 - a2) * n_dot_v * n_dot_v))).min(1.0);
         let specular = F * D * G / (4.0 * n_dot_v * n_dot_l + 1e-4);
 
         // Clearcoat lobe

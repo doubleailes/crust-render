@@ -39,9 +39,9 @@ fn main() {
         for b in -2..3 {
             let center = Vec3A::new(a as f32, 0.2, b as f32);
             let material: MaterialType = match (a + b) % 4 {
-                0 => MaterialType::Lambertian(crust_core::Lambertian::new(Vec3A::new(
-                    0.8, 0.3, 0.3,
-                ))),
+                0 => {
+                    MaterialType::Lambertian(crust_core::Lambertian::new(Vec3A::new(0.8, 0.3, 0.3)))
+                }
                 1 => MaterialType::Metal(crust_core::Metal::new(Vec3A::new(0.7, 0.6, 0.5), 0.1)),
                 2 => MaterialType::Dielectric(crust_core::Dielectric::new(1.5)),
                 _ => MaterialType::CookTorrance(crust_core::CookTorrance::new(
