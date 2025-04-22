@@ -1,8 +1,7 @@
 use clap::Parser;
-use crust_render::Document;
-use crust_render::Renderer;
-use crust_render::convert;
-use crust_render::{get_settings, simple_scene};
+use crust_core::Document;
+use crust_core::Renderer;
+use crust_core::convert;
 use exr::prelude::*;
 use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info};
