@@ -36,8 +36,8 @@ pub fn sample_vndf_ggx(view: Vec3A, roughness: f32) -> Vec3A {
     let phi = 2.0 * std::f32::consts::PI * u2;
     let t1_coeff = r * phi.cos();
     let t2_coeff = r * phi.sin();
-    let _s = 0.5 * (1.0 + v.z);
-    let t3 = (1.0 - u1).sqrt();
+    let s = 0.5 * (1.0 + v.z);
+    let t3 = (1.0 - u1 * s).sqrt();
 
     let h = t1 * t1_coeff + t2 * t2_coeff + v * t3;
     Vec3A::new(roughness * h.x, roughness * h.y, h.z.max(1e-6)).normalize()

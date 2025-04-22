@@ -55,7 +55,11 @@ pub(crate) fn triangle_hit(
     let h = ray.direction().cross(edge2);
     let a = edge1.dot(h);
 
-    if a.abs() < 1e-6 {
+    // Use a relative epsilon based on triangle size
+    let triangle_size = (edge1.length() + edge2.length()) * 0.5;
+    let epsilon = triangle_size * 1e-6;
+
+    if a.abs() < epsilon {
         return false;
     }
 
