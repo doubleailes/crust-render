@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use crust_render::Camera;
-use crust_render::simple_scene;
-use crust_render::{RenderSettings, Renderer, Vec3A};
+use crust_core::Camera;
+use crust_core::simple_scene;
+use crust_core::{RenderSettings, Renderer, Vec3A};
 
 const ASPECT_RATIO: f32 = 16.0 / 9.0;
 const IMAGE_WIDTH: usize = 400;
