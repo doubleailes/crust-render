@@ -76,7 +76,7 @@ impl Light for Emissive {
         let direction = light_point - hit_point;
         let distance_squared = direction.length_squared();
         let normal = direction.normalize();
-        let cosine: f32 = f32::max(normal.dot((light_point - self.position).normalize()), 0.0);
+        let cosine: f32 = f32::max(normal.dot((light_point - hit_point).normalize()), 0.0);
         let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
         distance_squared / (cosine * area + 1e-8)
     }
