@@ -6,10 +6,10 @@ license-file.workspace = true
 
 [dependencies]
 crust-core = {path = "../crust-core"}
-clap = { version = "4.5.34", features = ["derive"] }
+clap = { version = "4.5.48", features = ["derive"] }
 tracing.workspace = true
 exr.workspace = true
 
 [dependencies.tracing-subscriber]
-version = "0.3.19"
+version = "0.3.20"
 features = ["fmt"]
