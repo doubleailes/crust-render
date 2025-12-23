@@ -1,6 +1,7 @@
 use exr::prelude as exrs;
 use exr::prelude::*;
 use image as png;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
 
@@ -58,6 +59,13 @@ pub fn convert() {
     // save the png buffer to a png file
     let png_buffer = &image.layer_data.channel_data.pixels;
     let name = unique_timestamp();
+    
+    // Ensure the test_images directory exists
+    if let Err(e) = fs::create_dir_all("./test_images") {
+        error!("Failed to create test_images directory: {}", e);
+        std::process::exit(1);
+    }
+    
     match png_buffer.save(&name) {
         Ok(_) => {
             info!("Image saved successfully in tmp {}", name);
