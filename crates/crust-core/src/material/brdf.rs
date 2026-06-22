@@ -79,11 +79,23 @@ pub fn disney_diffuse(
         * (1.0 + (fd90 - 1.0) * view_scatter)
 }
 
-// GTR1 distribution for clearcoat
+// GTR1 distribution for clearcoat (Disney / Burley).
+//
+// D_GTR1 = (a^2 - 1) / (PI * ln(a^2) * (1 + (a^2 - 1) * NdotH^2))
+//
+// The previous implementation squared the denominator (that is the GTR2/GGX
+// form) and dropped the `ln(a^2)` term. Because `alpha < 1`, the numerator
+// `a^2 - 1` is negative, so without the (also negative) `ln(a^2)` factor the
+// function returned a *negative* density, which made the clearcoat lobe
+// subtract energy instead of adding it.
 pub fn gtr1(n_dot_h: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
-    let denom = PI * ((n_dot_h * n_dot_h * (a2 - 1.0) + 1.0).powi(2));
-    (a2 - 1.0) / denom.max(1e-4)
+    if a2 >= 1.0 {
+        // Perfectly rough clearcoat degenerates to a uniform distribution.
+        return 1.0 / PI;
+    }
+    let t = 1.0 + (a2 - 1.0) * n_dot_h * n_dot_h;
+    (a2 - 1.0) / (PI * a2.ln() * t)
 }
 
 // Clearcoat Fresnel approx

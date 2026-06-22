@@ -92,7 +92,11 @@ impl Material for Disney {
 
         // Clearcoat lobe
         let h_clear = (v + l).normalize();
-        let clear_alpha = (1.0 - self.clearcoat_gloss).lerp(0.1, 0.001);
+        // Disney maps clearcoat gloss to roughness as mix(0.1, 0.001, gloss):
+        // gloss = 0 -> 0.1 (soft coat), gloss = 1 -> 0.001 (sharp coat).
+        // The previous `(1.0 - gloss).lerp(0.1, 0.001)` interpolated the *gloss
+        // value itself* by a constant t = 0.001, which is meaningless.
+        let clear_alpha = (0.1_f32).lerp(0.001, self.clearcoat_gloss);
         #[allow(non_snake_case)]
         let Dc = gtr1(n.dot(h_clear).max(0.0), clear_alpha);
         #[allow(non_snake_case)]
