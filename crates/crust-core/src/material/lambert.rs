@@ -3,7 +3,7 @@ use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
 use serde::{Deserialize, Serialize};
-use utils::random3;
+use utils::random_unit_vector;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Lambertian {
     albedo: Vec3A,
@@ -23,7 +23,12 @@ impl Material for Lambertian {
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
-        let mut scatter_direction = rec.normal + random3();
+        // True Lambertian scattering: perturb the normal by a uniformly random
+        // unit vector. Previously this used `random3()`, which returns a vector
+        // with each component in [0, 1) — i.e. always pointing into the
+        // (+x, +y, +z) octant — biasing every diffuse bounce toward one corner
+        // of the world instead of producing an unbiased cosine distribution.
+        let mut scatter_direction = rec.normal + random_unit_vector();
 
         // Catch degenerate scatter direction
         if is_near_zero(scatter_direction) {
