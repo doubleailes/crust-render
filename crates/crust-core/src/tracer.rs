@@ -183,6 +183,13 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     let cmj_samples = generate_cmj_2d(4); // Fixed number of samples for now
 
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
+        // Beer-Lambert attenuation across the segment travelled inside a
+        // participating medium (transmissive OpenPBR surfaces mark rays with
+        // `Some(medium)` on refraction; free-space rays are unaffected).
+        let medium_atten = match r.medium() {
+            Some(m) => m.transmittance(rec.t),
+            None => Vec3A::ONE,
+        };
         let emitted = rec.mat.as_ref().unwrap().emitted();
         let mut total_light = emitted;
 
@@ -241,7 +248,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
                 brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
         }
 
-        return total_light;
+        return total_light * medium_atten;
     }
 
     // === Background ===
