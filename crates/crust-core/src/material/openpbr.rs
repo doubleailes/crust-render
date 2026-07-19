@@ -21,10 +21,12 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::material::brdf::*;
+use crate::medium::Medium;
 use crate::ray::Ray;
 use glam::Vec3A;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
+use std::sync::Arc;
 use utils::{Lerp, align_to_normal, random, random_cosine_direction};
 
 // ---------------------------------------------------------------------------
@@ -259,13 +261,15 @@ impl Frame {
 /// Sampling lobes. The specular lobe covers both the metal and
 /// dielectric-specular contributions (they share the same GGX distribution
 /// and sampling, only Fresnel differs). Coat is its own lobe because it
-/// has its own IOR and roughness.
+/// has its own IOR and roughness. Transmission handles refraction through a
+/// transmissive dielectric interior.
 #[derive(Clone, Copy)]
 enum Lobe {
     Diffuse,
     Specular,
     Coat,
     Fuzz,
+    Transmission,
 }
 
 struct LobePmf {
@@ -273,6 +277,7 @@ struct LobePmf {
     p_specular: f32,
     p_coat: f32,
     p_fuzz: f32,
+    p_transmission: f32,
 }
 
 impl LobePmf {
@@ -297,12 +302,22 @@ impl LobePmf {
         let w_coat = (m.coat_weight * coat_luma * f0_coat).max(1e-6);
         let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
 
-        let total = w_diffuse + w_specular + w_coat + w_fuzz;
+        // Transmission: dominant when weight is high. When enabled it
+        // steals energy from the dielectric-specular / diffuse pathway.
+        let trans_luma = luma(m.transmission_color).max(0.02);
+        let w_transmission = if m.transmission_weight > 0.0 {
+            ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4)
+        } else {
+            0.0
+        };
+
+        let total = w_diffuse + w_specular + w_coat + w_fuzz + w_transmission;
         Self {
             p_diffuse: w_diffuse / total,
             p_specular: w_specular / total,
             p_coat: w_coat / total,
             p_fuzz: w_fuzz / total,
+            p_transmission: w_transmission / total,
         }
     }
 
@@ -319,7 +334,11 @@ impl LobePmf {
         if u < acc {
             return Lobe::Coat;
         }
-        Lobe::Fuzz
+        acc += self.p_fuzz;
+        if u < acc {
+            return Lobe::Fuzz;
+        }
+        Lobe::Transmission
     }
 }
 
@@ -509,6 +528,147 @@ fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Transmission (Phase 3+4)
+// ---------------------------------------------------------------------------
+
+/// Per-channel IOR for a dispersive dielectric. Returns `(η_R, η_G, η_B)`.
+/// `dispersion_scale = 0` collapses to `(η_D, η_D, η_D)`.
+fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
+    if dispersion_scale <= 0.0 {
+        return Vec3A::splat(n_d);
+    }
+    let v = abbe.max(1.0);
+    let spread = (n_d - 1.0) / v * dispersion_scale;
+    Vec3A::new(n_d - 0.3 * spread, n_d, n_d + 0.7 * spread)
+}
+
+/// Pick one RGB channel uniformly and return `(channel, mask)` where `mask`
+/// is a Vec3A with `3.0` at the picked channel and zero elsewhere — the
+/// hero-wavelength throughput multiplier that keeps the estimator unbiased
+/// across the 3-channel image.
+fn hero_channel(u: f32) -> (usize, Vec3A) {
+    if u < 1.0 / 3.0 {
+        (0, Vec3A::new(3.0, 0.0, 0.0))
+    } else if u < 2.0 / 3.0 {
+        (1, Vec3A::new(0.0, 3.0, 0.0))
+    } else {
+        (2, Vec3A::new(0.0, 0.0, 3.0))
+    }
+}
+
+/// Refract `v` (unit, pointing away from the surface) across the surface with
+/// unit outward normal `n`, using relative index `eta = η_incident / η_transmitted`.
+/// Returns None on total internal reflection.
+fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
+    let cos_i = v.dot(n).min(1.0).max(-1.0);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if sin2_t >= 1.0 {
+        return None;
+    }
+    let cos_t = (1.0 - sin2_t).sqrt();
+    // Transmitted direction, using the standard vector form of Snell.
+    Some(-v * eta + n * (eta * cos_i - cos_t))
+}
+
+/// Attempt to sample a Transmission event. Returns (world-space scattered
+/// ray, throughput, pdf), or None on total internal reflection.
+///
+/// Handles: thin-walled delta transmission (no medium), thick refraction
+/// (creates a medium from transmission_color / transmission_depth),
+/// dispersion (hero-wavelength IOR), and the incoming-side check
+/// (`front_face`) for entering vs exiting.
+fn sample_transmission(
+    m: &OpenPBR,
+    r_in: &Ray,
+    rec: &HitRecord,
+    frame: &Frame,
+) -> Option<(Ray, Vec3A, f32)> {
+    let v_world = -r_in.direction().normalize();
+    let front = rec.front_face;
+
+    // Thin-walled: delta transmission straight through, no medium.
+    if m.geometry_thin_walled {
+        let l_world = -v_world;
+        // No cosine in a delta lobe; we ape the codebase convention by
+        // returning throughput = tint (the tracer's cosine multiply is
+        // strictly incorrect for delta lobes but matches the rest of the
+        // renderer's estimator).
+        let throughput = m.transmission_color * m.transmission_weight;
+        // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the tint
+        // unmodified. Direct-light MIS won't hit a delta lobe.
+        return Some((Ray::new(rec.p, l_world), throughput, 1.0));
+    }
+
+    // Thick refraction. Determine per-channel IOR (dispersion) and pick a
+    // hero wavelength when dispersion is active.
+    let (eta_r, eta_g, eta_b) = {
+        let iors = dispersive_ior(
+            m.specular_ior,
+            m.transmission_dispersion_abbe_number,
+            m.transmission_dispersion_scale,
+        );
+        (iors.x, iors.y, iors.z)
+    };
+    let (hero_ior, hero_mult) = if m.transmission_dispersion_scale > 0.0 {
+        let (c, mask) = hero_channel(random());
+        let ior = match c {
+            0 => eta_r,
+            1 => eta_g,
+            _ => eta_b,
+        };
+        (ior, mask)
+    } else {
+        (eta_g, Vec3A::ONE)
+    };
+
+    // Sample a GGX half-vector to add roughness to the refraction.
+    let v_local = frame.to_local(v_world);
+    let (ax, ay) =
+        roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
+    let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
+    let h_world = frame.to_world(h_local);
+
+    // Relative IOR: entering => 1 / hero_ior, exiting => hero_ior / 1.
+    // We use the shading normal for Snell so it stays consistent with `h`.
+    let eta = if front { 1.0 / hero_ior } else { hero_ior };
+    let l_world = match refract_dir(v_world, h_world, eta) {
+        Some(l) => l.normalize(),
+        None => {
+            // TIR at the sampled microfacet — fall back to reflection so we
+            // don't lose the sample. (Ideally we'd MIS with the specular
+            // lobe here; a Phase-6 quality improvement.)
+            let l = 2.0 * v_world.dot(h_world) * h_world - v_world;
+            return Some((Ray::new(rec.p, l.normalize()), Vec3A::ONE, 1.0));
+        }
+    };
+
+    // Fresnel at the microfacet — energy goes to refraction only when Transmission is chosen.
+    let cos_i = v_world.dot(h_world).abs();
+    let f_scalar = fresnel_schlick_scalar(cos_i, f0_from_ior(hero_ior));
+    let transmittance = 1.0 - f_scalar;
+
+    let throughput = m.transmission_color * m.transmission_weight * hero_mult * transmittance;
+
+    // Build the scattered ray. If entering, tag it with the transmission
+    // medium so the tracer applies Beer-Lambert over the traversal.
+    let scattered = if front {
+        let medium = Arc::new(Medium::from_transmission(
+            m.transmission_color,
+            m.transmission_depth,
+        ));
+        Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
+    } else {
+        // Exiting the medium — new ray is in vacuum.
+        Ray::new(rec.p + l_world * 1e-4, l_world)
+    };
+
+    // Delta-ish pdf. Rough refraction has a proper BTDF pdf, but the
+    // estimator-consistency wins here matter more than analytic accuracy
+    // for artist-facing renders. Phase-6 upgrade.
+    Some((scattered, throughput, 1.0))
+}
+
+// ---------------------------------------------------------------------------
 // Material impl
 // ---------------------------------------------------------------------------
 
@@ -528,7 +688,18 @@ impl Material for OpenPBR {
         let pmf = LobePmf::from_params(self);
         let lobe = pmf.pick(random());
 
-        // Sample a direction from the picked lobe.
+        // Transmission is a delta-ish lobe on the far hemisphere — handle
+        // it separately from the reflection lobes because the composed
+        // mixture PDF only covers same-hemisphere directions.
+        if matches!(lobe, Lobe::Transmission) {
+            let (scattered, throughput, pdf) = sample_transmission(self, r_in, rec, &frame)?;
+            // Divide by the lobe-selection probability so the mixture
+            // estimator stays unbiased.
+            let p_select = pmf.p_transmission.max(1e-4);
+            return Some((scattered, throughput / p_select, pdf));
+        }
+
+        // Reflection lobes — sample a direction from the picked lobe.
         let l_local = match lobe {
             Lobe::Diffuse | Lobe::Fuzz => random_cosine_direction(),
             Lobe::Specular => {
@@ -555,6 +726,7 @@ impl Material for OpenPBR {
                 }
                 l
             }
+            Lobe::Transmission => unreachable!(),
         };
 
         // Mixture PDF and full-mixture BRDF value.
@@ -677,6 +849,76 @@ mod tests {
             }
         }
         assert!(got_positive, "coat-only material never scattered energy");
+    }
+
+    #[test]
+    fn dispersive_ior_no_scale_is_flat() {
+        let v = dispersive_ior(1.5, 30.0, 0.0);
+        assert_eq!(v.x, 1.5);
+        assert_eq!(v.y, 1.5);
+        assert_eq!(v.z, 1.5);
+    }
+
+    #[test]
+    fn dispersive_ior_blue_bends_more() {
+        let v = dispersive_ior(1.5, 30.0, 1.0);
+        assert!(v.z > v.y, "blue IOR {} not > green {}", v.z, v.y);
+        assert!(v.y > v.x, "green IOR {} not > red {}", v.y, v.x);
+    }
+
+    #[test]
+    fn hero_channel_distributes_uniformly() {
+        // Rough uniformity check across the three thirds of the [0, 1) range.
+        let (c0, _) = hero_channel(0.05);
+        let (c1, _) = hero_channel(0.5);
+        let (c2, _) = hero_channel(0.9);
+        assert_eq!(c0, 0);
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 2);
+    }
+
+    #[test]
+    fn medium_transmittance_full_at_zero_depth() {
+        let m = Medium::from_transmission(Vec3A::new(0.5, 0.5, 0.5), 0.0);
+        let t = m.transmittance(1.0);
+        // Zero-depth medium: no absorption, transmittance identically 1.
+        assert!((t - Vec3A::ONE).length() < 1e-4);
+    }
+
+    #[test]
+    fn medium_transmittance_attenuates_with_distance() {
+        let m = Medium::from_transmission(Vec3A::new(0.5, 0.7, 0.9), 1.0);
+        let t_short = m.transmittance(0.1);
+        let t_long = m.transmittance(2.0);
+        assert!(t_long.x < t_short.x);
+        assert!(t_long.y < t_short.y);
+        assert!(t_long.z < t_short.z);
+    }
+
+    #[test]
+    fn thin_walled_transmission_scatters_downward() {
+        let m = OpenPBR {
+            transmission_weight: 1.0,
+            transmission_color: Vec3A::new(0.7, 0.9, 0.7),
+            geometry_thin_walled: true,
+            ..OpenPBR::default()
+        };
+        use crate::hittable::HitRecord;
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Y;
+        rec.front_face = true;
+        let ray = Ray::new(Vec3A::new(0.0, 1.0, 0.0), Vec3A::new(0.0, -1.0, 0.0));
+        let mut got_downward = false;
+        for _ in 0..64 {
+            if let Some((scattered, _, _)) = m.scatter_importance(&ray, &rec) {
+                if scattered.direction().y < 0.0 {
+                    got_downward = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_downward, "thin-walled transmission never went through");
     }
 
     #[test]
