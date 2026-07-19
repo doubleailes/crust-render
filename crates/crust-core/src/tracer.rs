@@ -1,5 +1,6 @@
 use crate::buffer::Buffer;
 use crate::hittable::{HitRecord, Hittable};
+use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
@@ -183,6 +184,29 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
     let cmj_samples = generate_cmj_2d(4); // Fixed number of samples for now
 
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
+        // Volume interaction sampling for scattering media (subsurface,
+        // participating volumes). If the sampled distance is closer than
+        // the surface hit, kick a scattering event and short-circuit the
+        // surface interaction.
+        if let Some(medium) = r.medium() {
+            if medium.is_scattering() {
+                let sigma_t_max = medium.sigma_t_max().max(1e-4);
+                let t_scatter = -(utils::random().ln()) / sigma_t_max;
+                if t_scatter < rec.t {
+                    let pos = r.at(t_scatter);
+                    let dir = sample_henyey_greenstein(
+                        r.direction().normalize(),
+                        medium.g,
+                        utils::random(),
+                        utils::random(),
+                    );
+                    let new_ray = Ray::new_in_medium(pos, dir, medium.clone());
+                    let albedo = medium.albedo();
+                    return albedo * ray_color(&new_ray, world, lights, depth - 1);
+                }
+            }
+        }
+
         // Beer-Lambert attenuation across the segment travelled inside a
         // participating medium (transmissive OpenPBR surfaces mark rays with
         // `Some(medium)` on refraction; free-space rays are unaffected).

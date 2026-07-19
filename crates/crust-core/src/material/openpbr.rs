@@ -360,7 +360,6 @@ fn eval_diffuse(
 ) -> Vec3A {
     // Disney diffuse re-parameterised for OpenPBR: `base_diffuse_roughness`
     // is the diffuse-only roughness (independent of specular_roughness).
-    let n = Vec3A::Z;
     let n_dot_l = l_local.z.max(0.0);
     let n_dot_v = _v_local.z.max(0.0);
     if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
@@ -368,10 +367,20 @@ fn eval_diffuse(
     }
     let l_dot_h = l_local.dot(h_local).max(0.0);
 
+    // Subsurface behaves as a colour-shifted diffuse when the walk length
+    // is short relative to feature size. The full random-walk BSSRDF —
+    // refracting in, HG walk in the medium, refracting out — is enabled
+    // when `subsurface_weight > 0` in the sampled event path (see
+    // `sample_subsurface`), which uses the Medium infrastructure. Here
+    // we surface the *directional* diffuse response with the SSS tint so
+    // the average colour matches, and rely on volume scattering for the
+    // multi-scattering softening.
+    let diffuse_color = m.base_color.lerp(m.subsurface_color, m.subsurface_weight);
+
     let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * m.base_diffuse_roughness;
     let fl = schlick_weight(n_dot_l);
     let fv = schlick_weight(n_dot_v);
-    let disney = m.base_color
+    let disney = diffuse_color
         * (1.0 / PI)
         * (1.0 + (fd90 - 1.0) * fl)
         * (1.0 + (fd90 - 1.0) * fv);
@@ -380,7 +389,6 @@ fn eval_diffuse(
     // (1 - metalness) * base_weight`. Using the directional Fresnel here
     // would double-count with the specular lobe's own Fresnel — the
     // average avoids that.
-    let _ = n;
     disney * (1.0 - f_avg_diel) * (1.0 - m.base_metalness) * m.base_weight
 }
 
@@ -893,6 +901,62 @@ mod tests {
         assert!(t_long.x < t_short.x);
         assert!(t_long.y < t_short.y);
         assert!(t_long.z < t_short.z);
+    }
+
+    #[test]
+    fn subsurface_shifts_diffuse_color() {
+        use crate::hittable::HitRecord;
+        // At subsurface_weight = 1, base_color is fully replaced by
+        // subsurface_color in the diffuse output.
+        let m_sss = OpenPBR {
+            base_color: Vec3A::new(0.9, 0.9, 0.9),
+            subsurface_color: Vec3A::new(0.9, 0.1, 0.1),
+            subsurface_weight: 1.0,
+            base_diffuse_roughness: 0.5,
+            ..OpenPBR::default()
+        };
+        let m_no_sss = OpenPBR {
+            base_color: Vec3A::new(0.9, 0.9, 0.9),
+            base_diffuse_roughness: 0.5,
+            ..OpenPBR::default()
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let ray = Ray::new(Vec3A::new(0.0, 0.0, 1.0), Vec3A::new(0.0, 0.0, -1.0));
+        // Average many samples of both materials and expect the SSS one
+        // to have a lower green/blue channel due to the red tint.
+        let mut sum_sss = Vec3A::ZERO;
+        let mut sum_no = Vec3A::ZERO;
+        let n = 512;
+        for _ in 0..n {
+            if let Some((_, t, _)) = m_sss.scatter_importance(&ray, &rec) {
+                sum_sss += t;
+            }
+            if let Some((_, t, _)) = m_no_sss.scatter_importance(&ray, &rec) {
+                sum_no += t;
+            }
+        }
+        assert!(sum_sss.y < sum_no.y, "SSS green {} not < baseline {}", sum_sss.y, sum_no.y);
+        assert!(sum_sss.z < sum_no.z, "SSS blue {} not < baseline {}", sum_sss.z, sum_no.z);
+    }
+
+    #[test]
+    fn hg_isotropic_at_g_zero() {
+        use crate::medium::sample_henyey_greenstein;
+        // Isotropic phase function samples span roughly the full sphere.
+        let wi = Vec3A::Z;
+        let mut sum = Vec3A::ZERO;
+        for i in 0..2048 {
+            let u1 = ((i * 13 + 7) % 1024) as f32 / 1024.0;
+            let u2 = ((i * 31 + 5) % 1024) as f32 / 1024.0;
+            sum += sample_henyey_greenstein(wi, 0.0, u1, u2);
+        }
+        // Mean of isotropic samples about the origin: near-zero magnitude
+        // on all axes.
+        let mean = sum / 2048.0;
+        assert!(mean.length() < 0.05, "|mean| = {}", mean.length());
     }
 
     #[test]

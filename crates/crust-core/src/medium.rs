@@ -64,4 +64,50 @@ impl Medium {
         let e = (self.sigma_a + self.sigma_s) * t;
         Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp())
     }
+
+    /// True when the medium scatters (subsurface, participating volumes).
+    /// Non-scattering media use pure Beer-Lambert and never fire volume
+    /// scattering events.
+    pub fn is_scattering(&self) -> bool {
+        self.sigma_s.max_element() > 1e-6
+    }
+
+    /// Extinction majorant used for distance sampling — the max-channel
+    /// value of `σₐ + σₛ`.
+    pub fn sigma_t_max(&self) -> f32 {
+        (self.sigma_a + self.sigma_s).max_element()
+    }
+
+    /// Single-scattering albedo `σₛ / σₜ`, per channel.
+    pub fn albedo(&self) -> Vec3A {
+        let sigma_t = self.sigma_a + self.sigma_s;
+        let denom = sigma_t.max(Vec3A::splat(1e-6));
+        self.sigma_s / denom
+    }
+}
+
+/// Henyey–Greenstein phase-function sampling. Returns a scattering direction
+/// in the local frame with the incoming direction `wi` on the +z axis of
+/// its own frame, then rotated so `wi` maps back to itself.
+pub fn sample_henyey_greenstein(wi: Vec3A, g: f32, u1: f32, u2: f32) -> Vec3A {
+    use std::f32::consts::PI;
+    let cos_theta = if g.abs() < 1e-3 {
+        1.0 - 2.0 * u1
+    } else {
+        let sq = (1.0 - g * g) / (1.0 - g + 2.0 * g * u1);
+        -(1.0 + g * g - sq * sq) / (2.0 * g)
+    };
+    let cos_theta = cos_theta.clamp(-1.0, 1.0);
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+    let phi = 2.0 * PI * u2;
+
+    // Build a frame with wi along +z.
+    let up = if wi.z.abs() < 0.999 {
+        Vec3A::Z
+    } else {
+        Vec3A::X
+    };
+    let t = wi.cross(up).normalize();
+    let b = wi.cross(t);
+    (t * (sin_theta * phi.cos()) + b * (sin_theta * phi.sin()) + wi * cos_theta).normalize()
 }
