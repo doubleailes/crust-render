@@ -254,10 +254,72 @@ pub fn sheen_charlie(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, roughness: f32) -
 /// is the closed-form energy-compensation form recommended in the OpenPBR
 /// spec. `coat_darkening ∈ [0, 1]` fades between "no darkening" (`0`, useful
 /// for artistic mixes) and "full physical darkening" (`1`).
-#[allow(dead_code)] // used by Phase 2 (coat lobe)
 pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -> Vec3A {
     let f_avg = f0_from_ior(coat_ior) + (1.0 - f0_from_ior(coat_ior)) * 0.05;
     let dark = base_color / (Vec3A::ONE - f_avg * (Vec3A::ONE - base_color)).max(Vec3A::splat(1e-4));
     let one = Vec3A::ONE;
     one * (1.0 - darkening) + dark * darkening
+}
+
+// -------- Thin-film interference (Belcour & Barla 2017, simplified) --------
+//
+// Three-layer Airy-summation reflectance for a single dielectric film of
+// thickness `d` (nm) and index `η_film` sandwiched between an outer medium
+// of index `η_1` and a base of index `η_2`. Evaluated at the CIE sRGB
+// primaries (R = 615 nm, G = 545 nm, B = 465 nm) — a 3-wavelength
+// approximation that captures the characteristic soap-bubble / oil-slick
+// look without full spectral rendering.
+pub fn thin_film_fresnel(
+    cos_theta_1: f32,
+    eta_1: f32,
+    eta_film: f32,
+    eta_2: f32,
+    thickness_nm: f32,
+) -> Vec3A {
+    let cos1 = cos_theta_1.clamp(0.0, 1.0);
+    let sin2_1 = 1.0 - cos1 * cos1;
+
+    let sin2_film = (eta_1 / eta_film).powi(2) * sin2_1;
+    if sin2_film >= 1.0 {
+        return Vec3A::ONE;
+    }
+    let cos_film = (1.0 - sin2_film).sqrt();
+
+    let sin2_base = (eta_film / eta_2).powi(2) * sin2_film;
+    if sin2_base >= 1.0 {
+        return Vec3A::ONE;
+    }
+    let cos_base = (1.0 - sin2_base).sqrt();
+
+    // Amplitude-space Fresnel at each interface (average of s and p — good
+    // enough for unpolarised light, keeps the formula scalar-per-wavelength).
+    let r_a = fresnel_amplitude(eta_1, eta_film, cos1, cos_film);
+    let r_b = fresnel_amplitude(eta_film, eta_2, cos_film, cos_base);
+
+    // Optical path difference inside the film.
+    let opd = 2.0 * eta_film * thickness_nm * cos_film;
+
+    const LAMBDA_RGB: [f32; 3] = [615.0, 545.0, 465.0];
+    let mut out = Vec3A::ZERO;
+    for i in 0..3 {
+        let phi = 2.0 * PI * opd / LAMBDA_RGB[i];
+        let cos_phi = phi.cos();
+        let num = r_a * r_a + 2.0 * r_a * r_b * cos_phi + r_b * r_b;
+        let den = 1.0 + 2.0 * r_a * r_b * cos_phi + (r_a * r_b).powi(2);
+        let r = (num / den.max(1e-8)).clamp(0.0, 1.0);
+        match i {
+            0 => out.x = r,
+            1 => out.y = r,
+            _ => out.z = r,
+        }
+    }
+    out
+}
+
+// Signed amplitude Fresnel — average of s/p, sign preserved (positive when
+// going from lower to higher index at normal incidence).
+fn fresnel_amplitude(eta_i: f32, eta_t: f32, cos_i: f32, cos_t: f32) -> f32 {
+    let rs = (eta_i * cos_i - eta_t * cos_t) / (eta_i * cos_i + eta_t * cos_t);
+    let rp = (eta_t * cos_i - eta_i * cos_t) / (eta_t * cos_i + eta_i * cos_t);
+    0.5 * (rs + rp)
 }
