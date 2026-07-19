@@ -253,22 +253,25 @@ impl Frame {
 }
 
 // ---------------------------------------------------------------------------
-// Discrete lobe PMF for Phase 1
+// Discrete lobe PMF
 // ---------------------------------------------------------------------------
 
-/// Phase-1 sampling lobes. The specular lobe covers both the metal and
+/// Sampling lobes. The specular lobe covers both the metal and
 /// dielectric-specular contributions (they share the same GGX distribution
-/// and sampling, only Fresnel differs).
+/// and sampling, only Fresnel differs). Coat is its own lobe because it
+/// has its own IOR and roughness.
 #[derive(Clone, Copy)]
 enum Lobe {
     Diffuse,
     Specular,
+    Coat,
     Fuzz,
 }
 
 struct LobePmf {
     p_diffuse: f32,
     p_specular: f32,
+    p_coat: f32,
     p_fuzz: f32,
 }
 
@@ -278,9 +281,11 @@ impl LobePmf {
     /// per-lobe weights we sample by.
     fn from_params(m: &OpenPBR) -> Self {
         let f0_diel = f0_from_ior(m.specular_ior);
+        let f0_coat = f0_from_ior(m.coat_ior);
         let base_luma = luma(m.base_color).max(0.02);
         let spec_luma = luma(m.specular_color).max(0.02);
         let fuzz_luma = luma(m.fuzz_color).max(0.02);
+        let coat_luma = luma(m.coat_color).max(0.02);
 
         let w_metal = m.base_metalness * base_luma;
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
@@ -289,24 +294,32 @@ impl LobePmf {
         let w_diffuse = ((1.0 - m.base_metalness) * m.base_weight * base_luma * (1.0 - f0_diel))
             .max(1e-4);
 
+        let w_coat = (m.coat_weight * coat_luma * f0_coat).max(1e-6);
         let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
 
-        let total = w_diffuse + w_specular + w_fuzz;
+        let total = w_diffuse + w_specular + w_coat + w_fuzz;
         Self {
             p_diffuse: w_diffuse / total,
             p_specular: w_specular / total,
+            p_coat: w_coat / total,
             p_fuzz: w_fuzz / total,
         }
     }
 
     fn pick(&self, u: f32) -> Lobe {
-        if u < self.p_diffuse {
-            Lobe::Diffuse
-        } else if u < self.p_diffuse + self.p_specular {
-            Lobe::Specular
-        } else {
-            Lobe::Fuzz
+        let mut acc = self.p_diffuse;
+        if u < acc {
+            return Lobe::Diffuse;
         }
+        acc += self.p_specular;
+        if u < acc {
+            return Lobe::Specular;
+        }
+        acc += self.p_coat;
+        if u < acc {
+            return Lobe::Coat;
+        }
+        Lobe::Fuzz
     }
 }
 
@@ -371,14 +384,72 @@ fn eval_specular(
     );
 
     let f0_diel_scalar = f0_from_ior(m.specular_ior);
-    let f0_diel = m.specular_color * f0_diel_scalar * m.specular_weight;
-    let f_diel = fresnel_schlick(v_dot_h, f0_diel);
+    let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
+
+    // Thin-film interference (Phase 2): replaces the dielectric Fresnel with
+    // an iridescent one at 3 wavelengths, blended by thin_film_weight.
+    let f_diel = if m.thin_film_weight > 0.0 {
+        let f_normal = fresnel_schlick(v_dot_h, f0_diel_base);
+        // OpenPBR spec places thin-film between coat and base; when there is
+        // no coat the outer medium is air.
+        let outer_ior = if m.coat_weight > 0.0 {
+            m.coat_ior
+        } else {
+            1.0
+        };
+        let f_iri = thin_film_fresnel(
+            v_dot_h,
+            outer_ior,
+            m.thin_film_ior,
+            m.specular_ior,
+            m.thin_film_thickness * 1000.0, // OpenPBR thickness is in μm; helper wants nm
+        );
+        f_normal * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+    } else {
+        fresnel_schlick(v_dot_h, f0_diel_base)
+    };
+
     let f_metal = fresnel_schlick(v_dot_h, m.base_color);
 
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
     // Metal path: base_color-tinted Fresnel * brdf * metalness
     // Dielectric-specular path: F_dielectric * brdf * (1 - metalness)
     (f_metal * m.base_metalness + f_diel * (1.0 - m.base_metalness)) * brdf
+}
+
+fn eval_coat(
+    m: &OpenPBR,
+    v_local: Vec3A,
+    l_local: Vec3A,
+    h_local: Vec3A,
+    ax_coat: f32,
+    ay_coat: f32,
+) -> Vec3A {
+    let n_dot_v = v_local.z.max(1e-4);
+    let n_dot_l = l_local.z.max(1e-4);
+    let n_dot_h = h_local.z.max(1e-4);
+    let v_dot_h = v_local.dot(h_local).max(1e-4);
+
+    let d = ggx_d_aniso(n_dot_h, h_local.x, h_local.y, ax_coat, ay_coat);
+    let g = ggx_g2_smith_aniso(
+        n_dot_v, v_local.x, v_local.y, n_dot_l, l_local.x, l_local.y, ax_coat, ay_coat,
+    );
+    let f = fresnel_schlick_scalar(v_dot_h, f0_from_ior(m.coat_ior));
+    let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
+    m.coat_color * (m.coat_weight * f * brdf)
+}
+
+/// Directional attenuation the coat imposes on the layers beneath it, as a
+/// Fresnel-weighted transmission * multi-bounce darkening factor. Applied as
+/// a per-channel multiplier to (base_specular + base_diffuse).
+fn coat_attenuation(m: &OpenPBR, cos_theta_h: f32) -> Vec3A {
+    if m.coat_weight <= 0.0 {
+        return Vec3A::ONE;
+    }
+    let f_coat = fresnel_schlick_scalar(cos_theta_h, f0_from_ior(m.coat_ior));
+    let transmit = 1.0 - m.coat_weight * f_coat;
+    let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_darkening);
+    Vec3A::splat(transmit) * dark
 }
 
 fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
@@ -395,18 +466,21 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A) -> Vec3A {
     let h_local = (v_local + l_local).normalize();
 
     let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
+    let (ax_coat, ay_coat) =
+        roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
     let diffuse = eval_diffuse(m, v_local, l_local, h_local, f_avg_diel);
     let specular = eval_specular(m, v_local, l_local, h_local, ax, ay);
+    let coat = eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat);
     let fuzz = eval_fuzz(m, v_local, l_local, h_local);
 
-    // Fuzz sits above base+spec as an outer layer; approximate energy
-    // conservation with a directional-albedo-independent scalar attenuation
-    // by `(1 - fuzz_weight)`. A Zeltner-style pre-integrated LUT is a
-    // Phase 2/6 upgrade.
+    // Layered composition (top→bottom): fuzz over coat over base.
+    //  throughput = fuzz + (1 - fuzz_weight) · (coat + coat_atten · base)
+    let v_dot_h = v_local.dot(h_local).max(0.0);
+    let coat_atten = coat_attenuation(m, v_dot_h);
     let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
-    fuzz + base_atten * (diffuse + specular)
+    fuzz + base_atten * (coat + coat_atten * (diffuse + specular))
 }
 
 // ---------------------------------------------------------------------------
@@ -420,12 +494,18 @@ fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A) -> f32 {
     let h_local = (v_local + l_local).normalize();
 
     let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
+    let (ax_coat, ay_coat) =
+        roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
 
     let pdf_diffuse = l_local.z.max(0.0) / PI;
     let pdf_specular = pdf_vndf_ggx_aniso_local(v_local, h_local, ax, ay);
+    let pdf_coat = pdf_vndf_ggx_aniso_local(v_local, h_local, ax_coat, ay_coat);
     let pdf_fuzz = l_local.z.max(0.0) / PI;
 
-    pmf.p_diffuse * pdf_diffuse + pmf.p_specular * pdf_specular + pmf.p_fuzz * pdf_fuzz
+    pmf.p_diffuse * pdf_diffuse
+        + pmf.p_specular * pdf_specular
+        + pmf.p_coat * pdf_coat
+        + pmf.p_fuzz * pdf_fuzz
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +537,18 @@ impl Material for OpenPBR {
                     self.specular_roughness_anisotropy,
                 );
                 let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
-                // Reflect view around sampled half-vector.
+                let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
+                if l.z <= 0.0 {
+                    return None;
+                }
+                l
+            }
+            Lobe::Coat => {
+                let (ax, ay) = roughness_to_alpha_aniso(
+                    self.coat_roughness,
+                    self.coat_roughness_anisotropy,
+                );
+                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
                     return None;
@@ -544,6 +635,48 @@ mod tests {
         assert_eq!(m.thin_film_ior, 1.4);
         assert_eq!(m.transmission_dispersion_abbe_number, 20.0);
         assert_eq!(m.subsurface_radius_scale, Vec3A::new(1.0, 0.5, 0.25));
+    }
+
+    #[test]
+    fn coat_darkening_identity_at_zero() {
+        // darkening = 0 → returns Vec3A::ONE regardless of base_color / ior.
+        let v = coat_darkening_factor(Vec3A::new(0.7, 0.3, 0.2), 1.6, 0.0);
+        assert!((v - Vec3A::ONE).length() < 1e-4);
+    }
+
+    #[test]
+    fn thin_film_at_normal_incidence_is_bounded() {
+        let r = thin_film_fresnel(1.0, 1.0, 1.4, 1.5, 500.0);
+        assert!(r.x >= 0.0 && r.x <= 1.0);
+        assert!(r.y >= 0.0 && r.y <= 1.0);
+        assert!(r.z >= 0.0 && r.z <= 1.0);
+    }
+
+    #[test]
+    fn coat_lobe_contributes_when_enabled() {
+        // A pure-coat material should have non-zero scatter at grazing.
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_roughness: 0.05,
+            coat_ior: 1.5,
+            base_color: Vec3A::new(0.5, 0.5, 0.5),
+            ..OpenPBR::default()
+        };
+        use crate::hittable::HitRecord;
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        let ray = Ray::new(Vec3A::new(0.5, 0.0, 1.0), Vec3A::new(-0.5, 0.0, -1.0).normalize());
+        let mut got_positive = false;
+        for _ in 0..128 {
+            if let Some((_, throughput, _)) = m.scatter_importance(&ray, &rec) {
+                if throughput.length_squared() > 0.0 {
+                    got_positive = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_positive, "coat-only material never scattered energy");
     }
 
     #[test]
