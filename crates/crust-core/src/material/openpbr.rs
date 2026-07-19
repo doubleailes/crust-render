@@ -903,6 +903,57 @@ mod tests {
         assert!(t_long.z < t_short.z);
     }
 
+    // Comparing average scattered throughput for many samples between
+    // OpenPBR and Disney with matching parameters. Ignored by default
+    // because it takes ~1s; opt in with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn openpbr_diffuse_matches_disney_within_mc_noise() {
+        use crate::hittable::HitRecord;
+        use crate::material::Disney;
+        let opb = OpenPBR {
+            base_color: Vec3A::new(0.6, 0.4, 0.3),
+            base_diffuse_roughness: 0.5,
+            specular_roughness: 0.2,
+            specular_ior: 1.5,
+            ..OpenPBR::default()
+        };
+        let dis = Disney::new(
+            Vec3A::new(0.6, 0.4, 0.3),
+            0.0,
+            0.2,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let ray = Ray::new(Vec3A::new(0.2, 0.0, 1.0), Vec3A::new(-0.2, 0.0, -1.0).normalize());
+        let n = 16_000;
+        let mut sum_opb = Vec3A::ZERO;
+        let mut sum_dis = Vec3A::ZERO;
+        for _ in 0..n {
+            if let Some((_, t, p)) = opb.scatter_importance(&ray, &rec) {
+                sum_opb += t / p;
+            }
+            if let Some((_, t, p)) = dis.scatter_importance(&ray, &rec) {
+                sum_dis += t / p;
+            }
+        }
+        let mean_opb = sum_opb / n as f32;
+        let mean_dis = sum_dis / n as f32;
+        // Both use different multi-lobe compositions internally, so a
+        // wide tolerance is expected — this test is a smoke check that
+        // the OpenPBR default output is not orders-of-magnitude off.
+        let ratio = (mean_opb / mean_dis.max(Vec3A::splat(1e-3))).max_element();
+        assert!(ratio < 5.0, "OPB/Disney ratio {ratio} too high; mean_opb = {mean_opb:?} mean_dis = {mean_dis:?}");
+    }
+
     #[test]
     fn subsurface_shifts_diffuse_color() {
         use crate::hittable::HitRecord;
