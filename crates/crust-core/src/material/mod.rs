@@ -16,6 +16,8 @@ mod brdf;
 pub use brdf::{fresnel_schlick, geometry_schlick_ggx, pdf_vndf_ggx, sample_vndf_ggx};
 mod disney;
 pub use disney::Disney;
+mod openpbr;
+pub use openpbr::OpenPBR;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -27,6 +29,7 @@ pub enum MaterialType {
     CookTorrance(CookTorrance),
     Emissive(Emissive),
     Disney(Disney),
+    OpenPBR(OpenPBR),
 }
 use std::sync::Arc;
 
@@ -40,6 +43,7 @@ impl MaterialType {
             MaterialType::CookTorrance(m) => Arc::new((*m).clone()),
             MaterialType::Emissive(m) => Arc::new((*m).clone()),
             MaterialType::Disney(m) => Arc::new((*m).clone()),
+            MaterialType::OpenPBR(m) => Arc::new((*m).clone()),
         }
     }
     pub fn is_emissive(&self) -> bool {

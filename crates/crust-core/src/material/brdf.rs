@@ -102,3 +102,162 @@ pub fn gtr1(n_dot_h: f32, alpha: f32) -> f32 {
 pub fn fresnel_schlick_scalar(cos_theta: f32, f0: f32) -> f32 {
     f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
 }
+
+// -------- OpenPBR helpers --------
+//
+// The helpers below extend `brdf.rs` for the OpenPBR Surface shading model.
+// They are intentionally additive: existing helpers (isotropic GGX / VNDF)
+// are the `ax == ay` fast path used by the anisotropic wrappers.
+
+/// Schlick reflectance at normal incidence for a dielectric interface with
+/// relative IOR `ior` (assumes the exterior IOR is 1). Uses
+/// `((ior - 1) / (ior + 1))^2`.
+pub fn f0_from_ior(ior: f32) -> f32 {
+    let r = (ior - 1.0) / (ior + 1.0);
+    r * r
+}
+
+/// Convert an isotropic roughness in [0, 1] plus a signed anisotropy in
+/// [-1, 1] to two microfacet slope alphas `(ax, ay)`. OpenPBR's convention:
+/// positive anisotropy stretches along the surface tangent. The mapping
+/// follows the "perceptually linear" convention used by Autodesk Standard
+/// Surface and the OpenPBR reference: `α = r²`, then split by anisotropy.
+pub fn roughness_to_alpha_aniso(roughness: f32, anisotropy: f32) -> (f32, f32) {
+    let a = roughness * roughness;
+    let aniso = anisotropy.clamp(-0.99, 0.99);
+    let ax = a * (1.0 + aniso).sqrt();
+    let ay = a * (1.0 - aniso).sqrt();
+    (ax.max(1e-4), ay.max(1e-4))
+}
+
+/// Anisotropic GGX NDF, evaluated in the tangent frame where `h` is expressed
+/// via `n·h`, `h·t`, `h·b` (all cosines).
+pub fn ggx_d_aniso(n_dot_h: f32, h_dot_t: f32, h_dot_b: f32, ax: f32, ay: f32) -> f32 {
+    let tx = h_dot_t / ax;
+    let ty = h_dot_b / ay;
+    let term = tx * tx + ty * ty + n_dot_h * n_dot_h;
+    1.0 / (PI * ax * ay * term * term)
+}
+
+/// Smith's Lambda function for anisotropic GGX (Heitz 2014).
+pub fn ggx_lambda_aniso(v_dot_n: f32, v_dot_t: f32, v_dot_b: f32, ax: f32, ay: f32) -> f32 {
+    let vt = v_dot_t * ax;
+    let vb = v_dot_b * ay;
+    let a2 = vt * vt + vb * vb;
+    let n2 = (v_dot_n * v_dot_n).max(1e-8);
+    (-1.0 + (1.0 + a2 / n2).sqrt()) * 0.5
+}
+
+/// Smith G2 masking-shadowing for anisotropic GGX (uncorrelated form).
+#[allow(clippy::too_many_arguments)]
+pub fn ggx_g2_smith_aniso(
+    v_dot_n: f32,
+    v_dot_t: f32,
+    v_dot_b: f32,
+    l_dot_n: f32,
+    l_dot_t: f32,
+    l_dot_b: f32,
+    ax: f32,
+    ay: f32,
+) -> f32 {
+    let lv = ggx_lambda_aniso(v_dot_n, v_dot_t, v_dot_b, ax, ay);
+    let ll = ggx_lambda_aniso(l_dot_n, l_dot_t, l_dot_b, ax, ay);
+    1.0 / (1.0 + lv + ll)
+}
+
+/// Sample the half-vector in the tangent frame (t, b, n) using Heitz 2018
+/// VNDF sampling for anisotropic GGX. `v_local` is the view direction in the
+/// local frame with n along +z. Returns the sampled half-vector in the same
+/// local frame.
+pub fn sample_vndf_ggx_aniso_local(v_local: Vec3A, ax: f32, ay: f32) -> Vec3A {
+    // Stretch to hemispherical config.
+    let vh = Vec3A::new(ax * v_local.x, ay * v_local.y, v_local.z).normalize();
+
+    let lensq = vh.x * vh.x + vh.y * vh.y;
+    let t1 = if lensq > 0.0 {
+        Vec3A::new(-vh.y, vh.x, 0.0) / lensq.sqrt()
+    } else {
+        Vec3A::X
+    };
+    let t2 = vh.cross(t1);
+
+    let (u1, u2) = utils::random2();
+    let r = u1.sqrt();
+    let phi = 2.0 * PI * u2;
+    let t1c = r * phi.cos();
+    let t2c_pre = r * phi.sin();
+    let s = 0.5 * (1.0 + vh.z);
+    let t2c = (1.0 - s) * (1.0 - t1c * t1c).max(0.0).sqrt() + s * t2c_pre;
+
+    let nh = t1 * t1c + t2 * t2c + vh * (1.0 - t1c * t1c - t2c * t2c).max(0.0).sqrt();
+
+    Vec3A::new(ax * nh.x, ay * nh.y, nh.z.max(0.0)).normalize()
+}
+
+/// PDF for the reflected direction `l` sampled via VNDF, in the tangent
+/// frame. Uses the standard reflection Jacobian `1 / (4 |v·h|)`.
+pub fn pdf_vndf_ggx_aniso_local(v_local: Vec3A, h_local: Vec3A, ax: f32, ay: f32) -> f32 {
+    let n_dot_v = v_local.z.max(1e-6);
+    let n_dot_h = h_local.z.max(1e-6);
+
+    let d = ggx_d_aniso(n_dot_h, h_local.x, h_local.y, ax, ay);
+    let lambda_v = ggx_lambda_aniso(n_dot_v, v_local.x, v_local.y, ax, ay);
+    let g1 = 1.0 / (1.0 + lambda_v);
+
+    // p(h) = D * G1 * |v.h| / |v.n|   →   p(l) = p(h) / (4 |v.h|)
+    d * g1 / (4.0 * n_dot_v)
+}
+
+/// Build an orthonormal tangent frame (t, b) around the surface normal `n`
+/// with no assumed UV parametrisation. Uses the Duff et al. 2017 branchless
+/// method — stable everywhere, including near the poles.
+pub fn tangent_frame(n: Vec3A) -> (Vec3A, Vec3A) {
+    let sign = if n.z >= 0.0 { 1.0_f32 } else { -1.0 };
+    let a = -1.0 / (sign + n.z);
+    let b = n.x * n.y * a;
+    let t = Vec3A::new(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
+    let bt = Vec3A::new(b, sign + n.y * n.y * a, -n.y);
+    (t, bt)
+}
+
+/// Convert a world-space vector into the tangent frame `(t, b, n)`.
+pub fn to_tangent(v: Vec3A, t: Vec3A, b: Vec3A, n: Vec3A) -> Vec3A {
+    Vec3A::new(v.dot(t), v.dot(b), v.dot(n))
+}
+
+/// Convert a vector from the tangent frame back to world space.
+pub fn from_tangent(v_local: Vec3A, t: Vec3A, b: Vec3A, n: Vec3A) -> Vec3A {
+    t * v_local.x + b * v_local.y + n * v_local.z
+}
+
+/// Estevez–Kulla "Charlie" sheen distribution, as used by glTF and OpenPBR
+/// fuzz. `roughness` is the fuzz roughness in [0, 1].
+pub fn sheen_charlie_d(n_dot_h: f32, roughness: f32) -> f32 {
+    let alpha = roughness.max(0.05);
+    let inv_alpha = 1.0 / alpha;
+    let sin_theta_h_sq = (1.0 - n_dot_h * n_dot_h).max(0.0);
+    (2.0 + inv_alpha) * sin_theta_h_sq.powf(inv_alpha * 0.5) / (2.0 * PI)
+}
+
+/// Sony Imageworks visibility approximation for Charlie sheen.
+pub fn sheen_charlie_v(n_dot_v: f32, n_dot_l: f32) -> f32 {
+    1.0 / (4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v).max(1e-4))
+}
+
+/// Full analytic Charlie sheen BRDF value (D * V, no Fresnel).
+pub fn sheen_charlie(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, roughness: f32) -> f32 {
+    sheen_charlie_d(n_dot_h, roughness) * sheen_charlie_v(n_dot_v, n_dot_l)
+}
+
+/// A Fresnel-averaged approximation of the darkening a physical coat
+/// produces on the base layer through multi-bounce internal reflection. This
+/// is the closed-form energy-compensation form recommended in the OpenPBR
+/// spec. `coat_darkening ∈ [0, 1]` fades between "no darkening" (`0`, useful
+/// for artistic mixes) and "full physical darkening" (`1`).
+#[allow(dead_code)] // used by Phase 2 (coat lobe)
+pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -> Vec3A {
+    let f_avg = f0_from_ior(coat_ior) + (1.0 - f0_from_ior(coat_ior)) * 0.05;
+    let dark = base_color / (Vec3A::ONE - f_avg * (Vec3A::ONE - base_color)).max(Vec3A::splat(1e-4));
+    let one = Vec3A::ONE;
+    one * (1.0 - darkening) + dark * darkening
+}
