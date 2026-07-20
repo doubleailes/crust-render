@@ -6,8 +6,7 @@ use glam::Vec3A;
 use std::f32::consts::PI;
 use utils::{Lerp, random_cosine_direction};
 
-use serde::{Deserialize, Serialize};
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Disney {
     pub base_color: Vec3A,
     pub metallic: f32,

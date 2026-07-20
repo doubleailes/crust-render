@@ -1,5 +1,4 @@
 use clap::Parser;
-use crust_core::Document;
 use crust_core::Renderer;
 use crust_core::Scene;
 use crust_core::convert;
@@ -20,7 +19,7 @@ enum LoggerLevel {
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Input scene path — .ron (legacy) or .usda / .usdc / .usdz (USD).
+    /// Input scene path — .usda / .usdc / .usdz.
     /// When absent, falls back to a hard-coded procedural scene.
     #[arg(short, long)]
     input: Option<String>,
@@ -59,29 +58,7 @@ fn main() {
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
         debug!("Scene loaded at path: {:?}", input_path);
-        let ext = input_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase);
-        match ext.as_deref() {
-            #[cfg(feature = "usd")]
-            Some("usd") | Some("usda") | Some("usdc") | Some("usdz") => {
-                Scene::from_usd(input_path).expect("Failed to load USD scene")
-            }
-            #[cfg(not(feature = "usd"))]
-            Some("usd") | Some("usda") | Some("usdc") | Some("usdz") => {
-                error!(
-                    "USD input requires building with `--features usd`; got {:?}",
-                    input_path
-                );
-                std::process::exit(1);
-            }
-            _ => {
-                let doc: Document =
-                    Document::read(input_path).expect("Failed to read document");
-                doc.get_scene()
-            }
-        }
+        Scene::from_usd(input_path).expect("Failed to load USD scene")
     } else {
         let (world, lights) = simple_scene();
         let (camera, settings) = get_settings();

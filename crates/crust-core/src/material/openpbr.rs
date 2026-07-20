@@ -24,7 +24,6 @@ use crate::material::brdf::*;
 use crate::medium::Medium;
 use crate::ray::Ray;
 use glam::Vec3A;
-use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 use std::sync::Arc;
 use utils::{Lerp, align_to_normal, random, random_cosine_direction};
@@ -34,10 +33,6 @@ use utils::{Lerp, align_to_normal, random, random_cosine_direction};
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn one_vec() -> Vec3A {
-    Vec3A::ONE
-}
-#[inline]
 fn white() -> Vec3A {
     Vec3A::new(0.8, 0.8, 0.8)
 }
@@ -46,142 +41,64 @@ fn subsurface_radius_scale_default() -> Vec3A {
     Vec3A::new(1.0, 0.5, 0.25)
 }
 #[inline]
-fn f_zero() -> f32 {
-    0.0
-}
-#[inline]
-fn f_one() -> f32 {
-    1.0
-}
-#[inline]
-fn f_half() -> f32 {
-    0.5
-}
-#[inline]
 fn base_default() -> Vec3A {
     Vec3A::new(0.8, 0.8, 0.8)
 }
-#[inline]
-fn specular_roughness_default() -> f32 {
-    0.3
-}
-#[inline]
-fn specular_ior_default() -> f32 {
-    1.5
-}
-#[inline]
-fn coat_ior_default() -> f32 {
-    1.6
-}
-#[inline]
-fn thin_film_thickness_default() -> f32 {
-    0.5
-}
-#[inline]
-fn thin_film_ior_default() -> f32 {
-    1.4
-}
-#[inline]
-fn abbe_default() -> f32 {
-    20.0
-}
-#[inline]
-fn subsurface_radius_default() -> f32 {
-    1.0
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct OpenPBR {
     // --- base -----------------------------------------------------------
-    #[serde(default = "f_one")]
     pub base_weight: f32,
-    #[serde(default = "base_default")]
     pub base_color: Vec3A,
-    #[serde(default = "f_zero")]
     pub base_diffuse_roughness: f32,
-    #[serde(default = "f_zero")]
     pub base_metalness: f32,
 
     // --- specular -------------------------------------------------------
-    #[serde(default = "f_one")]
     pub specular_weight: f32,
-    #[serde(default = "one_vec")]
     pub specular_color: Vec3A,
-    #[serde(default = "specular_roughness_default")]
     pub specular_roughness: f32,
-    #[serde(default = "specular_ior_default")]
     pub specular_ior: f32,
-    #[serde(default = "f_zero")]
     pub specular_roughness_anisotropy: f32,
 
     // --- transmission (phase 3) -----------------------------------------
-    #[serde(default = "f_zero")]
     pub transmission_weight: f32,
-    #[serde(default = "one_vec")]
     pub transmission_color: Vec3A,
-    #[serde(default = "f_zero")]
     pub transmission_depth: f32,
-    #[serde(default)]
     pub transmission_scatter: Vec3A,
-    #[serde(default = "f_zero")]
     pub transmission_scatter_anisotropy: f32,
-    #[serde(default = "f_zero")]
     pub transmission_dispersion_scale: f32,
-    #[serde(default = "abbe_default")]
     pub transmission_dispersion_abbe_number: f32,
 
     // --- subsurface (phase 5) -------------------------------------------
-    #[serde(default = "f_zero")]
     pub subsurface_weight: f32,
-    #[serde(default = "white")]
     pub subsurface_color: Vec3A,
-    #[serde(default = "subsurface_radius_default")]
     pub subsurface_radius: f32,
-    #[serde(default = "subsurface_radius_scale_default")]
     pub subsurface_radius_scale: Vec3A,
-    #[serde(default = "f_zero")]
     pub subsurface_scatter_anisotropy: f32,
 
     // --- fuzz -----------------------------------------------------------
-    #[serde(default = "f_zero")]
     pub fuzz_weight: f32,
-    #[serde(default = "one_vec")]
     pub fuzz_color: Vec3A,
-    #[serde(default = "f_half")]
     pub fuzz_roughness: f32,
 
     // --- coat (phase 2) -------------------------------------------------
-    #[serde(default = "f_zero")]
     pub coat_weight: f32,
-    #[serde(default = "one_vec")]
     pub coat_color: Vec3A,
-    #[serde(default = "f_zero")]
     pub coat_roughness: f32,
-    #[serde(default = "f_zero")]
     pub coat_roughness_anisotropy: f32,
-    #[serde(default = "coat_ior_default")]
     pub coat_ior: f32,
-    #[serde(default = "f_one")]
     pub coat_darkening: f32,
 
     // --- thin-film (phase 2) --------------------------------------------
-    #[serde(default = "f_zero")]
     pub thin_film_weight: f32,
-    #[serde(default = "thin_film_thickness_default")]
     pub thin_film_thickness: f32,
-    #[serde(default = "thin_film_ior_default")]
     pub thin_film_ior: f32,
 
     // --- emission -------------------------------------------------------
-    #[serde(default = "f_zero")]
     pub emission_luminance: f32,
-    #[serde(default = "one_vec")]
     pub emission_color: Vec3A,
 
     // --- geometry -------------------------------------------------------
-    #[serde(default = "f_one")]
     pub geometry_opacity: f32,
-    #[serde(default)]
     pub geometry_thin_walled: bool,
 }
 

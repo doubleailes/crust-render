@@ -29,10 +29,8 @@ impl Scene {
     }
 }
 
-#[cfg(feature = "usd")]
 mod usd_import;
 
-#[cfg(feature = "usd")]
 impl Scene {
     /// Load a full runtime scene (camera, geometry, lights, render settings)
     /// from a USD stage — `.usda`, `.usdc`, or `.usdz`.

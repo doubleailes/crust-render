@@ -7,7 +7,6 @@ use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 
 pub struct Renderer {
     pub camera: Camera,
@@ -140,14 +139,19 @@ impl Renderer {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct RenderSettings {
     samples_per_pixel: u32,
     max_depth: u32,
     width: usize,
     height: usize,
+    // Adaptive sampling + animation controls parsed from USD but not yet
+    // consumed by the tracer. Kept in the struct so the plumbing exists.
+    #[allow(dead_code)]
     min_samples_per_pixel: u32,
+    #[allow(dead_code)]
     variance_threshold: f32,
+    #[allow(dead_code)]
     frame: isize,
 }
 impl RenderSettings {

@@ -7,8 +7,7 @@ use crate::material::sample_vndf_ggx;
 use crate::ray::Ray;
 use glam::Vec3A;
 
-use serde::{Deserialize, Serialize};
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct CookTorrance {
     pub albedo: Vec3A,
     pub roughness: f32,
