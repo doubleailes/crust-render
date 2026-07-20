@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
 use crust_core::Scene;
+use openusd::schemas::shade::{Material as UsdMaterial, MaterialBindingAPI};
+use openusd::sdf;
+use openusd::usd::{PrimPredicate, Stage};
 
 fn sample(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -62,5 +65,58 @@ fn loads_openpbr_showcase_usda() {
         scene.world.count(),
         scene.lights.count(),
         scene.settings.get_dimensions(),
+    );
+}
+
+/// Regression guard: every material in the ported showcase must decode to
+/// the `crust:openpbr` shader id, and every scene sphere must bind one of
+/// them. When this test drifts (renamed shader ids, missing material
+/// binding, openusd stops surfacing `info:id`), the loader silently falls
+/// back to a grey Lambertian — which is what happened before this fix.
+#[test]
+fn openpbr_showcase_materials_all_decode() {
+    let stage = Stage::open(sample("openpbr_showcase.usda").to_str().unwrap())
+        .expect("open showcase stage");
+
+    let mut prims: Vec<sdf::Path> = Vec::new();
+    stage
+        .traverse(PrimPredicate::DEFAULT_PROXIES, |p| prims.push(p.clone()))
+        .unwrap();
+
+    // Every Material's surface shader must resolve to `crust:openpbr`.
+    let mut mats = 0;
+    for p in &prims {
+        if let Ok(Some(mat)) = UsdMaterial::get(&stage, p.clone()) {
+            let shader = mat
+                .compute_surface_source()
+                .unwrap()
+                .unwrap_or_else(|| panic!("Material {} has no surface shader", p));
+            let id = shader
+                .id()
+                .unwrap()
+                .unwrap_or_else(|| panic!("Shader at {} has no info:id", shader.path()));
+            assert_eq!(
+                id, "crust:openpbr",
+                "Material {} shader id was {:?}, expected `crust:openpbr`",
+                p, id
+            );
+            mats += 1;
+        }
+    }
+    assert_eq!(mats, 7, "expected 7 authored materials, saw {}", mats);
+
+    // Every sphere prim under /World/Scene except the ground must bind one.
+    let mut bound = 0;
+    for p in &prims {
+        if let Ok(Some(bind)) = MaterialBindingAPI::get(&stage, p.clone()) {
+            if let Ok(Some(_mat_path)) = bind.direct_binding("") {
+                bound += 1;
+            }
+        }
+    }
+    assert_eq!(
+        bound, 7,
+        "expected 7 bound spheres (ground has no binding), saw {}",
+        bound
     );
 }
