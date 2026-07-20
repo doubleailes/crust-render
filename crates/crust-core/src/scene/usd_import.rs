@@ -542,15 +542,20 @@ fn default_material() -> Arc<dyn Material> {
 }
 
 fn shader_info_id(shader: &Shader) -> Option<String> {
-    // Try schema-typed id() first; some crate revisions expose it as an
-    // Attribute called `info:id` that decodes to a Token.
+    // `Shader::id()` is the higher-level accessor and does the correct
+    // `get::<String>()` (which extracts from both String and Token variants).
+    if let Ok(Some(id)) = shader.id() {
+        return Some(id);
+    }
+    // Fallback for older openusd revisions or shaders that author info:id
+    // via a raw attribute rather than the schema helper.
     shader
-        .id_attr()
+        .attribute("info:id")
         .get::<sdf::Value>()
         .ok()
         .flatten()
         .and_then(|v| match v {
-            sdf::Value::Token(t) => Some(t.to_string()),
+            sdf::Value::Token(t) | sdf::Value::String(t) => Some(t),
             _ => None,
         })
 }
