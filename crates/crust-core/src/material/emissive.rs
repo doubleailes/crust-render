@@ -3,9 +3,8 @@ use crate::light::Light;
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Emissive {
     color: Vec3A,
     position: Vec3A,

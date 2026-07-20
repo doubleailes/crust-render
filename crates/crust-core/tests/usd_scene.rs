@@ -1,5 +1,3 @@
-#![cfg(feature = "usd")]
-
 use std::path::PathBuf;
 
 use crust_core::Scene;

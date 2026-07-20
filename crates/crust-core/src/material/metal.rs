@@ -3,8 +3,7 @@ use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
 
-use serde::{Deserialize, Serialize};
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Metal {
     albedo: Vec3A,
     fuzz: f32,

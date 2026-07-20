@@ -1,11 +1,10 @@
 use crate::ray::Ray;
 use glam::Vec3A;
-use serde::{Deserialize, Serialize};
 use utils::random_in_unit_disk;
 
 /// The `Camera` struct represents a virtual camera in the ray tracing system.
 /// It is responsible for generating rays that simulate the perspective view of a scene.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// The origin of the camera (position in 3D space).
     origin: Vec3A,
