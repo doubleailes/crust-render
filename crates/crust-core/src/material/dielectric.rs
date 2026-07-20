@@ -98,15 +98,20 @@ impl Material for ComplexDielectric {
         // Decide between reflection and refraction
         let reflect = utils::random() < fresnel.x;
 
+        // glam's `reflect`/`refract` expect the *incident* direction (pointing
+        // into the surface), not the view direction (pointing back toward the
+        // camera). Using `view` directly reflected the ray back into the
+        // surface; reflect the incident ray instead.
+        let incident = r_in.direction().normalize();
         let direction = if reflect {
-            view.reflect(h)
+            incident.reflect(h)
         } else {
             let eta = if rec.front_face || self.thin {
                 1.0 / self.ior
             } else {
                 self.ior
             };
-            view.refract(h, eta)
+            incident.refract(h, eta)
         };
 
         *scattered = Ray::new(rec.p, direction);

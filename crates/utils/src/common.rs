@@ -70,6 +70,21 @@ pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3A {
     }
 }
 
+// Function to generate a uniformly distributed random Vec3A on the unit sphere
+// (a true random unit vector). Used for Lambertian diffuse scattering.
+pub fn random_unit_vector() -> Vec3A {
+    let mut rng = rand::rng();
+    loop {
+        let v = random_vec3_unit_cube(&mut rng);
+        let len_sq = v.length_squared();
+        // Reject points outside the unit sphere and the (near) origin to avoid
+        // dividing by zero when normalizing.
+        if (1e-12..1.0).contains(&len_sq) {
+            return v / len_sq.sqrt();
+        }
+    }
+}
+
 pub fn random_in_unit_disk() -> Vec3A {
     loop {
         let p = Vec3A::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
