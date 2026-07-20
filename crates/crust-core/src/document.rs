@@ -45,6 +45,13 @@ impl Document {
     pub fn settings(&self) -> RenderSettings {
         self.settings
     }
+    /// Build a runtime `Scene` from this RON document (camera + world +
+    /// lights + settings). Used by the CLI when the input file is `.ron`.
+    pub fn get_scene(&self) -> crate::Scene {
+        let (world, lights) = self.get_world();
+        crate::Scene::new(self.camera(), world, lights, self.settings())
+    }
+
     pub fn get_world(&self) -> (HittableList, LightList) {
         let mut world = HittableList::new();
         let mut lights = LightList::new();
