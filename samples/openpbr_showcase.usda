@@ -1,0 +1,254 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    doc = "OpenPBR feature showcase — port of samples/openpbr_showcase.ron."
+)
+
+def Xform "World"
+{
+    # ---------------------------------------------------------------------
+    # Camera — recovered from the RON's derived basis (u, v, w=(0,0.0905,0.9959)).
+    # local -Z points at (0, -0.0905, -0.9959) → the lookat direction from
+    # (0, 3, 22) toward (0, 1, 0). fStop chosen so focal_length/fStop = 0.05
+    # matches the RON's `lens_radius=0.025` (aperture = 2 * lens_radius).
+    # ---------------------------------------------------------------------
+    def Camera "Cam"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0),
+                                        (0, 0.9958932, -0.09053575, 0),
+                                        (0, 0.09053575, 0.9958932, 0),
+                                        (0, 3, 22, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        float focalLength = 50
+        float horizontalAperture = 73.63848
+        float verticalAperture = 41.42165
+        float fStop = 1000
+        float focusDistance = 22
+        token projection = "perspective"
+    }
+
+    # ---------------------------------------------------------------------
+    # Materials — one Material per sphere. `info:id = "crust:openpbr"` uses
+    # the custom shader schema; only inputs that differ from OpenPBR::default
+    # are authored (the decoder falls back to defaults for missing inputs).
+    # ---------------------------------------------------------------------
+    def Scope "Materials"
+    {
+        def Material "chrome_metal"
+        {
+            token outputs:surface.connect = </World/Materials/chrome_metal/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.95, 0.95, 0.95)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.02
+                token outputs:surface
+            }
+        }
+
+        def Material "red_plastic"
+        {
+            token outputs:surface.connect = </World/Materials/red_plastic/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.1, 0.1)
+                token outputs:surface
+            }
+        }
+
+        def Material "red_car_paint"
+        {
+            token outputs:surface.connect = </World/Materials/red_car_paint/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.05, 0.05)
+                float inputs:baseMetalness = 0.9
+                float inputs:specularRoughness = 0.25
+                float inputs:coatWeight = 1.0
+                float inputs:coatRoughness = 0.02
+                float inputs:coatIor = 1.5
+                token outputs:surface
+            }
+        }
+
+        def Material "velvet_cloth"
+        {
+            token outputs:surface.connect = </World/Materials/velvet_cloth/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.35, 0.15, 0.55)
+                float inputs:baseDiffuseRoughness = 0.9
+                float inputs:specularRoughness = 0.9
+                float inputs:fuzzWeight = 1.0
+                float inputs:fuzzRoughness = 0.3
+                token outputs:surface
+            }
+        }
+
+        def Material "green_glass_dispersion"
+        {
+            token outputs:surface.connect = </World/Materials/green_glass_dispersion/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                float inputs:specularRoughness = 0.02
+                float inputs:specularIor = 1.55
+                float inputs:transmissionWeight = 1.0
+                color3f inputs:transmissionColor = (0.7, 0.9, 0.75)
+                float inputs:transmissionDepth = 1.0
+                float inputs:transmissionDispersionScale = 0.6
+                token outputs:surface
+            }
+        }
+
+        def Material "waxy_subsurface"
+        {
+            token outputs:surface.connect = </World/Materials/waxy_subsurface/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.75, 0.55)
+                float inputs:specularRoughness = 0.5
+                float inputs:subsurfaceWeight = 1.0
+                color3f inputs:subsurfaceColor = (0.95, 0.55, 0.35)
+                float inputs:subsurfaceRadius = 1.5
+                token outputs:surface
+            }
+        }
+
+        def Material "soap_bubble"
+        {
+            token outputs:surface.connect = </World/Materials/soap_bubble/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.8, 0.8)
+                float inputs:specularRoughness = 0.02
+                float inputs:specularIor = 1.33
+                float inputs:transmissionWeight = 0.4
+                color3f inputs:transmissionColor = (0.95, 0.95, 1.0)
+                float inputs:thinFilmWeight = 1.0
+                float inputs:thinFilmThickness = 0.55
+                bool inputs:geometryThinWalled = true
+                token outputs:surface
+            }
+        }
+    }
+
+    # ---------------------------------------------------------------------
+    # Scene — the ground sphere (no material binding → default grey
+    # Lambertian) plus seven material spheres in a row at y=1.
+    # ---------------------------------------------------------------------
+    def Xform "Scene"
+    {
+        def Sphere "ground"
+        {
+            double radius = 1000.0
+            double3 xformOp:translate = (0, -1000, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Sphere "sphere_chrome" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (-7.5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/chrome_metal>
+        }
+
+        def Sphere "sphere_red_plastic" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (-5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/red_plastic>
+        }
+
+        def Sphere "sphere_red_car_paint" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (-2.5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/red_car_paint>
+        }
+
+        def Sphere "sphere_velvet" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/velvet_cloth>
+        }
+
+        def Sphere "sphere_glass" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (2.5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/green_glass_dispersion>
+        }
+
+        def Sphere "sphere_subsurface" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/waxy_subsurface>
+        }
+
+        def Sphere "sphere_soap_bubble" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 1.0
+            double3 xformOp:translate = (7.5, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/soap_bubble>
+        }
+    }
+
+    # ---------------------------------------------------------------------
+    # Lights — SphereLights matching the RON's Emissive spheres. The RON
+    # emitted `color=(15,15,15)` and `color=(18,12,9)` — encode that as
+    # color*intensity with intensity=1 so the effective radiance is
+    # unchanged. Each SphereLight is also rendered as visible geometry
+    # (the importer adds both a `Light` entry and a sphere hittable).
+    # ---------------------------------------------------------------------
+    def SphereLight "Light1"
+    {
+        float inputs:radius = 1.5
+        color3f inputs:color = (15, 15, 15)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (-2, 8, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "Light2"
+    {
+        float inputs:radius = 1.5
+        color3f inputs:color = (18, 12, 9)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (4, 8, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# -------------------------------------------------------------------------
+# RenderSettings — non-standard params in the `crust:` namespace.
+# -------------------------------------------------------------------------
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 360)
+        int crust:samplesPerPixel = 128
+        int crust:maxDepth = 32
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}

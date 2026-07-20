@@ -22,7 +22,7 @@ glam.workspace = true
 tracing.workspace = true
 exr.workspace = true
 rand.workspace = true
-openusd = { version = "0.5", default-features = false, features = ["geom"], optional = true }
+openusd = { version = "0.5", default-features = false, features = ["geom", "lux", "shade", "render"], optional = true }
 
 [features]
 default = []
