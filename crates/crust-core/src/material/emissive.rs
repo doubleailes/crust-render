@@ -75,8 +75,15 @@ impl Light for Emissive {
     fn pdf(&self, hit_point: Vec3A, light_point: Vec3A) -> f32 {
         let direction = light_point - hit_point;
         let distance_squared = direction.length_squared();
-        let normal = direction.normalize();
-        let cosine = f32::max(normal.dot((light_point - hit_point).normalize()), 0.0);
+        let dir_to_light = direction.normalize();
+        // Solid-angle pdf of sampling this point on the sphere uniformly by
+        // area: dist^2 / (cos(theta_light) * area), where theta_light is the
+        // angle between the light's *surface* normal at `light_point` and the
+        // direction back toward the shaded point. The previous code dotted the
+        // direction with itself, so the cosine was always 1.0, dropping the
+        // grazing-angle foreshortening entirely.
+        let light_normal = (light_point - self.position).normalize();
+        let cosine = f32::max(light_normal.dot(-dir_to_light), 0.0);
         let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
         distance_squared / (cosine * area + 1e-4)
     }
