@@ -34,6 +34,9 @@ struct Cli {
     /// Bucket rendering
     #[arg(short, long, default_value_t = false)]
     bucket: bool,
+    /// Samples per pixel. Overrides the scene / default value when set.
+    #[arg(short, long)]
+    samples: Option<u32>,
 }
 
 fn get_logger_level(level: LoggerLevel) -> Level {
@@ -67,7 +70,10 @@ fn main() {
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
-    let settings = scene.settings;
+    let settings = match cli.samples {
+        Some(spp) => scene.settings.with_samples_per_pixel(spp),
+        None => scene.settings,
+    };
     debug!("Render Settings: {:#?}", settings);
     // Timer
     let start = Instant::now();
