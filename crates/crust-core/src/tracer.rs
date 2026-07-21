@@ -1,4 +1,5 @@
 use crate::buffer::Buffer;
+use crate::guiding::{GuidingField, SampleData, luminance};
 use crate::hittable::{HitRecord, Hittable};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
@@ -7,6 +8,18 @@ use glam::Vec3A;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
 use sampler::{Sampler, SobolSampler};
+
+/// Training-only clamp on recorded radiance so a single firefly cannot
+/// dominate a directional distribution. Affects the guiding field, never the
+/// image estimator.
+const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
+
+/// Per-pass guiding state handed down the integrator recursion.
+struct GuidingContext<'a> {
+    field: &'a GuidingField,
+    /// Record `SampleData` for field training during this pass?
+    training: bool,
+}
 
 pub struct Renderer {
     pub camera: Camera,
@@ -185,6 +198,68 @@ pub fn ray_color(
     depth: i32,
     sampler: &mut dyn Sampler,
 ) -> Vec3A {
+    let mut no_training = Vec::new();
+    ray_color_inner(r, world, lights, depth, sampler, None, &mut no_training)
+}
+
+/// Choose the bounce direction and the pdf its contribution is divided by.
+///
+/// With guiding this is one-sample MIS between the guiding distribution and
+/// BSDF sampling: pick the guide with probability α, the BSDF otherwise, and
+/// divide by the mixture pdf `α·p_guide + (1-α)·p_bsdf`. The mixture pdf is
+/// used iff guiding was *available* at this vertex — the local distribution
+/// is trained and the material is evaluable — independent of which branch
+/// the coin picked; `Material::eval`'s contract (evaluability never depends
+/// on the queried direction) is what keeps the two branches consistent, and
+/// hence the estimator unbiased.
+fn sample_bounce_direction(
+    r: &Ray,
+    rec: &HitRecord,
+    guiding: Option<&GuidingContext>,
+    sampler: &mut dyn Sampler,
+) -> Option<(Ray, Vec3A, f32)> {
+    let mat = rec.mat.as_ref().unwrap();
+
+    let g = match guiding {
+        Some(g) if g.field.trained_at(rec.p) => g,
+        _ => return mat.scatter_importance(r, rec, sampler),
+    };
+    let alpha = g.field.config().guide_prob;
+
+    if sampler.next_1d() < alpha {
+        // Guide branch. A trained field always yields a sample; delta and
+        // transmissive materials (eval == None) cannot use it, so they drop
+        // to the pure-BSDF estimator — exactly as they do in the BSDF branch.
+        if let Some((wi, p_guide)) = g.field.sample(rec.p, sampler.next_2d()) {
+            if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
+                let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
+                return Some((Ray::new(rec.p, wi), value, pdf));
+            }
+        }
+        mat.scatter_importance(r, rec, sampler)
+    } else {
+        // BSDF branch.
+        let (scattered, value, p_bsdf) = mat.scatter_importance(r, rec, sampler)?;
+        let wi = scattered.direction().normalize();
+        if mat.eval(r, rec, wi).is_some() {
+            let p_guide = g.field.pdf(rec.p, wi);
+            let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
+            Some((scattered, value, pdf))
+        } else {
+            Some((scattered, value, p_bsdf))
+        }
+    }
+}
+
+fn ray_color_inner(
+    r: &Ray,
+    world: &dyn Hittable,
+    lights: &LightList,
+    depth: i32,
+    sampler: &mut dyn Sampler,
+    guiding: Option<&GuidingContext>,
+    train_out: &mut Vec<SampleData>,
+) -> Vec3A {
     if depth <= 0 {
         return Vec3A::new(0.0, 0.0, 0.0); // recursion limit
     }
@@ -215,7 +290,18 @@ pub fn ray_color(
                     );
                     let new_ray = Ray::new_in_medium(pos, dir, medium.clone());
                     let albedo = medium.albedo();
-                    return albedo * ray_color(&new_ray, world, lights, depth - 1, sampler);
+                    // Volume scattering events are not recorded — the field
+                    // guides surface bounces only.
+                    return albedo
+                        * ray_color_inner(
+                            &new_ray,
+                            world,
+                            lights,
+                            depth - 1,
+                            sampler,
+                            guiding,
+                            train_out,
+                        );
                 }
             }
         }
@@ -258,9 +344,9 @@ pub fn ray_color(
             }
         }
 
-        // === 2. Indirect Lighting via BRDF Sampling ===
+        // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         if let Some((scattered, brdf_value, brdf_pdf)) =
-            rec.mat.as_ref().unwrap().scatter_importance(r, &rec, sampler)
+            sample_bounce_direction(r, &rec, guiding, sampler)
         {
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
 
@@ -283,12 +369,26 @@ pub fn ray_color(
                 }
             }
 
+            let incident =
+                ray_color_inner(&scattered, world, lights, depth - 1, sampler, guiding, train_out);
+
+            // Record a training sample for the guiding field: from rec.p
+            // along the bounce direction the path saw `incident` radiance
+            // (which includes emission at the next hit, so it is a full
+            // incident-radiance estimate).
+            if let Some(g) = guiding {
+                if g.training {
+                    train_out.push(SampleData {
+                        pos: rec.p,
+                        dir: scattered.direction().normalize(),
+                        radiance: luminance(incident).min(TRAIN_RADIANCE_CLAMP),
+                    });
+                }
+            }
+
             // Add both direct hit on light and recursive bounce
             total_light += add_emission;
-            total_light += brdf_value
-                * ray_color(&scattered, world, lights, depth - 1, sampler)
-                * cosine
-                / brdf_pdf;
+            total_light += brdf_value * incident * cosine / brdf_pdf;
         }
 
         return total_light * medium_atten;
