@@ -3,6 +3,7 @@ use crate::light::Light;
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 
 #[derive(Debug, Clone)]
 pub struct Emissive {
@@ -35,6 +36,7 @@ impl Material for Emissive {
         &self,
         _r_in: &Ray,
         _rec: &HitRecord,
+        _sampler: &mut dyn Sampler,
         _attenuation: &mut Vec3A,
         _scattered: &mut Ray,
     ) -> bool {
@@ -45,7 +47,12 @@ impl Material for Emissive {
         self.color
     }
 
-    fn scatter_importance(&self, _r_in: &Ray, _rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
+    fn scatter_importance(
+        &self,
+        _r_in: &Ray,
+        _rec: &HitRecord,
+        _sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
         None
     }
 }

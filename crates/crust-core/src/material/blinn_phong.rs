@@ -2,6 +2,7 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 
 #[derive(Debug, Clone)]
 pub struct BlinnPhong {
@@ -27,6 +28,7 @@ impl Material for BlinnPhong {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
+        _sampler: &mut dyn Sampler,
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {

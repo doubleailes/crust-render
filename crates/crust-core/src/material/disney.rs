@@ -3,8 +3,9 @@ use crate::material::Material;
 use crate::material::brdf::*;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 use std::f32::consts::PI;
-use utils::{Lerp, random_cosine_direction};
+use utils::{Lerp, cosine_hemisphere};
 
 #[derive(Debug, Clone)]
 pub struct Disney {
@@ -46,10 +47,15 @@ impl Disney {
 }
 
 impl Material for Disney {
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
         let n = rec.normal;
         let v = -r_in.direction().normalize();
-        let l_local = random_cosine_direction();
+        let l_local = cosine_hemisphere(sampler.next_2d());
         let l = utils::align_to_normal(l_local, n);
 
         let h = (v + l).normalize();
@@ -113,7 +119,14 @@ impl Material for Disney {
         Some((scattered, total * n_dot_l, pdf.max(1e-4)))
     }
 
-    fn scatter(&self, _: &Ray, _: &HitRecord, _: &mut Vec3A, _: &mut Ray) -> bool {
+    fn scatter(
+        &self,
+        _: &Ray,
+        _: &HitRecord,
+        _: &mut dyn Sampler,
+        _: &mut Vec3A,
+        _: &mut Ray,
+    ) -> bool {
         false // Only importance sampling supported
     }
 

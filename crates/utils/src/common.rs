@@ -107,15 +107,57 @@ pub fn random_range3(min: f32, max: f32) -> Vec3A {
 }
 
 pub fn random_cosine_direction() -> Vec3A {
-    let r1 = random();
-    let r2 = random();
-    let z = f32::sqrt(1.0 - r2);
+    cosine_hemisphere([random(), random()])
+}
 
-    let phi = 2.0 * std::f32::consts::PI * r1;
-    let x = f32::cos(phi) * f32::sqrt(r2);
-    let y = f32::sin(phi) * f32::sqrt(r2);
-
+/// Cosine-weighted hemisphere sample from an explicit 2D uniform pair.
+/// Returns a direction in the local frame with the surface normal on +Z.
+pub fn cosine_hemisphere(uv: [f32; 2]) -> Vec3A {
+    let (u, v) = (uv[0], uv[1]);
+    let z = f32::sqrt(1.0 - v);
+    let phi = 2.0 * std::f32::consts::PI * u;
+    let x = f32::cos(phi) * f32::sqrt(v);
+    let y = f32::sin(phi) * f32::sqrt(v);
     Vec3A::new(x, y, z)
+}
+
+/// Uniform sphere-surface sample from an explicit 2D uniform pair. Analytic
+/// (no rejection), so behaves identically each time for a given `uv`.
+pub fn uniform_sphere(uv: [f32; 2]) -> Vec3A {
+    let (u, v) = (uv[0], uv[1]);
+    let z = 1.0 - 2.0 * u;
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = 2.0 * std::f32::consts::PI * v;
+    Vec3A::new(r * phi.cos(), r * phi.sin(), z)
+}
+
+/// Uniform sample of the closed unit ball (volume, not surface) from an
+/// explicit 3D uniform triple. Radius warp is `u^(1/3)` so the result is
+/// volumetrically uniform.
+pub fn uniform_ball(uvw: [f32; 3]) -> Vec3A {
+    let dir = uniform_sphere([uvw[0], uvw[1]]);
+    let r = uvw[2].max(0.0).cbrt();
+    dir * r
+}
+
+/// Concentric-disk warp (Shirley 1997) from an explicit 2D uniform pair.
+/// Returns an xy-point in the unit disk, `z = 0`.
+pub fn concentric_disk(uv: [f32; 2]) -> Vec3A {
+    // Remap to [-1, 1]^2, handle the origin explicitly to avoid divide-by-0.
+    let sx = 2.0 * uv[0] - 1.0;
+    let sy = 2.0 * uv[1] - 1.0;
+    if sx == 0.0 && sy == 0.0 {
+        return Vec3A::ZERO;
+    }
+    let (r, theta) = if sx.abs() > sy.abs() {
+        (sx, std::f32::consts::FRAC_PI_4 * (sy / sx))
+    } else {
+        (
+            sy,
+            std::f32::consts::FRAC_PI_2 - std::f32::consts::FRAC_PI_4 * (sx / sy),
+        )
+    };
+    Vec3A::new(r * theta.cos(), r * theta.sin(), 0.0)
 }
 
 pub fn align_to_normal(local: Vec3A, normal: Vec3A) -> Vec3A {

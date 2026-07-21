@@ -6,6 +6,7 @@ use crate::material::pdf_vndf_ggx;
 use crate::material::sample_vndf_ggx;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 
 #[derive(Debug, Clone)]
 pub struct CookTorrance {
@@ -22,35 +23,6 @@ impl CookTorrance {
             metallic: metallic.clamp(0.0, 1.0),
         }
     }
-
-    // GGX sample (based on spherical coordinates)
-    #[allow(dead_code)]
-    fn sample_ggx(normal: Vec3A, roughness: f32) -> Vec3A {
-        let u1 = utils::random();
-        let u2 = utils::random();
-
-        let a = roughness * roughness;
-
-        let theta = f32::acos(f32::sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1)));
-        let phi = 2.0 * std::f32::consts::PI * u2;
-
-        let sin_theta = f32::sin(theta);
-        let x = sin_theta * f32::cos(phi);
-        let y = sin_theta * f32::sin(phi);
-        let z = f32::cos(theta);
-
-        let h_local = Vec3A::new(x, y, z);
-        utils::align_to_normal(h_local, normal)
-    }
-    #[allow(dead_code)]
-    fn pdf_ggx(normal: Vec3A, h: Vec3A, roughness: f32) -> f32 {
-        let a = roughness * roughness;
-        let a2 = a * a;
-        let n_dot_h = f32::max(normal.dot(h), 0.0);
-        let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-        let d = a2 / (std::f32::consts::PI * denom * denom);
-        d * n_dot_h / (4.0 * h.dot(h.normalize()).abs())
-    }
 }
 
 impl Material for CookTorrance {
@@ -58,6 +30,7 @@ impl Material for CookTorrance {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
+        sampler: &mut dyn Sampler,
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
@@ -65,7 +38,7 @@ impl Material for CookTorrance {
         let v = -r_in.direction().normalize();
 
         // Sample a halfway vector using VNDF
-        let h = sample_vndf_ggx(v, self.roughness);
+        let h = sample_vndf_ggx(v, self.roughness, sampler.next_2d());
         let l = -v.reflect(h);
         if l.dot(n) <= 0.0 {
             return false;
@@ -95,15 +68,20 @@ impl Material for CookTorrance {
         true
     }
 
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
         let n = rec.normal;
         let v = -r_in.direction().normalize();
 
-        let sample_specular = utils::random() < 0.5;
+        let sample_specular = sampler.next_1d() < 0.5;
 
         let (l, pdf_specular, pdf_diffuse, brdf) = if sample_specular {
             // === Sample GGX specular ===
-            let h = sample_vndf_ggx(v, self.roughness);
+            let h = sample_vndf_ggx(v, self.roughness, sampler.next_2d());
             let l = -v.reflect(h);
             if l.dot(n) <= 0.0 {
                 return None;
@@ -139,7 +117,7 @@ impl Material for CookTorrance {
             (l, pdf_ggx * 0.5, pdf_cosine * 0.5, brdf)
         } else {
             // === Sample cosine-weighted hemisphere (diffuse) ===
-            let l_local = utils::random_cosine_direction();
+            let l_local = utils::cosine_hemisphere(sampler.next_2d());
             let l = utils::align_to_normal(l_local, n);
             if l.dot(n) <= 0.0 {
                 return None;

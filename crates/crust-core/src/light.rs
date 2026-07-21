@@ -1,4 +1,5 @@
 use glam::Vec3A;
+use sampler::Sampler;
 use std::sync::Arc;
 
 /// The `Light` trait defines the behavior of light sources in the ray tracing system.
@@ -73,16 +74,19 @@ impl LightList {
         self.lights.push(light);
     }
 
-    /// Randomly samples a light source from the `LightList`.
+    /// Randomly samples a light source from the `LightList` using the given
+    /// sampler for the uniform pick.
     ///
     /// # Returns
     /// - `Some(&Arc<dyn Light>)` if the list is not empty.
     /// - `None` if the list is empty.
-    pub fn sample(&self) -> Option<&Arc<dyn Light>> {
+    pub fn sample(&self, sampler: &mut dyn Sampler) -> Option<&Arc<dyn Light>> {
         if self.lights.is_empty() {
             None
         } else {
-            let i = (utils::random() * self.lights.len() as f32) as usize;
+            let i = (sampler.next_1d() * self.lights.len() as f32) as usize;
+            // Guard against `next_1d() == 1.0 - epsilon` rounding to len.
+            let i = i.min(self.lights.len() - 1);
             self.lights.get(i)
         }
     }
