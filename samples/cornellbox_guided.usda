@@ -184,7 +184,7 @@ def Scope "Render"
         float crust:varianceThreshold = 0.05
         int crust:frame = 0
         bool crust:pathGuiding = true
-        int crust:guidingTrainIterations = 4
+        int crust:guidingTrainIterations = 8
         float crust:guidingProb = 0.5
     }
 }

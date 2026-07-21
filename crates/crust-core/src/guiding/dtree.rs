@@ -9,10 +9,23 @@
 //! same path, which keeps them exactly consistent.
 
 use glam::Vec3A;
+use sampler::Sampler;
 use std::f32::consts::{PI, TAU};
 
 const NO_CHILD: u32 = u32::MAX;
 const ONE_MINUS_EPS: f32 = 1.0 - f32::EPSILON;
+
+/// PCG32 step producing a uniform f32 in [0, 1).
+#[inline]
+fn pcg_f32(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    let xorshifted = (((*state >> 18) ^ *state) >> 27) as u32;
+    let rot = (*state >> 59) as u32;
+    let bits = xorshifted.rotate_right(rot);
+    (bits >> 8) as f32 * (1.0 / (1u32 << 24) as f32)
+}
 
 /// Cylindrical equal-area map from a unit direction to the canonical square.
 pub fn dir_to_canonical(d: Vec3A) -> [f32; 2] {
@@ -140,11 +153,21 @@ impl DTree {
 
     /// Draw a canonical position proportional to the stored flux, returning
     /// it with its solid-angle pdf. `None` if the tree holds no flux yet.
-    pub fn sample(&self, u: [f32; 2]) -> Option<([f32; 2], f32)> {
+    ///
+    /// Exactly one 2D draw is consumed from `sampler`; it seeds a PCG stream
+    /// that supplies fresh uniforms per tree level. Rescaling a single 2D
+    /// sample down the tree (the textbook trick) loses entropy on sharp
+    /// distributions until deep cells are no longer sampled uniformly, and
+    /// drawing per-level from the QMC sampler burns through its dimension
+    /// window; the hashed stream avoids both while keeping the sampler's
+    /// dimension usage fixed.
+    pub fn sample(&self, sampler: &mut dyn Sampler) -> Option<([f32; 2], f32)> {
         if self.total_flux() <= 0.0 {
             return None;
         }
-        let mut u = [u[0].clamp(0.0, ONE_MINUS_EPS), u[1].clamp(0.0, ONE_MINUS_EPS)];
+        let seed = sampler.next_2d();
+        let mut rng_state: u64 = ((seed[0].to_bits() as u64) << 32 | seed[1].to_bits() as u64)
+            ^ 0x9E37_79B9_7F4A_7C15;
         let mut node = 0usize;
         let mut base = [0.0f32; 2];
         let mut scale = 1.0f32;
@@ -156,31 +179,20 @@ impl DTree {
                 // No information below this node: uniform within its domain.
                 break;
             }
+            let u = [pcg_f32(&mut rng_state), pcg_f32(&mut rng_state)];
 
-            // Pick the column proportional to column flux, reusing `u[0]`.
+            // Pick the column proportional to column flux.
             let p_left = (n.sums[0] + n.sums[2]) / total;
-            let qx = if u[0] < p_left {
-                u[0] = (u[0] / p_left).clamp(0.0, ONE_MINUS_EPS);
-                0usize
-            } else {
-                u[0] = ((u[0] - p_left) / (1.0 - p_left)).clamp(0.0, ONE_MINUS_EPS);
-                1usize
-            };
+            let qx = (u[0] >= p_left) as usize;
 
-            // Pick the row within the column, reusing `u[1]`.
+            // Pick the row within the column.
             let col_total = n.sums[qx] + n.sums[qx + 2];
             let p_bottom = if col_total > 0.0 {
                 n.sums[qx] / col_total
             } else {
                 0.5
             };
-            let qy = if u[1] < p_bottom {
-                u[1] = (u[1] / p_bottom).clamp(0.0, ONE_MINUS_EPS);
-                0usize
-            } else {
-                u[1] = ((u[1] - p_bottom) / (1.0 - p_bottom)).clamp(0.0, ONE_MINUS_EPS);
-                1usize
-            };
+            let qy = (u[1] >= p_bottom) as usize;
 
             let q = qx + 2 * qy;
             let frac = n.sums[q] / total;
@@ -199,6 +211,8 @@ impl DTree {
             }
             node = c as usize;
         }
+        // Uniform position within the reached cell.
+        let u = [pcg_f32(&mut rng_state), pcg_f32(&mut rng_state)];
         let p = [
             (base[0] + u[0] * scale).clamp(0.0, ONE_MINUS_EPS),
             (base[1] + u[1] * scale).clamp(0.0, ONE_MINUS_EPS),
@@ -351,7 +365,7 @@ mod tests {
         let tree = trained_tree();
         let mut s = RngSampler::default();
         for _ in 0..1000 {
-            let (p, pdf) = tree.sample(s.next_2d()).expect("trained tree samples");
+            let (p, pdf) = tree.sample(&mut s).expect("trained tree samples");
             let lookup = tree.pdf(p);
             assert!(
                 (pdf - lookup).abs() < 1e-3 * (1.0 + pdf),
@@ -372,9 +386,62 @@ mod tests {
         }
         let tree = tree.refine(0.01, 20);
         for _ in 0..1000 {
-            let (p, _) = tree.sample(s.next_2d()).unwrap();
+            let (p, _) = tree.sample(&mut s).unwrap();
             let d = canonical_to_dir(p);
             assert!(d.z > -1e-3, "sampled below the trained hemisphere: {d}");
+        }
+    }
+
+    #[test]
+    fn sampled_histogram_matches_pdf_on_sharp_tree() {
+        // Train a sharply concentrated distribution over many rounds — the
+        // regime where sample/pdf inconsistencies (e.g. degraded sample
+        // entropy at deep levels) show up as estimator bias.
+        let mut s = RngSampler::default();
+        let mut tree = DTree::new();
+        for round in 0..8 {
+            for _ in 0..50_000 {
+                // A tight cone around +z plus a dim uniform background.
+                let u = s.next_2d();
+                let d = if u[0] < 0.9 {
+                    let v = s.next_2d();
+                    Vec3A::new(0.05 * (v[0] - 0.5), 0.05 * (v[1] - 0.5), 1.0).normalize()
+                } else {
+                    uniform_sphere(s.next_2d())
+                };
+                tree.record(dir_to_canonical(d), 1.0);
+            }
+            if round < 7 {
+                tree = tree.refine(0.01, 20);
+            }
+        }
+        let tree = tree.refine(0.01, 20);
+
+        // Empirical mass per octant must match the pdf-integrated mass.
+        let n = 400_000;
+        let mut counts = [0u64; 8];
+        for _ in 0..n {
+            let (p, _) = tree.sample(&mut s).unwrap();
+            let d = canonical_to_dir(p);
+            let oct = (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize)
+                + 4 * ((d.z >= 0.0) as usize);
+            counts[oct] += 1;
+        }
+        let m = 400_000;
+        let mut integrals = [0.0f64; 8];
+        for _ in 0..m {
+            let d = uniform_sphere(s.next_2d());
+            let oct = (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize)
+                + 4 * ((d.z >= 0.0) as usize);
+            integrals[oct] += tree.pdf(dir_to_canonical(d)) as f64;
+        }
+        for oct in 0..8 {
+            let freq = counts[oct] as f64 / n as f64;
+            let mass = 4.0 * std::f64::consts::PI * integrals[oct] / m as f64;
+            assert!(
+                (freq - mass).abs() < 0.02,
+                "octant {oct}: sampled {freq:.4} vs pdf mass {mass:.4}"
+            );
         }
     }
 
@@ -387,7 +454,8 @@ mod tests {
     #[test]
     fn untrained_tree_declines_to_sample() {
         let tree = DTree::new();
-        assert!(tree.sample([0.3, 0.7]).is_none());
+        let mut s = RngSampler::default();
+        assert!(tree.sample(&mut s).is_none());
         assert_eq!(tree.pdf([0.3, 0.7]), 0.0);
     }
 }
