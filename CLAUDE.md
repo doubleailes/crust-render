@@ -55,11 +55,23 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
 3. **`ray_color()`** (`tracer.rs`) is the integrator — recursive path tracer with:
    - **MIS** combining direct light sampling and BRDF sampling via `balance_heuristic`.
+     Bounce-hit emission is owned by the MIS-weighted `add_emission` term; the recursion
+     suppresses the next vertex's self-emission (`suppress_emission`) to avoid counting
+     it twice.
    - Volumetric scattering (Henyey-Greenstein) and Beer-Lambert attenuation when a ray
      carries `Some(Medium)` (set by transmissive OpenPBR refraction — see `ray.rs` /
      `medium.rs`). Free-space rays are unaffected.
    - A sky-gradient background when nothing is hit.
-4. Output is written to the `-o` EXR, then **`convert()`** (`convert.rs`) tone-maps to sRGB PNG.
+4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
+   Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
+   passes at 1, 2, 4, … spp, splats `(position, direction, luminance·cos²)` samples
+   into the field between passes, then renders the final pass with one-sample MIS
+   between the frozen field and the BSDF (mixture pdf; secondary bounces only —
+   primary vertices sit far below the field's spatial resolution). Delta/transmissive
+   materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
+   sampling. The NEE weight competes against the same mixture pdf — keep the two sides
+   consistent or emission gets double-counted.
+5. Output is written to the `-o` EXR, then **`convert()`** (`convert.rs`) tone-maps to sRGB PNG.
 
 ### Gotcha: EXR/PNG output paths are partly hard-coded
 `convert()` reads a **hard-coded `"output.exr"`** and writes a timestamped PNG under
@@ -77,7 +89,10 @@ Keep `-o output.exr` (the default) if you want the PNG.
   split axis, so it is non-deterministic.
 - **`Material`** (`material/material.rs`) — `scatter(...)` (bool-out-params style) plus
   `scatter_importance(r_in, rec) -> Option<(Ray, brdf_value, pdf)>` used by the integrator,
-  and `emitted()`. Implementations in `material/`: `Lambertian`, `Metal`, `Dielectric` /
+  `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate toward a *given* direction — what
+  NEE and guided MIS need; `None` = delta/transmissive, and per its contract that decision
+  must never depend on `wi`), and `emitted()`. Implementations in `material/`:
+  `Lambertian`, `Metal`, `Dielectric` /
   `ComplexDielectric`, `BlinnPhong`, `CookTorrance`, `Disney`, `OpenPBR`, `Emissive`.
   Shared microfacet helpers (GGX VNDF sampling, Schlick Fresnel, geometry term) live in
   `material/brdf.rs`.
@@ -118,3 +133,8 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
   consume them yet — they are marked `#[allow(dead_code)]`. Wiring adaptive/variance-based
   early-stop into `render()`/`render_with_tiles()` is open work.
 - Non-sphere USD lux light schemas are skipped (see above).
+- **Path guiding** covers surfaces only (no volume/phase guiding), trains on luminance
+  (no chromatic distributions), and discards training-pass images instead of blending
+  iterations. `Metal`/`Dielectric`/`BlinnPhong`/`Disney` have no `Material::eval` yet, so
+  NEE and guiding skip them (delta treatment — correct for metal/glass, conservative for
+  the two glossy ones).

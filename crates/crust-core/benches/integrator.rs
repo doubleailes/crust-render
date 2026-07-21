@@ -54,5 +54,40 @@ fn bench_simple_world(c: &mut Criterion) {
     });
 }
 
-criterion_group!(name = benches;config = Criterion::default(); targets= bench_dot,bench_simple_world);
+fn bench_simple_world_guided(c: &mut Criterion) {
+    c.bench_function("simple world guided", |b| {
+        b.iter(|| {
+            let (world, lights) = simple_scene();
+            let lookfrom = Vec3A::new(13.0, 2.0, 3.0);
+            let lookat = Vec3A::new(0.0, 0.0, 0.0);
+            let vup = Vec3A::new(0.0, 1.0, 0.0);
+            let dist_to_focus = 10.0;
+            let aperture = 0.1;
+
+            let cam = Camera::new(
+                lookfrom,
+                lookat,
+                vup,
+                20.0,
+                ASPECT_RATIO,
+                aperture,
+                dist_to_focus,
+            );
+            let render_settings = RenderSettings::new(
+                10,
+                20,
+                IMAGE_WIDTH,
+                IMAGE_HEIGHT,
+                MIN_SAMPLES,
+                VARIANCE_THRESHOLD,
+                0,
+            )
+            .with_guiding(true, 2, 0.5);
+            let renderer = Renderer::new(cam, world, lights, render_settings);
+            let _ = renderer.render();
+        })
+    });
+}
+
+criterion_group!(name = benches;config = Criterion::default(); targets= bench_dot,bench_simple_world,bench_simple_world_guided);
 criterion_main!(benches);
