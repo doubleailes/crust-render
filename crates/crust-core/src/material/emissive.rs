@@ -32,21 +32,11 @@ impl Emissive {
 }
 
 impl Material for Emissive {
-    fn scatter(
-        &self,
-        _r_in: &Ray,
-        _rec: &HitRecord,
-        _sampler: &mut dyn Sampler,
-        _attenuation: &mut Vec3A,
-        _scattered: &mut Ray,
-    ) -> bool {
-        false // Emissive materials do not scatter
-    }
-
     fn emitted(&self) -> Vec3A {
         self.color
     }
 
+    // Emissive surfaces do not scatter.
     fn scatter_importance(
         &self,
         _r_in: &Ray,

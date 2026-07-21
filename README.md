@@ -18,14 +18,16 @@ Completely in a vibe coding mood.
 ## ✨ Features
 
 - ✅ **Physically-Based Path Tracing**
-  - Supports diffuse, metal, glass, Blinn-Phong, Cook-Torrance
+  - One material to rule them all: the OpenPBR übershader (diffuse, metal,
+    glass, coat, fuzz, thin-film, subsurface, emission)
 - 🔁 **Recursive Ray Scattering** with depth control
 - 💡 **Multiple Light Sources**
   - Emissive materials
   - Light sampling & MIS (Multiple Importance Sampling)
 - ⚙️ **Material System**
-  - Trait-based, easy to extend
+  - Trait-based (`Material`), with OpenPBR as the single surface shader
   - Microfacet GGX BRDF with Fresnel and geometry terms
+  - Rust-side presets: `OpenPBR::diffuse / metal / glass / glossy`
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
 - 🧭 **Path Guiding** (opt-in)
@@ -35,8 +37,6 @@ Completely in a vibe coding mood.
     `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples)
 - 🧪 **Modular Design**
   - Clean separation between renderer, integrator, materials, scene
-- **Disney Principled Shader**
-  - A basic integration of the animation standard shader
 - **Correlated Multi-Jittered (CMJ)**
   - Use CMJ for camera and light rays
 
@@ -74,7 +74,7 @@ Every `UsdGeomMesh` / `UsdGeomSphere` binds a `UsdShadeMaterial` via
   `geometryThinWalled`, …). Non-portable but lossless. See
   `samples/openpbr_showcase.usda` for the seven-preset reference scene.
 
-Unbound geometry falls back to a grey Lambertian.
+Unbound geometry falls back to a grey diffuse OpenPBR.
 
 ### 💡 Lights
 

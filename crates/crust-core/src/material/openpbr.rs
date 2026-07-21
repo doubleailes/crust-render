@@ -147,6 +147,48 @@ impl Default for OpenPBR {
     }
 }
 
+impl OpenPBR {
+    /// Pure diffuse surface (the old `Lambertian` preset).
+    pub fn diffuse(base_color: Vec3A) -> Self {
+        OpenPBR {
+            base_color,
+            specular_weight: 0.0,
+            ..OpenPBR::default()
+        }
+    }
+
+    /// Metallic surface (the old `Metal` preset; `roughness` plays the role
+    /// of fuzz).
+    pub fn metal(base_color: Vec3A, roughness: f32) -> Self {
+        OpenPBR {
+            base_color,
+            base_metalness: 1.0,
+            specular_roughness: roughness.clamp(0.0, 1.0),
+            ..OpenPBR::default()
+        }
+    }
+
+    /// Smooth transmissive dielectric (the old `Dielectric` preset).
+    pub fn glass(ior: f32) -> Self {
+        OpenPBR {
+            transmission_weight: 1.0,
+            specular_ior: ior,
+            specular_roughness: 0.01,
+            ..OpenPBR::default()
+        }
+    }
+
+    /// Glossy dielectric/metal mix (the old `CookTorrance` preset).
+    pub fn glossy(base_color: Vec3A, roughness: f32, metalness: f32) -> Self {
+        OpenPBR {
+            base_color,
+            specular_roughness: roughness.clamp(0.05, 1.0),
+            base_metalness: metalness.clamp(0.0, 1.0),
+            ..OpenPBR::default()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal shading state
 // ---------------------------------------------------------------------------
@@ -600,17 +642,6 @@ fn sample_transmission(
 // ---------------------------------------------------------------------------
 
 impl Material for OpenPBR {
-    fn scatter(
-        &self,
-        _r_in: &Ray,
-        _rec: &HitRecord,
-        _sampler: &mut dyn Sampler,
-        _: &mut Vec3A,
-        _: &mut Ray,
-    ) -> bool {
-        false
-    }
-
     fn scatter_importance(
         &self,
         r_in: &Ray,
@@ -897,58 +928,6 @@ mod tests {
         assert!(t_long.x < t_short.x);
         assert!(t_long.y < t_short.y);
         assert!(t_long.z < t_short.z);
-    }
-
-    // Comparing average scattered throughput for many samples between
-    // OpenPBR and Disney with matching parameters. Ignored by default
-    // because it takes ~1s; opt in with `cargo test -- --ignored`.
-    #[test]
-    #[ignore]
-    fn openpbr_diffuse_matches_disney_within_mc_noise() {
-        use crate::hittable::HitRecord;
-        use crate::material::Disney;
-        let opb = OpenPBR {
-            base_color: Vec3A::new(0.6, 0.4, 0.3),
-            base_diffuse_roughness: 0.5,
-            specular_roughness: 0.2,
-            specular_ior: 1.5,
-            ..OpenPBR::default()
-        };
-        let dis = Disney::new(
-            Vec3A::new(0.6, 0.4, 0.3),
-            0.0,
-            0.2,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        );
-        let mut rec = HitRecord::new();
-        rec.p = Vec3A::ZERO;
-        rec.normal = Vec3A::Z;
-        rec.front_face = true;
-        let ray = Ray::new(Vec3A::new(0.2, 0.0, 1.0), Vec3A::new(-0.2, 0.0, -1.0).normalize());
-        let n = 16_000;
-        let mut sum_opb = Vec3A::ZERO;
-        let mut sum_dis = Vec3A::ZERO;
-        let mut smp = s();
-        for _ in 0..n {
-            if let Some((_, t, p)) = opb.scatter_importance(&ray, &rec, &mut smp) {
-                sum_opb += t / p;
-            }
-            if let Some((_, t, p)) = dis.scatter_importance(&ray, &rec, &mut smp) {
-                sum_dis += t / p;
-            }
-        }
-        let mean_opb = sum_opb / n as f32;
-        let mean_dis = sum_dis / n as f32;
-        // Both use different multi-lobe compositions internally, so a
-        // wide tolerance is expected — this test is a smoke check that
-        // the OpenPBR default output is not orders-of-magnitude off.
-        let ratio = (mean_opb / mean_dis.max(Vec3A::splat(1e-3))).max_element();
-        assert!(ratio < 5.0, "OPB/Disney ratio {ratio} too high; mean_opb = {mean_opb:?} mean_dis = {mean_dis:?}");
     }
 
     #[test]
