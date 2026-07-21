@@ -1,0 +1,190 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    doc = "Closed Cornell-style box whose only light is shrouded from direct view — transport must go light -> ceiling -> scene, the classic hard case for BSDF sampling that path guiding (crust:pathGuiding) is built for. Render with and without the flag to compare noise at equal spp."
+)
+
+def Xform "World"
+{
+    # Camera sits inside the closed box, just in front of the front wall,
+    # looking down -Z at the back wall. ~74 deg horizontal FOV.
+    def Camera "Cam"
+    {
+        double3 xformOp:translate = (0, 2, 1.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        float focalLength = 24
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        float fStop = 1000
+        float focusDistance = 3.7
+        token projection = "perspective"
+    }
+
+    def Scope "Materials"
+    {
+        def Material "white"
+        {
+            token outputs:surface.connect = </World/Materials/white/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.73, 0.73, 0.73)
+                float inputs:specularWeight = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "red"
+        {
+            token outputs:surface.connect = </World/Materials/red/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.63, 0.065, 0.05)
+                float inputs:specularWeight = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "green"
+        {
+            token outputs:surface.connect = </World/Materials/green/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.14, 0.45, 0.091)
+                float inputs:specularWeight = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    # Box interior: x in [-2, 2], y in [0, 4], z in [-2, 2]. All six walls
+    # are closed so the only light is the shrouded SphereLight below the
+    # ceiling.
+    def Xform "Box"
+    {
+        def Mesh "floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2.0, 0.0, -2.0), (2.0, 0.0, 2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.0, 0.0, -2.0), (2.0, 0.0, -2.0), (2.0, 0.0, 2.0), (-2.0, 0.0, 2.0)]
+            rel material:binding = </World/Materials/white>
+        }
+
+        def Mesh "ceiling" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2.0, 4.0, -2.0), (2.0, 4.0, 2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.0, 4.0, -2.0), (2.0, 4.0, -2.0), (2.0, 4.0, 2.0), (-2.0, 4.0, 2.0)]
+            rel material:binding = </World/Materials/white>
+        }
+
+        def Mesh "back_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2.0, 0.0, -2.0), (2.0, 4.0, -2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.0, 0.0, -2.0), (2.0, 0.0, -2.0), (2.0, 4.0, -2.0), (-2.0, 4.0, -2.0)]
+            rel material:binding = </World/Materials/white>
+        }
+
+        def Mesh "front_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2.0, 0.0, 2.0), (2.0, 4.0, 2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.0, 0.0, 2.0), (2.0, 0.0, 2.0), (2.0, 4.0, 2.0), (-2.0, 4.0, 2.0)]
+            rel material:binding = </World/Materials/white>
+        }
+
+        def Mesh "left_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-2.0, 0.0, -2.0), (-2.0, 4.0, 2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-2.0, 0.0, -2.0), (-2.0, 0.0, 2.0), (-2.0, 4.0, 2.0), (-2.0, 4.0, -2.0)]
+            rel material:binding = </World/Materials/red>
+        }
+
+        def Mesh "right_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(2.0, 0.0, -2.0), (2.0, 4.0, 2.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(2.0, 0.0, -2.0), (2.0, 0.0, 2.0), (2.0, 4.0, 2.0), (2.0, 4.0, -2.0)]
+            rel material:binding = </World/Materials/green>
+        }
+
+        def Mesh "light_shroud" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform bool doubleSided = 1
+            float3[] extent = [(-1.0, 3.0, -1.0), (1.0, 3.0, 1.0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-1.0, 3.0, -1.0), (1.0, 3.0, -1.0), (1.0, 3.0, 1.0), (-1.0, 3.0, 1.0)]
+            rel material:binding = </World/Materials/white>
+        }
+    }
+
+    def Xform "Contents"
+    {
+        def Sphere "big_sphere" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 0.7
+            double3 xformOp:translate = (-0.9, 0.7, -0.6)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/white>
+        }
+
+        def Sphere "small_sphere" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            double radius = 0.5
+            double3 xformOp:translate = (0.9, 0.5, 0.3)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </World/Materials/white>
+        }
+    }
+
+    # A single bright light hidden between the shroud panel (y=3) and the
+    # ceiling (y=4): almost nothing in the scene sees it directly, so plain
+    # BSDF sampling and NEE both struggle — paths must learn to aim at the
+    # bright ceiling patch, which is exactly what the guiding field encodes.
+    def SphereLight "CeilingLight"
+    {
+        float inputs:radius = 0.35
+        color3f inputs:color = (60, 60, 60)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (0, 3.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# RenderSettings — non-standard params in the `crust:` namespace. Path
+# guiding is opt-in: delete or set crust:pathGuiding = false to compare
+# against plain BSDF sampling at the same samplesPerPixel.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (512, 512)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+        bool crust:pathGuiding = true
+        int crust:guidingTrainIterations = 4
+        float crust:guidingProb = 0.5
+    }
+}

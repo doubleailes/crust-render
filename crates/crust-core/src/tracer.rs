@@ -1,5 +1,5 @@
 use crate::buffer::Buffer;
-use crate::guiding::{GuidingField, SampleData, luminance};
+use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::{HitRecord, Hittable};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
@@ -8,6 +8,7 @@ use glam::Vec3A;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
 use sampler::{Sampler, SobolSampler};
+use tracing::{info, warn};
 
 /// Training-only clamp on recorded radiance so a single firefly cannot
 /// dominate a directional distribution. Affects the guiding field, never the
@@ -44,112 +45,205 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
-        let bar = ProgressBar::new(self.settings.height as u64);
-        bar.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-                )
-                .unwrap(),
-        );
-        let frame_seed = self.settings.frame as u32;
-        for j in (0..self.settings.height).rev() {
-            let pixel_colors: Vec<_> = (0..self.settings.width)
-                .into_par_iter()
-                .map(|i| {
-                    let mut sampler = SobolSampler::new(frame_seed);
-                    sampler.start_pixel(i as u32, j as u32);
-                    let mut sum = Vec3A::new(0.0, 0.0, 0.0);
-
-                    for sample in 0..self.settings.samples_per_pixel {
-                        sampler.start_sample(sample);
-                        let jitter = sampler.next_2d();
-                        let lens_uv = sampler.next_2d();
-                        let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
-                        let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
-                        let r = self.camera.get_ray(u, v, lens_uv);
-                        let col = ray_color(
-                            &r,
-                            &self.world,
-                            &self.lights,
-                            self.settings.max_depth as i32,
-                            &mut sampler,
-                        );
-
-                        sum += col;
-                    }
-                    sum / self.settings.samples_per_pixel as f32
-                })
-                .collect();
-            for (i, pixel_color) in pixel_colors.into_iter().enumerate() {
-                buffer.set_pixel(i, j, pixel_color);
-            }
-            bar.inc(1);
+        if self.settings.guiding {
+            return self.render_guided(false);
         }
-        bar.finish();
-        buffer
+        self.render_pass(
+            self.settings.samples_per_pixel,
+            self.settings.frame as u32,
+            false,
+            None,
+            true,
+        )
+        .0
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
-        let bar = ProgressBar::new(tiles.len() as u64);
-        bar.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-                )
-                .unwrap(),
-        );
-        let frame_seed = self.settings.frame as u32;
-        // Collect all pixels in parallel from tiles
-        let pixels: Vec<(usize, usize, Vec3A)> = tiles
-            .into_par_iter()
-            .flat_map(|tile| {
-                let mut local = Vec::with_capacity(tile.width * tile.height);
+        if self.settings.guiding {
+            return self.render_guided(true);
+        }
+        self.render_pass(
+            self.settings.samples_per_pixel,
+            self.settings.frame as u32,
+            true,
+            None,
+            true,
+        )
+        .0
+    }
 
-                for j in tile.y..tile.y + tile.height {
-                    for i in tile.x..tile.x + tile.width {
-                        let mut sampler = SobolSampler::new(frame_seed);
-                        sampler.start_pixel(i as u32, j as u32);
-                        let mut color = Vec3A::new(0.0, 0.0, 0.0);
+    /// Progressive path-guided rendering: training passes with geometrically
+    /// growing sample budgets (1, 2, 4, … spp) build the guiding field, then
+    /// the full per-pixel budget renders the final image with the frozen
+    /// field. The final image comes from the final pass alone.
+    fn render_guided(&self, tiled: bool) -> Buffer {
+        let bounds = match self.world.bounding_box() {
+            Some(b) => b,
+            None => {
+                warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
+                return self
+                    .render_pass(
+                        self.settings.samples_per_pixel,
+                        self.settings.frame as u32,
+                        tiled,
+                        None,
+                        true,
+                    )
+                    .0;
+            }
+        };
+        let cfg = GuidingConfig {
+            train_iterations: self.settings.guiding_train_iterations,
+            guide_prob: self.settings.guiding_prob,
+            ..GuidingConfig::default()
+        };
+        let mut field = GuidingField::new(bounds, cfg);
+        let base_seed = self.settings.frame as u32;
 
-                        for sample in 0..self.settings.samples_per_pixel {
-                            sampler.start_sample(sample);
-                            let jitter = sampler.next_2d();
-                            let lens_uv = sampler.next_2d();
-
-                            let u = (i as f32 + jitter[0]) / (self.settings.width - 1) as f32;
-                            let v = (j as f32 + jitter[1]) / (self.settings.height - 1) as f32;
-
-                            let ray = self.camera.get_ray(u, v, lens_uv);
-                            color += ray_color(
-                                &ray,
-                                &self.world,
-                                &self.lights,
-                                self.settings.max_depth as i32,
-                                &mut sampler,
-                            );
-                        }
-
-                        let final_color = color / self.settings.samples_per_pixel as f32;
-                        local.push((i, j, final_color));
-                    }
-                }
-
-                bar.inc(1);
-                local
-            })
-            .collect();
-        bar.finish();
-        // Combine results into a buffer
-        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
-        for (i, j, color) in pixels {
-            buffer.set_pixel(i, j, color);
+        for k in 0..cfg.train_iterations {
+            let spp = 1u32 << k.min(16);
+            // Decorrelate the Sobol sequences between passes.
+            let seed = base_seed.wrapping_add((k + 1).wrapping_mul(0x9E37_79B9));
+            info!(
+                "path guiding: training pass {}/{} at {} spp",
+                k + 1,
+                cfg.train_iterations,
+                spp
+            );
+            let gctx = GuidingContext {
+                field: &field,
+                training: true,
+            };
+            let (_, samples) = self.render_pass(spp, seed, tiled, Some(&gctx), false);
+            drop(gctx);
+            info!("path guiding: splatting {} samples", samples.len());
+            field.update(&samples, k + 1);
         }
 
-        buffer
+        info!(
+            "path guiding: final pass at {} spp",
+            self.settings.samples_per_pixel
+        );
+        let gctx = GuidingContext {
+            field: &field,
+            training: false,
+        };
+        self.render_pass(
+            self.settings.samples_per_pixel,
+            base_seed,
+            tiled,
+            Some(&gctx),
+            true,
+        )
+        .0
     }
+
+    /// One full-frame pass at `spp` samples per pixel. Returns the image and
+    /// whatever training samples the pass recorded (empty unless a training
+    /// `GuidingContext` is supplied).
+    fn render_pass(
+        &self,
+        spp: u32,
+        pass_seed: u32,
+        tiled: bool,
+        gctx: Option<&GuidingContext>,
+        progress: bool,
+    ) -> (Buffer, Vec<SampleData>) {
+        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        let mut all_samples = Vec::new();
+
+        if tiled {
+            let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
+            let bar = progress_bar(tiles.len() as u64, progress);
+            let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>)> = tiles
+                .into_par_iter()
+                .map(|tile| {
+                    let mut pixels = Vec::with_capacity(tile.width * tile.height);
+                    let mut samples = Vec::new();
+                    for j in tile.y..tile.y + tile.height {
+                        for i in tile.x..tile.x + tile.width {
+                            let (color, mut s) = self.render_pixel(i, j, spp, pass_seed, gctx);
+                            pixels.push((i, j, color));
+                            samples.append(&mut s);
+                        }
+                    }
+                    bar.inc(1);
+                    (pixels, samples)
+                })
+                .collect();
+            for (pixels, samples) in results {
+                for (i, j, color) in pixels {
+                    buffer.set_pixel(i, j, color);
+                }
+                all_samples.extend(samples);
+            }
+            bar.finish();
+        } else {
+            let bar = progress_bar(self.settings.height as u64, progress);
+            for j in (0..self.settings.height).rev() {
+                let row: Vec<(Vec3A, Vec<SampleData>)> = (0..self.settings.width)
+                    .into_par_iter()
+                    .map(|i| self.render_pixel(i, j, spp, pass_seed, gctx))
+                    .collect();
+                for (i, (color, samples)) in row.into_iter().enumerate() {
+                    buffer.set_pixel(i, j, color);
+                    all_samples.extend(samples);
+                }
+                bar.inc(1);
+            }
+            bar.finish();
+        }
+
+        (buffer, all_samples)
+    }
+
+    fn render_pixel(
+        &self,
+        i: usize,
+        j: usize,
+        spp: u32,
+        pass_seed: u32,
+        gctx: Option<&GuidingContext>,
+    ) -> (Vec3A, Vec<SampleData>) {
+        let mut sampler = SobolSampler::new(pass_seed);
+        sampler.start_pixel(i as u32, j as u32);
+        let mut sum = Vec3A::ZERO;
+        let mut samples = Vec::new();
+
+        for sample in 0..spp {
+            sampler.start_sample(sample);
+            let jitter = sampler.next_2d();
+            let lens_uv = sampler.next_2d();
+            let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
+            let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
+            let r = self.camera.get_ray(u, v, lens_uv);
+            sum += ray_color_inner(
+                &r,
+                &self.world,
+                &self.lights,
+                self.settings.max_depth as i32,
+                &mut sampler,
+                gctx,
+                &mut samples,
+            );
+        }
+        (sum / spp as f32, samples)
+    }
+}
+
+fn progress_bar(len: u64, visible: bool) -> ProgressBar {
+    if !visible {
+        return ProgressBar::hidden();
+    }
+    let bar = ProgressBar::new(len);
+    bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap(),
+    );
+    bar
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,6 +259,10 @@ pub struct RenderSettings {
     #[allow(dead_code)]
     variance_threshold: f32,
     frame: isize,
+    // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).
+    guiding: bool,
+    guiding_train_iterations: u32,
+    guiding_prob: f32,
 }
 impl RenderSettings {
     pub fn new(
@@ -184,8 +282,21 @@ impl RenderSettings {
             min_samples_per_pixel,
             variance_threshold,
             frame,
+            guiding: false,
+            guiding_train_iterations: 4,
+            guiding_prob: 0.5,
         }
     }
+
+    /// Enable (or disable) path guiding with the given number of training
+    /// iterations and guide-sampling probability α.
+    pub fn with_guiding(mut self, enabled: bool, train_iterations: u32, guide_prob: f32) -> Self {
+        self.guiding = enabled;
+        self.guiding_train_iterations = train_iterations.max(1);
+        self.guiding_prob = guide_prob.clamp(0.1, 0.9);
+        self
+    }
+
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
