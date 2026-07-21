@@ -442,7 +442,7 @@ fn sample_bounce_direction(
             if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
                 let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
                 return Some(ScatterSample {
-                    ray: Ray::new(rec.p, wi),
+                    ray: mat.make_ray(rec, wi),
                     value,
                     pdf,
                     delta: false,
@@ -563,7 +563,10 @@ fn ray_color_inner(
             let mut shadow_hit = HitRecord::new();
 
             if !world.hit(&shadow_ray, 0.001, light_distance - 0.001, &mut shadow_hit) {
-                let cosine = f32::max(rec.normal.dot(light_dir_unit), 0.0);
+                // Unsigned: lights behind the ray-facing normal are reachable
+                // through a continuous transmission lobe (opaque materials
+                // evaluate to zero there anyway).
+                let cosine = rec.normal.dot(light_dir_unit).abs();
                 let light_pdf = light.pdf(rec.p, light_point);
 
                 // Evaluate the BSDF toward the light direction. Delta and
@@ -596,15 +599,15 @@ fn ray_color_inner(
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         if let Some(sample) = sample_bounce_direction(r, &rec, guiding_here, sampler) {
             let dir = sample.ray.direction().normalize();
-            // The codebase convention multiplies the material's brdf*cos
-            // value by the cosine again — but only for continuous samples: a
-            // delta transmission direction lies behind the ray-facing normal
-            // (its clamped cosine is zero) and carries its full throughput
-            // in `value` already.
+            // The codebase convention multiplies the material's brdf*|cos|
+            // value by the cosine again — unsigned, so continuous
+            // transmission directions (behind the ray-facing normal) are not
+            // zeroed. Delta samples carry their full throughput in `value`
+            // and skip the factor entirely.
             let cosine = if sample.delta {
                 1.0
             } else {
-                f32::max(rec.normal.dot(dir), 0.0)
+                rec.normal.dot(dir).abs()
             };
 
             let mut light_hit = HitRecord::new();
@@ -655,13 +658,13 @@ fn ray_color_inner(
             // Record a training sample for the guiding field: the full
             // incident radiance (reflected + the suppressed hit emission),
             // weighted by cos² to match this tracer's estimator, which
-            // multiplies the codebase's brdf*cos material values by the
-            // cosine again. Delta transmission directions record zero flux
-            // (the guide models the continuous reflection component only)
-            // but still count toward the spatial split statistic.
+            // multiplies the codebase's brdf*|cos| material values by the
+            // cosine again. Delta samples are skipped — the guide models the
+            // continuous component only and can never produce their
+            // directions.
             if let Some(g) = guiding {
-                if g.training {
-                    let cos = rec.normal.dot(dir).max(0.0);
+                if g.training && !sample.delta {
+                    let cos = rec.normal.dot(dir).abs();
                     train_out.push(SampleData {
                         pos: rec.p,
                         dir,

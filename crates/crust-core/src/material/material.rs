@@ -71,6 +71,14 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// Builds the continuation ray for an externally chosen direction `wi`
+    /// (e.g. drawn from the guiding field). Materials that tag rays with an
+    /// interior medium on transmission must do the same here, so a guided
+    /// direction crosses the interface exactly like a BSDF-sampled one.
+    fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+        Ray::new(rec.p, wi)
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

@@ -119,6 +119,35 @@ pub fn pdf_vndf_ggx_aniso_local(v_local: Vec3A, h_local: Vec3A, ax: f32, ay: f32
     d * g1 / (4.0 * n_dot_v)
 }
 
+/// Raw half-vector density of VNDF sampling, `p(h) = D · G1 · |v·h| / |v·n|`,
+/// in the tangent frame. Combine with the transform Jacobian of the mapping
+/// h → outgoing direction (reflection: `1/(4|v·h|)`; refraction: Walter et
+/// al. 2007 eq. 17) to get an outgoing-direction pdf.
+pub fn pdf_vndf_h_aniso_local(v_local: Vec3A, h_local: Vec3A, ax: f32, ay: f32) -> f32 {
+    let n_dot_v = v_local.z.max(1e-6);
+    let v_dot_h = v_local.dot(h_local).max(0.0);
+    let d = ggx_d_aniso(h_local.z.max(1e-6), h_local.x, h_local.y, ax, ay);
+    let lambda_v = ggx_lambda_aniso(n_dot_v, v_local.x, v_local.y, ax, ay);
+    let g1 = 1.0 / (1.0 + lambda_v);
+    d * g1 * v_dot_h / n_dot_v
+}
+
+/// Exact unpolarized dielectric Fresnel reflectance for an interface with
+/// incident-side IOR `eta_i` and transmitted-side IOR `eta_t`. `cos_i` is
+/// the (positive) cosine between the incident direction and the facet
+/// normal. Returns 1.0 under total internal reflection.
+pub fn fresnel_dielectric(cos_i: f32, eta_i: f32, eta_t: f32) -> f32 {
+    let cos_i = cos_i.clamp(0.0, 1.0);
+    let sin2_t = (eta_i / eta_t) * (eta_i / eta_t) * (1.0 - cos_i * cos_i);
+    if sin2_t >= 1.0 {
+        return 1.0;
+    }
+    let cos_t = (1.0 - sin2_t).sqrt();
+    let r_par = (eta_t * cos_i - eta_i * cos_t) / (eta_t * cos_i + eta_i * cos_t);
+    let r_perp = (eta_i * cos_i - eta_t * cos_t) / (eta_i * cos_i + eta_t * cos_t);
+    0.5 * (r_par * r_par + r_perp * r_perp)
+}
+
 /// Build an orthonormal tangent frame (t, b) around the surface normal `n`
 /// with no assumed UV parametrisation. Uses the Duff et al. 2017 branchless
 /// method — stable everywhere, including near the poles.

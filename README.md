@@ -134,11 +134,12 @@ against a converged reference by ~20% at equal final spp:
 cargo run --release -- -i samples/cornellbox_guided.usda
 ```
 
-Every continuous lobe is guided — including the reflection lobes of glass.
-Only the delta transmission lobe itself and volume scattering are excluded
-(a learned continuous density cannot represent a singular lobe); untrained
-regions fall back to plain BSDF sampling, so the estimator stays unbiased
-everywhere.
+Every continuous lobe is guided — including refraction: thick glass uses a
+real Walter et al. 2007 microfacet BTDF with a proper VNDF-based pdf, so
+the guiding field can learn and sample directions straight through it. Only
+thin-walled and dispersive transmission (genuinely singular/discrete lobes)
+and volume scattering are excluded; untrained regions fall back to plain
+BSDF sampling, so the estimator stays unbiased everywhere.
 
 ### CLI
 

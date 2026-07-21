@@ -458,9 +458,18 @@ fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec
     m.fuzz_color * m.fuzz_weight * sheen_charlie(n_dot_v, n_dot_l, n_dot_h, m.fuzz_roughness)
 }
 
-fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A) -> Vec3A {
-    if l_local.z <= 0.0 || v_local.z <= 0.0 {
+fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3A {
+    if v_local.z <= 0.0 {
         return Vec3A::ZERO;
+    }
+    if l_local.z <= 0.0 {
+        // Below the ray-facing hemisphere: only a continuous transmission
+        // lobe contributes (delta transmission is excluded from evaluation
+        // by the trait contract).
+        if !transmission_is_continuous(m) {
+            return Vec3A::ZERO;
+        }
+        return eval_transmission(m, v_local, l_local, entering).0;
     }
     let h_local = (v_local + l_local).normalize();
 
@@ -486,9 +495,15 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A) -> Vec3A {
 // Mixture PDF: p(l) = Σ p_lobe · pdf_lobe(l)
 // ---------------------------------------------------------------------------
 
-fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A) -> f32 {
-    if l_local.z <= 0.0 || v_local.z <= 0.0 {
+fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A, entering: bool) -> f32 {
+    if v_local.z <= 0.0 {
         return 0.0;
+    }
+    if l_local.z <= 0.0 {
+        if !transmission_is_continuous(m) {
+            return 0.0;
+        }
+        return pmf.p_transmission * eval_transmission(m, v_local, l_local, entering).1;
     }
     let h_local = (v_local + l_local).normalize();
 
@@ -650,6 +665,124 @@ fn sample_transmission(
 }
 
 // ---------------------------------------------------------------------------
+// Rough refraction — Walter et al. 2007, "Microfacet Models for Refraction
+// through Rough Surfaces". Thick, non-dispersive transmission is a proper
+// continuous BTDF lobe: sampleable, evaluable, and therefore visible to NEE
+// and the guiding mixture. Thin-walled and hero-wavelength-dispersive
+// transmission remain delta lobes.
+// ---------------------------------------------------------------------------
+
+/// Whether the transmission lobe is a continuous BTDF (thick, non-dispersive
+/// refraction) as opposed to a delta lobe.
+fn transmission_is_continuous(m: &OpenPBR) -> bool {
+    m.transmission_weight > 0.0
+        && !m.geometry_thin_walled
+        && m.transmission_dispersion_scale <= 0.0
+}
+
+/// Incident / transmitted IORs at the interface, in the ray-facing local
+/// frame (`entering` = the ray hit the front face and refracts into the
+/// interior medium).
+fn interface_iors(m: &OpenPBR, entering: bool) -> (f32, f32) {
+    if entering {
+        (1.0, m.specular_ior)
+    } else {
+        (m.specular_ior, 1.0)
+    }
+}
+
+/// GGX alphas for the transmission lobe. Roughness is floored so the
+/// distribution stays finite for nominally perfect glass.
+fn transmission_alphas(m: &OpenPBR) -> (f32, f32) {
+    roughness_to_alpha_aniso(
+        m.specular_roughness.max(0.01),
+        m.specular_roughness_anisotropy,
+    )
+}
+
+/// Walter et al. BTDF value (without the tracer-facing cosine, tinted by
+/// transmission color/weight) and the matching VNDF sampling pdf for a
+/// below-hemisphere direction `l_local`. Returns zeros when `l_local` is not
+/// a valid refraction of `v_local`.
+fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> (Vec3A, f32) {
+    let (eta_i, eta_t) = interface_iors(m, entering);
+
+    // Half vector for refraction (eq. 16): h ∝ -(η_i·v + η_t·l), oriented
+    // into the upper hemisphere of the ray-facing frame.
+    let mut h = -(v_local * eta_i + l_local * eta_t);
+    if h.length_squared() < 1e-12 {
+        return (Vec3A::ZERO, 0.0);
+    }
+    h = h.normalize();
+    if h.z < 0.0 {
+        h = -h;
+    }
+
+    let v_dot_h = v_local.dot(h);
+    let l_dot_h = l_local.dot(h);
+    if v_dot_h <= 1e-6 || l_dot_h >= -1e-6 {
+        return (Vec3A::ZERO, 0.0);
+    }
+
+    let (ax, ay) = transmission_alphas(m);
+    let n_dot_v = v_local.z.max(1e-6);
+    let n_dot_l = (-l_local.z).max(1e-6);
+
+    let d = ggx_d_aniso(h.z.max(1e-6), h.x, h.y, ax, ay);
+    let g = ggx_g2_smith_aniso(
+        n_dot_v, v_local.x, v_local.y, n_dot_l, l_local.x, l_local.y, ax, ay,
+    );
+    let f = fresnel_dielectric(v_dot_h, eta_i, eta_t);
+
+    let denom = eta_i * v_dot_h + eta_t * l_dot_h;
+    let denom2 = denom * denom;
+    if denom2 < 1e-10 {
+        return (Vec3A::ZERO, 0.0);
+    }
+
+    // BTDF (eq. 21).
+    let btdf = (v_dot_h * -l_dot_h) / (n_dot_v * n_dot_l)
+        * (eta_t * eta_t * (1.0 - f) * d * g / denom2);
+    let value = m.transmission_color
+        * (m.transmission_weight * (1.0 - m.base_metalness) * btdf.max(0.0));
+
+    // pdf: raw VNDF half-vector density times the refraction Jacobian
+    // (eq. 17): dω_h/dω_l = η_t² |l·h| / (η_i(v·h) + η_t(l·h))².
+    let p_h = pdf_vndf_h_aniso_local(v_local, h, ax, ay);
+    let jacobian = eta_t * eta_t * -l_dot_h / denom2;
+
+    (value, p_h * jacobian)
+}
+
+/// Sample the continuous transmission lobe: VNDF half-vector, then Snell.
+/// Returns the transmitted direction in the local frame, or `None` on total
+/// internal reflection at the sampled microfacet (that energy is carried by
+/// the specular reflection lobe).
+fn sample_transmission_rough(
+    m: &OpenPBR,
+    v_local: Vec3A,
+    entering: bool,
+    sampler: &mut dyn Sampler,
+) -> Option<Vec3A> {
+    let (eta_i, eta_t) = interface_iors(m, entering);
+    let eta_rel = eta_i / eta_t;
+    let (ax, ay) = transmission_alphas(m);
+
+    let h = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
+    let cos_i = v_local.dot(h);
+    if cos_i <= 1e-6 {
+        return None;
+    }
+    let sin2_t = eta_rel * eta_rel * (1.0 - cos_i * cos_i);
+    if sin2_t >= 1.0 {
+        return None; // TIR
+    }
+    let cos_t = (1.0 - sin2_t).sqrt();
+    let l = (-v_local * eta_rel + h * (eta_rel * cos_i - cos_t)).normalize();
+    if l.z >= -1e-6 { None } else { Some(l) }
+}
+
+// ---------------------------------------------------------------------------
 // Material impl
 // ---------------------------------------------------------------------------
 
@@ -670,11 +803,37 @@ impl Material for OpenPBR {
         let pmf = LobePmf::from_params(self);
         let lobe = pmf.pick(sampler.next_1d());
 
-        // Transmission is a delta lobe (refraction through a sampled
-        // microfacet, reported with a placeholder pdf) — handle it
-        // separately from the continuous reflection lobes and flag it so the
-        // integrator never mixes it with a continuous density.
         if matches!(lobe, Lobe::Transmission) {
+            // Thick, non-dispersive refraction is a continuous Walter BTDF
+            // lobe: value and pdf come from the same full-sphere
+            // eval_all/pdf_all composition as the reflection lobes, so
+            // sampling and evaluation agree exactly.
+            if transmission_is_continuous(self) {
+                let l_local =
+                    sample_transmission_rough(self, v_local, rec.front_face, sampler)?;
+                let l_world = frame.to_world(l_local);
+                let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
+                let brdf = eval_all(self, v_local, l_local, rec.front_face);
+                let ray = if rec.front_face {
+                    let medium = Arc::new(Medium::from_transmission(
+                        self.transmission_color,
+                        self.transmission_depth,
+                    ));
+                    Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
+                } else {
+                    Ray::new(rec.p + l_world * 1e-4, l_world)
+                };
+                return Some(ScatterSample {
+                    ray,
+                    value: brdf * l_local.z.abs(),
+                    pdf,
+                    delta: false,
+                });
+            }
+
+            // Thin-walled and hero-wavelength-dispersive transmission stay
+            // delta lobes (placeholder pdf, never mixed with a continuous
+            // density).
             let (scattered, throughput, pdf) =
                 sample_transmission(self, r_in, rec, &frame, sampler)?;
             // Divide by the lobe-selection probability so the mixture
@@ -719,11 +878,11 @@ impl Material for OpenPBR {
         };
 
         // Mixture PDF and full-mixture BRDF value. `pdf_all` weights by the
-        // full lobe PMF (including any transmission share), so this is the
-        // exact — defective when transmission takes selection mass — density
-        // of the continuous sampling procedure.
-        let pdf = pdf_all(self, &pmf, v_local, l_local).max(1e-4);
-        let brdf = eval_all(self, v_local, l_local);
+        // full lobe PMF (including any delta-transmission share), so this is
+        // the exact — defective when a delta lobe takes selection mass —
+        // density of the continuous sampling procedure.
+        let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
+        let brdf = eval_all(self, v_local, l_local, rec.front_face);
         let n_dot_l = l_local.z.max(0.0);
 
         let l_world = frame.to_world(l_local);
@@ -738,23 +897,42 @@ impl Material for OpenPBR {
     }
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
-        // Evaluates the continuous (reflection) component only. On a
-        // transmissive surface the delta transmission lobe is excluded per
-        // the trait contract; its reflection lobes — glass still has
-        // specular highlights — remain visible to NEE and guiding, with
-        // `pdf_all` reporting the matching defective density.
+        // Evaluates the continuous component over the full sphere: the
+        // reflection lobes above the ray-facing hemisphere and — for thick,
+        // non-dispersive transmissive surfaces — the Walter BTDF below it.
+        // Delta lobes (thin-walled / dispersive transmission) are excluded
+        // per the trait contract; `pdf_all` reports the matching defective
+        // density.
         let frame = Frame::new(rec.normal);
         let v_local = frame.to_local(-r_in.direction().normalize());
         if v_local.z <= 0.0 {
             return None;
         }
         let l_local = frame.to_local(wi.normalize());
-        if l_local.z <= 0.0 {
-            return Some((Vec3A::ZERO, 1e-4));
-        }
         let pmf = LobePmf::from_params(self);
-        let pdf = pdf_all(self, &pmf, v_local, l_local).max(1e-4);
-        Some((eval_all(self, v_local, l_local) * l_local.z, pdf))
+        let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
+        Some((
+            eval_all(self, v_local, l_local, rec.front_face) * l_local.z.abs(),
+            pdf,
+        ))
+    }
+
+    fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+        // Mirror the ray construction of `scatter_importance` for an
+        // externally chosen direction (e.g. from the guiding field), so a
+        // guided transmission direction crosses the interface with the same
+        // origin offset and interior-medium tagging as a BSDF-sampled one.
+        if transmission_is_continuous(self) && rec.normal.dot(wi) < 0.0 {
+            if rec.front_face {
+                let medium = Arc::new(Medium::from_transmission(
+                    self.transmission_color,
+                    self.transmission_depth,
+                ));
+                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, medium);
+            }
+            return Ray::new(rec.p + wi * 1e-4, wi);
+        }
+        Ray::new(rec.p, wi)
     }
 
     fn emitted(&self) -> Vec3A {
@@ -819,11 +997,17 @@ mod tests {
     }
 
     #[test]
-    fn transmissive_eval_covers_continuous_samples() {
-        // The continuous (reflection) component of a transmissive surface is
-        // evaluable and consistent with sampling; transmission itself is
-        // flagged as a delta sample.
-        let m = OpenPBR::glass(1.5);
+    fn glass_transmission_is_continuous_and_eval_consistent() {
+        // Thick, non-dispersive glass samples a Walter BTDF: every sample is
+        // continuous and must agree with eval on both hemispheres. Uses a
+        // visibly rough glass — at near-delta roughness the D term varies so
+        // fast that f32 half-vector reconstruction noise dominates any
+        // pointwise comparison (the value/pdf ratio stays stable, checked
+        // below for smooth glass too).
+        let m = OpenPBR {
+            specular_roughness: 0.25,
+            ..OpenPBR::glass(1.5)
+        };
         let mut sampler = s();
         let mut rec = HitRecord::new();
         rec.p = Vec3A::ZERO;
@@ -831,40 +1015,124 @@ mod tests {
         rec.front_face = true;
         let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
 
-        let (mut continuous, mut delta) = (0, 0);
+        let (mut transmitted, mut reflected) = (0, 0);
         for _ in 0..256 {
             if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                assert!(!sample.delta, "thick non-dispersive glass has no delta lobe");
                 let wi = sample.ray.direction().normalize();
-                if sample.delta {
-                    assert!(
-                        wi.z < 0.0 || sample.pdf == 1.0,
-                        "delta sample should be transmission-like"
-                    );
-                    delta += 1;
+                if wi.z < 0.0 {
+                    transmitted += 1;
                 } else {
-                    let (ev, epdf) =
-                        m.eval(&r_in, &rec, wi).expect("continuous component is evaluable");
-                    let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
+                    reflected += 1;
+                }
+                let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("glass is fully evaluable");
+                let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
+                assert!(
+                    (ev - sample.value).abs().max_element() < tol,
+                    "{ev} vs {:?} (wi.z = {})",
+                    sample.value,
+                    wi.z
+                );
+                assert!(
+                    (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
+                    "{epdf} vs {} (wi.z = {})",
+                    sample.pdf,
+                    wi.z
+                );
+                // VNDF-sampled Walter weights are bounded: value/pdf stays sane.
+                let w = (sample.value / sample.pdf).max_element();
+                assert!(w.is_finite() && w >= 0.0 && w < 10.0, "weight {w}");
+            }
+        }
+        assert!(transmitted > 64, "glass should mostly refract: {transmitted}");
+        assert!(reflected >= 0);
+
+        // Near-smooth glass: pointwise agreement degrades to float noise but
+        // the estimator weight value/pdf must stay bounded and the pdfs must
+        // agree within a loose relative tolerance.
+        let smooth = OpenPBR::glass(1.5);
+        for _ in 0..128 {
+            if let Some(sample) = smooth.scatter_importance(&r_in, &rec, &mut sampler) {
+                let wi = sample.ray.direction().normalize();
+                let (_, epdf) = smooth.eval(&r_in, &rec, wi).expect("evaluable");
+                assert!(
+                    (epdf - sample.pdf).abs() < 0.05 * (1.0 + sample.pdf),
+                    "{epdf} vs {}",
+                    sample.pdf
+                );
+                let w = (sample.value / sample.pdf).max_element();
+                assert!(w.is_finite() && w >= 0.0 && w < 10.0, "weight {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn near_smooth_refraction_matches_snell() {
+        // At near-zero roughness the sampled transmitted direction must
+        // approach the analytic Snell refraction of the view ray.
+        let m = OpenPBR::glass(1.5);
+        let mut sampler = s();
+        let mut rec = HitRecord::new();
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let dir_in = Vec3A::new(0.4, 0.0, -1.0).normalize();
+        let r_in = Ray::new(-dir_in, dir_in);
+        let expected = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+
+        let mut checked = 0;
+        for _ in 0..128 {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                let wi = sample.ray.direction().normalize();
+                if wi.z < 0.0 {
                     assert!(
-                        (ev - sample.value).abs().max_element() < tol,
-                        "{ev} vs {:?}",
-                        sample.value
+                        wi.dot(expected) > 0.995,
+                        "refracted {wi} too far from Snell {expected}"
                     );
-                    assert!(
-                        (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
-                        "{epdf} vs {}",
-                        sample.pdf
-                    );
-                    continuous += 1;
+                    checked += 1;
                 }
             }
         }
-        assert!(delta > 32, "glass should mostly sample transmission: {delta}");
-        assert!(continuous > 2, "glass still has specular reflection: {continuous}");
-        // Full transmission displaces the diffuse base entirely: a grazing
-        // reflection eval must carry no diffuse albedo tint.
-        let (ev, _) = m.eval(&r_in, &rec, Vec3A::new(0.6, 0.0, 0.8).normalize()).unwrap();
-        assert!(ev.is_finite(), "eval value not finite: {ev}");
+        assert!(checked > 32, "too few transmission samples: {checked}");
+    }
+
+    #[test]
+    fn thin_walled_transmission_stays_delta() {
+        let m = OpenPBR {
+            geometry_thin_walled: true,
+            ..OpenPBR::glass(1.5)
+        };
+        let mut sampler = s();
+        let mut rec = HitRecord::new();
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let mut deltas = 0;
+        for _ in 0..128 {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                if sample.ray.direction().z < 0.0 {
+                    assert!(sample.delta, "thin-walled transmission must stay delta");
+                    deltas += 1;
+                }
+            }
+        }
+        assert!(deltas > 16, "thin-walled never transmitted: {deltas}");
+        // And its eval must report zero continuous density below the horizon.
+        let (ev, _) = m.eval(&r_in, &rec, -Vec3A::Z).unwrap();
+        assert_eq!(ev, Vec3A::ZERO);
+    }
+
+    #[test]
+    fn fresnel_dielectric_sanity() {
+        // Normal incidence at air/glass ≈ 4%.
+        let f = fresnel_dielectric(1.0, 1.0, 1.5);
+        assert!((f - 0.04).abs() < 1e-3, "F(0°) = {f}");
+        // Beyond the critical angle from the dense side: total internal
+        // reflection.
+        let f = fresnel_dielectric(0.2, 1.5, 1.0);
+        assert_eq!(f, 1.0);
+        // Grazing incidence tends to 1.
+        let f = fresnel_dielectric(0.01, 1.0, 1.5);
+        assert!(f > 0.9, "F(grazing) = {f}");
     }
 
     #[test]

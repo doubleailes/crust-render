@@ -139,7 +139,10 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 - Non-sphere USD lux light schemas are skipped (see above).
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
-  (no chromatic distributions). Transmission is a per-sample delta lobe
-  (`ScatterSample::delta`) excluded from NEE/guide mixtures; the reflection lobes of
-  transmissive surfaces are fully covered by `eval`. The guide-vs-BSDF selection probability is fixed (no learned α), and
+  (no chromatic distributions). Thick non-dispersive transmission is a
+  continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable
+  over the full sphere, and part of the NEE/guide mixtures (guide-chosen directions
+  cross the interface via `Material::make_ray`, which tags the interior medium). Only
+  thin-walled and hero-wavelength-dispersive transmission remain per-sample delta lobes
+  (`ScatterSample::delta`), excluded from continuous mixtures. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
