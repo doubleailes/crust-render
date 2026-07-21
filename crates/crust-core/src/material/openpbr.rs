@@ -24,9 +24,10 @@ use crate::material::brdf::*;
 use crate::medium::Medium;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 use std::f32::consts::PI;
 use std::sync::Arc;
-use utils::{Lerp, align_to_normal, random, random_cosine_direction};
+use utils::{Lerp, align_to_normal, cosine_hemisphere};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -507,6 +508,7 @@ fn sample_transmission(
     r_in: &Ray,
     rec: &HitRecord,
     frame: &Frame,
+    sampler: &mut dyn Sampler,
 ) -> Option<(Ray, Vec3A, f32)> {
     let v_world = -r_in.direction().normalize();
     let front = rec.front_face;
@@ -535,7 +537,7 @@ fn sample_transmission(
         (iors.x, iors.y, iors.z)
     };
     let (hero_ior, hero_mult) = if m.transmission_dispersion_scale > 0.0 {
-        let (c, mask) = hero_channel(random());
+        let (c, mask) = hero_channel(sampler.next_1d());
         let ior = match c {
             0 => eta_r,
             1 => eta_g,
@@ -550,7 +552,7 @@ fn sample_transmission(
     let v_local = frame.to_local(v_world);
     let (ax, ay) =
         roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
-    let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
+    let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
     let h_world = frame.to_world(h_local);
 
     // Relative IOR: entering => 1 / hero_ior, exiting => hero_ior / 1.
@@ -598,11 +600,23 @@ fn sample_transmission(
 // ---------------------------------------------------------------------------
 
 impl Material for OpenPBR {
-    fn scatter(&self, _r_in: &Ray, _rec: &HitRecord, _: &mut Vec3A, _: &mut Ray) -> bool {
+    fn scatter(
+        &self,
+        _r_in: &Ray,
+        _rec: &HitRecord,
+        _sampler: &mut dyn Sampler,
+        _: &mut Vec3A,
+        _: &mut Ray,
+    ) -> bool {
         false
     }
 
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
         let frame = Frame::new(rec.normal);
         let v_world = -r_in.direction().normalize();
         let v_local = frame.to_local(v_world);
@@ -611,13 +625,14 @@ impl Material for OpenPBR {
         }
 
         let pmf = LobePmf::from_params(self);
-        let lobe = pmf.pick(random());
+        let lobe = pmf.pick(sampler.next_1d());
 
         // Transmission is a delta-ish lobe on the far hemisphere — handle
         // it separately from the reflection lobes because the composed
         // mixture PDF only covers same-hemisphere directions.
         if matches!(lobe, Lobe::Transmission) {
-            let (scattered, throughput, pdf) = sample_transmission(self, r_in, rec, &frame)?;
+            let (scattered, throughput, pdf) =
+                sample_transmission(self, r_in, rec, &frame, sampler)?;
             // Divide by the lobe-selection probability so the mixture
             // estimator stays unbiased.
             let p_select = pmf.p_transmission.max(1e-4);
@@ -626,13 +641,13 @@ impl Material for OpenPBR {
 
         // Reflection lobes — sample a direction from the picked lobe.
         let l_local = match lobe {
-            Lobe::Diffuse | Lobe::Fuzz => random_cosine_direction(),
+            Lobe::Diffuse | Lobe::Fuzz => cosine_hemisphere(sampler.next_2d()),
             Lobe::Specular => {
                 let (ax, ay) = roughness_to_alpha_aniso(
                     self.specular_roughness,
                     self.specular_roughness_anisotropy,
                 );
-                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
+                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
                     return None;
@@ -644,7 +659,7 @@ impl Material for OpenPBR {
                     self.coat_roughness,
                     self.coat_roughness_anisotropy,
                 );
-                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay);
+                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
                     return None;
@@ -691,6 +706,11 @@ fn _lerp_ping(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sampler::RngSampler;
+
+    fn s() -> RngSampler {
+        RngSampler::default()
+    }
 
     #[test]
     fn f0_from_ior_glass() {
@@ -765,8 +785,9 @@ mod tests {
         rec.normal = Vec3A::Z;
         let ray = Ray::new(Vec3A::new(0.5, 0.0, 1.0), Vec3A::new(-0.5, 0.0, -1.0).normalize());
         let mut got_positive = false;
+        let mut smp = s();
         for _ in 0..128 {
-            if let Some((_, throughput, _)) = m.scatter_importance(&ray, &rec) {
+            if let Some((_, throughput, _)) = m.scatter_importance(&ray, &rec, &mut smp) {
                 if throughput.length_squared() > 0.0 {
                     got_positive = true;
                     break;
@@ -854,11 +875,12 @@ mod tests {
         let n = 16_000;
         let mut sum_opb = Vec3A::ZERO;
         let mut sum_dis = Vec3A::ZERO;
+        let mut smp = s();
         for _ in 0..n {
-            if let Some((_, t, p)) = opb.scatter_importance(&ray, &rec) {
+            if let Some((_, t, p)) = opb.scatter_importance(&ray, &rec, &mut smp) {
                 sum_opb += t / p;
             }
-            if let Some((_, t, p)) = dis.scatter_importance(&ray, &rec) {
+            if let Some((_, t, p)) = dis.scatter_importance(&ray, &rec, &mut smp) {
                 sum_dis += t / p;
             }
         }
@@ -898,11 +920,12 @@ mod tests {
         let mut sum_sss = Vec3A::ZERO;
         let mut sum_no = Vec3A::ZERO;
         let n = 512;
+        let mut smp = s();
         for _ in 0..n {
-            if let Some((_, t, _)) = m_sss.scatter_importance(&ray, &rec) {
+            if let Some((_, t, _)) = m_sss.scatter_importance(&ray, &rec, &mut smp) {
                 sum_sss += t;
             }
-            if let Some((_, t, _)) = m_no_sss.scatter_importance(&ray, &rec) {
+            if let Some((_, t, _)) = m_no_sss.scatter_importance(&ray, &rec, &mut smp) {
                 sum_no += t;
             }
         }
@@ -942,8 +965,9 @@ mod tests {
         rec.front_face = true;
         let ray = Ray::new(Vec3A::new(0.0, 1.0, 0.0), Vec3A::new(0.0, -1.0, 0.0));
         let mut got_downward = false;
+        let mut smp = s();
         for _ in 0..64 {
-            if let Some((scattered, _, _)) = m.scatter_importance(&ray, &rec) {
+            if let Some((scattered, _, _)) = m.scatter_importance(&ray, &rec, &mut smp) {
                 if scattered.direction().y < 0.0 {
                     got_downward = true;
                     break;
@@ -968,8 +992,9 @@ mod tests {
         rec.normal = Vec3A::Y;
         let ray = Ray::new(Vec3A::new(0.0, 1.0, 1.0), Vec3A::new(0.0, -1.0, -1.0).normalize());
         // Run many samples: none should be NaN or negative.
+        let mut smp = s();
         for _ in 0..64 {
-            if let Some((_, throughput, pdf)) = m.scatter_importance(&ray, &rec) {
+            if let Some((_, throughput, pdf)) = m.scatter_importance(&ray, &rec, &mut smp) {
                 assert!(pdf.is_finite() && pdf > 0.0, "pdf = {pdf}");
                 assert!(throughput.is_finite(), "throughput = {throughput:?}");
                 assert!(

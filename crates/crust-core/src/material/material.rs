@@ -1,6 +1,7 @@
 use crate::hittable::HitRecord;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
 /// Materials determine how rays interact with surfaces, including scattering and emission.
@@ -10,6 +11,7 @@ pub trait Material: Send + Sync {
     /// # Parameters
     /// - `r_in`: The incoming ray.
     /// - `rec`: The hit record containing information about the intersection.
+    /// - `sampler`: The active QMC sampler, from which any random samples must be drawn.
     /// - `attenuation`: A mutable reference to the color attenuation (output).
     /// - `scattered`: A mutable reference to the scattered ray (output).
     ///
@@ -19,28 +21,31 @@ pub trait Material: Send + Sync {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
+        sampler: &mut dyn Sampler,
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool;
 
     /// Computes the importance sampling for the material, if supported.
     ///
-    /// This method provides a default implementation for materials that do not
-    /// explicitly support importance sampling. It uses the `scatter` method to
-    /// determine the scattered ray and attenuation.
-    ///
     /// # Parameters
     /// - `r_in`: The incoming ray.
     /// - `rec`: The hit record containing information about the intersection.
+    /// - `sampler`: The active QMC sampler.
     ///
     /// # Returns
     /// - `Some((scattered_ray, attenuation, pdf))` if importance sampling is supported.
     /// - `None` if the material does not scatter the ray.
-    fn scatter_importance(&self, r_in: &Ray, rec: &HitRecord) -> Option<(Ray, Vec3A, f32)> {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
         // Default fallback for materials that don't support importance sampling
         let mut attenuation = Vec3A::default();
         let mut scattered = Ray::default();
-        if self.scatter(r_in, rec, &mut attenuation, &mut scattered) {
+        if self.scatter(r_in, rec, sampler, &mut attenuation, &mut scattered) {
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
             let pdf = 1.0; // uniform sampling (fake)
             return Some((scattered, attenuation * cosine, pdf));
@@ -52,9 +57,6 @@ pub trait Material: Send + Sync {
     ///
     /// This method is used for materials that emit light, such as light sources.
     /// By default, it returns black (no emission).
-    ///
-    /// # Returns
-    /// - A `Vec3A` representing the emitted light.
     fn emitted(&self) -> Vec3A {
         Vec3A::new(0.0, 0.0, 0.0)
     }

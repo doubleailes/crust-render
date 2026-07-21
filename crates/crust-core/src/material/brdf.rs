@@ -1,6 +1,5 @@
 use glam::Vec3A;
 use std::f32::consts::PI;
-use utils::random2;
 
 pub fn fresnel_schlick(cos_theta: f32, f0: Vec3A) -> Vec3A {
     f0 + (Vec3A::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
@@ -11,12 +10,11 @@ pub fn geometry_schlick_ggx(n_dot: f32, roughness: f32) -> f32 {
     n_dot / (n_dot * (1.0 - k) + k)
 }
 
-pub fn sample_vndf_ggx(view: Vec3A, roughness: f32) -> Vec3A {
+pub fn sample_vndf_ggx(view: Vec3A, roughness: f32, uv: [f32; 2]) -> Vec3A {
     // Transform view direction to hemisphere aligned with normal (Z+)
     let v = Vec3A::new(roughness * view.x, roughness * view.y, view.z).normalize();
 
-    // Generate 2D random numbers
-    let (u1, u2) = random2();
+    let (u1, u2) = (uv[0], uv[1]);
 
     // Construct orthonormal basis
     let lensq = v.x * v.x + v.y * v.y;
@@ -169,7 +167,7 @@ pub fn ggx_g2_smith_aniso(
 /// VNDF sampling for anisotropic GGX. `v_local` is the view direction in the
 /// local frame with n along +z. Returns the sampled half-vector in the same
 /// local frame.
-pub fn sample_vndf_ggx_aniso_local(v_local: Vec3A, ax: f32, ay: f32) -> Vec3A {
+pub fn sample_vndf_ggx_aniso_local(v_local: Vec3A, ax: f32, ay: f32, uv: [f32; 2]) -> Vec3A {
     // Stretch to hemispherical config.
     let vh = Vec3A::new(ax * v_local.x, ay * v_local.y, v_local.z).normalize();
 
@@ -181,7 +179,7 @@ pub fn sample_vndf_ggx_aniso_local(v_local: Vec3A, ax: f32, ay: f32) -> Vec3A {
     };
     let t2 = vh.cross(t1);
 
-    let (u1, u2) = utils::random2();
+    let (u1, u2) = (uv[0], uv[1]);
     let r = u1.sqrt();
     let phi = 2.0 * PI * u2;
     let t1c = r * phi.cos();

@@ -3,6 +3,7 @@ use crate::material::Material;
 use crate::material::brdf;
 use crate::ray::Ray;
 use glam::Vec3A;
+use sampler::Sampler;
 
 #[derive(Debug, Clone)]
 pub struct Dielectric {
@@ -29,6 +30,7 @@ impl Material for Dielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
+        sampler: &mut dyn Sampler,
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
@@ -44,7 +46,7 @@ impl Material for Dielectric {
 
         let cannot_refract = refraction_ratio * sin_theta > 1.0;
         let direction =
-            if cannot_refract || Self::reflectance(cos_theta, refraction_ratio) > utils::random() {
+            if cannot_refract || Self::reflectance(cos_theta, refraction_ratio) > sampler.next_1d() {
                 unit_direction.reflect(rec.normal)
             } else {
                 unit_direction.refract(rec.normal, refraction_ratio)
@@ -79,6 +81,7 @@ impl Material for ComplexDielectric {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
+        sampler: &mut dyn Sampler,
         attenuation: &mut Vec3A,
         scattered: &mut Ray,
     ) -> bool {
@@ -87,7 +90,7 @@ impl Material for ComplexDielectric {
         let n = if rec.front_face { normal } else { -normal };
 
         // Sample half vector from GGX VNDF
-        let h = brdf::sample_vndf_ggx(view, self.roughness);
+        let h = brdf::sample_vndf_ggx(view, self.roughness, sampler.next_2d());
         let h = if h.dot(n) < 0.0 { -h } else { h };
 
         let cos_theta = view.dot(h).max(0.0);
@@ -95,7 +98,7 @@ impl Material for ComplexDielectric {
         let fresnel = brdf::fresnel_schlick(cos_theta, f0);
 
         // Decide between reflection and refraction
-        let reflect = utils::random() < fresnel.x;
+        let reflect = sampler.next_1d() < fresnel.x;
 
         // glam's `reflect`/`refract` expect the *incident* direction (pointing
         // into the surface), not the view direction (pointing back toward the
