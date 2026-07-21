@@ -1,0 +1,37 @@
+schema: spec-driven
+
+# Project context — shown to AI when creating OpenSpec artifacts.
+context: |
+  Crust Render is a toy, physically-based path tracer written in safe Rust
+  (edition 2024), inspired by PBRT, "Ray Tracing in One Weekend", and Autodesk
+  Standard Surface / OpenPBR.
+
+  Tech stack:
+  - Rust 2024, Cargo workspace with three crates under crates/:
+    - crust-core: the whole engine as a library (renderer, integrator, materials,
+      primitives, lights, BVH, USD import).
+    - crust-render: the thin CLI binary (main.rs only) — clap args, builds a Scene,
+      runs the Renderer, writes EXR.
+    - utils: math/RNG helpers (random*, balance_heuristic, align_to_normal, clamp, Lerp).
+  - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output),
+    openusd 0.5 (scene import — always compiled in, no feature flag), tracing (logging),
+    indicatif (progress bar), criterion (benches).
+
+  Domain conventions:
+  - Scenes load exclusively from USD (.usda/.usdc/.usdz); RON support was removed.
+  - Requirements should describe observable renderer behavior (CLI, image output,
+    scene interpretation), not internal Rust types, unless the type is the contract.
+  - Describe the CURRENT implemented behavior in openspec/specs/. Note known gaps
+    explicitly rather than speccing unimplemented features as done.
+
+  Known incomplete work (do not spec as working):
+  - Adaptive sampling params (min_samples_per_pixel, variance_threshold, frame) are
+    parsed into RenderSettings but NOT consumed by the tracer yet.
+  - Non-sphere USD lux lights (Rect/Disk/Distant/Dome/Cylinder) warn once and are skipped.
+
+# Per-artifact rules (optional).
+rules:
+  specs:
+    - Describe observable behavior (CLI flags, files produced, image results), not Rust internals.
+    - Every requirement must have at least one WHEN/THEN scenario.
+    - Mark not-yet-implemented behavior clearly; never spec it as if it works.
