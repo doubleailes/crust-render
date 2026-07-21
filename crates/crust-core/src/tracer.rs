@@ -245,8 +245,12 @@ pub fn ray_color(
                 let cosine = f32::max(rec.normal.dot(light_dir_unit), 0.0);
                 let light_pdf = light.pdf(rec.p, light_point);
 
-                if let Some((_, brdf_value, brdf_pdf)) =
-                    rec.mat.as_ref().unwrap().scatter_importance(r, &rec, sampler)
+                // Evaluate the BSDF toward the light direction. Delta and
+                // transmissive materials return None — they cannot see a
+                // light-sampled direction and pick up emission via BSDF
+                // sampling instead.
+                if let Some((brdf_value, brdf_pdf)) =
+                    rec.mat.as_ref().unwrap().eval(r, &rec, light_dir_unit)
                 {
                     let weight = utils::balance_heuristic(light_pdf, brdf_pdf);
                     total_light += light.color() * brdf_value * cosine * weight / light_pdf;

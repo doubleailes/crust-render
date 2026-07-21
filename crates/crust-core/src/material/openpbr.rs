@@ -680,6 +680,26 @@ impl Material for OpenPBR {
         Some((Ray::new(rec.p, l_world), brdf * n_dot_l, pdf))
     }
 
+    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        // `eval_all` / `pdf_all` only cover the reflection hemisphere, so a
+        // transmissive surface cannot be evaluated for arbitrary directions.
+        if self.transmission_weight > 0.0 {
+            return None;
+        }
+        let frame = Frame::new(rec.normal);
+        let v_local = frame.to_local(-r_in.direction().normalize());
+        if v_local.z <= 0.0 {
+            return None;
+        }
+        let l_local = frame.to_local(wi.normalize());
+        if l_local.z <= 0.0 {
+            return Some((Vec3A::ZERO, 1e-4));
+        }
+        let pmf = LobePmf::from_params(self);
+        let pdf = pdf_all(self, &pmf, v_local, l_local).max(1e-4);
+        Some((eval_all(self, v_local, l_local) * l_local.z, pdf))
+    }
+
     fn emitted(&self) -> Vec3A {
         self.emission_color * self.emission_luminance
     }
@@ -710,6 +730,44 @@ mod tests {
 
     fn s() -> RngSampler {
         RngSampler::default()
+    }
+
+    #[test]
+    fn eval_matches_scatter_importance() {
+        let m = OpenPBR::default();
+        let mut sampler = s();
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+
+        let mut checked = 0;
+        for _ in 0..128 {
+            if let Some((scattered, value, pdf)) = m.scatter_importance(&r_in, &rec, &mut sampler)
+            {
+                let wi = scattered.direction().normalize();
+                let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("opaque OpenPBR is evaluable");
+                let tol = 1e-3 * (1.0 + value.max_element().abs());
+                assert!((ev - value).abs().max_element() < tol, "{ev} vs {value}");
+                assert!((epdf - pdf).abs() < 1e-3 * (1.0 + pdf), "{epdf} vs {pdf}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 32, "too few valid samples: {checked}");
+    }
+
+    #[test]
+    fn eval_none_for_transmissive() {
+        let m = OpenPBR {
+            transmission_weight: 1.0,
+            ..OpenPBR::default()
+        };
+        let mut rec = HitRecord::new();
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::Z, -Vec3A::Z);
+        assert!(m.eval(&r_in, &rec, Vec3A::Z).is_none());
     }
 
     #[test]
