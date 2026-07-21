@@ -63,15 +63,25 @@ impl AABB {
 }
 
 pub fn triangle_aabb(v0: Vec3A, v1: Vec3A, v2: Vec3A) -> AABB {
-    let min = Vec3A::new(
+    let mut min = Vec3A::new(
         v0[0].min(v1[0]).min(v2[0]),
         v0[1].min(v1[1]).min(v2[1]),
         v0[2].min(v1[2]).min(v2[2]),
     );
-    let max = Vec3A::new(
+    let mut max = Vec3A::new(
         v0[0].max(v1[0]).max(v2[0]),
         v0[1].max(v1[1]).max(v2[1]),
         v0[2].max(v1[2]).max(v2[2]),
     );
+    // An axis-aligned triangle has zero extent along one axis, and the slab
+    // test in `AABB::hit` rejects zero-thickness boxes (`t_max <= t_min`).
+    // Pad degenerate axes so flat geometry stays hittable.
+    const PAD: f32 = 1e-4;
+    for a in 0..3 {
+        if max[a] - min[a] < PAD {
+            min[a] -= PAD;
+            max[a] += PAD;
+        }
+    }
     AABB::new(min, max)
 }

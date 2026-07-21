@@ -26,5 +26,5 @@ pub use medium::Medium;
 pub use primitives::{SmoothTriangle, Sphere, Triangle};
 pub use ray::Ray;
 pub use scene::Scene;
-pub use tracer::{RenderSettings, Renderer};
+pub use tracer::{RenderSettings, Renderer, ray_color};
 pub use world::{get_settings, simple_scene};

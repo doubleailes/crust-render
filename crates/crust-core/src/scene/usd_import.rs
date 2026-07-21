@@ -37,6 +37,8 @@ const DEFAULT_HEIGHT: usize = 360;
 const DEFAULT_MIN_SPP: u32 = 32;
 const DEFAULT_VARIANCE: f32 = 0.05;
 const DEFAULT_FRAME: isize = 0;
+const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
+const DEFAULT_GUIDING_PROB: f32 = 0.5;
 
 pub(crate) fn load_scene(path: &Path) -> std::io::Result<Scene> {
     let path_str = path.to_str().ok_or_else(|| {
@@ -759,7 +761,16 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         custom_f32(&prim, "crust:varianceThreshold").unwrap_or(DEFAULT_VARIANCE);
     let frame = custom_i32(&prim, "crust:frame").unwrap_or(DEFAULT_FRAME as i32) as isize;
 
+    // Path guiding (opt-in).
+    let guiding = custom_bool(&prim, "crust:pathGuiding").unwrap_or(false);
+    let guiding_iters = custom_i32(&prim, "crust:guidingTrainIterations")
+        .unwrap_or(DEFAULT_GUIDING_TRAIN_ITERATIONS as i32)
+        .max(1) as u32;
+    let guiding_prob =
+        custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
+
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
+        .with_guiding(guiding, guiding_iters, guiding_prob)
 }
 
 fn default_settings() -> RenderSettings {
@@ -787,6 +798,16 @@ fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
     match v {
         sdf::Value::Float(f) => Some(f),
         sdf::Value::Double(d) => Some(d as f32),
+        _ => None,
+    }
+}
+
+fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::Bool(b) => Some(b),
+        // Authoring tools sometimes write bools as ints.
+        sdf::Value::Int(i) => Some(i != 0),
         _ => None,
     }
 }
