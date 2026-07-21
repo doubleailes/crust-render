@@ -2,11 +2,11 @@ use crate::buffer::Buffer;
 use crate::hittable::{HitRecord, Hittable};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
-use crate::sampler::generate_cmj_2d;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
+use sampler::{Sampler, SobolSampler};
 
 pub struct Renderer {
     pub camera: Camera,
@@ -32,8 +32,6 @@ impl Renderer {
 
     pub fn render(&self) -> Buffer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
-        let samples_sqrt = (self.settings.samples_per_pixel as f32).sqrt().ceil() as usize;
-        let cmj_samples = generate_cmj_2d(samples_sqrt);
         let bar = ProgressBar::new(self.settings.height as u64);
         bar.set_style(
             indicatif::ProgressStyle::default_bar()
@@ -42,26 +40,28 @@ impl Renderer {
                 )
                 .unwrap(),
         );
+        let frame_seed = self.settings.frame as u32;
         for j in (0..self.settings.height).rev() {
             let pixel_colors: Vec<_> = (0..self.settings.width)
                 .into_par_iter()
                 .map(|i| {
+                    let mut sampler = SobolSampler::new(frame_seed);
+                    sampler.start_pixel(i as u32, j as u32);
                     let mut sum = Vec3A::new(0.0, 0.0, 0.0);
 
                     for sample in 0..self.settings.samples_per_pixel {
-                        let (u_offset, v_offset) = if (sample as usize) < cmj_samples.len() {
-                            cmj_samples[sample as usize]
-                        } else {
-                            (utils::random(), utils::random())
-                        };
-                        let u = ((i as f32) + u_offset) / (self.settings.width - 1) as f32;
-                        let v = ((j as f32) + v_offset) / (self.settings.height - 1) as f32;
-                        let r = self.camera.get_ray(u, v);
+                        sampler.start_sample(sample);
+                        let jitter = sampler.next_2d();
+                        let lens_uv = sampler.next_2d();
+                        let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
+                        let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
+                        let r = self.camera.get_ray(u, v, lens_uv);
                         let col = ray_color(
                             &r,
                             &self.world,
                             &self.lights,
                             self.settings.max_depth as i32,
+                            &mut sampler,
                         );
 
                         sum += col;
@@ -79,8 +79,6 @@ impl Renderer {
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        let cmj_samples =
-            generate_cmj_2d((self.settings.samples_per_pixel as f32).sqrt().ceil() as usize);
         let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
         let bar = ProgressBar::new(tiles.len() as u64);
         bar.set_style(
@@ -90,6 +88,7 @@ impl Renderer {
                 )
                 .unwrap(),
         );
+        let frame_seed = self.settings.frame as u32;
         // Collect all pixels in parallel from tiles
         let pixels: Vec<(usize, usize, Vec3A)> = tiles
             .into_par_iter()
@@ -98,24 +97,25 @@ impl Renderer {
 
                 for j in tile.y..tile.y + tile.height {
                     for i in tile.x..tile.x + tile.width {
+                        let mut sampler = SobolSampler::new(frame_seed);
+                        sampler.start_pixel(i as u32, j as u32);
                         let mut color = Vec3A::new(0.0, 0.0, 0.0);
 
                         for sample in 0..self.settings.samples_per_pixel {
-                            let (dx, dy) = if (sample as usize) < cmj_samples.len() {
-                                cmj_samples[sample as usize]
-                            } else {
-                                (utils::random(), utils::random())
-                            };
+                            sampler.start_sample(sample);
+                            let jitter = sampler.next_2d();
+                            let lens_uv = sampler.next_2d();
 
-                            let u = (i as f32 + dx) / (self.settings.width - 1) as f32;
-                            let v = (j as f32 + dy) / (self.settings.height - 1) as f32;
+                            let u = (i as f32 + jitter[0]) / (self.settings.width - 1) as f32;
+                            let v = (j as f32 + jitter[1]) / (self.settings.height - 1) as f32;
 
-                            let ray = self.camera.get_ray(u, v);
+                            let ray = self.camera.get_ray(u, v, lens_uv);
                             color += ray_color(
                                 &ray,
                                 &self.world,
                                 &self.lights,
                                 self.settings.max_depth as i32,
+                                &mut sampler,
                             );
                         }
 
@@ -151,7 +151,6 @@ pub struct RenderSettings {
     min_samples_per_pixel: u32,
     #[allow(dead_code)]
     variance_threshold: f32,
-    #[allow(dead_code)]
     frame: isize,
 }
 impl RenderSettings {
@@ -179,13 +178,22 @@ impl RenderSettings {
     }
 }
 
-pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) -> Vec3A {
+pub fn ray_color(
+    r: &Ray,
+    world: &dyn Hittable,
+    lights: &LightList,
+    depth: i32,
+    sampler: &mut dyn Sampler,
+) -> Vec3A {
     if depth <= 0 {
         return Vec3A::new(0.0, 0.0, 0.0); // recursion limit
     }
 
+    // Fresh dimension window for this bounce — a no-op today, a hook for
+    // padded-Sobol later.
+    sampler.advance_bounce();
+
     let mut rec = HitRecord::new();
-    let cmj_samples = generate_cmj_2d(4); // Fixed number of samples for now
 
     if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
         // Volume interaction sampling for scattering media (subsurface,
@@ -195,18 +203,19 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
         if let Some(medium) = r.medium() {
             if medium.is_scattering() {
                 let sigma_t_max = medium.sigma_t_max().max(1e-4);
-                let t_scatter = -(utils::random().ln()) / sigma_t_max;
+                let t_scatter = -(sampler.next_1d().ln()) / sigma_t_max;
                 if t_scatter < rec.t {
                     let pos = r.at(t_scatter);
+                    let phase_uv = sampler.next_2d();
                     let dir = sample_henyey_greenstein(
                         r.direction().normalize(),
                         medium.g,
-                        utils::random(),
-                        utils::random(),
+                        phase_uv[0],
+                        phase_uv[1],
                     );
                     let new_ray = Ray::new_in_medium(pos, dir, medium.clone());
                     let albedo = medium.albedo();
-                    return albedo * ray_color(&new_ray, world, lights, depth - 1);
+                    return albedo * ray_color(&new_ray, world, lights, depth - 1, sampler);
                 }
             }
         }
@@ -222,9 +231,9 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
         let mut total_light = emitted;
 
         // === 1. Direct Lighting via Light Sampling ===
-        for (light_idx, light) in lights.lights.iter().enumerate() {
-            let (u, v) = cmj_samples[light_idx % cmj_samples.len()];
-            let light_point = light.sample_cmj(u, v);
+        for light in lights.lights.iter() {
+            let area_uv = sampler.next_2d();
+            let light_point = light.sample_cmj(area_uv[0], area_uv[1]);
             let light_dir = light_point - rec.p;
             let light_distance = light_dir.length();
             let light_dir_unit = light_dir.normalize();
@@ -237,7 +246,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
                 let light_pdf = light.pdf(rec.p, light_point);
 
                 if let Some((_, brdf_value, brdf_pdf)) =
-                    rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
+                    rec.mat.as_ref().unwrap().scatter_importance(r, &rec, sampler)
                 {
                     let weight = utils::balance_heuristic(light_pdf, brdf_pdf);
                     total_light += light.color() * brdf_value * cosine * weight / light_pdf;
@@ -247,7 +256,7 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
 
         // === 2. Indirect Lighting via BRDF Sampling ===
         if let Some((scattered, brdf_value, brdf_pdf)) =
-            rec.mat.as_ref().unwrap().scatter_importance(r, &rec)
+            rec.mat.as_ref().unwrap().scatter_importance(r, &rec, sampler)
         {
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
 
@@ -272,8 +281,10 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32) 
 
             // Add both direct hit on light and recursive bounce
             total_light += add_emission;
-            total_light +=
-                brdf_value * ray_color(&scattered, world, lights, depth - 1) * cosine / brdf_pdf;
+            total_light += brdf_value
+                * ray_color(&scattered, world, lights, depth - 1, sampler)
+                * cosine
+                / brdf_pdf;
         }
 
         return total_light * medium_atten;
