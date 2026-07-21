@@ -385,6 +385,12 @@ impl RenderSettings {
         }
     }
 
+    /// Override the samples-per-pixel count (e.g. from a CLI flag). Clamped to >= 1.
+    pub fn with_samples_per_pixel(mut self, spp: u32) -> Self {
+        self.samples_per_pixel = spp.max(1);
+        self
+    }
+
     /// Enable (or disable) path guiding with the given number of training
     /// iterations and guide-sampling probability α.
     pub fn with_guiding(mut self, enabled: bool, train_iterations: u32, guide_prob: f32) -> Self {
