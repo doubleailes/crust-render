@@ -134,9 +134,11 @@ against a converged reference by ~20% at equal final spp:
 cargo run --release -- -i samples/cornellbox_guided.usda
 ```
 
-Delta materials (metal, glass, transmissive OpenPBR) and volume scattering
-are not guided; untrained regions fall back to plain BSDF sampling, so the
-estimator stays unbiased everywhere.
+Every continuous lobe is guided — including the reflection lobes of glass.
+Only the delta transmission lobe itself and volume scattering are excluded
+(a learned continuous density cannot represent a singular lobe); untrained
+regions fall back to plain BSDF sampling, so the estimator stays unbiased
+everywhere.
 
 ### CLI
 

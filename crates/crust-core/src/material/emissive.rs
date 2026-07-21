@@ -1,6 +1,6 @@
 use crate::hittable::HitRecord;
 use crate::light::Light;
-use crate::material::Material;
+use crate::material::{Material, ScatterSample};
 use crate::ray::Ray;
 use glam::Vec3A;
 use sampler::Sampler;
@@ -42,7 +42,7 @@ impl Material for Emissive {
         _r_in: &Ray,
         _rec: &HitRecord,
         _sampler: &mut dyn Sampler,
-    ) -> Option<(Ray, Vec3A, f32)> {
+    ) -> Option<ScatterSample> {
         None
     }
 }
