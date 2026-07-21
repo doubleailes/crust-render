@@ -3,6 +3,24 @@ use crate::ray::Ray;
 use glam::Vec3A;
 use sampler::Sampler;
 
+/// One direction sampled from a material's importance distribution.
+#[derive(Clone)]
+pub struct ScatterSample {
+    pub ray: Ray,
+    /// `brdf * cos(theta_i)` per the codebase convention (the tracer
+    /// multiplies by the cosine again).
+    pub value: Vec3A,
+    /// Solid-angle pdf of the sampled direction. For delta lobes this is a
+    /// placeholder 1.0 with any discrete lobe-selection compensation already
+    /// folded into `value`.
+    pub pdf: f32,
+    /// True when the direction came from a delta lobe (e.g. transmission,
+    /// TIR fallback). A delta sample's contribution must never be mixed with
+    /// a continuous density — no guide-mixture pdf, no light-MIS weight; it
+    /// carries its bounce-hit emission at full weight.
+    pub delta: bool,
+}
+
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
 /// Materials determine how rays interact with surfaces, including scattering and emission.
 pub trait Material: Send + Sync {
@@ -15,30 +33,32 @@ pub trait Material: Send + Sync {
     /// - `sampler`: The active QMC sampler, from which any random samples must be drawn.
     ///
     /// # Returns
-    /// - `Some((scattered_ray, value, pdf))` where `value` follows the
-    ///   codebase convention of `brdf * cos(theta_i)` (the tracer multiplies
-    ///   by the cosine again) and `pdf` is the solid-angle density of the
-    ///   sampled direction.
+    /// - `Some(sample)` describing the sampled bounce (see [`ScatterSample`]).
     /// - `None` if the material does not scatter the ray.
     fn scatter_importance(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
         sampler: &mut dyn Sampler,
-    ) -> Option<(Ray, Vec3A, f32)>;
+    ) -> Option<ScatterSample>;
 
-    /// Evaluates the BSDF toward a given world-space unit direction `wi`,
-    /// without sampling. This is what MIS against an external sampling
-    /// strategy (light sampling, path guiding) needs and `scatter_importance`
-    /// cannot provide, since the latter picks its own direction.
+    /// Evaluates the *continuous* part of the BSDF toward a given
+    /// world-space unit direction `wi`, without sampling. This is what MIS
+    /// against an external sampling strategy (light sampling, path guiding)
+    /// needs and `scatter_importance` cannot provide, since the latter picks
+    /// its own direction. Delta lobes (transmission) are excluded by
+    /// definition: they cover a measure-zero set of directions, are never
+    /// produced by an external continuous sampler, and are compensated at
+    /// full weight when sampled directly.
     ///
     /// # Returns
     /// - `Some((value, pdf))` where `value` follows the codebase convention of
     ///   `brdf * cos(theta_i)` (the tracer multiplies by the cosine again) and
-    ///   `pdf` is the solid-angle density `scatter_importance` would have
-    ///   assigned to `wi`.
-    /// - `None` if the material cannot be evaluated for arbitrary directions
-    ///   (delta/specular or transmissive lobes).
+    ///   `pdf` is the (possibly defective, if delta lobes take part of the
+    ///   lobe-selection mass) solid-angle density `scatter_importance`
+    ///   assigns to continuous samples at `wi`.
+    /// - `None` if the material has no continuous component at all (pure
+    ///   emitters).
     ///
     /// # Contract
     /// Whether this returns `None` must depend only on the material and hit

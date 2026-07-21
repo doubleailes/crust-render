@@ -1,6 +1,7 @@
 use crate::buffer::Buffer;
 use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::{HitRecord, Hittable};
+use crate::material::ScatterSample;
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
@@ -412,56 +413,59 @@ pub fn ray_color(
 /// Choose the bounce direction and the pdf its contribution is divided by.
 ///
 /// With guiding this is one-sample MIS between the guiding distribution and
-/// BSDF sampling: pick the guide with probability α, the BSDF otherwise, and
-/// divide by the mixture pdf `α·p_guide + (1-α)·p_bsdf`. The mixture pdf is
-/// used iff guiding was *available* at this vertex — the local distribution
-/// is trained and the material is evaluable — independent of which branch
-/// the coin picked; `Material::eval`'s contract (evaluability never depends
-/// on the queried direction) is what keeps the two branches consistent, and
-/// hence the estimator unbiased.
+/// the material's *continuous* component: pick the guide with probability α,
+/// the BSDF otherwise, and divide continuous samples by the mixture pdf
+/// `α·p_guide + (1-α)·p_bsdf` — used iff guiding is available at the vertex
+/// (trained field + evaluable material), independent of which branch the
+/// coin picked. Delta samples (transmission) are a singular component the
+/// guide can never produce: they keep their placeholder pdf, are never mixed
+/// with a continuous density, and their value is divided by `1-α` to
+/// compensate for the coin reducing the delta lobe's selection probability.
 fn sample_bounce_direction(
     r: &Ray,
     rec: &HitRecord,
     guiding: Option<&GuidingContext>,
     sampler: &mut dyn Sampler,
-) -> Option<(Ray, Vec3A, f32, bool)> {
+) -> Option<ScatterSample> {
     let mat = rec.mat.as_ref().unwrap();
 
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
-        _ => {
-            let (scattered, value, pdf) = mat.scatter_importance(r, rec, sampler)?;
-            let evaluable = mat
-                .eval(r, rec, scattered.direction().normalize())
-                .is_some();
-            return Some((scattered, value, pdf, evaluable));
-        }
+        _ => return mat.scatter_importance(r, rec, sampler),
     };
     let alpha = g.field.config().guide_prob;
 
     if sampler.next_1d() < alpha {
-        // Guide branch. A trained field always yields a sample; delta and
-        // transmissive materials (eval == None) cannot use it, so they drop
-        // to the pure-BSDF estimator — exactly as they do in the BSDF branch.
+        // Guide branch: draw from the field; the material's continuous
+        // component supplies the value and the BSDF side of the mixture pdf.
         if let Some((wi, p_guide)) = g.field.sample(rec.p, sampler) {
             if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
                 let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
-                return Some((Ray::new(rec.p, wi), value, pdf, true));
+                return Some(ScatterSample {
+                    ray: Ray::new(rec.p, wi),
+                    value,
+                    pdf,
+                    delta: false,
+                });
             }
         }
-        let (scattered, value, pdf) = mat.scatter_importance(r, rec, sampler)?;
-        Some((scattered, value, pdf, false))
+        // Material with no continuous component: pure BSDF sampling.
+        mat.scatter_importance(r, rec, sampler)
     } else {
         // BSDF branch.
-        let (scattered, value, p_bsdf) = mat.scatter_importance(r, rec, sampler)?;
-        let wi = scattered.direction().normalize();
+        let mut sample = mat.scatter_importance(r, rec, sampler)?;
+        if sample.delta {
+            // Only this branch can reach the delta lobe, so the coin scaled
+            // its selection probability by 1-α.
+            sample.value /= 1.0 - alpha;
+            return Some(sample);
+        }
+        let wi = sample.ray.direction().normalize();
         if mat.eval(r, rec, wi).is_some() {
             let p_guide = g.field.pdf(rec.p, wi);
-            let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
-            Some((scattered, value, pdf, true))
-        } else {
-            Some((scattered, value, p_bsdf, false))
+            sample.pdf = (alpha * p_guide + (1.0 - alpha) * sample.pdf).max(1e-4);
         }
+        Some(sample)
     }
 }
 
@@ -590,22 +594,34 @@ fn ray_color_inner(
         }
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some((scattered, brdf_value, brdf_pdf, nee_capable)) =
-            sample_bounce_direction(r, &rec, guiding_here, sampler)
-        {
-            let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
+        if let Some(sample) = sample_bounce_direction(r, &rec, guiding_here, sampler) {
+            let dir = sample.ray.direction().normalize();
+            // The codebase convention multiplies the material's brdf*cos
+            // value by the cosine again — but only for continuous samples: a
+            // delta transmission direction lies behind the ray-facing normal
+            // (its clamped cosine is zero) and carries its full throughput
+            // in `value` already.
+            let cosine = if sample.delta {
+                1.0
+            } else {
+                f32::max(rec.normal.dot(dir), 0.0)
+            };
 
             let mut light_hit = HitRecord::new();
             let mut add_emission = Vec3A::new(0.0, 0.0, 0.0);
             let mut hit_emission = Vec3A::ZERO;
 
-            if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
+            if world.hit(&sample.ray, 0.001, f32::INFINITY, &mut light_hit) {
                 let emitted = light_hit.mat.as_ref().unwrap().emitted();
                 if emitted.length_squared() > 0.0 {
                     hit_emission = emitted;
-                    // NEE-capable vertices share the emission between light
-                    // sampling and the bounce via MIS; delta/transmissive
-                    // vertices skipped NEE, so the bounce carries it whole.
+                    // Continuous samples at NEE-capable vertices share the
+                    // emission with light sampling via MIS. Delta samples are
+                    // invisible to light sampling (their lobe is excluded
+                    // from eval), so the bounce carries the emission whole —
+                    // likewise at vertices where NEE is inactive.
+                    let nee_capable =
+                        !sample.delta && rec.mat.as_ref().unwrap().eval(r, &rec, dir).is_some();
                     let weight = if nee_capable {
                         let light_pdf_sum: f32 = lights
                             .lights
@@ -613,20 +629,20 @@ fn ray_color_inner(
                             .map(|light| light.pdf(rec.p, light_hit.p))
                             .sum();
                         let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
-                        utils::balance_heuristic(brdf_pdf, light_pdf)
+                        utils::balance_heuristic(sample.pdf, light_pdf)
                     } else {
                         1.0
                     };
 
                     // Add the contribution of hitting the light via BRDF
-                    add_emission = emitted * brdf_value * cosine * weight / brdf_pdf;
+                    add_emission = emitted * sample.value * cosine * weight / sample.pdf;
                 }
             }
 
             // The recursion must not count the next vertex's emission again —
             // `add_emission` above owns that term.
             let incident = ray_color_inner(
-                &scattered,
+                &sample.ray,
                 world,
                 lights,
                 depth - 1,
@@ -640,10 +656,11 @@ fn ray_color_inner(
             // incident radiance (reflected + the suppressed hit emission),
             // weighted by cos² to match this tracer's estimator, which
             // multiplies the codebase's brdf*cos material values by the
-            // cosine again.
+            // cosine again. Delta transmission directions record zero flux
+            // (the guide models the continuous reflection component only)
+            // but still count toward the spatial split statistic.
             if let Some(g) = guiding {
                 if g.training {
-                    let dir = scattered.direction().normalize();
                     let cos = rec.normal.dot(dir).max(0.0);
                     train_out.push(SampleData {
                         pos: rec.p,
@@ -656,7 +673,7 @@ fn ray_color_inner(
 
             // Add both direct hit on light and recursive bounce
             total_light += add_emission;
-            total_light += brdf_value * incident * cosine / brdf_pdf;
+            total_light += sample.value * incident * cosine / sample.pdf;
         }
 
         return total_light * medium_atten;

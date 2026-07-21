@@ -19,7 +19,7 @@
 //! authored today continue to render correctly once later phases land.
 
 use crate::hittable::HitRecord;
-use crate::material::Material;
+use crate::material::{Material, ScatterSample};
 use crate::material::brdf::*;
 use crate::medium::Medium;
 use crate::ray::Ray;
@@ -256,7 +256,14 @@ impl LobePmf {
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
-        let w_diffuse = ((1.0 - m.base_metalness) * m.base_weight * base_luma * (1.0 - f0_diel))
+        // Transmission displaces the diffuse base (OpenPBR: the base is a
+        // mix of the opaque-diffuse and translucent-base substrates), so
+        // fully transmissive surfaces stop scattering diffusely.
+        let w_diffuse = ((1.0 - m.base_metalness)
+            * (1.0 - m.transmission_weight)
+            * m.base_weight
+            * base_luma
+            * (1.0 - f0_diel))
             .max(1e-4);
 
         let w_coat = (m.coat_weight * coat_luma * f0_coat).max(1e-6);
@@ -349,7 +356,12 @@ fn eval_diffuse(
     // (1 - metalness) * base_weight`. Using the directional Fresnel here
     // would double-count with the specular lobe's own Fresnel — the
     // average avoids that.
-    disney * (1.0 - f_avg_diel) * (1.0 - m.base_metalness) * m.base_weight
+    // Transmission displaces the diffuse base — see `LobePmf::from_params`.
+    disney
+        * (1.0 - f_avg_diel)
+        * (1.0 - m.base_metalness)
+        * (1.0 - m.transmission_weight)
+        * m.base_weight
 }
 
 fn eval_specular(
@@ -647,7 +659,7 @@ impl Material for OpenPBR {
         r_in: &Ray,
         rec: &HitRecord,
         sampler: &mut dyn Sampler,
-    ) -> Option<(Ray, Vec3A, f32)> {
+    ) -> Option<ScatterSample> {
         let frame = Frame::new(rec.normal);
         let v_world = -r_in.direction().normalize();
         let v_local = frame.to_local(v_world);
@@ -658,16 +670,22 @@ impl Material for OpenPBR {
         let pmf = LobePmf::from_params(self);
         let lobe = pmf.pick(sampler.next_1d());
 
-        // Transmission is a delta-ish lobe on the far hemisphere — handle
-        // it separately from the reflection lobes because the composed
-        // mixture PDF only covers same-hemisphere directions.
+        // Transmission is a delta lobe (refraction through a sampled
+        // microfacet, reported with a placeholder pdf) — handle it
+        // separately from the continuous reflection lobes and flag it so the
+        // integrator never mixes it with a continuous density.
         if matches!(lobe, Lobe::Transmission) {
             let (scattered, throughput, pdf) =
                 sample_transmission(self, r_in, rec, &frame, sampler)?;
             // Divide by the lobe-selection probability so the mixture
             // estimator stays unbiased.
             let p_select = pmf.p_transmission.max(1e-4);
-            return Some((scattered, throughput / p_select, pdf));
+            return Some(ScatterSample {
+                ray: scattered,
+                value: throughput / p_select,
+                pdf,
+                delta: true,
+            });
         }
 
         // Reflection lobes — sample a direction from the picked lobe.
@@ -700,7 +718,10 @@ impl Material for OpenPBR {
             Lobe::Transmission => unreachable!(),
         };
 
-        // Mixture PDF and full-mixture BRDF value.
+        // Mixture PDF and full-mixture BRDF value. `pdf_all` weights by the
+        // full lobe PMF (including any transmission share), so this is the
+        // exact — defective when transmission takes selection mass — density
+        // of the continuous sampling procedure.
         let pdf = pdf_all(self, &pmf, v_local, l_local).max(1e-4);
         let brdf = eval_all(self, v_local, l_local);
         let n_dot_l = l_local.z.max(0.0);
@@ -708,15 +729,20 @@ impl Material for OpenPBR {
         let l_world = frame.to_world(l_local);
         // Convention across this codebase's materials: return brdf * cos as
         // the "throughput" and the tracer multiplies by cos again. Match.
-        Some((Ray::new(rec.p, l_world), brdf * n_dot_l, pdf))
+        Some(ScatterSample {
+            ray: Ray::new(rec.p, l_world),
+            value: brdf * n_dot_l,
+            pdf,
+            delta: false,
+        })
     }
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
-        // `eval_all` / `pdf_all` only cover the reflection hemisphere, so a
-        // transmissive surface cannot be evaluated for arbitrary directions.
-        if self.transmission_weight > 0.0 {
-            return None;
-        }
+        // Evaluates the continuous (reflection) component only. On a
+        // transmissive surface the delta transmission lobe is excluded per
+        // the trait contract; its reflection lobes — glass still has
+        // specular highlights — remain visible to NEE and guiding, with
+        // `pdf_all` reporting the matching defective density.
         let frame = Frame::new(rec.normal);
         let v_local = frame.to_local(-r_in.direction().normalize());
         if v_local.z <= 0.0 {
@@ -775,13 +801,17 @@ mod tests {
 
         let mut checked = 0;
         for _ in 0..128 {
-            if let Some((scattered, value, pdf)) = m.scatter_importance(&r_in, &rec, &mut sampler)
-            {
-                let wi = scattered.direction().normalize();
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                assert!(!sample.delta, "opaque OpenPBR has no delta lobe");
+                let wi = sample.ray.direction().normalize();
                 let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("opaque OpenPBR is evaluable");
-                let tol = 1e-3 * (1.0 + value.max_element().abs());
-                assert!((ev - value).abs().max_element() < tol, "{ev} vs {value}");
-                assert!((epdf - pdf).abs() < 1e-3 * (1.0 + pdf), "{epdf} vs {pdf}");
+                let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
+                assert!((ev - sample.value).abs().max_element() < tol, "{ev} vs {:?}", sample.value);
+                assert!(
+                    (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
+                    "{epdf} vs {}",
+                    sample.pdf
+                );
                 checked += 1;
             }
         }
@@ -789,16 +819,52 @@ mod tests {
     }
 
     #[test]
-    fn eval_none_for_transmissive() {
-        let m = OpenPBR {
-            transmission_weight: 1.0,
-            ..OpenPBR::default()
-        };
+    fn transmissive_eval_covers_continuous_samples() {
+        // The continuous (reflection) component of a transmissive surface is
+        // evaluable and consistent with sampling; transmission itself is
+        // flagged as a delta sample.
+        let m = OpenPBR::glass(1.5);
+        let mut sampler = s();
         let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::Z, -Vec3A::Z);
-        assert!(m.eval(&r_in, &rec, Vec3A::Z).is_none());
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+
+        let (mut continuous, mut delta) = (0, 0);
+        for _ in 0..256 {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                let wi = sample.ray.direction().normalize();
+                if sample.delta {
+                    assert!(
+                        wi.z < 0.0 || sample.pdf == 1.0,
+                        "delta sample should be transmission-like"
+                    );
+                    delta += 1;
+                } else {
+                    let (ev, epdf) =
+                        m.eval(&r_in, &rec, wi).expect("continuous component is evaluable");
+                    let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
+                    assert!(
+                        (ev - sample.value).abs().max_element() < tol,
+                        "{ev} vs {:?}",
+                        sample.value
+                    );
+                    assert!(
+                        (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
+                        "{epdf} vs {}",
+                        sample.pdf
+                    );
+                    continuous += 1;
+                }
+            }
+        }
+        assert!(delta > 32, "glass should mostly sample transmission: {delta}");
+        assert!(continuous > 2, "glass still has specular reflection: {continuous}");
+        // Full transmission displaces the diffuse base entirely: a grazing
+        // reflection eval must carry no diffuse albedo tint.
+        let (ev, _) = m.eval(&r_in, &rec, Vec3A::new(0.6, 0.0, 0.8).normalize()).unwrap();
+        assert!(ev.is_finite(), "eval value not finite: {ev}");
     }
 
     #[test]
@@ -876,8 +942,8 @@ mod tests {
         let mut got_positive = false;
         let mut smp = s();
         for _ in 0..128 {
-            if let Some((_, throughput, _)) = m.scatter_importance(&ray, &rec, &mut smp) {
-                if throughput.length_squared() > 0.0 {
+            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+                if sample.value.length_squared() > 0.0 {
                     got_positive = true;
                     break;
                 }
@@ -959,11 +1025,11 @@ mod tests {
         let n = 512;
         let mut smp = s();
         for _ in 0..n {
-            if let Some((_, t, _)) = m_sss.scatter_importance(&ray, &rec, &mut smp) {
-                sum_sss += t;
+            if let Some(sample) = m_sss.scatter_importance(&ray, &rec, &mut smp) {
+                sum_sss += sample.value;
             }
-            if let Some((_, t, _)) = m_no_sss.scatter_importance(&ray, &rec, &mut smp) {
-                sum_no += t;
+            if let Some(sample) = m_no_sss.scatter_importance(&ray, &rec, &mut smp) {
+                sum_no += sample.value;
             }
         }
         assert!(sum_sss.y < sum_no.y, "SSS green {} not < baseline {}", sum_sss.y, sum_no.y);
@@ -1004,8 +1070,9 @@ mod tests {
         let mut got_downward = false;
         let mut smp = s();
         for _ in 0..64 {
-            if let Some((scattered, _, _)) = m.scatter_importance(&ray, &rec, &mut smp) {
-                if scattered.direction().y < 0.0 {
+            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+                if sample.ray.direction().y < 0.0 {
+                    assert!(sample.delta, "transmission must be flagged delta");
                     got_downward = true;
                     break;
                 }
@@ -1031,12 +1098,13 @@ mod tests {
         // Run many samples: none should be NaN or negative.
         let mut smp = s();
         for _ in 0..64 {
-            if let Some((_, throughput, pdf)) = m.scatter_importance(&ray, &rec, &mut smp) {
-                assert!(pdf.is_finite() && pdf > 0.0, "pdf = {pdf}");
-                assert!(throughput.is_finite(), "throughput = {throughput:?}");
+            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+                assert!(sample.pdf.is_finite() && sample.pdf > 0.0, "pdf = {}", sample.pdf);
+                assert!(sample.value.is_finite(), "value = {:?}", sample.value);
                 assert!(
-                    throughput.x >= 0.0 && throughput.y >= 0.0 && throughput.z >= 0.0,
-                    "throughput = {throughput:?}"
+                    sample.value.x >= 0.0 && sample.value.y >= 0.0 && sample.value.z >= 0.0,
+                    "value = {:?}",
+                    sample.value
                 );
             }
         }

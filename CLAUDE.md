@@ -94,10 +94,13 @@ Keep `-o output.exr` (the default) if you want the PNG.
   built to wrap the triangles of an imported mesh (`usd_import.rs`). BVH build picks a random
   split axis, so it is non-deterministic.
 - **`Material`** (`material/material.rs`) —
-  `scatter_importance(r_in, rec) -> Option<(Ray, brdf_value, pdf)>` used by the integrator,
-  `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate toward a *given* direction — what
-  NEE and guided MIS need; `None` = delta/transmissive, and per its contract that decision
-  must never depend on `wi`), and `emitted()`. Exactly two implementations: **`OpenPBR`**,
+  `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
+  (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a
+  continuous density, no tracer cosine, emission carried at full weight),
+  `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate the *continuous* component
+  toward a given direction — what NEE and guided MIS need; `None` = no continuous
+  component at all, and per its contract that decision must never depend on `wi`),
+  and `emitted()`. Exactly two implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), and **`Emissive`**, which doubles
   as the `Light` implementation. Shared microfacet helpers (aniso GGX VNDF sampling,
@@ -136,6 +139,7 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 - Non-sphere USD lux light schemas are skipped (see above).
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
-  (no chromatic distributions). Transmissive OpenPBR surfaces have no `Material::eval`,
-  so NEE and guiding skip them (delta treatment). The guide-vs-BSDF selection probability is fixed (no learned α), and
+  (no chromatic distributions). Transmission is a per-sample delta lobe
+  (`ScatterSample::delta`) excluded from NEE/guide mixtures; the reflection lobes of
+  transmissive surfaces are fully covered by `eval`. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
