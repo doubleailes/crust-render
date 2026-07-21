@@ -54,6 +54,7 @@ impl Renderer {
             false,
             None,
             true,
+            true,
         )
         .0
     }
@@ -67,6 +68,7 @@ impl Renderer {
             self.settings.frame as u32,
             true,
             None,
+            true,
             true,
         )
         .0
@@ -91,6 +93,7 @@ impl Renderer {
                         tiled,
                         None,
                         true,
+                        true,
                     )
                     .0;
             }
@@ -113,7 +116,7 @@ impl Renderer {
                 training: true,
             };
             let (buffer, samples, variance) =
-                self.render_pass(spp, seed, tiled, Some(&gctx), false);
+                self.render_pass(spp, seed, tiled, Some(&gctx), false, false);
             drop(gctx);
             info!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}",
@@ -140,6 +143,7 @@ impl Renderer {
             base_seed,
             tiled,
             Some(&gctx),
+            true,
             true,
         );
         passes.push((final_buffer, final_variance));
@@ -198,6 +202,7 @@ impl Renderer {
         pass_seed: u32,
         tiled: bool,
         gctx: Option<&GuidingContext>,
+        adaptive: bool,
         progress: bool,
     ) -> (Buffer, Vec<SampleData>, f64) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
@@ -216,7 +221,8 @@ impl Renderer {
                     let mut var = 0.0f64;
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) = self.render_pixel(i, j, spp, pass_seed, gctx);
+                            let (color, mut s, v) =
+                                self.render_pixel(i, j, spp, pass_seed, gctx, adaptive);
                             pixels.push((i, j, color));
                             samples.append(&mut s);
                             var += v;
@@ -239,7 +245,7 @@ impl Renderer {
             for j in (0..self.settings.height).rev() {
                 let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
                     .into_par_iter()
-                    .map(|i| self.render_pixel(i, j, spp, pass_seed, gctx))
+                    .map(|i| self.render_pixel(i, j, spp, pass_seed, gctx, adaptive))
                     .collect();
                 for (i, (color, samples, var)) in row.into_iter().enumerate() {
                     buffer.set_pixel(i, j, color);
@@ -261,6 +267,7 @@ impl Renderer {
         spp: u32,
         pass_seed: u32,
         gctx: Option<&GuidingContext>,
+        adaptive: bool,
     ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sampler = SobolSampler::new(pass_seed);
         sampler.start_pixel(i as u32, j as u32);
@@ -268,6 +275,10 @@ impl Renderer {
         let mut samples = Vec::new();
         let mut lum_sum = 0.0f64;
         let mut lum_sq = 0.0f64;
+
+        let threshold = self.settings.variance_threshold as f64;
+        let min_spp = self.settings.min_samples_per_pixel.max(2);
+        let mut taken = 0u32;
 
         for sample in 0..spp {
             sampler.start_sample(sample);
@@ -290,16 +301,30 @@ impl Renderer {
             let lum = luminance(color) as f64;
             lum_sum += lum;
             lum_sq += lum * lum;
+            taken = sample + 1;
+
+            // Adaptive early stop: once past the minimum budget, quit as soon
+            // as the relative standard error of the pixel mean is below the
+            // threshold. Checked every 4th sample to amortize the cost.
+            if adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
+                let n = taken as f64;
+                let var_of_mean =
+                    ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
+                let mean = (lum_sum / n).max(1e-4);
+                if var_of_mean.sqrt() / mean < threshold {
+                    break;
+                }
+            }
         }
 
         // Unbiased variance of the pixel-mean luminance.
-        let n = spp as f64;
-        let variance = if spp >= 2 {
+        let n = taken as f64;
+        let variance = if taken >= 2 {
             ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0)
         } else {
             f64::INFINITY
         };
-        (sum / spp as f32, samples, variance)
+        (sum / taken as f32, samples, variance)
     }
 }
 
@@ -324,11 +349,10 @@ pub struct RenderSettings {
     max_depth: u32,
     width: usize,
     height: usize,
-    // Adaptive sampling + animation controls parsed from USD but not yet
-    // consumed by the tracer. Kept in the struct so the plumbing exists.
-    #[allow(dead_code)]
+    // Adaptive sampling: a pixel may stop early once it has taken at least
+    // `min_samples_per_pixel` samples and the relative standard error of its
+    // mean drops below `variance_threshold` (0 disables early stopping).
     min_samples_per_pixel: u32,
-    #[allow(dead_code)]
     variance_threshold: f32,
     frame: isize,
     // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).

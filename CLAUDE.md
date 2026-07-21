@@ -67,11 +67,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    passes at 1, 2, 4, … spp, splats `(position, direction, luminance·cos²)` samples
    into the field between passes, then renders the final pass with one-sample MIS
    between the frozen field and the BSDF (mixture pdf; secondary bounces only —
-   primary vertices sit far below the field's spatial resolution). Delta/transmissive
+   primary vertices sit far below the field's spatial resolution). All passes
+   (training + final) are blended into the output weighted by inverse variance, so
+   the training budget is not discarded. Delta/transmissive
    materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
    sampling. The NEE weight competes against the same mixture pdf — keep the two sides
    consistent or emission gets double-counted.
-5. Output is written to the `-o` EXR, then **`convert()`** (`convert.rs`) tone-maps to sRGB PNG.
+5. **Adaptive sampling**: pixels stop early once they hold `crust:minSamplesPerPixel`
+   samples and the relative standard error of the pixel mean drops below
+   `crust:varianceThreshold` (0 disables). Applies to main/final passes, never to
+   guiding training passes.
+6. Output is written to the `-o` EXR, then **`convert()`** (`convert.rs`) tone-maps to sRGB PNG.
 
 ### Gotcha: EXR/PNG output paths are partly hard-coded
 `convert()` reads a **hard-coded `"output.exr"`** and writes a timestamped PNG under
@@ -128,13 +134,9 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 ## Known incomplete work
 
-- **Adaptive sampling** is advertised (README) and its params (`min_samples_per_pixel`,
-  `variance_threshold`, `frame`) are parsed into `RenderSettings`, but the tracer does **not**
-  consume them yet — they are marked `#[allow(dead_code)]`. Wiring adaptive/variance-based
-  early-stop into `render()`/`render_with_tiles()` is open work.
 - Non-sphere USD lux light schemas are skipped (see above).
-- **Path guiding** covers surfaces only (no volume/phase guiding), trains on luminance
-  (no chromatic distributions), and discards training-pass images instead of blending
-  iterations. `Metal`/`Dielectric`/`BlinnPhong`/`Disney` have no `Material::eval` yet, so
-  NEE and guiding skip them (delta treatment — correct for metal/glass, conservative for
-  the two glossy ones).
+- **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
+  (no chromatic distributions). `Metal`/`Dielectric`/`BlinnPhong` have no `Material::eval`,
+  so NEE and guiding skip them (delta treatment — correct for metal/glass, conservative
+  for BlinnPhong). The guide-vs-BSDF selection probability is fixed (no learned α), and
+  spatial lookups are not parallax-compensated.

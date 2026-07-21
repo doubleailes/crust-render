@@ -31,7 +31,8 @@ Completely in a vibe coding mood.
 - 🧭 **Path Guiding** (opt-in)
   - Pure-Rust Practical Path Guiding (SD-tree), one-sample MIS with the BSDF
 - ⚡ **Adaptive Sampling**
-  - Early stop based on variance threshold
+  - Pixels stop early once their relative standard error drops below
+    `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples)
 - 🧪 **Modular Design**
   - Clean separation between renderer, integrator, materials, scene
 - **Disney Principled Shader**
@@ -122,7 +123,9 @@ the mixture pdf.
 Enable it per scene with `bool crust:pathGuiding = true` on the
 RenderSettings prim. `crust:guidingTrainIterations` controls how many
 training passes run before the final pass (their total cost is
-`2^iterations − 1` spp). Guiding pays off on scenes where light is hard to
+`2^iterations − 1` spp — not wasted: every pass is blended into the final
+image weighted by inverse variance, so the training budget contributes at
+equal total spp). Guiding pays off on scenes where light is hard to
 find by chance — the bundled `samples/cornellbox_guided.usda` hides its only
 light behind a shroud so all transport is multi-bounce, and guiding cuts MSE
 against a converged reference by ~20% at equal final spp:
