@@ -537,23 +537,11 @@ fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
     Vec3A::new(n_d - 0.3 * spread, n_d, n_d + 0.7 * spread)
 }
 
-/// Pick one RGB channel uniformly and return `(channel, mask)` where `mask`
-/// is a Vec3A with `3.0` at the picked channel and zero elsewhere — the
-/// hero-wavelength throughput multiplier that keeps the estimator unbiased
-/// across the 3-channel image.
-fn hero_channel(u: f32) -> (usize, Vec3A) {
-    if u < 1.0 / 3.0 {
-        (0, Vec3A::new(3.0, 0.0, 0.0))
-    } else if u < 2.0 / 3.0 {
-        (1, Vec3A::new(0.0, 3.0, 0.0))
-    } else {
-        (2, Vec3A::new(0.0, 0.0, 3.0))
-    }
-}
-
 /// Refract `v` (unit, pointing away from the surface) across the surface with
 /// unit outward normal `n`, using relative index `eta = η_incident / η_transmitted`.
-/// Returns None on total internal reflection.
+/// Returns None on total internal reflection. (Analytic Snell reference,
+/// used by tests to cross-check the sampled BTDF directions.)
+#[cfg_attr(not(test), allow(dead_code))]
 fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
     let cos_i = v.dot(n).min(1.0).max(-1.0);
     let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
@@ -565,130 +553,52 @@ fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
     Some(-v * eta + n * (eta * cos_i - cos_t))
 }
 
-/// Attempt to sample a Transmission event. Returns (world-space scattered
-/// ray, throughput, pdf), or None on total internal reflection.
-///
-/// Handles: thin-walled delta transmission (no medium), thick refraction
-/// (creates a medium from transmission_color / transmission_depth),
-/// dispersion (hero-wavelength IOR), and the incoming-side check
-/// (`front_face`) for entering vs exiting.
-fn sample_transmission(
-    m: &OpenPBR,
-    r_in: &Ray,
-    rec: &HitRecord,
-    frame: &Frame,
-    sampler: &mut dyn Sampler,
-) -> Option<(Ray, Vec3A, f32)> {
-    let v_world = -r_in.direction().normalize();
-    let front = rec.front_face;
-
-    // Thin-walled: delta transmission straight through, no medium.
-    if m.geometry_thin_walled {
-        let l_world = -v_world;
-        // No cosine in a delta lobe; we ape the codebase convention by
-        // returning throughput = tint (the tracer's cosine multiply is
-        // strictly incorrect for delta lobes but matches the rest of the
-        // renderer's estimator).
-        let throughput = m.transmission_color * m.transmission_weight;
-        // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the tint
-        // unmodified. Direct-light MIS won't hit a delta lobe.
-        return Some((Ray::new(rec.p, l_world), throughput, 1.0));
-    }
-
-    // Thick refraction. Determine per-channel IOR (dispersion) and pick a
-    // hero wavelength when dispersion is active.
-    let (eta_r, eta_g, eta_b) = {
-        let iors = dispersive_ior(
-            m.specular_ior,
-            m.transmission_dispersion_abbe_number,
-            m.transmission_dispersion_scale,
-        );
-        (iors.x, iors.y, iors.z)
-    };
-    let (hero_ior, hero_mult) = if m.transmission_dispersion_scale > 0.0 {
-        let (c, mask) = hero_channel(sampler.next_1d());
-        let ior = match c {
-            0 => eta_r,
-            1 => eta_g,
-            _ => eta_b,
-        };
-        (ior, mask)
-    } else {
-        (eta_g, Vec3A::ONE)
-    };
-
-    // Sample a GGX half-vector to add roughness to the refraction.
-    let v_local = frame.to_local(v_world);
-    let (ax, ay) =
-        roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
-    let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
-    let h_world = frame.to_world(h_local);
-
-    // Relative IOR: entering => 1 / hero_ior, exiting => hero_ior / 1.
-    // We use the shading normal for Snell so it stays consistent with `h`.
-    let eta = if front { 1.0 / hero_ior } else { hero_ior };
-    let l_world = match refract_dir(v_world, h_world, eta) {
-        Some(l) => l.normalize(),
-        None => {
-            // TIR at the sampled microfacet — fall back to reflection so we
-            // don't lose the sample. (Ideally we'd MIS with the specular
-            // lobe here; a Phase-6 quality improvement.)
-            let l = 2.0 * v_world.dot(h_world) * h_world - v_world;
-            return Some((Ray::new(rec.p, l.normalize()), Vec3A::ONE, 1.0));
-        }
-    };
-
-    // Fresnel at the microfacet — energy goes to refraction only when Transmission is chosen.
-    let cos_i = v_world.dot(h_world).abs();
-    let f_scalar = fresnel_schlick_scalar(cos_i, f0_from_ior(hero_ior));
-    let transmittance = 1.0 - f_scalar;
-
-    let throughput = m.transmission_color * m.transmission_weight * hero_mult * transmittance;
-
-    // Build the scattered ray. If entering, tag it with the transmission
-    // medium so the tracer applies Beer-Lambert over the traversal.
-    let scattered = if front {
-        let medium = Arc::new(Medium::from_transmission(
-            m.transmission_color,
-            m.transmission_depth,
-        ));
-        Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
-    } else {
-        // Exiting the medium — new ray is in vacuum.
-        Ray::new(rec.p + l_world * 1e-4, l_world)
-    };
-
-    // Delta-ish pdf. Rough refraction has a proper BTDF pdf, but the
-    // estimator-consistency wins here matter more than analytic accuracy
-    // for artist-facing renders. Phase-6 upgrade.
-    Some((scattered, throughput, 1.0))
+/// Thin-walled delta transmission: straight through, no bending, no medium.
+/// Returns (world-space scattered ray, throughput, placeholder pdf).
+fn sample_transmission_thin(m: &OpenPBR, r_in: &Ray, rec: &HitRecord) -> (Ray, Vec3A, f32) {
+    let l_world = r_in.direction().normalize();
+    // No cosine in a delta lobe; we ape the codebase convention by
+    // returning throughput = tint (the tracer's cosine multiply is
+    // strictly incorrect for delta lobes but matches the rest of the
+    // renderer's estimator).
+    let throughput = m.transmission_color * m.transmission_weight;
+    // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the tint
+    // unmodified. Direct-light MIS won't hit a delta lobe.
+    (Ray::new(rec.p, l_world), throughput, 1.0)
 }
 
 // ---------------------------------------------------------------------------
 // Rough refraction — Walter et al. 2007, "Microfacet Models for Refraction
-// through Rough Surfaces". Thick, non-dispersive transmission is a proper
-// continuous BTDF lobe: sampleable, evaluable, and therefore visible to NEE
-// and the guiding mixture. Thin-walled and hero-wavelength-dispersive
-// transmission remain delta lobes.
+// through Rough Surfaces". Thick transmission — dispersive or not — is a
+// proper continuous BTDF lobe: sampleable, evaluable, and therefore visible
+// to NEE and the guiding mixture. Dispersion is continuous per-channel:
+// each RGB channel refracts with its own IOR, sampling picks one channel's
+// IOR uniformly, and evaluation runs three per-channel BTDF evaluations
+// whose sampling pdfs average into the channel-mixture density. Only
+// thin-walled transmission remains a delta lobe.
 // ---------------------------------------------------------------------------
 
-/// Whether the transmission lobe is a continuous BTDF (thick, non-dispersive
-/// refraction) as opposed to a delta lobe.
+/// Whether the transmission lobe is a continuous BTDF (thick refraction,
+/// dispersive or not) as opposed to a delta lobe (thin-walled only).
 fn transmission_is_continuous(m: &OpenPBR) -> bool {
-    m.transmission_weight > 0.0
-        && !m.geometry_thin_walled
-        && m.transmission_dispersion_scale <= 0.0
+    m.transmission_weight > 0.0 && !m.geometry_thin_walled
 }
 
-/// Incident / transmitted IORs at the interface, in the ray-facing local
-/// frame (`entering` = the ray hit the front face and refracts into the
-/// interior medium).
-fn interface_iors(m: &OpenPBR, entering: bool) -> (f32, f32) {
-    if entering {
-        (1.0, m.specular_ior)
-    } else {
-        (m.specular_ior, 1.0)
-    }
+/// Per-channel interior IORs of the transmission lobe (all three equal when
+/// dispersion is off).
+fn transmission_iors(m: &OpenPBR) -> Vec3A {
+    dispersive_ior(
+        m.specular_ior,
+        m.transmission_dispersion_abbe_number,
+        m.transmission_dispersion_scale,
+    )
+}
+
+/// Incident / transmitted IORs at the interface for an interior IOR `ior`,
+/// in the ray-facing local frame (`entering` = the ray hit the front face
+/// and refracts into the interior medium).
+fn interface_iors(ior: f32, entering: bool) -> (f32, f32) {
+    if entering { (1.0, ior) } else { (ior, 1.0) }
 }
 
 /// GGX alphas for the transmission lobe. Roughness is floored so the
@@ -700,18 +610,25 @@ fn transmission_alphas(m: &OpenPBR) -> (f32, f32) {
     )
 }
 
-/// Walter et al. BTDF value (without the tracer-facing cosine, tinted by
-/// transmission color/weight) and the matching VNDF sampling pdf for a
-/// below-hemisphere direction `l_local`. Returns zeros when `l_local` is not
-/// a valid refraction of `v_local`.
-fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> (Vec3A, f32) {
-    let (eta_i, eta_t) = interface_iors(m, entering);
+/// Walter et al. BTDF for one color channel with interior IOR `ior`:
+/// untinted scalar BTDF value (without the tracer-facing cosine) and the
+/// matching VNDF sampling pdf for a below-hemisphere direction `l_local`.
+/// Returns zeros when `l_local` is not a valid refraction of `v_local` at
+/// this IOR.
+fn eval_transmission_channel(
+    m: &OpenPBR,
+    v_local: Vec3A,
+    l_local: Vec3A,
+    entering: bool,
+    ior: f32,
+) -> (f32, f32) {
+    let (eta_i, eta_t) = interface_iors(ior, entering);
 
     // Half vector for refraction (eq. 16): h ∝ -(η_i·v + η_t·l), oriented
     // into the upper hemisphere of the ray-facing frame.
     let mut h = -(v_local * eta_i + l_local * eta_t);
     if h.length_squared() < 1e-12 {
-        return (Vec3A::ZERO, 0.0);
+        return (0.0, 0.0);
     }
     h = h.normalize();
     if h.z < 0.0 {
@@ -721,7 +638,7 @@ fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool
     let v_dot_h = v_local.dot(h);
     let l_dot_h = l_local.dot(h);
     if v_dot_h <= 1e-6 || l_dot_h >= -1e-6 {
-        return (Vec3A::ZERO, 0.0);
+        return (0.0, 0.0);
     }
 
     let (ax, ay) = transmission_alphas(m);
@@ -737,34 +654,73 @@ fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool
     let denom = eta_i * v_dot_h + eta_t * l_dot_h;
     let denom2 = denom * denom;
     if denom2 < 1e-10 {
-        return (Vec3A::ZERO, 0.0);
+        return (0.0, 0.0);
     }
 
     // BTDF (eq. 21).
     let btdf = (v_dot_h * -l_dot_h) / (n_dot_v * n_dot_l)
         * (eta_t * eta_t * (1.0 - f) * d * g / denom2);
-    let value = m.transmission_color
-        * (m.transmission_weight * (1.0 - m.base_metalness) * btdf.max(0.0));
 
     // pdf: raw VNDF half-vector density times the refraction Jacobian
     // (eq. 17): dω_h/dω_l = η_t² |l·h| / (η_i(v·h) + η_t(l·h))².
     let p_h = pdf_vndf_h_aniso_local(v_local, h, ax, ay);
     let jacobian = eta_t * eta_t * -l_dot_h / denom2;
 
-    (value, p_h * jacobian)
+    (btdf.max(0.0), p_h * jacobian)
+}
+
+/// Transmission BTDF value (tinted, without the tracer-facing cosine) and
+/// sampling pdf for a below-hemisphere direction `l_local`.
+///
+/// Without dispersion this is a single Walter BTDF. With dispersion each RGB
+/// channel refracts with its own IOR, so the lobe is a uniform per-channel
+/// mixture: three BTDF evaluations — channel `c`'s value comes from η_c —
+/// and a pdf that averages the three per-channel sampling densities
+/// (matching `sample_transmission_rough`, which picks a channel uniformly).
+fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> (Vec3A, f32) {
+    let tint = m.transmission_color * (m.transmission_weight * (1.0 - m.base_metalness));
+    let iors = transmission_iors(m);
+    if m.transmission_dispersion_scale <= 0.0 {
+        let (btdf, pdf) = eval_transmission_channel(m, v_local, l_local, entering, iors.y);
+        return (tint * btdf, pdf);
+    }
+    let mut value = [0.0f32; 3];
+    let mut pdf = 0.0;
+    for (c, ior) in [iors.x, iors.y, iors.z].into_iter().enumerate() {
+        let (btdf, p) = eval_transmission_channel(m, v_local, l_local, entering, ior);
+        value[c] = btdf;
+        pdf += p / 3.0;
+    }
+    (tint * Vec3A::from_array(value), pdf)
 }
 
 /// Sample the continuous transmission lobe: VNDF half-vector, then Snell.
-/// Returns the transmitted direction in the local frame, or `None` on total
-/// internal reflection at the sampled microfacet (that energy is carried by
-/// the specular reflection lobe).
+/// With dispersion active, one RGB channel's IOR is picked uniformly — the
+/// estimator divides by the channel-averaged pdf from `eval_transmission`
+/// (one-sample channel mixture), so no hero-channel throughput mask is
+/// needed. Returns the transmitted direction in the local frame, or `None`
+/// on total internal reflection at the sampled microfacet (that energy is
+/// carried by the specular reflection lobe).
 fn sample_transmission_rough(
     m: &OpenPBR,
     v_local: Vec3A,
     entering: bool,
     sampler: &mut dyn Sampler,
 ) -> Option<Vec3A> {
-    let (eta_i, eta_t) = interface_iors(m, entering);
+    let iors = transmission_iors(m);
+    let ior = if m.transmission_dispersion_scale > 0.0 {
+        let u = sampler.next_1d();
+        if u < 1.0 / 3.0 {
+            iors.x
+        } else if u < 2.0 / 3.0 {
+            iors.y
+        } else {
+            iors.z
+        }
+    } else {
+        iors.y
+    };
+    let (eta_i, eta_t) = interface_iors(ior, entering);
     let eta_rel = eta_i / eta_t;
     let (ax, ay) = transmission_alphas(m);
 
@@ -804,10 +760,12 @@ impl Material for OpenPBR {
         let lobe = pmf.pick(sampler.next_1d());
 
         if matches!(lobe, Lobe::Transmission) {
-            // Thick, non-dispersive refraction is a continuous Walter BTDF
-            // lobe: value and pdf come from the same full-sphere
+            // Thick refraction — dispersive or not — is a continuous Walter
+            // BTDF lobe: value and pdf come from the same full-sphere
             // eval_all/pdf_all composition as the reflection lobes, so
-            // sampling and evaluation agree exactly.
+            // sampling and evaluation agree exactly. Dispersion samples one
+            // channel's IOR; eval_all/pdf_all answer with the three-channel
+            // BTDF value and the channel-averaged mixture pdf.
             if transmission_is_continuous(self) {
                 let l_local =
                     sample_transmission_rough(self, v_local, rec.front_face, sampler)?;
@@ -831,11 +789,9 @@ impl Material for OpenPBR {
                 });
             }
 
-            // Thin-walled and hero-wavelength-dispersive transmission stay
-            // delta lobes (placeholder pdf, never mixed with a continuous
-            // density).
-            let (scattered, throughput, pdf) =
-                sample_transmission(self, r_in, rec, &frame, sampler)?;
+            // Thin-walled transmission stays a delta lobe (placeholder pdf,
+            // never mixed with a continuous density).
+            let (scattered, throughput, pdf) = sample_transmission_thin(self, r_in, rec);
             // Divide by the lobe-selection probability so the mixture
             // estimator stays unbiased.
             let p_select = pmf.p_transmission.max(1e-4);
@@ -898,11 +854,12 @@ impl Material for OpenPBR {
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
         // Evaluates the continuous component over the full sphere: the
-        // reflection lobes above the ray-facing hemisphere and — for thick,
-        // non-dispersive transmissive surfaces — the Walter BTDF below it.
-        // Delta lobes (thin-walled / dispersive transmission) are excluded
-        // per the trait contract; `pdf_all` reports the matching defective
-        // density.
+        // reflection lobes above the ray-facing hemisphere and — for thick
+        // transmissive surfaces, dispersive or not — the Walter BTDF below
+        // it (per-channel with the channel-mixture pdf when dispersion is
+        // active). The only delta lobe left (thin-walled transmission) is
+        // excluded per the trait contract; `pdf_all` reports the matching
+        // defective density.
         let frame = Frame::new(rec.normal);
         let v_local = frame.to_local(-r_in.direction().normalize());
         if v_local.z <= 0.0 {
@@ -1236,14 +1193,75 @@ mod tests {
     }
 
     #[test]
-    fn hero_channel_distributes_uniformly() {
-        // Rough uniformity check across the three thirds of the [0, 1) range.
-        let (c0, _) = hero_channel(0.05);
-        let (c1, _) = hero_channel(0.5);
-        let (c2, _) = hero_channel(0.9);
-        assert_eq!(c0, 0);
-        assert_eq!(c1, 1);
-        assert_eq!(c2, 2);
+    fn dispersive_glass_is_continuous_and_eval_consistent() {
+        // Dispersive thick glass is a per-channel continuous BTDF: no delta
+        // samples, and scatter_importance must agree with eval (three-channel
+        // value, channel-averaged mixture pdf) on both hemispheres.
+        let m = OpenPBR {
+            specular_roughness: 0.25,
+            transmission_dispersion_scale: 1.0,
+            ..OpenPBR::glass(1.5)
+        };
+        let mut sampler = s();
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+
+        let mut transmitted = 0;
+        for _ in 0..256 {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                assert!(!sample.delta, "dispersive thick glass has no delta lobe");
+                let wi = sample.ray.direction().normalize();
+                if wi.z < 0.0 {
+                    transmitted += 1;
+                }
+                let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("dispersive glass is evaluable");
+                let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
+                assert!(
+                    (ev - sample.value).abs().max_element() < tol,
+                    "{ev} vs {:?} (wi.z = {})",
+                    sample.value,
+                    wi.z
+                );
+                assert!(
+                    (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
+                    "{epdf} vs {} (wi.z = {})",
+                    sample.pdf,
+                    wi.z
+                );
+                // One-sample channel-mixture weights are bounded by roughly
+                // 3× the non-dispersive Walter weight.
+                let w = (sample.value / sample.pdf).max_element();
+                assert!(w.is_finite() && w >= 0.0 && w < 30.0, "weight {w}");
+            }
+        }
+        assert!(transmitted > 64, "dispersive glass should mostly refract: {transmitted}");
+    }
+
+    #[test]
+    fn dispersion_separates_channels() {
+        // Near-smooth dispersive glass: at the green-channel Snell direction
+        // the BTDF must be green-dominated — red and blue refract to
+        // measurably different directions.
+        let m = OpenPBR {
+            transmission_dispersion_scale: 1.0,
+            ..OpenPBR::glass(1.5)
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let dir_in = Vec3A::new(0.6, 0.0, -1.0).normalize();
+        let r_in = Ray::new(-dir_in, dir_in);
+        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+
+        let (v, pdf) = m.eval(&r_in, &rec, l_green).expect("evaluable");
+        assert!(pdf > 0.0, "pdf = {pdf}");
+        assert!(v.y > 0.0, "green channel dark at its own Snell direction: {v}");
+        assert!(v.y > v.x, "green {} not > red {} at green Snell direction", v.y, v.x);
+        assert!(v.y > v.z, "green {} not > blue {} at green Snell direction", v.y, v.z);
     }
 
     #[test]

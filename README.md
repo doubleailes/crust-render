@@ -136,10 +136,14 @@ cargo run --release -- -i samples/cornellbox_guided.usda
 
 Every continuous lobe is guided — including refraction: thick glass uses a
 real Walter et al. 2007 microfacet BTDF with a proper VNDF-based pdf, so
-the guiding field can learn and sample directions straight through it. Only
-thin-walled and dispersive transmission (genuinely singular/discrete lobes)
-and volume scattering are excluded; untrained regions fall back to plain
-BSDF sampling, so the estimator stays unbiased everywhere.
+the guiding field can learn and sample directions straight through it.
+Dispersion is continuous too — each RGB channel refracts with its own IOR
+(one channel's IOR sampled uniformly, three per-channel BTDF evaluations
+with a channel-averaged mixture pdf), so dispersive glass joins the NEE and
+guiding mixtures instead of being a hero-wavelength delta lobe. Only
+thin-walled transmission (a genuinely singular lobe) and volume scattering
+are excluded; untrained regions fall back to plain BSDF sampling, so the
+estimator stays unbiased everywhere.
 
 ### CLI
 
