@@ -2,9 +2,20 @@ schema: spec-driven
 
 # Project context — shown to AI when creating OpenSpec artifacts.
 context: |
-  Crust Render is a toy, physically-based path tracer written in safe Rust
-  (edition 2024), inspired by PBRT, "Ray Tracing in One Weekend", and Autodesk
-  Standard Surface / OpenPBR.
+  Crust Render is a production-inspired, CPU-only toy path tracer in pure, safe
+  Rust (edition 2024). The guiding goal is to bring industry-standard graphics
+  formats and models — OpenUSD (scene interchange) and OpenPBR (surface shading)
+  — into a Rust environment, drawing on PBRT, "Ray Tracing in One Weekend", and
+  Autodesk Standard Surface.
+
+  Guiding principles (apply when writing proposals and specs):
+  - Performance is a core concern: prefer designs and data layouts that keep the
+    CPU path tracer fast (Rayon parallelism, cache-friendly structures, BVH).
+    Flag proposals that would regress render throughput.
+  - CPU only — there is no GPU backend; do not spec one.
+  - The CLI is the only UI for now; assume no interactive/GUI surface.
+  - "Production-inspired toy": favor correct, industry-aligned semantics
+    (OpenUSD scene model, OpenPBR shading) over breadth of one-off features.
 
   Tech stack:
   - Rust 2024, Cargo workspace with three crates under crates/:
