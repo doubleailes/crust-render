@@ -29,7 +29,9 @@ context: |
     indicatif (progress bar), criterion (benches).
 
   Domain conventions:
-  - Scenes load exclusively from USD (.usda/.usdc/.usdz); RON support was removed.
+  - Scenes load exclusively from USD (.usda/.usdc/.usdz). RON, Alembic (.abc),
+    and OBJ (Wavefront) are deprecated/out of scope — do not add or spec loaders
+    for any non-USD scene or mesh format.
   - Requirements should describe observable renderer behavior (CLI, image output,
     scene interpretation), not internal Rust types, unless the type is the contract.
   - Describe the CURRENT implemented behavior in openspec/specs/. Note known gaps
