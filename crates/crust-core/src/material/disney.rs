@@ -46,18 +46,11 @@ impl Disney {
     }
 }
 
-impl Material for Disney {
-    fn scatter_importance(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-        sampler: &mut dyn Sampler,
-    ) -> Option<(Ray, Vec3A, f32)> {
-        let n = rec.normal;
-        let v = -r_in.direction().normalize();
-        let l_local = cosine_hemisphere(sampler.next_2d());
-        let l = utils::align_to_normal(l_local, n);
-
+impl Disney {
+    /// Value (`brdf * cos`, codebase convention) and cosine-sampling pdf for
+    /// an arbitrary outgoing direction `l`. Shared by sampling and
+    /// evaluation so the two stay consistent.
+    fn value_pdf(&self, v: Vec3A, l: Vec3A, n: Vec3A) -> (Vec3A, f32) {
         let h = (v + l).normalize();
         let n_dot_l = n.dot(l).max(0.0);
         let n_dot_v = n.dot(v).max(0.0);
@@ -112,11 +105,36 @@ impl Material for Disney {
         let clearcoat = self.clearcoat * Dc * Fc * Gc / (4.0 * n_dot_v * n_dot_l + 1e-4);
 
         let total = kd * diffuse + specular + sheen + Vec3A::new(clearcoat, clearcoat, clearcoat);
+        let pdf = (n_dot_l / PI).max(1e-4);
 
-        let scattered = Ray::new(rec.p, l);
-        let pdf = n_dot_l / PI;
+        (total * n_dot_l, pdf)
+    }
+}
 
-        Some((scattered, total * n_dot_l, pdf.max(1e-4)))
+impl Material for Disney {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: &mut dyn Sampler,
+    ) -> Option<(Ray, Vec3A, f32)> {
+        let n = rec.normal;
+        let v = -r_in.direction().normalize();
+        let l_local = cosine_hemisphere(sampler.next_2d());
+        let l = utils::align_to_normal(l_local, n);
+
+        let (value, pdf) = self.value_pdf(v, l, n);
+        Some((Ray::new(rec.p, l), value, pdf))
+    }
+
+    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        let n = rec.normal;
+        let v = -r_in.direction().normalize();
+        let l = wi.normalize();
+        if l.dot(n) <= 0.0 || v.dot(n) <= 0.0 {
+            return Some((Vec3A::ZERO, 1e-4));
+        }
+        Some(self.value_pdf(v, l, n))
     }
 
     fn scatter(
@@ -132,5 +150,43 @@ impl Material for Disney {
 
     fn emitted(&self) -> Vec3A {
         Vec3A::new(0.0, 0.0, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sampler::RngSampler;
+
+    #[test]
+    fn eval_matches_scatter_importance() {
+        let m = Disney::new(
+            Vec3A::new(0.7, 0.4, 0.3),
+            0.3,
+            0.5,
+            0.5,
+            0.2,
+            0.4,
+            0.6,
+            0.7,
+            0.8,
+        );
+        let mut sampler = RngSampler::default();
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+
+        for _ in 0..64 {
+            let (scattered, value, pdf) = m
+                .scatter_importance(&r_in, &rec, &mut sampler)
+                .expect("disney always scatters");
+            let wi = scattered.direction().normalize();
+            let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("disney is evaluable");
+            let tol = 1e-3 * (1.0 + value.max_element().abs());
+            assert!((ev - value).abs().max_element() < tol, "{ev} vs {value}");
+            assert!((epdf - pdf).abs() < 1e-3 * (1.0 + pdf), "{epdf} vs {pdf}");
+        }
     }
 }
