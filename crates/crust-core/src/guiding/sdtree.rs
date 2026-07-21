@@ -221,10 +221,11 @@ mod tests {
         }
         tree.refine(1, 100.0, 24, 0.01, 20);
         // Every region should still sample toward +z after the split.
+        let mut s = sampler::RngSampler::default();
         for p in [Vec3A::new(0.1, 0.5, 0.5), Vec3A::new(0.9, 0.5, 0.5)] {
             let dtree = tree.dtree_at(p);
             assert!(dtree.total_flux() > 0.0, "child at {p} lost its flux");
-            let (c, _) = dtree.sample([0.4, 0.6]).unwrap();
+            let (c, _) = dtree.sample(&mut s).unwrap();
             let d = super::super::dtree::canonical_to_dir(c);
             assert!(d.z > 0.0, "child at {p} samples away from the light: {d}");
         }

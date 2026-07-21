@@ -225,6 +225,7 @@ impl Renderer {
                 &mut sampler,
                 gctx,
                 &mut samples,
+                false,
             );
         }
         (sum / spp as f32, samples)
@@ -310,7 +311,7 @@ pub fn ray_color(
     sampler: &mut dyn Sampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
-    ray_color_inner(r, world, lights, depth, sampler, None, &mut no_training)
+    ray_color_inner(r, world, lights, depth, sampler, None, &mut no_training, false)
 }
 
 /// Choose the bounce direction and the pdf its contribution is divided by.
@@ -328,12 +329,18 @@ fn sample_bounce_direction(
     rec: &HitRecord,
     guiding: Option<&GuidingContext>,
     sampler: &mut dyn Sampler,
-) -> Option<(Ray, Vec3A, f32)> {
+) -> Option<(Ray, Vec3A, f32, bool)> {
     let mat = rec.mat.as_ref().unwrap();
 
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
-        _ => return mat.scatter_importance(r, rec, sampler),
+        _ => {
+            let (scattered, value, pdf) = mat.scatter_importance(r, rec, sampler)?;
+            let evaluable = mat
+                .eval(r, rec, scattered.direction().normalize())
+                .is_some();
+            return Some((scattered, value, pdf, evaluable));
+        }
     };
     let alpha = g.field.config().guide_prob;
 
@@ -341,13 +348,14 @@ fn sample_bounce_direction(
         // Guide branch. A trained field always yields a sample; delta and
         // transmissive materials (eval == None) cannot use it, so they drop
         // to the pure-BSDF estimator — exactly as they do in the BSDF branch.
-        if let Some((wi, p_guide)) = g.field.sample(rec.p, sampler.next_2d()) {
+        if let Some((wi, p_guide)) = g.field.sample(rec.p, sampler) {
             if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
                 let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
-                return Some((Ray::new(rec.p, wi), value, pdf));
+                return Some((Ray::new(rec.p, wi), value, pdf, true));
             }
         }
-        mat.scatter_importance(r, rec, sampler)
+        let (scattered, value, pdf) = mat.scatter_importance(r, rec, sampler)?;
+        Some((scattered, value, pdf, false))
     } else {
         // BSDF branch.
         let (scattered, value, p_bsdf) = mat.scatter_importance(r, rec, sampler)?;
@@ -355,13 +363,14 @@ fn sample_bounce_direction(
         if mat.eval(r, rec, wi).is_some() {
             let p_guide = g.field.pdf(rec.p, wi);
             let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
-            Some((scattered, value, pdf))
+            Some((scattered, value, pdf, true))
         } else {
-            Some((scattered, value, p_bsdf))
+            Some((scattered, value, p_bsdf, false))
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ray_color_inner(
     r: &Ray,
     world: &dyn Hittable,
@@ -370,6 +379,10 @@ fn ray_color_inner(
     sampler: &mut dyn Sampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
+    // The previous bounce already accounted for this vertex's emission via
+    // its MIS-weighted `add_emission` term; adding it again here would count
+    // bounce-hit emission twice.
+    suppress_emission: bool,
 ) -> Vec3A {
     if depth <= 0 {
         return Vec3A::new(0.0, 0.0, 0.0); // recursion limit
@@ -402,7 +415,9 @@ fn ray_color_inner(
                     let new_ray = Ray::new_in_medium(pos, dir, medium.clone());
                     let albedo = medium.albedo();
                     // Volume scattering events are not recorded — the field
-                    // guides surface bounces only.
+                    // guides surface bounces only. No emission bookkeeping
+                    // happened along this phase-scattered ray, so the next
+                    // hit's emission must count.
                     return albedo
                         * ray_color_inner(
                             &new_ray,
@@ -412,6 +427,7 @@ fn ray_color_inner(
                             sampler,
                             guiding,
                             train_out,
+                            false,
                         );
                 }
             }
@@ -424,8 +440,17 @@ fn ray_color_inner(
             Some(m) => m.transmittance(rec.t),
             None => Vec3A::ONE,
         };
-        let emitted = rec.mat.as_ref().unwrap().emitted();
+        let emitted = if suppress_emission {
+            Vec3A::ZERO
+        } else {
+            rec.mat.as_ref().unwrap().emitted()
+        };
         let mut total_light = emitted;
+
+        // Guide secondary bounces only: primary vertices vary per pixel far
+        // below the guiding field's spatial resolution, so guiding them adds
+        // parallax-mismatch variance instead of removing any.
+        let guiding_here = if suppress_emission { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
         for light in lights.lights.iter() {
@@ -449,50 +474,87 @@ fn ray_color_inner(
                 if let Some((brdf_value, brdf_pdf)) =
                     rec.mat.as_ref().unwrap().eval(r, &rec, light_dir_unit)
                 {
-                    let weight = utils::balance_heuristic(light_pdf, brdf_pdf);
+                    // The competing strategy for this MIS weight is the
+                    // bounce sampler, whose density toward the light is the
+                    // guide/BSDF mixture whenever guiding is available at
+                    // this vertex — using the plain BSDF pdf here while the
+                    // bounce side weights with the mixture makes the two
+                    // weights sum past one and double-counts emission.
+                    let bounce_pdf = match guiding_here {
+                        Some(g) if g.field.trained_at(rec.p) => {
+                            let alpha = g.field.config().guide_prob;
+                            alpha * g.field.pdf(rec.p, light_dir_unit)
+                                + (1.0 - alpha) * brdf_pdf
+                        }
+                        _ => brdf_pdf,
+                    };
+                    let weight = utils::balance_heuristic(light_pdf, bounce_pdf);
                     total_light += light.color() * brdf_value * cosine * weight / light_pdf;
                 }
             }
         }
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some((scattered, brdf_value, brdf_pdf)) =
-            sample_bounce_direction(r, &rec, guiding, sampler)
+        if let Some((scattered, brdf_value, brdf_pdf, nee_capable)) =
+            sample_bounce_direction(r, &rec, guiding_here, sampler)
         {
             let cosine = f32::max(rec.normal.dot(scattered.direction().normalize()), 0.0);
 
             let mut light_hit = HitRecord::new();
             let mut add_emission = Vec3A::new(0.0, 0.0, 0.0);
+            let mut hit_emission = Vec3A::ZERO;
 
             if world.hit(&scattered, 0.001, f32::INFINITY, &mut light_hit) {
                 let emitted = light_hit.mat.as_ref().unwrap().emitted();
                 if emitted.length_squared() > 0.0 {
-                    let light_pdf_sum: f32 = lights
-                        .lights
-                        .iter()
-                        .map(|light| light.pdf(rec.p, light_hit.p))
-                        .sum();
-                    let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
-                    let weight = utils::balance_heuristic(brdf_pdf, light_pdf);
+                    hit_emission = emitted;
+                    // NEE-capable vertices share the emission between light
+                    // sampling and the bounce via MIS; delta/transmissive
+                    // vertices skipped NEE, so the bounce carries it whole.
+                    let weight = if nee_capable {
+                        let light_pdf_sum: f32 = lights
+                            .lights
+                            .iter()
+                            .map(|light| light.pdf(rec.p, light_hit.p))
+                            .sum();
+                        let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
+                        utils::balance_heuristic(brdf_pdf, light_pdf)
+                    } else {
+                        1.0
+                    };
 
                     // Add the contribution of hitting the light via BRDF
                     add_emission = emitted * brdf_value * cosine * weight / brdf_pdf;
                 }
             }
 
-            let incident =
-                ray_color_inner(&scattered, world, lights, depth - 1, sampler, guiding, train_out);
+            // The recursion must not count the next vertex's emission again —
+            // `add_emission` above owns that term.
+            let incident = ray_color_inner(
+                &scattered,
+                world,
+                lights,
+                depth - 1,
+                sampler,
+                guiding,
+                train_out,
+                true,
+            );
 
-            // Record a training sample for the guiding field: from rec.p
-            // along the bounce direction the path saw `incident` radiance
-            // (which includes emission at the next hit, so it is a full
-            // incident-radiance estimate).
+            // Record a training sample for the guiding field: the full
+            // incident radiance (reflected + the suppressed hit emission),
+            // weighted by cos² to match this tracer's estimator, which
+            // multiplies the codebase's brdf*cos material values by the
+            // cosine again.
             if let Some(g) = guiding {
                 if g.training {
+                    let dir = scattered.direction().normalize();
+                    let cos = rec.normal.dot(dir).max(0.0);
                     train_out.push(SampleData {
                         pos: rec.p,
-                        dir: scattered.direction().normalize(),
-                        radiance: luminance(incident).min(TRAIN_RADIANCE_CLAMP),
+                        dir,
+                        radiance: (luminance(incident + hit_emission) * cos * cos)
+                            .min(TRAIN_RADIANCE_CLAMP),
                     });
                 }
             }
