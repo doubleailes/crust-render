@@ -12,7 +12,7 @@ use crate::camera::Camera;
 use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::light::{Light, LightList};
-use crate::material::{Emissive, Lambertian, Material, OpenPBR};
+use crate::material::{Emissive, Material, OpenPBR};
 use crate::primitives::{Sphere as CrustSphere, Triangle};
 use crate::scene::Scene;
 use crate::tracer::RenderSettings;
@@ -500,7 +500,7 @@ fn resolve_material(stage: &Stage, prim: &Prim) -> Arc<dyn Material> {
         Ok(Some(m)) => m,
         _ => {
             warn!(
-                "Material at {} not resolvable — using default Lambertian",
+                "Material at {} not resolvable — using default grey OpenPBR",
                 mat_path
             );
             return default_material();
@@ -511,7 +511,7 @@ fn resolve_material(stage: &Stage, prim: &Prim) -> Arc<dyn Material> {
         Ok(Some(s)) => s,
         _ => {
             warn!(
-                "Material {} has no surface shader — using default Lambertian",
+                "Material {} has no surface shader — using default grey OpenPBR",
                 mat_path
             );
             return default_material();
@@ -524,14 +524,14 @@ fn resolve_material(stage: &Stage, prim: &Prim) -> Arc<dyn Material> {
         Some("UsdPreviewSurface") => preview_surface_to_openpbr(stage, &mat_path),
         Some(other) => {
             warn!(
-                "Unrecognized shader id '{}' at {} — using default Lambertian",
+                "Unrecognized shader id '{}' at {} — using default grey OpenPBR",
                 other, mat_path
             );
             default_material()
         }
         None => {
             warn!(
-                "Shader at {} has no info:id — using default Lambertian",
+                "Shader at {} has no info:id — using default grey OpenPBR",
                 mat_path
             );
             default_material()
@@ -540,7 +540,7 @@ fn resolve_material(stage: &Stage, prim: &Prim) -> Arc<dyn Material> {
 }
 
 fn default_material() -> Arc<dyn Material> {
-    Arc::new(Lambertian::new(Vec3A::new(0.5, 0.5, 0.5)))
+    Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)))
 }
 
 fn shader_info_id(shader: &Shader) -> Option<String> {

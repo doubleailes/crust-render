@@ -72,7 +72,7 @@ fn loads_openpbr_showcase_usda() {
 /// the `crust:openpbr` shader id, and every scene sphere must bind one of
 /// them. When this test drifts (renamed shader ids, missing material
 /// binding, openusd stops surfacing `info:id`), the loader silently falls
-/// back to a grey Lambertian — which is what happened before this fix.
+/// back to a grey diffuse OpenPBR — which is what happened before this fix.
 #[test]
 fn openpbr_showcase_materials_all_decode() {
     let stage = Stage::open(sample("openpbr_showcase.usda").to_str().unwrap())

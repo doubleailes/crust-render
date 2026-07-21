@@ -93,15 +93,15 @@ Keep `-o output.exr` (the default) if you want the PNG.
   The top-level `world` is a **linear `HittableList`** (no acceleration); `BVHNode` is only
   built to wrap the triangles of an imported mesh (`usd_import.rs`). BVH build picks a random
   split axis, so it is non-deterministic.
-- **`Material`** (`material/material.rs`) — `scatter(...)` (bool-out-params style) plus
+- **`Material`** (`material/material.rs`) —
   `scatter_importance(r_in, rec) -> Option<(Ray, brdf_value, pdf)>` used by the integrator,
   `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate toward a *given* direction — what
   NEE and guided MIS need; `None` = delta/transmissive, and per its contract that decision
-  must never depend on `wi`), and `emitted()`. Implementations in `material/`:
-  `Lambertian`, `Metal`, `Dielectric` /
-  `ComplexDielectric`, `BlinnPhong`, `CookTorrance`, `Disney`, `OpenPBR`, `Emissive`.
-  Shared microfacet helpers (GGX VNDF sampling, Schlick Fresnel, geometry term) live in
-  `material/brdf.rs`.
+  must never depend on `wi`), and `emitted()`. Exactly two implementations: **`OpenPBR`**,
+  the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
+  constructors used by `world.rs` and the USD fallback), and **`Emissive`**, which doubles
+  as the `Light` implementation. Shared microfacet helpers (aniso GGX VNDF sampling,
+  Schlick Fresnel, sheen, thin-film) live in `material/brdf.rs`.
 - **`Light`** (`light.rs`) — `sample`/`sample_cmj`/`pdf`/`color`. Lights are stored in a
   `LightList` and are also added to `world` as emissive geometry (Cornell-box semantics:
   a sphere light is both light and visible object).
@@ -121,7 +121,7 @@ Xform hierarchy into world matrices. Schema mapping:
     `metallic→baseMetalness`, `roughness→specularRoughness`, etc.).
   - `crust:openpbr` → decoded 1:1 into `OpenPBR`; every input is the camelCase mirror of the
     Rust field name (lossless but non-portable). Reference scene: `samples/openpbr_showcase.usda`.
-  - Unbound geometry → grey `Lambertian`.
+  - Unbound geometry → grey diffuse `OpenPBR`.
 - `UsdLuxSphereLight` → an `Emissive` sphere (light + geometry). Other lux types
   (`RectLight`, `DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`) warn once and are skipped.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
@@ -136,7 +136,6 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 - Non-sphere USD lux light schemas are skipped (see above).
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
-  (no chromatic distributions). `Metal`/`Dielectric`/`BlinnPhong` have no `Material::eval`,
-  so NEE and guiding skip them (delta treatment — correct for metal/glass, conservative
-  for BlinnPhong). The guide-vs-BSDF selection probability is fixed (no learned α), and
+  (no chromatic distributions). Transmissive OpenPBR surfaces have no `Material::eval`,
+  so NEE and guiding skip them (delta treatment). The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
