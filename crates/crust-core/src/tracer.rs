@@ -74,8 +74,11 @@ impl Renderer {
 
     /// Progressive path-guided rendering: training passes with geometrically
     /// growing sample budgets (1, 2, 4, … spp) build the guiding field, then
-    /// the full per-pixel budget renders the final image with the frozen
-    /// field. The final image comes from the final pass alone.
+    /// the full per-pixel budget renders with the frozen field. Every pass is
+    /// an unbiased image of the same scene, so instead of discarding the
+    /// training passes the final image blends all of them weighted by
+    /// inverse variance — passes rendered before the field converged simply
+    /// receive small weights.
     fn render_guided(&self, tiled: bool) -> Buffer {
         let bounds = match self.world.bounding_box() {
             Some(b) => b,
@@ -99,25 +102,29 @@ impl Renderer {
         };
         let mut field = GuidingField::new(bounds, cfg);
         let base_seed = self.settings.frame as u32;
+        let mut passes: Vec<(Buffer, f64)> = Vec::new();
 
         for k in 0..cfg.train_iterations {
             let spp = 1u32 << k.min(16);
             // Decorrelate the Sobol sequences between passes.
             let seed = base_seed.wrapping_add((k + 1).wrapping_mul(0x9E37_79B9));
-            info!(
-                "path guiding: training pass {}/{} at {} spp",
-                k + 1,
-                cfg.train_iterations,
-                spp
-            );
             let gctx = GuidingContext {
                 field: &field,
                 training: true,
             };
-            let (_, samples) = self.render_pass(spp, seed, tiled, Some(&gctx), false);
+            let (buffer, samples, variance) =
+                self.render_pass(spp, seed, tiled, Some(&gctx), false);
             drop(gctx);
-            info!("path guiding: splatting {} samples", samples.len());
+            info!(
+                "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}",
+                k + 1,
+                cfg.train_iterations,
+                spp,
+                samples.len(),
+                variance
+            );
             field.update(&samples, k + 1);
+            passes.push((buffer, variance));
         }
 
         info!(
@@ -128,19 +135,63 @@ impl Renderer {
             field: &field,
             training: false,
         };
-        self.render_pass(
+        let (final_buffer, _, final_variance) = self.render_pass(
             self.settings.samples_per_pixel,
             base_seed,
             tiled,
             Some(&gctx),
             true,
-        )
-        .0
+        );
+        passes.push((final_buffer, final_variance));
+
+        self.blend_passes(passes)
     }
 
-    /// One full-frame pass at `spp` samples per pixel. Returns the image and
+    /// Inverse-variance blend of independent unbiased passes. Passes whose
+    /// variance could not be estimated (spp < 2) get zero weight; if nothing
+    /// is weightable, the last (final) pass is returned as-is.
+    fn blend_passes(&self, mut passes: Vec<(Buffer, f64)>) -> Buffer {
+        let weights: Vec<f64> = passes
+            .iter()
+            .map(|(_, var)| {
+                if var.is_finite() && *var > 0.0 {
+                    1.0 / var
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let total: f64 = weights.iter().sum();
+        if total <= 0.0 {
+            return passes.pop().expect("at least the final pass exists").0;
+        }
+        info!(
+            "path guiding: blending {} passes, weight shares {:?}",
+            passes.len(),
+            weights
+                .iter()
+                .map(|w| (w / total * 100.0).round() as i32)
+                .collect::<Vec<_>>()
+        );
+        let (width, height) = (self.settings.width, self.settings.height);
+        let mut out = Buffer::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let mut c = Vec3A::ZERO;
+                for (pass, w) in passes.iter().zip(&weights) {
+                    c += pass.0.get_pixel(x, y) * (*w / total) as f32;
+                }
+                out.set_pixel(x, y, c);
+            }
+        }
+        out
+    }
+
+    /// One full-frame pass at `spp` samples per pixel. Returns the image,
     /// whatever training samples the pass recorded (empty unless a training
-    /// `GuidingContext` is supplied).
+    /// `GuidingContext` is supplied), and the pass's mean per-pixel variance
+    /// of the pixel estimate — the inverse-variance blending weight
+    /// (`f64::INFINITY` when spp < 2 makes estimation impossible).
     fn render_pass(
         &self,
         spp: u32,
@@ -148,53 +199,59 @@ impl Renderer {
         tiled: bool,
         gctx: Option<&GuidingContext>,
         progress: bool,
-    ) -> (Buffer, Vec<SampleData>) {
+    ) -> (Buffer, Vec<SampleData>, f64) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let mut all_samples = Vec::new();
+        let mut variance_sum = 0.0f64;
+        let pixel_count = (self.settings.width * self.settings.height) as f64;
 
         if tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
             let bar = progress_bar(tiles.len() as u64, progress);
-            let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>)> = tiles
+            let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>, f64)> = tiles
                 .into_par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     let mut samples = Vec::new();
+                    let mut var = 0.0f64;
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s) = self.render_pixel(i, j, spp, pass_seed, gctx);
+                            let (color, mut s, v) = self.render_pixel(i, j, spp, pass_seed, gctx);
                             pixels.push((i, j, color));
                             samples.append(&mut s);
+                            var += v;
                         }
                     }
                     bar.inc(1);
-                    (pixels, samples)
+                    (pixels, samples, var)
                 })
                 .collect();
-            for (pixels, samples) in results {
+            for (pixels, samples, var) in results {
                 for (i, j, color) in pixels {
                     buffer.set_pixel(i, j, color);
                 }
                 all_samples.extend(samples);
+                variance_sum += var;
             }
             bar.finish();
         } else {
             let bar = progress_bar(self.settings.height as u64, progress);
             for j in (0..self.settings.height).rev() {
-                let row: Vec<(Vec3A, Vec<SampleData>)> = (0..self.settings.width)
+                let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
                     .into_par_iter()
                     .map(|i| self.render_pixel(i, j, spp, pass_seed, gctx))
                     .collect();
-                for (i, (color, samples)) in row.into_iter().enumerate() {
+                for (i, (color, samples, var)) in row.into_iter().enumerate() {
                     buffer.set_pixel(i, j, color);
                     all_samples.extend(samples);
+                    variance_sum += var;
                 }
                 bar.inc(1);
             }
             bar.finish();
         }
 
-        (buffer, all_samples)
+        (buffer, all_samples, variance_sum / pixel_count)
     }
 
     fn render_pixel(
@@ -204,11 +261,13 @@ impl Renderer {
         spp: u32,
         pass_seed: u32,
         gctx: Option<&GuidingContext>,
-    ) -> (Vec3A, Vec<SampleData>) {
+    ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sampler = SobolSampler::new(pass_seed);
         sampler.start_pixel(i as u32, j as u32);
         let mut sum = Vec3A::ZERO;
         let mut samples = Vec::new();
+        let mut lum_sum = 0.0f64;
+        let mut lum_sq = 0.0f64;
 
         for sample in 0..spp {
             sampler.start_sample(sample);
@@ -217,7 +276,7 @@ impl Renderer {
             let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
             let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
             let r = self.camera.get_ray(u, v, lens_uv);
-            sum += ray_color_inner(
+            let color = ray_color_inner(
                 &r,
                 &self.world,
                 &self.lights,
@@ -227,8 +286,20 @@ impl Renderer {
                 &mut samples,
                 false,
             );
+            sum += color;
+            let lum = luminance(color) as f64;
+            lum_sum += lum;
+            lum_sq += lum * lum;
         }
-        (sum / spp as f32, samples)
+
+        // Unbiased variance of the pixel-mean luminance.
+        let n = spp as f64;
+        let variance = if spp >= 2 {
+            ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0)
+        } else {
+            f64::INFINITY
+        };
+        (sum / spp as f32, samples, variance)
     }
 }
 
