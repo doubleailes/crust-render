@@ -28,6 +28,8 @@ Completely in a vibe coding mood.
   - Microfacet GGX BRDF with Fresnel and geometry terms
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
+- 🧭 **Path Guiding** (opt-in)
+  - Pure-Rust Practical Path Guiding (SD-tree), one-sample MIS with the BSDF
 - ⚡ **Adaptive Sampling**
   - Early stop based on variance threshold
 - 🧪 **Modular Design**
@@ -94,10 +96,44 @@ def RenderSettings "settings" {
     int crust:minSamplesPerPixel = 32
     float crust:varianceThreshold = 0.05
     int crust:frame = 0
+    bool crust:pathGuiding = false
+    int crust:guidingTrainIterations = 8
+    float crust:guidingProb = 0.5
 }
 ```
 
-Missing attrs fall back to sensible defaults (128 spp, 32 depth, 640×360).
+Missing attrs fall back to sensible defaults (128 spp, 32 depth, 640×360,
+guiding off).
+
+### 🧭 Path guiding
+
+An opt-in, pure-Rust implementation of *Practical Path Guiding* (Müller et
+al. 2017) — the SD-tree algorithm family that Intel's
+[OpenPGL](https://github.com/OpenPathGuidingLibrary/openpgl) generalizes,
+reimplemented natively so the renderer stays dependency-light and 100% safe
+Rust. The renderer learns a spatio-directional distribution of incident
+radiance (a binary spatial tree over the scene whose leaves hold adaptive
+directional quadtrees) over progressive training passes with geometrically
+growing budgets (1, 2, 4, … spp), then renders the final image by one-sample
+MIS: each secondary bounce draws its direction from the learned distribution
+with probability `crust:guidingProb` and from the BSDF otherwise, dividing by
+the mixture pdf.
+
+Enable it per scene with `bool crust:pathGuiding = true` on the
+RenderSettings prim. `crust:guidingTrainIterations` controls how many
+training passes run before the final pass (their total cost is
+`2^iterations − 1` spp). Guiding pays off on scenes where light is hard to
+find by chance — the bundled `samples/cornellbox_guided.usda` hides its only
+light behind a shroud so all transport is multi-bounce, and guiding cuts MSE
+against a converged reference by ~20% at equal final spp:
+
+```bash
+cargo run --release -- -i samples/cornellbox_guided.usda
+```
+
+Delta materials (metal, glass, transmissive OpenPBR) and volume scattering
+are not guided; untrained regions fall back to plain BSDF sampling, so the
+estimator stays unbiased everywhere.
 
 ### CLI
 
