@@ -124,6 +124,87 @@ fn loads_rectlight_usda() {
     assert_eq!(scene.settings.get_dimensions(), (64, 64));
 }
 
+#[test]
+fn loads_fog_usda() {
+    let scene = Scene::from_usd(&sample("fog.usda")).expect("failed to open fog.usda");
+
+    // Room mesh BVH + ball sphere + two rect-light triangles; the Fog cube
+    // must import as a volume region, NOT as geometry.
+    assert_eq!(
+        scene.world.count(),
+        4,
+        "expected 4 hittables (room, ball, 2 light triangles), got {}",
+        scene.world.count()
+    );
+    assert_eq!(scene.lights.count(), 1);
+    assert_eq!(scene.volumes.len(), 1, "expected 1 volume region");
+
+    let fog = &scene.volumes[0];
+    assert!(fog.is_homogeneous());
+    assert!((fog.g - 0.3).abs() < 1e-6);
+    assert!((fog.sigma_s - crust_core::Vec3A::splat(0.15)).abs().max_element() < 1e-6);
+    // The homogeneous fast path must yield exact Beer-Lambert through the
+    // 4-unit room: e^{-(0.15+0.01)·4} in the red channel.
+    let mut s = sampler::RngSampler::default();
+    let volumes = crust_core::Volumes::new(scene.volumes);
+    let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.0, 2.0, 10.0), -crust_core::Vec3A::Z);
+    let tr = volumes.transmittance(&ray, 1e-3, 100.0, &mut s);
+    let expect = (-(0.15f32 + 0.01) * 4.0).exp();
+    assert!(
+        (tr.x - expect).abs() < 1e-4,
+        "fog transmittance {} vs analytic {}",
+        tr.x,
+        expect
+    );
+}
+
+#[test]
+fn loads_smoke_usda() {
+    let scene = Scene::from_usd(&sample("smoke.usda")).expect("failed to open smoke.usda");
+
+    // Room mesh + two light triangles; all three volume cubes must import
+    // as regions, not geometry.
+    assert_eq!(
+        scene.world.count(),
+        3,
+        "expected 3 hittables (room, 2 light triangles), got {}",
+        scene.world.count()
+    );
+    assert_eq!(scene.lights.count(), 1);
+    assert_eq!(
+        scene.volumes.len(),
+        3,
+        "expected 3 volume regions (smoke, ember, grid puff)"
+    );
+
+    // Prim traversal order is an implementation detail — identify the
+    // regions by their properties instead.
+    let smoke = scene
+        .volumes
+        .iter()
+        .find(|v| !v.is_homogeneous() && (v.g - 0.2).abs() < 1e-6)
+        .expect("smoke plume region");
+    // densityScale is folded into the coefficients: σs = 0.8 · 12.
+    assert!((smoke.sigma_s.x - 9.6).abs() < 1e-4);
+
+    let ember = scene
+        .volumes
+        .iter()
+        .find(|v| v.emission.max_element() > 0.0)
+        .expect("emissive ember region");
+    assert!(ember.is_homogeneous());
+
+    // The grid puff has positive density at its center, zero at a corner.
+    let grid = scene
+        .volumes
+        .iter()
+        .find(|v| !v.is_homogeneous() && v.g.abs() < 1e-6)
+        .expect("grid puff region");
+    let center = crust_core::Vec3A::new(1.1, 2.6, -0.8);
+    assert!(grid.density(center) > 0.3);
+    assert!(grid.density(center + crust_core::Vec3A::splat(0.49)) < 1e-3);
+}
+
 /// Regression guard: every material in the ported showcase must decode to
 /// the `crust:openpbr` shader id, and every scene sphere must bind one of
 /// them. When this test drifts (renamed shader ids, missing material

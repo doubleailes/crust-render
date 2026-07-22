@@ -2,6 +2,7 @@ use crate::camera::Camera;
 use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::tracer::RenderSettings;
+use crate::volume::VolumeRegion;
 
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
@@ -12,6 +13,9 @@ pub struct Scene {
     pub world: HittableList,
     pub lights: LightList,
     pub settings: RenderSettings,
+    /// Participating-media regions (smoke, fog, …), kept outside `world`
+    /// so their bounds never act as occluding geometry.
+    pub volumes: Vec<VolumeRegion>,
 }
 
 impl Scene {
@@ -26,7 +30,13 @@ impl Scene {
             world,
             lights,
             settings,
+            volumes: Vec::new(),
         }
+    }
+
+    pub fn with_volumes(mut self, volumes: Vec<VolumeRegion>) -> Self {
+        self.volumes = volumes;
+        self
     }
 }
 

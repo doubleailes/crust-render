@@ -13,6 +13,7 @@ mod primitives;
 mod ray;
 mod scene;
 mod tracer;
+mod volume;
 mod world;
 
 pub use aabb::AABB;
@@ -31,4 +32,5 @@ pub use primitives::{SmoothTriangle, Sphere, Triangle};
 pub use ray::Ray;
 pub use scene::Scene;
 pub use tracer::{ProgressCallback, RenderSettings, Renderer, ray_color};
+pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};
