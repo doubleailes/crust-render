@@ -53,11 +53,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
    - `render()` — parallel over pixels within each scanline row.
    - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
-3. **`ray_color()`** (`tracer.rs`) is the integrator — recursive path tracer with:
+3. **`trace_path()`** (`tracer.rs`, public wrapper `ray_color()`) is the integrator — an
+   **iterative** path tracer in two passes: a forward walk that traces one segment per
+   bounce and records a `VertexRec` per vertex, then a backward gather that folds the
+   records into the radiance estimate and emits guiding training samples (which need
+   the radiance from the rest of the path — the reason for the backward pass). Features:
    - **MIS** combining direct light sampling and BRDF sampling via `balance_heuristic`.
-     Bounce-hit emission is owned by the MIS-weighted `add_emission` term; the recursion
-     suppresses the next vertex's self-emission (`suppress_emission`) to avoid counting
-     it twice.
+     Emission at a bounce-arrival vertex is owned by the *previous* vertex's record
+     (`next_emit` + MIS weight); counting it at the vertex itself too would double it.
+   - **Russian roulette** from the 4th vertex on (`RR_START_BOUNCE`): survival tracks
+     path throughput with a probability floor (`RR_MIN_PROB`), factor divided out on
+     survival.
    - Volumetric scattering (Henyey-Greenstein) and Beer-Lambert attenuation when a ray
      carries `Some(Medium)` (set by transmissive OpenPBR refraction — see `ray.rs` /
      `medium.rs`). Free-space rays are unaffected.

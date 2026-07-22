@@ -17,11 +17,27 @@ use tracing::{info, warn};
 /// image estimator.
 const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
 
-/// Per-pass guiding state handed down the integrator recursion.
+/// Russian roulette: paths may terminate stochastically once they carry at
+/// least this many vertices; the survival probability tracks the path
+/// throughput but never drops below the floor, so weights stay bounded.
+const RR_START_BOUNCE: usize = 3;
+const RR_MIN_PROB: f32 = 0.05;
+
+/// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
     field: &'a GuidingField,
     /// Record `SampleData` for field training during this pass?
     training: bool,
+}
+
+/// Parameters of one full-frame render pass.
+#[derive(Clone, Copy)]
+struct PassConfig {
+    spp: u32,
+    seed: u32,
+    tiled: bool,
+    adaptive: bool,
+    progress: bool,
 }
 
 pub struct Renderer {
@@ -55,30 +71,26 @@ impl Renderer {
         if self.settings.guiding {
             return self.render_guided(false);
         }
-        self.render_pass(
-            self.settings.samples_per_pixel,
-            self.settings.frame as u32,
-            false,
-            None,
-            true,
-            true,
-        )
-        .0
+        self.render_pass(self.final_pass_config(false), None).0
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
         if self.settings.guiding {
             return self.render_guided(true);
         }
-        self.render_pass(
-            self.settings.samples_per_pixel,
-            self.settings.frame as u32,
-            true,
-            None,
-            true,
-            true,
-        )
-        .0
+        self.render_pass(self.final_pass_config(true), None).0
+    }
+
+    /// Config of a final (image-quality) pass: full budget, adaptive
+    /// sampling, visible progress.
+    fn final_pass_config(&self, tiled: bool) -> PassConfig {
+        PassConfig {
+            spp: self.settings.samples_per_pixel,
+            seed: self.settings.frame as u32,
+            tiled,
+            adaptive: true,
+            progress: true,
+        }
     }
 
     /// Progressive path-guided rendering: training passes with geometrically
@@ -93,16 +105,7 @@ impl Renderer {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self
-                    .render_pass(
-                        self.settings.samples_per_pixel,
-                        self.settings.frame as u32,
-                        tiled,
-                        None,
-                        true,
-                        true,
-                    )
-                    .0;
+                return self.render_pass(self.final_pass_config(tiled), None).0;
             }
         };
         let cfg = GuidingConfig {
@@ -122,8 +125,14 @@ impl Renderer {
                 field: &field,
                 training: true,
             };
-            let (buffer, samples, variance) =
-                self.render_pass(spp, seed, tiled, Some(&gctx), false, false);
+            let train_cfg = PassConfig {
+                spp,
+                seed,
+                tiled,
+                adaptive: false,
+                progress: false,
+            };
+            let (buffer, samples, variance) = self.render_pass(train_cfg, Some(&gctx));
             drop(gctx);
             info!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}",
@@ -145,14 +154,8 @@ impl Renderer {
             field: &field,
             training: false,
         };
-        let (final_buffer, _, final_variance) = self.render_pass(
-            self.settings.samples_per_pixel,
-            base_seed,
-            tiled,
-            Some(&gctx),
-            true,
-            true,
-        );
+        let (final_buffer, _, final_variance) =
+            self.render_pass(self.final_pass_config(tiled), Some(&gctx));
         passes.push((final_buffer, final_variance));
 
         self.blend_passes(passes)
@@ -205,21 +208,17 @@ impl Renderer {
     /// (`f64::INFINITY` when spp < 2 makes estimation impossible).
     fn render_pass(
         &self,
-        spp: u32,
-        pass_seed: u32,
-        tiled: bool,
+        cfg: PassConfig,
         gctx: Option<&GuidingContext>,
-        adaptive: bool,
-        progress: bool,
     ) -> (Buffer, Vec<SampleData>, f64) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let mut all_samples = Vec::new();
         let mut variance_sum = 0.0f64;
         let pixel_count = (self.settings.width * self.settings.height) as f64;
 
-        if tiled {
+        if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
-            let bar = progress_bar(tiles.len() as u64, progress);
+            let bar = progress_bar(tiles.len() as u64, cfg.progress);
             let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>, f64)> = tiles
                 .into_par_iter()
                 .map(|tile| {
@@ -228,8 +227,7 @@ impl Renderer {
                     let mut var = 0.0f64;
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) =
-                                self.render_pixel(i, j, spp, pass_seed, gctx, adaptive);
+                            let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
                             pixels.push((i, j, color));
                             samples.append(&mut s);
                             var += v;
@@ -248,11 +246,11 @@ impl Renderer {
             }
             bar.finish();
         } else {
-            let bar = progress_bar(self.settings.height as u64, progress);
+            let bar = progress_bar(self.settings.height as u64, cfg.progress);
             for j in (0..self.settings.height).rev() {
                 let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
                     .into_par_iter()
-                    .map(|i| self.render_pixel(i, j, spp, pass_seed, gctx, adaptive))
+                    .map(|i| self.render_pixel(i, j, &cfg, gctx))
                     .collect();
                 for (i, (color, samples, var)) in row.into_iter().enumerate() {
                     buffer.set_pixel(i, j, color);
@@ -271,12 +269,10 @@ impl Renderer {
         &self,
         i: usize,
         j: usize,
-        spp: u32,
-        pass_seed: u32,
+        cfg: &PassConfig,
         gctx: Option<&GuidingContext>,
-        adaptive: bool,
     ) -> (Vec3A, Vec<SampleData>, f64) {
-        let mut sampler = SobolSampler::new(pass_seed);
+        let mut sampler = SobolSampler::new(cfg.seed);
         sampler.start_pixel(i as u32, j as u32);
         let mut sum = Vec3A::ZERO;
         let mut samples = Vec::new();
@@ -287,14 +283,14 @@ impl Renderer {
         let min_spp = self.settings.min_samples_per_pixel.max(2);
         let mut taken = 0u32;
 
-        for sample in 0..spp {
+        for sample in 0..cfg.spp {
             sampler.start_sample(sample);
             let jitter = sampler.next_2d();
             let lens_uv = sampler.next_2d();
             let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
             let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
             let r = self.camera.get_ray(u, v, lens_uv);
-            let color = ray_color_inner(
+            let color = trace_path(
                 &r,
                 &self.world,
                 &self.lights,
@@ -302,7 +298,6 @@ impl Renderer {
                 &mut sampler,
                 gctx,
                 &mut samples,
-                false,
             );
             sum += color;
             let lum = luminance(color) as f64;
@@ -313,7 +308,7 @@ impl Renderer {
             // Adaptive early stop: once past the minimum budget, quit as soon
             // as the relative standard error of the pixel mean is below the
             // threshold. Checked every 4th sample to amortize the cost.
-            if adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
+            if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
                 let n = taken as f64;
                 let var_of_mean =
                     ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
@@ -419,7 +414,7 @@ pub fn ray_color(
     sampler: &mut dyn Sampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
-    ray_color_inner(r, world, lights, depth, sampler, None, &mut no_training, false)
+    trace_path(r, world, lights, depth, sampler, None, &mut no_training)
 }
 
 /// Choose the bounce direction and the pdf its contribution is divided by.
@@ -480,8 +475,84 @@ fn sample_bounce_direction(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ray_color_inner(
+/// Everything recorded at one path vertex during the forward walk. The
+/// backward gather reconstructs the radiance estimate from these exactly as
+/// the old recursion did: `R = atten · (emit_here + nee + factor ·
+/// (next_emit·next_emit_weight + R_incoming))`.
+struct VertexRec {
+    /// Beer-Lambert transmittance over the segment that arrived at this
+    /// vertex (`ONE` for volume-scatter vertices, whose segment the
+    /// estimator does not attenuate).
+    atten: Vec3A,
+    /// Emission counted at this vertex itself: primary and post-scatter
+    /// vertices only. Emission at bounce-arrival vertices is owned by the
+    /// previous vertex via `next_emit`/`next_emit_weight`.
+    emit_here: Vec3A,
+    /// Direct lighting gathered by NEE at this vertex.
+    nee: Vec3A,
+    /// Local continuation factor toward the next vertex: `value·cos/pdf`
+    /// for surface bounces (already compensated for Russian roulette), the
+    /// medium albedo for volume scatters, zero when the path was absorbed
+    /// or roulette-killed.
+    factor: Vec3A,
+    /// Raw emission of the surface the continuation ray hit, and the MIS
+    /// weight it carries in this vertex's estimator. Patched when the next
+    /// vertex is processed; the raw value is kept separate because guiding
+    /// training records the emission unweighted.
+    next_emit: Vec3A,
+    next_emit_weight: f32,
+    /// Guiding-training info (continuous surface bounces in training passes).
+    train: Option<TrainRec>,
+}
+
+struct TrainRec {
+    pos: Vec3A,
+    dir: Vec3A,
+    cos: f32,
+}
+
+/// The state of the previous surface bounce that the next vertex needs to
+/// MIS-weight its emission: the sampling context (`ray`/`rec`/`mat`/`dir`
+/// for the lazy NEE-capability check) and the bounce density.
+struct PrevBounce<'a> {
+    ray: Ray,
+    rec: HitRecord,
+    mat: &'a dyn Material,
+    dir: Vec3A,
+    pdf: f32,
+    delta: bool,
+}
+
+/// MIS weight for emission reached by the previous vertex's bounce ray.
+/// Delta samples are invisible to light sampling (their lobe is excluded
+/// from eval), so the bounce carries the emission whole — likewise at
+/// vertices where NEE is inactive, and for emissive geometry with no
+/// light-list entry, which NEE can never sample. Otherwise the competing
+/// density is the same strategy the NEE side uses: uniform 1-of-N pick
+/// times the hit light's area-sampling pdf.
+fn bounce_emission_weight(prev: &PrevBounce, lights: &LightList, hit: &crate::hittable::Hit) -> f32 {
+    if prev.delta || prev.mat.eval(&prev.ray, &prev.rec, prev.dir).is_none() {
+        return 1.0;
+    }
+    match lights.find_by_material(hit.mat) {
+        Some(light) => {
+            let light_pdf =
+                (light.pdf(prev.rec.p, hit.rec.p) / lights.count() as f32).max(1e-6);
+            utils::balance_heuristic(prev.pdf, light_pdf)
+        }
+        None => 1.0,
+    }
+}
+
+/// The integrator: an iterative path tracer in two passes. The forward walk
+/// traces one segment per bounce (each hit serves both as the previous
+/// vertex's potential light hit and as the next vertex — the old recursion
+/// intersected every segment twice), records a `VertexRec` per vertex, and
+/// applies Russian roulette past `RR_START_BOUNCE`. The backward gather
+/// then folds the records into the radiance estimate and emits guiding
+/// training samples, which need the radiance arriving from the rest of the
+/// path and therefore cannot be computed forward.
+fn trace_path(
     r: &Ray,
     world: &dyn Hittable,
     lights: &LightList,
@@ -489,56 +560,89 @@ fn ray_color_inner(
     sampler: &mut dyn Sampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
-    // The previous bounce already accounted for this vertex's emission via
-    // its MIS-weighted `add_emission` term; adding it again here would count
-    // bounce-hit emission twice.
-    suppress_emission: bool,
 ) -> Vec3A {
-    if depth <= 0 {
-        return Vec3A::new(0.0, 0.0, 0.0); // recursion limit
-    }
+    let training = guiding.is_some_and(|g| g.training);
+    let mut records: Vec<VertexRec> = Vec::with_capacity(depth.max(0) as usize);
+    let mut ray = r.clone();
+    let mut remaining = depth;
+    // Set after every surface bounce; `None` at the primary vertex and
+    // after volume scatters, where the next vertex's emission counts fully.
+    let mut prev: Option<PrevBounce> = None;
+    // Running throughput. Only drives the roulette survival probability —
+    // the estimate itself is rebuilt by the backward gather.
+    let mut beta = Vec3A::ONE;
+    // Radiance entering the path from beyond the last vertex.
+    let mut terminal = Vec3A::ZERO;
 
-    // Fresh dimension window for this bounce — a no-op today, a hook for
-    // padded-Sobol later.
-    sampler.advance_bounce();
+    loop {
+        if remaining <= 0 {
+            // Depth exhausted. The old recursion still counted bounce-hit
+            // emission at the last vertex (its `add_emission` term traced
+            // the ray itself) but never the background — reproduce both.
+            if let Some(p) = &prev {
+                if let Some(hit) = world.hit(&ray, 0.001, f32::INFINITY) {
+                    let emitted = hit.mat.emitted();
+                    if emitted.length_squared() > 0.0 {
+                        let last = records.last_mut().expect("prev implies a record");
+                        last.next_emit = emitted;
+                        last.next_emit_weight = bounce_emission_weight(p, lights, &hit);
+                    }
+                }
+            }
+            break;
+        }
 
-    if let Some(hit) = world.hit(r, 0.001, f32::INFINITY) {
+        // Fresh dimension window for this bounce — a no-op today, a hook for
+        // padded-Sobol later.
+        sampler.advance_bounce();
+
+        let Some(hit) = world.hit(&ray, 0.001, f32::INFINITY) else {
+            // === Background ===
+            let unit_direction = Vec3A::normalize(ray.direction());
+            let t = 0.5 * (unit_direction.y + 1.0);
+            terminal = (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
+            break;
+        };
         let rec: HitRecord = hit.rec;
         let mat = hit.mat;
+
         // Volume interaction sampling for scattering media (subsurface,
         // participating volumes). If the sampled distance is closer than
         // the surface hit, kick a scattering event and short-circuit the
         // surface interaction.
-        if let Some(medium) = r.medium() {
+        if let Some(medium) = ray.medium() {
             if medium.is_scattering() {
                 let sigma_t_max = medium.sigma_t_max().max(1e-4);
                 let t_scatter = -(sampler.next_1d().ln()) / sigma_t_max;
                 if t_scatter < rec.t {
-                    let pos = r.at(t_scatter);
+                    let pos = ray.at(t_scatter);
                     let phase_uv = sampler.next_2d();
                     let dir = sample_henyey_greenstein(
-                        r.direction().normalize(),
+                        ray.direction().normalize(),
                         medium.g,
                         phase_uv[0],
                         phase_uv[1],
                     );
-                    let new_ray = Ray::new_in_medium(pos, dir, medium.clone());
                     let albedo = medium.albedo();
-                    // Volume scattering events are not recorded — the field
-                    // guides surface bounces only. No emission bookkeeping
-                    // happened along this phase-scattered ray, so the next
-                    // hit's emission must count.
-                    return albedo
-                        * ray_color_inner(
-                            &new_ray,
-                            world,
-                            lights,
-                            depth - 1,
-                            sampler,
-                            guiding,
-                            train_out,
-                            false,
-                        );
+                    let medium = medium.clone();
+                    // Volume scattering events are not trained on — the
+                    // field guides surface bounces only. No emission
+                    // bookkeeping happened along this phase-scattered ray,
+                    // so the next hit's emission must count.
+                    records.push(VertexRec {
+                        atten: Vec3A::ONE,
+                        emit_here: Vec3A::ZERO,
+                        nee: Vec3A::ZERO,
+                        factor: albedo,
+                        next_emit: Vec3A::ZERO,
+                        next_emit_weight: 1.0,
+                        train: None,
+                    });
+                    beta *= albedo;
+                    ray = Ray::new_in_medium(pos, dir, medium);
+                    remaining -= 1;
+                    prev = None;
+                    continue;
                 }
             }
         }
@@ -546,29 +650,40 @@ fn ray_color_inner(
         // Beer-Lambert attenuation across the segment travelled inside a
         // participating medium (transmissive OpenPBR surfaces mark rays with
         // `Some(medium)` on refraction; free-space rays are unaffected).
-        let medium_atten = match r.medium() {
+        let atten = match ray.medium() {
             Some(m) => m.transmittance(rec.t),
             None => Vec3A::ONE,
         };
-        let emitted = if suppress_emission {
-            Vec3A::ZERO
-        } else {
-            mat.emitted()
-        };
-        let mut total_light = emitted;
+
+        // Emission accounting: a vertex reached by a surface bounce hands
+        // its emission to the previous vertex's record, MIS-weighted —
+        // counting it here too would double it. At the primary vertex and
+        // after volume scatters it counts here, in full.
+        let emitted = mat.emitted();
+        let mut emit_here = Vec3A::ZERO;
+        match &prev {
+            Some(p) => {
+                if emitted.length_squared() > 0.0 {
+                    let last = records.last_mut().expect("prev implies a record");
+                    last.next_emit = emitted;
+                    last.next_emit_weight = bounce_emission_weight(p, lights, &hit);
+                }
+            }
+            None => emit_here = emitted,
+        }
 
         // Guide secondary bounces only: primary vertices vary per pixel far
         // below the guiding field's spatial resolution, so guiding them adds
         // parallax-mismatch variance instead of removing any.
-        let guiding_here = if suppress_emission { guiding } else { None };
+        let guiding_here = if prev.is_some() { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
         // The light strategy is "pick one light uniformly, then sample a
         // point on it by area", so its solid-angle density is
-        // `light.pdf / n_lights`. The bounce side below attributes a hit
-        // emissive surface to its light and evaluates the *same* expression
-        // — both MIS weights must describe the same strategy or emission is
-        // double-counted.
+        // `light.pdf / n_lights`. `bounce_emission_weight` evaluates the
+        // same expression for a bounce-hit light — both MIS weights must
+        // describe the same strategy or emission is double-counted.
+        let mut nee = Vec3A::ZERO;
         if let Some(light) = lights.sample(sampler) {
             let n_lights = lights.count() as f32;
             let area_uv = sampler.next_2d();
@@ -590,7 +705,7 @@ fn ray_color_inner(
                 // transmissive materials return None — they cannot see a
                 // light-sampled direction and pick up emission via BSDF
                 // sampling instead.
-                if let Some((brdf_value, brdf_pdf)) = mat.eval(r, &rec, light_dir_unit) {
+                if let Some((brdf_value, brdf_pdf)) = mat.eval(&ray, &rec, light_dir_unit) {
                     // The competing strategy for this MIS weight is the
                     // bounce sampler, whose density toward the light is the
                     // guide/BSDF mixture whenever guiding is available at
@@ -606,13 +721,23 @@ fn ray_color_inner(
                         _ => brdf_pdf,
                     };
                     let weight = utils::balance_heuristic(light_pdf, bounce_pdf);
-                    total_light += light.emission() * brdf_value * cosine * weight / light_pdf;
+                    nee += light.emission() * brdf_value * cosine * weight / light_pdf;
                 }
             }
         }
 
+        let mut vrec = VertexRec {
+            atten,
+            emit_here,
+            nee,
+            factor: Vec3A::ZERO,
+            next_emit: Vec3A::ZERO,
+            next_emit_weight: 1.0,
+            train: None,
+        };
+
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some(sample) = sample_bounce_direction(r, &rec, mat, guiding_here, sampler) {
+        if let Some(sample) = sample_bounce_direction(&ray, &rec, mat, guiding_here, sampler) {
             let dir = sample.ray.direction().normalize();
             // The codebase convention multiplies the material's brdf*|cos|
             // value by the cosine again — unsigned, so continuous
@@ -624,84 +749,83 @@ fn ray_color_inner(
             } else {
                 rec.normal.dot(dir).abs()
             };
+            let mut factor = sample.value * cosine / sample.pdf;
 
-            let mut add_emission = Vec3A::new(0.0, 0.0, 0.0);
-            let mut hit_emission = Vec3A::ZERO;
-
-            if let Some(light_hit) = world.hit(&sample.ray, 0.001, f32::INFINITY) {
-                let emitted = light_hit.mat.emitted();
-                if emitted.length_squared() > 0.0 {
-                    hit_emission = emitted;
-                    // Continuous samples at NEE-capable vertices share the
-                    // emission with light sampling via MIS. Delta samples are
-                    // invisible to light sampling (their lobe is excluded
-                    // from eval), so the bounce carries the emission whole —
-                    // likewise at vertices where NEE is inactive, and for
-                    // emissive geometry with no light-list entry, which NEE
-                    // can never sample.
-                    let nee_capable = !sample.delta && mat.eval(r, &rec, dir).is_some();
-                    let weight = match lights.find_by_material(light_hit.mat) {
-                        Some(light) if nee_capable => {
-                            // Same strategy density as the NEE side above:
-                            // uniform 1-of-N pick times this light's
-                            // area-sampling pdf toward the hit point.
-                            let light_pdf = (light.pdf(rec.p, light_hit.rec.p)
-                                / lights.count() as f32)
-                                .max(1e-6);
-                            utils::balance_heuristic(sample.pdf, light_pdf)
-                        }
-                        _ => 1.0,
-                    };
-
-                    // Add the contribution of hitting the light via BRDF
-                    add_emission = emitted * sample.value * cosine * weight / sample.pdf;
+            // Russian roulette on the continuation: survive with probability
+            // tracking the throughput, dividing it out on survival. Applies
+            // to the whole continuation (bounce-hit emission included).
+            beta *= atten * factor;
+            let mut survived = true;
+            if records.len() >= RR_START_BOUNCE {
+                let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
+                if p_survive < 1.0 {
+                    if sampler.next_1d() >= p_survive {
+                        survived = false;
+                    } else {
+                        factor /= p_survive;
+                        beta /= p_survive;
+                    }
                 }
             }
 
-            // The recursion must not count the next vertex's emission again —
-            // `add_emission` above owns that term.
-            let incident = ray_color_inner(
-                &sample.ray,
-                world,
-                lights,
-                depth - 1,
-                sampler,
-                guiding,
-                train_out,
-                true,
-            );
-
-            // Record a training sample for the guiding field: the full
-            // incident radiance (reflected + the suppressed hit emission),
-            // weighted by cos² to match this tracer's estimator, which
-            // multiplies the codebase's brdf*|cos| material values by the
-            // cosine again. Delta samples are skipped — the guide models the
-            // continuous component only and can never produce their
-            // directions.
-            if let Some(g) = guiding {
-                if g.training && !sample.delta {
-                    let cos = rec.normal.dot(dir).abs();
-                    train_out.push(SampleData {
+            if survived {
+                // Training samples cover continuous surface bounces only —
+                // the guide can never produce a delta direction. The
+                // radiance is filled in by the backward gather.
+                if training && !sample.delta {
+                    vrec.train = Some(TrainRec {
                         pos: rec.p,
                         dir,
-                        radiance: (luminance(incident + hit_emission) * cos * cos)
-                            .min(TRAIN_RADIANCE_CLAMP),
+                        cos: rec.normal.dot(dir).abs(),
                     });
                 }
+                vrec.factor = factor;
+                prev = Some(PrevBounce {
+                    ray: ray.clone(),
+                    rec,
+                    mat,
+                    dir,
+                    pdf: sample.pdf,
+                    delta: sample.delta,
+                });
+                records.push(vrec);
+                ray = sample.ray;
+                remaining -= 1;
+                continue;
             }
-
-            // Add both direct hit on light and recursive bounce
-            total_light += add_emission;
-            total_light += sample.value * incident * cosine / sample.pdf;
         }
 
-        return total_light * medium_atten;
+        // Absorbed or roulette-killed: this vertex's own gathers stand
+        // (factor stays zero), the path ends here.
+        records.push(vrec);
+        break;
     }
 
-    // === Background ===
-    let unit_direction = Vec3A::normalize(r.direction());
-    let t = 0.5 * (unit_direction.y + 1.0);
-    (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0)
+    // Backward gather: fold the records into the estimate, deepest vertex
+    // first, emitting guiding training samples along the way. `radiance` is
+    // what the old recursion returned to each vertex from its continuation
+    // (next vertex's emission suppressed — its MIS-weighted share enters
+    // separately through `next_emit`).
+    let mut radiance = terminal;
+    for vrec in records.iter().rev() {
+        if let Some(t) = &vrec.train {
+            // The full incident radiance (reflected + the raw hit emission),
+            // weighted by cos² to match this tracer's estimator, which
+            // multiplies the codebase's brdf*|cos| material values by the
+            // cosine again.
+            train_out.push(SampleData {
+                pos: t.pos,
+                dir: t.dir,
+                radiance: (luminance(radiance + vrec.next_emit) * t.cos * t.cos)
+                    .min(TRAIN_RADIANCE_CLAMP),
+            });
+        }
+        radiance = vrec.atten
+            * (vrec.emit_here
+                + vrec.nee
+                + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + radiance));
+    }
+    radiance
 }
 
 struct Tile {
