@@ -68,6 +68,28 @@ fn loads_openpbr_showcase_usda() {
     );
 }
 
+#[test]
+fn loads_rectlight_usda() {
+    let scene =
+        Scene::from_usd(&sample("rectlight.usda")).expect("failed to open rectlight.usda");
+
+    // Ball sphere + floor mesh BVH + two triangles of rect-light geometry.
+    assert_eq!(
+        scene.world.count(),
+        4,
+        "expected 4 hittables (sphere, floor, 2 light triangles), got {}",
+        scene.world.count()
+    );
+    // The RectLight must import as a real light, not warn-and-skip.
+    assert_eq!(
+        scene.lights.count(),
+        1,
+        "expected 1 light (RectLight), got {}",
+        scene.lights.count()
+    );
+    assert_eq!(scene.settings.get_dimensions(), (64, 64));
+}
+
 /// Regression guard: every material in the ported showcase must decode to
 /// the `crust:openpbr` shader id, and every scene sphere must bind one of
 /// them. When this test drifts (renamed shader ids, missing material

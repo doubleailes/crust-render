@@ -1,0 +1,56 @@
+#usda 1.0
+(
+    doc = "Minimal RectLight scene: a diffuse ball on a floor, lit by a single UsdLux RectLight emitting along its local -Z toward the ball. Exercises the RectShape/AreaLight import path."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.2, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball"
+    {
+        double radius = 1.0
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-8, 0, -8), (8, 0, -8), (8, 0, 8), (-8, 0, 8)]
+    }
+
+    # Rect area light in front of and above the ball, emitting along its
+    # local -Z (toward the ball, which sits further down -Z).
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 2
+        float inputs:height = 1.5
+        color3f inputs:color = (8, 8, 8)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (0, 2.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (64, 64)
+        int crust:samplesPerPixel = 8
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 4
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}

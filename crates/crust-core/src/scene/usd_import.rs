@@ -11,7 +11,7 @@ use crate::bvh::Bvh;
 use crate::camera::Camera;
 use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
-use crate::light::{Light, LightList};
+use crate::light::{AreaLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::primitives::{Sphere as CrustSphere, Triangle};
 use crate::scene::Scene;
@@ -90,6 +90,8 @@ pub(crate) fn load_scene(path: &Path) -> std::io::Result<Scene> {
             }
         } else if let Ok(Some(light)) = SphereLight::get(&stage, prim.path().clone()) {
             emit_sphere_light(&mut world, &mut lights, &light, this_world);
+        } else if let Ok(Some(light)) = RectLight::get(&stage, prim.path().clone()) {
+            emit_rect_light(&mut world, &mut lights, &light, this_world);
         } else {
             warn_unsupported_light(&stage, &prim);
         }
@@ -170,6 +172,11 @@ fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
             return usd_mat_to_glam(mat);
         }
     }
+    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone()) {
+        if let Ok(mat) = l.local_to_parent_transform(0.0) {
+            return usd_mat_to_glam(mat);
+        }
+    }
     GMat4::IDENTITY
 }
 
@@ -187,6 +194,9 @@ fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
         return c.resets_xform_stack().unwrap_or(false);
     }
     if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone()) {
+        return l.resets_xform_stack().unwrap_or(false);
+    }
+    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone()) {
         return l.resets_xform_stack().unwrap_or(false);
     }
     false
@@ -395,6 +405,16 @@ fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
 // Lights
 // -----------------------------------------------------------------------
 
+/// Effective emitted radiance of a lux light: color scaled by intensity and
+/// exposure gain.
+fn lux_emission(light: &impl UsdLight) -> Vec3A {
+    let intensity = attr_f32(&light.intensity_attr()).unwrap_or(1.0);
+    let exposure = attr_f32(&light.exposure_attr()).unwrap_or(0.0);
+    let color = attr_color3f(&light.color_attr()).unwrap_or([1.0, 1.0, 1.0]);
+    let gain = intensity * 2f32.powf(exposure);
+    Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain)
+}
+
 fn emit_sphere_light(
     world: &mut HittableList,
     lights: &mut LightList,
@@ -402,22 +422,68 @@ fn emit_sphere_light(
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let intensity = attr_f32(&light.intensity_attr()).unwrap_or(1.0);
-    let exposure = attr_f32(&light.exposure_attr()).unwrap_or(0.0);
-    let color = attr_color3f(&light.color_attr()).unwrap_or([1.0, 1.0, 1.0]);
-    let gain = intensity * 2f32.powf(exposure);
-    let effective = Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain);
+    let effective = lux_emission(light);
     let pos_v = world_xf.transform_point3(Vec3::ZERO);
     let position = Vec3A::new(pos_v.x, pos_v.y, pos_v.z);
 
-    let emissive = Emissive::new(effective, position, radius);
-    let em_light: Arc<dyn Light> = Arc::new(emissive.clone());
-    lights.add(em_light);
-    let em_material: Arc<dyn Material> = Arc::new(emissive);
-    world.add(Box::new(CrustSphere::new(position, radius, em_material)));
+    // One Emissive material shared between the visible sphere geometry and
+    // the AreaLight — the integrator identifies the light by this material
+    // when a bounce ray hits it.
+    let material = Arc::new(Emissive::new(effective));
+    world.add(Box::new(CrustSphere::new(position, radius, material.clone())));
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(SphereShape {
+            center: position,
+            radius,
+        }),
+        material,
+    )));
     debug!(
         "SphereLight: pos={:?} radius={} effective_color={:?}",
         position, radius, effective
+    );
+}
+
+fn emit_rect_light(
+    world: &mut HittableList,
+    lights: &mut LightList,
+    light: &RectLight,
+    world_xf: GMat4,
+) {
+    let width = attr_f32(&light.width_attr()).unwrap_or(1.0);
+    let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
+    let effective = lux_emission(light);
+
+    // UsdLux RectLight: a rectangle in the local XY plane, centered at the
+    // origin, emitting along local -Z.
+    let corner = world_xf.transform_point3(Vec3::new(-0.5 * width, -0.5 * height, 0.0));
+    let origin = Vec3A::new(corner.x, corner.y, corner.z);
+    let eu = world_xf.transform_vector3(Vec3::new(width, 0.0, 0.0));
+    let ev = world_xf.transform_vector3(Vec3::new(0.0, height, 0.0));
+    let nz = world_xf.transform_vector3(Vec3::NEG_Z);
+    let edge_u = Vec3A::new(eu.x, eu.y, eu.z);
+    let edge_v = Vec3A::new(ev.x, ev.y, ev.z);
+    let normal = Vec3A::new(nz.x, nz.y, nz.z);
+
+    // One Emissive material shared between the visible geometry (two
+    // triangles spanning the rectangle) and the AreaLight, so the
+    // integrator can attribute bounce hits to this light by identity.
+    let material = Arc::new(Emissive::new(effective));
+    let (c00, c10, c11, c01) = (
+        origin,
+        origin + edge_u,
+        origin + edge_u + edge_v,
+        origin + edge_v,
+    );
+    world.add(Box::new(Triangle::new(c00, c10, c11, material.clone())));
+    world.add(Box::new(Triangle::new(c00, c11, c01, material.clone())));
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(RectShape::new(origin, edge_u, edge_v, normal)),
+        material,
+    )));
+    debug!(
+        "RectLight: origin={:?} edge_u={:?} edge_v={:?} effective_color={:?}",
+        origin, edge_u, edge_v, effective
     );
 }
 
@@ -435,12 +501,6 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
         .is_some()
     {
         warn_type("DistantLight");
-    } else if RectLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("RectLight");
     } else if DiskLight::get(stage, prim.path().clone())
         .ok()
         .flatten()

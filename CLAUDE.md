@@ -104,12 +104,21 @@ Keep `-o output.exr` (the default) if you want the PNG.
   component at all, and per its contract that decision must never depend on `wi`),
   and `emitted()`. Exactly two implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
-  constructors used by `world.rs` and the USD fallback), and **`Emissive`**, which doubles
-  as the `Light` implementation. Shared microfacet helpers (aniso GGX VNDF sampling,
+  constructors used by `world.rs` and the USD fallback), and **`Emissive`**, a pure
+  emitter with no geometry knowledge. Shared microfacet helpers (aniso GGX VNDF sampling,
   Schlick Fresnel, sheen, thin-film) live in `material/brdf.rs`.
-- **`Light`** (`light.rs`) — `sample`/`sample_cmj`/`pdf`/`color`. Lights are stored in a
-  `LightList` and are also added to `world` as emissive geometry (Cornell-box semantics:
-  a sphere light is both light and visible object).
+- **`Light`** (`light.rs`) — `sample_point`/`pdf`/`emission`/`material`. The one
+  implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
+  `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
+  Lights are stored in a `LightList` and their surfaces are also added to `world` as
+  emissive geometry (Cornell-box semantics: a light is both light and visible object) —
+  sharing one `Emissive` Arc, which is how the integrator attributes a bounce-hit
+  emissive surface to its light (`LightList::find_by_material`, address identity).
+  **NEE samples one light per vertex** (uniform pick), so the light strategy's MIS
+  density is `light.pdf / n_lights` — the bounce side evaluates the exact same
+  expression for the light it hit; keep the two sides identical or emission is
+  double-counted. Emissive geometry with no light-list entry is handled: the bounce
+  keeps its emission at full weight.
 
 Sampling uses **Correlated Multi-Jittered (CMJ)** patterns from `sampler.rs`
 (`generate_cmj_2d`) for camera and light rays, falling back to plain RNG past the CMJ budget.
@@ -127,8 +136,11 @@ Xform hierarchy into world matrices. Schema mapping:
   - `crust:openpbr` → decoded 1:1 into `OpenPBR`; every input is the camelCase mirror of the
     Rust field name (lossless but non-portable). Reference scene: `samples/openpbr_showcase.usda`.
   - Unbound geometry → grey diffuse `OpenPBR`.
-- `UsdLuxSphereLight` → an `Emissive` sphere (light + geometry). Other lux types
-  (`RectLight`, `DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`) warn once and are skipped.
+- `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
+  `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
+  emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
+  Other lux types (`DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`) warn once and
+  are skipped.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`). Missing attrs fall back to defaults (128 spp,
@@ -139,7 +151,9 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 ## Known incomplete work
 
-- Non-sphere USD lux light schemas are skipped (see above).
+- USD lux light schemas beyond `SphereLight`/`RectLight` are skipped (see above). Disk
+  lights need a disk primitive; distant/dome lights need non-area `Light` impls and
+  integrator support for lights without scene geometry.
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
   (no chromatic distributions). Thick transmission — dispersive or not — is a
   continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable
