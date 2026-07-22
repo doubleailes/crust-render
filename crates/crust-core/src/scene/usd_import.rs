@@ -146,6 +146,18 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
 
 /// Local-to-parent transform of `prim`, tried across the concrete
 /// Xformable schemas the tracer cares about.
+///
+/// KNOWN BUG (upstream, openusd 0.5.0): `local_to_parent_transform`
+/// composes multi-op `xformOpOrder` stacks in the wrong order. USD applies
+/// ops in reverse declaration order (for Maya's
+/// `["xformOp:translate", "xformOp:scale"]` the translate is outermost),
+/// but openusd returns the translate multiplied by the scale — e.g.
+/// `samples/cornellbox.usda`'s `pCube1` (translate `(0,2,0)`, scale 4)
+/// yields translation `(0,8,0)`, which is why that scene renders as
+/// floating objects against sky. Translate-only prims are unaffected.
+/// Fix: patch upstream, or read the individual `xformOp:*` attributes here
+/// and compose them ourselves in reverse order. See CLAUDE.md → "Known
+/// incomplete work".
 fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
     if let Ok(Some(x)) = Xform::get(stage, prim.path().clone()) {
         if let Ok(m) = x.local_to_parent_transform(0.0) {
