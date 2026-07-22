@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crust_core::Scene;
+use crust_core::{Hittable, Scene};
 use openusd::schemas::shade::{Material as UsdMaterial, MaterialBindingAPI};
 use openusd::sdf;
 use openusd::usd::{PrimPredicate, Stage};
@@ -66,6 +66,40 @@ fn loads_openpbr_showcase_usda() {
         scene.lights.count(),
         scene.settings.get_dimensions(),
     );
+}
+
+/// Regression guard for xformOp composition: the Maya-authored Cornell box
+/// (`pCube1`: translate `(0,2,0)` then scale 4, i.e. a multi-op stack)
+/// must land with its shell spanning x,z ∈ [-2,2] and y ∈ [0,4]. openusd
+/// 0.5.0's `local_to_parent_transform` composes such stacks in the wrong
+/// order (translation came back scaled → shell at y ∈ [6,10], props shrunk
+/// toward the origin), which is why `usd_import` composes the individual
+/// `xformOp:*` attributes itself.
+#[test]
+fn cornellbox_transforms_compose_correctly() {
+    let scene = Scene::from_usd(&sample("cornellbox.usda"))
+        .expect("failed to open cornellbox.usda");
+    let bbox = scene
+        .world
+        .bounding_box()
+        .expect("cornellbox world must be bounded");
+
+    let tol = 0.1;
+    assert!(
+        (bbox.minimum.y).abs() < tol && (bbox.maximum.y - 4.0).abs() < tol,
+        "box shell must span y in [0, 4], got [{}, {}]",
+        bbox.minimum.y,
+        bbox.maximum.y
+    );
+    for (min, max, axis) in [
+        (bbox.minimum.x, bbox.maximum.x, "x"),
+        (bbox.minimum.z, bbox.maximum.z, "z"),
+    ] {
+        assert!(
+            (min + 2.0).abs() < tol && (max - 2.0).abs() < tol,
+            "box shell must span {axis} in [-2, 2], got [{min}, {max}]"
+        );
+    }
 }
 
 #[test]
