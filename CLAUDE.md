@@ -38,8 +38,12 @@ Three crates under `crates/`:
 
 - **`crust-core`** — the whole engine as a library (`crust_core`): renderer, integrator,
   materials, primitives, lights, BVH, USD import. Everything of substance lives here.
+  UI-free by design: no progress-bar or image-encoding dependencies; progress is
+  reported through a `ProgressCallback`, and fallible entry points return
+  `crust_core::Error` instead of exiting.
 - **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene`, calls the
-  `Renderer`, writes the EXR. `main.rs` is the only file.
+  `Renderer` (wiring an `indicatif` bar to the progress callback), writes the EXR and
+  the tone-mapped PNG. `main.rs` is the only file.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
 
@@ -83,13 +87,10 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    samples and the relative standard error of the pixel mean drops below
    `crust:varianceThreshold` (0 disables). Applies to main/final passes, never to
    guiding training passes.
-6. Output is written to the `-o` EXR, then **`convert()`** (`convert.rs`) tone-maps to sRGB PNG.
-
-### Gotcha: EXR/PNG output paths are partly hard-coded
-`convert()` reads a **hard-coded `"output.exr"`** and writes a timestamped PNG under
-**`./test_images/`** — it ignores the `-o` value. Rendering with `-o something_else.exr`
-still produces that EXR, but the PNG conversion step reads a stale/missing `output.exr`.
-Keep `-o output.exr` (the default) if you want the PNG.
+6. The CLI writes the linear EXR to the `-o` path and a tone-mapped sRGB PNG next to it
+   (same path, `.png` extension) — e.g. `-o renders/foo.exr` produces `renders/foo.exr`
+   and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
+   crate only produces the `Buffer`.
 
 ## Core traits (extension points)
 

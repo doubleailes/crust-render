@@ -7,10 +7,16 @@ use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
-use indicatif::ProgressBar;
 use rayon::prelude::*;
 use sampler::{Sampler, SobolSampler};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
+
+/// Render-progress callback: invoked with `(completed, total)` work units
+/// (scanline rows, or tiles under bucket rendering) as a pass advances.
+/// Called from worker threads, hence `Sync`. Presentation (progress bars,
+/// logging) is the caller's concern — the engine has no UI dependencies.
+pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
 /// Training-only clamp on recorded radiance so a single firefly cannot
 /// dominate a directional distribution. Affects the guiding field, never the
@@ -37,7 +43,6 @@ struct PassConfig {
     seed: u32,
     tiled: bool,
     adaptive: bool,
-    progress: bool,
 }
 
 pub struct Renderer {
@@ -68,28 +73,36 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        if self.settings.guiding {
-            return self.render_guided(false);
-        }
-        self.render_pass(self.final_pass_config(false), None).0
+        self.render_impl(false, None)
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
+        self.render_impl(true, None)
+    }
+
+    /// Renders with a progress callback — see [`ProgressCallback`]. With
+    /// guiding enabled, only the final pass reports (training passes are
+    /// silent, as before).
+    pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
+        self.render_impl(tiled, Some(progress))
+    }
+
+    fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
         if self.settings.guiding {
-            return self.render_guided(true);
+            return self.render_guided(tiled, progress);
         }
-        self.render_pass(self.final_pass_config(true), None).0
+        self.render_pass(self.final_pass_config(tiled), None, progress)
+            .0
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
-    /// sampling, visible progress.
+    /// sampling.
     fn final_pass_config(&self, tiled: bool) -> PassConfig {
         PassConfig {
             spp: self.settings.samples_per_pixel,
             seed: self.settings.frame as u32,
             tiled,
             adaptive: true,
-            progress: true,
         }
     }
 
@@ -100,12 +113,14 @@ impl Renderer {
     /// training passes the final image blends all of them weighted by
     /// inverse variance — passes rendered before the field converged simply
     /// receive small weights.
-    fn render_guided(&self, tiled: bool) -> Buffer {
+    fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
         let bounds = match self.world.bounding_box() {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self.render_pass(self.final_pass_config(tiled), None).0;
+                return self
+                    .render_pass(self.final_pass_config(tiled), None, progress)
+                    .0;
             }
         };
         let cfg = GuidingConfig {
@@ -130,9 +145,8 @@ impl Renderer {
                 seed,
                 tiled,
                 adaptive: false,
-                progress: false,
             };
-            let (buffer, samples, variance) = self.render_pass(train_cfg, Some(&gctx));
+            let (buffer, samples, variance) = self.render_pass(train_cfg, Some(&gctx), None);
             drop(gctx);
             info!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}",
@@ -155,7 +169,7 @@ impl Renderer {
             training: false,
         };
         let (final_buffer, _, final_variance) =
-            self.render_pass(self.final_pass_config(tiled), Some(&gctx));
+            self.render_pass(self.final_pass_config(tiled), Some(&gctx), progress);
         passes.push((final_buffer, final_variance));
 
         self.blend_passes(passes)
@@ -210,6 +224,7 @@ impl Renderer {
         &self,
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
+        progress: Option<ProgressCallback>,
     ) -> (Buffer, Vec<SampleData>, f64) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let mut all_samples = Vec::new();
@@ -218,7 +233,8 @@ impl Renderer {
 
         if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
-            let bar = progress_bar(tiles.len() as u64, cfg.progress);
+            let total = tiles.len() as u64;
+            let done = AtomicU64::new(0);
             let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>, f64)> = tiles
                 .into_par_iter()
                 .map(|tile| {
@@ -233,7 +249,9 @@ impl Renderer {
                             var += v;
                         }
                     }
-                    bar.inc(1);
+                    if let Some(cb) = progress {
+                        cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                    }
                     (pixels, samples, var)
                 })
                 .collect();
@@ -244,9 +262,9 @@ impl Renderer {
                 all_samples.extend(samples);
                 variance_sum += var;
             }
-            bar.finish();
         } else {
-            let bar = progress_bar(self.settings.height as u64, cfg.progress);
+            let total = self.settings.height as u64;
+            let mut done = 0u64;
             for j in (0..self.settings.height).rev() {
                 let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
                     .into_par_iter()
@@ -257,9 +275,11 @@ impl Renderer {
                     all_samples.extend(samples);
                     variance_sum += var;
                 }
-                bar.inc(1);
+                done += 1;
+                if let Some(cb) = progress {
+                    cb(done, total);
+                }
             }
-            bar.finish();
         }
 
         (buffer, all_samples, variance_sum / pixel_count)
@@ -328,21 +348,6 @@ impl Renderer {
         };
         (sum / taken as f32, samples, variance)
     }
-}
-
-fn progress_bar(len: u64, visible: bool) -> ProgressBar {
-    if !visible {
-        return ProgressBar::hidden();
-    }
-    let bar = ProgressBar::new(len);
-    bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
-            )
-            .unwrap(),
-    );
-    bar
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -2,6 +2,7 @@
 image.ppm
 Cargo.lock
 output.exr
+output.png
 /test_images
 samples/vi_model.abc
 .claude/settings.local.json
