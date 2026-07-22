@@ -2,11 +2,29 @@ use crate::RenderSettings;
 use crate::Sphere;
 use crate::camera::Camera;
 use crate::hittable_list::HittableList;
-use crate::light::LightList;
+use crate::light::{AreaLight, LightList, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
 use glam::Vec3A;
 use std::sync::Arc;
 use utils::{random_range3, random3};
+
+/// Adds a sphere light to the scene: emissive sphere geometry in `world`
+/// plus an `AreaLight` over the same surface in `lights`, tied together by
+/// sharing one `Emissive` material (Cornell-box semantics).
+fn add_sphere_light(
+    world: &mut HittableList,
+    lights: &mut LightList,
+    color: Vec3A,
+    center: Vec3A,
+    radius: f32,
+) {
+    let material = Arc::new(Emissive::new(color));
+    world.add(Box::new(Sphere::new(center, radius, material.clone())));
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(SphereShape { center, radius }),
+        material,
+    )));
+}
 
 #[allow(dead_code)]
 pub fn random_scene() -> (HittableList, LightList) {
@@ -76,29 +94,20 @@ pub fn random_scene() -> (HittableList, LightList) {
         material3,
     )));
 
-    let light: Arc<Emissive> = Arc::new(Emissive::new(
+    add_sphere_light(
+        &mut world,
+        &mut lights,
         Vec3A::new(10.0, 10.0, 10.0),
         Vec3A::new(0.0, 7.0, 0.0),
         1.0,
-    ));
-    world.add(Box::new(Sphere::new(
-        light.position(),
-        light.radius(),
-        light.clone(),
-    )));
-
-    lights.add(light);
-    let light2 = Arc::new(Emissive::new(
+    );
+    add_sphere_light(
+        &mut world,
+        &mut lights,
         Vec3A::new(20.0, 10.0, 7.0),
         Vec3A::new(-4.0, 7.0, 0.0),
         1.0,
-    ));
-    world.add(Box::new(Sphere::new(
-        light2.position(),
-        light2.radius(),
-        light2.clone(),
-    )));
-    lights.add(light2);
+    );
 
     (world, lights)
 }
@@ -171,29 +180,20 @@ pub fn simple_scene() -> (HittableList, LightList) {
     )));
 
     // Lights
-    let light1 = Arc::new(Emissive::new(
+    add_sphere_light(
+        &mut world,
+        &mut lights,
         Vec3A::new(10.0, 10.0, 10.0),
         Vec3A::new(0.0, 7.0, 0.0),
         1.0,
-    ));
-    world.add(Box::new(Sphere::new(
-        light1.position(),
-        light1.radius(),
-        light1.clone(),
-    )));
-    lights.add(light1);
-
-    let light2 = Arc::new(Emissive::new(
+    );
+    add_sphere_light(
+        &mut world,
+        &mut lights,
         Vec3A::new(20.0, 10.0, 7.0),
         Vec3A::new(-4.0, 7.0, 0.0),
         1.0,
-    ));
-    world.add(Box::new(Sphere::new(
-        light2.position(),
-        light2.radius(),
-        light2.clone(),
-    )));
-    lights.add(light2);
+    );
 
     (world, lights)
 }

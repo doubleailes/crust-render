@@ -1,33 +1,24 @@
 use crate::hittable::HitRecord;
-use crate::light::Light;
 use crate::material::{Material, ScatterSample};
 use crate::ray::Ray;
 use glam::Vec3A;
 use sampler::Sampler;
 
+/// A purely emissive surface material. Emission is all it knows — the shape
+/// of the light it belongs to lives in a `LightShape` on the light side
+/// (`light.rs`), and the two are tied together by binding the same
+/// `Arc<Emissive>` to both the scene geometry and the `AreaLight`.
 #[derive(Debug, Clone)]
 pub struct Emissive {
     color: Vec3A,
-    position: Vec3A,
-    radius: f32,
 }
 
 impl Emissive {
-    pub fn new(color: Vec3A, position: Vec3A, radius: f32) -> Self {
-        Emissive {
-            color,
-            position,
-            radius,
-        }
+    pub fn new(color: Vec3A) -> Self {
+        Emissive { color }
     }
     pub fn color(&self) -> Vec3A {
         self.color
-    }
-    pub fn position(&self) -> Vec3A {
-        self.position
-    }
-    pub fn radius(&self) -> f32 {
-        self.radius
     }
 }
 
@@ -44,47 +35,5 @@ impl Material for Emissive {
         _sampler: &mut dyn Sampler,
     ) -> Option<ScatterSample> {
         None
-    }
-}
-
-impl Light for Emissive {
-    fn sample(&self) -> Vec3A {
-        let uv = (utils::random(), utils::random());
-        let theta = 2.0 * std::f32::consts::PI * uv.0;
-        let phi = (1.0 - 2.0 * uv.1).acos();
-        let x = phi.sin() * theta.cos();
-        let y = phi.sin() * theta.sin();
-        let z = phi.cos();
-        self.position + self.radius * Vec3A::new(x, y, z)
-    }
-
-    fn sample_cmj(&self, u: f32, v: f32) -> Vec3A {
-        let theta = 2.0 * std::f32::consts::PI * u;
-        let phi = (1.0 - 2.0 * v).acos();
-        let x = phi.sin() * theta.cos();
-        let y = phi.sin() * theta.sin();
-        let z = phi.cos();
-
-        self.position + self.radius * Vec3A::new(x, y, z)
-    }
-
-    fn pdf(&self, hit_point: Vec3A, light_point: Vec3A) -> f32 {
-        let direction = light_point - hit_point;
-        let distance_squared = direction.length_squared();
-        let dir_to_light = direction.normalize();
-        // Solid-angle pdf of sampling this point on the sphere uniformly by
-        // area: dist^2 / (cos(theta_light) * area), where theta_light is the
-        // angle between the light's *surface* normal at `light_point` and the
-        // direction back toward the shaded point. The previous code dotted the
-        // direction with itself, so the cosine was always 1.0, dropping the
-        // grazing-angle foreshortening entirely.
-        let light_normal = (light_point - self.position).normalize();
-        let cosine = f32::max(light_normal.dot(-dir_to_light), 0.0);
-        let area = 4.0 * std::f32::consts::PI * self.radius * self.radius;
-        distance_squared / (cosine * area + 1e-4)
-    }
-
-    fn color(&self) -> Vec3A {
-        self.color
     }
 }

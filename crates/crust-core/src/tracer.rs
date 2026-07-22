@@ -563,9 +563,16 @@ fn ray_color_inner(
         let guiding_here = if suppress_emission { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
-        for light in lights.lights.iter() {
+        // The light strategy is "pick one light uniformly, then sample a
+        // point on it by area", so its solid-angle density is
+        // `light.pdf / n_lights`. The bounce side below attributes a hit
+        // emissive surface to its light and evaluates the *same* expression
+        // — both MIS weights must describe the same strategy or emission is
+        // double-counted.
+        if let Some(light) = lights.sample(sampler) {
+            let n_lights = lights.count() as f32;
             let area_uv = sampler.next_2d();
-            let light_point = light.sample_cmj(area_uv[0], area_uv[1]);
+            let light_point = light.sample_point(area_uv[0], area_uv[1]);
             let light_dir = light_point - rec.p;
             let light_distance = light_dir.length();
             let light_dir_unit = light_dir.normalize();
@@ -577,7 +584,7 @@ fn ray_color_inner(
                 // through a continuous transmission lobe (opaque materials
                 // evaluate to zero there anyway).
                 let cosine = rec.normal.dot(light_dir_unit).abs();
-                let light_pdf = light.pdf(rec.p, light_point);
+                let light_pdf = (light.pdf(rec.p, light_point) / n_lights).max(1e-6);
 
                 // Evaluate the BSDF toward the light direction. Delta and
                 // transmissive materials return None — they cannot see a
@@ -599,7 +606,7 @@ fn ray_color_inner(
                         _ => brdf_pdf,
                     };
                     let weight = utils::balance_heuristic(light_pdf, bounce_pdf);
-                    total_light += light.color() * brdf_value * cosine * weight / light_pdf;
+                    total_light += light.emission() * brdf_value * cosine * weight / light_pdf;
                 }
             }
         }
@@ -629,18 +636,21 @@ fn ray_color_inner(
                     // emission with light sampling via MIS. Delta samples are
                     // invisible to light sampling (their lobe is excluded
                     // from eval), so the bounce carries the emission whole —
-                    // likewise at vertices where NEE is inactive.
+                    // likewise at vertices where NEE is inactive, and for
+                    // emissive geometry with no light-list entry, which NEE
+                    // can never sample.
                     let nee_capable = !sample.delta && mat.eval(r, &rec, dir).is_some();
-                    let weight = if nee_capable {
-                        let light_pdf_sum: f32 = lights
-                            .lights
-                            .iter()
-                            .map(|light| light.pdf(rec.p, light_hit.rec.p))
-                            .sum();
-                        let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
-                        utils::balance_heuristic(sample.pdf, light_pdf)
-                    } else {
-                        1.0
+                    let weight = match lights.find_by_material(light_hit.mat) {
+                        Some(light) if nee_capable => {
+                            // Same strategy density as the NEE side above:
+                            // uniform 1-of-N pick times this light's
+                            // area-sampling pdf toward the hit point.
+                            let light_pdf = (light.pdf(rec.p, light_hit.rec.p)
+                                / lights.count() as f32)
+                                .max(1e-6);
+                            utils::balance_heuristic(sample.pdf, light_pdf)
+                        }
+                        _ => 1.0,
                     };
 
                     // Add the contribution of hitting the light via BRDF

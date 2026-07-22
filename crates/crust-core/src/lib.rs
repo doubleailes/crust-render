@@ -23,7 +23,7 @@ pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::{Hit, HitRecord, Hittable};
 pub use hittable_list::HittableList;
-pub use light::{Light, LightList};
+pub use light::{AreaLight, Light, LightList, LightShape, RectShape, SphereShape};
 pub use material::*;
 pub use medium::Medium;
 pub use primitives::{SmoothTriangle, Sphere, Triangle};
