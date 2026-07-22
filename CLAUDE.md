@@ -157,6 +157,21 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
 
 ## Known incomplete work
 
+- **`samples/cornellbox.usda` renders wrong — upstream `openusd` xformOp bug.** The image
+  shows a few floating objects against sky (~89% of primary rays miss the scene) instead
+  of a Cornell box. Root cause: `openusd` 0.5.0 (latest as of 2026-06) composes multi-op
+  `xformOpOrder` stacks in the wrong order. UsdGeomXformable applies ops in *reverse*
+  declaration order — for the Maya-authored `["xformOp:translate", "xformOp:scale"]` the
+  scale applies to points first and the translate last, so the local matrix's translation
+  must equal the authored translate. Instead `local_to_parent_transform` returns the
+  translate *multiplied by the scale*: `pCube1` (translate `(0,2,0)`, scale 4) comes back
+  with translation `(0,8,0)`, so the box shell lands at y∈[6,10] instead of y∈[0,4], and
+  every scaled prop shrinks toward the origin (`pSphere1`: authored translate
+  `(-1.156, 0.2, -0.556)`, scale 0.2 → returned translation `(-0.231, 0.04, -0.111)`).
+  Translate-only prims (all cameras/lights, every prim in the other samples) are
+  unaffected, which is why only this scene breaks. Fix options: patch upstream, or stop
+  using `local_to_parent_transform` in `usd_import.rs::local_matrix_at` and compose the
+  individual `xformOp:*` attrs ourselves in reverse order. See the note at that function.
 - USD lux light schemas beyond `SphereLight`/`RectLight` are skipped (see above). Disk
   lights need a disk primitive; distant/dome lights need non-area `Light` impls and
   integrator support for lights without scene geometry.
