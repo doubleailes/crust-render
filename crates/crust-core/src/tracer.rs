@@ -1,7 +1,8 @@
 use crate::buffer::Buffer;
+use crate::bvh::Bvh;
 use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::{HitRecord, Hittable};
-use crate::material::ScatterSample;
+use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::{LightList, camera::Camera, hittable_list::HittableList};
@@ -25,7 +26,9 @@ struct GuidingContext<'a> {
 
 pub struct Renderer {
     pub camera: Camera,
-    pub world: HittableList,
+    /// Top-level BVH over every scene object (meshes carry their own
+    /// nested BVH over triangles, built at import).
+    pub world: Bvh,
     pub lights: LightList,
     pub settings: RenderSettings,
 }
@@ -37,6 +40,9 @@ impl Renderer {
         lights: LightList,
         settings: RenderSettings,
     ) -> Self {
+        let object_count = world.count();
+        let world = Bvh::new(world.into_objects());
+        info!("built top-level BVH over {} scene objects", object_count);
         Renderer {
             camera,
             world,
@@ -430,11 +436,10 @@ pub fn ray_color(
 fn sample_bounce_direction(
     r: &Ray,
     rec: &HitRecord,
+    mat: &dyn Material,
     guiding: Option<&GuidingContext>,
     sampler: &mut dyn Sampler,
 ) -> Option<ScatterSample> {
-    let mat = rec.mat.as_ref().unwrap();
-
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
         _ => return mat.scatter_importance(r, rec, sampler),
@@ -497,9 +502,9 @@ fn ray_color_inner(
     // padded-Sobol later.
     sampler.advance_bounce();
 
-    let mut rec = HitRecord::new();
-
-    if world.hit(r, 0.001, f32::INFINITY, &mut rec) {
+    if let Some(hit) = world.hit(r, 0.001, f32::INFINITY) {
+        let rec: HitRecord = hit.rec;
+        let mat = hit.mat;
         // Volume interaction sampling for scattering media (subsurface,
         // participating volumes). If the sampled distance is closer than
         // the surface hit, kick a scattering event and short-circuit the
@@ -548,7 +553,7 @@ fn ray_color_inner(
         let emitted = if suppress_emission {
             Vec3A::ZERO
         } else {
-            rec.mat.as_ref().unwrap().emitted()
+            mat.emitted()
         };
         let mut total_light = emitted;
 
@@ -566,9 +571,8 @@ fn ray_color_inner(
             let light_dir_unit = light_dir.normalize();
 
             let shadow_ray = Ray::new(rec.p, light_dir_unit);
-            let mut shadow_hit = HitRecord::new();
 
-            if !world.hit(&shadow_ray, 0.001, light_distance - 0.001, &mut shadow_hit) {
+            if world.hit(&shadow_ray, 0.001, light_distance - 0.001).is_none() {
                 // Unsigned: lights behind the ray-facing normal are reachable
                 // through a continuous transmission lobe (opaque materials
                 // evaluate to zero there anyway).
@@ -579,9 +583,7 @@ fn ray_color_inner(
                 // transmissive materials return None — they cannot see a
                 // light-sampled direction and pick up emission via BSDF
                 // sampling instead.
-                if let Some((brdf_value, brdf_pdf)) =
-                    rec.mat.as_ref().unwrap().eval(r, &rec, light_dir_unit)
-                {
+                if let Some((brdf_value, brdf_pdf)) = mat.eval(r, &rec, light_dir_unit) {
                     // The competing strategy for this MIS weight is the
                     // bounce sampler, whose density toward the light is the
                     // guide/BSDF mixture whenever guiding is available at
@@ -603,7 +605,7 @@ fn ray_color_inner(
         }
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some(sample) = sample_bounce_direction(r, &rec, guiding_here, sampler) {
+        if let Some(sample) = sample_bounce_direction(r, &rec, mat, guiding_here, sampler) {
             let dir = sample.ray.direction().normalize();
             // The codebase convention multiplies the material's brdf*|cos|
             // value by the cosine again — unsigned, so continuous
@@ -616,12 +618,11 @@ fn ray_color_inner(
                 rec.normal.dot(dir).abs()
             };
 
-            let mut light_hit = HitRecord::new();
             let mut add_emission = Vec3A::new(0.0, 0.0, 0.0);
             let mut hit_emission = Vec3A::ZERO;
 
-            if world.hit(&sample.ray, 0.001, f32::INFINITY, &mut light_hit) {
-                let emitted = light_hit.mat.as_ref().unwrap().emitted();
+            if let Some(light_hit) = world.hit(&sample.ray, 0.001, f32::INFINITY) {
+                let emitted = light_hit.mat.emitted();
                 if emitted.length_squared() > 0.0 {
                     hit_emission = emitted;
                     // Continuous samples at NEE-capable vertices share the
@@ -629,13 +630,12 @@ fn ray_color_inner(
                     // invisible to light sampling (their lobe is excluded
                     // from eval), so the bounce carries the emission whole —
                     // likewise at vertices where NEE is inactive.
-                    let nee_capable =
-                        !sample.delta && rec.mat.as_ref().unwrap().eval(r, &rec, dir).is_some();
+                    let nee_capable = !sample.delta && mat.eval(r, &rec, dir).is_some();
                     let weight = if nee_capable {
                         let light_pdf_sum: f32 = lights
                             .lights
                             .iter()
-                            .map(|light| light.pdf(rec.p, light_hit.p))
+                            .map(|light| light.pdf(rec.p, light_hit.rec.p))
                             .sum();
                         let light_pdf = (light_pdf_sum / lights.lights.len() as f32).max(1e-4);
                         utils::balance_heuristic(sample.pdf, light_pdf)

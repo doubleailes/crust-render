@@ -1,6 +1,5 @@
 use crate::aabb::AABB;
-use crate::hittable::HitRecord;
-use crate::hittable::Hittable;
+use crate::hittable::{Hit, HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -27,7 +26,7 @@ impl Hittable for Sphere {
             self.center + Vec3A::new(self.radius, self.radius, self.radius),
         ))
     }
-    fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
+    fn hit(&self, r: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
         let oc = r.origin() - self.center;
         let a = r.direction().length_squared();
         let half_b = oc.dot(r.direction());
@@ -35,7 +34,7 @@ impl Hittable for Sphere {
         let discriminant = half_b * half_b - a * c;
 
         if discriminant < 0.0 {
-            return false;
+            return None;
         }
 
         let sqrt_d = discriminant.sqrt();
@@ -44,15 +43,18 @@ impl Hittable for Sphere {
         if root <= t_min || root >= t_max {
             root = (-half_b + sqrt_d) / a;
             if root <= t_min || root >= t_max {
-                return false;
+                return None;
             }
         }
 
+        let mut rec = HitRecord::new();
         rec.t = root;
         rec.p = r.at(root);
         let outward_normal = (rec.p - self.center) / self.radius;
         rec.set_face_normal(r, outward_normal);
-        rec.mat = Some(self.material.clone());
-        true
+        Some(Hit {
+            rec,
+            mat: self.material.as_ref(),
+        })
     }
 }

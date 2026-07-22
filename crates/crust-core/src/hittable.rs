@@ -1,20 +1,19 @@
 use crate::ray::Ray;
 use glam::Vec3A;
-use std::sync::Arc;
 
 use crate::aabb::AABB;
 use crate::material::Material;
 
-/// The `HitRecord` struct stores information about a ray-object intersection.
-/// It contains details such as the intersection point, surface normal, material, and more.
-#[derive(Clone, Default)]
+/// The `HitRecord` struct stores the geometry of a ray-object intersection:
+/// the intersection point, surface normal, ray parameter, and facing.
+/// It is plain `Copy` data — the material of the hit surface travels
+/// alongside it in [`Hit`], borrowed from the primitive that was hit.
+#[derive(Clone, Copy, Default)]
 pub struct HitRecord {
     /// The point of intersection.
     pub p: Vec3A,
     /// The surface normal at the intersection point.
     pub normal: Vec3A,
-    /// The material of the object at the intersection point.
-    pub mat: Option<Arc<dyn Material>>,
     /// The parameter `t` along the ray where the intersection occurs.
     pub t: f32,
     /// Indicates whether the ray hit the front face of the surface.
@@ -48,6 +47,17 @@ impl HitRecord {
     }
 }
 
+/// A successful ray-object intersection: the geometric [`HitRecord`] plus the
+/// material at the hit point, borrowed from the scene for the duration of the
+/// trace. Borrowing (instead of the former `Option<Arc<dyn Material>>` field)
+/// keeps intersection records `Copy` and removes an atomic refcount bump per
+/// candidate hit in the traversal hot loop.
+#[derive(Clone, Copy)]
+pub struct Hit<'a> {
+    pub rec: HitRecord,
+    pub mat: &'a dyn Material,
+}
+
 /// The `Hittable` trait defines objects that can be intersected by rays.
 /// Implementing this trait allows objects to participate in ray tracing.
 pub trait Hittable: Send + Sync {
@@ -57,10 +67,10 @@ pub trait Hittable: Send + Sync {
     /// - `ray`: The ray to test for intersection.
     /// - `t_min`: The minimum value of the parameter `t` to consider.
     /// - `t_max`: The maximum value of the parameter `t` to consider.
-    /// - `rec`: A mutable reference to a `HitRecord` to store intersection details.
     ///
     /// # Returns
-    /// - `true` if the ray intersects the object, `false` otherwise.
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool;
+    /// - `Some(Hit)` describing the closest intersection in `(t_min, t_max)`,
+    ///   or `None` if the ray misses the object.
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>>;
     fn bounding_box(&self) -> Option<AABB>;
 }

@@ -1,5 +1,5 @@
 use crate::aabb::{AABB, triangle_aabb};
-use crate::hittable::{HitRecord, Hittable};
+use crate::hittable::{Hit, HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -38,7 +38,7 @@ impl SmoothTriangle {
 }
 
 impl Hittable for SmoothTriangle {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
         let edge1 = self.v1 - self.v0;
         let edge2 = self.v2 - self.v0;
         let h = ray.direction().cross(edge2);
@@ -49,27 +49,28 @@ impl Hittable for SmoothTriangle {
         let epsilon = triangle_size * 1e-6;
 
         if a.abs() < epsilon {
-            return false;
+            return None;
         }
 
         let f = 1.0 / a;
         let s = ray.origin() - self.v0;
         let u = f * s.dot(h);
         if !(0.0..=1.0).contains(&u) {
-            return false;
+            return None;
         }
 
         let q = s.cross(edge1);
         let v = f * ray.direction().dot(q);
         if v < 0.0 || u + v > 1.0 {
-            return false;
+            return None;
         }
 
         let t = f * edge2.dot(q);
         if t < t_min || t > t_max {
-            return false;
+            return None;
         }
 
+        let mut rec = HitRecord::new();
         rec.t = t;
         rec.p = ray.at(t);
 
@@ -77,9 +78,11 @@ impl Hittable for SmoothTriangle {
         let w = 1.0 - u - v;
         let interpolated_normal = (self.n0 * w + self.n1 * u + self.n2 * v).normalize();
         rec.set_face_normal(ray, interpolated_normal);
-        rec.mat = Some(self.material.clone());
 
-        true
+        Some(Hit {
+            rec,
+            mat: self.material.as_ref(),
+        })
     }
 
     fn bounding_box(&self) -> Option<AABB> {

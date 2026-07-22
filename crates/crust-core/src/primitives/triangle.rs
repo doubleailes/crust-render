@@ -1,5 +1,5 @@
 use crate::aabb::{AABB, triangle_aabb};
-use crate::hittable::{HitRecord, Hittable};
+use crate::hittable::{Hit, HitRecord, Hittable};
 use crate::material::Material;
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -26,17 +26,11 @@ impl Hittable for Triangle {
     fn bounding_box(&self) -> Option<AABB> {
         Some(triangle_aabb(self.v0, self.v1, self.v2))
     }
-    fn hit(&self, r: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
-        triangle_hit(
-            r,
-            self.v0,
-            self.v1,
-            self.v2,
-            t_min,
-            t_max,
+    fn hit(&self, r: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
+        triangle_hit(r, self.v0, self.v1, self.v2, t_min, t_max).map(|rec| Hit {
             rec,
-            &self.material,
-        )
+            mat: self.material.as_ref(),
+        })
     }
 }
 
@@ -47,9 +41,7 @@ pub(crate) fn triangle_hit(
     v2: Vec3A,
     t_min: f32,
     t_max: f32,
-    rec: &mut HitRecord,
-    material: &Arc<dyn Material>,
-) -> bool {
+) -> Option<HitRecord> {
     let edge1 = v1 - v0;
     let edge2 = v2 - v0;
     let h = ray.direction().cross(edge2);
@@ -60,31 +52,31 @@ pub(crate) fn triangle_hit(
     let epsilon = triangle_size * 1e-6;
 
     if a.abs() < epsilon {
-        return false;
+        return None;
     }
 
     let f = 1.0 / a;
     let s = ray.origin() - v0;
     let u = f * s.dot(h);
     if !(0.0..=1.0).contains(&u) {
-        return false;
+        return None;
     }
 
     let q = s.cross(edge1);
     let v = f * ray.direction().dot(q);
     if v < 0.0 || u + v > 1.0 {
-        return false;
+        return None;
     }
 
     let t = f * edge2.dot(q);
     if t < t_min || t > t_max {
-        return false;
+        return None;
     }
 
+    let mut rec = HitRecord::new();
     rec.t = t;
     rec.p = ray.at(t);
     let normal = edge1.cross(edge2).normalize();
     rec.set_face_normal(ray, normal);
-    rec.mat = Some(material.clone());
-    true
+    Some(rec)
 }
