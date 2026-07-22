@@ -40,16 +40,14 @@ const DEFAULT_FRAME: isize = 0;
 const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
 const DEFAULT_GUIDING_PROB: f32 = 0.5;
 
-pub(crate) fn load_scene(path: &Path) -> std::io::Result<Scene> {
-    let path_str = path.to_str().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "USD path is not UTF-8")
-    })?;
+pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
 
-    let stage = Stage::open(path_str).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to open USD stage {}: {}", path_str, e),
-        )
+    let stage = Stage::open(path_str).map_err(|e| crate::Error::UsdOpen {
+        path: path.to_path_buf(),
+        message: e.to_string(),
     })?;
 
     // Render settings come first — the camera importer needs the aspect ratio.

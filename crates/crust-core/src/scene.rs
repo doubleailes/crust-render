@@ -3,9 +3,10 @@ use crate::hittable_list::HittableList;
 use crate::light::LightList;
 use crate::tracer::RenderSettings;
 
-/// The renderer's runtime scene. Produced either from a RON `Document`
-/// (`Document::get_scene`) or from a USD stage (`Scene::from_usd`, behind
-/// the `usd` feature). `Renderer::new` consumes this directly.
+/// The renderer's runtime scene, produced from a USD stage
+/// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
+/// procedural `world::simple_scene`). `Renderer::new` consumes this
+/// directly.
 pub struct Scene {
     pub camera: Camera,
     pub world: HittableList,
@@ -45,7 +46,7 @@ impl Scene {
     ///   geometry and light. Other lux schemas warn and are skipped.
     /// * `UsdRenderSettings` (plus `crust:*` custom attrs for spp / depth
     ///   / etc.) → `RenderSettings`. Falls back to sensible defaults.
-    pub fn from_usd(path: &std::path::Path) -> std::io::Result<Scene> {
+    pub fn from_usd(path: &std::path::Path) -> Result<Scene, crate::Error> {
         usd_import::load_scene(path)
     }
 }
