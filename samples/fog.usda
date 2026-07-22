@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    doc = "Homogeneous fog in a grey room lit by a ceiling RectLight: god rays around an occluding ball. Exercises the crust:volume:* homogeneous import, volume NEE and the analytic (noise-free) transmittance fast path."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 2, 8.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Five-sided grey room: floor, ceiling, back, left, right (front open).
+    def Mesh "Room"
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        point3f[] points = [(-2, 0, -2), (2, 0, -2), (2, 0, 2), (-2, 0, 2), (-2, 4, -2), (2, 4, -2), (2, 4, 2), (-2, 4, 2), (-2, 0, -2), (2, 0, -2), (2, 4, -2), (-2, 4, -2), (-2, 0, -2), (-2, 0, 2), (-2, 4, 2), (-2, 4, -2), (2, 0, -2), (2, 0, 2), (2, 4, 2), (2, 4, -2)]
+    }
+
+    def Sphere "Ball"
+    {
+        double radius = 0.6
+        double3 xformOp:translate = (-0.7, 0.6, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The fog: a Cube-shaped homogeneous region filling the room. Slightly
+    # blue-leaning absorption gives the beams a warm tint.
+    def Cube "Fog"
+    {
+        double size = 4
+        token crust:volume:type = "homogeneous"
+        color3f crust:volume:sigmaS = (0.15, 0.15, 0.15)
+        color3f crust:volume:sigmaA = (0.01, 0.015, 0.025)
+        float crust:volume:anisotropy = 0.3
+        double3 xformOp:translate = (0, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Ceiling light, rotated so its local -Z emits downward.
+    def RectLight "CeilingLight"
+    {
+        float inputs:width = 1.6
+        float inputs:height = 1.6
+        color3f inputs:color = (10, 10, 10)
+        float inputs:intensity = 1.0
+        float xformOp:rotateX = -90
+        double3 xformOp:translate = (0, 3.98, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 16
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}

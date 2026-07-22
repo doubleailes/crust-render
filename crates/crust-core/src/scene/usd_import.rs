@@ -16,6 +16,7 @@ use crate::material::{Emissive, Material, OpenPBR};
 use crate::primitives::{Sphere as CrustSphere, Triangle};
 use crate::scene::Scene;
 use crate::tracer::RenderSettings;
+use crate::volume::{DensityField, VolumeRegion};
 use glam::{Vec3, Vec3A};
 
 use openusd::gf::{Matrix4d, Vec3f};
@@ -55,6 +56,7 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
 
     let mut world = HittableList::new();
     let mut lights = LightList::new();
+    let mut volumes: Vec<VolumeRegion> = Vec::new();
     let mut camera_candidate: Option<Camera> = None;
 
     let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
@@ -64,9 +66,15 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         let resets = resets_xform_stack_at(&stage, &prim);
         let this_world = if resets { local } else { parent_world * local };
 
-        // Dispatch by schema. Order matters only for Meshes vs Sphere prims —
-        // both check first so we don't recurse into their materials as prims.
-        if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
+        // Dispatch by schema. Volume prims are checked first: a prim
+        // carrying `crust:volume:type` imports as a participating-media
+        // region only — never as geometry, so its bounds cannot occlude
+        // shadow rays. Otherwise order matters only for Meshes vs Sphere
+        // prims — both check first so we don't recurse into their
+        // materials as prims.
+        if custom_token(&prim, "crust:volume:type").is_some() {
+            emit_volume(&prim, this_world, &mut volumes);
+        } else if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
             let mat = resolve_material(&stage, &prim);
             emit_mesh(&mut world, &prim, &mesh, this_world, mat);
         } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
@@ -108,7 +116,88 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         crate::world::get_settings().0
     });
 
-    Ok(Scene::new(camera, world, lights, settings))
+    Ok(Scene::new(camera, world, lights, settings).with_volumes(volumes))
+}
+
+// -----------------------------------------------------------------------
+// Volumes
+// -----------------------------------------------------------------------
+
+/// Import a `crust:volume:*` prim as a `VolumeRegion`. The local box is
+/// `[-size/2, size/2]^3` when the prim authors a `size` attribute (a
+/// `Cube`'s convention; USD's default cube size is 2) and the unit cube
+/// `[-0.5, 0.5]^3` otherwise; placement, orientation and scale come from
+/// the composed prim transform.
+fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
+    let ty = custom_token(prim, "crust:volume:type").expect("checked by dispatch");
+
+    let field = match ty.as_str() {
+        "homogeneous" => DensityField::Homogeneous,
+        "smoke" => DensityField::Noise {
+            scale: custom_f32(prim, "crust:volume:noiseScale").unwrap_or(4.0),
+            octaves: custom_i32(prim, "crust:volume:noiseOctaves").unwrap_or(4).max(1) as u32,
+            gain: custom_f32(prim, "crust:volume:noiseGain").unwrap_or(0.5),
+            lacunarity: custom_f32(prim, "crust:volume:noiseLacunarity").unwrap_or(2.0),
+            threshold: custom_f32(prim, "crust:volume:noiseThreshold").unwrap_or(0.3),
+            seed: custom_i32(prim, "crust:volume:noiseSeed").unwrap_or(0) as u32,
+        },
+        "grid" => {
+            let dims = custom_i32_array(prim, "crust:volume:gridDims");
+            let data = custom_f32_array(prim, "crust:volume:gridData");
+            match (dims, data) {
+                (Some(d), Some(data)) if d.len() == 3 => {
+                    let (nx, ny, nz) = (d[0].max(1) as usize, d[1].max(1) as usize, d[2].max(1) as usize);
+                    if nx * ny * nz != data.len() {
+                        warn!(
+                            "Volume at {}: gridDims {}x{}x{} does not match gridData length {} — skipped",
+                            prim.path(), nx, ny, nz, data.len()
+                        );
+                        return;
+                    }
+                    DensityField::Grid { nx, ny, nz, data }
+                }
+                _ => {
+                    warn!(
+                        "Volume at {}: grid type needs int[3] crust:volume:gridDims and float[] crust:volume:gridData — skipped",
+                        prim.path()
+                    );
+                    return;
+                }
+            }
+        }
+        other => {
+            warn!(
+                "Volume at {}: unknown crust:volume:type \"{}\" (expected homogeneous | smoke | grid) — skipped",
+                prim.path(),
+                other
+            );
+            return;
+        }
+    };
+
+    let sigma_s = custom_color3(prim, "crust:volume:sigmaS").unwrap_or(Vec3A::splat(0.5));
+    let sigma_a = custom_color3(prim, "crust:volume:sigmaA").unwrap_or(Vec3A::ZERO);
+    let emission = custom_color3(prim, "crust:volume:emission").unwrap_or(Vec3A::ZERO);
+    let g = custom_f32(prim, "crust:volume:anisotropy").unwrap_or(0.0);
+    let density_scale = custom_f32(prim, "crust:volume:densityScale").unwrap_or(1.0);
+    let half = custom_f32(prim, "size").map_or(0.5, |s| s * 0.5);
+
+    info!(
+        "Imported {} volume at {} (densityScale={})",
+        ty,
+        prim.path(),
+        density_scale
+    );
+    volumes.push(VolumeRegion::new(
+        world_xf,
+        Vec3A::splat(half),
+        sigma_s,
+        sigma_a,
+        g,
+        emission,
+        density_scale,
+        field,
+    ));
 }
 
 // -----------------------------------------------------------------------
@@ -978,6 +1067,41 @@ fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
         sdf::Value::Bool(b) => Some(b),
         // Authoring tools sometimes write bools as ints.
         sdf::Value::Int(i) => Some(i != 0),
+        _ => None,
+    }
+}
+
+fn custom_token(prim: &Prim, name: &str) -> Option<String> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::Token(t) => Some(t),
+        sdf::Value::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::Vec3f(c) => Some(Vec3A::new(c.x, c.y, c.z)),
+        sdf::Value::Vec3d(c) => Some(Vec3A::new(c.x as f32, c.y as f32, c.z as f32)),
+        _ => None,
+    }
+}
+
+fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::FloatVec(v) => Some(v),
+        sdf::Value::DoubleVec(v) => Some(v.into_iter().map(|d| d as f32).collect()),
+        _ => None,
+    }
+}
+
+fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::IntVec(v) => Some(v),
         _ => None,
     }
 }

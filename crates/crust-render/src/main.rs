@@ -109,6 +109,7 @@ fn main() {
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
+    let volumes = scene.volumes;
     let settings = match cli.samples {
         Some(spp) => scene.settings.with_samples_per_pixel(spp),
         None => scene.settings,
@@ -121,7 +122,7 @@ fn main() {
     debug!("World loaded with {} objects", world.count());
     debug!("Lights loaded with {} objects", lights.count());
     // Camera
-    let renderer = Renderer::new(camera, world, lights, settings);
+    let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!("Let's start rendering...");
     if cli.bucket {
         info!("Bucket rendering is enabled");
