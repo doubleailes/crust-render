@@ -87,12 +87,14 @@ Keep `-o output.exr` (the default) if you want the PNG.
 
 ## Core traits (extension points)
 
-- **`Hittable`** (`hittable.rs`) — `hit(ray, t_min, t_max, &mut HitRecord)` + `bounding_box()`.
-  `HitRecord` carries the point, normal, `Option<Arc<dyn Material>>`, `t`, and `front_face`.
-  Implemented by `Sphere`, `Triangle`, `SmoothTriangle`, `Mesh`, `HittableList`, `BVHNode`.
-  The top-level `world` is a **linear `HittableList`** (no acceleration); `BVHNode` is only
-  built to wrap the triangles of an imported mesh (`usd_import.rs`). BVH build picks a random
-  split axis, so it is non-deterministic.
+- **`Hittable`** (`hittable.rs`) — `hit(ray, t_min, t_max) -> Option<Hit>` + `bounding_box()`.
+  `HitRecord` is `Copy` geometry only (point, normal, `t`, `front_face`); `Hit` pairs it with
+  a **borrowed** `&dyn Material`, so traversal never touches an `Arc` refcount. Implemented by
+  `Sphere`, `Triangle`, `SmoothTriangle`, `Mesh`, `HittableList`, `Bvh`. Rendering uses a
+  **two-level BVH**: `Renderer::new` builds a top-level `Bvh` (`bvh.rs`) over the scene's
+  `HittableList`, and each imported mesh carries its own nested `Bvh` over triangles
+  (`usd_import.rs`). `Bvh` is a flat node array with binned-SAH splits and iterative
+  traversal — deterministic for a given scene.
 - **`Material`** (`material/material.rs`) —
   `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
   (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a

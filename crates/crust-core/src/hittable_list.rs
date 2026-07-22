@@ -1,9 +1,12 @@
 use crate::aabb::AABB;
-use crate::hittable::{HitRecord, Hittable};
+use crate::hittable::{Hit, Hittable};
 use crate::ray::Ray;
 
 /// The `HittableList` struct represents a collection of objects that can be intersected by rays.
 /// It allows for managing multiple `Hittable` objects and testing for ray intersections with all of them.
+///
+/// This is the scene-construction container; for rendering, `Renderer::new`
+/// converts it into a top-level [`crate::Bvh`] via [`HittableList::into_objects`].
 #[derive(Default)]
 pub struct HittableList {
     /// A vector of objects implementing the `Hittable` trait.
@@ -33,36 +36,29 @@ impl HittableList {
     pub fn count(&self) -> usize {
         self.objects.len()
     }
+
+    /// Consumes the list and returns its objects, e.g. to build an
+    /// acceleration structure over them.
+    pub fn into_objects(self) -> Vec<Box<dyn Hittable>> {
+        self.objects
+    }
 }
 
 impl Hittable for HittableList {
-    /// Determines if a ray intersects any object in the list.
-    ///
-    /// # Parameters
-    /// - `ray`: The ray to test for intersections.
-    /// - `t_min`: The minimum value of the parameter `t` to consider.
-    /// - `t_max`: The maximum value of the parameter `t` to consider.
-    /// - `rec`: A mutable reference to a `HitRecord` to store intersection details.
-    ///
-    /// # Returns
-    /// - `true` if the ray intersects any object in the list, `false` otherwise.
-    ///
-    /// This method iterates through all objects in the list and checks for intersections.
-    /// If an intersection is found, it updates the `HitRecord` with the closest intersection.
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, rec: &mut HitRecord) -> bool {
-        let mut temp_rec = HitRecord::new();
-        let mut hit_anything = false;
+    /// Finds the closest intersection of the ray with any object in the list
+    /// by linear scan.
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
         let mut closest_so_far = t_max;
+        let mut best: Option<Hit> = None;
 
         for object in &self.objects {
-            if object.hit(ray, t_min, closest_so_far, &mut temp_rec) {
-                hit_anything = true;
-                closest_so_far = temp_rec.t;
-                *rec = temp_rec.clone();
+            if let Some(hit) = object.hit(ray, t_min, closest_so_far) {
+                closest_so_far = hit.rec.t;
+                best = Some(hit);
             }
         }
 
-        hit_anything
+        best
     }
     fn bounding_box(&self) -> Option<AABB> {
         if self.objects.is_empty() {

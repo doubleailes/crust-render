@@ -1,6 +1,6 @@
 mod aabb;
 mod buffer;
-mod bvhnode;
+mod bvh;
 mod camera;
 mod convert;
 mod guiding;
@@ -15,10 +15,13 @@ mod scene;
 mod tracer;
 mod world;
 
+pub use aabb::AABB;
+pub use bvh::Bvh;
 pub use camera::Camera;
 pub use convert::convert;
 pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
+pub use hittable::{Hit, HitRecord, Hittable};
 pub use hittable_list::HittableList;
 pub use light::{Light, LightList};
 pub use material::*;

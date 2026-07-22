@@ -7,7 +7,7 @@ use std::sync::Arc;
 use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
 
-use crate::bvhnode::BVHNode;
+use crate::bvh::Bvh;
 use crate::camera::Camera;
 use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
@@ -250,7 +250,7 @@ fn emit_mesh(
         })
         .collect();
 
-    let mut tris: Vec<Arc<dyn Hittable>> = Vec::new();
+    let mut tris: Vec<Box<dyn Hittable>> = Vec::new();
     let mut offset = 0usize;
     for &fc in &counts {
         let fc = fc as usize;
@@ -265,7 +265,7 @@ fn emit_mesh(
             if i0 >= verts.len() || i1 >= verts.len() || i2 >= verts.len() {
                 continue;
             }
-            tris.push(Arc::new(Triangle::new(
+            tris.push(Box::new(Triangle::new(
                 verts[i0],
                 verts[i1],
                 verts[i2],
@@ -280,27 +280,7 @@ fn emit_mesh(
         return;
     }
 
-    let bvh = BVHNode::build(tris);
-    world.add(Box::new(BvhBox(bvh)) as Box<dyn Hittable>);
-}
-
-/// `HittableList::add` requires `Box<dyn Hittable>`; the BVH we build is an
-/// `Arc<dyn Hittable>`. Wrap it in a boxed newtype that forwards `Hittable`.
-struct BvhBox(Arc<dyn Hittable>);
-
-impl Hittable for BvhBox {
-    fn hit(
-        &self,
-        r: &crate::ray::Ray,
-        t_min: f32,
-        t_max: f32,
-        rec: &mut crate::hittable::HitRecord,
-    ) -> bool {
-        self.0.hit(r, t_min, t_max, rec)
-    }
-    fn bounding_box(&self) -> Option<crate::aabb::AABB> {
-        self.0.bounding_box()
-    }
+    world.add(Box::new(Bvh::new(tris)));
 }
 
 // -----------------------------------------------------------------------
