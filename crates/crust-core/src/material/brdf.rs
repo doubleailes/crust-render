@@ -298,7 +298,37 @@ pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -
 // primaries (R = 615 nm, G = 545 nm, B = 465 nm) — a 3-wavelength
 // approximation that captures the characteristic soap-bubble / oil-slick
 // look without full spectral rendering.
-const LAMBDA_RGB: [f32; 3] = [615.0, 545.0, 465.0];
+/// Representative wavelengths (nm) of the sRGB primaries, shared by the
+/// thin-film interference and dispersion models so per-channel spectral
+/// effects stay consistent.
+pub const LAMBDA_RGB: [f32; 3] = [615.0, 545.0, 465.0];
+
+// -------- Physical dispersion (Cauchy / Abbe) --------
+//
+// Following Adobe's OpenPBR BSDF reference (openpbr_dispersion_utils.h): a
+// dielectric is specified by its index n_d at the Fraunhofer d line plus an
+// Abbe number V_d = (n_d − 1)/(n_F − n_C), and the wavelength dependence is
+// reconstructed with the two-term Cauchy equation n(λ) = A + B/λ² — the
+// best fit available without partial-dispersion data.
+
+/// Fraunhofer C line (hydrogen), 656.3 nm — the long/red reference.
+pub const FRAUNHOFER_C_NM: f32 = 656.3;
+/// Fraunhofer d line (helium), 587.6 nm — where `n_d` is defined.
+pub const FRAUNHOFER_D_NM: f32 = 587.6;
+/// Fraunhofer F line (hydrogen), 486.1 nm — the short/blue reference.
+pub const FRAUNHOFER_F_NM: f32 = 486.1;
+
+/// Cauchy-fit refractive index at `lambda_nm` for a dielectric with index
+/// `n_d` (> 1) at the d line and Abbe number `v_d`. A and B are chosen so
+/// that `n(λ_d) = n_d` exactly and the fit's Abbe number is exactly `v_d`.
+pub fn cauchy_ior(n_d: f32, v_d: f32, lambda_nm: f32) -> f32 {
+    let b = (n_d - 1.0)
+        / (v_d
+            * (1.0 / (FRAUNHOFER_F_NM * FRAUNHOFER_F_NM)
+                - 1.0 / (FRAUNHOFER_C_NM * FRAUNHOFER_C_NM)));
+    let a = n_d - b / (FRAUNHOFER_D_NM * FRAUNHOFER_D_NM);
+    a + b / (lambda_nm * lambda_nm)
+}
 
 /// Airy-summation reflectance of the film stack at a single wavelength, for
 /// a base of (real) index `eta_2`. Returns 1.0 past a TIR boundary.
