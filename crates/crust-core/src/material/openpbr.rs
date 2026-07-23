@@ -322,50 +322,32 @@ fn luma(c: Vec3A) -> f32 {
 // Lobe evaluations. Each returns a *linear-space* BRDF value (no cosine).
 // ---------------------------------------------------------------------------
 
-fn eval_diffuse(
-    m: &OpenPBR,
-    _v_local: Vec3A,
-    l_local: Vec3A,
-    h_local: Vec3A,
-    f_avg_diel: f32,
-) -> Vec3A {
-    // Disney diffuse re-parameterised for OpenPBR: `base_diffuse_roughness`
+fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) -> Vec3A {
+    // EON diffuse (energy-preserving Fujii Oren-Nayar) — the model the
+    // OpenPBR spec names for the base diffuse slab. `base_diffuse_roughness`
     // is the diffuse-only roughness (independent of specular_roughness).
-    let n_dot_l = l_local.z.max(0.0);
-    let n_dot_v = _v_local.z.max(0.0);
-    if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
+    if l_local.z <= 0.0 || v_local.z <= 0.0 {
         return Vec3A::ZERO;
     }
-    let l_dot_h = l_local.dot(h_local).max(0.0);
 
     // Subsurface behaves as a colour-shifted diffuse when the walk length
-    // is short relative to feature size. The full random-walk BSSRDF —
-    // refracting in, HG walk in the medium, refracting out — is enabled
-    // when `subsurface_weight > 0` in the sampled event path (see
-    // `sample_subsurface`), which uses the Medium infrastructure. Here
-    // we surface the *directional* diffuse response with the SSS tint so
-    // the average colour matches, and rely on volume scattering for the
-    // multi-scattering softening.
+    // is short relative to feature size: surface the directional diffuse
+    // response with the SSS tint so the average colour matches (the full
+    // random-walk BSSRDF is future work — see the module header).
     let diffuse_color = m.base_color.lerp(m.subsurface_color, m.subsurface_weight);
 
-    let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * m.base_diffuse_roughness;
-    let fl = schlick_weight(n_dot_l);
-    let fv = schlick_weight(n_dot_v);
-    let disney = diffuse_color
-        * (1.0 / PI)
-        * (1.0 + (fd90 - 1.0) * fl)
-        * (1.0 + (fd90 - 1.0) * fv);
-
-    // Energy left after specular reflection: `(1 - F_dielectric_avg) *
-    // (1 - metalness) * base_weight`. Using the directional Fresnel here
-    // would double-count with the specular lobe's own Fresnel — the
-    // average avoids that.
+    // Fold the presence weights into the EON albedo, as Adobe's reference
+    // does (`diffuse_albedo = base_color · base_weight · opaque-dielectric
+    // fraction`): the multiple-scattering term is nonlinear in ρ and should
+    // saturate with the *effective* albedo, not the raw color.
     // Transmission displaces the diffuse base — see `LobePmf::from_params`.
-    disney
-        * (1.0 - f_avg_diel)
-        * (1.0 - m.base_metalness)
-        * (1.0 - m.transmission_weight)
-        * m.base_weight
+    let rho = diffuse_color
+        * (m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight));
+
+    // Energy left after specular reflection: `1 - F_dielectric_avg`. Using
+    // the directional Fresnel here would double-count with the specular
+    // lobe's own Fresnel — the average avoids that.
+    eon_diffuse(rho, m.base_diffuse_roughness, v_local, l_local) * (1.0 - f_avg_diel)
 }
 
 fn eval_specular(
@@ -510,7 +492,7 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
         roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
-    let diffuse = eval_diffuse(m, v_local, l_local, h_local, f_avg_diel);
+    let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
     let specular = eval_specular(m, v_local, l_local, h_local, ax, ay);
     let coat = eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat);
     let fuzz = eval_fuzz(m, v_local, l_local, h_local);
@@ -1322,6 +1304,76 @@ mod tests {
         assert!(v.y > 0.0, "green channel dark at its own Snell direction: {v}");
         assert!(v.y > v.x, "green {} not > red {} at green Snell direction", v.y, v.x);
         assert!(v.y > v.z, "green {} not > blue {} at green Snell direction", v.y, v.z);
+    }
+
+    #[test]
+    fn eon_reduces_to_lambert_at_zero_roughness() {
+        let rho = Vec3A::new(0.8, 0.5, 0.3);
+        let v = Vec3A::new(0.3, 0.1, 0.9).normalize();
+        let l = Vec3A::new(-0.2, 0.4, 0.8).normalize();
+        let f = eon_diffuse(rho, 0.0, v, l);
+        let lambert = rho / PI;
+        assert!(
+            (f - lambert).abs().max_element() < 1e-4,
+            "EON at r=0 {f} != Lambert {lambert}"
+        );
+    }
+
+    #[test]
+    fn eon_is_reciprocal() {
+        let rho = Vec3A::new(0.9, 0.6, 0.2);
+        let v = Vec3A::new(0.5, -0.1, 0.6).normalize();
+        let l = Vec3A::new(-0.3, 0.2, 0.9).normalize();
+        for r in [0.2, 0.6, 1.0] {
+            let a = eon_diffuse(rho, r, v, l);
+            let b = eon_diffuse(rho, r, l, v);
+            assert!((a - b).abs().max_element() < 1e-5, "r={r}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn eon_albedo_approx_matches_exact() {
+        for i in 1..=20 {
+            let mu = i as f32 / 20.0;
+            for r in [0.0, 0.3, 0.7, 1.0] {
+                let exact = eon_albedo_exact(mu, r);
+                let approx = eon_albedo_approx(mu, r);
+                assert!(
+                    (exact - approx).abs() < 0.01,
+                    "albedo mismatch at mu={mu}, r={r}: {exact} vs {approx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eon_preserves_energy_at_high_roughness() {
+        // The defining property: at rho = 1 the hemispherical albedo
+        // (∫ f·cosθ dω) is 1 for any roughness — the single-scattering Fujii
+        // lobe alone loses well over 10% at roughness 1; the
+        // multiple-scattering lobe restores it. Quadrature over the
+        // hemisphere for a few view angles.
+        let n_theta = 128;
+        let n_phi = 128;
+        for view_z in [0.95f32, 0.6, 0.25] {
+            let v = Vec3A::new((1.0 - view_z * view_z).sqrt(), 0.0, view_z);
+            let mut integral = 0.0f32;
+            for it in 0..n_theta {
+                let theta = (it as f32 + 0.5) / n_theta as f32 * (PI / 2.0);
+                let (sin_t, cos_t) = theta.sin_cos();
+                for ip in 0..n_phi {
+                    let phi = (ip as f32 + 0.5) / n_phi as f32 * (2.0 * PI);
+                    let l = Vec3A::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                    let f = eon_diffuse(Vec3A::ONE, 1.0, v, l).x;
+                    integral += f * cos_t * sin_t;
+                }
+            }
+            integral *= (PI / 2.0) / n_theta as f32 * (2.0 * PI) / n_phi as f32;
+            assert!(
+                (0.97..=1.03).contains(&integral),
+                "white-furnace albedo {integral} at view_z {view_z}"
+            );
+        }
     }
 
     #[test]
