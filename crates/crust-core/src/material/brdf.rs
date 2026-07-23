@@ -133,6 +133,79 @@ pub fn pdf_vndf_h_aniso_local(v_local: Vec3A, h_local: Vec3A, ax: f32, ay: f32) 
     d * g1 * v_dot_h / n_dot_v
 }
 
+// -------- EON (energy-preserving Oren-Nayar) diffuse --------
+//
+// Portsmouth et al., "EON: A practical energy-preserving rough diffuse
+// BRDF" — the model the OpenPBR spec names for the base diffuse slab,
+// following the formulation in Adobe's OpenPBR BSDF reference: Fujii's
+// Oren-Nayar variant (single-scattering) plus an analytic
+// multiple-scattering lobe that restores the energy the single-scattering
+// term loses at high roughness. At `rho = 1` the total hemispherical albedo
+// is exactly 1 for any roughness; at zero roughness it reduces to Lambert.
+
+/// Fujii Oren-Nayar `A` constant: `1/(1 + A·r)` normalises the lobe.
+const EON_A: f32 = 0.5 - 2.0 / (3.0 * PI);
+/// Constant in the average (cosine-weighted) directional albedo
+/// `Ē = (1 + B·r) / (1 + A·r)`.
+const EON_B: f32 = 2.0 / 3.0 - 28.0 / (15.0 * PI);
+
+/// Fujii Oren-Nayar directional albedo, exact closed form. (Reference for
+/// the approximation below; used by tests to pin the fit.)
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn eon_albedo_exact(mu: f32, roughness: f32) -> f32 {
+    let mu = mu.clamp(1e-4, 1.0);
+    let af = 1.0 / (1.0 + EON_A * roughness);
+    let bf = roughness * af;
+    let si = (1.0 - mu * mu).max(0.0).sqrt();
+    let g = si * (mu.acos() - si * mu) + (2.0 / 3.0) * ((si / mu) * (1.0 - si * si * si) - si);
+    af + (bf / PI) * g
+}
+
+/// Fujii Oren-Nayar directional albedo, quartic polynomial fit (the runtime
+/// form used by the Adobe reference; agrees with the exact form to ~1e-2).
+pub fn eon_albedo_approx(mu: f32, roughness: f32) -> f32 {
+    let mucomp = 1.0 - mu.clamp(0.0, 1.0);
+    const G1: f32 = 0.057_108_529;
+    const G2: f32 = 0.491_881_87;
+    const G3: f32 = -0.332_181_44;
+    const G4: f32 = 0.071_442_995;
+    let g_over_pi = mucomp * (G1 + mucomp * (G2 + mucomp * (G3 + mucomp * G4)));
+    (1.0 + roughness * g_over_pi) / (1.0 + EON_A * roughness)
+}
+
+/// EON BRDF value (no cosine). `rho` is the single-scattering albedo
+/// (clamped to [0, 1] — the multiple-scattering series diverges beyond),
+/// `v_local`/`l_local` are unit view/light directions in the tangent frame.
+/// Reciprocal in `v`/`l`.
+pub fn eon_diffuse(rho: Vec3A, roughness: f32, v_local: Vec3A, l_local: Vec3A) -> Vec3A {
+    let rho = rho.clamp(Vec3A::ZERO, Vec3A::ONE);
+    let mu_i = v_local.z;
+    let mu_o = l_local.z;
+
+    // Single-scattering Fujii lobe.
+    let s = v_local.dot(l_local) - mu_i * mu_o;
+    let s_over_t = if s > 0.0 {
+        s / mu_i.max(mu_o).max(1e-6)
+    } else {
+        s
+    };
+    let af = 1.0 / (1.0 + EON_A * roughness);
+    let f_ss = rho * (af / PI) * (1.0 + roughness * s_over_t);
+
+    // Multiple-scattering compensation lobe: shaped like
+    // (1 − E(μ_o))(1 − E(μ_i)) / (1 − Ē), scaled by the geometric-series
+    // multi-bounce albedo ρ_ms — integrates to exactly the missing energy.
+    let e_o = eon_albedo_approx(mu_o, roughness);
+    let e_i = eon_albedo_approx(mu_i, roughness);
+    let avg_e = af * (1.0 + EON_B * roughness);
+    let rho_ms = (rho * rho) * avg_e / (Vec3A::ONE - rho * (1.0 - avg_e));
+    const EPS: f32 = 1.0e-7;
+    let f_ms =
+        rho_ms * (1.0 / PI) * ((1.0 - e_o).max(EPS) * (1.0 - e_i).max(EPS) / (1.0 - avg_e).max(EPS));
+
+    f_ss + f_ms
+}
+
 /// "F82-tint" conductor Fresnel (Kutz et al., as adopted by the OpenPBR
 /// metal slab / MaterialX `generalized_schlick_bsdf` with `color0`/`color82`).
 /// Plain Schlick pinned at `f0` for normal incidence and white at grazing,
