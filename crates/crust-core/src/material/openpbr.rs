@@ -250,9 +250,11 @@ impl LobePmf {
         let base_luma = luma(m.base_color).max(0.02);
         let spec_luma = luma(m.specular_color).max(0.02);
         let fuzz_luma = luma(m.fuzz_color).max(0.02);
-        let coat_luma = luma(m.coat_color).max(0.02);
 
-        let w_metal = m.base_metalness * base_luma;
+        // Metal reflectivity is base_color · base_weight scaled by
+        // specular_weight (the reference's `metal_bsdf` weight input).
+        let w_metal =
+            m.base_metalness * m.specular_weight * luma(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
@@ -266,7 +268,9 @@ impl LobePmf {
             * (1.0 - f0_diel))
             .max(1e-4);
 
-        let w_coat = (m.coat_weight * coat_luma * f0_coat).max(1e-6);
+        // The coat reflection is untinted — coat_color only attenuates the
+        // substrate — so its lobe weight ignores the color.
+        let w_coat = (m.coat_weight * f0_coat).max(1e-6);
         let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
 
         // Transmission: dominant when weight is high. When enabled it
@@ -385,33 +389,53 @@ fn eval_specular(
     let f0_diel_scalar = f0_from_ior(m.specular_ior);
     let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
 
-    // Thin-film interference (Phase 2): replaces the dielectric Fresnel with
-    // an iridescent one at 3 wavelengths, blended by thin_film_weight.
+    // OpenPBR spec places thin-film between coat and base; when there is
+    // no coat the outer medium is air.
+    let outer_ior = if m.coat_weight > 0.0 {
+        m.coat_ior
+    } else {
+        1.0
+    };
+    // OpenPBR thickness is in μm; the thin-film helpers want nm.
+    let tf_thickness_nm = m.thin_film_thickness * 1000.0;
+
+    // Thin-film interference (Phase 2): replaces the Fresnel with an
+    // iridescent one at 3 wavelengths, blended by thin_film_weight.
     let f_diel = if m.thin_film_weight > 0.0 {
         let f_normal = fresnel_schlick(v_dot_h, f0_diel_base);
-        // OpenPBR spec places thin-film between coat and base; when there is
-        // no coat the outer medium is air.
-        let outer_ior = if m.coat_weight > 0.0 {
-            m.coat_ior
-        } else {
-            1.0
-        };
         let f_iri = thin_film_fresnel(
             v_dot_h,
             outer_ior,
             m.thin_film_ior,
             m.specular_ior,
-            m.thin_film_thickness * 1000.0, // OpenPBR thickness is in μm; helper wants nm
+            tf_thickness_nm,
         );
         f_normal * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
     } else {
         fresnel_schlick(v_dot_h, f0_diel_base)
     };
 
-    let f_metal = fresnel_schlick(v_dot_h, m.base_color);
+    // Metal slab per the MaterialX reference `generalized_schlick_bsdf`:
+    // F0 = base_color · base_weight, F82 edge tint = specular_color, the
+    // whole lobe scaled by specular_weight — with its own thin-film variant
+    // (`metal_bsdf_tf`) blended in by thin_film_weight.
+    let metal_f0 = m.base_color * m.base_weight;
+    let f_metal_base = fresnel_f82_tint(v_dot_h, metal_f0, m.specular_color);
+    let f_metal = (if m.thin_film_weight > 0.0 {
+        let f_iri = thin_film_fresnel_metal(
+            v_dot_h,
+            outer_ior,
+            m.thin_film_ior,
+            metal_f0,
+            tf_thickness_nm,
+        );
+        f_metal_base * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+    } else {
+        f_metal_base
+    }) * m.specular_weight;
 
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    // Metal path: base_color-tinted Fresnel * brdf * metalness
+    // Metal path: F82-tinted Fresnel * brdf * metalness
     // Dielectric-specular path: F_dielectric * brdf * (1 - metalness)
     (f_metal * m.base_metalness + f_diel * (1.0 - m.base_metalness)) * brdf
 }
@@ -435,20 +459,28 @@ fn eval_coat(
     );
     let f = fresnel_schlick_scalar(v_dot_h, f0_from_ior(m.coat_ior));
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    m.coat_color * (m.coat_weight * f * brdf)
+    // The coat reflection itself is untinted (the reference's `coat_bsdf`
+    // has no color input) — `coat_color` is absorption on the way *through*
+    // the coat and lives in `coat_attenuation`.
+    Vec3A::splat(m.coat_weight * f * brdf)
 }
 
-/// Directional attenuation the coat imposes on the layers beneath it, as a
-/// Fresnel-weighted transmission * multi-bounce darkening factor. Applied as
-/// a per-channel multiplier to (base_specular + base_diffuse).
+/// Directional attenuation the coat imposes on the layers beneath it:
+/// Fresnel-weighted transmission * coat absorption tint * multi-bounce
+/// darkening factor. Applied as a per-channel multiplier to
+/// (base_specular + base_diffuse). The tint term is the reference's
+/// `coat_attenuation` node — `lerp(white, coat_color, coat_weight)` — which
+/// puts `coat_color` on light transmitted through the coat, not on the
+/// coat's own reflection.
 fn coat_attenuation(m: &OpenPBR, cos_theta_h: f32) -> Vec3A {
     if m.coat_weight <= 0.0 {
         return Vec3A::ONE;
     }
     let f_coat = fresnel_schlick_scalar(cos_theta_h, f0_from_ior(m.coat_ior));
     let transmit = 1.0 - m.coat_weight * f_coat;
+    let absorb = Vec3A::ONE.lerp(m.coat_color, m.coat_weight);
     let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_darkening);
-    Vec3A::splat(transmit) * dark
+    Vec3A::splat(transmit) * absorb * dark
 }
 
 fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
@@ -678,7 +710,17 @@ fn eval_transmission_channel(
 /// and a pdf that averages the three per-channel sampling densities
 /// (matching `sample_transmission_rough`, which picks a channel uniformly).
 fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> (Vec3A, f32) {
-    let tint = m.transmission_color * (m.transmission_weight * (1.0 - m.base_metalness));
+    // The reference's `if_transmission_tint`: with `transmission_depth > 0`
+    // the interior Beer-Lambert medium owns the color (see
+    // `Medium::from_transmission`), so the interface BTDF is untinted —
+    // tinting both would apply `transmission_color` twice. Only at zero
+    // depth does the color act as a non-physical surface tint.
+    let color = if m.transmission_depth > 0.0 {
+        Vec3A::ONE
+    } else {
+        m.transmission_color
+    };
+    let tint = color * (m.transmission_weight * (1.0 - m.base_metalness));
     let iors = transmission_iors(m);
     if m.transmission_dispersion_scale <= 0.0 {
         let (btdf, pdf) = eval_transmission_channel(m, v_local, l_local, entering, iors.y);
@@ -894,6 +936,24 @@ impl Material for OpenPBR {
 
     fn emitted(&self) -> Vec3A {
         self.emission_color * self.emission_luminance
+    }
+
+    /// Emission seen through the coat, per the reference's `emission_edf`
+    /// mix: the coated branch tints the EDF by `coat_color` and modulates it
+    /// by a `generalized_schlick_edf` with `color0 = 1 − coat_F0`,
+    /// `color90 = 0`, exponent 5 — i.e. `(1 − F0)(1 − (1 − μ)⁵)` — the coat's
+    /// view-dependent Fresnel transmission. Blended with the uncoated EDF by
+    /// `coat_weight`.
+    fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
+        let uncoated = self.emission_color * self.emission_luminance;
+        if self.coat_weight <= 0.0 {
+            return uncoated;
+        }
+        let f0_coat = f0_from_ior(self.coat_ior);
+        let mu = cos_theta_o.clamp(0.0, 1.0);
+        let schlick_transmit = (1.0 - f0_coat) * (1.0 - schlick_weight(mu));
+        let coated = uncoated * self.coat_color * schlick_transmit;
+        uncoated.lerp(coated, self.coat_weight)
     }
 }
 
@@ -1262,6 +1322,134 @@ mod tests {
         assert!(v.y > 0.0, "green channel dark at its own Snell direction: {v}");
         assert!(v.y > v.x, "green {} not > red {} at green Snell direction", v.y, v.x);
         assert!(v.y > v.z, "green {} not > blue {} at green Snell direction", v.y, v.z);
+    }
+
+    #[test]
+    fn deep_transmission_interface_is_untinted() {
+        // With transmission_depth > 0 the Beer-Lambert medium owns the color:
+        // the interface BTDF must be untinted (channel-uniform), or the color
+        // would apply twice. At zero depth the color is a surface tint.
+        let color = Vec3A::new(0.9, 0.4, 0.2);
+        let shallow = OpenPBR {
+            specular_roughness: 0.25,
+            transmission_color: color,
+            ..OpenPBR::glass(1.5)
+        };
+        let deep = OpenPBR {
+            transmission_depth: 1.0,
+            ..shallow.clone()
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let dir_in = Vec3A::new(0.4, 0.0, -1.0).normalize();
+        let r_in = Ray::new(-dir_in, dir_in);
+        let wi = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+
+        let (v_deep, _) = deep.eval(&r_in, &rec, wi).expect("evaluable");
+        assert!(v_deep.y > 0.0, "no transmission at the Snell direction");
+        assert!(
+            (v_deep.x - v_deep.y).abs() < 1e-5 && (v_deep.y - v_deep.z).abs() < 1e-5,
+            "deep transmission tinted at the interface: {v_deep}"
+        );
+
+        let (v_shallow, _) = shallow.eval(&r_in, &rec, wi).expect("evaluable");
+        let ratio = v_shallow.x / v_shallow.y;
+        assert!(
+            (ratio - color.x / color.y).abs() < 1e-3,
+            "zero-depth tint ratio {ratio} != color ratio {}",
+            color.x / color.y
+        );
+    }
+
+    #[test]
+    fn f82_metal_edge_tint() {
+        let f0 = Vec3A::new(0.9, 0.6, 0.3);
+        let tint = Vec3A::new(1.0, 0.5, 0.25);
+        // Normal incidence pins F0 regardless of tint.
+        let f_n = fresnel_f82_tint(1.0, f0, tint);
+        assert!((f_n - f0).abs().max_element() < 1e-5, "F(0°) = {f_n}");
+        // Grazing incidence goes to white.
+        let f_g = fresnel_f82_tint(0.0, f0, tint);
+        assert!((f_g - Vec3A::ONE).abs().max_element() < 1e-5, "F(90°) = {f_g}");
+        // At μ̄ = 1/7 the reflectance is exactly Schlick scaled by the tint.
+        let mu_bar = 1.0 / 7.0;
+        let with = fresnel_f82_tint(mu_bar, f0, tint);
+        let without = fresnel_f82_tint(mu_bar, f0, Vec3A::ONE);
+        assert!((with.y / without.y - tint.y).abs() < 1e-3, "{with} vs {without}");
+        assert!((with.z / without.z - tint.z).abs() < 1e-3, "{with} vs {without}");
+        assert!((with.x - without.x).abs() < 1e-5, "untinted channel moved");
+    }
+
+    #[test]
+    fn coat_color_tints_substrate_not_coat_reflection() {
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(0.9, 0.2, 0.2),
+            coat_darkening: 0.0, // isolate the absorption tint
+            ..OpenPBR::default()
+        };
+        // The coat reflection lobe itself is untinted.
+        let v = Vec3A::new(0.3, 0.0, 1.0).normalize();
+        let c = eval_coat(&m, v, v, v, 0.1, 0.1);
+        assert!(
+            (c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6,
+            "coat reflection tinted: {c}"
+        );
+        // The substrate attenuation carries the coat_color absorption.
+        let atten = coat_attenuation(&m, 0.9);
+        assert!(
+            (atten.x / atten.y - m.coat_color.x / m.coat_color.y).abs() < 1e-3,
+            "substrate attenuation not coat_color-tinted: {atten}"
+        );
+    }
+
+    #[test]
+    fn coated_emission_dims_and_tints() {
+        let uncoated = OpenPBR {
+            emission_luminance: 100.0,
+            ..OpenPBR::default()
+        };
+        // No coat: directional emission equals the isotropic EDF.
+        assert_eq!(uncoated.emitted_directional(0.3), uncoated.emitted());
+
+        let coated = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(1.0, 0.2, 0.2),
+            ..uncoated.clone()
+        };
+        let e_n = coated.emitted_directional(1.0);
+        // Dimmed by the coat's Fresnel transmission (1 - F0 at normal).
+        assert!(e_n.x < 100.0, "coated emission not dimmed: {e_n}");
+        // Tinted by coat_color.
+        assert!((e_n.y / e_n.x - 0.2).abs() < 1e-3, "not coat-tinted: {e_n}");
+        // Grazing angles transmit less than normal incidence.
+        let e_g = coated.emitted_directional(0.05);
+        assert!(e_g.x < e_n.x, "grazing {e_g} not dimmer than normal {e_n}");
+    }
+
+    #[test]
+    fn aniso_matches_reference_remap() {
+        // The open_pbr_anisotropy graph: ax = r²·√(2/(1+(1−a)²)), ay = (1−a)·ax.
+        let (r, a) = (0.5f32, 0.8f32);
+        let (ax, ay) = roughness_to_alpha_aniso(r, a);
+        let inv = 1.0 - a;
+        let expect_ax = r * r * (2.0 / (1.0 + inv * inv)).sqrt();
+        assert!((ax - expect_ax).abs() < 1e-6, "ax {ax} != {expect_ax}");
+        assert!((ay - inv * expect_ax).abs() < 1e-6, "ay {ay} != {}", inv * expect_ax);
+    }
+
+    #[test]
+    fn thin_film_on_metal_is_bounded_and_active() {
+        let f0 = Vec3A::new(0.9, 0.7, 0.4);
+        let r = thin_film_fresnel_metal(0.8, 1.0, 1.4, f0, 500.0);
+        for c in [r.x, r.y, r.z] {
+            assert!((0.0..=1.0).contains(&c), "out of range: {r}");
+        }
+        // A visible film must actually change the metal Fresnel somewhere.
+        let plain = fresnel_f82_tint(0.8, f0, Vec3A::ONE);
+        assert!((r - plain).abs().max_element() > 1e-3, "film had no effect");
     }
 
     #[test]

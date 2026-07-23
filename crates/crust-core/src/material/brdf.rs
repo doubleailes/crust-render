@@ -28,16 +28,17 @@ pub fn f0_from_ior(ior: f32) -> f32 {
     r * r
 }
 
-/// Convert an isotropic roughness in [0, 1] plus a signed anisotropy in
-/// [-1, 1] to two microfacet slope alphas `(ax, ay)`. OpenPBR's convention:
-/// positive anisotropy stretches along the surface tangent. The mapping
-/// follows the "perceptually linear" convention used by Autodesk Standard
-/// Surface and the OpenPBR reference: `α = r²`, then split by anisotropy.
+/// Convert an isotropic roughness in [0, 1] plus an anisotropy in [0, 1] to
+/// two microfacet slope alphas `(ax, ay)`, stretching highlights along the
+/// surface tangent. This is the `open_pbr_anisotropy` graph from the OpenPBR
+/// MaterialX reference:
+///   `ax = r² · √(2 / (1 + (1 − a)²))`,  `ay = (1 − a) · ax`
+/// which reduces to `ax = ay = r²` at zero anisotropy.
 pub fn roughness_to_alpha_aniso(roughness: f32, anisotropy: f32) -> (f32, f32) {
     let a = roughness * roughness;
-    let aniso = anisotropy.clamp(-0.99, 0.99);
-    let ax = a * (1.0 + aniso).sqrt();
-    let ay = a * (1.0 - aniso).sqrt();
+    let inv = 1.0 - anisotropy.clamp(0.0, 1.0);
+    let ax = a * (2.0 / (1.0 + inv * inv)).sqrt();
+    let ay = inv * ax;
     (ax.max(1e-4), ay.max(1e-4))
 }
 
@@ -132,6 +133,21 @@ pub fn pdf_vndf_h_aniso_local(v_local: Vec3A, h_local: Vec3A, ax: f32, ay: f32) 
     d * g1 * v_dot_h / n_dot_v
 }
 
+/// "F82-tint" conductor Fresnel (Kutz et al., as adopted by the OpenPBR
+/// metal slab / MaterialX `generalized_schlick_bsdf` with `color0`/`color82`).
+/// Plain Schlick pinned at `f0` for normal incidence and white at grazing,
+/// with the reflectance at μ̄ = cos 82° ≈ 1/7 scaled by `tint` — the
+/// `specular_color` edge tint:
+///   `F(μ) = F_s(μ) − μ (1 − μ)⁶ · F_s(μ̄) (1 − tint) / (μ̄ (1 − μ̄)⁶)`
+pub fn fresnel_f82_tint(cos_theta: f32, f0: Vec3A, tint: Vec3A) -> Vec3A {
+    const MU_BAR: f32 = 1.0 / 7.0;
+    let mu = cos_theta.clamp(0.0, 1.0);
+    let f_schlick = |m: f32| f0 + (Vec3A::ONE - f0) * (1.0 - m).powf(5.0);
+    let denom = MU_BAR * (1.0 - MU_BAR).powi(6);
+    let a = f_schlick(MU_BAR) * (Vec3A::ONE - tint) / denom;
+    (f_schlick(mu) - a * mu * (1.0 - mu).powi(6)).clamp(Vec3A::ZERO, Vec3A::ONE)
+}
+
 /// Exact unpolarized dielectric Fresnel reflectance for an interface with
 /// incident-side IOR `eta_i` and transmitted-side IOR `eta_t`. `cos_i` is
 /// the (positive) cosine between the incident direction and the facet
@@ -209,25 +225,30 @@ pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -
 // primaries (R = 615 nm, G = 545 nm, B = 465 nm) — a 3-wavelength
 // approximation that captures the characteristic soap-bubble / oil-slick
 // look without full spectral rendering.
-pub fn thin_film_fresnel(
+const LAMBDA_RGB: [f32; 3] = [615.0, 545.0, 465.0];
+
+/// Airy-summation reflectance of the film stack at a single wavelength, for
+/// a base of (real) index `eta_2`. Returns 1.0 past a TIR boundary.
+fn thin_film_reflectance_lambda(
     cos_theta_1: f32,
     eta_1: f32,
     eta_film: f32,
     eta_2: f32,
     thickness_nm: f32,
-) -> Vec3A {
+    lambda_nm: f32,
+) -> f32 {
     let cos1 = cos_theta_1.clamp(0.0, 1.0);
     let sin2_1 = 1.0 - cos1 * cos1;
 
     let sin2_film = (eta_1 / eta_film).powi(2) * sin2_1;
     if sin2_film >= 1.0 {
-        return Vec3A::ONE;
+        return 1.0;
     }
     let cos_film = (1.0 - sin2_film).sqrt();
 
     let sin2_base = (eta_film / eta_2).powi(2) * sin2_film;
     if sin2_base >= 1.0 {
-        return Vec3A::ONE;
+        return 1.0;
     }
     let cos_base = (1.0 - sin2_base).sqrt();
 
@@ -239,21 +260,51 @@ pub fn thin_film_fresnel(
     // Optical path difference inside the film.
     let opd = 2.0 * eta_film * thickness_nm * cos_film;
 
-    const LAMBDA_RGB: [f32; 3] = [615.0, 545.0, 465.0];
-    let mut out = Vec3A::ZERO;
-    for i in 0..3 {
-        let phi = 2.0 * PI * opd / LAMBDA_RGB[i];
-        let cos_phi = phi.cos();
-        let num = r_a * r_a + 2.0 * r_a * r_b * cos_phi + r_b * r_b;
-        let den = 1.0 + 2.0 * r_a * r_b * cos_phi + (r_a * r_b).powi(2);
-        let r = (num / den.max(1e-8)).clamp(0.0, 1.0);
-        match i {
-            0 => out.x = r,
-            1 => out.y = r,
-            _ => out.z = r,
-        }
+    let phi = 2.0 * PI * opd / lambda_nm;
+    let cos_phi = phi.cos();
+    let num = r_a * r_a + 2.0 * r_a * r_b * cos_phi + r_b * r_b;
+    let den = 1.0 + 2.0 * r_a * r_b * cos_phi + (r_a * r_b).powi(2);
+    (num / den.max(1e-8)).clamp(0.0, 1.0)
+}
+
+pub fn thin_film_fresnel(
+    cos_theta_1: f32,
+    eta_1: f32,
+    eta_film: f32,
+    eta_2: f32,
+    thickness_nm: f32,
+) -> Vec3A {
+    let mut out = [0.0f32; 3];
+    for (i, lambda) in LAMBDA_RGB.into_iter().enumerate() {
+        out[i] =
+            thin_film_reflectance_lambda(cos_theta_1, eta_1, eta_film, eta_2, thickness_nm, lambda);
     }
-    out
+    Vec3A::from_array(out)
+}
+
+/// Thin-film reflectance over a metallic base described by its per-channel
+/// normal-incidence reflectance `f0` (the OpenPBR metal slab's
+/// `base_color · base_weight`). Each channel's F0 is converted to the
+/// equivalent real IOR `η = (1 + √F0) / (1 − √F0)` and the Airy summation is
+/// evaluated at that channel's wavelength — the same 3-wavelength
+/// approximation as `thin_film_fresnel`, mirroring the MaterialX
+/// `generalized_schlick_bsdf` thin-film variant used by `metal_bsdf_tf`.
+pub fn thin_film_fresnel_metal(
+    cos_theta_1: f32,
+    eta_1: f32,
+    eta_film: f32,
+    f0: Vec3A,
+    thickness_nm: f32,
+) -> Vec3A {
+    let mut out = [0.0f32; 3];
+    for (i, lambda) in LAMBDA_RGB.into_iter().enumerate() {
+        let f0_c = f0[i].clamp(0.0, 0.9999);
+        let sqrt_f0 = f0_c.sqrt();
+        let eta_2 = (1.0 + sqrt_f0) / (1.0 - sqrt_f0);
+        out[i] =
+            thin_film_reflectance_lambda(cos_theta_1, eta_1, eta_film, eta_2, thickness_nm, lambda);
+    }
+    Vec3A::from_array(out)
 }
 
 // Signed amplitude Fresnel — average of s/p, sign preserved (positive when

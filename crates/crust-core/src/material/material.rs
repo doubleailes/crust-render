@@ -86,4 +86,15 @@ pub trait Material: Send + Sync {
     fn emitted(&self) -> Vec3A {
         Vec3A::new(0.0, 0.0, 0.0)
     }
+
+    /// Emitted radiance toward a direction making angle `θ` with the surface
+    /// normal (`cos_theta_o` ≥ 0). Defaults to the isotropic `emitted()`;
+    /// materials whose emission is view-dependent (e.g. OpenPBR's emission
+    /// seen through its coat) override this. The integrator uses it at hit
+    /// points, where the outgoing direction is known; `emitted()` remains
+    /// the direction-free radiance used by the light list.
+    fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
+        let _ = cos_theta_o;
+        self.emitted()
+    }
 }
