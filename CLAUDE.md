@@ -52,8 +52,8 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 
 ## Render pipeline (the big picture)
 
-1. **`main.rs`** builds a `Scene { camera, world, lights, settings }` — either from USD
-   (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
+1. **`main.rs`** builds a `Scene { camera, world, lights, settings, volumes }` — either from
+   USD (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
 2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
    - `render()` — parallel over pixels within each scanline row.
    - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
@@ -68,10 +68,35 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    - **Russian roulette** from the 4th vertex on (`RR_START_BOUNCE`): survival tracks
      path throughput with a probability floor (`RR_MIN_PROB`), factor divided out on
      survival.
-   - Volumetric scattering (Henyey-Greenstein) and Beer-Lambert attenuation when a ray
-     carries `Some(Medium)` (set by transmissive OpenPBR refraction — see `ray.rs` /
-     `medium.rs`). Free-space rays are unaffected.
-   - A sky-gradient background when nothing is hit.
+   - Carried-medium transport (subsurface / glass interiors) when a ray holds
+     `Some(Medium)` (set by transmissive OpenPBR refraction — see `ray.rs` /
+     `medium.rs`): weighted analog free-flight sampling at the extinction majorant with
+     the chromatic correction `e^{(σ̄−σₜ)t}` (gray media reduce to the classic
+     albedo/Beer-Lambert forms). Carried-medium scatter vertices run **no NEE** and keep
+     `prev = None` (full-weight next emission) — that pairing is what avoids double
+     counting there. Free-space rays are unaffected.
+   - **Volume regions** (`volume.rs`): free-standing smoke/fog/absorption/fire volumes
+     held on `Renderer.volumes`, *outside* the surface BVH so their bounds never occlude
+     shadow rays. Each `VolumeRegion` is an oriented box (composed prim xform) with a
+     `DensityField` (`Homogeneous` | `Noise` fBm | `Grid` trilinear voxels) and
+     σₛ/σₐ/g/emission (densityScale pre-folded into the coefficients). Per segment the
+     integrator clips `Volumes::sample_interaction` to `min(t_surface, t_medium)` — the
+     nearest-event competition between surface, carried medium and regions is then exact.
+     Distance sampling is weighted delta tracking against the summed per-region majorant
+     (chromatic-safe null collisions; absorption decays the weight instead of
+     analog-terminating). Volume scatter vertices run **NEE with MIS** (`volume_nee`):
+     the phase mixture's value == pdf (`PhaseMix`), and the bounce-side
+     `bounce_emission_weight` has a matching `PrevVertex::Phase` arm — the two are a
+     coupled pair exactly like the surface NEE pair; change one and you double-count
+     emission. Shadow rays use `shadow_transmittance` (boolean surface occlusion ×
+     `Volumes::transmittance` — ratio tracking, exact Beer-Lambert fast path when all
+     crossed regions are homogeneous). Volume emission accumulates `σₐ·Lₑ` along the walk
+     into `VertexRec.segment_emit`, which the gather adds **outside** `atten` (it is
+     already weighted; folding it in would double-attenuate). Emission reached by a
+     bounce (`next_emit`) is stored pre-multiplied by the arriving segment's attenuation.
+     `volumes.is_empty()` short-circuits everything — volume-free scenes render as before.
+   - A sky-gradient background when nothing is hit (attenuated by, and adding the
+     emission of, any volumes the escaping segment crossed).
 4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
    Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
    passes at 2, 2, 4, 8, … spp (geometric, floored at 2 so every pass can estimate
@@ -157,6 +182,18 @@ Xform hierarchy into world matrices. Schema mapping:
   emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
   Other lux types (`DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`) warn once and
   are skipped.
+- **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
+  *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
+  shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
+  `Cube`; USD's default size is 2), else the unit cube; placement/orientation/scale come
+  from the composed prim transform. Attributes (all in `crust:volume:`, defaults in
+  parentheses): `type` = `homogeneous` | `smoke` | `grid` (required); `densityScale` (1);
+  `sigmaS` color3f (0.5 grey); `sigmaA` color3f (0); `emission` color3f (0);
+  `anisotropy` (0, clamped ±0.99). Smoke adds `noiseScale`/`noiseOctaves`/`noiseGain`/
+  `noiseLacunarity`/`noiseThreshold`/`noiseSeed` (4 / 4 / 0.5 / 2 / 0.3 / 0); grid needs
+  `gridDims` int[3] + `gridData` float[] (x-fastest, length must equal nx·ny·nz — warns
+  and skips otherwise). Sample scenes: `samples/fog.usda` (homogeneous god rays),
+  `samples/smoke.usda` (noise plume + emissive ember + tiny explicit grid).
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`). Missing attrs fall back to defaults (128 spp,
@@ -191,3 +228,21 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
   thin-walled transmission remains a per-sample delta lobe (`ScatterSample::delta`),
   excluded from continuous mixtures. The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
+- **Volume regions** (`volume.rs`) have no OpenVDB / `UsdVolVolume` import (openusd 0.5
+  ships no `vol` feature) — density is homogeneous, procedural fBm noise, or an inline
+  voxel grid authored in the USDA. No volume path guiding (volume vertices push
+  `train: None`; volume-heavy scenes train the surface field on noisier estimates —
+  slower convergence, not bias). One global majorant per region — no coarse max-grid, so
+  a high `densityScale` over a large box tracks slowly. Emissive volumes are not
+  light-list entries: fire is found only by phase/BSDF-sampled paths (firefly risk near
+  bright emission), never by NEE. Carried-medium (subsurface) scatter vertices run no
+  NEE. Region overlap uses summed extinction (exact) with a σₛ-weighted phase mixture.
+- **HG convention fix**: `sample_henyey_greenstein` used to apply PBRT's inversion to the
+  propagation direction (PBRT's frame is around the *reversed* `wo`), so `g > 0`
+  scattered backward. It now scatters forward, matching `hg_phase` (value == pdf, cosθ
+  against the propagation direction); the histogram test in `medium.rs` pins the pair.
+  The carried-medium estimator was also fixed: it double-counted extinction for
+  scattering media (analog free-flight at σ̄ *plus* full Beer-Lambert) — scattering
+  interiors (subsurface) render brighter than before, correctly. And bounce-hit emission
+  (`next_emit`) is now attenuated by the arriving segment (tinted glass / smoke in front
+  of an emitter used to pass emission through undimmed).

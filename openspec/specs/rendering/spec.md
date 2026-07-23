@@ -80,6 +80,37 @@ travelling in free space (no medium) SHALL be unaffected.
 - **WHEN** a ray carries no medium
 - **THEN** no Beer-Lambert attenuation is applied to its contribution
 
+### Requirement: Free-standing volume regions
+
+The renderer SHALL transport light through the scene's volume regions
+(smoke, fog, absorption and emissive volumes) held outside the surface BVH:
+distance sampling by weighted delta tracking against each region's
+extinction majorant, direct lighting with MIS at volume scatter vertices,
+and transmittance-aware shadow rays (stochastic ratio tracking for
+heterogeneous regions, exact Beer-Lambert for homogeneous ones). Scenes
+without volume regions SHALL render exactly as before.
+
+#### Scenario: Scatter event inside a volume region
+
+- **WHEN** a path segment crosses a volume region and the tracking walk
+  produces a real collision before the nearest surface
+- **THEN** the path scatters there via the Henyey-Greenstein phase function,
+  gathers direct lighting with the light/phase balance heuristic, and the
+  bounce-hit emission of the continuation is MIS-weighted against the same
+  light strategy
+
+#### Scenario: Shadow rays attenuate through volumes
+
+- **WHEN** an NEE shadow ray crosses a volume region without surface occlusion
+- **THEN** the direct-lighting contribution is multiplied by the volumetric
+  transmittance along the segment rather than treated as fully visible
+
+#### Scenario: Emissive volumes glow
+
+- **WHEN** a path segment crosses a region with nonzero emission
+- **THEN** the segment accumulates `σₐ·Lₑ` source radiance weighted by the
+  transmittance up to each emission point
+
 ### Requirement: Sky-gradient background
 
 The renderer SHALL return a vertical white-to-blue gradient based on ray

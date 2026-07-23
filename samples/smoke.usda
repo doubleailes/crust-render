@@ -1,0 +1,98 @@
+#usda 1.0
+(
+    doc = "Procedural noise smoke, an emissive ember volume (fire) and a tiny explicit density grid in a grey room under a ceiling RectLight. Exercises the smoke/grid crust:volume:* import paths, delta tracking, volume emission and transmittance shadow rays."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 2, 8.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Five-sided grey room: floor, ceiling, back, left, right (front open).
+    def Mesh "Room"
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        point3f[] points = [(-2, 0, -2), (2, 0, -2), (2, 0, 2), (-2, 0, 2), (-2, 4, -2), (2, 4, -2), (2, 4, 2), (-2, 4, 2), (-2, 0, -2), (2, 0, -2), (2, 4, -2), (-2, 4, -2), (-2, 0, -2), (-2, 0, 2), (-2, 4, 2), (-2, 4, -2), (2, 0, -2), (2, 0, 2), (2, 4, 2), (2, 4, -2)]
+    }
+
+    # A plume of procedural fBm smoke, stretched upward.
+    def Cube "Smoke"
+    {
+        double size = 2
+        token crust:volume:type = "smoke"
+        float crust:volume:densityScale = 12
+        color3f crust:volume:sigmaS = (0.8, 0.8, 0.8)
+        color3f crust:volume:sigmaA = (0.08, 0.08, 0.08)
+        float crust:volume:anisotropy = 0.2
+        float crust:volume:noiseScale = 4
+        int crust:volume:noiseOctaves = 4
+        float crust:volume:noiseGain = 0.5
+        float crust:volume:noiseLacunarity = 2
+        float crust:volume:noiseThreshold = 0.25
+        int crust:volume:noiseSeed = 42
+        float3 xformOp:scale = (0.9, 1.6, 0.9)
+        double3 xformOp:translate = (-0.4, 1.7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # A small glowing ember: absorbing + emissive (fire).
+    def Cube "Ember"
+    {
+        double size = 0.5
+        token crust:volume:type = "homogeneous"
+        float crust:volume:densityScale = 4
+        color3f crust:volume:sigmaS = (0.05, 0.05, 0.05)
+        color3f crust:volume:sigmaA = (0.6, 0.35, 0.15)
+        color3f crust:volume:emission = (6, 2.2, 0.5)
+        double3 xformOp:translate = (0.9, 0.3, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # A tiny explicit 4x4x4 density grid (spherical blob), exercising the
+    # gridDims/gridData import and trilinear lookup.
+    def Cube "GridPuff"
+    {
+        double size = 1
+        token crust:volume:type = "grid"
+        float crust:volume:densityScale = 6
+        color3f crust:volume:sigmaS = (0.7, 0.7, 0.7)
+        color3f crust:volume:sigmaA = (0.05, 0.05, 0.05)
+        int[] crust:volume:gridDims = [4, 4, 4]
+        float[] crust:volume:gridData = [0.000, 0.092, 0.092, 0.000, 0.092, 0.309, 0.309, 0.092, 0.092, 0.309, 0.309, 0.092, 0.000, 0.092, 0.092, 0.000, 0.092, 0.309, 0.309, 0.092, 0.309, 0.639, 0.639, 0.309, 0.309, 0.639, 0.639, 0.309, 0.092, 0.309, 0.309, 0.092, 0.092, 0.309, 0.309, 0.092, 0.309, 0.639, 0.639, 0.309, 0.309, 0.639, 0.639, 0.309, 0.092, 0.309, 0.309, 0.092, 0.000, 0.092, 0.092, 0.000, 0.092, 0.309, 0.309, 0.092, 0.092, 0.309, 0.309, 0.092, 0.000, 0.092, 0.092, 0.000]
+        double3 xformOp:translate = (1.1, 2.6, -0.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Ceiling light, rotated so its local -Z emits downward.
+    def RectLight "CeilingLight"
+    {
+        float inputs:width = 1.6
+        float inputs:height = 1.6
+        color3f inputs:color = (10, 10, 10)
+        float inputs:intensity = 1.0
+        float xformOp:rotateX = -90
+        double3 xformOp:translate = (0, 3.98, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 16
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}
