@@ -45,6 +45,18 @@ struct PassConfig {
     adaptive: bool,
 }
 
+/// Image-quality statistics of one render pass.
+struct PassStats {
+    /// Mean per-pixel variance of the pixel estimate — the inverse-variance
+    /// blending weight (`f64::INFINITY` when spp < 2 makes estimation
+    /// impossible).
+    variance: f64,
+    /// Per-pixel variance of the pixel-mean luminance, row-major. Feeds the
+    /// guiding efficiency estimate, which normalizes it against a reference
+    /// image shared by every pass being compared (`mean_relative_error`).
+    var_map: Vec<f64>,
+}
+
 pub struct Renderer {
     pub camera: Camera,
     /// Top-level BVH over every scene object (meshes carry their own
@@ -107,12 +119,25 @@ impl Renderer {
     }
 
     /// Progressive path-guided rendering: training passes with geometrically
-    /// growing sample budgets (1, 2, 4, … spp) build the guiding field, then
-    /// the full per-pixel budget renders with the frozen field. Every pass is
-    /// an unbiased image of the same scene, so instead of discarding the
-    /// training passes the final image blends all of them weighted by
-    /// inverse variance — passes rendered before the field converged simply
-    /// receive small weights.
+    /// growing sample budgets (2, 2, 4, … spp — the schedule is floored at
+    /// 2 spp so every pass can estimate its own variance) build the guiding
+    /// field, then the full per-pixel budget renders with the frozen field.
+    /// Every pass is an unbiased image of the same scene, so instead of
+    /// discarding the training passes the final image blends all of them
+    /// weighted by inverse variance — passes rendered before the field
+    /// converged simply receive small weights.
+    ///
+    /// The training passes double as a guiding efficiency estimate
+    /// (Li et al. 2026, "Path Guiding in Disney's Zootopia 2"): efficiency
+    /// is `E = 1/(cost · variance)`, with wall-clock cost and MRSE variance
+    /// (`mean_relative_error`). The first pass runs before the field has
+    /// trained — effectively an unguided render — and gives `E_pg−`; the
+    /// last training pass, with the field at its most trained, gives
+    /// `E_pg+`. Variance scales as 1/spp while cost scales as spp, so the
+    /// product is comparable across passes with different budgets. If
+    /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
+    /// removes here, and the final pass renders unguided instead (the
+    /// training passes still blend in — they are unbiased either way).
     fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
         let bounds = match self.world.bounding_box() {
             Some(b) => b,
@@ -131,9 +156,17 @@ impl Renderer {
         let mut field = GuidingField::new(bounds, cfg);
         let base_seed = self.settings.frame as u32;
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
+        // (per-pixel variance map, seconds) of the first pass (untrained
+        // field → effectively unguided) and of the last training pass
+        // (most-trained field) — the two endpoints of the efficiency
+        // estimate. The first pass does carry the sample-recording overhead,
+        // which slightly understates the unguided efficiency, i.e. errs
+        // toward keeping guiding on.
+        let mut eff_unguided: Option<(Vec<f64>, f64)> = None;
+        let mut eff_guided: Option<(Vec<f64>, f64)> = None;
 
         for k in 0..cfg.train_iterations {
-            let spp = 1u32 << k.min(16);
+            let spp = (1u32 << k.min(16)).max(2);
             // Decorrelate the Sobol sequences between passes.
             let seed = base_seed.wrapping_add((k + 1).wrapping_mul(0x9E37_79B9));
             let gctx = GuidingContext {
@@ -146,31 +179,72 @@ impl Renderer {
                 tiled,
                 adaptive: false,
             };
-            let (buffer, samples, variance) = self.render_pass(train_cfg, Some(&gctx), None);
+            let start = std::time::Instant::now();
+            let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
+            let secs = start.elapsed().as_secs_f64();
             drop(gctx);
             info!(
-                "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}",
+                "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
                 cfg.train_iterations,
                 spp,
                 samples.len(),
-                variance
+                stats.variance,
+                secs
             );
+            if k == 0 {
+                eff_unguided = Some((stats.var_map, secs));
+            } else if k == cfg.train_iterations - 1 {
+                eff_guided = Some((stats.var_map, secs));
+            }
             field.update(&samples, k + 1);
-            passes.push((buffer, variance));
+            passes.push((buffer, stats.variance));
         }
 
+        let guide_final = match (&eff_unguided, &eff_guided) {
+            (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
+                // Reference image for relative error: the blend of all
+                // training passes — our stand-in for the paper's denoised
+                // accumulated image, and crucially the *same* image for both
+                // sides of the ratio.
+                let ref_lum = blend_luminance(&passes, self.settings.width, self.settings.height);
+                let mrse_pt = mean_relative_error(var_pt, &ref_lum);
+                let mrse_pg = mean_relative_error(var_pg, &ref_lum);
+                if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
+                    let delta_eff = (cost_pt * mrse_pt) / (cost_pg * mrse_pg);
+                    info!(
+                        "path guiding: estimated efficiency improvement ΔEff = {:.2} (>1 means guiding pays off)",
+                        delta_eff
+                    );
+                    if delta_eff < 1.0 {
+                        info!(
+                            "path guiding: ΔEff < 1 — guiding costs more than the variance it removes here; rendering the final pass unguided"
+                        );
+                    }
+                    delta_eff >= 1.0
+                } else {
+                    true
+                }
+            }
+            // A single training iteration never runs a guided pass, and
+            // degenerate statistics give no basis to overrule the scene's
+            // explicit opt-in — keep guiding.
+            _ => true,
+        };
+
         info!(
-            "path guiding: final pass at {} spp",
-            self.settings.samples_per_pixel
+            "path guiding: final pass at {} spp ({})",
+            self.settings.samples_per_pixel,
+            if guide_final { "guided" } else { "unguided" }
         );
         let gctx = GuidingContext {
             field: &field,
             training: false,
         };
-        let (final_buffer, _, final_variance) =
-            self.render_pass(self.final_pass_config(tiled), Some(&gctx), progress);
-        passes.push((final_buffer, final_variance));
+        let final_gctx = if guide_final { Some(&gctx) } else { None };
+        let (final_buffer, _, final_stats) =
+            self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
+        passes.push((final_buffer, final_stats.variance));
 
         self.blend_passes(passes)
     }
@@ -217,50 +291,48 @@ impl Renderer {
 
     /// One full-frame pass at `spp` samples per pixel. Returns the image,
     /// whatever training samples the pass recorded (empty unless a training
-    /// `GuidingContext` is supplied), and the pass's mean per-pixel variance
-    /// of the pixel estimate — the inverse-variance blending weight
-    /// (`f64::INFINITY` when spp < 2 makes estimation impossible).
+    /// `GuidingContext` is supplied), and the pass's [`PassStats`].
     fn render_pass(
         &self,
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
-    ) -> (Buffer, Vec<SampleData>, f64) {
+    ) -> (Buffer, Vec<SampleData>, PassStats) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let mut all_samples = Vec::new();
         let mut variance_sum = 0.0f64;
+        let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
         let pixel_count = (self.settings.width * self.settings.height) as f64;
 
         if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
             let total = tiles.len() as u64;
             let done = AtomicU64::new(0);
-            let results: Vec<(Vec<(usize, usize, Vec3A)>, Vec<SampleData>, f64)> = tiles
+            let results: Vec<(Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>)> = tiles
                 .into_par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     let mut samples = Vec::new();
-                    let mut var = 0.0f64;
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
                             let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
-                            pixels.push((i, j, color));
+                            pixels.push((i, j, color, v));
                             samples.append(&mut s);
-                            var += v;
                         }
                     }
                     if let Some(cb) = progress {
                         cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     }
-                    (pixels, samples, var)
+                    (pixels, samples)
                 })
                 .collect();
-            for (pixels, samples, var) in results {
-                for (i, j, color) in pixels {
+            for (pixels, samples) in results {
+                for (i, j, color, var) in pixels {
                     buffer.set_pixel(i, j, color);
+                    var_map[j * self.settings.width + i] = var;
+                    variance_sum += var;
                 }
                 all_samples.extend(samples);
-                variance_sum += var;
             }
         } else {
             let total = self.settings.height as u64;
@@ -273,6 +345,7 @@ impl Renderer {
                 for (i, (color, samples, var)) in row.into_iter().enumerate() {
                     buffer.set_pixel(i, j, color);
                     all_samples.extend(samples);
+                    var_map[j * self.settings.width + i] = var;
                     variance_sum += var;
                 }
                 done += 1;
@@ -282,7 +355,14 @@ impl Renderer {
             }
         }
 
-        (buffer, all_samples, variance_sum / pixel_count)
+        (
+            buffer,
+            all_samples,
+            PassStats {
+                variance: variance_sum / pixel_count,
+                var_map,
+            },
+        )
     }
 
     fn render_pixel(
@@ -831,6 +911,52 @@ fn trace_path(
                 + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + radiance));
     }
     radiance
+}
+
+/// Per-pixel luminance of the inverse-variance blend of `passes` — the
+/// reference image the guiding efficiency estimate normalizes against.
+/// Un-weightable passes (non-finite or zero variance) contribute nothing;
+/// if no pass is weightable the result is black and the floor in
+/// `mean_relative_error` takes over.
+fn blend_luminance(passes: &[(Buffer, f64)], width: usize, height: usize) -> Vec<f64> {
+    let weights: Vec<f64> = passes
+        .iter()
+        .map(|(_, var)| {
+            if var.is_finite() && *var > 0.0 {
+                1.0 / var
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total: f64 = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
+    let mut out = vec![0.0f64; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let mut c = Vec3A::ZERO;
+            for ((pass, _), w) in passes.iter().zip(&weights) {
+                c += pass.get_pixel(x, y) * (*w / total) as f32;
+            }
+            out[y * width + x] = luminance(c) as f64;
+        }
+    }
+    out
+}
+
+/// Mean relative squared error of a pass (Rousselle et al. 2011): per-pixel
+/// variance over the squared luminance of a reference image, floored at
+/// 1e-4 so directly visible light sources don't dominate. The reference
+/// must be *shared* by every pass being compared — normalizing a low-spp
+/// pass by its own noisy mean correlates numerator and denominator and
+/// breaks the 1/spp scaling the efficiency ratio relies on.
+fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
+    let n = var_map.len().max(1) as f64;
+    var_map
+        .iter()
+        .zip(ref_lum)
+        .map(|(v, d)| v / (d * d).max(1e-4))
+        .sum::<f64>()
+        / n
 }
 
 struct Tile {

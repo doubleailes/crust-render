@@ -74,7 +74,8 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    - A sky-gradient background when nothing is hit.
 4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
    Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
-   passes at 1, 2, 4, … spp, splats `(position, direction, luminance·cos²)` samples
+   passes at 2, 2, 4, 8, … spp (geometric, floored at 2 so every pass can estimate
+   its own variance), splats `(position, direction, luminance·cos²)` samples
    into the field between passes, then renders the final pass with one-sample MIS
    between the frozen field and the BSDF (mixture pdf; secondary bounces only —
    primary vertices sit far below the field's spatial resolution). All passes
@@ -83,6 +84,14 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
    sampling. The NEE weight competes against the same mixture pdf — keep the two sides
    consistent or emission gets double-counted.
+   The training passes double as a **guiding efficiency estimate** (Li et al. 2026,
+   "Path Guiding in Disney's Zootopia 2"): efficiency `E = 1/(wall-clock cost × MRSE)`,
+   comparing the first pass (field untrained → effectively unguided) against the last
+   training pass (field most trained). MRSE normalizes each pass's per-pixel variance
+   by one *shared* reference image (the blend of all training passes) — never by the
+   pass's own noisy mean, which would correlate numerator and denominator and break
+   the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
+   unguided (training passes still blend in; every pass is unbiased either way).
 5. **Adaptive sampling**: pixels stop early once they hold `crust:minSamplesPerPixel`
    samples and the relative standard error of the pixel mean drops below
    `crust:varianceThreshold` (0 disables). Applies to main/final passes, never to
