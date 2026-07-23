@@ -540,15 +540,29 @@ fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A, entering:
 // Transmission (Phase 3+4)
 // ---------------------------------------------------------------------------
 
-/// Per-channel IOR for a dispersive dielectric. Returns `(η_R, η_G, η_B)`.
-/// `dispersion_scale = 0` collapses to `(η_D, η_D, η_D)`.
+/// Per-channel IOR for a dispersive dielectric, `(η_R, η_G, η_B)` at the
+/// sRGB primary wavelengths, via the Cauchy/Abbe fit (`cauchy_ior`).
+/// `transmission_dispersion_scale` divides the authored Abbe number — the
+/// effective Abbe is `abbe / scale`, so scale 1 is the physical dispersion
+/// of a glass with that Abbe number, larger scales exaggerate it linearly,
+/// and 0 collapses to `(η_D, η_D, η_D)`. An IOR below 1 (interior less
+/// dense than the exterior) disperses via its reciprocal, keeping the
+/// model symmetric across the interface.
 fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
-    if dispersion_scale <= 0.0 {
+    if dispersion_scale <= 0.0 || n_d == 1.0 {
         return Vec3A::splat(n_d);
     }
-    let v = abbe.max(1.0);
-    let spread = (n_d - 1.0) / v * dispersion_scale;
-    Vec3A::new(n_d - 0.3 * spread, n_d, n_d + 0.7 * spread)
+    let inverted = n_d < 1.0;
+    let n_above_one = if inverted { 1.0 / n_d } else { n_d };
+    // Realistic glasses span V_d ≈ 20–95; the floor keeps authored extremes
+    // (tiny Abbe, huge scale) from producing a runaway Cauchy B term.
+    let v_d = (abbe.max(1.0) / dispersion_scale).max(1.0);
+    let mut out = [0.0f32; 3];
+    for (c, lambda) in LAMBDA_RGB.into_iter().enumerate() {
+        let n = cauchy_ior(n_above_one, v_d, lambda);
+        out[c] = if inverted { 1.0 / n } else { n };
+    }
+    Vec3A::from_array(out)
 }
 
 /// Refract `v` (unit, pointing away from the surface) across the surface with
@@ -1235,6 +1249,53 @@ mod tests {
     }
 
     #[test]
+    fn cauchy_fit_hits_abbe_definition() {
+        // The fit must reproduce n_d exactly at the d line and have exactly
+        // the requested Abbe number V_d = (n_d − 1)/(n_F − n_C).
+        let (n_d, v_d) = (1.5f32, 30.0f32);
+        let n_at_d = cauchy_ior(n_d, v_d, FRAUNHOFER_D_NM);
+        assert!((n_at_d - n_d).abs() < 1e-6, "n(λ_d) = {n_at_d}");
+        let n_f = cauchy_ior(n_d, v_d, FRAUNHOFER_F_NM);
+        let n_c = cauchy_ior(n_d, v_d, FRAUNHOFER_C_NM);
+        let abbe = (n_d - 1.0) / (n_f - n_c);
+        assert!(
+            (abbe - v_d).abs() < 0.05,
+            "fit Abbe {abbe} != requested {v_d}"
+        );
+    }
+
+    #[test]
+    fn dispersion_scale_scales_spread_linearly() {
+        // The effective Abbe is abbe/scale, and the Cauchy B term (hence the
+        // per-channel spread) is proportional to 1/V_d — so doubling the
+        // scale doubles the R↔B spread.
+        let full = dispersive_ior(1.5, 40.0, 1.0);
+        let half = dispersive_ior(1.5, 40.0, 0.5);
+        let ratio = (full.z - full.x) / (half.z - half.x);
+        assert!((ratio - 2.0).abs() < 1e-3, "spread ratio {ratio}");
+        // And scale 1 gives the physical glass: green stays near n_d.
+        assert!((full.y - 1.5).abs() < 0.01, "green {} far from n_d", full.y);
+    }
+
+    #[test]
+    fn dispersive_ior_below_one_uses_reciprocal() {
+        // η < 1 disperses via its reciprocal: dispersive(1/n) = 1/dispersive(n)
+        // per channel, so the model is symmetric across the interface.
+        let n = dispersive_ior(1.5, 30.0, 1.0);
+        let inv = dispersive_ior(1.0 / 1.5, 30.0, 1.0);
+        for c in 0..3 {
+            assert!(
+                (inv[c] - 1.0 / n[c]).abs() < 1e-5,
+                "channel {c}: {} vs 1/{}",
+                inv[c],
+                n[c]
+            );
+        }
+        // Blue still bends more: reciprocal of a larger index is smaller.
+        assert!(inv.z < inv.y && inv.y < inv.x, "{inv}");
+    }
+
+    #[test]
     fn dispersive_glass_is_continuous_and_eval_consistent() {
         // Dispersive thick glass is a per-channel continuous BTDF: no delta
         // samples, and scatter_importance must agree with eval (three-channel
@@ -1297,7 +1358,10 @@ mod tests {
         rec.front_face = true;
         let dir_in = Vec3A::new(0.6, 0.0, -1.0).normalize();
         let r_in = Ray::new(-dir_in, dir_in);
-        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+        // The green channel's own IOR under the Cauchy fit (545 nm sits
+        // slightly blue of the d line where n_d is defined).
+        let eta_g = transmission_iors(&m).y;
+        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / eta_g).unwrap().normalize();
 
         let (v, pdf) = m.eval(&r_in, &rec, l_green).expect("evaluable");
         assert!(pdf > 0.0, "pdf = {pdf}");
