@@ -250,9 +250,11 @@ impl LobePmf {
         let base_luma = luma(m.base_color).max(0.02);
         let spec_luma = luma(m.specular_color).max(0.02);
         let fuzz_luma = luma(m.fuzz_color).max(0.02);
-        let coat_luma = luma(m.coat_color).max(0.02);
 
-        let w_metal = m.base_metalness * base_luma;
+        // Metal reflectivity is base_color · base_weight scaled by
+        // specular_weight (the reference's `metal_bsdf` weight input).
+        let w_metal =
+            m.base_metalness * m.specular_weight * luma(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
@@ -266,7 +268,9 @@ impl LobePmf {
             * (1.0 - f0_diel))
             .max(1e-4);
 
-        let w_coat = (m.coat_weight * coat_luma * f0_coat).max(1e-6);
+        // The coat reflection is untinted — coat_color only attenuates the
+        // substrate — so its lobe weight ignores the color.
+        let w_coat = (m.coat_weight * f0_coat).max(1e-6);
         let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
 
         // Transmission: dominant when weight is high. When enabled it
@@ -318,50 +322,32 @@ fn luma(c: Vec3A) -> f32 {
 // Lobe evaluations. Each returns a *linear-space* BRDF value (no cosine).
 // ---------------------------------------------------------------------------
 
-fn eval_diffuse(
-    m: &OpenPBR,
-    _v_local: Vec3A,
-    l_local: Vec3A,
-    h_local: Vec3A,
-    f_avg_diel: f32,
-) -> Vec3A {
-    // Disney diffuse re-parameterised for OpenPBR: `base_diffuse_roughness`
+fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) -> Vec3A {
+    // EON diffuse (energy-preserving Fujii Oren-Nayar) — the model the
+    // OpenPBR spec names for the base diffuse slab. `base_diffuse_roughness`
     // is the diffuse-only roughness (independent of specular_roughness).
-    let n_dot_l = l_local.z.max(0.0);
-    let n_dot_v = _v_local.z.max(0.0);
-    if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
+    if l_local.z <= 0.0 || v_local.z <= 0.0 {
         return Vec3A::ZERO;
     }
-    let l_dot_h = l_local.dot(h_local).max(0.0);
 
     // Subsurface behaves as a colour-shifted diffuse when the walk length
-    // is short relative to feature size. The full random-walk BSSRDF —
-    // refracting in, HG walk in the medium, refracting out — is enabled
-    // when `subsurface_weight > 0` in the sampled event path (see
-    // `sample_subsurface`), which uses the Medium infrastructure. Here
-    // we surface the *directional* diffuse response with the SSS tint so
-    // the average colour matches, and rely on volume scattering for the
-    // multi-scattering softening.
+    // is short relative to feature size: surface the directional diffuse
+    // response with the SSS tint so the average colour matches (the full
+    // random-walk BSSRDF is future work — see the module header).
     let diffuse_color = m.base_color.lerp(m.subsurface_color, m.subsurface_weight);
 
-    let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * m.base_diffuse_roughness;
-    let fl = schlick_weight(n_dot_l);
-    let fv = schlick_weight(n_dot_v);
-    let disney = diffuse_color
-        * (1.0 / PI)
-        * (1.0 + (fd90 - 1.0) * fl)
-        * (1.0 + (fd90 - 1.0) * fv);
-
-    // Energy left after specular reflection: `(1 - F_dielectric_avg) *
-    // (1 - metalness) * base_weight`. Using the directional Fresnel here
-    // would double-count with the specular lobe's own Fresnel — the
-    // average avoids that.
+    // Fold the presence weights into the EON albedo, as Adobe's reference
+    // does (`diffuse_albedo = base_color · base_weight · opaque-dielectric
+    // fraction`): the multiple-scattering term is nonlinear in ρ and should
+    // saturate with the *effective* albedo, not the raw color.
     // Transmission displaces the diffuse base — see `LobePmf::from_params`.
-    disney
-        * (1.0 - f_avg_diel)
-        * (1.0 - m.base_metalness)
-        * (1.0 - m.transmission_weight)
-        * m.base_weight
+    let rho = diffuse_color
+        * (m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight));
+
+    // Energy left after specular reflection: `1 - F_dielectric_avg`. Using
+    // the directional Fresnel here would double-count with the specular
+    // lobe's own Fresnel — the average avoids that.
+    eon_diffuse(rho, m.base_diffuse_roughness, v_local, l_local) * (1.0 - f_avg_diel)
 }
 
 fn eval_specular(
@@ -385,33 +371,53 @@ fn eval_specular(
     let f0_diel_scalar = f0_from_ior(m.specular_ior);
     let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
 
-    // Thin-film interference (Phase 2): replaces the dielectric Fresnel with
-    // an iridescent one at 3 wavelengths, blended by thin_film_weight.
+    // OpenPBR spec places thin-film between coat and base; when there is
+    // no coat the outer medium is air.
+    let outer_ior = if m.coat_weight > 0.0 {
+        m.coat_ior
+    } else {
+        1.0
+    };
+    // OpenPBR thickness is in μm; the thin-film helpers want nm.
+    let tf_thickness_nm = m.thin_film_thickness * 1000.0;
+
+    // Thin-film interference (Phase 2): replaces the Fresnel with an
+    // iridescent one at 3 wavelengths, blended by thin_film_weight.
     let f_diel = if m.thin_film_weight > 0.0 {
         let f_normal = fresnel_schlick(v_dot_h, f0_diel_base);
-        // OpenPBR spec places thin-film between coat and base; when there is
-        // no coat the outer medium is air.
-        let outer_ior = if m.coat_weight > 0.0 {
-            m.coat_ior
-        } else {
-            1.0
-        };
         let f_iri = thin_film_fresnel(
             v_dot_h,
             outer_ior,
             m.thin_film_ior,
             m.specular_ior,
-            m.thin_film_thickness * 1000.0, // OpenPBR thickness is in μm; helper wants nm
+            tf_thickness_nm,
         );
         f_normal * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
     } else {
         fresnel_schlick(v_dot_h, f0_diel_base)
     };
 
-    let f_metal = fresnel_schlick(v_dot_h, m.base_color);
+    // Metal slab per the MaterialX reference `generalized_schlick_bsdf`:
+    // F0 = base_color · base_weight, F82 edge tint = specular_color, the
+    // whole lobe scaled by specular_weight — with its own thin-film variant
+    // (`metal_bsdf_tf`) blended in by thin_film_weight.
+    let metal_f0 = m.base_color * m.base_weight;
+    let f_metal_base = fresnel_f82_tint(v_dot_h, metal_f0, m.specular_color);
+    let f_metal = (if m.thin_film_weight > 0.0 {
+        let f_iri = thin_film_fresnel_metal(
+            v_dot_h,
+            outer_ior,
+            m.thin_film_ior,
+            metal_f0,
+            tf_thickness_nm,
+        );
+        f_metal_base * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+    } else {
+        f_metal_base
+    }) * m.specular_weight;
 
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    // Metal path: base_color-tinted Fresnel * brdf * metalness
+    // Metal path: F82-tinted Fresnel * brdf * metalness
     // Dielectric-specular path: F_dielectric * brdf * (1 - metalness)
     (f_metal * m.base_metalness + f_diel * (1.0 - m.base_metalness)) * brdf
 }
@@ -435,20 +441,28 @@ fn eval_coat(
     );
     let f = fresnel_schlick_scalar(v_dot_h, f0_from_ior(m.coat_ior));
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    m.coat_color * (m.coat_weight * f * brdf)
+    // The coat reflection itself is untinted (the reference's `coat_bsdf`
+    // has no color input) — `coat_color` is absorption on the way *through*
+    // the coat and lives in `coat_attenuation`.
+    Vec3A::splat(m.coat_weight * f * brdf)
 }
 
-/// Directional attenuation the coat imposes on the layers beneath it, as a
-/// Fresnel-weighted transmission * multi-bounce darkening factor. Applied as
-/// a per-channel multiplier to (base_specular + base_diffuse).
+/// Directional attenuation the coat imposes on the layers beneath it:
+/// Fresnel-weighted transmission * coat absorption tint * multi-bounce
+/// darkening factor. Applied as a per-channel multiplier to
+/// (base_specular + base_diffuse). The tint term is the reference's
+/// `coat_attenuation` node — `lerp(white, coat_color, coat_weight)` — which
+/// puts `coat_color` on light transmitted through the coat, not on the
+/// coat's own reflection.
 fn coat_attenuation(m: &OpenPBR, cos_theta_h: f32) -> Vec3A {
     if m.coat_weight <= 0.0 {
         return Vec3A::ONE;
     }
     let f_coat = fresnel_schlick_scalar(cos_theta_h, f0_from_ior(m.coat_ior));
     let transmit = 1.0 - m.coat_weight * f_coat;
+    let absorb = Vec3A::ONE.lerp(m.coat_color, m.coat_weight);
     let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_darkening);
-    Vec3A::splat(transmit) * dark
+    Vec3A::splat(transmit) * absorb * dark
 }
 
 fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
@@ -478,7 +492,7 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
         roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
-    let diffuse = eval_diffuse(m, v_local, l_local, h_local, f_avg_diel);
+    let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
     let specular = eval_specular(m, v_local, l_local, h_local, ax, ay);
     let coat = eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat);
     let fuzz = eval_fuzz(m, v_local, l_local, h_local);
@@ -526,15 +540,29 @@ fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A, entering:
 // Transmission (Phase 3+4)
 // ---------------------------------------------------------------------------
 
-/// Per-channel IOR for a dispersive dielectric. Returns `(η_R, η_G, η_B)`.
-/// `dispersion_scale = 0` collapses to `(η_D, η_D, η_D)`.
+/// Per-channel IOR for a dispersive dielectric, `(η_R, η_G, η_B)` at the
+/// sRGB primary wavelengths, via the Cauchy/Abbe fit (`cauchy_ior`).
+/// `transmission_dispersion_scale` divides the authored Abbe number — the
+/// effective Abbe is `abbe / scale`, so scale 1 is the physical dispersion
+/// of a glass with that Abbe number, larger scales exaggerate it linearly,
+/// and 0 collapses to `(η_D, η_D, η_D)`. An IOR below 1 (interior less
+/// dense than the exterior) disperses via its reciprocal, keeping the
+/// model symmetric across the interface.
 fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
-    if dispersion_scale <= 0.0 {
+    if dispersion_scale <= 0.0 || n_d == 1.0 {
         return Vec3A::splat(n_d);
     }
-    let v = abbe.max(1.0);
-    let spread = (n_d - 1.0) / v * dispersion_scale;
-    Vec3A::new(n_d - 0.3 * spread, n_d, n_d + 0.7 * spread)
+    let inverted = n_d < 1.0;
+    let n_above_one = if inverted { 1.0 / n_d } else { n_d };
+    // Realistic glasses span V_d ≈ 20–95; the floor keeps authored extremes
+    // (tiny Abbe, huge scale) from producing a runaway Cauchy B term.
+    let v_d = (abbe.max(1.0) / dispersion_scale).max(1.0);
+    let mut out = [0.0f32; 3];
+    for (c, lambda) in LAMBDA_RGB.into_iter().enumerate() {
+        let n = cauchy_ior(n_above_one, v_d, lambda);
+        out[c] = if inverted { 1.0 / n } else { n };
+    }
+    Vec3A::from_array(out)
 }
 
 /// Refract `v` (unit, pointing away from the surface) across the surface with
@@ -678,7 +706,17 @@ fn eval_transmission_channel(
 /// and a pdf that averages the three per-channel sampling densities
 /// (matching `sample_transmission_rough`, which picks a channel uniformly).
 fn eval_transmission(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> (Vec3A, f32) {
-    let tint = m.transmission_color * (m.transmission_weight * (1.0 - m.base_metalness));
+    // The reference's `if_transmission_tint`: with `transmission_depth > 0`
+    // the interior Beer-Lambert medium owns the color (see
+    // `Medium::from_transmission`), so the interface BTDF is untinted —
+    // tinting both would apply `transmission_color` twice. Only at zero
+    // depth does the color act as a non-physical surface tint.
+    let color = if m.transmission_depth > 0.0 {
+        Vec3A::ONE
+    } else {
+        m.transmission_color
+    };
+    let tint = color * (m.transmission_weight * (1.0 - m.base_metalness));
     let iors = transmission_iors(m);
     if m.transmission_dispersion_scale <= 0.0 {
         let (btdf, pdf) = eval_transmission_channel(m, v_local, l_local, entering, iors.y);
@@ -894,6 +932,24 @@ impl Material for OpenPBR {
 
     fn emitted(&self) -> Vec3A {
         self.emission_color * self.emission_luminance
+    }
+
+    /// Emission seen through the coat, per the reference's `emission_edf`
+    /// mix: the coated branch tints the EDF by `coat_color` and modulates it
+    /// by a `generalized_schlick_edf` with `color0 = 1 − coat_F0`,
+    /// `color90 = 0`, exponent 5 — i.e. `(1 − F0)(1 − (1 − μ)⁵)` — the coat's
+    /// view-dependent Fresnel transmission. Blended with the uncoated EDF by
+    /// `coat_weight`.
+    fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
+        let uncoated = self.emission_color * self.emission_luminance;
+        if self.coat_weight <= 0.0 {
+            return uncoated;
+        }
+        let f0_coat = f0_from_ior(self.coat_ior);
+        let mu = cos_theta_o.clamp(0.0, 1.0);
+        let schlick_transmit = (1.0 - f0_coat) * (1.0 - schlick_weight(mu));
+        let coated = uncoated * self.coat_color * schlick_transmit;
+        uncoated.lerp(coated, self.coat_weight)
     }
 }
 
@@ -1193,6 +1249,53 @@ mod tests {
     }
 
     #[test]
+    fn cauchy_fit_hits_abbe_definition() {
+        // The fit must reproduce n_d exactly at the d line and have exactly
+        // the requested Abbe number V_d = (n_d − 1)/(n_F − n_C).
+        let (n_d, v_d) = (1.5f32, 30.0f32);
+        let n_at_d = cauchy_ior(n_d, v_d, FRAUNHOFER_D_NM);
+        assert!((n_at_d - n_d).abs() < 1e-6, "n(λ_d) = {n_at_d}");
+        let n_f = cauchy_ior(n_d, v_d, FRAUNHOFER_F_NM);
+        let n_c = cauchy_ior(n_d, v_d, FRAUNHOFER_C_NM);
+        let abbe = (n_d - 1.0) / (n_f - n_c);
+        assert!(
+            (abbe - v_d).abs() < 0.05,
+            "fit Abbe {abbe} != requested {v_d}"
+        );
+    }
+
+    #[test]
+    fn dispersion_scale_scales_spread_linearly() {
+        // The effective Abbe is abbe/scale, and the Cauchy B term (hence the
+        // per-channel spread) is proportional to 1/V_d — so doubling the
+        // scale doubles the R↔B spread.
+        let full = dispersive_ior(1.5, 40.0, 1.0);
+        let half = dispersive_ior(1.5, 40.0, 0.5);
+        let ratio = (full.z - full.x) / (half.z - half.x);
+        assert!((ratio - 2.0).abs() < 1e-3, "spread ratio {ratio}");
+        // And scale 1 gives the physical glass: green stays near n_d.
+        assert!((full.y - 1.5).abs() < 0.01, "green {} far from n_d", full.y);
+    }
+
+    #[test]
+    fn dispersive_ior_below_one_uses_reciprocal() {
+        // η < 1 disperses via its reciprocal: dispersive(1/n) = 1/dispersive(n)
+        // per channel, so the model is symmetric across the interface.
+        let n = dispersive_ior(1.5, 30.0, 1.0);
+        let inv = dispersive_ior(1.0 / 1.5, 30.0, 1.0);
+        for c in 0..3 {
+            assert!(
+                (inv[c] - 1.0 / n[c]).abs() < 1e-5,
+                "channel {c}: {} vs 1/{}",
+                inv[c],
+                n[c]
+            );
+        }
+        // Blue still bends more: reciprocal of a larger index is smaller.
+        assert!(inv.z < inv.y && inv.y < inv.x, "{inv}");
+    }
+
+    #[test]
     fn dispersive_glass_is_continuous_and_eval_consistent() {
         // Dispersive thick glass is a per-channel continuous BTDF: no delta
         // samples, and scatter_importance must agree with eval (three-channel
@@ -1255,13 +1358,214 @@ mod tests {
         rec.front_face = true;
         let dir_in = Vec3A::new(0.6, 0.0, -1.0).normalize();
         let r_in = Ray::new(-dir_in, dir_in);
-        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+        // The green channel's own IOR under the Cauchy fit (545 nm sits
+        // slightly blue of the d line where n_d is defined).
+        let eta_g = transmission_iors(&m).y;
+        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / eta_g).unwrap().normalize();
 
         let (v, pdf) = m.eval(&r_in, &rec, l_green).expect("evaluable");
         assert!(pdf > 0.0, "pdf = {pdf}");
         assert!(v.y > 0.0, "green channel dark at its own Snell direction: {v}");
         assert!(v.y > v.x, "green {} not > red {} at green Snell direction", v.y, v.x);
         assert!(v.y > v.z, "green {} not > blue {} at green Snell direction", v.y, v.z);
+    }
+
+    #[test]
+    fn eon_reduces_to_lambert_at_zero_roughness() {
+        let rho = Vec3A::new(0.8, 0.5, 0.3);
+        let v = Vec3A::new(0.3, 0.1, 0.9).normalize();
+        let l = Vec3A::new(-0.2, 0.4, 0.8).normalize();
+        let f = eon_diffuse(rho, 0.0, v, l);
+        let lambert = rho / PI;
+        assert!(
+            (f - lambert).abs().max_element() < 1e-4,
+            "EON at r=0 {f} != Lambert {lambert}"
+        );
+    }
+
+    #[test]
+    fn eon_is_reciprocal() {
+        let rho = Vec3A::new(0.9, 0.6, 0.2);
+        let v = Vec3A::new(0.5, -0.1, 0.6).normalize();
+        let l = Vec3A::new(-0.3, 0.2, 0.9).normalize();
+        for r in [0.2, 0.6, 1.0] {
+            let a = eon_diffuse(rho, r, v, l);
+            let b = eon_diffuse(rho, r, l, v);
+            assert!((a - b).abs().max_element() < 1e-5, "r={r}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn eon_albedo_approx_matches_exact() {
+        for i in 1..=20 {
+            let mu = i as f32 / 20.0;
+            for r in [0.0, 0.3, 0.7, 1.0] {
+                let exact = eon_albedo_exact(mu, r);
+                let approx = eon_albedo_approx(mu, r);
+                assert!(
+                    (exact - approx).abs() < 0.01,
+                    "albedo mismatch at mu={mu}, r={r}: {exact} vs {approx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eon_preserves_energy_at_high_roughness() {
+        // The defining property: at rho = 1 the hemispherical albedo
+        // (∫ f·cosθ dω) is 1 for any roughness — the single-scattering Fujii
+        // lobe alone loses well over 10% at roughness 1; the
+        // multiple-scattering lobe restores it. Quadrature over the
+        // hemisphere for a few view angles.
+        let n_theta = 128;
+        let n_phi = 128;
+        for view_z in [0.95f32, 0.6, 0.25] {
+            let v = Vec3A::new((1.0 - view_z * view_z).sqrt(), 0.0, view_z);
+            let mut integral = 0.0f32;
+            for it in 0..n_theta {
+                let theta = (it as f32 + 0.5) / n_theta as f32 * (PI / 2.0);
+                let (sin_t, cos_t) = theta.sin_cos();
+                for ip in 0..n_phi {
+                    let phi = (ip as f32 + 0.5) / n_phi as f32 * (2.0 * PI);
+                    let l = Vec3A::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                    let f = eon_diffuse(Vec3A::ONE, 1.0, v, l).x;
+                    integral += f * cos_t * sin_t;
+                }
+            }
+            integral *= (PI / 2.0) / n_theta as f32 * (2.0 * PI) / n_phi as f32;
+            assert!(
+                (0.97..=1.03).contains(&integral),
+                "white-furnace albedo {integral} at view_z {view_z}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_transmission_interface_is_untinted() {
+        // With transmission_depth > 0 the Beer-Lambert medium owns the color:
+        // the interface BTDF must be untinted (channel-uniform), or the color
+        // would apply twice. At zero depth the color is a surface tint.
+        let color = Vec3A::new(0.9, 0.4, 0.2);
+        let shallow = OpenPBR {
+            specular_roughness: 0.25,
+            transmission_color: color,
+            ..OpenPBR::glass(1.5)
+        };
+        let deep = OpenPBR {
+            transmission_depth: 1.0,
+            ..shallow.clone()
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let dir_in = Vec3A::new(0.4, 0.0, -1.0).normalize();
+        let r_in = Ray::new(-dir_in, dir_in);
+        let wi = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+
+        let (v_deep, _) = deep.eval(&r_in, &rec, wi).expect("evaluable");
+        assert!(v_deep.y > 0.0, "no transmission at the Snell direction");
+        assert!(
+            (v_deep.x - v_deep.y).abs() < 1e-5 && (v_deep.y - v_deep.z).abs() < 1e-5,
+            "deep transmission tinted at the interface: {v_deep}"
+        );
+
+        let (v_shallow, _) = shallow.eval(&r_in, &rec, wi).expect("evaluable");
+        let ratio = v_shallow.x / v_shallow.y;
+        assert!(
+            (ratio - color.x / color.y).abs() < 1e-3,
+            "zero-depth tint ratio {ratio} != color ratio {}",
+            color.x / color.y
+        );
+    }
+
+    #[test]
+    fn f82_metal_edge_tint() {
+        let f0 = Vec3A::new(0.9, 0.6, 0.3);
+        let tint = Vec3A::new(1.0, 0.5, 0.25);
+        // Normal incidence pins F0 regardless of tint.
+        let f_n = fresnel_f82_tint(1.0, f0, tint);
+        assert!((f_n - f0).abs().max_element() < 1e-5, "F(0°) = {f_n}");
+        // Grazing incidence goes to white.
+        let f_g = fresnel_f82_tint(0.0, f0, tint);
+        assert!((f_g - Vec3A::ONE).abs().max_element() < 1e-5, "F(90°) = {f_g}");
+        // At μ̄ = 1/7 the reflectance is exactly Schlick scaled by the tint.
+        let mu_bar = 1.0 / 7.0;
+        let with = fresnel_f82_tint(mu_bar, f0, tint);
+        let without = fresnel_f82_tint(mu_bar, f0, Vec3A::ONE);
+        assert!((with.y / without.y - tint.y).abs() < 1e-3, "{with} vs {without}");
+        assert!((with.z / without.z - tint.z).abs() < 1e-3, "{with} vs {without}");
+        assert!((with.x - without.x).abs() < 1e-5, "untinted channel moved");
+    }
+
+    #[test]
+    fn coat_color_tints_substrate_not_coat_reflection() {
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(0.9, 0.2, 0.2),
+            coat_darkening: 0.0, // isolate the absorption tint
+            ..OpenPBR::default()
+        };
+        // The coat reflection lobe itself is untinted.
+        let v = Vec3A::new(0.3, 0.0, 1.0).normalize();
+        let c = eval_coat(&m, v, v, v, 0.1, 0.1);
+        assert!(
+            (c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6,
+            "coat reflection tinted: {c}"
+        );
+        // The substrate attenuation carries the coat_color absorption.
+        let atten = coat_attenuation(&m, 0.9);
+        assert!(
+            (atten.x / atten.y - m.coat_color.x / m.coat_color.y).abs() < 1e-3,
+            "substrate attenuation not coat_color-tinted: {atten}"
+        );
+    }
+
+    #[test]
+    fn coated_emission_dims_and_tints() {
+        let uncoated = OpenPBR {
+            emission_luminance: 100.0,
+            ..OpenPBR::default()
+        };
+        // No coat: directional emission equals the isotropic EDF.
+        assert_eq!(uncoated.emitted_directional(0.3), uncoated.emitted());
+
+        let coated = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(1.0, 0.2, 0.2),
+            ..uncoated.clone()
+        };
+        let e_n = coated.emitted_directional(1.0);
+        // Dimmed by the coat's Fresnel transmission (1 - F0 at normal).
+        assert!(e_n.x < 100.0, "coated emission not dimmed: {e_n}");
+        // Tinted by coat_color.
+        assert!((e_n.y / e_n.x - 0.2).abs() < 1e-3, "not coat-tinted: {e_n}");
+        // Grazing angles transmit less than normal incidence.
+        let e_g = coated.emitted_directional(0.05);
+        assert!(e_g.x < e_n.x, "grazing {e_g} not dimmer than normal {e_n}");
+    }
+
+    #[test]
+    fn aniso_matches_reference_remap() {
+        // The open_pbr_anisotropy graph: ax = r²·√(2/(1+(1−a)²)), ay = (1−a)·ax.
+        let (r, a) = (0.5f32, 0.8f32);
+        let (ax, ay) = roughness_to_alpha_aniso(r, a);
+        let inv = 1.0 - a;
+        let expect_ax = r * r * (2.0 / (1.0 + inv * inv)).sqrt();
+        assert!((ax - expect_ax).abs() < 1e-6, "ax {ax} != {expect_ax}");
+        assert!((ay - inv * expect_ax).abs() < 1e-6, "ay {ay} != {}", inv * expect_ax);
+    }
+
+    #[test]
+    fn thin_film_on_metal_is_bounded_and_active() {
+        let f0 = Vec3A::new(0.9, 0.7, 0.4);
+        let r = thin_film_fresnel_metal(0.8, 1.0, 1.4, f0, 500.0);
+        for c in [r.x, r.y, r.z] {
+            assert!((0.0..=1.0).contains(&c), "out of range: {r}");
+        }
+        // A visible film must actually change the metal Fresnel somewhere.
+        let plain = fresnel_f82_tint(0.8, f0, Vec3A::ONE);
+        assert!((r - plain).abs().max_element() > 1e-3, "film had no effect");
     }
 
     #[test]
