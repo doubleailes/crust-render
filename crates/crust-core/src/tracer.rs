@@ -768,7 +768,8 @@ fn trace_path(
             // attenuating through any media the final segment crosses.
             if let Some(p) = &prev {
                 if let Some(hit) = world.hit(&ray, 0.001, f32::INFINITY) {
-                    let mut emitted = hit.mat.emitted();
+                    let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
+                    let mut emitted = hit.mat.emitted_directional(cos_o);
                     if emitted.length_squared() > 0.0 {
                         if let Some(m) = ray.medium() {
                             emitted *= m.transmittance(hit.rec.t);
@@ -978,7 +979,8 @@ fn trace_path(
         // after carried-medium scatters it counts here, in full. Either
         // way the emission pays the arriving segment's attenuation (an
         // emitter seen through tinted glass or smoke must dim).
-        let emitted = mat.emitted();
+        let cos_o = ray.direction().normalize().dot(rec.normal).abs();
+        let emitted = mat.emitted_directional(cos_o);
         let mut emit_here = Vec3A::ZERO;
         match &prev {
             Some(p) => {
