@@ -397,6 +397,21 @@ fn eval_specular(
         fresnel_schlick(v_dot_h, f0_diel_base)
     };
 
+    // Thin-walled window reflectance: the transmissive fraction of a thin
+    // sheet reflects from both surfaces including all internal bounces —
+    // `R_window = 2R/(1+R)` (Adobe reference `openpbr_thin_wall_fresnel`)
+    // instead of the single-interface `R`. Scale the dielectric Fresnel by
+    // the physical boost `2/(1+R)`, blended by how transmissive the sheet
+    // is; together with the `(1−R)/(1+R)` window transmittance a clear
+    // sheet reflects + transmits exactly unit energy.
+    let f_diel = if m.geometry_thin_walled && m.transmission_weight > 0.0 {
+        let f_phys = fresnel_schlick_scalar(v_dot_h, f0_diel_scalar);
+        let boost = 2.0 / (1.0 + f_phys);
+        f_diel * (1.0 + (boost - 1.0) * m.transmission_weight)
+    } else {
+        f_diel
+    };
+
     // Metal slab per the MaterialX reference `generalized_schlick_bsdf`:
     // F0 = base_color · base_weight, F82 edge tint = specular_color, the
     // whole lobe scaled by specular_weight — with its own thin-film variant
@@ -581,16 +596,47 @@ fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
     Some(-v * eta + n * (eta * cos_i - cos_t))
 }
 
-/// Thin-walled delta transmission: straight through, no bending, no medium.
+/// Thin-walled delta transmission — the window model of the Adobe OpenPBR
+/// reference: straight through with no bending (the front and back
+/// refractions of an infinitesimally thin sheet cancel), but with proper
+/// window energy. The transmitted fraction accounts for both interfaces
+/// *plus all internal bounces*: `T = 1 − 2R/(1+R) = (1−R)/(1+R)` with `R`
+/// the single-interface dielectric Fresnel at the view angle
+/// (`openpbr_thin_wall_fresnel`). The authored `transmission_color` — the
+/// transmittance at *normal* incidence — is raised to the relative in-sheet
+/// path length `1/cos θ_refracted` (Beer-Lambert along the slanted path).
 /// Returns (world-space scattered ray, throughput, placeholder pdf).
 fn sample_transmission_thin(m: &OpenPBR, r_in: &Ray, rec: &HitRecord) -> (Ray, Vec3A, f32) {
-    let l_world = r_in.direction().normalize();
+    let dir = r_in.direction().normalize();
+    let l_world = dir;
+    // Thin walls are double-sided: always treated as hit from outside.
+    let cos_i = (-dir).dot(rec.normal).clamp(0.0, 1.0);
+    let eta = m.specular_ior.max(1e-4);
+
+    // Refracted angle inside the sheet (Snell); η < 1 sheets can TIR.
+    let sin2_t = (1.0 - cos_i * cos_i) / (eta * eta);
+    if sin2_t >= 1.0 {
+        return (Ray::new(rec.p, l_world), Vec3A::ZERO, 1.0);
+    }
+    let cos_t = (1.0 - sin2_t).sqrt();
+
+    // Window transmittance: both surfaces and every internal bounce.
+    let f = fresnel_dielectric(cos_i, 1.0, eta);
+    let window_transmittance = (1.0 - f) / (1.0 + f);
+
+    // View-dependent absorption along the refracted path.
+    let path_length = 1.0 / cos_t.max(1e-4);
+    let tint = m
+        .transmission_color
+        .clamp(Vec3A::ZERO, Vec3A::ONE)
+        .powf(path_length);
+
     // No cosine in a delta lobe; we ape the codebase convention by
-    // returning throughput = tint (the tracer's cosine multiply is
+    // returning the throughput directly (the tracer's cosine multiply is
     // strictly incorrect for delta lobes but matches the rest of the
     // renderer's estimator).
-    let throughput = m.transmission_color * m.transmission_weight;
-    // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the tint
+    let throughput = tint * (window_transmittance * m.transmission_weight);
+    // Delta pdf: use 1.0 so tracer's `brdf / pdf` returns the throughput
     // unmodified. Direct-light MIS won't hit a delta lobe.
     (Ray::new(rec.p, l_world), throughput, 1.0)
 }
@@ -1132,6 +1178,95 @@ mod tests {
         // And its eval must report zero continuous density below the horizon.
         let (ev, _) = m.eval(&r_in, &rec, -Vec3A::Z).unwrap();
         assert_eq!(ev, Vec3A::ZERO);
+    }
+
+    #[test]
+    fn thin_wall_window_transmittance_matches_formula() {
+        // Clear thin glass: throughput must be exactly (1−R)/(1+R) at the
+        // view angle, and the R/T window pair must sum to unit energy.
+        let m = OpenPBR {
+            geometry_thin_walled: true,
+            ..OpenPBR::glass(1.5)
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let dir = Vec3A::new(0.6, 0.0, -1.0).normalize();
+        let ray = Ray::new(-dir, dir);
+
+        let (_, thr, _) = sample_transmission_thin(&m, &ray, &rec);
+        let cos_i = -dir.z / dir.length();
+        let f = fresnel_dielectric(cos_i, 1.0, 1.5);
+        let expected = (1.0 - f) / (1.0 + f);
+        assert!(
+            (thr - Vec3A::splat(expected)).abs().max_element() < 1e-5,
+            "throughput {thr} != window transmittance {expected}"
+        );
+        // Energy: window reflectance + window transmittance = 1.
+        let r_window = 2.0 * f / (1.0 + f);
+        assert!((r_window + expected - 1.0).abs() < 1e-6);
+
+        // Grazing rays transmit less than normal-incidence rays.
+        let down = Ray::new(Vec3A::Z, -Vec3A::Z);
+        let (_, thr_n, _) = sample_transmission_thin(&m, &down, &rec);
+        let grazing_dir = Vec3A::new(6.0, 0.0, -1.0).normalize();
+        let grazing = Ray::new(-grazing_dir, grazing_dir);
+        let (_, thr_g, _) = sample_transmission_thin(&m, &grazing, &rec);
+        assert!(thr_g.x < thr_n.x, "grazing {thr_g} not < normal {thr_n}");
+    }
+
+    #[test]
+    fn thin_wall_tint_darkens_with_angle() {
+        // transmission_color is the normal-incidence transmittance; slanted
+        // paths travel 1/cosθ_t through the sheet, so darker channels darken
+        // faster with angle than lighter ones.
+        let m = OpenPBR {
+            geometry_thin_walled: true,
+            transmission_color: Vec3A::new(0.4, 0.8, 0.9),
+            ..OpenPBR::glass(1.5)
+        };
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+
+        let down = Ray::new(Vec3A::Z, -Vec3A::Z);
+        let (_, thr_n, _) = sample_transmission_thin(&m, &down, &rec);
+        // Normal incidence: path length 1, tint is the authored color.
+        assert!(
+            (thr_n.x / thr_n.z - 0.4 / 0.9).abs() < 1e-4,
+            "normal-incidence tint ratio off: {thr_n}"
+        );
+        let oblique_dir = Vec3A::new(2.0, 0.0, -1.0).normalize();
+        let oblique = Ray::new(-oblique_dir, oblique_dir);
+        let (_, thr_o, _) = sample_transmission_thin(&m, &oblique, &rec);
+        assert!(
+            thr_o.x / thr_o.z < thr_n.x / thr_n.z,
+            "oblique tint {thr_o} not relatively darker in the dark channel than {thr_n}"
+        );
+    }
+
+    #[test]
+    fn thin_wall_reflection_boosted_by_internal_bounces() {
+        // A thin-walled transmissive sheet reflects 2R/(1+R) — strictly more
+        // than the single-interface R of the same thick glass.
+        let thick = OpenPBR {
+            specular_roughness: 0.25,
+            ..OpenPBR::glass(1.5)
+        };
+        let thin = OpenPBR {
+            geometry_thin_walled: true,
+            ..thick.clone()
+        };
+        let v = Vec3A::new(0.4, 0.0, 1.0).normalize();
+        let l = Vec3A::new(-0.4, 0.0, 1.0).normalize(); // mirror direction
+        let r_thick = eval_all(&thick, v, l, true);
+        let r_thin = eval_all(&thin, v, l, true);
+        assert!(
+            r_thin.x > r_thick.x * 1.5,
+            "thin-wall reflection {r_thin} not boosted over {r_thick}"
+        );
     }
 
     #[test]
