@@ -184,6 +184,8 @@ Light-only renders the rough plates cleanly but leaves the smooth plates'
 reflections dark and firefly-ridden; bsdf-only is the exact mirror image;
 MIS matches the cleaner of the two everywhere.
 
+![veach](images/veach_mis_test.png)
+
 ### CLI
 
 ```bash
