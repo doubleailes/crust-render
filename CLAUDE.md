@@ -146,8 +146,12 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   and `emitted()`. Exactly two implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), and **`Emissive`**, a pure
-  emitter with no geometry knowledge. Shared microfacet helpers (aniso GGX VNDF sampling,
-  Schlick Fresnel, sheen, thin-film) live in `material/brdf.rs`.
+  emitter with no geometry knowledge. Shared shading helpers (aniso GGX VNDF sampling,
+  Schlick/F82 Fresnel, EON diffuse, Charlie sheen, thin-film, Cauchy dispersion) live in
+  `material/brdf.rs`. The OpenPBR formulas are aligned against the MaterialX nodegraph
+  and Adobe's `openpbr-bsdf` reference — the item-by-item alignment record (with the
+  remaining gaps, e.g. no LUT-based multiple-scattering compensation and no random-walk
+  SSS entry) is `docs/openpbr_reference_alignment.md`.
 - **`Light`** (`light.rs`) — `sample_point`/`pdf`/`emission`/`material`. The one
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
   `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
@@ -222,11 +226,13 @@ that mention a `usd` **feature flag** are stale — there is no such feature.
   continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable
   over the full sphere, and part of the NEE/guide mixtures (guide-chosen directions
   cross the interface via `Material::make_ray`, which tags the interior medium).
-  Dispersion is continuous per-channel: each RGB channel refracts with its own IOR,
-  sampling picks one channel's IOR uniformly, and evaluation runs three per-channel
+  Dispersion is continuous per-channel: each RGB channel refracts with its own
+  Cauchy/Abbe-derived IOR (`cauchy_ior`, anchored at the Fraunhofer d line), sampling
+  picks one channel's IOR uniformly, and evaluation runs three per-channel
   BTDF evaluations whose sampling pdfs average into the channel-mixture density. Only
   thin-walled transmission remains a per-sample delta lobe (`ScatterSample::delta`),
-  excluded from continuous mixtures. The guide-vs-BSDF selection probability is fixed (no learned α), and
+  excluded from continuous mixtures — carrying window-model energy
+  (`(1−R)/(1+R)` transmittance, boosted `2R/(1+R)` reflection, view-dependent tint). The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
 - **Volume regions** (`volume.rs`) have no OpenVDB / `UsdVolVolume` import (openusd 0.5
   ships no `vol` feature) — density is homogeneous, procedural fBm noise, or an inline

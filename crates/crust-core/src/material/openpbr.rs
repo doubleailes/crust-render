@@ -2,21 +2,38 @@
 //!
 //! Full parameter set matches the OpenPBR MaterialX reference
 //! (https://academysoftwarefoundation.github.io/OpenPBR/). Every field
-//! defaults to the spec value, so RON scenes can specify only what they
-//! need.
+//! defaults to the spec value, so USD scenes can specify only what they
+//! need. Formulas are aligned against the MaterialX nodegraph and the
+//! Adobe OpenPBR BSDF reference (github.com/adobe/openpbr-bsdf) — the
+//! full alignment record, item by item with commits, lives in
+//! `docs/openpbr_reference_alignment.md`.
 //!
-//! ## Phase status
+//! ## Implemented
 //!
-//! - Phase 1 (done): base_diffuse + base_specular_dielectric + base_metal
-//!   + fuzz + emission, sampled with multi-lobe MIS.
-//! - Phase 2: coat + thin-film interference.
-//! - Phase 3: transmission (thin-walled + rough refraction) + dispersion.
-//! - Phase 4: `Ray` medium stack + Beer-Lambert in the tracer.
-//! - Phase 5: subsurface (random walk).
+//! - Base: EON diffuse (energy-preserving Fujii Oren-Nayar), F82-tint
+//!   metal, dielectric specular — anisotropic GGX with VNDF sampling,
+//!   multi-lobe one-sample MIS (`eval_all`/`pdf_all` are the single
+//!   shared composition, so eval/sample/pdf stay consistent).
+//! - Transmission: continuous Walter BTDF (thick), Cauchy/Abbe physical
+//!   dispersion per channel, thin-wall window model (delta, with
+//!   `(1−R)/(1+R)` energy and view-dependent tint).
+//! - Interior media: unified transmission + subsurface volume (van de
+//!   Hulst albedo inversion, `transmission_scatter`) carried by refracted
+//!   rays via `interior_medium`.
+//! - Coat: untinted reflection lobe + per-passage view-dependent
+//!   absorption (`√coat_color` per crossing, refracted path length),
+//!   multi-bounce darkening, coat-attenuated emission.
+//! - Fuzz (Charlie sheen) and 3-wavelength thin-film interference on both
+//!   the dielectric and metal Fresnel.
 //!
-//! Parameters for not-yet-wired features (transmission, subsurface, coat,
-//! thin_film, opacity) are accepted, deserialised, and preserved so scenes
-//! authored today continue to render correctly once later phases land.
+//! ## Not implemented (see the alignment doc for the full gap list)
+//!
+//! - Microfacet multiple-scattering energy compensation (Adobe uses LUTs;
+//!   crust couples diffuse↔specular with a flat `1 − F_avg`).
+//! - Random-walk subsurface entry: SSS without transmission renders as
+//!   tinted diffuse — its volume is only reachable through refraction.
+//! - `geometry_opacity` (host-renderer cutout) and authored geometry
+//!   normals/tangents.
 
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
