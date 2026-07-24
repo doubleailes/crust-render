@@ -15,7 +15,7 @@ use crate::light::{AreaLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::primitives::{Sphere as CrustSphere, Triangle};
 use crate::scene::Scene;
-use crate::tracer::RenderSettings;
+use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Vec3, Vec3A};
 
@@ -1028,8 +1028,24 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     let guiding_prob =
         custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
 
+    // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
+    let strategy = match custom_token(&prim, "crust:samplingStrategy").as_deref() {
+        None | Some("power") | Some("mis") => SamplingStrategy::PowerMis,
+        Some("balance") => SamplingStrategy::BalanceMis,
+        Some("light") => SamplingStrategy::LightOnly,
+        Some("bsdf") => SamplingStrategy::BsdfOnly,
+        Some(other) => {
+            warn!(
+                "Unknown crust:samplingStrategy \"{}\" (expected power | balance | light | bsdf) — using power MIS",
+                other
+            );
+            SamplingStrategy::PowerMis
+        }
+    };
+
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
         .with_guiding(guiding, guiding_iters, guiding_prob)
+        .with_sampling_strategy(strategy)
 }
 
 fn default_settings() -> RenderSettings {

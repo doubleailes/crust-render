@@ -29,7 +29,20 @@ pub fn clamp(x: f32, min: f32, max: f32) -> f32 {
     x
 }
 
+/// Veach's balance heuristic: `w_a = pdf_a / (pdf_a + pdf_b)`.
+///
+/// Historical note: before the sampling strategies were made configurable
+/// this function computed the β=2 power heuristic under the wrong name —
+/// that formula now lives in [`power_heuristic`], which remains the
+/// integrator's default so existing renders are unchanged.
 pub fn balance_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
+    pdf_a / (pdf_a + pdf_b + 1e-6)
+}
+
+/// Veach's power heuristic with β = 2: `w_a = pdf_a² / (pdf_a² + pdf_b²)`.
+/// Sharpens the balance heuristic toward whichever strategy is denser —
+/// Veach found β = 2 a good default for glossy surfaces.
+pub fn power_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
     let pdf_a2 = pdf_a * pdf_a;
     let pdf_b2 = pdf_b * pdf_b;
     pdf_a2 / (pdf_a2 + pdf_b2 + 1e-6)

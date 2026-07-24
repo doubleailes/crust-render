@@ -30,6 +30,64 @@ const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
 const RR_START_BOUNCE: usize = 3;
 const RR_MIN_PROB: f32 = 0.05;
 
+/// How the integrator combines its two direct-lighting strategies — light
+/// sampling (NEE) and BSDF/phase sampling — into one estimate. The two MIS
+/// variants weight each strategy's samples with a Veach heuristic; the
+/// single-strategy variants disable one side entirely and exist to
+/// visualize what each strategy contributes and where it fails (the classic
+/// Veach comparison — `samples/veach_mis.usda` is the matching scene).
+///
+/// Every variant keeps `light_weight + bounce_weight = 1` for a light both
+/// strategies can reach, so emission is counted exactly once and all four
+/// estimators are unbiased — they differ only in variance. Lights only BSDF
+/// sampling can reach (delta lobes, emissive geometry outside the light
+/// list) keep full bounce weight under every strategy, `LightOnly`
+/// included, because zeroing them would lose their energy entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SamplingStrategy {
+    /// β=2 power-heuristic MIS — the renderer's historical default.
+    #[default]
+    PowerMis,
+    /// Balance-heuristic MIS.
+    BalanceMis,
+    /// Light sampling only: NEE at full weight, bounce-hit emission dropped
+    /// (for lights NEE could have sampled).
+    LightOnly,
+    /// BSDF sampling only: no shadow rays, bounce-hit emission at full
+    /// weight.
+    BsdfOnly,
+}
+
+impl SamplingStrategy {
+    /// Does this strategy trace NEE shadow rays at all?
+    pub fn samples_lights(self) -> bool {
+        !matches!(self, SamplingStrategy::BsdfOnly)
+    }
+
+    /// Weight of a light-sampled (NEE) contribution, given the competing
+    /// bounce strategy's density toward the same direction.
+    pub fn light_weight(self, light_pdf: f32, bounce_pdf: f32) -> f32 {
+        match self {
+            SamplingStrategy::PowerMis => utils::power_heuristic(light_pdf, bounce_pdf),
+            SamplingStrategy::BalanceMis => utils::balance_heuristic(light_pdf, bounce_pdf),
+            SamplingStrategy::LightOnly => 1.0,
+            SamplingStrategy::BsdfOnly => 0.0,
+        }
+    }
+
+    /// Weight of bounce-hit emission on a light that NEE could also have
+    /// sampled with density `light_pdf`. Mirror of [`Self::light_weight`]:
+    /// for every strategy the two weights sum to one.
+    pub fn bounce_weight(self, bounce_pdf: f32, light_pdf: f32) -> f32 {
+        match self {
+            SamplingStrategy::PowerMis => utils::power_heuristic(bounce_pdf, light_pdf),
+            SamplingStrategy::BalanceMis => utils::balance_heuristic(bounce_pdf, light_pdf),
+            SamplingStrategy::LightOnly => 0.0,
+            SamplingStrategy::BsdfOnly => 1.0,
+        }
+    }
+}
+
 /// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
     field: &'a GuidingField,
@@ -407,6 +465,7 @@ impl Renderer {
                 &self.lights,
                 &self.volumes,
                 self.settings.max_depth as i32,
+                self.settings.sampling_strategy,
                 &mut sampler,
                 gctx,
                 &mut samples,
@@ -458,6 +517,9 @@ pub struct RenderSettings {
     guiding: bool,
     guiding_train_iterations: u32,
     guiding_prob: f32,
+    // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
+    // `--strategy`).
+    sampling_strategy: SamplingStrategy,
 }
 impl RenderSettings {
     pub fn new(
@@ -480,6 +542,7 @@ impl RenderSettings {
             guiding: false,
             guiding_train_iterations: 4,
             guiding_prob: 0.5,
+            sampling_strategy: SamplingStrategy::default(),
         }
     }
 
@@ -498,6 +561,17 @@ impl RenderSettings {
         self
     }
 
+    /// Select how light sampling and BSDF sampling combine — see
+    /// [`SamplingStrategy`].
+    pub fn with_sampling_strategy(mut self, strategy: SamplingStrategy) -> Self {
+        self.sampling_strategy = strategy;
+        self
+    }
+
+    pub fn sampling_strategy(&self) -> SamplingStrategy {
+        self.sampling_strategy
+    }
+
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
@@ -509,10 +583,21 @@ pub fn ray_color(
     lights: &LightList,
     volumes: &Volumes,
     depth: i32,
+    strategy: SamplingStrategy,
     sampler: &mut dyn Sampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
-    trace_path(r, world, lights, volumes, depth, sampler, None, &mut no_training)
+    trace_path(
+        r,
+        world,
+        lights,
+        volumes,
+        depth,
+        strategy,
+        sampler,
+        None,
+        &mut no_training,
+    )
 }
 
 /// Choose the bounce direction and the pdf its contribution is divided by.
@@ -654,6 +739,7 @@ fn bounce_emission_weight(
     prev: &PrevVertex,
     lights: &LightList,
     hit: &crate::hittable::Hit,
+    strategy: SamplingStrategy,
 ) -> f32 {
     let (from, bounce_pdf) = match prev {
         PrevVertex::Surface(p) => {
@@ -667,7 +753,7 @@ fn bounce_emission_weight(
     match lights.find_by_material(hit.mat) {
         Some(light) => {
             let light_pdf = (light.pdf(from, hit.rec.p) / lights.count() as f32).max(1e-6);
-            utils::balance_heuristic(bounce_pdf, light_pdf)
+            strategy.bounce_weight(bounce_pdf, light_pdf)
         }
         None => 1.0,
     }
@@ -706,8 +792,12 @@ fn volume_nee(
     world: &dyn Hittable,
     volumes: &Volumes,
     lights: &LightList,
+    strategy: SamplingStrategy,
     sampler: &mut dyn Sampler,
 ) -> Vec3A {
+    if !strategy.samples_lights() {
+        return Vec3A::ZERO;
+    }
     let Some(light) = lights.sample(sampler) else {
         return Vec3A::ZERO;
     };
@@ -724,7 +814,7 @@ fn volume_nee(
     }
     let light_pdf = (light.pdf(p, light_point) / n_lights).max(1e-6);
     let phase_val = phase.pdf(wi.dot(light_dir_unit));
-    let weight = utils::balance_heuristic(light_pdf, phase_val);
+    let weight = strategy.light_weight(light_pdf, phase_val);
     light.emission() * phase_val * tr * weight / light_pdf
 }
 
@@ -742,6 +832,7 @@ fn trace_path(
     lights: &LightList,
     volumes: &Volumes,
     depth: i32,
+    strategy: SamplingStrategy,
     sampler: &mut dyn Sampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
@@ -779,7 +870,7 @@ fn trace_path(
                         }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
-                        last.next_emit_weight = bounce_emission_weight(p, lights, &hit);
+                        last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                     }
                 }
             }
@@ -832,7 +923,7 @@ fn trace_path(
                 let wi = ray.direction().normalize();
                 let dir = phase.sample(wi, sampler);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee = volume_nee(p, wi, &phase, world, volumes, lights, sampler);
+                let nee = volume_nee(p, wi, &phase, world, volumes, lights, strategy, sampler);
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -987,7 +1078,7 @@ fn trace_path(
                 if emitted.length_squared() > 0.0 {
                     let last = records.last_mut().expect("prev implies a record");
                     last.next_emit = atten * emitted;
-                    last.next_emit_weight = bounce_emission_weight(p, lights, &hit);
+                    last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
                 }
             }
             None => emit_here = emitted,
@@ -1005,7 +1096,11 @@ fn trace_path(
         // same expression for a bounce-hit light — both MIS weights must
         // describe the same strategy or emission is double-counted.
         let mut nee = Vec3A::ZERO;
-        if let Some(light) = lights.sample(sampler) {
+        if let Some(light) = strategy
+            .samples_lights()
+            .then(|| lights.sample(sampler))
+            .flatten()
+        {
             let n_lights = lights.count() as f32;
             let area_uv = sampler.next_2d();
             let light_point = light.sample_point(area_uv[0], area_uv[1]);
@@ -1043,7 +1138,7 @@ fn trace_path(
                         }
                         _ => brdf_pdf,
                     };
-                    let weight = utils::balance_heuristic(light_pdf, bounce_pdf);
+                    let weight = strategy.light_weight(light_pdf, bounce_pdf);
                     nee += light.emission() * brdf_value * cosine * shadow_tr * weight
                         / light_pdf;
                 }
@@ -1205,6 +1300,64 @@ struct Tile {
     pub y: usize,
     pub width: usize,
     pub height: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SamplingStrategy;
+
+    /// The invariant every strategy must keep: for a light both strategies
+    /// can reach, the NEE weight and the bounce-emission weight are a
+    /// partition of unity — anything else double-counts or loses emission.
+    #[test]
+    fn strategy_weights_partition_unity() {
+        let strategies = [
+            SamplingStrategy::PowerMis,
+            SamplingStrategy::BalanceMis,
+            SamplingStrategy::LightOnly,
+            SamplingStrategy::BsdfOnly,
+        ];
+        // (light_pdf, bounce_pdf) pairs spanning near-delta glossy spikes,
+        // balanced cases, and tiny-light spikes.
+        let pdf_pairs = [
+            (0.5, 0.5),
+            (1e-4, 1e4),
+            (1e4, 1e-4),
+            (3.0, 0.2),
+            (0.05, 40.0),
+        ];
+        for s in strategies {
+            for (light_pdf, bounce_pdf) in pdf_pairs {
+                let sum = s.light_weight(light_pdf, bounce_pdf)
+                    + s.bounce_weight(bounce_pdf, light_pdf);
+                assert!(
+                    (sum - 1.0).abs() < 1e-3,
+                    "{s:?}: weights sum to {sum} at pdfs ({light_pdf}, {bounce_pdf})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_strategy_modes_disable_the_other_side() {
+        assert!(!SamplingStrategy::BsdfOnly.samples_lights());
+        assert!(SamplingStrategy::LightOnly.samples_lights());
+        assert_eq!(SamplingStrategy::LightOnly.light_weight(1.0, 100.0), 1.0);
+        assert_eq!(SamplingStrategy::LightOnly.bounce_weight(100.0, 1.0), 0.0);
+        assert_eq!(SamplingStrategy::BsdfOnly.light_weight(100.0, 1.0), 0.0);
+        assert_eq!(SamplingStrategy::BsdfOnly.bounce_weight(1.0, 100.0), 1.0);
+    }
+
+    /// The power heuristic commits harder to the denser strategy than the
+    /// balance heuristic — the property that makes it the better default on
+    /// glossy surfaces.
+    #[test]
+    fn power_sharpens_balance() {
+        let (a, b) = (10.0, 1.0);
+        let balance = SamplingStrategy::BalanceMis.light_weight(a, b);
+        let power = SamplingStrategy::PowerMis.light_weight(a, b);
+        assert!(power > balance, "power {power} <= balance {balance}");
+    }
 }
 
 fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {

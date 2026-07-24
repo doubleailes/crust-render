@@ -1,0 +1,212 @@
+#usda 1.0
+(
+    doc = """The classic Veach MIS scene: four glossy metal plates of
+increasing roughness (top to bottom: 0.01, 0.05, 0.12, 0.25) reflect a row
+of four sphere lights of increasing radius (0.05 to 1.35, x3 steps) whose
+radiance scales as 1/radius^2 so every light carries the same power.
+Light sampling alone is good for rough plates / large lights but terrible
+for smooth plates / big lights seen through a narrow lobe; BSDF sampling
+alone is the exact opposite. Render with --strategy light / bsdf /
+balance / power to compare how MIS weights the two.
+After https://blog.yiningkarlli.com/2015/02/multiple-importance-sampling.html
+(Veach 1997, fig. 9.5)."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    # Camera at (0, 4, 12) pitched down ~14 degrees toward the plate stack.
+    def Camera "Cam"
+    {
+        float focalLength = 16
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 4, 12)
+        float xformOp:rotateX = -10
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # -------------------------------------------------------------------
+    # Lights: equal power, so radiance x radius^2 is constant (~21.9).
+    # Tinted so each reflection band is attributable to its light.
+    # -------------------------------------------------------------------
+    def SphereLight "LightTiny"
+    {
+        float inputs:radius = 0.05
+        color3f inputs:color = (1.0, 0.45, 0.35)
+        float inputs:intensity = 8748
+        double3 xformOp:translate = (-3.375, 6, -3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "LightSmall"
+    {
+        float inputs:radius = 0.15
+        color3f inputs:color = (1.0, 0.85, 0.45)
+        float inputs:intensity = 972
+        double3 xformOp:translate = (-1.125, 6, -3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "LightMedium"
+    {
+        float inputs:radius = 0.45
+        color3f inputs:color = (0.45, 1.0, 0.55)
+        float inputs:intensity = 108
+        double3 xformOp:translate = (1.125, 6, -3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "LightBig"
+    {
+        float inputs:radius = 1.35
+        color3f inputs:color = (0.4, 0.6, 1.0)
+        float inputs:intensity = 12
+        double3 xformOp:translate = (3.375, 6, -3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # -------------------------------------------------------------------
+    # Materials: mirror-like to rough metal, one per plate.
+    # -------------------------------------------------------------------
+    def Scope "Materials"
+    {
+        def Material "PlateSmoothest"
+        {
+            token outputs:surface.connect = </World/Materials/PlateSmoothest/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.9, 0.9)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.01
+                token outputs:surface
+            }
+        }
+
+        def Material "PlateSmooth"
+        {
+            token outputs:surface.connect = </World/Materials/PlateSmooth/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.9, 0.9)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.05
+                token outputs:surface
+            }
+        }
+
+        def Material "PlateRough"
+        {
+            token outputs:surface.connect = </World/Materials/PlateRough/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.9, 0.9)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.12
+                token outputs:surface
+            }
+        }
+
+        def Material "PlateRoughest"
+        {
+            token outputs:surface.connect = </World/Materials/PlateRoughest/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.9, 0.9, 0.9)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.25
+                token outputs:surface
+            }
+        }
+
+        def Material "Backdrop"
+        {
+            token outputs:surface.connect = </World/Materials/Backdrop/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.05, 0.05, 0.05)
+                float inputs:specularWeight = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    # -------------------------------------------------------------------
+    # Plates: world-space quads tilted so the half-vector between the
+    # camera (0,4,12) and the light-row center (0,6,-3) is each plate's
+    # normal — every plate mirrors the whole light row toward the camera.
+    # Top plate is the smoothest, bottom the roughest.
+    # -------------------------------------------------------------------
+    def Mesh "Plate0" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/PlateSmoothest>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4.5, 1.845, -0.896), (4.5, 1.845, -0.896), (4.5, 2.555, -2.104), (-4.5, 2.555, -2.104)]
+    }
+
+    def Mesh "Plate1" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/PlateSmooth>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4.5, 1.161, 1.158), (4.5, 1.161, 1.158), (4.5, 1.639, -0.158), (-4.5, 1.639, -0.158)]
+    }
+
+    def Mesh "Plate2" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/PlateRough>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4.5, 0.450, 3.184), (4.5, 0.450, 3.184), (4.5, 0.750, 1.816), (-4.5, 0.750, 1.816)]
+    }
+
+    def Mesh "Plate3" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/PlateRoughest>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4.5, -0.263, 5.197), (4.5, -0.263, 5.197), (4.5, -0.137, 3.803), (-4.5, -0.137, 3.803)]
+    }
+
+    # Dark diffuse backdrop so the reflection bands read against black-ish
+    # surroundings instead of the sky gradient.
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/Backdrop>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-12, -2.5, 14), (12, -2.5, 14), (12, -2.5, -10), (-12, -2.5, -10)]
+    }
+
+    def Mesh "BackWall" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Materials/Backdrop>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-12, -2.5, -10), (12, -2.5, -10), (12, 14, -10), (-12, 14, -10)]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (960, 540)
+        int crust:samplesPerPixel = 128
+        int crust:maxDepth = 8
+        int crust:minSamplesPerPixel = 32
+        # Adaptive sampling off: every pixel takes the full budget, so the
+        # noise you see is exactly each strategy's variance.
+        float crust:varianceThreshold = 0.0
+        int crust:frame = 0
+        # balance | power | light | bsdf — the article's balance heuristic.
+        # Override per render with --strategy.
+        token crust:samplingStrategy = "balance"
+    }
+}
