@@ -187,6 +187,51 @@ impl OpenPBR {
             ..OpenPBR::default()
         }
     }
+
+    /// The unified interior medium of the closed surface, per Adobe's
+    /// reference (`openpbr_prepare_volume`): the transmission volume
+    /// (extinction from color/depth plus `transmission_scatter`) and the
+    /// subsurface volume (van de Hulst albedo inversion) blended by their
+    /// relative fractions of the dielectric base — transmission supersedes
+    /// subsurface, so the fractions are `t` and `(1 − t)·s`. Attached to
+    /// rays refracting into the front face; `None` when the interior
+    /// neither absorbs nor scatters (zero-depth clear glass), so inert
+    /// interiors skip medium tracking entirely.
+    fn interior_medium(&self) -> Option<Arc<Medium>> {
+        let trans_frac = self.transmission_weight;
+        let sss_frac = (1.0 - self.transmission_weight) * self.subsurface_weight;
+        let total = trans_frac + sss_frac;
+        if total <= 0.0 {
+            return None;
+        }
+        let trans_volume = Medium::from_transmission(
+            self.transmission_color,
+            self.transmission_depth,
+            self.transmission_scatter,
+            self.transmission_scatter_anisotropy,
+        );
+        let medium = if sss_frac > 0.0 {
+            let sss_volume = Medium::from_subsurface(
+                self.subsurface_color,
+                self.subsurface_radius,
+                self.subsurface_radius_scale,
+                self.subsurface_scatter_anisotropy,
+            );
+            Medium::blend(
+                &trans_volume,
+                trans_frac / total,
+                &sss_volume,
+                sss_frac / total,
+            )
+        } else {
+            trans_volume
+        };
+        if medium.sigma_t_max() <= 1e-6 {
+            None
+        } else {
+            Some(Arc::new(medium))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -856,14 +901,11 @@ impl Material for OpenPBR {
                 let l_world = frame.to_world(l_local);
                 let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
                 let brdf = eval_all(self, v_local, l_local, rec.front_face);
-                let ray = if rec.front_face {
-                    let medium = Arc::new(Medium::from_transmission(
-                        self.transmission_color,
-                        self.transmission_depth,
-                    ));
-                    Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
-                } else {
-                    Ray::new(rec.p + l_world * 1e-4, l_world)
+                let ray = match (rec.front_face, self.interior_medium()) {
+                    (true, Some(medium)) => {
+                        Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
+                    }
+                    _ => Ray::new(rec.p + l_world * 1e-4, l_world),
                 };
                 return Some(ScatterSample {
                     ray,
@@ -965,11 +1007,9 @@ impl Material for OpenPBR {
         // origin offset and interior-medium tagging as a BSDF-sampled one.
         if transmission_is_continuous(self) && rec.normal.dot(wi) < 0.0 {
             if rec.front_face {
-                let medium = Arc::new(Medium::from_transmission(
-                    self.transmission_color,
-                    self.transmission_depth,
-                ));
-                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, medium);
+                if let Some(medium) = self.interior_medium() {
+                    return Ray::new_in_medium(rec.p + wi * 1e-4, wi, medium);
+                }
             }
             return Ray::new(rec.p + wi * 1e-4, wi);
         }
@@ -1703,9 +1743,141 @@ mod tests {
         assert!((r - plain).abs().max_element() > 1e-3, "film had no effect");
     }
 
+    /// Draw transmission samples until one refracts into the surface, and
+    /// return the interior medium it carries (None if the ray has none).
+    fn sample_interior_medium(m: &OpenPBR) -> Option<Arc<Medium>> {
+        let mut sampler = s();
+        let mut rec = HitRecord::new();
+        rec.p = Vec3A::ZERO;
+        rec.normal = Vec3A::Z;
+        rec.front_face = true;
+        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        for _ in 0..256 {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+                if sample.ray.direction().z < 0.0 {
+                    return sample.ray.medium().cloned();
+                }
+            }
+        }
+        panic!("material never transmitted");
+    }
+
+    #[test]
+    fn transmission_scatter_wires_into_interior_medium() {
+        // transmission_scatter/depth becomes the interior σₛ, the extinction
+        // stays -ln(color)/depth, and the anisotropy carries through.
+        let m = OpenPBR {
+            specular_roughness: 0.25,
+            transmission_color: Vec3A::new(0.5, 0.7, 0.9),
+            transmission_depth: 2.0,
+            // Kept below the per-channel extinction so σₐ = σₜ − σₛ stays
+            // non-negative without triggering the spec's gray shift.
+            transmission_scatter: Vec3A::new(0.2, 0.2, 0.1),
+            transmission_scatter_anisotropy: 0.5,
+            ..OpenPBR::glass(1.5)
+        };
+        let medium = sample_interior_medium(&m).expect("scattering glass must carry a medium");
+        assert!(medium.is_scattering());
+        let expected_sigma_s = Vec3A::new(0.2, 0.2, 0.1) / 2.0;
+        assert!(
+            (medium.sigma_s - expected_sigma_s).abs().max_element() < 1e-5,
+            "sigma_s {:?}",
+            medium.sigma_s
+        );
+        let expected_ext = Vec3A::new(-0.5f32.ln(), -0.7f32.ln(), -0.9f32.ln()) / 2.0;
+        let ext = medium.sigma_a + medium.sigma_s;
+        assert!(
+            (ext - expected_ext).abs().max_element() < 1e-5,
+            "extinction {ext:?} != {expected_ext:?}"
+        );
+        assert_eq!(medium.g, 0.5);
+    }
+
+    #[test]
+    fn transmission_scatter_negative_absorption_shifts_to_gray() {
+        // White transmission color → zero extinction; with scatter > 0 the
+        // raw σₐ = -σₛ is negative, and the spec shifts it by enough gray to
+        // be non-negative.
+        let m = Medium::from_transmission(Vec3A::ONE, 1.0, Vec3A::new(0.1, 0.2, 0.4), 0.0);
+        assert!(m.sigma_a.min_element() >= 0.0, "σₐ {:?}", m.sigma_a);
+        // The largest-scatter channel ends at zero absorption after the shift.
+        assert!(m.sigma_a.z.abs() < 1e-6, "σₐ {:?}", m.sigma_a);
+        assert!(m.sigma_a.x > m.sigma_a.y && m.sigma_a.y > m.sigma_a.z);
+    }
+
+    #[test]
+    fn van_de_hulst_inversion_boosts_single_scatter_albedo() {
+        // An observed (multi-scattering) albedo of 0.5 requires a
+        // single-scattering albedo of ≈ 0.91 (van de Hulst); the naive
+        // σₛ = σₜ·A mapping would give 0.5 and badly under-scatter.
+        let m = Medium::from_subsurface(Vec3A::splat(0.5), 1.0, Vec3A::ONE, 0.0);
+        let a = m.albedo();
+        assert!(
+            (a.x - 0.9117).abs() < 5e-3,
+            "α_ss {a} for observed 0.5, expected ≈ 0.9117"
+        );
+        // Monotonic in the observed albedo, saturating toward 1.
+        let hi = Medium::from_subsurface(Vec3A::splat(0.95), 1.0, Vec3A::ONE, 0.0).albedo();
+        let lo = Medium::from_subsurface(Vec3A::splat(0.05), 1.0, Vec3A::ONE, 0.0).albedo();
+        assert!(hi.x > 0.99, "α_ss({}) = {}", 0.95, hi.x);
+        assert!(lo.x < a.x && a.x < hi.x);
+        // Forward anisotropy raises the required single-scattering albedo.
+        let fwd = Medium::from_subsurface(Vec3A::splat(0.5), 1.0, Vec3A::ONE, 0.9).albedo();
+        assert!(fwd.x > a.x, "g=0.9 albedo {} not > g=0 {}", fwd.x, a.x);
+        // Extinction is the reciprocal mean free path.
+        assert!(((m.sigma_a + m.sigma_s).x - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn interior_medium_blends_subsurface_into_glass() {
+        // Transmission + subsurface: the interior blends both volumes by
+        // their dielectric fractions (t and (1-t)·s), and the phase
+        // anisotropy comes from the scattering (subsurface) component.
+        let m = OpenPBR {
+            specular_roughness: 0.25,
+            transmission_depth: 1.0,
+            subsurface_weight: 1.0,
+            subsurface_color: Vec3A::splat(0.5),
+            subsurface_radius: 0.1,
+            subsurface_radius_scale: Vec3A::ONE,
+            subsurface_scatter_anisotropy: 0.3,
+            ..OpenPBR::glass(1.5)
+        };
+        let m = OpenPBR {
+            transmission_weight: 0.5,
+            ..m
+        };
+        let medium = sample_interior_medium(&m).expect("sss interior must carry a medium");
+        // Clear transmission volume contributes nothing; the sss half does.
+        assert!(medium.is_scattering());
+        assert!((medium.g - 0.3).abs() < 1e-5, "g {}", medium.g);
+        // Half the sss volume's scattering (sss fraction (1-0.5)·1 = 0.5).
+        let full_sss =
+            Medium::from_subsurface(Vec3A::splat(0.5), 0.1, Vec3A::ONE, 0.3);
+        assert!(
+            (medium.sigma_s - full_sss.sigma_s * 0.5).abs().max_element() < 1e-3,
+            "sigma_s {:?}",
+            medium.sigma_s
+        );
+    }
+
+    #[test]
+    fn inert_glass_attaches_no_medium() {
+        // Zero-depth clear glass has nothing to absorb or scatter: the
+        // refracted ray should carry no medium at all.
+        let m = OpenPBR {
+            specular_roughness: 0.25,
+            ..OpenPBR::glass(1.5)
+        };
+        assert!(
+            sample_interior_medium(&m).is_none(),
+            "inert interior should not carry a medium"
+        );
+    }
+
     #[test]
     fn medium_transmittance_full_at_zero_depth() {
-        let m = Medium::from_transmission(Vec3A::new(0.5, 0.5, 0.5), 0.0);
+        let m = Medium::from_transmission(Vec3A::new(0.5, 0.5, 0.5), 0.0, Vec3A::ZERO, 0.0);
         let t = m.transmittance(1.0);
         // Zero-depth medium: no absorption, transmittance identically 1.
         assert!((t - Vec3A::ONE).length() < 1e-4);
@@ -1713,7 +1885,7 @@ mod tests {
 
     #[test]
     fn medium_transmittance_attenuates_with_distance() {
-        let m = Medium::from_transmission(Vec3A::new(0.5, 0.7, 0.9), 1.0);
+        let m = Medium::from_transmission(Vec3A::new(0.5, 0.7, 0.9), 1.0, Vec3A::ZERO, 0.0);
         let t_short = m.transmittance(0.1);
         let t_long = m.transmittance(2.0);
         assert!(t_long.x < t_short.x);
