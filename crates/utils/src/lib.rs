@@ -5,4 +5,4 @@ pub use common::{
     random_cosine_direction, random_in_unit_disk, random_range, random_range3, random_unit_vector,
     random_vec3_unit_sphere, random2, random3, uniform_ball, uniform_sphere,
 };
-pub use common::{balance_heuristic, clamp};
+pub use common::{balance_heuristic, clamp, power_heuristic};

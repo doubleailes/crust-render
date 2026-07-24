@@ -1,6 +1,7 @@
 use clap::Parser;
 use crust_core::Buffer;
 use crust_core::Renderer;
+use crust_core::SamplingStrategy;
 use crust_core::Scene;
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
@@ -38,6 +39,34 @@ struct Cli {
     /// Samples per pixel. Overrides the scene / default value when set.
     #[arg(short, long)]
     samples: Option<u32>,
+    /// How light sampling and BSDF sampling combine. Overrides the scene's
+    /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
+    /// strategy alone to visualize what MIS balances between.
+    #[arg(long, value_enum)]
+    strategy: Option<Strategy>,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, Copy)]
+enum Strategy {
+    /// β=2 power-heuristic MIS (default)
+    Power,
+    /// Balance-heuristic MIS
+    Balance,
+    /// Light sampling (NEE) only
+    Light,
+    /// BSDF sampling only
+    Bsdf,
+}
+
+impl From<Strategy> for SamplingStrategy {
+    fn from(s: Strategy) -> Self {
+        match s {
+            Strategy::Power => SamplingStrategy::PowerMis,
+            Strategy::Balance => SamplingStrategy::BalanceMis,
+            Strategy::Light => SamplingStrategy::LightOnly,
+            Strategy::Bsdf => SamplingStrategy::BsdfOnly,
+        }
+    }
 }
 
 fn get_logger_level(level: LoggerLevel) -> Level {
@@ -110,10 +139,13 @@ fn main() {
     let world = scene.world;
     let lights = scene.lights;
     let volumes = scene.volumes;
-    let settings = match cli.samples {
+    let mut settings = match cli.samples {
         Some(spp) => scene.settings.with_samples_per_pixel(spp),
         None => scene.settings,
     };
+    if let Some(strategy) = cli.strategy {
+        settings = settings.with_sampling_strategy(strategy.into());
+    }
     debug!("Render Settings: {:#?}", settings);
     // Timer
     let start = Instant::now();

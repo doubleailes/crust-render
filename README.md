@@ -23,7 +23,9 @@ Completely in a vibe coding mood.
 - 🔁 **Recursive Ray Scattering** with depth control
 - 💡 **Multiple Light Sources**
   - Emissive materials
-  - Light sampling & MIS (Multiple Importance Sampling)
+  - Light sampling & MIS (Multiple Importance Sampling) with selectable
+    strategy: power / balance heuristic, or light-only / bsdf-only for
+    diagnosis (`samples/veach_mis.usda` is the classic comparison scene)
 - ⚙️ **Material System**
   - Trait-based (`Material`), with OpenPBR as the single surface shader
   - Microfacet GGX BRDF with Fresnel and geometry terms
@@ -100,6 +102,7 @@ def RenderSettings "settings" {
     bool crust:pathGuiding = false
     int crust:guidingTrainIterations = 8
     float crust:guidingProb = 0.5
+    token crust:samplingStrategy = "power"   # power | balance | light | bsdf
 }
 ```
 
@@ -145,7 +148,49 @@ thin-walled transmission (a genuinely singular lobe) and volume scattering
 are excluded; untrained regions fall back to plain BSDF sampling, so the
 estimator stays unbiased everywhere.
 
+### 🎯 Multiple importance sampling
+
+Direct lighting is estimated by two strategies at once — light sampling
+(next-event estimation) and BSDF sampling — combined with a Veach MIS
+heuristic. Neither strategy works everywhere: light sampling collapses on
+near-mirror surfaces (the sampled direction almost never lands inside the
+narrow lobe), BSDF sampling collapses on rough surfaces lit by small lights
+(the sampled lobe almost never hits the light). MIS weights each sample by
+how well its strategy could have produced it, so every regime stays clean.
+
+`crust:samplingStrategy` (or the `--strategy` CLI override) selects how the
+two sides combine:
+
+- `power` — β=2 power-heuristic MIS, the default
+- `balance` — balance-heuristic MIS
+- `light` — light sampling only (NEE at full weight, bounce-hit emission
+  dropped)
+- `bsdf` — BSDF sampling only (no shadow rays, bounce-hit emission at full
+  weight)
+
+All four are unbiased; they differ only in variance. `light` and `bsdf`
+exist to visualize what MIS balances between, after
+[Veach's classic scene](https://blog.yiningkarlli.com/2015/02/multiple-importance-sampling.html):
+
+```bash
+# four glossy plates (roughness 0.01 → 0.25) × four sphere lights of equal
+# power (radius 0.05 → 1.35) — render one strategy at a time and compare
+cargo run --release -- -i samples/veach_mis.usda -o veach_light.exr --strategy light
+cargo run --release -- -i samples/veach_mis.usda -o veach_bsdf.exr  --strategy bsdf
+cargo run --release -- -i samples/veach_mis.usda -o veach_mis.exr   --strategy power
+```
+
+Light-only renders the rough plates cleanly but leaves the smooth plates'
+reflections dark and firefly-ridden; bsdf-only is the exact mirror image;
+MIS matches the cleaner of the two everywhere.
+
 ### CLI
 
 ```bash
-cargo run --release -- --samples-per-pixel 200 --max-depth 50
+cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
+    -o out.exr                         # output EXR (+ tone-mapped PNG next to it)
+    -s 256                             # override samples per pixel
+    --strategy power                   # power | balance | light | bsdf
+    -b                                 # bucket (16×16 tile) rendering
+    -l debug                           # log level
+```

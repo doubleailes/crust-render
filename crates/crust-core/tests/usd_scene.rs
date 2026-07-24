@@ -125,6 +125,34 @@ fn loads_rectlight_usda() {
 }
 
 #[test]
+fn loads_veach_mis_usda() {
+    let scene =
+        Scene::from_usd(&sample("veach_mis.usda")).expect("failed to open veach_mis.usda");
+
+    // 4 plate meshes + floor + back wall + 4 light spheres.
+    assert_eq!(
+        scene.world.count(),
+        10,
+        "expected 10 hittables (4 plates, floor, wall, 4 light spheres), got {}",
+        scene.world.count()
+    );
+    assert_eq!(
+        scene.lights.count(),
+        4,
+        "expected 4 sphere lights, got {}",
+        scene.lights.count()
+    );
+    assert_eq!(scene.settings.get_dimensions(), (960, 540));
+    // The scene authors the article's balance heuristic; the token must
+    // round-trip through `crust:samplingStrategy` (default is PowerMis, so
+    // this fails if parsing silently falls back).
+    assert_eq!(
+        scene.settings.sampling_strategy(),
+        crust_core::SamplingStrategy::BalanceMis
+    );
+}
+
+#[test]
 fn loads_fog_usda() {
     let scene = Scene::from_usd(&sample("fog.usda")).expect("failed to open fog.usda");
 

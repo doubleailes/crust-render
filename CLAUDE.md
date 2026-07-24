@@ -62,7 +62,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
    records into the radiance estimate and emits guiding training samples (which need
    the radiance from the rest of the path — the reason for the backward pass). Features:
-   - **MIS** combining direct light sampling and BRDF sampling via `balance_heuristic`.
+   - **MIS** combining direct light sampling and BRDF sampling. The heuristic is
+     selectable via `SamplingStrategy` (`crust:samplingStrategy` attr / `--strategy`
+     flag): `power` (β=2 power heuristic — the default and historical behavior),
+     `balance`, plus diagnostic single-strategy modes `light` (NEE at full weight,
+     bounce-hit emission on light-list lights dropped) and `bsdf` (no shadow rays,
+     bounce emission at full weight). All four are unbiased — the strategy's
+     `light_weight`/`bounce_weight` pair is a partition of unity (pinned by a unit
+     test); route BOTH sides of any new weight through the strategy or emission gets
+     double-counted. `utils` now has both `balance_heuristic` (true `a/(a+b)` —
+     historically this name computed the power formula) and `power_heuristic`
+     (`a²/(a²+b²)`). `samples/veach_mis.usda` is the classic Veach comparison scene.
      Emission at a bounce-arrival vertex is owned by the *previous* vertex's record
      (`next_emit` + MIS weight); counting it at the vertex itself too would double it.
    - **Russian roulette** from the 4th vertex on (`RR_START_BOUNCE`): survival tracks
@@ -200,8 +210,9 @@ Xform hierarchy into world matrices. Schema mapping:
   `samples/smoke.usda` (noise plume + emissive ember + tiny explicit grid).
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
-  `crust:varianceThreshold`, `crust:frame`). Missing attrs fall back to defaults (128 spp,
-  depth 32, 640×360) defined as consts at the top of the file.
+  `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
+  `balance` | `light` | `bsdf`). Missing attrs fall back to defaults (128 spp,
+  depth 32, 640×360, power MIS) defined as consts at the top of the file.
 
 Note: `openusd` is a hard dependency and USD is always compiled in. Docstrings in `scene.rs`
 that mention a `usd` **feature flag** are stale — there is no such feature.
