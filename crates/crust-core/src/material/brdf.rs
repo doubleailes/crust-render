@@ -5,10 +5,6 @@ pub fn fresnel_schlick(cos_theta: f32, f0: Vec3A) -> Vec3A {
     f0 + (Vec3A::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
 }
 
-pub fn schlick_weight(cos_theta: f32) -> f32 {
-    (1.0 - cos_theta).powf(5.0)
-}
-
 // Clearcoat Fresnel approx
 pub fn fresnel_schlick_scalar(cos_theta: f32, f0: f32) -> f32 {
     f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
