@@ -6,13 +6,16 @@
 //! sample volume scattering events for participating volumes.
 //!
 //! For an OpenPBR transmissive surface, the medium is derived from
-//! `transmission_color` and `transmission_depth`:
+//! `transmission_color`, `transmission_depth` and `transmission_scatter`:
 //!
-//!   σₐ = -ln(transmission_color) / max(transmission_depth, ε)
+//!   σₜ = -ln(transmission_color) / depth,   σₛ = transmission_scatter / depth
 //!
-//! `transmission_depth = 0` collapses to a purely tinting delta transmission
-//! (Beer-Lambert becomes identity), which is what artists usually want for
-//! thin coloured glass.
+//! with `σₐ = σₜ − σₛ` shifted by enough gray to stay non-negative (per the
+//! OpenPBR spec). `transmission_depth = 0` collapses to a purely tinting
+//! delta transmission (the tint applies at the interface instead), which is
+//! what artists usually want for thin coloured glass. Subsurface interiors
+//! invert the observed albedo to a single-scattering albedo with the van de
+//! Hulst mapping.
 
 use glam::Vec3A;
 
@@ -28,35 +31,83 @@ pub struct Medium {
 }
 
 impl Medium {
-    /// Build a Medium from OpenPBR-style tint + depth. `depth = 0` yields
-    /// zero absorption (identity transmittance regardless of `tint`).
-    pub fn from_transmission(tint: Vec3A, depth: f32) -> Self {
-        let sigma_a = if depth <= 1e-6 {
-            Vec3A::ZERO
-        } else {
-            // Per-channel: σₐ = -ln(tint) / depth, clamped so a fully-black
-            // channel doesn't blow up.
-            let t = tint.max(Vec3A::splat(1e-4)).min(Vec3A::ONE);
-            Vec3A::new(-t.x.ln(), -t.y.ln(), -t.z.ln()) / depth
-        };
+    /// Build a Medium from OpenPBR-style transmission parameters. The color
+    /// sets the *extinction* (`σₜ = -ln(color)/depth`), `scatter` sets the
+    /// scattering coefficient (`σₛ = scatter/depth` — honey, murky water,
+    /// milky glass), and the absorption is the difference, shifted by
+    /// enough gray to stay non-negative per the OpenPBR spec. `depth = 0`
+    /// yields an inert medium (the tint applies at the interface instead).
+    pub fn from_transmission(tint: Vec3A, depth: f32, scatter: Vec3A, anisotropy: f32) -> Self {
+        if depth <= 1e-6 {
+            return Self {
+                sigma_a: Vec3A::ZERO,
+                sigma_s: Vec3A::ZERO,
+                g: 0.0,
+            };
+        }
+        // Per-channel extinction, clamped so a fully-black channel doesn't
+        // blow up.
+        let t = tint.clamp(Vec3A::splat(1e-4), Vec3A::ONE);
+        let extinction = Vec3A::new(-t.x.ln(), -t.y.ln(), -t.z.ln()) / depth;
+        let sigma_s = scatter.max(Vec3A::ZERO) / depth;
+        let mut sigma_a = extinction - sigma_s;
+        // "If any component of σₐ is negative, σₐ is shifted by enough gray
+        // to make all the components positive" (OpenPBR spec).
+        let min = sigma_a.min_element();
+        if min < 0.0 {
+            sigma_a -= Vec3A::splat(min);
+        }
         Self {
             sigma_a,
-            sigma_s: Vec3A::ZERO,
-            g: 0.0,
+            sigma_s,
+            g: anisotropy.clamp(-0.999, 0.999),
         }
     }
 
-    /// Build a scattering Medium for subsurface scattering — the
-    /// "artist-friendly" parameterisation from Chiang et al. 2016 as adapted
-    /// by OpenPBR (`subsurface_color` = albedo, `radius * radius_scale` =
-    /// mean free path per channel).
+    /// Build a scattering Medium for subsurface scattering from OpenPBR's
+    /// artist-friendly parameters: `subsurface_color` is the *observed*
+    /// (multiple-scattering) albedo and `radius · radius_scale` the
+    /// per-channel mean free path. The observed albedo is inverted to the
+    /// single-scattering albedo with the van de Hulst mapping used by the
+    /// OpenPBR spec and Adobe's reference — the naive `σₛ = σₜ·A` mapping
+    /// badly under-scatters (an observed albedo of 0.5 needs a
+    /// single-scattering albedo of ≈ 0.91).
     pub fn from_subsurface(albedo: Vec3A, radius: f32, radius_scale: Vec3A, g: f32) -> Self {
-        let mfp = (Vec3A::splat(radius) * radius_scale).max(Vec3A::splat(1e-4));
+        let mfp = (Vec3A::splat(radius) * radius_scale).max(Vec3A::splat(1e-3));
         let sigma_t = Vec3A::ONE / mfp;
-        let a = albedo.clamp(Vec3A::splat(1e-4), Vec3A::splat(0.999));
-        let sigma_s = sigma_t * a;
+        let g = g.clamp(-0.999, 0.999);
+        let a = albedo.clamp(Vec3A::ZERO, Vec3A::ONE);
+
+        // Van de Hulst inversion (the spec's anisotropy-compensated form):
+        //   s(A) = 4.09712 + 4.20863·A − √(9.59217 + 41.6808·A + 17.7126·A²)
+        //   α_ss = (1 − s²) / (1 − g·s²)
+        let inner = Vec3A::splat(9.59217) + 41.6808 * a + 17.7126 * a * a;
+        let sqrt_inner = Vec3A::new(inner.x.sqrt(), inner.y.sqrt(), inner.z.sqrt());
+        let s = Vec3A::splat(4.09712) + 4.20863 * a - sqrt_inner;
+        let s2 = s * s;
+        let alpha_ss =
+            ((Vec3A::ONE - s2) / (Vec3A::ONE - g * s2)).clamp(Vec3A::ZERO, Vec3A::ONE);
+
+        let sigma_s = sigma_t * alpha_ss;
         let sigma_a = sigma_t - sigma_s;
         Self { sigma_a, sigma_s, g }
+    }
+
+    /// Weighted blend of two media (Adobe reference `openpbr_add_volumes`):
+    /// coefficients combine linearly; the phase anisotropy is the
+    /// scattering-weighted mixture of the two, so a non-scattering
+    /// component never drags `g` toward zero.
+    pub fn blend(a: &Medium, wa: f32, b: &Medium, wb: f32) -> Medium {
+        let sigma_a = a.sigma_a * wa + b.sigma_a * wb;
+        let sigma_s = a.sigma_s * wa + b.sigma_s * wb;
+        let avg = |v: Vec3A| (v.x + v.y + v.z) / 3.0;
+        let (sa, sb) = (avg(a.sigma_s) * wa, avg(b.sigma_s) * wb);
+        let g = if sa + sb > 1e-8 {
+            (a.g * sa + b.g * sb) / (sa + sb)
+        } else {
+            0.0
+        };
+        Medium { sigma_a, sigma_s, g }
     }
 
     /// Beer–Lambert transmittance across a segment of length `t`.
