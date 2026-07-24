@@ -507,22 +507,48 @@ fn eval_coat(
     Vec3A::splat(m.coat_weight * f * brdf)
 }
 
+/// One-way passage factor through the coat for a direction making cosine
+/// `cos_theta` with the normal — the Adobe reference's
+/// `openpbr_coat_passage_color_multiplier × (1 − proportion reflected)`.
+/// The authored `coat_color` is defined as the *round-trip* absorption at
+/// normal incidence, so a single passage applies `√coat_color` raised to
+/// the relative in-coat path length `1/cos θ_refracted` (Snell at the coat
+/// IOR — slanted passages absorb more). The Fresnel term removes the
+/// energy the coat interface reflected away from this direction's passage.
+/// Both terms fade with `coat_weight` for partial coverage.
+fn coat_passage(m: &OpenPBR, cos_theta: f32) -> Vec3A {
+    let cos_i = cos_theta.clamp(1e-4, 1.0);
+    // Refracted angle inside the coat.
+    let eta = m.coat_ior.max(1e-4);
+    let sin2_t = (1.0 - cos_i * cos_i) / (eta * eta);
+    let cos_t = (1.0 - sin2_t).max(0.0).sqrt();
+    let path_length = 1.0 / cos_t.max(1e-3);
+
+    let one_passage = m
+        .coat_color
+        .clamp(Vec3A::ZERO, Vec3A::ONE)
+        .powf(0.5 * path_length);
+    let absorb = Vec3A::ONE.lerp(one_passage, m.coat_weight);
+
+    let f_coat = fresnel_schlick_scalar(cos_i, f0_from_ior(m.coat_ior));
+    absorb * (1.0 - m.coat_weight * f_coat)
+}
+
 /// Directional attenuation the coat imposes on the layers beneath it:
-/// Fresnel-weighted transmission * coat absorption tint * multi-bounce
-/// darkening factor. Applied as a per-channel multiplier to
-/// (base_specular + base_diffuse). The tint term is the reference's
-/// `coat_attenuation` node — `lerp(white, coat_color, coat_weight)` — which
-/// puts `coat_color` on light transmitted through the coat, not on the
-/// coat's own reflection.
-fn coat_attenuation(m: &OpenPBR, cos_theta_h: f32) -> Vec3A {
+/// light passes through the coat twice — in along the view direction, out
+/// along the light direction — and each passage pays its own
+/// Fresnel-weighted transmission and view-dependent absorption
+/// (`coat_passage`), times the multi-bounce darkening factor. Applied as a
+/// per-channel multiplier to (base_specular + base_diffuse). This is the
+/// incoming × outgoing base-layer scale of the Adobe reference coating
+/// lobe; at normal incidence the two passages recover exactly the authored
+/// round-trip `coat_color`.
+fn coat_attenuation(m: &OpenPBR, cos_v: f32, cos_l: f32) -> Vec3A {
     if m.coat_weight <= 0.0 {
         return Vec3A::ONE;
     }
-    let f_coat = fresnel_schlick_scalar(cos_theta_h, f0_from_ior(m.coat_ior));
-    let transmit = 1.0 - m.coat_weight * f_coat;
-    let absorb = Vec3A::ONE.lerp(m.coat_color, m.coat_weight);
     let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_darkening);
-    Vec3A::splat(transmit) * absorb * dark
+    coat_passage(m, cos_v) * coat_passage(m, cos_l) * dark
 }
 
 fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
@@ -559,8 +585,9 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
 
     // Layered composition (top→bottom): fuzz over coat over base.
     //  throughput = fuzz + (1 - fuzz_weight) · (coat + coat_atten · base)
-    let v_dot_h = v_local.dot(h_local).max(0.0);
-    let coat_atten = coat_attenuation(m, v_dot_h);
+    // The coat attenuation is per-direction (view in, light out), evaluated
+    // against the normal cosines, not the half-vector.
+    let coat_atten = coat_attenuation(m, v_local.z, l_local.z);
     let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
     fuzz + base_atten * (coat + coat_atten * (diffuse + specular))
 }
@@ -1020,22 +1047,18 @@ impl Material for OpenPBR {
         self.emission_color * self.emission_luminance
     }
 
-    /// Emission seen through the coat, per the reference's `emission_edf`
-    /// mix: the coated branch tints the EDF by `coat_color` and modulates it
-    /// by a `generalized_schlick_edf` with `color0 = 1 − coat_F0`,
-    /// `color90 = 0`, exponent 5 — i.e. `(1 − F0)(1 − (1 − μ)⁵)` — the coat's
-    /// view-dependent Fresnel transmission. Blended with the uncoated EDF by
-    /// `coat_weight`.
+    /// Emission seen through the coat: one outbound passage of the Adobe
+    /// reference coating model (`openpbr_compute_emission` scales emission
+    /// by the view-side base-layer factor) — `√coat_color` raised to the
+    /// refracted path length, the coat's directional Fresnel transmission,
+    /// and the multi-bounce darkening, all fading with `coat_weight`.
     fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
         let uncoated = self.emission_color * self.emission_luminance;
         if self.coat_weight <= 0.0 {
             return uncoated;
         }
-        let f0_coat = f0_from_ior(self.coat_ior);
-        let mu = cos_theta_o.clamp(0.0, 1.0);
-        let schlick_transmit = (1.0 - f0_coat) * (1.0 - schlick_weight(mu));
-        let coated = uncoated * self.coat_color * schlick_transmit;
-        uncoated.lerp(coated, self.coat_weight)
+        let dark = coat_darkening_factor(self.base_color, self.coat_ior, self.coat_darkening);
+        uncoated * coat_passage(self, cos_theta_o) * dark
     }
 }
 
@@ -1688,12 +1711,56 @@ mod tests {
             (c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6,
             "coat reflection tinted: {c}"
         );
-        // The substrate attenuation carries the coat_color absorption.
-        let atten = coat_attenuation(&m, 0.9);
+        // The substrate attenuation carries the coat_color absorption. At
+        // normal incidence the in + out passages (√color each) recover the
+        // authored round-trip color exactly.
+        let atten = coat_attenuation(&m, 1.0, 1.0);
         assert!(
             (atten.x / atten.y - m.coat_color.x / m.coat_color.y).abs() < 1e-3,
             "substrate attenuation not coat_color-tinted: {atten}"
         );
+    }
+
+    #[test]
+    fn coat_round_trip_recovers_authored_color() {
+        // coat_color is the round-trip absorption at normal incidence: the
+        // two passages must give exactly color · (1 − F0)² there.
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(0.9, 0.4, 0.16),
+            coat_darkening: 0.0,
+            ..OpenPBR::default()
+        };
+        let atten = coat_attenuation(&m, 1.0, 1.0);
+        let f0 = f0_from_ior(m.coat_ior);
+        let expected = m.coat_color * (1.0 - f0) * (1.0 - f0);
+        assert!(
+            (atten - expected).abs().max_element() < 1e-4,
+            "{atten} != {expected}"
+        );
+    }
+
+    #[test]
+    fn coat_passage_darkens_and_saturates_at_grazing() {
+        // Slanted passages travel further through the coat (1/cosθ_t) and
+        // lose more to Fresnel: every channel dims, and the tinted channel
+        // dims relatively faster (color saturates with angle).
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::new(0.9, 0.3, 0.3),
+            ..OpenPBR::default()
+        };
+        let p_n = coat_passage(&m, 1.0);
+        let p_g = coat_passage(&m, 0.2);
+        assert!(p_g.x < p_n.x && p_g.y < p_n.y, "{p_g} not dimmer than {p_n}");
+        assert!(
+            p_g.y / p_g.x < p_n.y / p_n.x,
+            "tinted channel not saturating with angle: {p_g} vs {p_n}"
+        );
+        // And the full attenuation is view-dependent through both passages.
+        let a_n = coat_attenuation(&m, 1.0, 1.0);
+        let a_g = coat_attenuation(&m, 0.2, 0.2);
+        assert!(a_g.y < a_n.y);
     }
 
     #[test]
@@ -1713,8 +1780,12 @@ mod tests {
         let e_n = coated.emitted_directional(1.0);
         // Dimmed by the coat's Fresnel transmission (1 - F0 at normal).
         assert!(e_n.x < 100.0, "coated emission not dimmed: {e_n}");
-        // Tinted by coat_color.
-        assert!((e_n.y / e_n.x - 0.2).abs() < 1e-3, "not coat-tinted: {e_n}");
+        // Tinted by one outbound coat passage: √coat_color at normal
+        // incidence (the authored color is the round-trip absorption).
+        assert!(
+            (e_n.y / e_n.x - 0.2f32.sqrt()).abs() < 1e-3,
+            "not coat-tinted: {e_n}"
+        );
         // Grazing angles transmit less than normal incidence.
         let e_g = coated.emitted_directional(0.05);
         assert!(e_g.x < e_n.x, "grazing {e_g} not dimmer than normal {e_n}");
