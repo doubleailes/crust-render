@@ -18,14 +18,15 @@ cargo run --release -- -i samples/cornellbox.usda
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
 
-# CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level), -b/--bucket
+# CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
+# -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf)
 
 # Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
 cargo test
 cargo test -p crust-core loads_cornellbox_usda     # run a single test by name
 
 # Benchmarks (criterion)
-cargo bench -p crust-core            # bench targets: "vec3 dot", "simple world"
+cargo bench -p crust-core            # bench targets: "vec3 dot", "simple world", "simple world guided"
 
 # CI runs: cargo build --verbose && cargo test --verbose
 ```
@@ -34,7 +35,7 @@ Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (def
 
 ## Workspace layout
 
-Three crates under `crates/`:
+Four crates under `crates/`:
 
 - **`crust-core`** — the whole engine as a library (`crust_core`): renderer, integrator,
   materials, primitives, lights, BVH, USD import. Everything of substance lives here.
@@ -45,7 +46,12 @@ Three crates under `crates/`:
   `Renderer` (wiring an `indicatif` bar to the progress callback), writes the EXR and
   the tone-mapped PNG. `main.rs` is the only file.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
-  `balance_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
+  `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
+- **`sampler`** — the `Sampler` trait plus its two implementations: `SobolSampler`
+  (Owen-scrambled Sobol via `sobol_burley`, the production sampler — per-pixel
+  decorrelated by hashing `(x, y, frame_seed)` into the scramble seed) and `RngSampler`
+  (`SmallRng` fallback for tests and once the dimension budget overflows). Depended on
+  by `crust-core` (materials, `guiding/`, `volume.rs`) for every stochastic draw.
 
 `crust-core/src/lib.rs` re-exports the public surface (`Renderer`, `Scene`, `Camera`, the
 material types, `simple_scene`, `get_settings`). Prefer importing from `crust_core::` roots.
@@ -175,8 +181,11 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   double-counted. Emissive geometry with no light-list entry is handled: the bounce
   keeps its emission at full weight.
 
-Sampling uses **Correlated Multi-Jittered (CMJ)** patterns from `sampler.rs`
-(`generate_cmj_2d`) for camera and light rays, falling back to plain RNG past the CMJ budget.
+Sampling goes through the `sampler` crate's `Sampler` trait (`start_pixel` / `start_sample`
+/ `next_1d` / `next_2d`). The production sampler is `SobolSampler`, Owen-scrambled Sobol
+(Burley 2020) via `sobol_burley`, per-pixel decorrelated by hashing `(x, y, frame_seed)`
+into the scramble seed; `RngSampler` (`SmallRng`) is the fallback used by tests, benches,
+and once a path's dimension count outgrows `sobol_burley`'s 256-dimension window.
 
 ## USD import (`scene/usd_import.rs`)
 
@@ -214,8 +223,8 @@ Xform hierarchy into world matrices. Schema mapping:
   `balance` | `light` | `bsdf`). Missing attrs fall back to defaults (128 spp,
   depth 32, 640×360, power MIS) defined as consts at the top of the file.
 
-Note: `openusd` is a hard dependency and USD is always compiled in. Docstrings in `scene.rs`
-that mention a `usd` **feature flag** are stale — there is no such feature.
+Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
+feature flag.
 
 ## Known incomplete work
 

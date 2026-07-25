@@ -4,7 +4,8 @@
 
 Persist the rendered pixel buffer to disk. The renderer writes a linear
 high-dynamic-range EXR, then converts it to a tone-mapped sRGB PNG for viewing.
-Covers EXR writing (`main.rs`) and the `convert()` step (`convert.rs`).
+Both steps live in `crust-render/src/main.rs`; the engine crate only produces
+the `Buffer`.
 
 ## Requirements
 
@@ -19,30 +20,25 @@ path (default `output.exr`).
 - **THEN** an EXR file is written at the requested output path with the rendered
   resolution
 
-### Requirement: Tone-mapped sRGB PNG conversion
+### Requirement: Tone-mapped sRGB PNG conversion next to the EXR
 
 After writing the EXR, the tool SHALL produce a viewable PNG by clamping linear
 values to [0,1], applying the sRGB transfer curve, and quantizing to 8-bit,
-saving a timestamped file under `./test_images/`.
+saving it next to the EXR at the same path with a `.png` extension.
 
 #### Scenario: PNG is produced from the render
 
-- **WHEN** the render's EXR has been written
-- **THEN** a timestamped tone-mapped sRGB PNG is saved under `./test_images/`
+- **WHEN** the render's EXR has been written at `-o` path `renders/foo.exr`
+- **THEN** a tone-mapped sRGB PNG is saved at `renders/foo.png`
 
-### Requirement: PNG conversion reads the default EXR path
+### Requirement: PNG path always tracks the EXR output path
 
-The PNG conversion step SHALL read a fixed `output.exr` input, independent of the
-`-o/--output` value. When a different output name is used, the EXR is still
-produced but the PNG step reads the fixed `output.exr` instead.
+The PNG conversion step SHALL derive its path from the `-o/--output` value
+(swapping the extension to `.png`), so a custom output name keeps the EXR and
+PNG in sync.
 
-#### Scenario: Default output keeps EXR and PNG consistent
-
-- **WHEN** the output path is left at the default `output.exr`
-- **THEN** the PNG is generated from the same EXR that was just written
-
-#### Scenario: Custom output name desynchronizes the PNG step
+#### Scenario: Custom output name keeps EXR and PNG in sync
 
 - **WHEN** the user renders with `-o some_other_name.exr`
-- **THEN** that EXR is written, but the PNG conversion still reads the fixed
-  `output.exr` (stale or missing) rather than the custom file
+- **THEN** that EXR is written, and the PNG is written to
+  `some_other_name.png` alongside it

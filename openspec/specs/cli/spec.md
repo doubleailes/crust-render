@@ -11,8 +11,10 @@ and writes the output image. This is the only user-facing surface of the tool.
 ### Requirement: Command-line argument parsing
 
 The CLI SHALL accept `-i/--input` (USD scene path), `-o/--output` (output path,
-default `output.exr`), `-l/--level` (log verbosity, default `info`), and
-`-b/--bucket` (tiled rendering, default off).
+default `output.exr`), `-l/--level` (log verbosity, default `info`),
+`-b/--bucket` (tiled rendering, default off), `-s/--samples` (override the
+scene's samples-per-pixel), and `--strategy` (override the scene's MIS
+sampling strategy: `power` | `balance` | `light` | `bsdf`).
 
 #### Scenario: Rendering a scene file
 
@@ -23,6 +25,12 @@ default `output.exr`), `-l/--level` (log verbosity, default `info`), and
 
 - **WHEN** `--bucket` is passed
 - **THEN** the renderer uses the tiled (bucket) strategy instead of scanline
+
+#### Scenario: Overriding samples and sampling strategy
+
+- **WHEN** `-s <n>` and/or `--strategy <mode>` are passed
+- **THEN** they override the scene's `crust:samplesPerPixel` /
+  `crust:samplingStrategy` values for this render only
 
 ### Requirement: Procedural fallback when no input is given
 

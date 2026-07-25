@@ -11,38 +11,67 @@ parallel execution strategies. It is the core of `crust-core` (`tracer.rs`).
 
 ### Requirement: Path-traced integration with Multiple Importance Sampling
 
-The renderer SHALL estimate per-pixel radiance by recursively path tracing
-camera rays, combining direct light sampling and BRDF sampling with the balance
-heuristic (MIS) at each surface interaction.
+The renderer SHALL estimate per-pixel radiance by path tracing camera rays
+(an iterative two-pass walk: a forward pass recording one vertex per bounce,
+then a backward gather), combining direct light sampling (NEE) and BSDF
+sampling at each surface interaction via a selectable `SamplingStrategy`
+(`crust:samplingStrategy` scene attribute / `--strategy` CLI override):
+`power` (β=2 power heuristic, the default), `balance` (balance heuristic), and
+the diagnostic single-strategy modes `light` (NEE only) and `bsdf` (BSDF
+sampling only, no shadow rays). All four strategies are unbiased.
 
 #### Scenario: Direct and indirect lighting are combined
 
 - **WHEN** a camera ray hits a non-emissive surface from which a light is visible
 - **THEN** the pixel radiance includes a direct-lighting term (from sampling the
-  light and casting a shadow ray) and an indirect term (from a BRDF-sampled
-  bounce), each weighted by the balance heuristic over the light PDF and BRDF PDF
+  light and casting a shadow ray) and an indirect term (from a BSDF-sampled
+  bounce), each weighted by the active sampling strategy over the light PDF and
+  BSDF PDF
 
 #### Scenario: Recursion is bounded by max depth
 
 - **WHEN** the bounce depth for a path reaches `max_depth`
 - **THEN** the path terminates and contributes no further radiance (returns black)
 
+#### Scenario: Russian roulette terminates long paths probabilistically
+
+- **WHEN** a path reaches its 4th vertex or beyond
+- **THEN** survival is sampled from the path's throughput (with a minimum
+  survival probability floor), and the throughput is divided by the survival
+  probability on paths that continue
+
 #### Scenario: Emissive surfaces contribute their emission
 
 - **WHEN** a ray hits a surface whose material emits light
 - **THEN** the surface's emitted radiance is added to the path contribution
 
-### Requirement: Anti-aliasing via multi-sampling with CMJ
+### Requirement: Anti-aliasing via multi-sampling with low-discrepancy sampling
 
-The renderer SHALL average `samples_per_pixel` samples per pixel, using
-Correlated Multi-Jittered (CMJ) sub-pixel offsets within the CMJ budget and
-falling back to uniform random offsets once the budget is exhausted.
+The renderer SHALL average `samples_per_pixel` samples per pixel, drawing
+sub-pixel offsets and all other per-sample randomness through the `Sampler`
+trait — Owen-scrambled Sobol (`SobolSampler`, per-pixel decorrelated) in
+production, falling back to a seeded RNG (`RngSampler`) once the Sobol
+dimension budget is exhausted.
 
 #### Scenario: Samples are averaged per pixel
 
 - **WHEN** `samples_per_pixel` is N
-- **THEN** each pixel value is the mean of N traced samples with jittered
-  sub-pixel offsets
+- **THEN** each pixel value is the mean of N traced samples with
+  low-discrepancy sub-pixel offsets
+
+### Requirement: Adaptive sampling stops pixels early
+
+The renderer SHALL stop sampling a pixel once it holds at least
+`crust:minSamplesPerPixel` samples and the relative standard error of the
+pixel mean drops below `crust:varianceThreshold` (0 disables adaptive
+sampling). This applies to the main/final render pass, never to path-guiding
+training passes.
+
+#### Scenario: A converged pixel stops early
+
+- **WHEN** a pixel has accumulated at least the minimum sample count and its
+  relative standard error is below the variance threshold
+- **THEN** no further samples are traced for that pixel
 
 ### Requirement: Parallel scanline and bucket rendering
 
@@ -110,6 +139,31 @@ without volume regions SHALL render exactly as before.
 - **WHEN** a path segment crosses a region with nonzero emission
 - **THEN** the segment accumulates `σₐ·Lₑ` source radiance weighted by the
   transmittance up to each emission point
+
+### Requirement: Opt-in path guiding
+
+When `crust:pathGuiding` is set on the scene's render settings, the renderer
+SHALL run `render_guided()`: a pure-Rust Practical Path Guiding SD-tree
+(`GuidingField`) trained over progressive passes at geometrically growing spp
+budgets, then a final pass sampling secondary bounces by one-sample MIS
+between the trained field and the BSDF. All passes (training and final) SHALL
+be blended into the output, weighted by inverse variance. Scenes without
+`crust:pathGuiding` SHALL render via the ungated path (no SD-tree, no extra
+training passes).
+
+#### Scenario: Guiding trains then renders
+
+- **WHEN** `crust:pathGuiding = true` on the render settings
+- **THEN** the renderer runs geometrically-growing training passes that splat
+  samples into the SD-tree, then a final pass that mixes guided and
+  BSDF-sampled directions at secondary bounces
+
+#### Scenario: Delta lobes and untrained regions fall back to the BSDF
+
+- **WHEN** a scattering event has no continuous BSDF component (a delta lobe)
+  or lands in an untrained region of the field
+- **THEN** the direction is sampled from the BSDF alone, and the estimate
+  stays unbiased
 
 ### Requirement: Sky-gradient background
 
