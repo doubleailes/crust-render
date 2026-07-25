@@ -14,15 +14,17 @@ Lives in `crust-core/src/material/`.
 
 Every material SHALL implement a common `Material` trait providing
 importance-sampled scattering (`scatter_importance` returning an optional
-scattered ray, BRDF value, and PDF) and an emission query (`emitted`). Materials
-that do not implement importance sampling SHALL fall back to the default derived
-from `scatter`.
+`ScatterSample` — scattered ray, BRDF value, PDF, and a `delta` flag marking
+singular lobes such as transmission), a continuous-component evaluator
+(`eval(r_in, rec, wi) -> Option<(value, pdf)>`, used by NEE and guided MIS;
+`None` means no continuous component and must not depend on `wi`), and an
+emission query (`emitted`).
 
 #### Scenario: Integrator queries a material
 
 - **WHEN** the integrator interacts with a hit surface
-- **THEN** it obtains a scattered ray, BRDF value, and PDF via
-  `scatter_importance`, or `None` when the material absorbs the ray
+- **THEN** it obtains a `ScatterSample` (scattered ray, BRDF value, PDF, delta
+  flag) via `scatter_importance`, or `None` when the material absorbs the ray
 
 #### Scenario: Non-emissive material
 
@@ -31,24 +33,28 @@ from `scatter`.
 
 ### Requirement: Supported shading models
 
-The engine SHALL provide the following material models: Lambertian, Metal,
-Dielectric and ComplexDielectric, Blinn-Phong, Cook-Torrance, Disney Principled,
-OpenPBR, and Emissive.
+The engine SHALL provide exactly two material implementations: **`OpenPBR`**,
+a single übershader covering diffuse, metal, glass/transmission, coat, fuzz,
+thin-film, and subsurface (with `diffuse`/`metal`/`glass`/`glossy` Rust-side
+preset constructors), and **`Emissive`**, a pure emitter with no geometry
+knowledge.
 
 #### Scenario: A model is selected for a surface
 
-- **WHEN** a surface is assigned one of the supported material models
-- **THEN** rays scatter according to that model's BRDF and parameters
+- **WHEN** a surface is assigned a material
+- **THEN** rays scatter according to `OpenPBR`'s layered BSDF and parameters,
+  or the surface is a pure `Emissive` light
 
 ### Requirement: Shared microfacet BRDF helpers
 
-Microfacet materials SHALL share GGX helpers: visible-normal (VNDF) GGX sampling
-and its PDF, Schlick Fresnel, and the Schlick-GGX geometry term. Lives in
-`material/brdf.rs`.
+`OpenPBR` lobes SHALL share GGX helpers from `material/brdf.rs`: anisotropic
+visible-normal (VNDF) GGX sampling and its PDF, Schlick/F82 Fresnel, EON
+(energy-preserving Oren-Nayar) diffuse, Charlie sheen, thin-film, and Cauchy
+dispersion.
 
-#### Scenario: Microfacet material samples a direction
+#### Scenario: Microfacet lobe samples a direction
 
-- **WHEN** a GGX-based material scatters a ray
+- **WHEN** a GGX-based lobe of `OpenPBR` scatters a ray
 - **THEN** the outgoing direction is drawn via VNDF sampling and weighted by
   Fresnel and geometry terms
 
@@ -61,3 +67,13 @@ same surface to serve as both visible geometry and a light source.
 
 - **WHEN** a ray hits an emissive surface
 - **THEN** the surface contributes its emission color to the path
+
+### Requirement: Unbound geometry falls back to grey OpenPBR
+
+Geometry with no resolvable bound material SHALL be assigned a default grey
+`OpenPBR` material, not a separate shading model.
+
+#### Scenario: Unbound geometry
+
+- **WHEN** a mesh or sphere has no resolvable bound material
+- **THEN** it renders with a default grey diffuse `OpenPBR` material

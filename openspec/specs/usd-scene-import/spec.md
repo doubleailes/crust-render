@@ -48,7 +48,7 @@ remains a linear list; BVH acceleration is built only per imported mesh.
 The importer SHALL resolve a bound material via `MaterialBindingAPI` and dispatch
 on the surface shader's `info:id`: `UsdPreviewSurface` maps into `OpenPBR`
 (portable field mapping), `crust:openpbr` decodes 1:1 into `OpenPBR`, and any
-geometry without a resolvable bound material falls back to a grey `Lambertian`.
+geometry without a resolvable bound material falls back to a default grey `OpenPBR`.
 
 #### Scenario: UsdPreviewSurface binding
 
@@ -64,31 +64,62 @@ geometry without a resolvable bound material falls back to a grey `Lambertian`.
 #### Scenario: Unbound geometry
 
 - **WHEN** geometry has no resolvable bound material
-- **THEN** it is assigned a grey Lambertian material
+- **THEN** it is assigned a default grey `OpenPBR` material
 
 ### Requirement: Light schema mapping
 
 The importer SHALL map `UsdLuxSphereLight` to an `Emissive` sphere that is both a
-light and visible geometry. Other lux schemas (`RectLight`, `DiskLight`,
-`DistantLight`, `DomeLight`, `CylinderLight`) SHALL warn once and be skipped.
+light and visible geometry, and `UsdLuxRectLight` to two emissive triangles
+plus an `AreaLight(RectShape)` (local XY plane, emitting along -Z per UsdLux —
+effectively one-sided). Other lux schemas (`DiskLight`, `DistantLight`,
+`DomeLight`, `CylinderLight`) SHALL warn once and be skipped.
 
 #### Scenario: Sphere light
 
 - **WHEN** a `UsdLuxSphereLight` prim is traversed
 - **THEN** it becomes an emissive sphere added to both the light list and the world
 
+#### Scenario: Rect light
+
+- **WHEN** a `UsdLuxRectLight` prim is traversed
+- **THEN** it becomes two emissive triangles added to both the light list and
+  the world
+
 #### Scenario: Unsupported lux light
 
-- **WHEN** a non-sphere lux light prim is traversed
+- **WHEN** a `DiskLight`, `DistantLight`, `DomeLight`, or `CylinderLight` prim
+  is traversed
 - **THEN** a warning is emitted and the light is skipped
+
+### Requirement: Volume region import
+
+Any prim carrying a `crust:volume:type` attribute SHALL import as a
+free-standing `VolumeRegion` rather than geometry — checked before the
+mesh/sphere/light dispatch, so its bounds never occlude shadow rays. The
+region's box comes from the prim's `size` (when it is a `Cube`) or the unit
+cube, oriented and scaled by the composed prim transform, with density
+(`homogeneous` | `smoke` procedural fBm noise | `grid` inline voxel data) and
+σₛ/σₐ/anisotropy/emission read from `crust:volume:*` attributes.
+
+#### Scenario: Volume prim
+
+- **WHEN** a prim authors `crust:volume:type`
+- **THEN** it is added to the scene's volume regions, not to world geometry
+
+#### Scenario: Missing grid data
+
+- **WHEN** a `grid`-type volume's `gridData` length does not match
+  `gridDims`' `nx·ny·nz`
+- **THEN** a warning is emitted and the volume is skipped
 
 ### Requirement: Render settings from USD with defaults
 
 The importer SHALL read `resolution` from `UsdRenderSettings` and per-render
 params from custom attributes in the `crust:` namespace (`crust:samplesPerPixel`,
 `crust:maxDepth`, `crust:minSamplesPerPixel`, `crust:varianceThreshold`,
-`crust:frame`). Missing attributes SHALL fall back to defaults (128 spp, depth
-32, 640×360).
+`crust:frame`, `crust:samplingStrategy`, `crust:pathGuiding`,
+`crust:guidingTrainIterations`, `crust:guidingProb`). Missing attributes SHALL
+fall back to defaults (128 spp, depth 32, 640×360, power MIS, guiding off).
 
 #### Scenario: Authored settings
 

@@ -37,10 +37,15 @@ Completely in a vibe coding mood.
 - ⚡ **Adaptive Sampling**
   - Pixels stop early once their relative standard error drops below
     `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples)
+- 🌫️ **Volume Rendering**
+  - Free-standing smoke/fog/absorption/fire volume regions (homogeneous,
+    procedural fBm noise, or an inline voxel grid), with NEE + MIS at
+    scatter vertices and transmittance-aware shadow rays
 - 🧪 **Modular Design**
   - Clean separation between renderer, integrator, materials, scene
-- **Correlated Multi-Jittered (CMJ)**
-  - Use CMJ for camera and light rays
+- **Owen-Scrambled Sobol Sampling**
+  - Per-pixel decorrelated low-discrepancy sampling (Burley 2020) for
+    camera, light, and BSDF rays
 
 ---
 
@@ -81,9 +86,22 @@ Unbound geometry falls back to a grey diffuse OpenPBR.
 ### 💡 Lights
 
 `UsdLuxSphereLight` maps to an `Emissive` sphere that acts as both light and
-visible geometry (matching classic Cornell-box scene semantics). Other lux
-types (`RectLight`, `DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`)
-warn once and are skipped — follow-up work.
+visible geometry (matching classic Cornell-box scene semantics).
+`UsdLuxRectLight` maps to two emissive triangles + an `AreaLight` (local XY
+plane, emitting along -Z per UsdLux; effectively one-sided) — see
+`samples/rectlight.usda`. Other lux types (`DiskLight`, `DistantLight`,
+`DomeLight`, `CylinderLight`) warn once and are skipped — follow-up work.
+
+### 🌫️ Volumes
+
+Any prim carrying `crust:volume:type` imports as a free-standing
+`VolumeRegion` — an oriented box, outside the surface BVH so it never
+occludes shadow rays — with a `homogeneous`, `smoke` (procedural fBm noise),
+or `grid` (inline voxel data) density field and its own σₛ/σₐ/anisotropy/
+emission. Scatter vertices inside a region get NEE with MIS against the
+phase function, and shadow rays attenuate through volumes via ratio/Beer-
+Lambert transmittance. See `samples/fog.usda` (homogeneous god rays) and
+`samples/smoke.usda` (noise plume + emissive ember + explicit grid).
 
 ### 🎥 Camera & render settings
 
