@@ -7,3 +7,5 @@ mod mesh;
 pub use mesh::Mesh;
 mod smooth_triangle;
 pub use smooth_triangle::SmoothTriangle;
+mod instance;
+pub use instance::Instance;
