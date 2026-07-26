@@ -151,6 +151,45 @@ impl Hittable for Bvh {
         }
         self.nodes.first().map(|n| n.bbox)
     }
+
+    /// Early-exit occlusion traversal: no front-to-back ordering, returns on
+    /// the first confirmed hit anywhere in `(t_min, t_max)`.
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        for obj in &self.unbounded {
+            if obj.hit_any(ray, t_min, t_max) {
+                return true;
+            }
+        }
+        if self.nodes.is_empty() {
+            return false;
+        }
+
+        let mut stack = [0u32; MAX_DEPTH + 4];
+        stack[0] = 0;
+        let mut sp = 1usize;
+
+        while sp > 0 {
+            sp -= 1;
+            let idx = stack[sp];
+            let node = &self.nodes[idx as usize];
+            if !node.bbox.hit(ray, t_min, t_max) {
+                continue;
+            }
+            if node.count > 0 {
+                let first = node.first_or_right as usize;
+                for prim in &self.prims[first..first + node.count as usize] {
+                    if prim.hit_any(ray, t_min, t_max) {
+                        return true;
+                    }
+                }
+            } else {
+                stack[sp] = idx + 1;
+                stack[sp + 1] = node.first_or_right;
+                sp += 2;
+            }
+        }
+        false
+    }
 }
 
 fn surface_area(b: &AABB) -> f32 {
@@ -366,6 +405,34 @@ mod tests {
                         x.is_some(),
                         y.is_some()
                     ),
+                }
+            }
+        }
+    }
+
+    /// `hit_any` must agree with `hit(..).is_some()` for every ray and range.
+    #[test]
+    fn hit_any_matches_hit() {
+        let bvh = Bvh::new(sphere_grid(4));
+        let origins = [
+            Vec3A::new(-5.0, 4.5, 4.5),
+            Vec3A::new(20.0, 3.0, 3.0),
+            Vec3A::new(4.5, 4.5, 4.5),
+        ];
+        let dirs = [
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(-1.0, 0.05, 0.02).normalize(),
+            Vec3A::new(0.3, 0.3, 1.0).normalize(),
+        ];
+        for o in origins {
+            for d in dirs {
+                let ray = Ray::new(o, d);
+                for t_max in [0.5, 3.0, f32::INFINITY] {
+                    assert_eq!(
+                        bvh.hit_any(&ray, 0.001, t_max),
+                        bvh.hit(&ray, 0.001, t_max).is_some(),
+                        "occlusion disagreement for {o:?} {d:?} t_max={t_max}"
+                    );
                 }
             }
         }

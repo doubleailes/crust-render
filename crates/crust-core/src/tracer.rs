@@ -791,7 +791,9 @@ fn shadow_transmittance(
     distance: f32,
     vertex: PathSampler,
 ) -> Vec3A {
-    if world.hit(shadow_ray, 0.001, distance - 0.001).is_some() {
+    // Dedicated occlusion query: any hit in range means full shadow, so the
+    // early-exit traversal beats searching for the closest hit.
+    if world.hit_any(shadow_ray, 0.001, distance - 0.001) {
         return Vec3A::ZERO;
     }
     if volumes.is_empty() {
