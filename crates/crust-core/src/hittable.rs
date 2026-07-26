@@ -84,4 +84,21 @@ pub trait Hittable: Send + Sync {
     fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         self.hit(ray, t_min, t_max).is_some()
     }
+
+    /// Conservative bounds of the part of the object inside the axis slab
+    /// `min <= x[axis] <= max` — what the BVH's spatial splits bin with.
+    /// `None` when the object misses the slab entirely. The default clips
+    /// the bounding box to the slab, which is always valid; primitives
+    /// with tighter knowledge (triangles) override it so long diagonal
+    /// geometry actually shrinks when chopped.
+    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        let b = self.bounding_box()?;
+        if b.minimum[axis] > max || b.maximum[axis] < min {
+            return None;
+        }
+        let mut c = b;
+        c.minimum[axis] = c.minimum[axis].max(min);
+        c.maximum[axis] = c.maximum[axis].min(max);
+        Some(c)
+    }
 }

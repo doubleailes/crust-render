@@ -61,4 +61,8 @@ impl Hittable for SmoothTriangle {
     fn bounding_box(&self) -> Option<AABB> {
         Some(triangle_aabb(self.v0, self.v1, self.v2))
     }
+
+    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        crate::primitives::triangle::clip_triangle_aabb(self.v0, self.v1, self.v2, axis, min, max)
+    }
 }

@@ -32,6 +32,79 @@ impl Hittable for Triangle {
             mat: self.material.as_ref(),
         })
     }
+    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        clip_triangle_aabb(self.v0, self.v1, self.v2, axis, min, max)
+    }
+}
+
+/// Exact bounds of a triangle clipped to the axis slab `[min, max]`:
+/// Sutherland-Hodgman against the slab's two planes, then the bounds of
+/// the surviving polygon (padded on degenerate axes like `triangle_aabb`).
+/// This is what makes spatial splits effective — a long diagonal
+/// triangle's *clipped* bounds shrink on every axis, where the default
+/// bbox∩slab only shrinks along the split axis.
+pub(crate) fn clip_triangle_aabb(
+    v0: Vec3A,
+    v1: Vec3A,
+    v2: Vec3A,
+    axis: usize,
+    min: f32,
+    max: f32,
+) -> Option<AABB> {
+    // Clip the polygon against x[axis] >= min, then x[axis] <= max.
+    let mut poly = [Vec3A::ZERO; 8];
+    let mut n = 3;
+    poly[0] = v0;
+    poly[1] = v1;
+    poly[2] = v2;
+
+    for &(bound, keep_ge) in &[(min, true), (max, false)] {
+        let mut out = [Vec3A::ZERO; 8];
+        let mut m = 0;
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let (da, db) = if keep_ge {
+                (a[axis] - bound, b[axis] - bound)
+            } else {
+                (bound - a[axis], bound - b[axis])
+            };
+            if da >= 0.0 {
+                out[m] = a;
+                m += 1;
+            }
+            if (da > 0.0) != (db > 0.0) && da != db {
+                // Edge crosses the plane.
+                let t = da / (da - db);
+                out[m] = a + (b - a) * t;
+                m += 1;
+            }
+        }
+        poly = out;
+        n = m;
+        if n == 0 {
+            return None;
+        }
+    }
+
+    let mut lo = poly[0];
+    let mut hi = poly[0];
+    for &p in &poly[1..n] {
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    // Snap the split axis exactly to the slab (interpolation rounding can
+    // stick out) and pad flat axes so the slab test keeps working.
+    lo[axis] = lo[axis].max(min);
+    hi[axis] = hi[axis].min(max);
+    const PAD: f32 = 1e-4;
+    for a in 0..3 {
+        if hi[a] - lo[a] < PAD {
+            lo[a] -= PAD;
+            hi[a] += PAD;
+        }
+    }
+    Some(AABB::new(lo, hi))
 }
 
 /// Watertight ray/triangle intersection (Woop, Benthin & Wald 2013,
