@@ -24,13 +24,57 @@ error[E0658]: use of unstable library feature `portable_simd`
 ```
 
 It is still nightly-only (tracking issue rust-lang/rust#86656), and crust
-builds on stable. The stable options for wider-than-4 lanes are the `wide`
-crate or `core::arch` intrinsics behind `#[target_feature]` + runtime
-detection; neither is used today. See "Not done" below for when they would
-pay off.
+builds on stable.
 
 `glam` is deliberately kept on its default (SSE2) backend rather than its
 optional `core-simd` feature, which requires nightly for the same reason.
+
+### The 128-bit ceiling, and why it is where it is
+
+This is worth stating plainly rather than leaving implicit, because current
+practice disagrees with it. Kerkour's *SIMD programming in pure Rust* puts it
+bluntly: "it makes no sense to implement SSE2 SIMDs these days, as most
+processors produced since 2015 support AVX2." Everything vectorized here —
+`glam`'s `Vec3A`/`Vec4`, the BVH4 node test, the `Tri4` leaf packets — is
+128-bit. So why stop there?
+
+Two reasons, one measured and one structural.
+
+**Measured: widening the *codegen* buys almost nothing, because the
+algorithm is 4 lanes wide.** LLVM cannot turn a 4-lane algorithm into an
+8-lane one; enabling AVX2 only lets it pick FMA and better instruction
+sequences for the lanes already there.
+
+| min-of-40, ms | baseline (SSE2) | `-C target-feature=+avx2,+fma` |
+| --- | --- | --- |
+| `tri_spheres intersect` | 3.450 | 3.386 |
+| `sphere_grid intersect` | 1.697 | 1.622 |
+| `instances occluded` | 2.268 | 2.243 |
+
+2–4%. Real 8-wide throughput needs what the article describes as the generic
+recipe — split the work into chunks of X blocks where X is the lane count —
+applied to the data structures themselves, not a compiler flag.
+
+**Structural: for the leaves, there is no eighth lane to fill.** A histogram
+of leaf occupancy on a dense mesh (80×40 UV sphere, 6400 triangles):
+
+```
+ 1 tris/leaf:     13 leaves
+ 2 tris/leaf:    505 leaves
+ 3 tris/leaf:    601 leaves
+ 4 tris/leaf:   1200 leaves
+vector rounds if 4-wide: 2319   if 8-wide: 2319
+```
+
+No leaf holds more than four triangles, because the SAH is free to split
+anything above `MIN_LEAF_PACKED`. A `Tri8` packet would run the *same
+number* of vector rounds with half the lanes idle. This is pinned by
+`eight_wide_packets_would_not_reduce_vector_rounds`, which fails if a future
+retune makes leaves big enough to change the answer.
+
+That leaves **BVH8 nodes** — 8 child boxes per vector round, and roughly half
+the tree depth — as the one remaining place where 256-bit vectors would pay.
+It is not implemented; see "Not done".
 
 ## The two kinds of SIMD in a ray tracer
 
@@ -188,6 +232,21 @@ heavy enough for traversal to matter, which is what the stress scene is for.
 (Its 8.2 s wall clock is mostly parsing 15 MB of USDA and building the BVH;
 the `rendering()` figure above is the render itself.)
 
+## Testing across instruction sets
+
+`scripts/test_simd_matrix.sh` runs the suite under four codegen
+configurations (target defaults; AVX/AVX2/AVX-512 disabled; AVX2+FMA;
+`target-cpu=native`). This is not ceremony: the kernel's correctness claims
+are about exact float bit patterns — `simd_matches_scalar_bitwise` asserts
+`to_bits()` equality, and watertightness depends on adjacent triangles
+computing *exactly* equal edge functions. Contracting `a*b + c` into an FMA
+rounds once instead of twice and would break both. Rust does not contract by
+default, but that is worth re-verifying rather than assuming, especially
+across toolchain bumps. All four configurations pass.
+
+(GitHub Actions runners generally do not expose AVX-512, so that leg only
+really runs locally — as the article notes.)
+
 ## Correctness verification
 
 - `cargo test` — 33 tests in `crust-rt`, whole workspace green.
@@ -228,19 +287,53 @@ different bytes for identical pixels. Use `exr_diff`.
 - `crates/crust-render/examples/exr_diff.rs` — numeric diff of two rendered
   EXRs (differing pixel count, max absolute/relative, mean absolute, and the
   first few coordinates). The regression check for any kernel change.
+- `scripts/test_simd_matrix.sh` — the test suite across four SIMD codegen
+  configurations (see above).
+
+## References
+
+- Sylvain Kerkour, *SIMD programming in pure Rust* (January 2026) — the
+  load→compute→store framing, the "chunk into X = lane-count blocks" recipe,
+  the survey of stable options (`core::arch`, `wide`, `pulp`) and their
+  trade-offs, the advice not to hand-vectorize what LLVM already
+  auto-vectorizes, and the RUSTFLAGS test matrix. Its "don't bother with
+  SSE2" guidance is addressed directly under "The 128-bit ceiling" above.
+- Woop, Benthin & Wald, *Watertight Ray/Triangle Intersection* (JCGT 2013) —
+  the intersector both paths implement.
+- Stich, Friedrich & Dietrich, *Spatial Splits in Bounding Volume
+  Hierarchies* (2009) — the build the packets hang off.
 
 ## Not done
 
-- **8-wide (AVX2) nodes or packets.** The machine has AVX2 and AVX-512F, and
-  a BVH8 / `Tri8` would halve the vector rounds again. On stable this needs
-  the `wide` crate or `core::arch` + `#[target_feature]` with
-  `is_x86_feature_detected!` dispatch, since a plain `-C target-cpu=native`
-  build is not distributable. Deliberately left out: it doubles the
-  intersector code paths, and the node layout would want re-tuning again.
+- **BVH8 (8-wide) nodes.** The one place 256-bit vectors would still pay:
+  eight child boxes per vector round and roughly half the tree depth. Note
+  `Tri8` packets are ruled out by the occupancy data above — this is about
+  nodes only.
+
+  It is not just a matter of writing the 8-wide slab test, because the width
+  has to be *reachable at runtime*. The options, in the terms the article
+  lays out:
+
+  | approach | 256-bit at runtime? | cost |
+  | --- | --- | --- |
+  | `wide::f32x8` | only if built with `+avx2`; otherwise 2×SSE2 | +1 dep, safe |
+  | `core::arch` + `is_x86_feature_detected!` | yes, dispatched per host | needs `unsafe`, per-arch duplication |
+  | `multiversion` | yes | +1 dep, keeps call sites safe |
+  | `-C target-cpu=native` | yes | binary not distributable |
+
+  The middle option is the article's recommendation (stable, zero
+  dependencies) but it conflicts with a stated property of this crate:
+  `crust-rt`'s own docs say the implementation "stays 100% safe Rust", and
+  `CLAUDE.md` describes the project as written in safe Rust. Widening the
+  nodes is therefore a *project* decision about safety and dependencies, not
+  just an optimization, and is left for whoever owns that call.
 - **`-C target-cpu`.** Not set, so the shipped binary stays baseline
-  x86-64. Worth trying locally (`RUSTFLAGS="-C target-cpu=native"`) — it
-  lets LLVM use AVX2/FMA in the `Vec4` code — but it is not a portable
-  default and was not measured as part of this work.
+  x86-64. Measured above at 2–4% on the current 4-lane code; not a portable
+  default.
+- **NEON / wasm32.** Only x86-64 was measured. `glam` uses NEON on aarch64,
+  so the 128-bit paths carry over unchanged; nothing here is
+  x86-specific (no intrinsics, no `#[cfg(target_arch)]`), which is itself an
+  argument for keeping the kernel on `glam` until portable SIMD stabilizes.
 - **Ray packets / streams.** crust traces one ray at a time
   (`rtcIntersect1`-shaped). Tracing 4 or 8 *coherent* rays against one node
   is the other axis of SIMD in a tracer, and would need the integrator

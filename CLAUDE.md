@@ -33,6 +33,10 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 
+# Kernel correctness is stated in exact float bits, so it must hold under every
+# codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
+scripts/test_simd_matrix.sh -p crust-rt
+
 # CI runs: cargo build --verbose && cargo test --verbose
 ```
 
@@ -318,15 +322,21 @@ feature flag.
   composition arcs are not consumed. Emissive curves/instances are not light-list entries
   (BSDF-sampled only, like emissive volumes).
 
-- **SIMD stops at 4 lanes** (`docs/simd.md`). Everything vectorized — `glam`'s `Vec3A`/
-  `Vec4`, the BVH4 slab test, `Tri4` leaf packets — is SSE2-width, because `std::simd` is
-  still nightly-only and crust builds on stable; 8-wide (AVX2) nodes or packets would
-  need the `wide` crate or `core::arch` + `#[target_feature]` runtime dispatch. Only
-  *triangles* pack: sphere, curve and instance leaves still run scalar (no `Sphere4`).
-  Rays are traced one at a time — there is no coherent ray-packet tracing, which would
-  need the integrator restructured, not just the kernel. `-C target-cpu` is left at the
-  baseline so the binary stays distributable. And the checked-in sample scenes are
-  shading-bound, so kernel speedups barely show up there — use
+- **SIMD stops at 128 bits** (`docs/simd.md` has the audit and the numbers). Everything
+  vectorized — `glam`'s `Vec3A`/`Vec4`, the BVH4 slab test, `Tri4` leaf packets — is
+  SSE2/NEON-width, because `std::simd` is still nightly-only and crust builds on stable.
+  Current practice says target AVX2 instead, so the reasons not to are recorded: merely
+  *enabling* AVX2 codegen is worth 2–4% (LLVM cannot widen a 4-lane algorithm), and
+  8-wide leaf packets would buy exactly nothing because no leaf holds more than 4
+  triangles — pinned by `eight_wide_packets_would_not_reduce_vector_rounds`. **BVH8
+  nodes** are the one place 256-bit vectors would still pay, and that is a project
+  decision, not just an optimization: reaching 256 bits at *runtime* needs `unsafe`
+  `core::arch` intrinsics (against this crate's "100% safe Rust" claim), a new
+  dependency (`wide`/`multiversion`), or a non-distributable `-C target-cpu`.
+  Also: only *triangles* pack — sphere, curve and instance leaves still run scalar (no
+  `Sphere4`); rays are traced one at a time, so there is no coherent ray-packet tracing
+  (that needs the integrator restructured, not just the kernel); and the checked-in
+  sample scenes are shading-bound, so kernel speedups barely show up there — use
   `scripts/gen_stress_scene.py` to benchmark traversal changes end to end.
 
 - **Upstream `openusd` xformOp bug, worked around locally.** `openusd` 0.5.0 (latest as
