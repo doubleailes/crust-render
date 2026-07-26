@@ -1,42 +1,44 @@
 use crate::RenderSettings;
-use crate::Sphere;
 use crate::camera::Camera;
-use crate::hittable_list::HittableList;
 use crate::light::{AreaLight, LightList, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
+use crate::rt_world::{World, WorldBuilder};
+use crust_rt::Geometry;
 use glam::Vec3A;
 use std::sync::Arc;
 use utils::{random_range3, random3};
 
+/// Attaches an analytic sphere with its material.
+fn add_sphere(world: &mut WorldBuilder, center: Vec3A, radius: f32, material: Arc<dyn Material>) {
+    world.attach(Geometry::Sphere { center, radius }, material);
+}
+
 /// Adds a sphere light to the scene: emissive sphere geometry in `world`
 /// plus an `AreaLight` over the same surface in `lights`, tied together by
-/// sharing one `Emissive` material (Cornell-box semantics).
+/// the geometry id (Cornell-box semantics — one surface, both roles).
 fn add_sphere_light(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     lights: &mut LightList,
     color: Vec3A,
     center: Vec3A,
     radius: f32,
 ) {
     let material = Arc::new(Emissive::new(color));
-    world.add(Box::new(Sphere::new(center, radius, material.clone())));
+    let geom_id = world.attach(Geometry::Sphere { center, radius }, material.clone());
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape { center, radius }),
         material,
+        geom_id,
     )));
 }
 
 #[allow(dead_code)]
-pub fn random_scene() -> (HittableList, LightList) {
-    let mut world = HittableList::new();
+pub fn random_scene() -> (World, LightList) {
+    let mut world = WorldBuilder::new();
     let mut lights = LightList::new();
 
     let ground_material = Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, -1000.0, 0.0),
-        1000.0,
-        ground_material,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, -1000.0, 0.0), 1000.0, ground_material);
 
     for a in -11..11 {
         for b in -11..11 {
@@ -68,31 +70,19 @@ pub fn random_scene() -> (HittableList, LightList) {
                     // Glass
                     Arc::new(OpenPBR::glass(1.5))
                 };
-                world.add(Box::new(Sphere::new(center, 0.2, sphere_material)));
+                add_sphere(&mut world, center, 0.2, sphere_material);
             }
         }
     }
 
     let material1 = Arc::new(OpenPBR::glass(1.5));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, 1.0, 0.0),
-        1.0,
-        material1,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, 1.0, 0.0), 1.0, material1);
 
     let material2 = Arc::new(OpenPBR::diffuse(Vec3A::new(0.4, 0.2, 0.1)));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(-4.0, 1.0, 0.0),
-        1.0,
-        material2,
-    )));
+    add_sphere(&mut world, Vec3A::new(-4.0, 1.0, 0.0), 1.0, material2);
 
     let material3 = Arc::new(OpenPBR::metal(Vec3A::new(0.7, 0.6, 0.5), 0.0));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(4.0, 1.0, 0.0),
-        1.0,
-        material3,
-    )));
+    add_sphere(&mut world, Vec3A::new(4.0, 1.0, 0.0), 1.0, material3);
 
     add_sphere_light(
         &mut world,
@@ -109,19 +99,15 @@ pub fn random_scene() -> (HittableList, LightList) {
         1.0,
     );
 
-    (world, lights)
+    (world.commit(), lights)
 }
 
-pub fn simple_scene() -> (HittableList, LightList) {
-    let mut world = HittableList::new();
+pub fn simple_scene() -> (World, LightList) {
+    let mut world = WorldBuilder::new();
     let mut lights = LightList::new();
 
     let ground_material = Arc::new(OpenPBR::diffuse(Vec3A::new(0.8, 0.5, 0.5)));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, -1000.0, 0.0),
-        1000.0,
-        ground_material,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, -1000.0, 0.0), 1000.0, ground_material);
 
     // Deterministic grid of spheres with preset materials
     for a in -2..3 {
@@ -134,38 +120,22 @@ pub fn simple_scene() -> (HittableList, LightList) {
                 _ => Arc::new(OpenPBR::glossy(Vec3A::new(0.9, 0.9, 0.9), 0.2, 0.5)),
             };
 
-            world.add(Box::new(Sphere::new(center, 0.2, material)));
+            add_sphere(&mut world, center, 0.2, material);
         }
     }
 
     // Center spheres
     let material1 = Arc::new(OpenPBR::glass(1.5));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, 1.0, 0.0),
-        1.0,
-        material1,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, 1.0, 0.0), 1.0, material1);
 
     let material2 = Arc::new(OpenPBR::diffuse(Vec3A::new(0.4, 0.2, 0.1)));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(-4.0, 1.0, 0.0),
-        1.0,
-        material2,
-    )));
+    add_sphere(&mut world, Vec3A::new(-4.0, 1.0, 0.0), 1.0, material2);
 
     let material3 = Arc::new(OpenPBR::metal(Vec3A::new(0.7, 0.6, 0.5), 0.0));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(4.0, 1.0, 0.0),
-        1.0,
-        material3,
-    )));
+    add_sphere(&mut world, Vec3A::new(4.0, 1.0, 0.0), 1.0, material3);
 
     let material4 = Arc::new(OpenPBR::glossy(Vec3A::new(0.5, 0.5, 0.5), 0.2, 0.0));
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, 1.0, 4.0),
-        1.0,
-        material4,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, 1.0, 4.0), 1.0, material4);
 
     let material5 = Arc::new(OpenPBR {
         base_color: Vec3A::new(0.5, 0.5, 0.5),
@@ -173,11 +143,7 @@ pub fn simple_scene() -> (HittableList, LightList) {
         coat_weight: 1.0,
         ..OpenPBR::default()
     });
-    world.add(Box::new(Sphere::new(
-        Vec3A::new(0.0, 1.0, -4.0),
-        1.0,
-        material5,
-    )));
+    add_sphere(&mut world, Vec3A::new(0.0, 1.0, -4.0), 1.0, material5);
 
     // Lights
     add_sphere_light(
@@ -195,7 +161,7 @@ pub fn simple_scene() -> (HittableList, LightList) {
         1.0,
     );
 
-    (world, lights)
+    (world.commit(), lights)
 }
 
 pub fn get_settings() -> (Camera, RenderSettings) {

@@ -1,13 +1,12 @@
 use crate::ray::Ray;
 use glam::Vec3A;
 
-use crate::aabb::AABB;
-use crate::material::Material;
-
-/// The `HitRecord` struct stores the geometry of a ray-object intersection:
-/// the intersection point, surface normal, ray parameter, and facing.
-/// It is plain `Copy` data — the material of the hit surface travels
-/// alongside it in [`Hit`], borrowed from the primitive that was hit.
+/// The `HitRecord` struct stores the geometry of a ray-surface
+/// intersection as the *materials* consume it: the intersection point,
+/// the ray-facing surface normal, the ray parameter, and the facing flag.
+/// Intersection itself happens in the `crust-rt` kernel (which reports
+/// ID-based [`crust_rt::RayHit`]s); [`crate::World`] converts kernel hits
+/// into `HitRecord`s and looks up the material by `geom_id`.
 #[derive(Clone, Copy, Default)]
 pub struct HitRecord {
     /// The point of intersection.
@@ -22,9 +21,6 @@ pub struct HitRecord {
 
 impl HitRecord {
     /// Creates a new, default `HitRecord`.
-    ///
-    /// # Returns
-    /// - A new instance of `HitRecord` with default values.
     pub fn new() -> HitRecord {
         Default::default()
     }
@@ -44,96 +40,5 @@ impl HitRecord {
         } else {
             -outward_normal
         };
-    }
-}
-
-/// A successful ray-object intersection: the geometric [`HitRecord`] plus the
-/// material at the hit point, borrowed from the scene for the duration of the
-/// trace. Borrowing (instead of the former `Option<Arc<dyn Material>>` field)
-/// keeps intersection records `Copy` and removes an atomic refcount bump per
-/// candidate hit in the traversal hot loop.
-#[derive(Clone, Copy)]
-pub struct Hit<'a> {
-    pub rec: HitRecord,
-    pub mat: &'a dyn Material,
-}
-
-/// Visibility-mask wrapper: the inner object only intersects rays whose
-/// category bit is in `mask` (see the `MASK_*` constants in [`crate::ray`]).
-/// Zero-cost for unmasked geometry, which is simply never wrapped.
-pub struct Masked {
-    inner: Box<dyn Hittable>,
-    mask: u32,
-}
-
-impl Masked {
-    pub fn new(inner: Box<dyn Hittable>, mask: u32) -> Self {
-        Masked { inner, mask }
-    }
-}
-
-impl Hittable for Masked {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
-        if ray.mask() & self.mask == 0 {
-            return None;
-        }
-        self.inner.hit(ray, t_min, t_max)
-    }
-
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        ray.mask() & self.mask != 0 && self.inner.hit_any(ray, t_min, t_max)
-    }
-
-    fn bounding_box(&self) -> Option<AABB> {
-        self.inner.bounding_box()
-    }
-
-    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
-        self.inner.clipped_aabb(axis, min, max)
-    }
-}
-
-/// The `Hittable` trait defines objects that can be intersected by rays.
-/// Implementing this trait allows objects to participate in ray tracing.
-pub trait Hittable: Send + Sync {
-    /// Determines if a ray intersects the object.
-    ///
-    /// # Parameters
-    /// - `ray`: The ray to test for intersection.
-    /// - `t_min`: The minimum value of the parameter `t` to consider.
-    /// - `t_max`: The maximum value of the parameter `t` to consider.
-    ///
-    /// # Returns
-    /// - `Some(Hit)` describing the closest intersection in `(t_min, t_max)`,
-    ///   or `None` if the ray misses the object.
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>>;
-    fn bounding_box(&self) -> Option<AABB>;
-
-    /// Occlusion query: does the ray hit *anything* in `(t_min, t_max)`?
-    ///
-    /// Semantically `self.hit(ray, t_min, t_max).is_some()` (the default
-    /// implementation), but implementors with an acceleration structure
-    /// override it to accept the first confirmed hit instead of searching
-    /// for the closest one — the shadow-ray fast path (Embree's
-    /// `rtcOccluded` split).
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        self.hit(ray, t_min, t_max).is_some()
-    }
-
-    /// Conservative bounds of the part of the object inside the axis slab
-    /// `min <= x[axis] <= max` — what the BVH's spatial splits bin with.
-    /// `None` when the object misses the slab entirely. The default clips
-    /// the bounding box to the slab, which is always valid; primitives
-    /// with tighter knowledge (triangles) override it so long diagonal
-    /// geometry actually shrinks when chopped.
-    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
-        let b = self.bounding_box()?;
-        if b.minimum[axis] > max || b.maximum[axis] < min {
-            return None;
-        }
-        let mut c = b;
-        c.minimum[axis] = c.minimum[axis].max(min);
-        c.maximum[axis] = c.maximum[axis].min(max);
-        Some(c)
     }
 }

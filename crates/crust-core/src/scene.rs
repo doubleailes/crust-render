@@ -1,16 +1,17 @@
 use crate::camera::Camera;
-use crate::hittable_list::HittableList;
 use crate::light::LightList;
+use crate::rt_world::World;
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
 /// The renderer's runtime scene, produced from a USD stage
 /// (`Scene::from_usd`) or assembled by hand (`Scene::new`, e.g. from the
 /// procedural `world::simple_scene`). `Renderer::new` consumes this
-/// directly.
+/// directly. `world` is a committed [`World`] — kernel scene plus the
+/// per-geometry material table.
 pub struct Scene {
     pub camera: Camera,
-    pub world: HittableList,
+    pub world: World,
     pub lights: LightList,
     pub settings: RenderSettings,
     /// Participating-media regions (smoke, fog, …), kept outside `world`
@@ -21,7 +22,7 @@ pub struct Scene {
 impl Scene {
     pub fn new(
         camera: Camera,
-        world: HittableList,
+        world: World,
         lights: LightList,
         settings: RenderSettings,
     ) -> Self {

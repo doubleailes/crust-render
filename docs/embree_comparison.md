@@ -199,6 +199,17 @@ value; Embree is (by design) a component such a renderer would sit on top of.
 
 Two distinct routes, not mutually exclusive:
 
+> **Addendum 2 (kernel extraction).** The "openqmc move" has since been made:
+> the whole intersection layer now lives in a dedicated **`crust-rt`** crate
+> behind an Embree-shaped API — `Geometry` objects attached to a
+> `SceneBuilder`, `commit()`, `Scene::intersect`/`Scene::occluded`
+> (`rtcIntersect1`/`rtcOccluded1`), ID-based `RayHit`s (`geom_id`/`prim_id`),
+> per-geometry masks. The renderer maps hits to materials through a
+> `geom_id`-indexed table (`crust_core::World`), and light attribution moved
+> from `Arc`-address identity to `geom_id`. This is exactly the seam Route A
+> below would need: an optional Embree backend is now a matter of
+> implementing the same four query/build entry points over `embree4-rs`.
+
 ### Route A: bind to Embree
 
 Rust bindings exist (`embree4-sys`, `embree4-rs`). Cycles-class traversal speed,

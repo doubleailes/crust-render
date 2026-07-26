@@ -9,16 +9,13 @@ use std::sync::Arc;
 use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
 
-use crate::bvh::Bvh;
 use crate::camera::Camera;
-use crate::hittable::Hittable;
-use crate::hittable_list::HittableList;
 use crate::light::{AreaLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::hittable::Masked;
-use crate::primitives::{Instance, RoundCurveSegment, Sphere as CrustSphere, Triangle};
 use crate::ray::MASK_ALL;
+use crate::rt_world::WorldBuilder;
 use crate::scene::Scene;
+use crust_rt::{CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder};
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Vec3, Vec3A};
@@ -59,15 +56,16 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
     // Render settings come first — the camera importer needs the aspect ratio.
     let settings = import_render_settings(&stage);
 
-    let mut world = HittableList::new();
+    let mut world = WorldBuilder::new();
     let mut lights = LightList::new();
     let mut volumes: Vec<VolumeRegion> = Vec::new();
     let mut camera_candidate: Option<Camera> = None;
     // Prims binding the same material path share one Arc, and prims with
-    // identical local geometry + material share one triangle BVH through
-    // an Instance — N placements of a mesh cost one copy of its triangles.
+    // identical local geometry + material share one committed kernel
+    // scene through instancing — N placements of a mesh cost one copy of
+    // its triangles.
     let mut materials = MaterialCache::default();
-    let mut meshes: HashMap<MeshKey, Arc<Bvh>> = HashMap::new();
+    let mut meshes: HashMap<MeshKey, Arc<RtScene>> = HashMap::new();
 
     let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
 
@@ -129,7 +127,7 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         crate::world::get_settings().0
     });
 
-    Ok(Scene::new(camera, world, lights, settings).with_volumes(volumes))
+    Ok(Scene::new(camera, world.commit(), lights, settings).with_volumes(volumes))
 }
 
 // -----------------------------------------------------------------------
@@ -447,14 +445,6 @@ fn prim_ray_mask(prim: &Prim) -> u32 {
         .unwrap_or(MASK_ALL)
 }
 
-fn apply_mask(obj: Box<dyn Hittable>, mask: u32) -> Box<dyn Hittable> {
-    if mask == MASK_ALL {
-        obj
-    } else {
-        Box::new(Masked::new(obj, mask))
-    }
-}
-
 /// `crust:motion:translate` — a world-space translation the prim moves
 /// through over the shutter interval (transform motion blur).
 fn prim_motion_translate(prim: &Prim) -> Option<Vec3> {
@@ -501,12 +491,12 @@ impl MeshKey {
 }
 
 fn emit_mesh(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     prim: &Prim,
     mesh: &UsdMesh,
     world_xf: GMat4,
     material: Arc<dyn Material>,
-    meshes: &mut HashMap<MeshKey, Arc<Bvh>>,
+    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
 ) {
     let points: Option<Vec<Vec3f>> = mesh
         .points_attr()
@@ -570,50 +560,66 @@ fn emit_mesh(
                 Vec3A::new(v.x, v.y, v.z)
             })
             .collect();
-        match build_triangles(&verts, &counts, &indices, &material) {
-            Some(tris) => world.add(apply_mask(Box::new(Bvh::new(tris)), mask)),
+        match triangulate(&counts, &indices, verts.len()) {
+            Some(tris) => {
+                world.attach_masked(
+                    Geometry::TriangleMesh {
+                        vertices: verts,
+                        indices: tris,
+                        normals: None,
+                    },
+                    material,
+                    mask,
+                );
+            }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
         }
         return;
     }
 
-    // The triangle BVH is built in the prim's *local* space and shared by
-    // every prim with identical geometry + material; the Instance carries
-    // the placement.
+    // The mesh's kernel scene is built in the prim's *local* space and
+    // shared by every prim with identical geometry + material; the
+    // Instance geometry carries the placement.
     let key = MeshKey::new(&points, &counts, &indices, &material);
-    let bvh = match meshes.get(&key) {
+    let inner = match meshes.get(&key) {
         Some(shared) => {
             debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
             shared.clone()
         }
         None => {
             let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
-            let Some(tris) = build_triangles(&verts, &counts, &indices, &material) else {
+            let Some(tris) = triangulate(&counts, &indices, verts.len()) else {
                 debug!("Mesh at {} produced no triangles", prim.path());
                 return;
             };
-            let bvh = Arc::new(Bvh::new(tris));
-            meshes.insert(key, bvh.clone());
-            bvh
+            let mut b = RtSceneBuilder::new();
+            b.attach(Geometry::TriangleMesh {
+                vertices: verts,
+                indices: tris,
+                normals: None,
+            });
+            let scene = Arc::new(b.commit());
+            meshes.insert(key, scene.clone());
+            scene
         }
     };
 
     let l2w = Affine3A::from_mat4(world_xf);
-    let mut inst = Instance::new(bvh, l2w);
-    if let Some(v) = motion {
-        inst = inst.with_motion(Affine3A::from_translation(v) * l2w);
-    }
-    world.add(apply_mask(Box::new(inst), mask));
+    world.attach_masked(
+        Geometry::Instance {
+            scene: inner,
+            transform: l2w,
+            transform_end: motion.map(|v| Affine3A::from_translation(v) * l2w),
+        },
+        material,
+        mask,
+    );
 }
 
-/// Fan-triangulates the faces into `Triangle`s; `None` if nothing survives.
-fn build_triangles(
-    verts: &[Vec3A],
-    counts: &[i32],
-    indices: &[i32],
-    material: &Arc<dyn Material>,
-) -> Option<Vec<Box<dyn Hittable>>> {
-    let mut tris: Vec<Box<dyn Hittable>> = Vec::new();
+/// Fan-triangulates the faces into an index-triple list; `None` if
+/// nothing survives.
+fn triangulate(counts: &[i32], indices: &[i32], n_verts: usize) -> Option<Vec<[u32; 3]>> {
+    let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut offset = 0usize;
     for &fc in counts {
         let fc = fc as usize;
@@ -622,18 +628,17 @@ fn build_triangles(
             continue;
         }
         for k in 1..(fc - 1) {
-            let i0 = indices[offset] as usize;
-            let i1 = indices[offset + k] as usize;
-            let i2 = indices[offset + k + 1] as usize;
-            if i0 >= verts.len() || i1 >= verts.len() || i2 >= verts.len() {
+            let i0 = indices[offset];
+            let i1 = indices[offset + k];
+            let i2 = indices[offset + k + 1];
+            if i0 < 0 || i1 < 0 || i2 < 0 {
                 continue;
             }
-            tris.push(Box::new(Triangle::new(
-                verts[i0],
-                verts[i1],
-                verts[i2],
-                material.clone(),
-            )));
+            let (i0, i1, i2) = (i0 as u32, i1 as u32, i2 as u32);
+            if i0 as usize >= n_verts || i1 as usize >= n_verts || i2 as usize >= n_verts {
+                continue;
+            }
+            tris.push([i0, i1, i2]);
         }
         offset += fc;
     }
@@ -645,7 +650,7 @@ fn build_triangles(
 // -----------------------------------------------------------------------
 
 fn emit_sphere(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     prim: &Prim,
     sphere: &UsdSphere,
     world_xf: GMat4,
@@ -670,17 +675,27 @@ fn emit_sphere(
         radius,
         center
     );
-    let sphere = CrustSphere::new(center, radius, material);
-    let obj: Box<dyn Hittable> = match prim_motion_translate(prim) {
-        // A moving sphere rides an identity-placed Instance whose end
+    let mask = prim_ray_mask(prim);
+    match prim_motion_translate(prim) {
+        // A moving sphere rides an identity-placed instance whose end
         // transform is the shutter translation.
-        Some(v) => Box::new(
-            Instance::new(Arc::new(sphere), Affine3A::IDENTITY)
-                .with_motion(Affine3A::from_translation(v)),
-        ),
-        None => Box::new(sphere),
-    };
-    world.add(apply_mask(obj, prim_ray_mask(prim)));
+        Some(v) => {
+            let mut b = RtSceneBuilder::new();
+            b.attach(Geometry::Sphere { center, radius });
+            world.attach_masked(
+                Geometry::Instance {
+                    scene: Arc::new(b.commit()),
+                    transform: Affine3A::IDENTITY,
+                    transform_end: Some(Affine3A::from_translation(v)),
+                },
+                material,
+                mask,
+            );
+        }
+        None => {
+            world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -728,7 +743,7 @@ const CURVE_FLATTEN_SEGS: usize = 8;
 /// per curve, or constant; anything else falls back to the first value.
 /// The segments live in local space under an `Instance`, like meshes.
 fn emit_curves(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     prim: &Prim,
     curves: &UsdBasisCurves,
     world_xf: GMat4,
@@ -806,7 +821,7 @@ fn emit_curves(
         }
     };
 
-    let mut segments: Vec<Box<dyn Hittable>> = Vec::new();
+    let mut segments: Vec<CurveSegment> = Vec::new();
     let mut offset = 0usize;
     for (curve_idx, &cnt) in counts.iter().enumerate() {
         let cnt = cnt as usize;
@@ -823,13 +838,12 @@ fn emit_curves(
 
         if ty == "linear" {
             for k in 0..cnt.saturating_sub(1) {
-                segments.push(Box::new(RoundCurveSegment::new(
-                    cp[k],
-                    cp[k + 1],
-                    radius(k),
-                    radius(k + 1),
-                    material.clone(),
-                )));
+                segments.push(CurveSegment {
+                    p0: cp[k],
+                    p1: cp[k + 1],
+                    r0: radius(k),
+                    r1: radius(k + 1),
+                });
             }
         } else {
             // Cubic: flatten each span. Span k uses control points
@@ -850,13 +864,12 @@ fn emit_curves(
                     let t = i as f32 / CURVE_FLATTEN_SEGS as f32;
                     let p = eval_cubic(basis, &ctrl, t);
                     let r = w0 + (w1 - w0) * t;
-                    segments.push(Box::new(RoundCurveSegment::new(
-                        prev_p,
-                        p,
-                        prev_r,
-                        r,
-                        material.clone(),
-                    )));
+                    segments.push(CurveSegment {
+                        p0: prev_p,
+                        p1: p,
+                        r0: prev_r,
+                        r1: r,
+                    });
                     prev_p = p;
                     prev_r = r;
                 }
@@ -884,8 +897,17 @@ fn emit_curves(
         );
         return;
     }
-    let inst = Instance::new(Arc::new(Bvh::new(segments)), Affine3A::from_mat4(world_xf));
-    world.add(apply_mask(Box::new(inst), prim_ray_mask(prim)));
+    let mut b = RtSceneBuilder::new();
+    b.attach(Geometry::RoundCurves { segments });
+    world.attach_masked(
+        Geometry::Instance {
+            scene: Arc::new(b.commit()),
+            transform: Affine3A::from_mat4(world_xf),
+            transform_end: None,
+        },
+        material,
+        prim_ray_mask(prim),
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -978,7 +1000,7 @@ fn lux_emission(light: &impl UsdLight) -> Vec3A {
 }
 
 fn emit_sphere_light(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     lights: &mut LightList,
     light: &SphereLight,
     world_xf: GMat4,
@@ -988,17 +1010,24 @@ fn emit_sphere_light(
     let pos_v = world_xf.transform_point3(Vec3::ZERO);
     let position = Vec3A::new(pos_v.x, pos_v.y, pos_v.z);
 
-    // One Emissive material shared between the visible sphere geometry and
-    // the AreaLight — the integrator identifies the light by this material
-    // when a bounce ray hits it.
+    // The visible sphere geometry and the AreaLight share one surface;
+    // the integrator attributes a bounce hit to the light by the
+    // geometry id the attach returns.
     let material = Arc::new(Emissive::new(effective));
-    world.add(Box::new(CrustSphere::new(position, radius, material.clone())));
+    let geom_id = world.attach(
+        Geometry::Sphere {
+            center: position,
+            radius,
+        },
+        material.clone(),
+    );
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape {
             center: position,
             radius,
         }),
         material,
+        geom_id,
     )));
     debug!(
         "SphereLight: pos={:?} radius={} effective_color={:?}",
@@ -1007,7 +1036,7 @@ fn emit_sphere_light(
 }
 
 fn emit_rect_light(
-    world: &mut HittableList,
+    world: &mut WorldBuilder,
     lights: &mut LightList,
     light: &RectLight,
     world_xf: GMat4,
@@ -1027,9 +1056,9 @@ fn emit_rect_light(
     let edge_v = Vec3A::new(ev.x, ev.y, ev.z);
     let normal = Vec3A::new(nz.x, nz.y, nz.z);
 
-    // One Emissive material shared between the visible geometry (two
-    // triangles spanning the rectangle) and the AreaLight, so the
-    // integrator can attribute bounce hits to this light by identity.
+    // The visible geometry (one mesh: two triangles spanning the
+    // rectangle) and the AreaLight share one surface; bounce hits are
+    // attributed to the light by the geometry id.
     let material = Arc::new(Emissive::new(effective));
     let (c00, c10, c11, c01) = (
         origin,
@@ -1037,11 +1066,18 @@ fn emit_rect_light(
         origin + edge_u + edge_v,
         origin + edge_v,
     );
-    world.add(Box::new(Triangle::new(c00, c10, c11, material.clone())));
-    world.add(Box::new(Triangle::new(c00, c11, c01, material.clone())));
+    let geom_id = world.attach(
+        Geometry::TriangleMesh {
+            vertices: vec![c00, c10, c11, c01],
+            indices: vec![[0, 1, 2], [0, 2, 3]],
+            normals: None,
+        },
+        material.clone(),
+    );
     lights.add(Arc::new(AreaLight::new(
         Box::new(RectShape::new(origin, edge_u, edge_v, normal)),
         material,
+        geom_id,
     )));
     debug!(
         "RectLight: origin={:?} edge_u={:?} edge_v={:?} effective_color={:?}",
