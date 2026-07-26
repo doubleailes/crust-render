@@ -34,6 +34,13 @@ pub(crate) trait Prim: Send + Sync {
 
     fn bbox(&self) -> AABB;
 
+    /// `Some` for triangles, which the BVH groups into 4-wide SIMD packets
+    /// when it builds its leaves. Avoids downcasting: a primitive simply
+    /// declares whether it can join a packet.
+    fn as_triangle(&self) -> Option<&TrianglePrim> {
+        None
+    }
+
     /// Conservative bounds of the part inside the axis slab, for the
     /// BVH's spatial splits. Default: bbox clipped to the slab.
     fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
@@ -69,12 +76,11 @@ pub(crate) struct TrianglePrim {
     pub mask: u32,
 }
 
-impl Prim for TrianglePrim {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
-        if masked_out(ray, self.mask) {
-            return None;
-        }
-        let (t, u, v) = triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max)?;
+impl TrianglePrim {
+    /// Completes a hit whose `(t, u, v)` are already known — the shared tail
+    /// of the scalar and the 4-wide SIMD intersectors, so both derive the
+    /// reported normal the same way.
+    pub(crate) fn hit_from_barycentric(&self, t: f32, u: f32, v: f32) -> Option<PrimHit> {
         let outward = match &self.normals {
             Some([n0, n1, n2]) => (*n0 * (1.0 - u - v) + *n1 * u + *n2 * v).normalize(),
             None => {
@@ -94,6 +100,16 @@ impl Prim for TrianglePrim {
             prim_id: self.prim_id,
         })
     }
+}
+
+impl Prim for TrianglePrim {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        if masked_out(ray, self.mask) {
+            return None;
+        }
+        let (t, u, v) = triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max)?;
+        self.hit_from_barycentric(t, u, v)
+    }
 
     fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         !masked_out(ray, self.mask)
@@ -102,6 +118,10 @@ impl Prim for TrianglePrim {
 
     fn bbox(&self) -> AABB {
         triangle_aabb(self.v0, self.v1, self.v2)
+    }
+
+    fn as_triangle(&self) -> Option<&TrianglePrim> {
+        Some(self)
     }
 
     fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {

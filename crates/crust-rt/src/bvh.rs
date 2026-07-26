@@ -8,19 +8,25 @@
 //! binned *spatial* split, which chops straddling references in two at the
 //! split plane (bounds via `Prim::clipped_aabb` — exact polygon clipping
 //! for triangles) and duplicates them into both children. The cheaper
-//! split wins. Leaves therefore index into a shared `indices` array (a
-//! primitive can appear in several leaves) while the primitives
-//! themselves are stored exactly once.
+//! split wins. A primitive can therefore appear in several leaves, while
+//! the primitives themselves are stored exactly once.
 //!
 //! The binary tree is then collapsed into 4-wide SoA nodes whose slab
-//! tests run on `Vec4` lanes. Large subtrees build in parallel via
-//! `rayon::join`; every split decision depends only on the input, so the
-//! tree is deterministic — threads only change *when* subtrees are built,
-//! never *what*.
+//! tests run on `Vec4` lanes, with the lane verdicts extracted as a bitmask
+//! rather than read back one at a time. Each leaf's payload lands in the
+//! separate `leaves` table — which keeps [`WideNode`] at two cache lines —
+//! and its triangles are packed into 4-wide [`Tri4`] packets so a leaf
+//! intersects four triangles per vector round; everything else (spheres,
+//! curves, instances) keeps a scalar index in `indices`.
+//!
+//! Large subtrees build in parallel via `rayon::join`; every split decision
+//! depends only on the input, so the tree is deterministic — threads only
+//! change *when* subtrees are built, never *what*.
 
 use crate::aabb::AABB;
-use crate::prim::{Prim, PrimHit};
+use crate::prim::{Prim, PrimHit, TrianglePrim};
 use crate::ray::Ray;
+use crate::triangle::{RayShear, Tri4};
 use glam::{Vec3A, Vec4};
 
 /// Leaves are forced at this depth so the traversal stack can never
@@ -28,6 +34,15 @@ use glam::{Vec3A, Vec4};
 const MAX_DEPTH: usize = 60;
 /// Ranges at or below this size always become a leaf.
 const MIN_LEAF: usize = 2;
+/// The leaf floor for ranges made *entirely* of triangles. Those are
+/// intersected four at a time by one SIMD packet, so a 4-primitive leaf
+/// costs the same vector round as a 1-primitive one — stopping at 2 would
+/// leave half the lanes idle and pay for a node test that buys nothing.
+/// Non-packable primitives (spheres, curves, instances) keep [`MIN_LEAF`]:
+/// for them a bigger leaf really is more work. Measured on the
+/// `ray_throughput` example, raising the floor for everything cost
+/// instanced scenes ~12% while raising it for triangles alone gains ~12%.
+const MIN_LEAF_PACKED: usize = 4;
 /// A range no larger than this may stay a leaf when splitting is not
 /// worth it by SAH cost; larger ranges are always split.
 const MAX_LEAF: usize = 8;
@@ -54,12 +69,22 @@ struct Node {
     count: u32,
 }
 
-/// Marks an unused lane of a [`WideNode`] (together with `count == 0`).
+/// Marks an unused lane of a [`WideNode`].
 const EMPTY_LANE: u32 = u32::MAX;
+
+/// Lane-validity bits of [`WideNode::flags`] (bit `k` = lane `k` holds a
+/// real child) and leaf bits (bit `4 + k` = that child is a leaf).
+const VALID_MASK: u32 = 0b1111;
+const LEAF_SHIFT: u32 = 4;
 
 /// A 4-wide BVH node in SoA layout: lane `k` of each `Vec4` holds child
 /// `k`'s slab bounds, so one round of vector min/max tests all four child
 /// boxes against the ray at once (Embree's BVH4 idea).
+///
+/// Exactly 128 bytes (two cache lines): six `Vec4`s, one child index per
+/// lane, and the flag nibbles. The leaf payload — how many primitives, and
+/// where their SIMD packets live — sits in the separate [`Leaf`] table
+/// rather than in the node, which is what keeps the node this small.
 struct WideNode {
     bmin_x: Vec4,
     bmin_y: Vec4,
@@ -67,17 +92,35 @@ struct WideNode {
     bmax_x: Vec4,
     bmax_y: Vec4,
     bmax_z: Vec4,
-    /// Leaf lane (`count > 0`): first offset into `indices`. Internal lane
-    /// (`count == 0`): wide-node index, or [`EMPTY_LANE`].
+    /// Leaf lane: index into the BVH's `leaves`. Internal lane: index into
+    /// `wide`. Unused lane: [`EMPTY_LANE`].
     child: [u32; 4],
-    count: [u32; 4],
+    /// Bits 0..4: lane `k` holds a real child. Bits 4..8: that child is a
+    /// leaf.
+    ///
+    /// The validity bits exist because unused lanes carry +INF/+INF
+    /// bounds, which *usually* fail the slab test but not always: for
+    /// `t_max == INF` and an all-positive ray direction the test reduces to
+    /// `INF <= INF`. Traversal ANDs the nibble into the SIMD hit mask — one
+    /// integer `and` in place of four per-lane branches.
+    flags: u32,
+}
+
+/// A leaf's payload: the 4-wide triangle packets to run, plus the leftover
+/// primitives (spheres, curves, instances, and the triangles that did not
+/// fill a packet's worth) that still go one at a time.
+struct Leaf {
+    /// Range in the BVH's `packets`.
+    pkt_first: u32,
+    pkt_count: u32,
+    /// Range in the BVH's `indices`.
+    idx_first: u32,
+    idx_count: u32,
 }
 
 impl WideNode {
     fn empty() -> Self {
         WideNode {
-            // +INF/+INF bounds: the swapped slab test can never pass them
-            // (an *inverted* box would — min/max swapping un-inverts it).
             bmin_x: Vec4::INFINITY,
             bmin_y: Vec4::INFINITY,
             bmin_z: Vec4::INFINITY,
@@ -85,7 +128,7 @@ impl WideNode {
             bmax_y: Vec4::INFINITY,
             bmax_z: Vec4::INFINITY,
             child: [EMPTY_LANE; 4],
-            count: [0; 4],
+            flags: 0,
         }
     }
 
@@ -96,13 +139,27 @@ impl WideNode {
         self.bmax_x[lane] = b.maximum.x;
         self.bmax_y[lane] = b.maximum.y;
         self.bmax_z[lane] = b.maximum.z;
+        self.flags |= 1 << lane;
+    }
+
+    #[inline]
+    fn is_leaf(&self, lane: usize) -> bool {
+        self.flags & (1 << (LEAF_SHIFT + lane as u32)) != 0
+    }
+
+    fn mark_leaf(&mut self, lane: usize) {
+        self.flags |= 1 << (LEAF_SHIFT + lane as u32);
     }
 }
 
 pub(crate) struct Bvh {
     wide: Vec<WideNode>,
-    /// Leaf ranges index into this; spatial splits may list a primitive in
-    /// more than one leaf.
+    /// Leaf payloads, indexed by a leaf lane's `child`.
+    leaves: Vec<Leaf>,
+    /// 4-wide triangle packets, grouped per leaf.
+    packets: Vec<Tri4>,
+    /// The one-at-a-time primitives of each leaf; spatial splits may list a
+    /// primitive in more than one leaf.
     indices: Vec<u32>,
     /// The primitives, stored once each, in input order.
     prims: Vec<Box<dyn Prim>>,
@@ -142,17 +199,20 @@ impl Bvh {
             })
             .collect();
 
-        let (wide, indices, root_bbox) = if refs.is_empty() {
-            (Vec::new(), Vec::new(), None)
+        let (wide, collected, root_bbox) = if refs.is_empty() {
+            (Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
             let subtree = build_subtree(&prims, refs, 0, surface_area(&root_bbox));
-            (collapse(&subtree.nodes), subtree.indices, Some(root_bbox))
+            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+            (wide, collected, Some(root_bbox))
         };
 
         Bvh {
             wide,
-            indices,
+            leaves: collected.leaves,
+            packets: collected.packets,
+            indices: collected.indices,
             prims,
             root_bbox,
         }
@@ -160,6 +220,24 @@ impl Bvh {
 
     pub(crate) fn prim_count(&self) -> usize {
         self.prims.len()
+    }
+
+    /// The per-ray Woop shear, derived once per traversal — but only for
+    /// scenes that actually hold triangle packets. It costs two divides,
+    /// which is real money on a scene of spheres or instances that would
+    /// never look at it.
+    #[inline]
+    fn shear(&self, ray: &Ray) -> Option<RayShear> {
+        (!self.packets.is_empty()).then(|| RayShear::new(ray))
+    }
+
+    /// Total primitive references held by leaves — packed SIMD lanes plus
+    /// scalar indices. Larger than `prim_count` exactly when spatial splits
+    /// duplicated references.
+    #[cfg(test)]
+    fn leaf_ref_count(&self) -> usize {
+        let packed: u32 = self.packets.iter().map(|p| p.active.count_ones()).sum();
+        packed as usize + self.indices.len()
     }
 
     pub(crate) fn bounds(&self) -> Option<AABB> {
@@ -174,8 +252,11 @@ impl Bvh {
         let mut closest = t_max;
         let mut best: Option<PrimHit> = None;
 
-        let o = ray.origin;
-        let inv = Vec3A::new(safe_inv(ray.dir.x), safe_inv(ray.dir.y), safe_inv(ray.dir.z));
+        // Splat the ray into SoA lanes once for the whole traversal
+        // instead of once per visited node, and likewise derive the Woop
+        // shear once instead of once per triangle.
+        let rs = RaySlab::new(ray, t_min);
+        let shear = self.shear(ray);
 
         let mut stack = [0u32; WIDE_STACK];
         stack[0] = 0;
@@ -184,44 +265,49 @@ impl Bvh {
         while sp > 0 {
             sp -= 1;
             let node = &self.wide[stack[sp] as usize];
-            let (tnear, tfar) = slab4(node, o, inv, t_min, closest);
+            let (tnear, tfar) = rs.slab4(node, closest);
 
-            // Hit lanes, insertion-sorted near-to-far (≤ 4 entries).
+            // One vector compare + one movmskps gives all four lane
+            // verdicts as a nibble; the validity bits drop unused lanes.
+            let mut mask = tnear.cmple(tfar).bitmask() & node.flags & VALID_MASK;
+            if mask == 0 {
+                continue;
+            }
+
+            // Hit lanes, insertion-sorted near-to-far (≤ 4 entries). The
+            // distances are read from one spilled copy of the vector
+            // rather than re-extracting a lane at a time.
+            let tn = tnear.to_array();
             let mut order = [(0f32, 0usize); 4];
             let mut n_hit = 0;
-            for l in 0..4 {
-                if node.count[l] == 0 && node.child[l] == EMPTY_LANE {
-                    continue;
+            while mask != 0 {
+                let l = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let t = tn[l];
+                let mut i = n_hit;
+                while i > 0 && order[i - 1].0 > t {
+                    order[i] = order[i - 1];
+                    i -= 1;
                 }
-                if tnear[l] <= tfar[l] {
-                    let mut i = n_hit;
-                    while i > 0 && order[i - 1].0 > tnear[l] {
-                        order[i] = order[i - 1];
-                        i -= 1;
-                    }
-                    order[i] = (tnear[l], l);
-                    n_hit += 1;
-                }
+                order[i] = (t, l);
+                n_hit += 1;
             }
 
             // Leaf lanes intersect immediately (near first, shrinking
             // `closest`); internal lanes are pushed far-to-near so the
             // nearest pops first.
-            for i in 0..n_hit {
-                let l = order[i].1;
-                if node.count[l] > 0 {
-                    let first = node.child[l] as usize;
-                    for &pi in &self.indices[first..first + node.count[l] as usize] {
-                        if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
-                            closest = hit.t;
-                            best = Some(hit);
-                        }
-                    }
+            for &(_, l) in &order[..n_hit] {
+                if node.is_leaf(l)
+                    && let Some(hit) =
+                        self.intersect_leaf(node.child[l], ray, shear.as_ref(), t_min, closest)
+                {
+                    closest = hit.t;
+                    best = Some(hit);
                 }
             }
             for i in (0..n_hit).rev() {
                 let l = order[i].1;
-                if node.count[l] == 0 {
+                if !node.is_leaf(l) {
                     stack[sp] = node.child[l];
                     sp += 1;
                 }
@@ -231,14 +317,83 @@ impl Bvh {
         best
     }
 
+    /// Closest hit within one leaf: the 4-wide triangle packets first (four
+    /// triangles per vector round), then whatever did not fit a packet.
+    #[inline]
+    fn intersect_leaf(
+        &self,
+        leaf_idx: u32,
+        ray: &Ray,
+        shear: Option<&RayShear>,
+        t_min: f32,
+        t_max: f32,
+    ) -> Option<PrimHit> {
+        let leaf = &self.leaves[leaf_idx as usize];
+        let mut closest = t_max;
+        let mut best: Option<PrimHit> = None;
+
+        let first = leaf.pkt_first as usize;
+        for packet in &self.packets[first..first + leaf.pkt_count as usize] {
+            let shear = shear.expect("a leaf with packets implies the scene has triangles");
+            let out = packet.intersect(shear, ray.mask, t_min, closest);
+            let mut hits = out.hits;
+            while hits != 0 {
+                let lane = hits.trailing_zeros() as usize;
+                hits &= hits - 1;
+                // Lanes were tested against the `closest` on entry, which
+                // earlier lanes may since have shrunk. The comparison is
+                // strict-greater, not greater-or-equal, so an exact tie
+                // resolves to the later primitive exactly as a run of
+                // scalar `hit` calls would.
+                if out.t[lane] > closest {
+                    continue;
+                }
+                let tri = self.triangle(packet.prim[lane]);
+                if let Some(hit) = tri.hit_from_barycentric(out.t[lane], out.u[lane], out.v[lane]) {
+                    closest = hit.t;
+                    best = Some(hit);
+                }
+            }
+            // Lanes sitting exactly on an edge: the f64 tie-break is scalar.
+            let mut fb = out.fallback;
+            while fb != 0 {
+                let lane = fb.trailing_zeros() as usize;
+                fb &= fb - 1;
+                let pi = packet.prim[lane] as usize;
+                if let Some(hit) = self.prims[pi].hit(ray, t_min, closest) {
+                    closest = hit.t;
+                    best = Some(hit);
+                }
+            }
+        }
+
+        let first = leaf.idx_first as usize;
+        for &pi in &self.indices[first..first + leaf.idx_count as usize] {
+            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
+                closest = hit.t;
+                best = Some(hit);
+            }
+        }
+        best
+    }
+
+    /// The triangle a packet lane came from. Packets are only built from
+    /// primitives that answered `as_triangle`, so this always resolves.
+    #[inline]
+    fn triangle(&self, prim_idx: u32) -> &TrianglePrim {
+        self.prims[prim_idx as usize]
+            .as_triangle()
+            .expect("packet lanes are built from triangles only")
+    }
+
     /// Early-exit occlusion traversal: no ordering, returns on the first
     /// confirmed hit anywhere in `(t_min, t_max)`.
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         if self.wide.is_empty() {
             return false;
         }
-        let o = ray.origin;
-        let inv = Vec3A::new(safe_inv(ray.dir.x), safe_inv(ray.dir.y), safe_inv(ray.dir.z));
+        let rs = RaySlab::new(ray, t_min);
+        let shear = self.shear(ray);
 
         let mut stack = [0u32; WIDE_STACK];
         stack[0] = 0;
@@ -247,20 +402,14 @@ impl Bvh {
         while sp > 0 {
             sp -= 1;
             let node = &self.wide[stack[sp] as usize];
-            let (tnear, tfar) = slab4(node, o, inv, t_min, t_max);
-            for l in 0..4 {
-                if node.count[l] == 0 && node.child[l] == EMPTY_LANE {
-                    continue;
-                }
-                if tnear[l] > tfar[l] {
-                    continue;
-                }
-                if node.count[l] > 0 {
-                    let first = node.child[l] as usize;
-                    for &pi in &self.indices[first..first + node.count[l] as usize] {
-                        if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
-                            return true;
-                        }
+            let (tnear, tfar) = rs.slab4(node, t_max);
+            let mut mask = tnear.cmple(tfar).bitmask() & node.flags & VALID_MASK;
+            while mask != 0 {
+                let l = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                if node.is_leaf(l) {
+                    if self.occlude_leaf(node.child[l], ray, shear.as_ref(), t_min, t_max) {
+                        return true;
                     }
                 } else {
                     stack[sp] = node.child[l];
@@ -270,18 +419,62 @@ impl Bvh {
         }
         false
     }
+
+    /// Boolean variant of [`Bvh::intersect_leaf`]: any lane hitting anywhere
+    /// in range ends the query, so there is no ordering and no need to
+    /// resolve which lane won.
+    #[inline]
+    fn occlude_leaf(
+        &self,
+        leaf_idx: u32,
+        ray: &Ray,
+        shear: Option<&RayShear>,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        let leaf = &self.leaves[leaf_idx as usize];
+
+        let first = leaf.pkt_first as usize;
+        for packet in &self.packets[first..first + leaf.pkt_count as usize] {
+            // Matching `TrianglePrim::hit_any`, occlusion needs no normal:
+            // any lane in range occludes.
+            let shear = shear.expect("a leaf with packets implies the scene has triangles");
+            let out = packet.intersect(shear, ray.mask, t_min, t_max);
+            if out.hits != 0 {
+                return true;
+            }
+            let mut fb = out.fallback;
+            while fb != 0 {
+                let lane = fb.trailing_zeros() as usize;
+                fb &= fb - 1;
+                if self.prims[packet.prim[lane] as usize].hit_any(ray, t_min, t_max) {
+                    return true;
+                }
+            }
+        }
+
+        let first = leaf.idx_first as usize;
+        for &pi in &self.indices[first..first + leaf.idx_count as usize] {
+            if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
-/// Finite reciprocal of a direction component: zero (and denormal-tiny)
+/// Finite reciprocal of every direction component: zero (and denormal-tiny)
 /// components become a huge same-signed value instead of ±∞, so the slab
 /// arithmetic can never produce the 0·∞ = NaN that poisons vector min/max.
+/// Branch-free and component-wise, so all three lanes go through one
+/// divide and one select.
 #[inline]
-fn safe_inv(x: f32) -> f32 {
-    if x.abs() < 1e-20 {
-        1e20f32.copysign(x)
-    } else {
-        1.0 / x
-    }
+fn safe_inv3(d: Vec3A) -> Vec3A {
+    const TINY: f32 = 1e-20;
+    const HUGE: f32 = 1e20;
+    // `copysign` via a sign-bit blend: `HUGE` with `d`'s sign bit.
+    let huge = Vec3A::splat(HUGE).copysign(d);
+    Vec3A::select(d.abs().cmplt(Vec3A::splat(TINY)), huge, d.recip())
 }
 
 /// Traversal stack: wide depth ≤ binary `MAX_DEPTH`, and each visited node
@@ -289,27 +482,58 @@ fn safe_inv(x: f32) -> f32 {
 /// the worst case.
 const WIDE_STACK: usize = 3 * MAX_DEPTH + 4;
 
-/// The 4-lane slab test: entry/exit distances for all four child boxes of
-/// `node` at once. A lane hits iff `tnear[l] <= tfar[l]`.
-#[inline]
-fn slab4(node: &WideNode, o: Vec3A, inv: Vec3A, t_min: f32, t_max: f32) -> (Vec4, Vec4) {
-    let t0x = (node.bmin_x - Vec4::splat(o.x)) * Vec4::splat(inv.x);
-    let t1x = (node.bmax_x - Vec4::splat(o.x)) * Vec4::splat(inv.x);
-    let t0y = (node.bmin_y - Vec4::splat(o.y)) * Vec4::splat(inv.y);
-    let t1y = (node.bmax_y - Vec4::splat(o.y)) * Vec4::splat(inv.y);
-    let t0z = (node.bmin_z - Vec4::splat(o.z)) * Vec4::splat(inv.z);
-    let t1z = (node.bmax_z - Vec4::splat(o.z)) * Vec4::splat(inv.z);
-    let tnear = t0x
-        .min(t1x)
-        .max(t0y.min(t1y))
-        .max(t0z.min(t1z))
-        .max(Vec4::splat(t_min));
-    let tfar = t0x
-        .max(t1x)
-        .min(t0y.max(t1y))
-        .min(t0z.max(t1z))
-        .min(Vec4::splat(t_max));
-    (tnear, tfar)
+/// The ray, pre-broadcast into the SoA layout the 4-wide slab test wants.
+/// Built once per traversal: the six splats and the reciprocal used to be
+/// recomputed for every visited node, which is pure overhead in a loop
+/// that visits tens of nodes per ray.
+struct RaySlab {
+    ox: Vec4,
+    oy: Vec4,
+    oz: Vec4,
+    ix: Vec4,
+    iy: Vec4,
+    iz: Vec4,
+    t_min: Vec4,
+}
+
+impl RaySlab {
+    #[inline]
+    fn new(ray: &Ray, t_min: f32) -> Self {
+        let o = ray.origin;
+        let inv = safe_inv3(ray.dir);
+        RaySlab {
+            ox: Vec4::splat(o.x),
+            oy: Vec4::splat(o.y),
+            oz: Vec4::splat(o.z),
+            ix: Vec4::splat(inv.x),
+            iy: Vec4::splat(inv.y),
+            iz: Vec4::splat(inv.z),
+            t_min: Vec4::splat(t_min),
+        }
+    }
+
+    /// The 4-lane slab test: entry/exit distances for all four child boxes
+    /// of `node` at once. A lane hits iff `tnear[l] <= tfar[l]`.
+    #[inline]
+    fn slab4(&self, node: &WideNode, t_max: f32) -> (Vec4, Vec4) {
+        let t0x = (node.bmin_x - self.ox) * self.ix;
+        let t1x = (node.bmax_x - self.ox) * self.ix;
+        let t0y = (node.bmin_y - self.oy) * self.iy;
+        let t1y = (node.bmax_y - self.oy) * self.iy;
+        let t0z = (node.bmin_z - self.oz) * self.iz;
+        let t1z = (node.bmax_z - self.oz) * self.iz;
+        let tnear = t0x
+            .min(t1x)
+            .max(t0y.min(t1y))
+            .max(t0z.min(t1z))
+            .max(self.t_min);
+        let tfar = t0x
+            .max(t1x)
+            .min(t0y.max(t1y))
+            .min(t0z.max(t1z))
+            .min(Vec4::splat(t_max));
+        (tnear, tfar)
+    }
 }
 
 fn surface_area(b: &AABB) -> f32 {
@@ -568,7 +792,8 @@ fn build_subtree(
 ) -> Subtree {
     let bbox = union_all(&refs);
     let count = refs.len();
-    if count <= MIN_LEAF || depth >= MAX_DEPTH {
+    let min_leaf = min_leaf_for(prims, &refs);
+    if count <= min_leaf || depth >= MAX_DEPTH {
         return leaf(bbox, &refs);
     }
 
@@ -667,7 +892,7 @@ fn object_partition_or_leaf(
 ) -> Subtree {
     let count = refs.len();
     match object {
-        Some(o) if count > MIN_LEAF => {
+        Some(o) if count > min_leaf_for(prims, &refs) => {
             let (l, r) = partition_by_bin(&mut refs, &o);
             if l.is_empty() || r.is_empty() {
                 let mut all = l;
@@ -679,6 +904,20 @@ fn object_partition_or_leaf(
             merge(bbox, left, right)
         }
         _ => leaf(bbox, &refs),
+    }
+}
+
+/// The leaf-size floor for this range: [`MIN_LEAF_PACKED`] when every
+/// reference is a triangle (so the leaf becomes exactly one SIMD packet),
+/// [`MIN_LEAF`] otherwise.
+fn min_leaf_for(prims: &[Box<dyn Prim>], refs: &[PrimRef]) -> usize {
+    if refs
+        .iter()
+        .all(|r| prims[r.idx as usize].as_triangle().is_some())
+    {
+        MIN_LEAF_PACKED
+    } else {
+        MIN_LEAF
     }
 }
 
@@ -698,30 +937,103 @@ fn partition_by_bin(refs: &mut Vec<PrimRef>, o: &ObjSplit) -> (Vec<PrimRef>, Vec
     (left, right)
 }
 
+/// Everything the collapse pass emits besides the nodes themselves: one
+/// [`Leaf`] per leaf lane, the triangle packets those leaves run, and the
+/// re-ordered one-at-a-time primitive indices.
+#[derive(Default)]
+struct LeafData {
+    leaves: Vec<Leaf>,
+    packets: Vec<Tri4>,
+    indices: Vec<u32>,
+}
+
+impl LeafData {
+    /// Turns one binary leaf's primitive range into a [`Leaf`]: triangles
+    /// are packed four to a SIMD packet, everything else keeps its scalar
+    /// index. Returns the new leaf's index.
+    ///
+    /// Packets are emitted contiguously per leaf, so a leaf's packets are
+    /// one linear sweep of memory at traversal time.
+    fn push_leaf(&mut self, range: &[u32], prims: &[Box<dyn Prim>]) -> u32 {
+        let pkt_first = self.packets.len() as u32;
+        let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, u32)> = Vec::with_capacity(4);
+        let idx_first = self.indices.len() as u32;
+        let mut idx_count = 0u32;
+
+        for &pi in range {
+            match prims[pi as usize].as_triangle() {
+                Some(t) => {
+                    batch.push((t.v0, t.v1, t.v2, pi, t.mask));
+                    if batch.len() == 4 {
+                        self.packets.push(Tri4::new(&batch));
+                        batch.clear();
+                    }
+                }
+                None => {
+                    self.indices.push(pi);
+                    idx_count += 1;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            // A partial tail packet still beats scalar calls: the unused
+            // lanes ride along for free.
+            self.packets.push(Tri4::new(&batch));
+        }
+
+        self.leaves.push(Leaf {
+            pkt_first,
+            pkt_count: self.packets.len() as u32 - pkt_first,
+            idx_first,
+            idx_count,
+        });
+        self.leaves.len() as u32 - 1
+    }
+}
+
 /// Collapses the binary tree into 4-wide nodes: each wide node adopts its
 /// binary node's two children, then repeatedly replaces the largest-area
 /// internal child with that child's own two children until four lanes are
-/// filled (or only leaves remain). Purely input-driven, so determinism is
-/// preserved.
-fn collapse(binary: &[Node]) -> Vec<WideNode> {
+/// filled (or only leaves remain). Leaf lanes are converted to [`Leaf`]
+/// entries with their triangles packed into SIMD packets as they are
+/// reached. Purely input-driven, so determinism is preserved.
+fn collapse(
+    binary: &[Node],
+    indices: &[u32],
+    prims: &[Box<dyn Prim>],
+) -> (Vec<WideNode>, LeafData) {
     let mut out = Vec::with_capacity(binary.len() / 2 + 1);
+    let mut data = LeafData::default();
     if binary.is_empty() {
-        return out;
+        return (out, data);
     }
     if binary[0].count > 0 {
         // Single-leaf tree.
         let mut w = WideNode::empty();
         w.set_lane_bounds(0, &binary[0].bbox);
-        w.child[0] = binary[0].first_or_right;
-        w.count[0] = binary[0].count;
+        w.child[0] = data.push_leaf(leaf_range(&binary[0], indices), prims);
+        w.mark_leaf(0);
         out.push(w);
-        return out;
+        return (out, data);
     }
-    collapse_node(binary, 0, &mut out);
-    out
+    collapse_node(binary, indices, prims, 0, &mut out, &mut data);
+    (out, data)
 }
 
-fn collapse_node(binary: &[Node], b_idx: u32, out: &mut Vec<WideNode>) -> u32 {
+/// The slice of `indices` a binary leaf owns.
+fn leaf_range<'a>(node: &Node, indices: &'a [u32]) -> &'a [u32] {
+    let first = node.first_or_right as usize;
+    &indices[first..first + node.count as usize]
+}
+
+fn collapse_node(
+    binary: &[Node],
+    indices: &[u32],
+    prims: &[Box<dyn Prim>],
+    b_idx: u32,
+    out: &mut Vec<WideNode>,
+    data: &mut LeafData,
+) -> u32 {
     let slot = out.len();
     out.push(WideNode::empty());
 
@@ -753,10 +1065,10 @@ fn collapse_node(binary: &[Node], b_idx: u32, out: &mut Vec<WideNode>) -> u32 {
         let bounds = binary[k].bbox;
         out[slot].set_lane_bounds(lane, &bounds);
         if binary[k].count > 0 {
-            out[slot].child[lane] = binary[k].first_or_right;
-            out[slot].count[lane] = binary[k].count;
+            out[slot].child[lane] = data.push_leaf(leaf_range(&binary[k], indices), prims);
+            out[slot].mark_leaf(lane);
         } else {
-            let ci = collapse_node(binary, kids[lane], out);
+            let ci = collapse_node(binary, indices, prims, kids[lane], out, data);
             out[slot].child[lane] = ci;
         }
     }
@@ -876,16 +1188,55 @@ mod tests {
     }
 
     /// Diagonal shards must actually produce duplicated references —
-    /// otherwise the spatial-split path is dead code.
+    /// otherwise the spatial-split path is dead code. References live in
+    /// two places now: packed SIMD lanes and the scalar `indices` list.
     #[test]
     fn spatial_splits_duplicate_references() {
         let bvh = Bvh::new(diagonal_shards(64));
+        let refs = bvh.leaf_ref_count();
         assert!(
-            bvh.indices.len() > bvh.prims.len(),
-            "no reference duplication: {} indices for {} prims",
-            bvh.indices.len(),
+            refs > bvh.prims.len(),
+            "no reference duplication: {refs} leaf references for {} prims",
             bvh.prims.len()
         );
+    }
+
+    /// Every leaf reference must land in exactly one place, and every
+    /// triangle must be packed rather than left on the scalar path.
+    #[test]
+    fn triangles_are_packed_into_simd_lanes() {
+        let bvh = Bvh::new(diagonal_shards(64));
+        assert!(!bvh.packets.is_empty(), "no packets built for a triangle scene");
+        assert!(
+            bvh.indices.is_empty(),
+            "{} triangles fell back to the scalar list",
+            bvh.indices.len()
+        );
+
+        // Spheres are not packable and must stay on the scalar path.
+        let bvh = Bvh::new(sphere_grid(4));
+        assert!(bvh.packets.is_empty(), "spheres must not be packed");
+        assert_eq!(bvh.indices.len(), bvh.leaf_ref_count());
+
+        // Mixed leaves must place each primitive on exactly one path.
+        let mut mixed = diagonal_shards(16);
+        mixed.extend(sphere_grid(2));
+        let bvh = Bvh::new(mixed);
+        assert!(!bvh.packets.is_empty() && !bvh.indices.is_empty());
+        assert!(bvh.leaf_ref_count() >= bvh.prims.len());
+    }
+
+    /// Packet lanes must average close to 4 on a dense mesh — a packing
+    /// that mostly emitted 1-lane packets would be SIMD in name only.
+    #[test]
+    fn packets_are_well_filled() {
+        let bvh = Bvh::new(diagonal_shards(256));
+        let lanes: u32 = bvh.packets.iter().map(|p| p.active.count_ones()).sum();
+        let avg = lanes as f32 / bvh.packets.len() as f32;
+        // `MIN_LEAF_PACKED` is what keeps this high — ~2.9 of 4 on this
+        // scene, against ~1.7 when the leaf floor was 2. Below 2.5 means
+        // the floor has drifted away from the SIMD width again.
+        assert!(avg >= 2.5, "average packet occupancy {avg} of 4 lanes");
     }
 
     /// `hit_any` must agree with `hit(..).is_some()` for every ray and range.
@@ -916,6 +1267,15 @@ mod tests {
         }
     }
 
+    /// Node size is a load-bearing claim, not a comment: the leaf payload
+    /// was moved into a side table precisely so the node still fits two
+    /// cache lines. Growing it would silently cost traversal bandwidth.
+    #[test]
+    fn wide_node_is_two_cache_lines() {
+        assert_eq!(std::mem::size_of::<WideNode>(), 128);
+        assert_eq!(std::mem::align_of::<WideNode>(), 16);
+    }
+
     /// Parallel subtree builds must not change the tree: the same input
     /// always produces byte-identical topology.
     #[test]
@@ -924,9 +1284,15 @@ mod tests {
         let b = Bvh::new(sphere_grid(6));
         assert_eq!(a.wide.len(), b.wide.len());
         assert_eq!(a.indices, b.indices);
+        assert_eq!(a.packets.len(), b.packets.len());
+        assert_eq!(a.leaves.len(), b.leaves.len());
+        for (x, y) in a.leaves.iter().zip(&b.leaves) {
+            assert_eq!((x.pkt_first, x.pkt_count), (y.pkt_first, y.pkt_count));
+            assert_eq!((x.idx_first, x.idx_count), (y.idx_first, y.idx_count));
+        }
         for (x, y) in a.wide.iter().zip(&b.wide) {
             assert_eq!(x.child, y.child);
-            assert_eq!(x.count, y.count);
+            assert_eq!(x.flags, y.flags);
             assert_eq!(x.bmin_x, y.bmin_x);
             assert_eq!(x.bmax_z, y.bmax_z);
         }
@@ -940,10 +1306,10 @@ mod tests {
         let n_leaf_slots: usize = bvh
             .wide
             .iter()
-            .flat_map(|w| w.count.iter())
-            .filter(|&&c| c > 0)
-            .count();
+            .map(|w| (0..4).filter(|&l| w.is_leaf(l)).count())
+            .sum();
         assert!(n_leaf_slots > 0);
+        assert_eq!(n_leaf_slots, bvh.leaves.len());
         // A binary tree over L leaves has L-1 internal nodes; BVH4 should
         // need roughly a third of that.
         assert!(

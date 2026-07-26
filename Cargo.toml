@@ -12,3 +12,19 @@ glam = { version = "0.30.8", features = ["serde"] }
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.73.0"
 rand = "0.9.2"
+
+# The hot loops are spread across crates: the integrator in `crust-core`
+# calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.
+# Every one of those is a small `#[inline]` function whose whole point is
+# to disappear into its caller — with the default 16 codegen units and no
+# LTO, cross-crate calls survive as real calls and the vectorized bodies
+# never fuse. LTO + a single codegen unit is what lets the SIMD already in
+# the code actually reach the machine code.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Benchmarks and tests inherit `release`, so they measure the same codegen.
+[profile.bench]
+lto = "thin"
+codegen-units = 1
