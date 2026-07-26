@@ -380,3 +380,129 @@ fn loads_motionblur_usda() {
         shadow_hit.rec.t
     );
 }
+
+/// Instancing, both mechanisms. `samples/instancing.usda` holds three
+/// natively-instanced towers (each a two-material prototype) and a
+/// `PointInstancer` scattering six gems, one of which `invisibleIds` hides.
+#[test]
+fn loads_instancing_usda() {
+    let scene = Scene::from_usd(&sample("instancing.usda"))
+        .expect("failed to open instancing.usda");
+
+    // 5 visible scatter instances + 3 towers x 2 prototype parts + floor
+    // + the rect light's geometry.
+    assert_eq!(
+        scene.world.count(),
+        13,
+        "expected 13 geometries (5 scatter + 6 tower parts + floor + light), got {}",
+        scene.world.count()
+    );
+
+    // The whole point: every placement is an instance, so the kernel sees
+    // one top-level primitive per placement rather than a copy of the
+    // prototype's triangles. The two rect-light triangles and the floor's
+    // two are the only non-instanced prims.
+    assert!(
+        scene.world.primitive_count() <= 16,
+        "geometry looks baked, not instanced: {} kernel primitives",
+        scene.world.primitive_count()
+    );
+}
+
+/// A `class` prototype must never be drawn in its own right — only through
+/// the instances that reference it. Before instancing support the class's
+/// contents rendered at the origin as an extra, phantom object.
+#[test]
+fn instancing_does_not_draw_the_class_prototype() {
+    let scene = Scene::from_usd(&sample("instancing.usda"))
+        .expect("failed to open instancing.usda");
+
+    // `/World/_Tower` is authored at the origin. The towers are placed at
+    // x = -4.2, -2.2 and -0.4, so nothing should occupy x = 0, and a ray
+    // down the tower's height there must reach only the floor.
+    let ray = crust_core::Ray::new(
+        crust_core::Vec3A::new(0.0, 1.0, 6.0),
+        -crust_core::Vec3A::Z,
+    );
+    assert!(
+        scene.world.intersect(&ray, 0.001, 20.0).is_none(),
+        "the class prototype was drawn at the origin"
+    );
+}
+
+/// Instances must land where their transforms put them, and carry the
+/// material bound inside the prototype.
+#[test]
+fn instances_are_placed_and_shaded_per_prototype_part() {
+    let scene = Scene::from_usd(&sample("instancing.usda"))
+        .expect("failed to open instancing.usda");
+
+    // TowerA sits at x = -4.2 with its block spanning y in [0, 2] and its
+    // emerald cap [2, 2.5] (prototype y in [-0.5, 1.5] / [1.5, 2.0], the
+    // instance raised by 0.5).
+    let shoot = |x: f32, y: f32| {
+        crust_core::Ray::new(
+            crust_core::Vec3A::new(x, y, 6.0),
+            -crust_core::Vec3A::Z,
+        )
+    };
+    let block = scene
+        .world
+        .intersect(&shoot(-4.2, 1.0), 0.001, 20.0)
+        .expect("TowerA's block should be hit at x = -4.2");
+    let cap = scene
+        .world
+        .intersect(&shoot(-4.2, 2.2), 0.001, 20.0)
+        .expect("TowerA's cap should be hit above the block");
+    assert_ne!(
+        block.geom_id, cap.geom_id,
+        "block and cap must stay separate geometries so both materials survive"
+    );
+
+    // Nothing between the towers.
+    assert!(
+        scene.world.intersect(&shoot(-3.4, 1.0), 0.001, 20.0).is_none(),
+        "unexpected geometry between TowerA and TowerB"
+    );
+
+    // TowerC is scaled to 1.4 in y, so its cap reaches higher than
+    // TowerA's: prototype y = 2.0 maps to 0.5 + 1.4 * 2.0 = 3.3.
+    assert!(
+        scene.world.intersect(&shoot(-0.4, 3.0), 0.001, 20.0).is_some(),
+        "TowerC's non-uniform scale was not applied"
+    );
+    assert!(
+        scene.world.intersect(&shoot(-4.2, 3.0), 0.001, 20.0).is_none(),
+        "unscaled TowerA should not reach y = 3"
+    );
+}
+
+/// `invisibleIds` prunes instances, and every visible one is placed.
+#[test]
+fn point_instancer_honours_invisible_ids() {
+    let scene = Scene::from_usd(&sample("instancing.usda"))
+        .expect("failed to open instancing.usda");
+
+    // Six positions are authored; id 13 — the fourth, at x = 5.4 — is
+    // hidden. Shoot straight down each gem's column from y = 4: a gem
+    // stops the ray above the floor, its absence lets it run to the floor
+    // at exactly t = 4. (The threshold is deliberately just shy of the
+    // floor rather than near the gems' tops: per-instance rotations tilt
+    // them, so the height at which a column meets a gem varies.)
+    let hit_above = |x: f32, z: f32| {
+        let ray = crust_core::Ray::new(
+            crust_core::Vec3A::new(x, 4.0, z),
+            -crust_core::Vec3A::Y,
+        );
+        scene
+            .world
+            .intersect(&ray, 0.001, 10.0)
+            .is_some_and(|h| h.rec.t < 3.9) // anything above the floor at y = 0
+    };
+    assert!(hit_above(1.6, 0.0), "gem id 10 missing");
+    assert!(hit_above(2.9, -1.1), "gem id 11 missing");
+    assert!(hit_above(4.2, 0.4), "gem id 12 missing");
+    assert!(!hit_above(5.4, -0.6), "gem id 13 is in invisibleIds but was drawn");
+    assert!(hit_above(2.2, 1.6), "gem id 14 missing");
+    assert!(hit_above(3.8, 2.1), "gem id 15 missing");
+}

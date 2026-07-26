@@ -23,7 +23,7 @@ use glam::{Affine3A, Vec3, Vec3A};
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, Mesh as UsdMesh,
-    PointBased, Sphere as UsdSphere, Xform, Xformable,
+    PointBased, PointInstancer, Sphere as UsdSphere, Xform, Xformable,
 };
 use openusd::schemas::lux::{
     CylinderLight, DiskLight, DistantLight, DomeLight, Light as UsdLight, RectLight, SphereLight,
@@ -64,15 +64,49 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
     // identical local geometry + material share one committed kernel
     // scene through instancing — N placements of a mesh cost one copy of
     // its triangles.
-    let mut materials = MaterialCache::default();
-    let mut meshes: HashMap<MeshKey, Arc<RtScene>> = HashMap::new();
+    let mut caches = ImportCaches::default();
 
     let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
 
     while let Some((prim, parent_world)) = stack.pop() {
+        // `class` prims (and their descendants) describe geometry that
+        // exists only to be referenced or instanced — they are never
+        // rendered in their own right. Prototypes reach the same prims
+        // through `collect_proto_parts`, which deliberately does not apply
+        // this rule.
+        if prim.is_abstract().unwrap_or(false) {
+            debug!("Skipping abstract (class) prim {}", prim.path());
+            continue;
+        }
+
         let local = local_matrix_at(&stage, &prim);
         let resets = resets_xform_stack_at(&stage, &prim);
         let this_world = if resets { local } else { parent_world * local };
+
+        // Native instancing: an `instanceable` prim with a composition arc
+        // shares one prototype with every other instance of it. Take the
+        // geometry from the prototype and place it — never descend into
+        // the instance's own (proxy) subtree, which would rebuild the same
+        // triangles once per instance.
+        if prim.is_instance().unwrap_or(false) {
+            match prim.prototype() {
+                Ok(Some(proto_path)) => {
+                    emit_native_instance(
+                        &stage,
+                        &mut world,
+                        &prim,
+                        &proto_path,
+                        this_world,
+                        &mut caches,
+                    );
+                    continue;
+                }
+                _ => warn!(
+                    "Prim {} is instanceable but has no prototype — importing directly",
+                    prim.path()
+                ),
+            }
+        }
 
         // Dispatch by schema. Volume prims are checked first: a prim
         // carrying `crust:volume:type` imports as a participating-media
@@ -80,16 +114,21 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         // shadow rays. Otherwise order matters only for Meshes vs Sphere
         // prims — both check first so we don't recurse into their
         // materials as prims.
-        if custom_token(&prim, "crust:volume:type").is_some() {
+        if let Ok(Some(instancer)) = PointInstancer::get(&stage, prim.path().clone()) {
+            emit_point_instancer(&stage, &mut world, &prim, &instancer, this_world, &mut caches);
+            // Prototypes are conventionally authored beneath the
+            // instancer; they are drawn through it, never on their own.
+            continue;
+        } else if custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut materials);
-            emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut meshes);
+            let mat = resolve_material(&stage, &prim, &mut caches.materials);
+            emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut caches.meshes);
         } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut materials);
+            let mat = resolve_material(&stage, &prim, &mut caches.materials);
             emit_sphere(&mut world, &prim, &sphere, this_world, mat);
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut materials);
+            let mat = resolve_material(&stage, &prim, &mut caches.materials);
             emit_curves(&mut world, &prim, &curves, this_world, mat);
         } else if UsdCamera::get(&stage, prim.path().clone())
             .ok()
@@ -498,43 +537,12 @@ fn emit_mesh(
     material: Arc<dyn Material>,
     meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
 ) {
-    let points: Option<Vec<Vec3f>> = mesh
-        .points_attr()
-        .get::<sdf::Value>()
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Vec3fVec(v) => Some(v),
-            _ => None,
-        });
-    let counts: Option<Vec<i32>> = mesh
-        .face_vertex_counts_attr()
-        .get::<sdf::Value>()
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::IntVec(v) => Some(v),
-            _ => None,
-        });
-    let indices: Option<Vec<i32>> = mesh
-        .face_vertex_indices_attr()
-        .get::<sdf::Value>()
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::IntVec(v) => Some(v),
-            _ => None,
-        });
-
-    let (points, counts, indices) = match (points, counts, indices) {
-        (Some(p), Some(c), Some(i)) => (p, c, i),
-        _ => {
-            debug!(
-                "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
-                prim.path()
-            );
-            return;
-        }
+    let Some((points, counts, indices)) = mesh_arrays(mesh) else {
+        debug!(
+            "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
+            prim.path()
+        );
+        return;
     };
 
     let mask = prim_ray_mask(prim);
@@ -580,28 +588,8 @@ fn emit_mesh(
     // The mesh's kernel scene is built in the prim's *local* space and
     // shared by every prim with identical geometry + material; the
     // Instance geometry carries the placement.
-    let key = MeshKey::new(&points, &counts, &indices, &material);
-    let inner = match meshes.get(&key) {
-        Some(shared) => {
-            debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
-            shared.clone()
-        }
-        None => {
-            let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
-            let Some(tris) = triangulate(&counts, &indices, verts.len()) else {
-                debug!("Mesh at {} produced no triangles", prim.path());
-                return;
-            };
-            let mut b = RtSceneBuilder::new();
-            b.attach(Geometry::TriangleMesh {
-                vertices: verts,
-                indices: tris,
-                normals: None,
-            });
-            let scene = Arc::new(b.commit());
-            meshes.insert(key, scene.clone());
-            scene
-        }
+    let Some(inner) = shared_mesh_scene(prim, &points, &counts, &indices, &material, meshes) else {
+        return;
     };
 
     let l2w = Affine3A::from_mat4(world_xf);
@@ -614,6 +602,56 @@ fn emit_mesh(
         material,
         mask,
     );
+}
+
+/// Reads a mesh prim's authored arrays. `None` when any of the three
+/// required attributes is missing.
+fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
+    let int_vec = |v: sdf::Value| match v {
+        sdf::Value::IntVec(v) => Some(v),
+        _ => None,
+    };
+    let points = match mesh.points_attr().get::<sdf::Value>().ok().flatten()? {
+        sdf::Value::Vec3fVec(v) => v,
+        _ => return None,
+    };
+    let counts = int_vec(mesh.face_vertex_counts_attr().get::<sdf::Value>().ok().flatten()?)?;
+    let indices = int_vec(mesh.face_vertex_indices_attr().get::<sdf::Value>().ok().flatten()?)?;
+    Some((points, counts, indices))
+}
+
+/// The mesh's triangles as a committed kernel scene in the prim's *local*
+/// space, shared with every earlier prim whose points/topology/material
+/// match. This is the unit of geometry sharing: N placements of a mesh —
+/// whether by repeated authoring, by a `PointInstancer`, or by native
+/// instancing — cost one copy of its triangles and one BVH.
+fn shared_mesh_scene(
+    prim: &Prim,
+    points: &[Vec3f],
+    counts: &[i32],
+    indices: &[i32],
+    material: &Arc<dyn Material>,
+    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
+) -> Option<Arc<RtScene>> {
+    let key = MeshKey::new(points, counts, indices, material);
+    if let Some(shared) = meshes.get(&key) {
+        debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
+        return Some(shared.clone());
+    }
+    let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+    let Some(tris) = triangulate(counts, indices, verts.len()) else {
+        debug!("Mesh at {} produced no triangles", prim.path());
+        return None;
+    };
+    let mut b = RtSceneBuilder::new();
+    b.attach(Geometry::TriangleMesh {
+        vertices: verts,
+        indices: tris,
+        normals: None,
+    });
+    let scene = Arc::new(b.commit());
+    meshes.insert(key, scene.clone());
+    Some(scene)
 }
 
 /// Fan-triangulates the faces into an index-triple list; `None` if
@@ -649,14 +687,9 @@ fn triangulate(counts: &[i32], indices: &[i32], n_verts: usize) -> Option<Vec<[u
 // Sphere
 // -----------------------------------------------------------------------
 
-fn emit_sphere(
-    world: &mut WorldBuilder,
-    prim: &Prim,
-    sphere: &UsdSphere,
-    world_xf: GMat4,
-    material: Arc<dyn Material>,
-) {
-    let radius = sphere
+/// The authored `radius`, defaulting to USD's 1.0.
+fn sphere_radius(sphere: &UsdSphere) -> f32 {
+    sphere
         .radius_attr()
         .get::<sdf::Value>()
         .ok()
@@ -666,7 +699,17 @@ fn emit_sphere(
             sdf::Value::Float(f) => Some(f),
             _ => None,
         })
-        .unwrap_or(1.0);
+        .unwrap_or(1.0)
+}
+
+fn emit_sphere(
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    sphere: &UsdSphere,
+    world_xf: GMat4,
+    material: Arc<dyn Material>,
+) {
+    let radius = sphere_radius(sphere);
     let center_world = world_xf.transform_point3(Vec3::ZERO);
     let center = Vec3A::new(center_world.x, center_world.y, center_world.z);
     debug!(
@@ -695,6 +738,394 @@ fn emit_sphere(
         None => {
             world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
         }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Instancing: prototypes
+//
+// Both instancing mechanisms — `UsdGeomPointInstancer` and native
+// `instanceable` prims — reduce to the same thing: build a prototype's
+// geometry *once*, then place it many times by transform. The shared
+// currency is a [`ProtoPart`]: one leaf geometry of the prototype, held as
+// a committed kernel scene in its own local space.
+//
+// The split into parts (rather than one scene per prototype) exists
+// because `World` maps materials per top-level geometry: a prototype whose
+// subtree binds two materials has to become two instances, or one of the
+// materials would be lost. Instances are cheap — a transform and a
+// pointer — so this costs a little top-level BVH and buys correct shading.
+// -----------------------------------------------------------------------
+
+/// The importer's memoization, threaded through geometry import.
+///
+/// All three caches exist for the same reason — authored geometry should
+/// be turned into kernel geometry exactly once, however many prims,
+/// instances or prototypes refer to it.
+#[derive(Default)]
+struct ImportCaches {
+    /// Material path (memoized) → shared material.
+    materials: MaterialCache,
+    /// Mesh content + material → the mesh's local-space kernel scene.
+    meshes: HashMap<MeshKey, Arc<RtScene>>,
+    /// Prototype path → its parts, for both instancing mechanisms.
+    protos: HashMap<String, Arc<Vec<ProtoPart>>>,
+}
+
+/// One leaf geometry of a prototype: a committed kernel scene in its own
+/// local space, the transform placing it relative to the prototype root,
+/// and the material and visibility mask authored on it.
+#[derive(Clone)]
+struct ProtoPart {
+    scene: Arc<RtScene>,
+    /// Prototype-root-relative placement. An instance's world transform is
+    /// composed onto the left of this.
+    local: GMat4,
+    material: Arc<dyn Material>,
+    mask: u32,
+}
+
+/// Walks a prototype subtree and builds its [`ProtoPart`]s, in the
+/// prototype root's local space (the root itself contributes no
+/// transform — an instance supplies the placement).
+///
+/// Abstract (`class`) prims are *not* skipped here, unlike in the main
+/// traversal: naming a class as a prototype is exactly how one authors
+/// "geometry that exists only to be instanced".
+fn collect_proto_parts(stage: &Stage, root: &Prim, caches: &mut ImportCaches) -> Vec<ProtoPart> {
+    let mut parts = Vec::new();
+    let mut stack: Vec<(Prim, GMat4)> = vec![(root.clone(), GMat4::IDENTITY)];
+
+    while let Some((prim, parent_local)) = stack.pop() {
+        // The prototype root's own transform is deliberately excluded: a
+        // `PointInstancer` prototype is placed entirely by its per-instance
+        // transform, and a native prototype root carries none.
+        let this_local = if prim.path() == root.path() {
+            GMat4::IDENTITY
+        } else if resets_xform_stack_at(stage, &prim) {
+            local_matrix_at(stage, &prim)
+        } else {
+            parent_local * local_matrix_at(stage, &prim)
+        };
+
+        let mask = prim_ray_mask(&prim);
+        if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+            let material = resolve_material(stage, &prim, &mut caches.materials);
+            if let Some((points, counts, indices)) = mesh_arrays(&mesh)
+                && let Some(scene) = shared_mesh_scene(
+                    &prim,
+                    &points,
+                    &counts,
+                    &indices,
+                    &material,
+                    &mut caches.meshes,
+                )
+            {
+                parts.push(ProtoPart {
+                    scene,
+                    local: this_local,
+                    material,
+                    mask,
+                });
+            }
+        } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
+            let material = resolve_material(stage, &prim, &mut caches.materials);
+            let radius = sphere_radius(&sphere);
+            let mut b = RtSceneBuilder::new();
+            // Local-space sphere at the origin: unlike the top-level
+            // sphere path, which bakes the centre into world space, this
+            // lets the instance transform scale it (a non-uniform scale
+            // correctly yields an ellipsoid, since rays enter local space).
+            b.attach(Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius,
+            });
+            parts.push(ProtoPart {
+                scene: Arc::new(b.commit()),
+                local: this_local,
+                material,
+                mask,
+            });
+        } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
+            let material = resolve_material(stage, &prim, &mut caches.materials);
+            if let Some(segments) = curve_segments(&prim, &curves) {
+                let mut b = RtSceneBuilder::new();
+                b.attach(Geometry::RoundCurves { segments });
+                parts.push(ProtoPart {
+                    scene: Arc::new(b.commit()),
+                    local: this_local,
+                    material,
+                    mask,
+                });
+            }
+        } else if custom_token(&prim, "crust:volume:type").is_some() {
+            // Volumes live outside the surface BVH entirely (their bounds
+            // must not occlude shadow rays), so they cannot ride an
+            // instance transform. Say so rather than dropping silently.
+            warn!(
+                "Volume at {} is inside a prototype — volumes cannot be instanced, skipped",
+                prim.path()
+            );
+        } else if PointInstancer::get(stage, prim.path().clone())
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            warn!(
+                "Nested PointInstancer at {} inside a prototype — not expanded",
+                prim.path()
+            );
+        }
+
+        if let Ok(children) = prim.children() {
+            for child in children {
+                stack.push((child, this_local));
+            }
+        }
+    }
+    parts
+}
+
+/// Imports one natively-instanced prim (`instanceable = true` plus a
+/// composition arc) by placing its shared prototype's parts.
+///
+/// This is the mechanism Moana-scale scenes rely on, and the reason it
+/// matters is memory: without it the importer walks each instance's proxy
+/// subtree and re-reads its geometry, so cost scales with the *instance*
+/// count. Here every instance of a prototype shares one set of committed
+/// kernel scenes, and costs only its transforms.
+fn emit_native_instance(
+    stage: &Stage,
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    proto_path: &sdf::Path,
+    world_xf: GMat4,
+    caches: &mut ImportCaches,
+) {
+    let key = proto_path.to_string();
+    let parts = match caches.protos.get(&key) {
+        Some(parts) => parts.clone(),
+        None => {
+            let root = stage.prim_at(proto_path.clone());
+            let parts = Arc::new(collect_proto_parts(stage, &root, caches));
+            debug!(
+                "Built prototype {key} for instance {} ({} part(s))",
+                prim.path(),
+                parts.len()
+            );
+            if parts.is_empty() {
+                warn!(
+                    "Prototype {key} (instanced at {}) contributed no geometry",
+                    prim.path()
+                );
+            }
+            caches.protos.insert(key, parts.clone());
+            parts
+        }
+    };
+    attach_proto_parts(world, &parts, world_xf, "native instance");
+}
+
+/// Attaches every part of a prototype at `placement`, one instance each.
+/// Non-invertible placements are skipped: the kernel's instance transform
+/// must be invertible, and a zero scale is a common "hide this instance"
+/// idiom rather than an error.
+fn attach_proto_parts(
+    world: &mut WorldBuilder,
+    parts: &[ProtoPart],
+    placement: GMat4,
+    what: &str,
+) -> usize {
+    let mut attached = 0;
+    for part in parts {
+        let xf = placement * part.local;
+        if xf.determinant().abs() < 1e-12 {
+            debug!("{what}: non-invertible instance transform — skipped");
+            continue;
+        }
+        world.attach_masked(
+            Geometry::Instance {
+                scene: part.scene.clone(),
+                transform: Affine3A::from_mat4(xf),
+                transform_end: None,
+            },
+            part.material.clone(),
+            part.mask,
+        );
+        attached += 1;
+    }
+    attached
+}
+
+/// Imports a `UsdGeomPointInstancer`: every entry of the per-instance
+/// arrays places the prototype selected by `protoIndices`.
+///
+/// The per-instance transform is USD's `translate ∘ orient ∘ scale`
+/// (spec: scale first, then orientation, then position), composed under
+/// the instancer's own world transform. `invisibleIds` prunes instances by
+/// `ids`; where `ids` is absent the array index is the id, as USD
+/// specifies.
+///
+/// Memory is what this is for: N instances of a prototype cost one copy of
+/// its geometry plus N transforms, instead of N baked copies.
+fn emit_point_instancer(
+    stage: &Stage,
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    instancer: &PointInstancer,
+    world_xf: GMat4,
+    caches: &mut ImportCaches,
+) {
+    let targets = match instancer.prototypes_rel().targets() {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            warn!(
+                "PointInstancer at {} has no `prototypes` targets — skipped",
+                prim.path()
+            );
+            return;
+        }
+    };
+
+    let proto_indices = match instancer.proto_indices_attr().get::<sdf::Value>() {
+        Ok(Some(sdf::Value::IntVec(v))) => v,
+        _ => {
+            warn!(
+                "PointInstancer at {} has no `protoIndices` — skipped",
+                prim.path()
+            );
+            return;
+        }
+    };
+
+    let positions = value_vec3f_array(&instancer.positions_attr()).unwrap_or_default();
+    let scales = value_vec3f_array(&instancer.scales_attr());
+    let orientations = instance_orientations(instancer);
+    let ids = match instancer.ids_attr().get::<sdf::Value>() {
+        Ok(Some(sdf::Value::Int64Vec(v))) => Some(v),
+        _ => None,
+    };
+    let invisible: std::collections::HashSet<i64> =
+        match instancer.invisible_ids_attr().get::<sdf::Value>() {
+            Ok(Some(sdf::Value::Int64Vec(v))) => v.into_iter().collect(),
+            _ => Default::default(),
+        };
+
+    if positions.len() < proto_indices.len() {
+        warn!(
+            "PointInstancer at {}: {} protoIndices but only {} positions — extra instances skipped",
+            prim.path(),
+            proto_indices.len(),
+            positions.len()
+        );
+    }
+
+    // Build each prototype once, keyed by path so several instancers (and
+    // repeated targets) share the work.
+    let mut proto_parts: Vec<Arc<Vec<ProtoPart>>> = Vec::with_capacity(targets.len());
+    for target in &targets {
+        let key = target.to_string();
+        let parts = match caches.protos.get(&key) {
+            Some(p) => p.clone(),
+            None => {
+                let root = stage.prim_at(target.clone());
+                let parts = Arc::new(collect_proto_parts(stage, &root, caches));
+                if parts.is_empty() {
+                    warn!("PointInstancer prototype {key} contributed no geometry");
+                }
+                caches.protos.insert(key, parts.clone());
+                parts
+            }
+        };
+        proto_parts.push(parts);
+    }
+
+    let mut instances = 0usize;
+    let mut hidden = 0usize;
+    for (i, &proto_index) in proto_indices.iter().enumerate() {
+        let Some(pos) = positions.get(i) else { break };
+
+        let id = ids.as_ref().map_or(i as i64, |ids| {
+            ids.get(i).copied().unwrap_or(i as i64)
+        });
+        if invisible.contains(&id) {
+            hidden += 1;
+            continue;
+        }
+
+        let Some(parts) = usize::try_from(proto_index)
+            .ok()
+            .and_then(|k| proto_parts.get(k))
+        else {
+            warn!(
+                "PointInstancer at {}: protoIndices[{i}] = {proto_index} is out of range — instance skipped",
+                prim.path()
+            );
+            continue;
+        };
+
+        // USD's instance transform: scale, then orient, then translate.
+        let scale = scales
+            .as_ref()
+            .and_then(|s| s.get(i))
+            .map_or(Vec3::ONE, |s| Vec3::new(s.x, s.y, s.z));
+        let rotation = orientations
+            .as_ref()
+            .and_then(|q| q.get(i).copied())
+            .unwrap_or(glam::Quat::IDENTITY);
+        let instance_xf = world_xf
+            * GMat4::from_scale_rotation_translation(
+                scale,
+                rotation,
+                Vec3::new(pos.x, pos.y, pos.z),
+            );
+
+        instances += attach_proto_parts(world, parts, instance_xf, "PointInstancer instance");
+    }
+
+    info!(
+        "Imported PointInstancer at {} ({} instances of {} prototype(s), {} geometries attached{})",
+        prim.path(),
+        proto_indices.len() - hidden,
+        targets.len(),
+        instances,
+        if hidden > 0 {
+            format!(", {hidden} hidden by invisibleIds")
+        } else {
+            String::new()
+        }
+    );
+}
+
+/// A `point3f[]` / `float3[]` attribute as a plain vector.
+fn value_vec3f_array(attr: &openusd::usd::Attribute) -> Option<Vec<Vec3f>> {
+    match attr.get::<sdf::Value>() {
+        Ok(Some(sdf::Value::Vec3fVec(v))) => Some(v),
+        _ => None,
+    }
+}
+
+/// Per-instance rotations, preferring single-precision `orientationsf`
+/// over half-precision `orientations` as USD specifies.
+fn instance_orientations(instancer: &PointInstancer) -> Option<Vec<glam::Quat>> {
+    let quat = |w: f32, x: f32, y: f32, z: f32| glam::Quat::from_xyzw(x, y, z, w).normalize();
+    if let Ok(Some(sdf::Value::QuatfVec(v))) = instancer.orientationsf_attr().get::<sdf::Value>() {
+        return Some(v.iter().map(|q| quat(q.w, q.x, q.y, q.z)).collect());
+    }
+    match instancer.orientations_attr().get::<sdf::Value>() {
+        Ok(Some(sdf::Value::QuathVec(v))) => Some(
+            v.iter()
+                .map(|q| {
+                    quat(
+                        q.w.to_f32(),
+                        q.x.to_f32(),
+                        q.y.to_f32(),
+                        q.z.to_f32(),
+                    )
+                })
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -742,13 +1173,10 @@ const CURVE_FLATTEN_SEGS: usize = 8;
 /// span. Widths (diameters, per USD) may be authored per point (`vertex`),
 /// per curve, or constant; anything else falls back to the first value.
 /// The segments live in local space under an `Instance`, like meshes.
-fn emit_curves(
-    world: &mut WorldBuilder,
-    prim: &Prim,
-    curves: &UsdBasisCurves,
-    world_xf: GMat4,
-    material: Arc<dyn Material>,
-) {
+/// The curve batch flattened into round segments, in the prim's *local*
+/// space. Shared by the top-level emitter and the prototype collector; the
+/// caller supplies the placement.
+fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Vec<CurveSegment>> {
     let points: Option<Vec<Vec3f>> = curves
         .points_attr()
         .get::<sdf::Value>()
@@ -774,7 +1202,7 @@ fn emit_curves(
                 "BasisCurves at {} missing points / curveVertexCounts — skipped",
                 prim.path()
             );
-            return;
+            return None;
         }
     };
     let pts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
@@ -803,7 +1231,7 @@ fn emit_curves(
                 prim.path(),
                 other
             );
-            return;
+            return None;
         }
     };
 
@@ -880,7 +1308,7 @@ fn emit_curves(
 
     if segments.is_empty() {
         debug!("BasisCurves at {} produced no segments", prim.path());
-        return;
+        return None;
     }
     info!(
         "Imported BasisCurves at {} ({} {} curves, {} segments)",
@@ -889,7 +1317,19 @@ fn emit_curves(
         ty,
         segments.len()
     );
+    Some(segments)
+}
 
+fn emit_curves(
+    world: &mut WorldBuilder,
+    prim: &Prim,
+    curves: &UsdBasisCurves,
+    world_xf: GMat4,
+    material: Arc<dyn Material>,
+) {
+    let Some(segments) = curve_segments(prim, curves) else {
+        return;
+    };
     if world_xf.determinant().abs() < 1e-12 {
         warn!(
             "BasisCurves at {} has a non-invertible transform — skipped",
