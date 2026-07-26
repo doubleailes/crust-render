@@ -20,13 +20,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub(crate) const TILE_SIZE: usize = 8;
 
 /// Pixel slots per full tile.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 pub(crate) const TILE_PIXELS: u32 = (TILE_SIZE * TILE_SIZE) as u32;
 
 /// Longest per-pixel sample range a single fine pass may cover. Bounds the
 /// work between two pass boundaries — the points where adaptive decisions,
 /// progress and checkpoints happen.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 pub(crate) const MAX_PASS_SAMPLES: u32 = 16;
 
 /// One tile of the image, clipped at the right/bottom edges.
@@ -162,7 +160,6 @@ fn morton_decode(code: u64) -> (usize, usize) {
 /// dither) order, so any prefix of the order is a well-dispersed subset of
 /// the tile. Coarse passes cover prefixes (1, 4, 16 pixels); fine passes
 /// cover all 64. Entries are `(x, y)` offsets within the tile.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 pub(crate) const FILL_ORDER: [(u8, u8); 64] = fill_order();
 
 const fn fill_order() -> [(u8, u8); 64] {
@@ -193,7 +190,6 @@ const fn fill_order() -> [(u8, u8); 64] {
 /// One unit of scheduled work, applied to every active tile: pixel slots
 /// `FILL_ORDER[start_pixel..end_pixel]`, each rendering per-pixel samples
 /// `[start_sample, end_sample)`. Mirrors MoonRay's `Pass`.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pass {
     pub start_pixel: u32,
@@ -202,15 +198,16 @@ pub(crate) struct Pass {
     pub end_sample: u32,
 }
 
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 impl Pass {
     pub fn pixels(&self) -> u32 {
         self.end_pixel - self.start_pixel
     }
+    #[allow(dead_code)] // reached only via from_tile_sample_range for now
     pub fn samples(&self) -> u32 {
         self.end_sample - self.start_sample
     }
     /// Pixel-samples this pass adds to one full tile.
+    #[allow(dead_code)] // reached only via from_tile_sample_range for now
     pub fn tile_samples(&self) -> u64 {
         self.pixels() as u64 * self.samples() as u64
     }
@@ -218,13 +215,11 @@ impl Pass {
 
 /// Boundaries where coarse passes split the tile's 64 pixel slots: 1, 4 and
 /// 16 pixels are each one refinement level of the Bayer fill order.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 const COARSE_PIXEL_BOUNDS: [u32; 5] = [0, 1, 4, 16, 64];
 
 /// The full pass sequence for one render: a pure function of
 /// `(spp, min_spp)`, which is the resume-alignment contract — a resumed
 /// render regenerates the identical remaining schedule.
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PassSchedule {
     pub passes: Vec<Pass>,
@@ -250,7 +245,6 @@ fn sample_boundaries(spp: u32, min_spp: u32) -> Vec<u32> {
     bounds
 }
 
-#[allow(dead_code)] // consumed by the pass-based driver (next commit)
 impl PassSchedule {
     pub fn new(spp: u32, min_spp: u32) -> Self {
         Self::from_range(0, spp.max(1), min_spp)
@@ -302,6 +296,7 @@ impl PassSchedule {
     ///
     /// Unused by the pass-boundary checkpoints of v1, but it is what makes
     /// mid-pass (e.g. signal-triggered) checkpoints exactly resumable.
+    #[allow(dead_code)] // pinned by tests; production consumer is future work
     pub fn from_tile_sample_range(start_id: u64, end_id: u64, spp: u32, min_spp: u32) -> Self {
         let full = Self::new(spp, min_spp);
         let mut passes = Vec::new();
@@ -362,9 +357,20 @@ impl PassSchedule {
     }
 
     /// Total pixel-samples the schedule spends on one full tile.
+    #[allow(dead_code)] // pinned by tests; production consumer is future work
     pub fn tile_samples(&self) -> u64 {
         self.passes.iter().map(Pass::tile_samples).sum()
     }
+}
+
+/// Adaptive-sampling lifecycle of one tile, advanced at pass boundaries:
+/// every tile takes the uniform sample floor, then keeps sampling until its
+/// split-buffer error converges (or the schedule runs out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TileStage {
+    Uniform,
+    Adaptive,
+    Completed,
 }
 
 /// MoonRay-style virtual work queue: stores nothing, synthesizes contiguous

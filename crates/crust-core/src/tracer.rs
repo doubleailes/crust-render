@@ -3,9 +3,13 @@ use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
+use crate::film::{ERROR_CALIBRATION, Film, PixelDelta};
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
-use crate::scheduler::{TileOrder, TileScheduler, TileWorkQueue};
+use crate::scheduler::{
+    FILL_ORDER, PassSchedule, TILE_PIXELS, Tile, TileOrder, TileScheduler, TileStage,
+    TileWorkQueue,
+};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
@@ -370,9 +374,19 @@ impl Renderer {
         out
     }
 
-    /// One full-frame pass at `spp` samples per pixel. Returns the image,
-    /// whatever training samples the pass recorded (empty unless a training
-    /// `GuidingContext` is supplied), and the pass's [`PassStats`].
+    /// One full-frame render at `spp` samples per pixel, executed as the
+    /// [`PassSchedule`]'s pass sequence over the permuted tile set. Returns
+    /// the image, whatever training samples the run recorded (empty unless
+    /// a training `GuidingContext` is supplied), and the run's
+    /// [`PassStats`].
+    ///
+    /// Adaptive sampling happens *between* passes, per tile: after every
+    /// pass that ends a uniform per-pixel sample boundary at or past the
+    /// minimum budget, each tile whose split-buffer error (see
+    /// [`Film::pixel_error`]) has converged — over the tile plus a
+    /// one-pixel neighbour ring, so convergence can't be declared against
+    /// an edge a neighbouring tile still disputes — drops out of the
+    /// remaining passes.
     fn render_pass(
         &self,
         cfg: PassConfig,
@@ -380,91 +394,136 @@ impl Renderer {
         progress: Option<ProgressCallback>,
     ) -> (Buffer, Vec<SampleData>, PassStats) {
         let (width, height) = (self.settings.width, self.settings.height);
-        let mut buffer = Buffer::new(width, height);
-        let mut all_samples = Vec::new();
-        let mut variance_sum = 0.0f64;
-        let mut var_map = vec![0.0f64; width * height];
-        let pixel_count = (width * height) as f64;
-
+        let min_floor = self.settings.min_samples_per_pixel.max(2).min(cfg.spp);
+        let schedule = PassSchedule::new(cfg.spp, min_floor);
         let scheduler = TileScheduler::new(width, height, cfg.order, cfg.seed);
-        let total = scheduler.tiles.len() as u64;
+        let num_tiles = scheduler.tiles.len();
+
+        let mut film = Film::new(width, height);
+        let mut stages = vec![TileStage::Uniform; num_tiles];
+        let mut all_samples = Vec::new();
+        let adaptive = cfg.adaptive && self.settings.variance_threshold > 0.0;
+        let stop_error = ERROR_CALIBRATION * self.settings.variance_threshold;
+
+        // Progress is reported in tile-passes; the total shrinks as tiles
+        // converge out of the remaining passes.
         let done = AtomicU64::new(0);
-        let queue = TileWorkQueue::new(scheduler.tiles.len() as u32, rayon::current_num_threads());
-        // Every pool thread drains the virtual work queue; per-tile results
-        // are buffered thread-locally and merged serially afterwards.
-        let mut results: Vec<(u32, Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>)> =
-            rayon::broadcast(|_| {
-                let mut out = Vec::new();
-                while let Some(group) = queue.next_group() {
-                    for t in group.start..group.end {
-                        let tile = scheduler.tiles[t as usize];
-                        let mut pixels = Vec::with_capacity(tile.w * tile.h);
-                        let mut samples = Vec::new();
-                        for j in tile.y..tile.y + tile.h {
-                            for i in tile.x..tile.x + tile.w {
-                                let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
-                                pixels.push((i, j, color, v));
-                                samples.append(&mut s);
+        let total = AtomicU64::new(num_tiles as u64 * schedule.passes.len() as u64);
+
+        for (pass_idx, pass) in schedule.passes.iter().enumerate() {
+            let active: Vec<u32> = (0..num_tiles as u32)
+                .filter(|&t| stages[t as usize] != TileStage::Completed)
+                .collect();
+            if active.is_empty() {
+                break;
+            }
+            let queue = TileWorkQueue::new(active.len() as u32, rayon::current_num_threads());
+            // Every pool thread drains the virtual work queue; per-tile
+            // deltas are buffered thread-locally and merged serially after
+            // the pass.
+            let mut results: Vec<(u32, Vec<(usize, usize, PixelDelta)>, Vec<SampleData>)> =
+                rayon::broadcast(|_| {
+                    let mut out = Vec::new();
+                    while let Some(group) = queue.next_group() {
+                        for a in group.start..group.end {
+                            let t = active[a as usize];
+                            let tile = scheduler.tiles[t as usize];
+                            let mut deltas = Vec::with_capacity(pass.pixels() as usize);
+                            let mut samples = Vec::new();
+                            for slot in pass.start_pixel..pass.end_pixel {
+                                let (fx, fy) = FILL_ORDER[slot as usize];
+                                let (fx, fy) = (fx as usize, fy as usize);
+                                // Clipped edge tiles skip out-of-image slots.
+                                if fx >= tile.w || fy >= tile.h {
+                                    continue;
+                                }
+                                let (i, j) = (tile.x + fx, tile.y + fy);
+                                let d = self.render_pixel_samples(
+                                    i,
+                                    j,
+                                    pass.start_sample..pass.end_sample,
+                                    cfg.seed,
+                                    gctx,
+                                    &mut samples,
+                                );
+                                deltas.push((i, j, d));
                             }
+                            if let Some(cb) = progress {
+                                cb(
+                                    done.fetch_add(1, Ordering::Relaxed) + 1,
+                                    total.load(Ordering::Relaxed),
+                                );
+                            }
+                            out.push((t, deltas, samples));
                         }
-                        if let Some(cb) = progress {
-                            cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
-                        }
-                        out.push((t, pixels, samples));
+                    }
+                    out
+                })
+                .into_iter()
+                .flatten()
+                .collect();
+            // Tiles are disjoint, so film merges commute — but merge order
+            // is pinned to tile order anyway to keep the guiding training
+            // stream (and float accumulation) deterministic under any
+            // thread scheduling.
+            results.sort_unstable_by_key(|&(t, ..)| t);
+            for (_, deltas, samples) in results {
+                for (i, j, d) in deltas {
+                    film.merge(i, j, &d);
+                }
+                all_samples.extend(samples);
+            }
+
+            // Adaptive stage update — only at whole-tile passes ending a
+            // uniform boundary at or past the minimum budget.
+            if adaptive && pass.end_pixel == TILE_PIXELS && pass.end_sample >= min_floor {
+                let mut completed_now = 0u64;
+                for (t, stage) in stages.iter_mut().enumerate() {
+                    if *stage == TileStage::Completed {
+                        continue;
+                    }
+                    *stage = TileStage::Adaptive;
+                    if tile_converged(&film, scheduler.tiles[t], stop_error) {
+                        *stage = TileStage::Completed;
+                        completed_now += 1;
                     }
                 }
-                out
-            })
-            .into_iter()
-            .flatten()
-            .collect();
-        // Tiles are disjoint, so pixel writes commute — but the guiding
-        // training samples must be merged in a scheduling-independent order
-        // to keep renders deterministic.
-        results.sort_unstable_by_key(|&(t, ..)| t);
-        for (_, pixels, samples) in results {
-            for (i, j, color, var) in pixels {
-                buffer.set_pixel(i, j, color);
-                var_map[j * width + i] = var;
-                variance_sum += var;
+                let remaining = (schedule.passes.len() - pass_idx - 1) as u64;
+                total.fetch_sub(completed_now * remaining, Ordering::Relaxed);
             }
-            all_samples.extend(samples);
         }
 
+        let (variance, var_map) = film.pass_stats();
         (
-            buffer,
+            film.to_buffer(),
             all_samples,
-            PassStats {
-                variance: variance_sum / pixel_count,
-                var_map,
-            },
+            PassStats { variance, var_map },
         )
     }
 
-    fn render_pixel(
+    /// Render one pixel's samples `[start, end)` of the pass and return the
+    /// accumulation delta. The sampler is rebuilt per *absolute* sample
+    /// index, so a range produces the identical radiances whether rendered
+    /// in one pass, split across passes, or resumed from a checkpoint.
+    fn render_pixel_samples(
         &self,
         i: usize,
         j: usize,
-        cfg: &PassConfig,
+        samples: std::ops::Range<u32>,
+        seed: u32,
         gctx: Option<&GuidingContext>,
-    ) -> (Vec3A, Vec<SampleData>, f64) {
-        let mut sum = Vec3A::ZERO;
-        let mut samples = Vec::new();
-        let mut lum_sum = 0.0f64;
-        let mut lum_sq = 0.0f64;
-
-        let threshold = self.settings.variance_threshold as f64;
-        let min_spp = self.settings.min_samples_per_pixel.max(2);
-        let mut taken = 0u32;
+        out: &mut Vec<SampleData>,
+    ) -> PixelDelta {
+        let mut delta = PixelDelta::default();
 
         // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
         // with an extra domain so images wider/taller than 256 stay fully
         // decorrelated (the frame seed alone is constant within one render).
         let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
 
-        for sample in 0..cfg.spp {
+        for sample in samples {
             let root =
-                PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
+                PathSampler::new(i as i32, j as i32, seed as i32, sample as i32).new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
             let u = ((i as f32) + cam[0]) / (self.settings.width - 1) as f32;
             let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
@@ -479,37 +538,37 @@ impl Renderer {
                 self.settings.sampling_strategy,
                 root,
                 gctx,
-                &mut samples,
+                out,
             );
-            sum += color;
+            delta.sum += color;
+            if sample % 2 == 1 {
+                delta.odd_sum += color;
+            }
+            delta.count += 1;
             let lum = luminance(color) as f64;
-            lum_sum += lum;
-            lum_sq += lum * lum;
-            taken = sample + 1;
+            delta.lum_sum += lum;
+            delta.lum_sq += lum * lum;
+        }
+        delta
+    }
+}
 
-            // Adaptive early stop: once past the minimum budget, quit as soon
-            // as the relative standard error of the pixel mean is below the
-            // threshold. Checked every 4th sample to amortize the cost.
-            if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
-                let n = taken as f64;
-                let var_of_mean =
-                    ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
-                let mean = (lum_sum / n).max(1e-4);
-                if var_of_mean.sqrt() / mean < threshold {
-                    break;
-                }
+/// Has every pixel of the tile — plus a one-pixel ring borrowed from its
+/// neighbours, the cheap stand-in for MoonRay's overlapping adaptive
+/// regions — converged below the stopping error?
+fn tile_converged(film: &Film, tile: Tile, stop_error: f32) -> bool {
+    let x0 = tile.x.saturating_sub(1);
+    let y0 = tile.y.saturating_sub(1);
+    let x1 = (tile.x + tile.w + 1).min(film.width());
+    let y1 = (tile.y + tile.h + 1).min(film.height());
+    for j in y0..y1 {
+        for i in x0..x1 {
+            if !(film.pixel_error(i, j) < stop_error) {
+                return false;
             }
         }
-
-        // Unbiased variance of the pixel-mean luminance.
-        let n = taken as f64;
-        let variance = if taken >= 2 {
-            ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0)
-        } else {
-            f64::INFINITY
-        };
-        (sum / taken as f32, samples, variance)
     }
+    true
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1351,6 +1410,88 @@ fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::SamplingStrategy;
+    use super::tile_converged;
+    use crate::film::{Film, PixelDelta};
+    use crate::guiding::luminance;
+    use crate::scheduler::Tile;
+    use glam::Vec3A;
+
+    /// Merge `n` synthetic samples into a pixel; even/odd sample values
+    /// straddle `mean` by ±`spread`, so the split-buffer error is
+    /// proportional to `spread / mean`.
+    fn fill_pixel(film: &mut Film, x: usize, y: usize, n: u32, mean: f32, spread: f32) {
+        let mut d = PixelDelta::default();
+        for s in 0..n {
+            let c = Vec3A::splat(if s % 2 == 0 { mean + spread } else { mean - spread });
+            d.sum += c;
+            if s % 2 == 1 {
+                d.odd_sum += c;
+            }
+            d.count += 1;
+            let l = luminance(c) as f64;
+            d.lum_sum += l;
+            d.lum_sq += l * l;
+        }
+        film.merge(x, y, &d);
+    }
+
+    #[test]
+    fn converged_tile_completes_and_one_noisy_pixel_blocks() {
+        let tile = Tile { x: 0, y: 0, w: 8, h: 8 };
+        let mut film = Film::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                fill_pixel(&mut film, x, y, 16, 1.0, 0.0);
+            }
+        }
+        assert!(tile_converged(&film, tile, 0.05));
+
+        // One noisy pixel anywhere in the tile keeps the whole tile going.
+        fill_pixel(&mut film, 3, 5, 16, 1.0, 10.0);
+        assert!(!tile_converged(&film, tile, 0.05));
+    }
+
+    /// A noisy pixel in the one-pixel neighbour ring — outside the tile —
+    /// also blocks convergence: tiles may not stop against an edge their
+    /// neighbour still disputes.
+    #[test]
+    fn noisy_ring_pixel_blocks_convergence() {
+        let tile = Tile { x: 8, y: 0, w: 8, h: 8 };
+        let mut film = Film::new(24, 8);
+        for y in 0..8 {
+            for x in 0..24 {
+                fill_pixel(&mut film, x, y, 16, 1.0, 0.0);
+            }
+        }
+        assert!(tile_converged(&film, tile, 0.05));
+        // Column 7 is the left neighbour's edge — inside this tile's ring.
+        let mut film2 = Film::new(24, 8);
+        for y in 0..8 {
+            for x in 0..24 {
+                let spread = if x == 7 && y == 4 { 10.0 } else { 0.0 };
+                fill_pixel(&mut film2, x, y, 16, 1.0, spread);
+            }
+        }
+        assert!(!tile_converged(&film2, tile, 0.05));
+        // Two pixels away it is outside the ring and no longer blocks.
+        let mut film3 = Film::new(24, 8);
+        for y in 0..8 {
+            for x in 0..24 {
+                let spread = if x == 6 && y == 4 { 10.0 } else { 0.0 };
+                fill_pixel(&mut film3, x, y, 16, 1.0, spread);
+            }
+        }
+        assert!(tile_converged(&film3, tile, 0.05));
+    }
+
+    /// Unsampled pixels report infinite error, so a tile can never be
+    /// declared converged before its samples exist.
+    #[test]
+    fn unsampled_pixels_never_converge() {
+        let film = Film::new(8, 8);
+        let tile = Tile { x: 0, y: 0, w: 8, h: 8 };
+        assert!(!tile_converged(&film, tile, 0.05));
+    }
 
     /// The invariant every strategy must keep: for a light both strategies
     /// can reach, the NEE weight and the bounce-emission weight are a

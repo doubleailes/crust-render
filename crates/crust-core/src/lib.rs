@@ -2,6 +2,7 @@ mod aabb;
 mod buffer;
 mod camera;
 mod error;
+mod film;
 mod guiding;
 mod hittable;
 mod light;
