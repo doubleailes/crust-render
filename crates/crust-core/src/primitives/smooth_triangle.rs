@@ -39,42 +39,15 @@ impl SmoothTriangle {
 
 impl Hittable for SmoothTriangle {
     fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
-        let edge1 = self.v1 - self.v0;
-        let edge2 = self.v2 - self.v0;
-        let h = ray.direction().cross(edge2);
-        let a = edge1.dot(h);
-
-        // Use a relative epsilon based on triangle size
-        let triangle_size = (edge1.length() + edge2.length()) * 0.5;
-        let epsilon = triangle_size * 1e-6;
-
-        if a.abs() < epsilon {
-            return None;
-        }
-
-        let f = 1.0 / a;
-        let s = ray.origin() - self.v0;
-        let u = f * s.dot(h);
-        if !(0.0..=1.0).contains(&u) {
-            return None;
-        }
-
-        let q = s.cross(edge1);
-        let v = f * ray.direction().dot(q);
-        if v < 0.0 || u + v > 1.0 {
-            return None;
-        }
-
-        let t = f * edge2.dot(q);
-        if t < t_min || t > t_max {
-            return None;
-        }
+        let (t, u, v) =
+            crate::primitives::triangle::triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max)?;
 
         let mut rec = HitRecord::new();
         rec.t = t;
         rec.p = ray.at(t);
 
-        // Interpolate normal using barycentric weights
+        // Interpolate the shading normal from the watertight barycentrics
+        // (u weights v1, v weights v2).
         let w = 1.0 - u - v;
         let interpolated_normal = (self.n0 * w + self.n1 * u + self.n2 * v).normalize();
         rec.set_face_normal(ray, interpolated_normal);
