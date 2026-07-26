@@ -26,7 +26,7 @@
 use crate::aabb::AABB;
 use crate::hittable::{Hit, Hittable};
 use crate::ray::Ray;
-use glam::Vec3A;
+use glam::{Vec3A, Vec4};
 
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
@@ -48,6 +48,8 @@ const SBVH_ALPHA: f32 = 1e-5;
 /// references for negligible traversal gain.
 const SBVH_MAX_DEPTH: usize = 32;
 
+/// Binary build node — an intermediate: the finished tree is the 4-wide
+/// [`WideNode`] array produced by collapsing these.
 struct Node {
     bbox: AABB,
     /// Leaf (`count > 0`): offset of the first entry in `indices`.
@@ -59,8 +61,53 @@ struct Node {
     axis: u8,
 }
 
+/// Marks an unused lane of a [`WideNode`] (together with `count == 0`).
+const EMPTY_LANE: u32 = u32::MAX;
+
+/// A 4-wide BVH node in SoA layout: lane `k` of each `Vec4` holds child
+/// `k`'s slab bounds, so one round of vector min/max tests all four child
+/// boxes against the ray at once (Embree's BVH4 idea).
+struct WideNode {
+    bmin_x: Vec4,
+    bmin_y: Vec4,
+    bmin_z: Vec4,
+    bmax_x: Vec4,
+    bmax_y: Vec4,
+    bmax_z: Vec4,
+    /// Leaf lane (`count > 0`): first offset into `indices`. Internal lane
+    /// (`count == 0`): wide-node index, or [`EMPTY_LANE`].
+    child: [u32; 4],
+    count: [u32; 4],
+}
+
+impl WideNode {
+    fn empty() -> Self {
+        WideNode {
+            // +INF/+INF bounds: the swapped slab test can never pass them
+            // (an *inverted* box would — min/max swapping un-inverts it).
+            bmin_x: Vec4::INFINITY,
+            bmin_y: Vec4::INFINITY,
+            bmin_z: Vec4::INFINITY,
+            bmax_x: Vec4::INFINITY,
+            bmax_y: Vec4::INFINITY,
+            bmax_z: Vec4::INFINITY,
+            child: [EMPTY_LANE; 4],
+            count: [0; 4],
+        }
+    }
+
+    fn set_lane_bounds(&mut self, lane: usize, b: &AABB) {
+        self.bmin_x[lane] = b.minimum.x;
+        self.bmin_y[lane] = b.minimum.y;
+        self.bmin_z[lane] = b.minimum.z;
+        self.bmax_x[lane] = b.maximum.x;
+        self.bmax_y[lane] = b.maximum.y;
+        self.bmax_z[lane] = b.maximum.z;
+    }
+}
+
 pub struct Bvh {
-    nodes: Vec<Node>,
+    wide: Vec<WideNode>,
     /// Leaf ranges index into this; spatial splits may list a primitive in
     /// more than one leaf.
     indices: Vec<u32>,
@@ -69,6 +116,8 @@ pub struct Bvh {
     /// Objects without a bounding box cannot enter the tree and are tested
     /// linearly on every ray.
     unbounded: Vec<Box<dyn Hittable>>,
+    /// Bounds of the whole tree (the binary root's, kept through collapse).
+    root_bbox: Option<AABB>,
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -110,27 +159,71 @@ impl Bvh {
             }
         }
 
-        let (nodes, indices) = if refs.is_empty() {
-            (Vec::new(), Vec::new())
+        let (wide, indices, root_bbox) = if refs.is_empty() {
+            (Vec::new(), Vec::new(), None)
         } else {
-            let root_bbox = refs
-                .iter()
-                .skip(1)
-                .fold(refs[0].bbox, |acc, r| AABB::surrounding_box(acc, r.bbox));
+            let root_bbox = union_all(&refs);
             let subtree = build_subtree(&prims, refs, 0, surface_area(&root_bbox));
-            (subtree.nodes, subtree.indices)
+            (
+                collapse(&subtree.nodes),
+                subtree.indices,
+                Some(root_bbox),
+            )
         };
 
         Bvh {
-            nodes,
+            wide,
             indices,
             prims,
             unbounded,
+            root_bbox,
         }
     }
 
     pub fn count(&self) -> usize {
         self.prims.len() + self.unbounded.len()
+    }
+}
+
+/// Finite reciprocal of a direction component: zero (and denormal-tiny)
+/// components become a huge same-signed value instead of ±∞, so the slab
+/// arithmetic can never produce the 0·∞ = NaN that poisons vector min/max.
+#[inline]
+fn safe_inv(x: f32) -> f32 {
+    if x.abs() < 1e-20 {
+        1e20f32.copysign(x)
+    } else {
+        1.0 / x
+    }
+}
+
+/// Traversal stack: wide depth ≤ binary `MAX_DEPTH`, and each visited node
+/// leaves at most 3 deferred lanes behind, so 3·MAX_DEPTH + 4 slots hold
+/// the worst case.
+const WIDE_STACK: usize = 3 * MAX_DEPTH + 4;
+
+impl Bvh {
+    /// The 4-lane slab test: entry/exit distances for all four child boxes
+    /// of `node` at once. A lane hits iff `tnear[l] <= tfar[l]`.
+    #[inline]
+    fn slab4(&self, node: &WideNode, o: Vec3A, inv: Vec3A, t_min: f32, t_max: f32) -> (Vec4, Vec4) {
+        let t0x = (node.bmin_x - Vec4::splat(o.x)) * Vec4::splat(inv.x);
+        let t1x = (node.bmax_x - Vec4::splat(o.x)) * Vec4::splat(inv.x);
+        let t0y = (node.bmin_y - Vec4::splat(o.y)) * Vec4::splat(inv.y);
+        let t1y = (node.bmax_y - Vec4::splat(o.y)) * Vec4::splat(inv.y);
+        let t0z = (node.bmin_z - Vec4::splat(o.z)) * Vec4::splat(inv.z);
+        let t1z = (node.bmax_z - Vec4::splat(o.z)) * Vec4::splat(inv.z);
+        let tnear = t0x
+            .min(t1x)
+            .max(t0y.min(t1y))
+            .max(t0z.min(t1z))
+            .max(Vec4::splat(t_min));
+        let tfar = t0x
+            .max(t1x)
+            .min(t0y.max(t1y))
+            .min(t0z.max(t1z))
+            .min(Vec4::splat(t_max));
+        (tnear, tfar)
     }
 }
 
@@ -146,44 +239,62 @@ impl Hittable for Bvh {
             }
         }
 
-        if self.nodes.is_empty() {
+        if self.wide.is_empty() {
             return best;
         }
 
-        // Depth is bounded by MAX_DEPTH and each traversal level holds at
-        // most one deferred sibling on the stack.
-        let mut stack = [0u32; MAX_DEPTH + 4];
+        let o = ray.origin();
+        let d = ray.direction();
+        let inv = Vec3A::new(safe_inv(d.x), safe_inv(d.y), safe_inv(d.z));
+
+        let mut stack = [0u32; WIDE_STACK];
         stack[0] = 0;
         let mut sp = 1usize;
 
         while sp > 0 {
             sp -= 1;
-            let idx = stack[sp];
-            let node = &self.nodes[idx as usize];
-            if !node.bbox.hit(ray, t_min, closest) {
-                continue;
+            let node = &self.wide[stack[sp] as usize];
+            let (tnear, tfar) = self.slab4(node, o, inv, t_min, closest);
+
+            // Hit lanes, insertion-sorted near-to-far (≤ 4 entries).
+            let mut order = [(0f32, 0usize); 4];
+            let mut n_hit = 0;
+            for l in 0..4 {
+                if node.count[l] == 0 && node.child[l] == EMPTY_LANE {
+                    continue;
+                }
+                if tnear[l] <= tfar[l] {
+                    let mut i = n_hit;
+                    while i > 0 && order[i - 1].0 > tnear[l] {
+                        order[i] = order[i - 1];
+                        i -= 1;
+                    }
+                    order[i] = (tnear[l], l);
+                    n_hit += 1;
+                }
             }
-            if node.count > 0 {
-                let first = node.first_or_right as usize;
-                for &pi in &self.indices[first..first + node.count as usize] {
-                    if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
-                        closest = hit.rec.t;
-                        best = Some(hit);
+
+            // Leaf lanes intersect immediately (near first, shrinking
+            // `closest`); internal lanes are pushed far-to-near so the
+            // nearest pops first.
+            for i in 0..n_hit {
+                let l = order[i].1;
+                if node.count[l] > 0 {
+                    let first = node.child[l] as usize;
+                    for &pi in &self.indices[first..first + node.count[l] as usize] {
+                        if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
+                            closest = hit.rec.t;
+                            best = Some(hit);
+                        }
                     }
                 }
-            } else {
-                // Visit the child on the ray's near side first so its hits
-                // shrink `closest` before the far child is tested.
-                let left = idx + 1;
-                let right = node.first_or_right;
-                let (near, far) = if ray.direction()[node.axis as usize] < 0.0 {
-                    (right, left)
-                } else {
-                    (left, right)
-                };
-                stack[sp] = far;
-                stack[sp + 1] = near;
-                sp += 2;
+            }
+            for i in (0..n_hit).rev() {
+                let l = order[i].1;
+                if node.count[l] == 0 {
+                    stack[sp] = node.child[l];
+                    sp += 1;
+                }
             }
         }
 
@@ -194,47 +305,120 @@ impl Hittable for Bvh {
         if !self.unbounded.is_empty() {
             return None;
         }
-        self.nodes.first().map(|n| n.bbox)
+        self.root_bbox
     }
 
-    /// Early-exit occlusion traversal: no front-to-back ordering, returns on
-    /// the first confirmed hit anywhere in `(t_min, t_max)`.
+    /// Early-exit occlusion traversal: no ordering, returns on the first
+    /// confirmed hit anywhere in `(t_min, t_max)`.
     fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         for obj in &self.unbounded {
             if obj.hit_any(ray, t_min, t_max) {
                 return true;
             }
         }
-        if self.nodes.is_empty() {
+        if self.wide.is_empty() {
             return false;
         }
 
-        let mut stack = [0u32; MAX_DEPTH + 4];
+        let o = ray.origin();
+        let d = ray.direction();
+        let inv = Vec3A::new(safe_inv(d.x), safe_inv(d.y), safe_inv(d.z));
+
+        let mut stack = [0u32; WIDE_STACK];
         stack[0] = 0;
         let mut sp = 1usize;
 
         while sp > 0 {
             sp -= 1;
-            let idx = stack[sp];
-            let node = &self.nodes[idx as usize];
-            if !node.bbox.hit(ray, t_min, t_max) {
-                continue;
-            }
-            if node.count > 0 {
-                let first = node.first_or_right as usize;
-                for &pi in &self.indices[first..first + node.count as usize] {
-                    if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
-                        return true;
-                    }
+            let node = &self.wide[stack[sp] as usize];
+            let (tnear, tfar) = self.slab4(node, o, inv, t_min, t_max);
+            for l in 0..4 {
+                if node.count[l] == 0 && node.child[l] == EMPTY_LANE {
+                    continue;
                 }
-            } else {
-                stack[sp] = idx + 1;
-                stack[sp + 1] = node.first_or_right;
-                sp += 2;
+                if tnear[l] > tfar[l] {
+                    continue;
+                }
+                if node.count[l] > 0 {
+                    let first = node.child[l] as usize;
+                    for &pi in &self.indices[first..first + node.count[l] as usize] {
+                        if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
+                            return true;
+                        }
+                    }
+                } else {
+                    stack[sp] = node.child[l];
+                    sp += 1;
+                }
             }
         }
         false
     }
+}
+
+/// Collapses the binary tree into 4-wide nodes: each wide node adopts its
+/// binary node's two children, then repeatedly replaces the largest-area
+/// internal child with that child's own two children until four lanes are
+/// filled (or only leaves remain). Purely input-driven, so determinism is
+/// preserved.
+fn collapse(binary: &[Node]) -> Vec<WideNode> {
+    let mut out = Vec::with_capacity(binary.len() / 2 + 1);
+    if binary.is_empty() {
+        return out;
+    }
+    if binary[0].count > 0 {
+        // Single-leaf tree.
+        let mut w = WideNode::empty();
+        w.set_lane_bounds(0, &binary[0].bbox);
+        w.child[0] = binary[0].first_or_right;
+        w.count[0] = binary[0].count;
+        out.push(w);
+        return out;
+    }
+    collapse_node(binary, 0, &mut out);
+    out
+}
+
+fn collapse_node(binary: &[Node], b_idx: u32, out: &mut Vec<WideNode>) -> u32 {
+    let slot = out.len();
+    out.push(WideNode::empty());
+
+    let mut kids = [0u32; 4];
+    kids[0] = b_idx + 1;
+    kids[1] = binary[b_idx as usize].first_or_right;
+    let mut n_kids = 2;
+    while n_kids < 4 {
+        // Expand the internal kid with the largest surface area; ties
+        // resolve to the first (deterministic).
+        let mut best: Option<(usize, f32)> = None;
+        for (i, &k) in kids.iter().enumerate().take(n_kids) {
+            if binary[k as usize].count == 0 {
+                let a = surface_area(&binary[k as usize].bbox);
+                if best.is_none_or(|(_, ba)| a > ba) {
+                    best = Some((i, a));
+                }
+            }
+        }
+        let Some((i, _)) = best else { break };
+        let k = kids[i];
+        kids[i] = k + 1;
+        kids[n_kids] = binary[k as usize].first_or_right;
+        n_kids += 1;
+    }
+
+    for lane in 0..n_kids {
+        let k = kids[lane] as usize;
+        let bounds = binary[k].bbox;
+        out[slot].set_lane_bounds(lane, &bounds);
+        if binary[k].count > 0 {
+            out[slot].child[lane] = binary[k].first_or_right;
+            out[slot].count[lane] = binary[k].count;
+        } else {
+            let ci = collapse_node(binary, kids[lane], out);
+            out[slot].child[lane] = ci;
+        }
+    }
+    slot as u32
 }
 
 fn surface_area(b: &AABB) -> f32 {
@@ -780,15 +964,36 @@ mod tests {
     fn build_is_deterministic() {
         let a = Bvh::new(sphere_grid(6));
         let b = Bvh::new(sphere_grid(6));
-        assert_eq!(a.nodes.len(), b.nodes.len());
+        assert_eq!(a.wide.len(), b.wide.len());
         assert_eq!(a.indices, b.indices);
-        for (x, y) in a.nodes.iter().zip(&b.nodes) {
-            assert_eq!(x.first_or_right, y.first_or_right);
+        for (x, y) in a.wide.iter().zip(&b.wide) {
+            assert_eq!(x.child, y.child);
             assert_eq!(x.count, y.count);
-            assert_eq!(x.axis, y.axis);
-            assert_eq!(x.bbox.minimum, y.bbox.minimum);
-            assert_eq!(x.bbox.maximum, y.bbox.maximum);
+            assert_eq!(x.bmin_x, y.bmin_x);
+            assert_eq!(x.bmax_z, y.bmax_z);
         }
+    }
+
+    /// The collapse must actually widen: a big tree ends up with far
+    /// fewer wide nodes than a binary tree would need.
+    #[test]
+    fn collapse_widens_the_tree() {
+        let bvh = Bvh::new(sphere_grid(6)); // 216 prims
+        let n_leaf_slots: usize = bvh
+            .wide
+            .iter()
+            .flat_map(|w| w.count.iter())
+            .filter(|&&c| c > 0)
+            .count();
+        assert!(n_leaf_slots > 0);
+        // A binary tree over L leaves has L-1 internal nodes; BVH4 should
+        // need roughly a third of that.
+        assert!(
+            bvh.wide.len() * 2 < n_leaf_slots.max(2) * 2 - 1,
+            "{} wide nodes for {} leaves",
+            bvh.wide.len(),
+            n_leaf_slots
+        );
     }
 
     #[test]
