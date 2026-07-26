@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crust_core::{Hittable, Scene};
+use crust_core::Scene;
 use openusd::schemas::shade::{Material as UsdMaterial, MaterialBindingAPI};
 use openusd::sdf;
 use openusd::usd::{PrimPredicate, Stage};
@@ -81,7 +81,7 @@ fn cornellbox_transforms_compose_correctly() {
         .expect("failed to open cornellbox.usda");
     let bbox = scene
         .world
-        .bounding_box()
+        .bounds()
         .expect("cornellbox world must be bounded");
 
     let tol = 0.1;
@@ -110,8 +110,8 @@ fn loads_rectlight_usda() {
     // Ball sphere + floor mesh BVH + two triangles of rect-light geometry.
     assert_eq!(
         scene.world.count(),
-        4,
-        "expected 4 hittables (sphere, floor, 2 light triangles), got {}",
+        3,
+        "expected 3 geometries (sphere, floor, rect-light mesh), got {}",
         scene.world.count()
     );
     // The RectLight must import as a real light, not warn-and-skip.
@@ -160,8 +160,8 @@ fn loads_fog_usda() {
     // must import as a volume region, NOT as geometry.
     assert_eq!(
         scene.world.count(),
-        4,
-        "expected 4 hittables (room, ball, 2 light triangles), got {}",
+        3,
+        "expected 3 geometries (room, ball, rect-light mesh), got {}",
         scene.world.count()
     );
     assert_eq!(scene.lights.count(), 1);
@@ -194,8 +194,8 @@ fn loads_smoke_usda() {
     // as regions, not geometry.
     assert_eq!(
         scene.world.count(),
-        3,
-        "expected 3 hittables (room, 2 light triangles), got {}",
+        2,
+        "expected 2 geometries (room, rect-light mesh), got {}",
         scene.world.count()
     );
     assert_eq!(scene.lights.count(), 1);
@@ -293,8 +293,8 @@ fn loads_curves_usda() {
     // Tuft instance + Tripod instance + floor instance + 2 light triangles.
     assert_eq!(
         scene.world.count(),
-        5,
-        "expected 5 hittables (2 curve batches, floor, 2 light tris), got {}",
+        4,
+        "expected 4 geometries (2 curve batches, floor, rect-light mesh), got {}",
         scene.world.count()
     );
 
@@ -307,7 +307,7 @@ fn loads_curves_usda() {
     );
     let hit = scene
         .world
-        .hit(&on_axis, 0.001, f32::INFINITY)
+        .intersect(&on_axis, 0.001, f32::INFINITY)
         .expect("ray through the strand must hit");
     assert!(
         (hit.rec.t - 5.4).abs() < 0.1,
@@ -324,8 +324,8 @@ fn loads_curves_usda() {
         crust_core::Vec3A::new(2.6, 0.4, 5.0),
         (crust_core::Vec3A::new(2.6, 3.0, -8.0) - crust_core::Vec3A::new(2.6, 0.4, 5.0)).normalize(),
     );
-    assert!(scene.world.hit(&wide, 0.001, 4.0).is_none());
-    assert!(scene.world.hit(&wide_up, 0.001, f32::INFINITY).is_none());
+    assert!(scene.world.intersect(&wide, 0.001, 4.0).is_none());
+    assert!(scene.world.intersect(&wide_up, 0.001, f32::INFINITY).is_none());
 }
 
 #[test]
@@ -336,8 +336,8 @@ fn loads_motionblur_usda() {
     // Mover sphere, Riser cube, floor, shadow card, 2 light triangles.
     assert_eq!(
         scene.world.count(),
-        6,
-        "expected 6 hittables, got {}",
+        5,
+        "expected 5 geometries, got {}",
         scene.world.count()
     );
 
@@ -351,9 +351,9 @@ fn loads_motionblur_usda() {
         )
         .with_time(time)
     };
-    assert!(scene.world.hit(&at(-1.5, 0.0), 0.001, 5.9).is_some());
-    assert!(scene.world.hit(&at(-1.5, 1.0), 0.001, 5.9).is_none());
-    assert!(scene.world.hit(&at(-0.5, 1.0), 0.001, 5.9).is_some());
+    assert!(scene.world.intersect(&at(-1.5, 0.0), 0.001, 5.9).is_some());
+    assert!(scene.world.intersect(&at(-1.5, 1.0), 0.001, 5.9).is_none());
+    assert!(scene.world.intersect(&at(-0.5, 1.0), 0.001, 5.9).is_some());
 
     // The shadow card (crust:rayMask = 6) is invisible to camera rays but
     // opaque to shadow rays.
@@ -363,7 +363,7 @@ fn loads_motionblur_usda() {
     );
     let cam_hit = scene
         .world
-        .hit(&down.clone().with_mask(crust_core::MASK_CAMERA), 0.001, f32::INFINITY)
+        .intersect(&down.clone().with_mask(crust_core::MASK_CAMERA), 0.001, f32::INFINITY)
         .expect("camera ray passes the card and hits the floor");
     assert!(
         (cam_hit.rec.t - 5.0).abs() < 1e-3,
@@ -372,7 +372,7 @@ fn loads_motionblur_usda() {
     );
     let shadow_hit = scene
         .world
-        .hit(&down.clone().with_mask(crust_core::MASK_SHADOW), 0.001, f32::INFINITY)
+        .intersect(&down.clone().with_mask(crust_core::MASK_SHADOW), 0.001, f32::INFINITY)
         .expect("shadow ray must be blocked by the card");
     assert!(
         (shadow_hit.rec.t - 3.0).abs() < 1e-3,

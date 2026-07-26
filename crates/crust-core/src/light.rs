@@ -82,8 +82,8 @@ impl LightShape for RectShape {
 /// The `Light` trait is what the integrator's light-sampling strategy (NEE)
 /// needs from a light: a surface point to aim a shadow ray at, the
 /// solid-angle density of that choice for MIS, the emitted radiance, and —
-/// for lights with scene geometry — the material identity that lets a
-/// bounce ray recognize the light it hit.
+/// for lights with scene geometry — the geometry id that lets a bounce
+/// ray recognize the light it hit.
 pub trait Light: Send + Sync {
     /// Samples a point on the light source, uniform by area.
     ///
@@ -99,10 +99,10 @@ pub trait Light: Send + Sync {
     /// material bound to the light's scene geometry.
     fn emission(&self) -> Vec3A;
 
-    /// The emissive material bound to this light's scene geometry, used to
-    /// recognize the light when a bounce ray hits it (by address identity).
-    /// `None` for lights with no geometry in the world.
-    fn material(&self) -> Option<&dyn Material>;
+    /// The `geom_id` of this light's scene geometry in the world, used to
+    /// recognize the light when a bounce ray hits it. `None` for lights
+    /// with no geometry in the world.
+    fn geom_id(&self) -> Option<u32>;
 }
 
 /// A geometric area light: any [`LightShape`] paired with the [`Emissive`]
@@ -111,11 +111,18 @@ pub trait Light: Send + Sync {
 pub struct AreaLight {
     shape: Box<dyn LightShape>,
     material: Arc<Emissive>,
+    /// The world `geom_id` of the emissive geometry this light shares its
+    /// surface with — how bounce hits are attributed back to the light.
+    geom_id: u32,
 }
 
 impl AreaLight {
-    pub fn new(shape: Box<dyn LightShape>, material: Arc<Emissive>) -> Self {
-        Self { shape, material }
+    pub fn new(shape: Box<dyn LightShape>, material: Arc<Emissive>, geom_id: u32) -> Self {
+        Self {
+            shape,
+            material,
+            geom_id,
+        }
     }
 }
 
@@ -144,8 +151,8 @@ impl Light for AreaLight {
         self.material.emitted()
     }
 
-    fn material(&self) -> Option<&dyn Material> {
-        Some(self.material.as_ref())
+    fn geom_id(&self) -> Option<u32> {
+        Some(self.geom_id)
     }
 }
 
@@ -190,15 +197,14 @@ impl LightList {
         }
     }
 
-    /// Finds the light whose scene geometry carries `mat`, by address
-    /// identity of the material. Used by the integrator to attribute a
-    /// bounce-hit emissive surface to its light for MIS; emissive geometry
-    /// with no light-list entry returns `None`.
-    pub fn find_by_material(&self, mat: &dyn Material) -> Option<&Arc<dyn Light>> {
-        self.lights.iter().find(|l| {
-            l.material()
-                .is_some_and(|m| std::ptr::addr_eq(m as *const dyn Material, mat))
-        })
+    /// Finds the light whose scene geometry has world id `geom_id`. Used
+    /// by the integrator to attribute a bounce-hit emissive surface to its
+    /// light for MIS; emissive geometry with no light-list entry returns
+    /// `None`.
+    pub fn find_by_geom(&self, geom_id: u32) -> Option<&Arc<dyn Light>> {
+        self.lights
+            .iter()
+            .find(|l| l.geom_id() == Some(geom_id))
     }
 
     /// Returns the number of lights in the `LightList`.
@@ -248,6 +254,7 @@ mod tests {
                 radius: 1.0,
             }),
             Arc::new(Emissive::new(Vec3A::splat(10.0))),
+            0,
         );
         // Nearest point on the sphere as seen from below.
         let pdf = light.pdf(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0));
@@ -256,20 +263,19 @@ mod tests {
     }
 
     #[test]
-    fn find_by_material_matches_by_address() {
-        let mat_a = Arc::new(Emissive::new(Vec3A::splat(1.0)));
-        let mat_b = Arc::new(Emissive::new(Vec3A::splat(1.0)));
+    fn find_by_geom_matches_by_id() {
+        let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
         let mut lights = LightList::new();
         lights.add(Arc::new(AreaLight::new(
             Box::new(SphereShape {
                 center: Vec3A::ZERO,
                 radius: 1.0,
             }),
-            mat_a.clone(),
+            mat,
+            7,
         )));
 
-        assert!(lights.find_by_material(mat_a.as_ref()).is_some());
-        // Equal color but a different allocation must not match.
-        assert!(lights.find_by_material(mat_b.as_ref()).is_none());
+        assert!(lights.find_by_geom(7).is_some());
+        assert!(lights.find_by_geom(8).is_none());
     }
 }

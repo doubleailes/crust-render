@@ -35,10 +35,25 @@ Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (def
 
 ## Workspace layout
 
-Four crates under `crates/`:
+Five crates under `crates/`:
 
-- **`crust-core`** — the whole engine as a library (`crust_core`): renderer, integrator,
-  materials, primitives, lights, BVH, USD import. Everything of substance lives here.
+- **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
+  `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
+  (triangle meshes with optional per-vertex shading normals, analytic spheres, round
+  curve segments, single-level `Instance`s with transform motion blur) attach to a
+  `SceneBuilder` with per-geometry visibility masks; `commit()` builds the acceleration
+  structure; `Scene::intersect`/`Scene::occluded` mirror `rtcIntersect1`/`rtcOccluded1`.
+  Hits are plain `Copy` `RayHit`s carrying `geom_id`/`prim_id` — the kernel never sees
+  materials. Instanced hits report the *instance's* top-level `geom_id` with the inner
+  `prim_id`. Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
+  parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
+  glam + rayon; deliberately swappable for Embree bindings behind the same seam.
+
+- **`crust-core`** — the engine as a library (`crust_core`): renderer, integrator,
+  materials, lights, volumes, path guiding, USD import — everything above the
+  intersection layer, which it consumes from `crust-rt` through `rt_world.rs`
+  (`WorldBuilder`/`World`: kernel geometries paired with a `geom_id`-indexed
+  material table).
   UI-free by design: no progress-bar or image-encoding dependencies; progress is
   reported through a `ProgressCallback`, and fallible entry points return
   `crust_core::Error` instead of exiting.
@@ -156,30 +171,30 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 
 ## Core traits (extension points)
 
-- **`Hittable`** (`hittable.rs`) — `hit(ray, t_min, t_max) -> Option<Hit>` + `bounding_box()`,
-  plus two defaulted methods: `hit_any` (boolean occlusion query — `Bvh` overrides it with an
-  early-exit traversal; NEE shadow rays go through it, never through closest-hit) and
-  `clipped_aabb(axis, min, max)` (conservative slab-clipped bounds for the BVH's spatial
-  splits; triangles override with exact Sutherland-Hodgman clipping).
-  `HitRecord` is `Copy` geometry only (point, normal, `t`, `front_face`); `Hit` pairs it with
-  a **borrowed** `&dyn Material`, so traversal never touches an `Arc` refcount. Implemented by
-  `Sphere`, `Triangle`/`SmoothTriangle` (one shared **watertight** intersector — Woop et al.
-  2013: dominant-axis shear, 2D edge functions with f64 fallback on exact-zero ties; no
-  pinholes along shared edges), `Mesh`, `RoundCurveSegment` (sphere-swept cone for
-  hair/curves), `Instance` (an `Arc`'d object placed by a transform — rays transform into
-  local space with unnormalized direction so `t` carries over, normals map back by
-  inverse-transpose; an optional end-of-shutter transform lerps per-ray for motion blur),
-  `Masked` (gates intersection on `ray.mask() & mask` — see the `MASK_*` consts in `ray.rs`),
-  `HittableList`, `Bvh`. Rendering uses a **two-level BVH**: `Renderer::new` builds a
-  top-level `Bvh` (`bvh.rs`) over the scene's `HittableList`, and each imported mesh carries
-  its own nested `Bvh` over *local-space* triangles, shared across identical prims via
-  `Instance` (`usd_import.rs`). The build is reference-based **SBVH** (binned object SAH +
-  spatial splits gated by the α-overlap test, references clipped and duplicated across
-  children — leaves index a shared `indices` array), runs subtrees in parallel via
-  `rayon::join` above 4096 refs, and is **deterministic** (input-only decisions, pinned by a
-  build-twice test). The binary tree is then **collapsed to BVH4**: 4-wide SoA nodes whose
-  slab tests run on `Vec4` lanes (`safe_inv` keeps zero-direction components NaN-free;
-  closest-hit traversal orders lanes near-to-far, occlusion traversal early-exits).
+- **Geometry & intersection** — there is no `Hittable` trait anymore: all intersection
+  lives in the **`crust-rt`** kernel crate (see the workspace layout), and crust-core
+  talks to it through `rt_world.rs`: a `WorldBuilder` pairs every attached
+  `rt::Geometry` with its `Arc<dyn Material>` (`attach(...) -> geom_id`), and the
+  committed `World` resolves kernel hits back to materials **by `geom_id`** —
+  `World::intersect` returns a `WorldHit { rec: HitRecord, mat, geom_id, prim_id }`,
+  `World::occluded` is the shadow-ray early-exit query (NEE never uses closest-hit).
+  `HitRecord` (`hittable.rs`) remains the material-facing `Copy` hit geometry (point,
+  ray-facing normal, `t`, `front_face`). Inside the kernel: `Sphere`,
+  triangles with one shared **watertight** intersector (Woop et al. 2013 — dominant-axis
+  shear, 2D edge functions with f64 fallback on exact-zero ties; no pinholes along
+  shared edges), `RoundCurves` (sphere-swept cones for hair), and `Instance` (a
+  committed inner `rt::Scene` placed by a transform — rays transform into local space
+  with unnormalized direction so `t` carries over, normals map back by
+  inverse-transpose; an optional end-of-shutter transform lerps per-ray for motion
+  blur). Per-geometry masks gate intersection on `ray.mask` (`MASK_*` consts,
+  re-exported from the kernel). The build is reference-based **SBVH** (binned object
+  SAH + spatial splits gated by the α-overlap test, references clipped via exact
+  Sutherland-Hodgman for triangles and duplicated across children), runs subtrees in
+  parallel via `rayon::join` above 4096 refs, is **deterministic** (input-only
+  decisions, pinned by a build-twice test), and is then **collapsed to BVH4**: 4-wide
+  SoA nodes whose slab tests run on `Vec4` lanes (`safe_inv` keeps zero-direction
+  components NaN-free; closest-hit traversal orders lanes near-to-far, occlusion
+  traversal early-exits).
 - **`Material`** (`material/material.rs`) —
   `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
   (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a
@@ -199,10 +214,10 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 - **`Light`** (`light.rs`) — `sample_point`/`pdf`/`emission`/`material`. The one
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
   `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
-  Lights are stored in a `LightList` and their surfaces are also added to `world` as
+  Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry (Cornell-box semantics: a light is both light and visible object) —
-  sharing one `Emissive` Arc, which is how the integrator attributes a bounce-hit
-  emissive surface to its light (`LightList::find_by_material`, address identity).
+  the `AreaLight` records the geometry's `geom_id`, which is how the integrator
+  attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
   **NEE samples one light per vertex** (uniform pick), so the light strategy's MIS
   density is `light.pdf / n_lights` — the bounce side evaluates the exact same
   expression for the light it hit; keep the two sides identical or emission is
@@ -228,11 +243,12 @@ The only scene format. `load_scene` opens the stage, imports `RenderSettings` fi
 camera needs the aspect ratio), then traverses prims with an explicit stack that bakes the
 Xform hierarchy into world matrices. Schema mapping:
 
-- `UsdGeomMesh` → triangles in *local* space wrapped in a nested `Bvh` and placed by an
-  `Instance`; prims with identical points/topology/material share one triangle BVH (content
-  hash + memoized material Arcs, so binding paths compare by pointer). Non-invertible
-  transforms fall back to world-space baking. `UsdGeomSphere` → analytic `Sphere`.
-- `UsdGeomBasisCurves` → `RoundCurveSegment` chains under an `Instance`: `linear` curves
+- `UsdGeomMesh` → a *local-space* committed `rt::Scene` (one `TriangleMesh` geometry)
+  placed by an `rt::Geometry::Instance`; prims with identical points/topology/material
+  share one kernel scene (content hash + memoized material Arcs, so binding paths
+  compare by pointer). Non-invertible transforms fall back to world-space baking.
+  `UsdGeomSphere` → analytic `Sphere` geometry.
+- `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
   (USD diameters) resolve per-vertex / per-curve / constant by array length.
 - Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2

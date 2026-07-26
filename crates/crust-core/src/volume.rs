@@ -388,7 +388,7 @@ impl Volumes {
             if region.majorant_sigma_t <= 0.0 {
                 continue;
             }
-            if !region.world_aabb.hit(ray, t_eps, t_max) {
+            if !region.world_aabb.hit(ray.rt(), t_eps, t_max) {
                 continue;
             }
             if let Some((t0, t1)) = region.intersect(ray) {

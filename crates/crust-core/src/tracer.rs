@@ -1,12 +1,12 @@
 use crate::buffer::Buffer;
-use crate::bvh::Bvh;
 use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
-use crate::hittable::{HitRecord, Hittable};
+use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
+use crate::rt_world::{World, WorldHit};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{LightList, PathSampler, camera::Camera, hittable_list::HittableList};
+use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,9 +132,9 @@ struct PassStats {
 
 pub struct Renderer {
     pub camera: Camera,
-    /// Top-level BVH over every scene object (meshes carry their own
-    /// nested BVH over triangles, built at import).
-    pub world: Bvh,
+    /// The committed world: the `crust-rt` kernel scene plus the material
+    /// table hits resolve through (by `geom_id`).
+    pub world: World,
     pub lights: LightList,
     pub settings: RenderSettings,
     /// Participating-media regions, sampled outside the BVH (see
@@ -146,13 +146,11 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         camera: Camera,
-        world: HittableList,
+        world: World,
         lights: LightList,
         settings: RenderSettings,
     ) -> Self {
-        let object_count = world.count();
-        let world = Bvh::new(world.into_objects());
-        info!("built top-level BVH over {} scene objects", object_count);
+        info!("world holds {} geometries", world.count());
         Renderer {
             camera,
             world,
@@ -222,7 +220,7 @@ impl Renderer {
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
     fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
-        let bounds = match self.world.bounding_box() {
+        let bounds = match self.world.bounds() {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
@@ -597,7 +595,7 @@ impl RenderSettings {
 
 pub fn ray_color(
     r: &Ray,
-    world: &dyn Hittable,
+    world: &World,
     lights: &LightList,
     volumes: &Volumes,
     depth: i32,
@@ -760,7 +758,7 @@ enum PrevVertex<'a> {
 fn bounce_emission_weight(
     prev: &PrevVertex,
     lights: &LightList,
-    hit: &crate::hittable::Hit,
+    hit: &WorldHit,
     strategy: SamplingStrategy,
 ) -> f32 {
     let (from, bounce_pdf) = match prev {
@@ -772,7 +770,7 @@ fn bounce_emission_weight(
         }
         PrevVertex::Phase { pos, pdf } => (*pos, *pdf),
     };
-    match lights.find_by_material(hit.mat) {
+    match lights.find_by_geom(hit.geom_id) {
         Some(light) => {
             let light_pdf = (light.pdf(from, hit.rec.p) / lights.count() as f32).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
@@ -787,7 +785,7 @@ fn bounce_emission_weight(
 /// exact for homogeneous ones). MIS weights are unaffected — transmittance
 /// is part of the integrand on both strategies, not of either pdf.
 fn shadow_transmittance(
-    world: &dyn Hittable,
+    world: &World,
     volumes: &Volumes,
     shadow_ray: &Ray,
     distance: f32,
@@ -795,7 +793,7 @@ fn shadow_transmittance(
 ) -> Vec3A {
     // Dedicated occlusion query: any hit in range means full shadow, so the
     // early-exit traversal beats searching for the closest hit.
-    if world.hit_any(shadow_ray, 0.001, distance - 0.001) {
+    if world.occluded(shadow_ray, 0.001, distance - 0.001) {
         return Vec3A::ZERO;
     }
     if volumes.is_empty() {
@@ -814,7 +812,7 @@ fn volume_nee(
     p: Vec3A,
     wi: Vec3A,
     phase: &PhaseMix,
-    world: &dyn Hittable,
+    world: &World,
     volumes: &Volumes,
     lights: &LightList,
     strategy: SamplingStrategy,
@@ -856,7 +854,7 @@ fn volume_nee(
 /// path and therefore cannot be computed forward.
 fn trace_path(
     r: &Ray,
-    world: &dyn Hittable,
+    world: &World,
     lights: &LightList,
     volumes: &Volumes,
     depth: i32,
@@ -892,7 +890,7 @@ fn trace_path(
             // the ray itself) but never the background — reproduce both,
             // attenuating through any media the final segment crosses.
             if let Some(p) = &prev {
-                if let Some(hit) = world.hit(&ray, 0.001, f32::INFINITY) {
+                if let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let mut emitted = hit.mat.emitted_directional(cos_o);
                     if emitted.length_squared() > 0.0 {
@@ -912,7 +910,7 @@ fn trace_path(
             break;
         }
 
-        let hit_opt = world.hit(&ray, 0.001, f32::INFINITY);
+        let hit_opt = world.intersect(&ray, 0.001, f32::INFINITY);
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
         // Free-flight candidate in the carried homogeneous medium

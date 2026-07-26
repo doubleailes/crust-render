@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 utils = { path = "../utils" }
 openqmc = { path = "../openqmc-rs", package = "openqmc-rs" }
+crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
