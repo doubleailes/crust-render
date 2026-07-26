@@ -1,15 +1,18 @@
+mod checkpoint_io;
+
 use clap::Parser;
 use crust_core::Buffer;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
 use crust_core::TileOrder;
+use crust_core::{CheckpointState, RenderOptions};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tracing::{Level, debug, error, info};
+use tracing::{Level, debug, error, info, warn};
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 enum LoggerLevel {
@@ -48,6 +51,19 @@ struct Cli {
     /// strategy alone to visualize what MIS balances between.
     #[arg(long, value_enum)]
     strategy: Option<Strategy>,
+    /// Write a resumable checkpoint EXR at most every SECS seconds (at
+    /// render pass boundaries). Not supported for path-guided renders.
+    #[arg(long, value_name = "SECS")]
+    checkpoint_interval: Option<u64>,
+    /// Where the checkpoint EXR is written (and read from by --resume).
+    /// Defaults to the output path with a .checkpoint.exr suffix.
+    #[arg(long, value_name = "PATH")]
+    checkpoint_file: Option<String>,
+    /// Resume from a checkpoint EXR (by default the --checkpoint-file
+    /// path). The scene and settings must match the interrupted render;
+    /// -s/--samples may be raised to extend it.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -206,8 +222,84 @@ fn main() {
         }
         progress_bar.set_position(done);
     };
-    let buffer = renderer.render_with_progress(cli.bucket, &progress);
+
+    // Checkpoint/resume wiring: the engine snapshots at pass boundaries,
+    // this closure persists them (and refreshes the preview PNG).
+    let checkpoint_path: PathBuf = cli
+        .checkpoint_file
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(&output).with_extension("checkpoint.exr"));
+    let resume_state: Option<CheckpointState> = cli.resume.as_ref().map(|p| {
+        let path = if p.is_empty() {
+            checkpoint_path.clone()
+        } else {
+            PathBuf::from(p)
+        };
+        match checkpoint_io::read_checkpoint(&path) {
+            Ok(state) => {
+                info!(
+                    "resuming from {:?} at {} samples per pixel (target {})",
+                    path,
+                    state.next_sample,
+                    settings.samples_per_pixel()
+                );
+                state
+            }
+            Err(e) => {
+                error!("failed to load resume checkpoint: {}", e);
+                std::process::exit(1);
+            }
+        }
+    });
+    let preview_png_path = Path::new(&output).with_extension("png");
+    let on_checkpoint = |state: &CheckpointState| {
+        match checkpoint_io::write_checkpoint(state, &checkpoint_path) {
+            Ok(()) => info!(
+                "checkpoint written to {:?} ({} spp so far)",
+                checkpoint_path, state.next_sample
+            ),
+            Err(e) => warn!("failed to write checkpoint: {}", e),
+        }
+        let mut preview = Buffer::new(state.width, state.height);
+        for y in 0..state.height {
+            for x in 0..state.width {
+                let i = y * state.width + x;
+                if state.count[i] > 0 {
+                    preview.set_pixel(x, y, state.sum[i] / state.count[i] as f32);
+                }
+            }
+        }
+        if let Err(e) = write_png(&preview, state.width, state.height, &preview_png_path) {
+            warn!("failed to write preview PNG: {}", e);
+        }
+    };
+    let checkpointing = cli.checkpoint_interval.is_some();
+    let opts = RenderOptions {
+        progress: Some(&progress),
+        checkpoint_interval: cli.checkpoint_interval.map(Duration::from_secs),
+        on_checkpoint: if checkpointing {
+            Some(&on_checkpoint)
+        } else {
+            None
+        },
+        resume: resume_state,
+    };
+    let buffer = match renderer.render_with_options(opts) {
+        Ok(buffer) => buffer,
+        Err(e) => {
+            bar.finish();
+            error!("{}", e);
+            std::process::exit(1);
+        }
+    };
     bar.finish();
+    if checkpointing {
+        info!(
+            "checkpoint file kept at {:?} — safe to delete once the render is kept",
+            checkpoint_path
+        );
+    }
     // Close Timer
     let duration: Duration = start.elapsed();
     info!("Time elapsed in rendering() is: {:?}", duration);
