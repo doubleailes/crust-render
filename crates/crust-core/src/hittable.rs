@@ -58,6 +58,41 @@ pub struct Hit<'a> {
     pub mat: &'a dyn Material,
 }
 
+/// Visibility-mask wrapper: the inner object only intersects rays whose
+/// category bit is in `mask` (see the `MASK_*` constants in [`crate::ray`]).
+/// Zero-cost for unmasked geometry, which is simply never wrapped.
+pub struct Masked {
+    inner: Box<dyn Hittable>,
+    mask: u32,
+}
+
+impl Masked {
+    pub fn new(inner: Box<dyn Hittable>, mask: u32) -> Self {
+        Masked { inner, mask }
+    }
+}
+
+impl Hittable for Masked {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>> {
+        if ray.mask() & self.mask == 0 {
+            return None;
+        }
+        self.inner.hit(ray, t_min, t_max)
+    }
+
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        ray.mask() & self.mask != 0 && self.inner.hit_any(ray, t_min, t_max)
+    }
+
+    fn bounding_box(&self) -> Option<AABB> {
+        self.inner.bounding_box()
+    }
+
+    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        self.inner.clipped_aabb(axis, min, max)
+    }
+}
+
 /// The `Hittable` trait defines objects that can be intersected by rays.
 /// Implementing this trait allows objects to participate in ray tracing.
 pub trait Hittable: Send + Sync {

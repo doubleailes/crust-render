@@ -15,7 +15,9 @@ use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::light::{AreaLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::primitives::{Instance, Sphere as CrustSphere, Triangle};
+use crate::hittable::Masked;
+use crate::primitives::{Instance, RoundCurveSegment, Sphere as CrustSphere, Triangle};
+use crate::ray::MASK_ALL;
 use crate::scene::Scene;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
@@ -23,7 +25,8 @@ use glam::{Affine3A, Vec3, Vec3A};
 
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
-    Camera as UsdCamera, Mesh as UsdMesh, PointBased, Sphere as UsdSphere, Xform, Xformable,
+    BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, Mesh as UsdMesh,
+    PointBased, Sphere as UsdSphere, Xform, Xformable,
 };
 use openusd::schemas::lux::{
     CylinderLight, DiskLight, DistantLight, DomeLight, Light as UsdLight, RectLight, SphereLight,
@@ -87,6 +90,9 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
             let mat = resolve_material(&stage, &prim, &mut materials);
             emit_sphere(&mut world, &prim, &sphere, this_world, mat);
+        } else if let Ok(Some(curves)) = UsdBasisCurves::get(&stage, prim.path().clone()) {
+            let mat = resolve_material(&stage, &prim, &mut materials);
+            emit_curves(&mut world, &prim, &curves, this_world, mat);
         } else if UsdCamera::get(&stage, prim.path().clone())
             .ok()
             .flatten()
@@ -429,6 +435,33 @@ fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
 }
 
 // -----------------------------------------------------------------------
+// Per-prim geometry attributes (visibility mask, motion)
+// -----------------------------------------------------------------------
+
+/// `crust:rayMask` — which ray categories see this geometry (bit 0 camera,
+/// bit 1 shadow, bit 2 indirect; default: all). E.g. `crust:rayMask = 6`
+/// makes a light-blocker invisible to the camera.
+fn prim_ray_mask(prim: &Prim) -> u32 {
+    custom_i32(prim, "crust:rayMask")
+        .map(|m| m as u32)
+        .unwrap_or(MASK_ALL)
+}
+
+fn apply_mask(obj: Box<dyn Hittable>, mask: u32) -> Box<dyn Hittable> {
+    if mask == MASK_ALL {
+        obj
+    } else {
+        Box::new(Masked::new(obj, mask))
+    }
+}
+
+/// `crust:motion:translate` — a world-space translation the prim moves
+/// through over the shutter interval (transform motion blur).
+fn prim_motion_translate(prim: &Prim) -> Option<Vec3> {
+    custom_color3(prim, "crust:motion:translate").map(|v| Vec3::new(v.x, v.y, v.z))
+}
+
+// -----------------------------------------------------------------------
 // Mesh
 // -----------------------------------------------------------------------
 
@@ -514,6 +547,9 @@ fn emit_mesh(
         }
     };
 
+    let mask = prim_ray_mask(prim);
+    let motion = prim_motion_translate(prim);
+
     // Non-invertible placements (a zero scale axis) cannot be instanced —
     // bake the degenerate transform into world-space triangles as before.
     if world_xf.determinant().abs() < 1e-12 {
@@ -521,6 +557,12 @@ fn emit_mesh(
             "Mesh at {} has a non-invertible transform — baking instead of instancing",
             prim.path()
         );
+        if motion.is_some() {
+            warn!(
+                "Mesh at {}: crust:motion:translate is ignored on baked (non-invertible) geometry",
+                prim.path()
+            );
+        }
         let verts: Vec<Vec3A> = points
             .iter()
             .map(|p| {
@@ -529,7 +571,7 @@ fn emit_mesh(
             })
             .collect();
         match build_triangles(&verts, &counts, &indices, &material) {
-            Some(tris) => world.add(Box::new(Bvh::new(tris))),
+            Some(tris) => world.add(apply_mask(Box::new(Bvh::new(tris)), mask)),
             None => debug!("Mesh at {} produced no triangles", prim.path()),
         }
         return;
@@ -556,10 +598,12 @@ fn emit_mesh(
         }
     };
 
-    world.add(Box::new(Instance::new(
-        bvh,
-        Affine3A::from_mat4(world_xf),
-    )));
+    let l2w = Affine3A::from_mat4(world_xf);
+    let mut inst = Instance::new(bvh, l2w);
+    if let Some(v) = motion {
+        inst = inst.with_motion(Affine3A::from_translation(v) * l2w);
+    }
+    world.add(apply_mask(Box::new(inst), mask));
 }
 
 /// Fan-triangulates the faces into `Triangle`s; `None` if nothing survives.
@@ -626,7 +670,222 @@ fn emit_sphere(
         radius,
         center
     );
-    world.add(Box::new(CrustSphere::new(center, radius, material)));
+    let sphere = CrustSphere::new(center, radius, material);
+    let obj: Box<dyn Hittable> = match prim_motion_translate(prim) {
+        // A moving sphere rides an identity-placed Instance whose end
+        // transform is the shutter translation.
+        Some(v) => Box::new(
+            Instance::new(Arc::new(sphere), Affine3A::IDENTITY)
+                .with_motion(Affine3A::from_translation(v)),
+        ),
+        None => Box::new(sphere),
+    };
+    world.add(apply_mask(obj, prim_ray_mask(prim)));
+}
+
+// -----------------------------------------------------------------------
+// Curves
+// -----------------------------------------------------------------------
+
+/// Cubic basis matrices (row-major, `[t³ t² t 1] · M · [P0 P1 P2 P3]ᵀ`).
+const BEZIER_M: [[f32; 4]; 4] = [
+    [-1.0, 3.0, -3.0, 1.0],
+    [3.0, -6.0, 3.0, 0.0],
+    [-3.0, 3.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+];
+const BSPLINE_M: [[f32; 4]; 4] = [
+    [-1.0 / 6.0, 3.0 / 6.0, -3.0 / 6.0, 1.0 / 6.0],
+    [3.0 / 6.0, -6.0 / 6.0, 3.0 / 6.0, 0.0],
+    [-3.0 / 6.0, 0.0, 3.0 / 6.0, 0.0],
+    [1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0, 0.0],
+];
+const CATMULL_ROM_M: [[f32; 4]; 4] = [
+    [-0.5, 1.5, -1.5, 0.5],
+    [1.0, -2.5, 2.0, -0.5],
+    [-0.5, 0.0, 0.5, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+];
+
+fn eval_cubic(m: &[[f32; 4]; 4], cp: &[Vec3A; 4], t: f32) -> Vec3A {
+    let pow = [t * t * t, t * t, t, 1.0];
+    let mut p = Vec3A::ZERO;
+    for (row, &w) in m.iter().zip(&pow) {
+        for (c, &coeff) in row.iter().enumerate() {
+            p += cp[c] * (coeff * w);
+        }
+    }
+    p
+}
+
+/// Segments each cubic span is flattened into before intersection.
+const CURVE_FLATTEN_SEGS: usize = 8;
+
+/// Import a `UsdGeomBasisCurves` batch as round (sphere-swept) curve
+/// segments: `linear` curves directly, `cubic` curves (bezier / bspline /
+/// catmullRom) flattened to a polyline at `CURVE_FLATTEN_SEGS` samples per
+/// span. Widths (diameters, per USD) may be authored per point (`vertex`),
+/// per curve, or constant; anything else falls back to the first value.
+/// The segments live in local space under an `Instance`, like meshes.
+fn emit_curves(
+    world: &mut HittableList,
+    prim: &Prim,
+    curves: &UsdBasisCurves,
+    world_xf: GMat4,
+    material: Arc<dyn Material>,
+) {
+    let points: Option<Vec<Vec3f>> = curves
+        .points_attr()
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            sdf::Value::Vec3fVec(v) => Some(v),
+            _ => None,
+        });
+    let counts: Option<Vec<i32>> = curves
+        .curve_vertex_counts_attr()
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            sdf::Value::IntVec(v) => Some(v),
+            _ => None,
+        });
+    let (points, counts) = match (points, counts) {
+        (Some(p), Some(c)) => (p, c),
+        _ => {
+            debug!(
+                "BasisCurves at {} missing points / curveVertexCounts — skipped",
+                prim.path()
+            );
+            return;
+        }
+    };
+    let pts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+
+    let widths: Vec<f32> = curves
+        .widths_attr()
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            sdf::Value::FloatVec(v) => Some(v),
+            _ => None,
+        })
+        .unwrap_or_else(|| vec![1.0]);
+
+    // USD defaults: type = cubic, basis = bezier.
+    let ty = custom_token(prim, "type").unwrap_or_else(|| "cubic".to_string());
+    let basis_name = custom_token(prim, "basis").unwrap_or_else(|| "bezier".to_string());
+    let (basis, vstep) = match basis_name.as_str() {
+        "bezier" => (&BEZIER_M, 3usize),
+        "bspline" => (&BSPLINE_M, 1),
+        "catmullRom" => (&CATMULL_ROM_M, 1),
+        other => {
+            warn!(
+                "BasisCurves at {}: basis \"{}\" is not supported (bezier | bspline | catmullRom) — skipped",
+                prim.path(),
+                other
+            );
+            return;
+        }
+    };
+
+    // Width (diameter) of control point `global_idx` under the authored
+    // interpolation, resolved structurally from the array length.
+    let n_points = pts.len();
+    let n_curves = counts.len();
+    let width_of = |global_idx: usize, curve_idx: usize| -> f32 {
+        if widths.len() == n_points {
+            widths[global_idx] // vertex
+        } else if widths.len() == n_curves {
+            widths[curve_idx] // uniform (per curve)
+        } else {
+            widths[0] // constant / fallback
+        }
+    };
+
+    let mut segments: Vec<Box<dyn Hittable>> = Vec::new();
+    let mut offset = 0usize;
+    for (curve_idx, &cnt) in counts.iter().enumerate() {
+        let cnt = cnt as usize;
+        if offset + cnt > pts.len() {
+            warn!(
+                "BasisCurves at {}: curveVertexCounts overruns points — remaining curves skipped",
+                prim.path()
+            );
+            break;
+        }
+        let cp = &pts[offset..offset + cnt];
+        let radius =
+            |k: usize| 0.5 * width_of(offset + k, curve_idx).max(1e-6);
+
+        if ty == "linear" {
+            for k in 0..cnt.saturating_sub(1) {
+                segments.push(Box::new(RoundCurveSegment::new(
+                    cp[k],
+                    cp[k + 1],
+                    radius(k),
+                    radius(k + 1),
+                    material.clone(),
+                )));
+            }
+        } else {
+            // Cubic: flatten each span. Span k uses control points
+            // [k·vstep .. k·vstep+3]; widths interpolate linearly over the
+            // curve parameter between the span's end control points.
+            if cnt < 4 {
+                offset += cnt;
+                continue;
+            }
+            let n_spans = (cnt - 4) / vstep + 1;
+            for s in 0..n_spans {
+                let base = s * vstep;
+                let ctrl = [cp[base], cp[base + 1], cp[base + 2], cp[base + 3]];
+                let (w0, w1) = (radius(base), radius(base + 3));
+                let mut prev_p = eval_cubic(basis, &ctrl, 0.0);
+                let mut prev_r = w0;
+                for i in 1..=CURVE_FLATTEN_SEGS {
+                    let t = i as f32 / CURVE_FLATTEN_SEGS as f32;
+                    let p = eval_cubic(basis, &ctrl, t);
+                    let r = w0 + (w1 - w0) * t;
+                    segments.push(Box::new(RoundCurveSegment::new(
+                        prev_p,
+                        p,
+                        prev_r,
+                        r,
+                        material.clone(),
+                    )));
+                    prev_p = p;
+                    prev_r = r;
+                }
+            }
+        }
+        offset += cnt;
+    }
+
+    if segments.is_empty() {
+        debug!("BasisCurves at {} produced no segments", prim.path());
+        return;
+    }
+    info!(
+        "Imported BasisCurves at {} ({} {} curves, {} segments)",
+        prim.path(),
+        counts.len(),
+        ty,
+        segments.len()
+    );
+
+    if world_xf.determinant().abs() < 1e-12 {
+        warn!(
+            "BasisCurves at {} has a non-invertible transform — skipped",
+            prim.path()
+        );
+        return;
+    }
+    let inst = Instance::new(Arc::new(Bvh::new(segments)), Affine3A::from_mat4(world_xf));
+    world.add(apply_mask(Box::new(inst), prim_ray_mask(prim)));
 }
 
 // -----------------------------------------------------------------------
