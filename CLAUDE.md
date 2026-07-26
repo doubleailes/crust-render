@@ -16,14 +16,23 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
 cargo run --release -- -i samples/cornellbox.usda
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
-cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
+cargo run --release -- -i samples/cornellbox.usda --tile-order spiral   # tile visit order
+
+# Checkpoint/resume: snapshot a resumable EXR every N seconds; resume (and
+# optionally extend with a larger -s) after an interruption — bit-exact.
+cargo run --release -- -i samples/cornellbox.usda -s 4096 --checkpoint-interval 60
+cargo run --release -- -i samples/cornellbox.usda -s 4096 --resume
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf)
+# -s/--samples (override spp), --strategy (power|balance|light|bsdf),
+# --tile-order (morton|spiral|scanline|random), --checkpoint-interval <SECS>,
+# --checkpoint-file <PATH> (default <output>.checkpoint.exr), --resume [<PATH>].
+# -b/--bucket is a hidden deprecated no-op — rendering is always tile-based now.
 
-# Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
+# Tests (integration tests live in crust-core/tests/: usd_scene.rs, checkpoint.rs)
 cargo test
 cargo test -p crust-core loads_cornellbox_usda     # run a single test by name
+cargo test -p crust-core --release --test checkpoint   # bit-exact resume suite
 
 # Benchmarks (criterion)
 cargo bench -p crust-core            # bench targets: "vec3 dot", "simple world", "simple world guided"
@@ -55,11 +64,15 @@ Five crates under `crates/`:
   (`WorldBuilder`/`World`: kernel geometries paired with a `geom_id`-indexed
   material table).
   UI-free by design: no progress-bar or image-encoding dependencies; progress is
-  reported through a `ProgressCallback`, and fallible entry points return
-  `crust_core::Error` instead of exiting.
+  reported through a `ProgressCallback`, checkpoint snapshots through a
+  `CheckpointCallback` (plain-data `CheckpointState` — serialization is the CLI's
+  job), and fallible entry points return `crust_core::Error` instead of exiting.
+  The render driver is MoonRay-shaped (`scheduler.rs`/`film.rs`/`checkpoint.rs` —
+  see `docs/moonray_comparison.md` and the pipeline section below).
 - **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene`, calls the
   `Renderer` (wiring an `indicatif` bar to the progress callback), writes the EXR and
-  the tone-mapped PNG. `main.rs` is the only file.
+  the tone-mapped PNG; `checkpoint_io.rs` round-trips `CheckpointState` through
+  resumable multi-channel EXRs (`--checkpoint-interval` / `--resume`).
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
 - **`openqmc-rs`** (crate/lib name `openqmc`) — a self-contained, from-scratch Rust port
@@ -87,9 +100,26 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 
 1. **`main.rs`** builds a `Scene { camera, world, lights, settings, volumes }` — either from
    USD (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
-2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
-   - `render()` — parallel over pixels within each scanline row.
-   - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
+2. **`Renderer`** (`tracer.rs`) drives sampling through a MoonRay-style pass/tile
+   scheduler (`scheduler.rs`; adopted from the MoonRay study — `docs/moonray_comparison.md`):
+   fixed **8×8 tiles** visited in a precomputed permutation (`TileOrder` — Morton
+   default, spiral/scanline/random via `--tile-order` / `crust:tileOrder`), drained
+   through a virtual work queue (one atomic cursor) by every Rayon pool thread. Work is
+   organized as a `PassSchedule` — a pure function of `(spp, min_spp)`: sample 0 as four
+   coarse passes over a Bayer-dispersed fill order, then doubling sample ranges capped
+   at 16/pass. Per-pixel accumulation lives in a `Film` (`film.rs`): sums, odd-indexed
+   sums, counts. Per-tile results merge in tile order after each pass — deterministic
+   under any thread scheduling. Entry points: `render()` / `render_with_tiles()` /
+   `render_with_progress()` (thin wrappers; the old `tiled` flag is vestigial) and
+   `render_with_options(RenderOptions)` — the full API with progress + checkpoint/resume.
+   **Checkpoint/resume** (`checkpoint.rs`): at uniform pass boundaries, after
+   `checkpoint_interval`, the driver thread hands a `CheckpointState` (raw sums, odd
+   sums, counts, boundary sample index, settings fingerprint) to `on_checkpoint`; the
+   CLI (`checkpoint_io.rs`) persists it as a multi-channel EXR (atomic tmp+rename).
+   Resume validates `RenderSettings::fingerprint()` (FNV-1a; excludes spp so `-s` can
+   extend a render), replays the schedule suffix, re-derives tile stages from restored
+   counts — **bit-exact**, adaptive included (pinned by `tests/checkpoint.rs`). Guided
+   renders refuse to resume and warn-ignore checkpoint options.
 3. **`trace_path()`** (`tracer.rs`, public wrapper `ray_color()`) is the integrator — an
    **iterative** path tracer in two passes: a forward walk that traces one segment per
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
@@ -160,10 +190,15 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    pass's own noisy mean, which would correlate numerator and denominator and break
    the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
    unguided (training passes still blend in; every pass is unbiased either way).
-5. **Adaptive sampling**: pixels stop early once they hold `crust:minSamplesPerPixel`
-   samples and the relative standard error of the pixel mean drops below
-   `crust:varianceThreshold` (0 disables). Applies to main/final passes, never to
-   guiding training passes.
+5. **Adaptive sampling** (MoonRay/Dammertz split-buffer, `film.rs` + the pass driver):
+   the `Film` keeps a second buffer of odd-indexed samples; the stopping error is
+   `luma(|mean − mean_odd|)/max(luma(mean), 1e-3)`, calibrated (×0.798, derivation in
+   `film.rs`) so `crust:varianceThreshold` keeps its historical relative-standard-error
+   meaning (0 disables). Decisions happen *between passes, per tile*: every tile takes
+   the `crust:minSamplesPerPixel` uniform floor, then a Uniform → Adaptive → Completed
+   state machine retires a tile once every pixel of the tile **plus a 1-pixel neighbour
+   ring** converges (the ring keeps tiles from stopping against an edge a neighbour
+   still disputes). Applies to main/final passes, never to guiding training passes.
 6. The CLI writes the linear EXR to the `-o` path and a tone-mapped sRGB PNG next to it
    (same path, `.png` extension) — e.g. `-o renders/foo.exr` produces `renders/foo.exr`
    and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
@@ -282,8 +317,9 @@ Xform hierarchy into world matrices. Schema mapping:
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
-  `balance` | `light` | `bsdf`). Missing attrs fall back to defaults (128 spp,
-  depth 32, 640×360, power MIS) defined as consts at the top of the file.
+  `balance` | `light` | `bsdf`, `crust:tileOrder` token = `morton` | `spiral` |
+  `scanline` | `random`). Missing attrs fall back to defaults (128 spp,
+  depth 32, 640×360, power MIS, morton tiles) defined as consts at the top of the file.
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.

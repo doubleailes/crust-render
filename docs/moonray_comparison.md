@@ -275,37 +275,49 @@ Points where crust is *not* simply behind:
 
 ## 3. Takeaways
 
-### 3.1 Adopted in this pass — *planned*
+### 3.1 Adopted in this pass — as built
 
-The three items below are being implemented in this adoption pass (branch
-`claude/moonray-crust-integration`). Status: **planned** — this section will be updated
-to record the as-built state.
+The three items below were implemented in this adoption pass. Where the as-built code
+lives: `crates/crust-core/src/scheduler.rs` (tiles, orders, passes, work queue),
+`film.rs` (accumulation + split-buffer error), `checkpoint.rs` + the driver in
+`tracer.rs` (engine side), `crates/crust-render/src/checkpoint_io.rs` (resumable EXRs).
 
-1. **Unified pass/tile scheduler.** Replace the dual scanline/16×16-bucket drivers with
-   MoonRay's shape: 8×8 tiles in a precomputed order (Morton default; spiral, scanline,
-   random selectable via `--tile-order` / `crust:tileOrder`), a virtual work queue (one
-   atomic cursor synthesizing tile groups), and a pass schedule
-   `Pass{pixel range, sample range}` — sample 0 dispersed across four coarse passes,
-   then geometrically growing fine passes. Deviation: no realtime/progressive display
-   modes (the CLI is batch), so coarse passes exist for scheduling and resume
-   granularity, not extrapolated preview.
-2. **Split-buffer adaptive sampling.** A `Film` accumulator with an odd-sample buffer;
-   per-pixel error `luma(|mean − mean_odd|)/luma(mean)`; per-tile
-   Uniform → Adaptive → Completed state machine evaluated at pass boundaries.
-   Deviations: error is mean-normalized (not `rsqrt`) to preserve the existing
-   `crust:varianceThreshold` relative-standard-error semantics (with a √(2/π)·2 ≈ 1.6
-   calibration factor); the region kd-tree is replaced by evaluating each tile's error
-   over the tile plus a 1-pixel neighbour ring (the overlap idea at 1/100 the
+1. **Unified pass/tile scheduler.** The dual scanline/16×16-bucket drivers are gone,
+   replaced by MoonRay's shape: 8×8 tiles in a precomputed order (Morton default;
+   spiral, scanline, random via `--tile-order` / `crust:tileOrder`), a virtual work
+   queue (one atomic cursor synthesizing tile groups, drained by every Rayon pool
+   thread under `rayon::broadcast`), and a pass schedule `Pass{pixel range, sample
+   range}` — sample 0 dispersed across four coarse passes over a Bayer-ordered fill
+   pattern, then geometrically growing fine passes capped at 16 samples per pass.
+   Per-tile results merge in tile order after each pass, so renders are deterministic
+   under any thread scheduling. Deviation: no realtime/progressive display modes (the
+   CLI is batch), so coarse passes exist for scheduling and resume granularity, not
+   extrapolated preview.
+2. **Split-buffer adaptive sampling.** The `Film` accumulator keeps an odd-sample
+   buffer; per-pixel error `luma(|mean − mean_odd|)/max(luma(mean), 1e-3)`; per-tile
+   Uniform → Adaptive → Completed state machine evaluated at pass boundaries, retiring
+   a tile only when the tile *plus a 1-pixel neighbour ring* has converged.
+   Deviations from MoonRay: error is mean-normalized (not `rsqrt`) to preserve the
+   existing `crust:varianceThreshold` relative-standard-error semantics — calibration
+   factor √(2/π) ≈ 0.798, since `mean − mean_odd` is half the even/odd split whose std
+   is `2σ/√n` (derivation in `film.rs`, pinned by a statistical test); the region
+   kd-tree is replaced by the neighbour ring (the overlap idea at 1/100 the
    machinery); no alpha term (no alpha channel yet).
-3. **Checkpoint / resume.** Film snapshots at pass boundaries on a time interval,
-   exposed by the engine as plain data (crust-core stays encoding-free) and written by
-   the CLI as a multi-channel EXR (raw sums + odd sums + counts, resume metadata in
-   header attributes, atomic tmp+rename). Resume is **bit-exact** — guaranteed by the
-   stateless sampler plus raw-f32 round-tripping — and validated by settings
-   fingerprint. `PassSchedule::from_tile_sample_range` implements MoonRay's
-   sample-id→pass conversion, enabling future mid-pass (SIGINT) checkpoints; v1
-   snapshots only at uniform pass boundaries. Guided renders don't checkpoint in v1
-   (N blended pass buffers + SD-tree state; explicitly rejected with an error).
+3. **Checkpoint / resume.** Film snapshots at uniform pass boundaries on a time
+   interval, exposed by the engine as plain data (`CheckpointState` via
+   `Renderer::render_with_options` — crust-core stays encoding-free) and written by
+   the CLI as a multi-channel EXR (`--checkpoint-interval`; raw sums + odd sums +
+   counts, resume metadata in header attributes, atomic tmp+rename). Resume
+   (`--resume`, extendable with a larger `-s`) is **bit-exact, adaptive sampling
+   included** — guaranteed by the stateless sampler, the pure pass schedule whose
+   suffix the resumed run replays, raw-f32 round-tripping, and stage re-derivation
+   from the restored per-pixel counts; pinned by integration tests comparing straight
+   vs. interrupted-and-resumed renders pixel-bit for pixel-bit. Validation is by
+   settings fingerprint (stable FNV-1a; `samples_per_pixel` deliberately excluded).
+   `PassSchedule::from_tile_sample_range` implements MoonRay's sample-id→pass
+   conversion, enabling future mid-pass (SIGINT) checkpoints; v1 snapshots only at
+   pass boundaries. Guided renders don't checkpoint (N blended pass buffers +
+   SD-tree state; rejected with `Error::CheckpointUnsupported`).
 
 ### 3.2 Documented only — future work
 
