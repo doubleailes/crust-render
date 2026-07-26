@@ -9,6 +9,11 @@ pub enum Error {
     NonUtf8Path(PathBuf),
     /// Opening or parsing the USD stage failed.
     UsdOpen { path: PathBuf, message: String },
+    /// A resume checkpoint does not match the scene/settings being
+    /// rendered (dimensions, settings fingerprint, or malformed buffers).
+    CheckpointMismatch { reason: String },
+    /// Checkpoint/resume is not supported for this render mode.
+    CheckpointUnsupported(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -19,6 +24,12 @@ impl fmt::Display for Error {
             }
             Error::UsdOpen { path, message } => {
                 write!(f, "failed to open USD stage {}: {}", path.display(), message)
+            }
+            Error::CheckpointMismatch { reason } => {
+                write!(f, "resume checkpoint does not match this render: {reason}")
+            }
+            Error::CheckpointUnsupported(what) => {
+                write!(f, "checkpoint/resume is not supported here: {what}")
             }
         }
     }

@@ -1,6 +1,7 @@
 mod aabb;
 mod buffer;
 mod camera;
+mod checkpoint;
 mod error;
 mod film;
 mod guiding;
@@ -28,6 +29,7 @@ pub use crust_rt as rt;
 pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
+pub use checkpoint::{CHECKPOINT_VERSION, CheckpointCallback, CheckpointState};
 pub use error::Error;
 pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
@@ -39,6 +41,8 @@ pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
 pub use rt_world::{World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use scheduler::TileOrder;
-pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};
+pub use tracer::{
+    ProgressCallback, RenderOptions, RenderSettings, Renderer, SamplingStrategy, ray_color,
+};
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

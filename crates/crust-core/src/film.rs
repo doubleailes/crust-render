@@ -4,6 +4,7 @@
 //! `docs/moonray_comparison.md`).
 
 use crate::buffer::Buffer;
+use crate::checkpoint::CheckpointState;
 use crate::guiding::luminance;
 use glam::Vec3A;
 
@@ -114,6 +115,41 @@ impl Film {
             }
         }
         buffer
+    }
+
+    /// Samples accumulated at one pixel.
+    pub(crate) fn sample_count(&self, x: usize, y: usize) -> u32 {
+        self.count[y * self.width + x]
+    }
+
+    /// Materialize the resumable state at a uniform pass boundary.
+    pub(crate) fn snapshot(&self, next_sample: u32, fingerprint: u64) -> CheckpointState {
+        CheckpointState {
+            width: self.width,
+            height: self.height,
+            sum: self.sum.clone(),
+            odd_sum: self.odd_sum.clone(),
+            count: self.count.clone(),
+            next_sample,
+            fingerprint,
+        }
+    }
+
+    /// Rebuild a film from checkpoint state. The luminance moments start at
+    /// zero: they only feed [`Self::pass_stats`], which the (non-guided,
+    /// hence resumable) render path never consumes — a resumed film's stats
+    /// would describe the resumed samples only.
+    pub(crate) fn restore(state: &CheckpointState) -> Film {
+        let n = state.width * state.height;
+        Film {
+            width: state.width,
+            height: state.height,
+            sum: state.sum.clone(),
+            odd_sum: state.odd_sum.clone(),
+            count: state.count.clone(),
+            lum_sum: vec![0.0; n],
+            lum_sq: vec![0.0; n],
+        }
     }
 
     /// Per-pixel unbiased variance of the pixel-mean luminance and its

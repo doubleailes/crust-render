@@ -3,6 +3,8 @@ use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
+use crate::checkpoint::{CheckpointCallback, CheckpointState};
+use crate::error::Error;
 use crate::film::{ERROR_CALIBRATION, Film, PixelDelta};
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
@@ -14,6 +16,7 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
@@ -106,6 +109,38 @@ impl SamplingStrategy {
     }
 }
 
+/// Options for [`Renderer::render_with_options`] — the full-featured entry
+/// point. `Default` renders exactly like [`Renderer::render`].
+#[derive(Default)]
+pub struct RenderOptions<'a> {
+    pub progress: Option<ProgressCallback<'a>>,
+    /// Minimum wall-clock time between checkpoint snapshots; requires
+    /// `on_checkpoint`. `Duration::ZERO` snapshots at every eligible pass
+    /// boundary.
+    pub checkpoint_interval: Option<Duration>,
+    /// Receives film snapshots on the driver thread — see
+    /// [`CheckpointCallback`].
+    pub on_checkpoint: Option<CheckpointCallback<'a>>,
+    /// Resume from a previous render's checkpoint. Validated against the
+    /// current settings ([`RenderSettings::fingerprint`]).
+    pub resume: Option<CheckpointState>,
+}
+
+/// Checkpoint hooks threaded into the pass driver.
+struct CheckpointHooks<'a> {
+    interval: Option<Duration>,
+    callback: Option<CheckpointCallback<'a>>,
+}
+
+impl CheckpointHooks<'_> {
+    fn none() -> Self {
+        CheckpointHooks {
+            interval: None,
+            callback: None,
+        }
+    }
+}
+
 /// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
     field: &'a GuidingField,
@@ -192,6 +227,75 @@ impl Renderer {
             return self.render_guided(progress);
         }
         self.render_pass(self.final_pass_config(), None, progress).0
+    }
+
+    /// The full-featured entry point: progress reporting plus
+    /// checkpoint/resume — see [`RenderOptions`].
+    ///
+    /// Path-guided renders blend several independent passes with a trained
+    /// guiding field; serializing that state is out of scope, so guided
+    /// renders ignore checkpoint options (with a warning) and refuse to
+    /// resume ([`Error::CheckpointUnsupported`]).
+    pub fn render_with_options(&self, opts: RenderOptions) -> Result<Buffer, Error> {
+        if self.settings.guiding {
+            if opts.resume.is_some() {
+                return Err(Error::CheckpointUnsupported(
+                    "path-guided renders blend multiple independent passes and cannot resume",
+                ));
+            }
+            if opts.checkpoint_interval.is_some() || opts.on_checkpoint.is_some() {
+                warn!("checkpointing is not supported with path guiding — ignored for this render");
+            }
+            return Ok(self.render_guided(opts.progress));
+        }
+        if let Some(state) = &opts.resume {
+            self.validate_resume(state)?;
+            if state.next_sample >= self.settings.samples_per_pixel {
+                info!(
+                    "checkpoint already holds {} of {} samples per pixel — returning it as-is",
+                    state.next_sample, self.settings.samples_per_pixel
+                );
+                return Ok(Film::restore(state).to_buffer());
+            }
+        }
+        let hooks = CheckpointHooks {
+            interval: opts.checkpoint_interval,
+            callback: opts.on_checkpoint,
+        };
+        Ok(self
+            .render_pass_full(
+                self.final_pass_config(),
+                None,
+                opts.progress,
+                opts.resume.as_ref(),
+                hooks,
+            )
+            .0)
+    }
+
+    fn validate_resume(&self, state: &CheckpointState) -> Result<(), Error> {
+        if !state.is_consistent() {
+            return Err(Error::CheckpointMismatch {
+                reason: "buffer lengths do not match the checkpoint dimensions".into(),
+            });
+        }
+        let (width, height) = (self.settings.width, self.settings.height);
+        if (state.width, state.height) != (width, height) {
+            return Err(Error::CheckpointMismatch {
+                reason: format!(
+                    "checkpoint is {}x{}, render is {}x{}",
+                    state.width, state.height, width, height
+                ),
+            });
+        }
+        if state.fingerprint != self.settings.fingerprint() {
+            return Err(Error::CheckpointMismatch {
+                reason: "settings fingerprint differs (scene, resolution, depth, seed/frame, \
+                         adaptive parameters or sampling strategy changed)"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
@@ -393,17 +497,60 @@ impl Renderer {
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
     ) -> (Buffer, Vec<SampleData>, PassStats) {
+        self.render_pass_full(cfg, gctx, progress, None, CheckpointHooks::none())
+    }
+
+    fn render_pass_full(
+        &self,
+        cfg: PassConfig,
+        gctx: Option<&GuidingContext>,
+        progress: Option<ProgressCallback>,
+        resume: Option<&CheckpointState>,
+        hooks: CheckpointHooks,
+    ) -> (Buffer, Vec<SampleData>, PassStats) {
         let (width, height) = (self.settings.width, self.settings.height);
         let min_floor = self.settings.min_samples_per_pixel.max(2).min(cfg.spp);
-        let schedule = PassSchedule::new(cfg.spp, min_floor);
+        // A resumed schedule is the suffix of the straight schedule from
+        // the checkpoint's boundary — same passes, same sample indices.
+        let schedule = match resume {
+            Some(state) => PassSchedule::from_range(state.next_sample, cfg.spp, min_floor),
+            None => PassSchedule::new(cfg.spp, min_floor),
+        };
         let scheduler = TileScheduler::new(width, height, cfg.order, cfg.seed);
         let num_tiles = scheduler.tiles.len();
 
-        let mut film = Film::new(width, height);
-        let mut stages = vec![TileStage::Uniform; num_tiles];
+        let mut film = match resume {
+            Some(state) => Film::restore(state),
+            None => Film::new(width, height),
+        };
         let mut all_samples = Vec::new();
         let adaptive = cfg.adaptive && self.settings.variance_threshold > 0.0;
         let stop_error = ERROR_CALIBRATION * self.settings.variance_threshold;
+        let fingerprint = self.settings.fingerprint();
+        let mut last_checkpoint = Instant::now();
+
+        // Tile stages: fresh renders start Uniform; a resumed render
+        // re-derives them from the restored film. A tile whose count froze
+        // below the checkpoint boundary was retired at an earlier boundary
+        // (its convergence call is frozen with it); a tile still at the
+        // boundary gets exactly the convergence check the straight run
+        // performed there, on identical film state — so a resumed adaptive
+        // render makes identical stage decisions.
+        let mut stages = vec![TileStage::Uniform; num_tiles];
+        if let Some(state) = resume {
+            if adaptive && state.next_sample >= min_floor {
+                for (t, stage) in stages.iter_mut().enumerate() {
+                    let tile = scheduler.tiles[t];
+                    if film.sample_count(tile.x, tile.y) < state.next_sample {
+                        *stage = TileStage::Completed;
+                    } else if tile_converged(&film, tile, stop_error) {
+                        *stage = TileStage::Completed;
+                    } else {
+                        *stage = TileStage::Adaptive;
+                    }
+                }
+            }
+        }
 
         // Progress is reported in tile-passes; the total shrinks as tiles
         // converge out of the remaining passes.
@@ -490,6 +637,21 @@ impl Renderer {
                 }
                 let remaining = (schedule.passes.len() - pass_idx - 1) as u64;
                 total.fetch_sub(completed_now * remaining, Ordering::Relaxed);
+            }
+
+            // Checkpoint at uniform pass boundaries once the interval has
+            // elapsed (never after the last pass — the render is done). The
+            // snapshot happens between passes on the driver thread, so it
+            // can never tear.
+            if let (Some(interval), Some(cb)) = (hooks.interval, hooks.callback) {
+                let is_last = pass_idx + 1 == schedule.passes.len();
+                if pass.end_pixel == TILE_PIXELS
+                    && !is_last
+                    && last_checkpoint.elapsed() >= interval
+                {
+                    cb(&film.snapshot(pass.end_sample, fingerprint));
+                    last_checkpoint = Instant::now();
+                }
             }
         }
 
@@ -656,8 +818,40 @@ impl RenderSettings {
         self.tile_order
     }
 
+    pub fn samples_per_pixel(&self) -> u32 {
+        self.samples_per_pixel
+    }
+
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// A deterministic digest of every setting that changes what a given
+    /// `(pixel, sample index)` evaluates to — the checkpoint compatibility
+    /// key. Deliberately **excludes** `samples_per_pixel` (resuming with a
+    /// larger budget extends a render) and `tile_order` (a pure scheduling
+    /// choice; per-pixel accumulation order is identical under every
+    /// order). FNV-1a rather than `DefaultHasher` so the value is stable
+    /// across Rust versions and platforms.
+    pub fn fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        fn mix(mut h: u64, bytes: &[u8]) -> u64 {
+            for &b in bytes {
+                h ^= b as u64;
+                h = h.wrapping_mul(PRIME);
+            }
+            h
+        }
+        let mut h = OFFSET;
+        h = mix(h, &(self.width as u64).to_le_bytes());
+        h = mix(h, &(self.height as u64).to_le_bytes());
+        h = mix(h, &(self.frame as i64).to_le_bytes());
+        h = mix(h, &self.max_depth.to_le_bytes());
+        h = mix(h, &self.min_samples_per_pixel.to_le_bytes());
+        h = mix(h, &self.variance_threshold.to_bits().to_le_bytes());
+        h = mix(h, &[self.sampling_strategy as u8, self.guiding as u8]);
+        h
     }
 }
 
