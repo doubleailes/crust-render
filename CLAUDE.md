@@ -273,6 +273,29 @@ Xform hierarchy into world matrices. Schema mapping:
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
   (USD diameters) resolve per-vertex / per-curve / constant by array length.
+- **Instancing** — both USD mechanisms reduce to the same thing, and share one code path
+  (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
+  place it by transform. A prototype becomes a `Vec<ProtoPart>` — one part per bound leaf
+  geometry, each a committed local-space `rt::Scene` plus its prototype-relative transform,
+  material and ray mask. It is split per *part* rather than per prototype because `World`
+  maps materials by top-level `geom_id`: a prototype binding two materials must become two
+  instances or one material is lost. Prototypes are memoized by path in `ImportCaches`.
+  - `UsdGeomPointInstancer` → one instance per entry of the per-instance arrays. The
+    transform is USD's `translate ∘ orient ∘ scale`, under the instancer's own world
+    matrix; `orientationsf` (quatf) wins over `orientations` (quath); `invisibleIds`
+    prunes by `ids` (array index where `ids` is absent). The instancer's children are
+    **not** traversed — prototypes are conventionally authored beneath it and are drawn
+    only through it. Nested instancers and volumes inside prototypes warn and are skipped.
+  - Native instancing (`instanceable = true` + a composition arc) → the prim's prototype
+    (`/__Prototype_N`) is built once and shared by every instance; the instance's own proxy
+    subtree is never descended into. Without this the importer re-read and re-hashed each
+    instance's geometry (~30% of load time on a 2000-instance scene).
+  - `class` prims are abstract and never drawn on their own — only reached through the
+    prototypes that reference them. `collect_proto_parts` deliberately ignores that rule,
+    since naming a class as a prototype is how "geometry that exists only to be instanced"
+    is authored. Sample scene: `samples/instancing.usda`.
+  - Non-invertible instance placements (a zero scale — a common "hide this" idiom) are
+    skipped: `rt::Geometry::Instance` requires an invertible transform.
 - Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2
   indirect — default all) to hide from ray categories, and `crust:motion:translate`
   (float3, world-space) to streak through that translation over the shutter (transform
@@ -318,9 +341,18 @@ feature flag.
   cubic spans to polylines (no exact cubic intersector) and lerps widths across a span in
   parameter; the rounded-cone can report an interior sphere surface for rays *starting
   inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
-  points/topology *and* material binding — `UsdGeomPointInstancer` and `instanceable`
-  composition arcs are not consumed. Emissive curves/instances are not light-list entries
-  (BSDF-sampled only, like emissive volumes).
+  points/topology *and* material binding. Emissive curves/instances are not light-list
+  entries (BSDF-sampled only, like emissive volumes).
+
+- **Instancing caveats.** Single-level only, as the kernel is: a prototype containing a
+  nested `PointInstancer` warns and skips it (an instance of an instance would need the
+  kernel's `Instance` to nest). Volumes inside prototypes are skipped — they live outside
+  the surface BVH by design and cannot ride an instance transform. `PointInstancer`
+  `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
+  do not motion-blur (`crust:motion:translate` still works on ordinary prims), and all
+  per-instance arrays are read at the default time sample. Top-level `UsdGeomSphere` prims
+  still bake their centre into world space and so ignore scale; spheres *inside* a
+  prototype go through the instanced path and scale correctly.
 
 - **SIMD stops at 128 bits** (`docs/simd.md` has the audit and the numbers). Everything
   vectorized — `glam`'s `Vec3A`/`Vec4`, the BVH4 slab test, `Tri4` leaf packets — is

@@ -105,6 +105,16 @@ impl World {
         self.materials.len()
     }
 
+    /// Number of top-level primitives in the acceleration structure.
+    ///
+    /// An instance counts as **one** primitive however much geometry it
+    /// references, so comparing this against a scene's triangle count is
+    /// how you tell instanced geometry from baked geometry: an instanced
+    /// import stays flat as placements multiply, a baked one does not.
+    pub fn primitive_count(&self) -> usize {
+        self.scene.primitive_count()
+    }
+
     /// The material bound to a geometry.
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()
