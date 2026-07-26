@@ -16,6 +16,11 @@ mod tracer;
 mod volume;
 mod world;
 
+/// The path tracer's QMC sampler: OpenQMC's Owen-scrambled Sobol, consumed
+/// through its native pass-by-value domain-tree API. Aliased here so a single
+/// edit can swap in another OpenQMC sampler (e.g. `SobolBnSampler`).
+pub type PathSampler = openqmc::SobolSampler;
+
 pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use bvh::Bvh;

@@ -173,7 +173,7 @@ fn loads_fog_usda() {
     assert!((fog.sigma_s - crust_core::Vec3A::splat(0.15)).abs().max_element() < 1e-6);
     // The homogeneous fast path must yield exact Beer-Lambert through the
     // 4-unit room: e^{-(0.15+0.01)·4} in the red channel.
-    let mut s = sampler::RngSampler::default();
+    let mut s = openqmc::pcg::Rng::new(1);
     let volumes = crust_core::Volumes::new(scene.volumes);
     let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.0, 2.0, 10.0), -crust_core::Vec3A::Z);
     let tr = volumes.transmittance(&ray, 1e-3, 100.0, &mut s);

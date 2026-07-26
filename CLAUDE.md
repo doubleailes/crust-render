@@ -47,11 +47,23 @@ Four crates under `crates/`:
   the tone-mapped PNG. `main.rs` is the only file.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
-- **`sampler`** — the `Sampler` trait plus its two implementations: `SobolSampler`
-  (Owen-scrambled Sobol via `sobol_burley`, the production sampler — per-pixel
-  decorrelated by hashing `(x, y, frame_seed)` into the scramble seed) and `RngSampler`
-  (`SmallRng` fallback for tests and once the dimension budget overflows). Depended on
-  by `crust-core` (materials, `guiding/`, `volume.rs`) for every stochastic draw.
+- **`openqmc-rs`** (crate/lib name `openqmc`) — a self-contained, from-scratch Rust port
+  of [AcademySoftwareFoundation/openqmc](https://github.com/AcademySoftwareFoundation/openqmc)
+  (Apache-2.0), the quasi-Monte Carlo sampling library. Modules map one-to-one to the
+  upstream `oqmc/*.h` headers (`pcg`, `reverse`, `rotate`, `permute`, `encode`, `float`,
+  `range`, `owen`, `rank1`, `lookup`, `stochastic`, `state`, `sampler`, plus the samplers)
+  and reproduce the upstream sample values **bit-for-bit** (pinned by
+  `tests/golden_upstream.rs`, generated from the real C++ headers). It exposes the native
+  **domain-tree** API: build a root `Sampler<T>` per `(x, y, frame, index)`, derive
+  independent 4D sub-patterns with `new_domain(key)` (padding), draw ≤4 dims per domain
+  with `draw_sample*` (high-quality stratified) or `draw_rnd*` / `rng()` (a `pcg::Rng`
+  stream for incidental/unbounded draws). Six samplers — Owen-scrambled `SobolSampler`
+  (the renderer's, aliased `crust_core::PathSampler`), `LatticeSampler`, `PmjSampler`, and
+  their blue-noise variants `SobolBnSampler`/`LatticeBnSampler`/`PmjBnSampler` (optimised
+  tables bundled as LE binary blobs in `src/data/`). Depended on by `crust-core`
+  (materials, `guiding/`, `volume.rs`, `tracer.rs`) for every stochastic draw. Idiomatic
+  divergences from the C++: the caller-allocated `void*` cache (a GPU concern) becomes a
+  lazy process-global, keeping every `Sampler<T>` a small `Copy + Send` value.
 
 `crust-core/src/lib.rs` re-exports the public surface (`Renderer`, `Scene`, `Camera`, the
 material types, `simple_scene`, `get_settings`). Prefer importing from `crust_core::` roots.
@@ -181,11 +193,18 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   double-counted. Emissive geometry with no light-list entry is handled: the bounce
   keeps its emission at full weight.
 
-Sampling goes through the `sampler` crate's `Sampler` trait (`start_pixel` / `start_sample`
-/ `next_1d` / `next_2d`). The production sampler is `SobolSampler`, Owen-scrambled Sobol
-(Burley 2020) via `sobol_burley`, per-pixel decorrelated by hashing `(x, y, frame_seed)`
-into the scramble seed; `RngSampler` (`SmallRng`) is the fallback used by tests, benches,
-and once a path's dimension count outgrows `sobol_burley`'s 256-dimension window.
+Sampling goes through the **`openqmc`** crate's native domain-tree API (see the workspace
+layout above). The integrator (`tracer.rs`) threads the sampler *by value* — no stateful
+`&mut dyn Sampler`: `render_pixel` builds a root `PathSampler::new(x, y, frame, index)` per
+sample (with an extra `new_domain(tile)` so images wider/taller than 256 stay decorrelated,
+since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a `K_CAMERA`
+domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
+and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
+…, keys defined atop `tracer.rs`); materials draw one 4D block from the `SobolSampler` domain
+they are handed. Unbounded/incidental draws — Russian roulette, volume delta-tracking,
+carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a domain
+(`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
+randomness use `openqmc::pcg::Rng`.
 
 ## USD import (`scene/usd_import.rs`)
 

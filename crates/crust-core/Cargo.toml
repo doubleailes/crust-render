@@ -10,11 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 utils = { path = "../utils" }
-sampler = { path = "../sampler" }
+openqmc = { path = "../openqmc-rs", package = "openqmc-rs" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
-rand.workspace = true
 openusd = { version = "0.5", default-features = false, features = ["geom", "lux", "shade", "render"] }
 
 [dev-dependencies]

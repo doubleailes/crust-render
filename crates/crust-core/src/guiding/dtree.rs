@@ -9,7 +9,6 @@
 //! same path, which keeps them exactly consistent.
 
 use glam::Vec3A;
-use sampler::Sampler;
 use std::f32::consts::{PI, TAU};
 
 const NO_CHILD: u32 = u32::MAX;
@@ -154,18 +153,17 @@ impl DTree {
     /// Draw a canonical position proportional to the stored flux, returning
     /// it with its solid-angle pdf. `None` if the tree holds no flux yet.
     ///
-    /// Exactly one 2D draw is consumed from `sampler`; it seeds a PCG stream
+    /// Takes a single 2D `seed` (one QMC domain draw); it seeds a PCG stream
     /// that supplies fresh uniforms per tree level. Rescaling a single 2D
     /// sample down the tree (the textbook trick) loses entropy on sharp
     /// distributions until deep cells are no longer sampled uniformly, and
     /// drawing per-level from the QMC sampler burns through its dimension
     /// window; the hashed stream avoids both while keeping the sampler's
     /// dimension usage fixed.
-    pub fn sample(&self, sampler: &mut dyn Sampler) -> Option<([f32; 2], f32)> {
+    pub fn sample(&self, seed: [f32; 2]) -> Option<([f32; 2], f32)> {
         if self.total_flux() <= 0.0 {
             return None;
         }
-        let seed = sampler.next_2d();
         let mut rng_state: u64 = ((seed[0].to_bits() as u64) << 32 | seed[1].to_bits() as u64)
             ^ 0x9E37_79B9_7F4A_7C15;
         let mut node = 0usize;
@@ -296,12 +294,12 @@ impl DTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sampler::{RngSampler, Sampler};
+    use openqmc::pcg::Rng;
     use utils::uniform_sphere;
 
     #[test]
     fn canonical_round_trip() {
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         for _ in 0..1000 {
             let d = uniform_sphere(s.next_2d()).normalize();
             let back = canonical_to_dir(dir_to_canonical(d));
@@ -313,7 +311,7 @@ mod tests {
     fn canonical_map_is_equal_area() {
         // Uniform canonical points must map to uniform sphere directions:
         // E[z] ≈ 0 and E[z²] ≈ 1/3.
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let n = 200_000;
         let (mut mean_z, mut mean_z2) = (0.0f64, 0.0f64);
         for _ in 0..n {
@@ -331,7 +329,7 @@ mod tests {
     /// Build a tree trained on an anisotropic distribution: all flux inside
     /// one octant of the sphere.
     fn trained_tree() -> DTree {
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let mut tree = DTree::new();
         for round in 0..4 {
             for _ in 0..20_000 {
@@ -348,7 +346,7 @@ mod tests {
     #[test]
     fn pdf_integrates_to_one() {
         let tree = trained_tree();
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let n = 200_000;
         let mut acc = 0.0f64;
         for _ in 0..n {
@@ -363,9 +361,9 @@ mod tests {
     #[test]
     fn sample_pdf_matches_pdf_lookup() {
         let tree = trained_tree();
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         for _ in 0..1000 {
-            let (p, pdf) = tree.sample(&mut s).expect("trained tree samples");
+            let (p, pdf) = tree.sample(s.next_2d()).expect("trained tree samples");
             let lookup = tree.pdf(p);
             assert!(
                 (pdf - lookup).abs() < 1e-3 * (1.0 + pdf),
@@ -378,7 +376,7 @@ mod tests {
     fn samples_follow_flux() {
         // All flux in the +z hemisphere ⇒ samples must land there.
         let mut tree = DTree::new();
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         for _ in 0..10_000 {
             let mut d = uniform_sphere(s.next_2d());
             d.z = d.z.abs().max(0.1);
@@ -386,7 +384,7 @@ mod tests {
         }
         let tree = tree.refine(0.01, 20);
         for _ in 0..1000 {
-            let (p, _) = tree.sample(&mut s).unwrap();
+            let (p, _) = tree.sample(s.next_2d()).unwrap();
             let d = canonical_to_dir(p);
             assert!(d.z > -1e-3, "sampled below the trained hemisphere: {d}");
         }
@@ -397,7 +395,7 @@ mod tests {
         // Train a sharply concentrated distribution over many rounds — the
         // regime where sample/pdf inconsistencies (e.g. degraded sample
         // entropy at deep levels) show up as estimator bias.
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let mut tree = DTree::new();
         for round in 0..8 {
             for _ in 0..50_000 {
@@ -421,7 +419,7 @@ mod tests {
         let n = 400_000;
         let mut counts = [0u64; 8];
         for _ in 0..n {
-            let (p, _) = tree.sample(&mut s).unwrap();
+            let (p, _) = tree.sample(s.next_2d()).unwrap();
             let d = canonical_to_dir(p);
             let oct = (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize)
                 + 4 * ((d.z >= 0.0) as usize);
@@ -454,8 +452,8 @@ mod tests {
     #[test]
     fn untrained_tree_declines_to_sample() {
         let tree = DTree::new();
-        let mut s = RngSampler::default();
-        assert!(tree.sample(&mut s).is_none());
+        let mut s = Rng::new(0xC0FFEE);
+        assert!(tree.sample(s.next_2d()).is_none());
         assert_eq!(tree.pdf([0.3, 0.7]), 0.0);
     }
 }

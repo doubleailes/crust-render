@@ -1,8 +1,8 @@
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
 use crate::ray::Ray;
+use crate::PathSampler;
 use glam::Vec3A;
-use sampler::Sampler;
 
 /// A purely emissive surface material. Emission is all it knows — the shape
 /// of the light it belongs to lives in a `LightShape` on the light side
@@ -32,7 +32,7 @@ impl Material for Emissive {
         &self,
         _r_in: &Ray,
         _rec: &HitRecord,
-        _sampler: &mut dyn Sampler,
+        _sampler: PathSampler,
     ) -> Option<ScatterSample> {
         None
     }

@@ -6,12 +6,25 @@ use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{LightList, camera::Camera, hittable_list::HittableList};
+use crate::{LightList, PathSampler, camera::Camera, hittable_list::HittableList};
 use glam::Vec3A;
 use rayon::prelude::*;
-use sampler::{Sampler, SobolSampler};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
+
+// OpenQMC domain-tree keys. The camera and the path subtree hang off the root
+// (per-pixel, per-sample) sampler; each per-event sub-domain hangs off the
+// current vertex domain. Distinct keys give independent 4D sub-patterns.
+const K_CAMERA: i32 = 0; // off root: jitter (0,1) + lens uv (2,3)
+const K_PATH: i32 = 1; // off root: the bounce subtree
+const K_NEE: i32 = 0; // off vertex: light pick (0) + area uv (1,2)
+const K_NEE_SHADOW: i32 = 1; // off vertex: shadow-ray volume transmittance
+const K_BSDF: i32 = 2; // off vertex: material scatter block
+const K_GUIDE: i32 = 3; // off vertex: guide coin (0) + guide seed (1,2)
+const K_PHASE: i32 = 4; // off vertex: phase lobe (0) + HG uv (1,2)
+const K_RR: i32 = 5; // off vertex: Russian-roulette survival
+const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
+const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
 
 /// Render-progress callback: invoked with `(completed, total)` work units
 /// (scanline rows, or tiles under bucket rendering) as a pass advances.
@@ -441,8 +454,6 @@ impl Renderer {
         cfg: &PassConfig,
         gctx: Option<&GuidingContext>,
     ) -> (Vec3A, Vec<SampleData>, f64) {
-        let mut sampler = SobolSampler::new(cfg.seed);
-        sampler.start_pixel(i as u32, j as u32);
         let mut sum = Vec3A::ZERO;
         let mut samples = Vec::new();
         let mut lum_sum = 0.0f64;
@@ -452,13 +463,18 @@ impl Renderer {
         let min_spp = self.settings.min_samples_per_pixel.max(2);
         let mut taken = 0u32;
 
+        // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
+        // with an extra domain so images wider/taller than 256 stay fully
+        // decorrelated (the frame seed alone is constant within one render).
+        let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
+
         for sample in 0..cfg.spp {
-            sampler.start_sample(sample);
-            let jitter = sampler.next_2d();
-            let lens_uv = sampler.next_2d();
-            let u = ((i as f32) + jitter[0]) / (self.settings.width - 1) as f32;
-            let v = ((j as f32) + jitter[1]) / (self.settings.height - 1) as f32;
-            let r = self.camera.get_ray(u, v, lens_uv);
+            let root =
+                PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
+            let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
+            let u = ((i as f32) + cam[0]) / (self.settings.width - 1) as f32;
+            let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
+            let r = self.camera.get_ray(u, v, [cam[2], cam[3]]);
             let color = trace_path(
                 &r,
                 &self.world,
@@ -466,7 +482,7 @@ impl Renderer {
                 &self.volumes,
                 self.settings.max_depth as i32,
                 self.settings.sampling_strategy,
-                &mut sampler,
+                root,
                 gctx,
                 &mut samples,
             );
@@ -584,7 +600,7 @@ pub fn ray_color(
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
-    sampler: &mut dyn Sampler,
+    sampler: PathSampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
     trace_path(
@@ -616,18 +632,22 @@ fn sample_bounce_direction(
     rec: &HitRecord,
     mat: &dyn Material,
     guiding: Option<&GuidingContext>,
-    sampler: &mut dyn Sampler,
+    sampler: PathSampler,
 ) -> Option<ScatterSample> {
+    // Distinct sub-domains: the BSDF scatter block, and the guide block whose
+    // first dimension is the α-coin and next two are the guide-sampling seed.
+    let bsdf_dom = sampler.new_domain(K_BSDF);
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
-        _ => return mat.scatter_importance(r, rec, sampler),
+        _ => return mat.scatter_importance(r, rec, bsdf_dom),
     };
     let alpha = g.field.config().guide_prob;
+    let gs = sampler.new_domain(K_GUIDE).draw_sample_f32::<4>();
 
-    if sampler.next_1d() < alpha {
+    if gs[0] < alpha {
         // Guide branch: draw from the field; the material's continuous
         // component supplies the value and the BSDF side of the mixture pdf.
-        if let Some((wi, p_guide)) = g.field.sample(rec.p, sampler) {
+        if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]]) {
             if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
                 let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
                 return Some(ScatterSample {
@@ -639,10 +659,10 @@ fn sample_bounce_direction(
             }
         }
         // Material with no continuous component: pure BSDF sampling.
-        mat.scatter_importance(r, rec, sampler)
+        mat.scatter_importance(r, rec, bsdf_dom)
     } else {
         // BSDF branch.
-        let mut sample = mat.scatter_importance(r, rec, sampler)?;
+        let mut sample = mat.scatter_importance(r, rec, bsdf_dom)?;
         if sample.delta {
             // Only this branch can reach the delta lobe, so the coin scaled
             // its selection probability by 1-α.
@@ -769,7 +789,7 @@ fn shadow_transmittance(
     volumes: &Volumes,
     shadow_ray: &Ray,
     distance: f32,
-    sampler: &mut dyn Sampler,
+    vertex: PathSampler,
 ) -> Vec3A {
     if world.hit(shadow_ray, 0.001, distance - 0.001).is_some() {
         return Vec3A::ZERO;
@@ -777,7 +797,8 @@ fn shadow_transmittance(
     if volumes.is_empty() {
         return Vec3A::ONE;
     }
-    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, sampler)
+    let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
+    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
 }
 
 /// Direct lighting at a volume-region scatter point. The exact mirror of
@@ -793,22 +814,22 @@ fn volume_nee(
     volumes: &Volumes,
     lights: &LightList,
     strategy: SamplingStrategy,
-    sampler: &mut dyn Sampler,
+    vertex: PathSampler,
 ) -> Vec3A {
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
     }
-    let Some(light) = lights.sample(sampler) else {
+    let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
+    let Some(light) = lights.pick(nee[0]) else {
         return Vec3A::ZERO;
     };
     let n_lights = lights.count() as f32;
-    let area_uv = sampler.next_2d();
-    let light_point = light.sample_point(area_uv[0], area_uv[1]);
+    let light_point = light.sample_point(nee[1], nee[2]);
     let light_dir = light_point - p;
     let light_distance = light_dir.length();
     let light_dir_unit = light_dir / light_distance.max(1e-6);
     let shadow_ray = Ray::new(p, light_dir_unit);
-    let tr = shadow_transmittance(world, volumes, &shadow_ray, light_distance, sampler);
+    let tr = shadow_transmittance(world, volumes, &shadow_ray, light_distance, vertex);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
@@ -833,11 +854,13 @@ fn trace_path(
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
-    sampler: &mut dyn Sampler,
+    sampler: PathSampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
 ) -> Vec3A {
     let training = guiding.is_some_and(|g| g.training);
+    // The bounce subtree; each vertex derives its own domain off this by depth.
+    let path = sampler.new_domain(K_PATH);
     let mut records: Vec<VertexRec> = Vec::with_capacity(depth.max(0) as usize);
     let mut ray = r.clone();
     let mut remaining = depth;
@@ -852,6 +875,10 @@ fn trace_path(
     let mut terminal = Vec3A::ZERO;
 
     loop {
+        // This vertex's domain: `records.len()` is the vertex index (nothing
+        // has been pushed for it yet). Every per-event draw hangs off `v`.
+        let v = path.new_domain(records.len() as i32);
+
         if remaining <= 0 {
             // Depth exhausted. The old recursion still counted bounce-hit
             // emission at the last vertex (its `add_emission` term traced
@@ -866,7 +893,8 @@ fn trace_path(
                             emitted *= m.transmittance(hit.rec.t);
                         }
                         if !volumes.is_empty() {
-                            emitted *= volumes.transmittance(&ray, 0.001, hit.rec.t, sampler);
+                            let mut rng = v.new_domain(K_VOLUME).rng();
+                            emitted *= volumes.transmittance(&ray, 0.001, hit.rec.t, &mut rng);
                         }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
@@ -877,20 +905,17 @@ fn trace_path(
             break;
         }
 
-        // Fresh dimension window for this bounce — a no-op today, a hook for
-        // padded-Sobol later.
-        sampler.advance_bounce();
-
         let hit_opt = world.hit(&ray, 0.001, f32::INFINITY);
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
         // Free-flight candidate in the carried homogeneous medium
         // (subsurface / participating glass interiors) — analog sampling
-        // at the extinction majorant, exactly as before.
+        // at the extinction majorant. Incidental (unbounded across bounces),
+        // so it uses the PRNG side rather than a stratified dimension.
         let t_med = match ray.medium() {
             Some(m) if m.is_scattering() => {
                 let sigma_t_max = m.sigma_t_max().max(1e-4);
-                -(sampler.next_1d().ln()) / sigma_t_max
+                -(v.new_domain(K_MEDIUM).draw_rnd_f32::<1>()[0].ln()) / sigma_t_max
             }
             _ => f32::INFINITY,
         };
@@ -908,7 +933,8 @@ fn trace_path(
                 emitted: Vec3A::ZERO,
             }
         } else {
-            volumes.sample_interaction(&ray, 0.001, t_lim, sampler)
+            let mut rng = v.new_domain(K_VOLUME).rng();
+            volumes.sample_interaction(&ray, 0.001, t_lim, &mut rng)
         };
 
         let (vol_tr, vol_emit) = match event {
@@ -921,9 +947,10 @@ fn trace_path(
             } => {
                 // === Volume-region scatter vertex ===
                 let wi = ray.direction().normalize();
-                let dir = phase.sample(wi, sampler);
+                let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
+                let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee = volume_nee(p, wi, &phase, world, volumes, lights, strategy, sampler);
+                let nee = volume_nee(p, wi, &phase, world, volumes, lights, strategy, v);
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -945,7 +972,7 @@ fn trace_path(
                 if records.len() >= RR_START_BOUNCE {
                     let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                     if p_survive < 1.0 {
-                        if sampler.next_1d() >= p_survive {
+                        if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                             survived = false;
                             vrec.factor = Vec3A::ZERO;
                         } else {
@@ -980,7 +1007,7 @@ fn trace_path(
             let medium = ray.medium().expect("t_med implies a medium").clone();
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
-            let phase_uv = sampler.next_2d();
+            let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
                 ray.direction().normalize(),
                 medium.g,
@@ -1014,7 +1041,7 @@ fn trace_path(
             if records.len() >= RR_START_BOUNCE {
                 let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                 if p_survive < 1.0 {
-                    if sampler.next_1d() >= p_survive {
+                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                         survived = false;
                         vrec.factor = Vec3A::ZERO;
                     } else {
@@ -1096,14 +1123,14 @@ fn trace_path(
         // same expression for a bounce-hit light — both MIS weights must
         // describe the same strategy or emission is double-counted.
         let mut nee = Vec3A::ZERO;
+        let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
         if let Some(light) = strategy
             .samples_lights()
-            .then(|| lights.sample(sampler))
+            .then(|| lights.pick(nee_s[0]))
             .flatten()
         {
             let n_lights = lights.count() as f32;
-            let area_uv = sampler.next_2d();
-            let light_point = light.sample_point(area_uv[0], area_uv[1]);
+            let light_point = light.sample_point(nee_s[1], nee_s[2]);
             let light_dir = light_point - rec.p;
             let light_distance = light_dir.length();
             let light_dir_unit = light_dir.normalize();
@@ -1111,7 +1138,7 @@ fn trace_path(
             let shadow_ray = Ray::new(rec.p, light_dir_unit);
 
             let shadow_tr =
-                shadow_transmittance(world, volumes, &shadow_ray, light_distance, sampler);
+                shadow_transmittance(world, volumes, &shadow_ray, light_distance, v);
             if shadow_tr != Vec3A::ZERO {
                 // Unsigned: lights behind the ray-facing normal are reachable
                 // through a continuous transmission lobe (opaque materials
@@ -1157,7 +1184,7 @@ fn trace_path(
         };
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some(sample) = sample_bounce_direction(&ray, &rec, mat, guiding_here, sampler) {
+        if let Some(sample) = sample_bounce_direction(&ray, &rec, mat, guiding_here, v) {
             let dir = sample.ray.direction().normalize();
             // The codebase convention multiplies the material's brdf*|cos|
             // value by the cosine again — unsigned, so continuous
@@ -1179,7 +1206,7 @@ fn trace_path(
             if records.len() >= RR_START_BOUNCE {
                 let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                 if p_survive < 1.0 {
-                    if sampler.next_1d() >= p_survive {
+                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                         survived = false;
                     } else {
                         factor /= p_survive;
