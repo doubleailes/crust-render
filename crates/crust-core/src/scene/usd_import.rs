@@ -1,6 +1,8 @@
 //! USD scene import: opens a stage and produces a runtime `Scene`
 //! (camera, world, lights, render settings). See `Scene::from_usd`.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,11 +15,11 @@ use crate::hittable::Hittable;
 use crate::hittable_list::HittableList;
 use crate::light::{AreaLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::primitives::{Sphere as CrustSphere, Triangle};
+use crate::primitives::{Instance, Sphere as CrustSphere, Triangle};
 use crate::scene::Scene;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
-use glam::{Vec3, Vec3A};
+use glam::{Affine3A, Vec3, Vec3A};
 
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
@@ -58,6 +60,11 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
     let mut lights = LightList::new();
     let mut volumes: Vec<VolumeRegion> = Vec::new();
     let mut camera_candidate: Option<Camera> = None;
+    // Prims binding the same material path share one Arc, and prims with
+    // identical local geometry + material share one triangle BVH through
+    // an Instance — N placements of a mesh cost one copy of its triangles.
+    let mut materials = MaterialCache::default();
+    let mut meshes: HashMap<MeshKey, Arc<Bvh>> = HashMap::new();
 
     let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
 
@@ -75,10 +82,10 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
         if custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim);
-            emit_mesh(&mut world, &prim, &mesh, this_world, mat);
+            let mat = resolve_material(&stage, &prim, &mut materials);
+            emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut meshes);
         } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim);
+            let mat = resolve_material(&stage, &prim, &mut materials);
             emit_sphere(&mut world, &prim, &sphere, this_world, mat);
         } else if UsdCamera::get(&stage, prim.path().clone())
             .ok()
@@ -425,12 +432,48 @@ fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
 // Mesh
 // -----------------------------------------------------------------------
 
+/// Identity of an imported mesh's shared geometry: a content hash of the
+/// authored points/counts/indices plus the (memoized, so pointer-comparable)
+/// material. Prims agreeing on all of it share one local-space triangle BVH.
+#[derive(PartialEq, Eq, Hash)]
+struct MeshKey {
+    geo_hash: u64,
+    n_points: usize,
+    n_indices: usize,
+    material: usize,
+}
+
+impl MeshKey {
+    fn new(
+        points: &[Vec3f],
+        counts: &[i32],
+        indices: &[i32],
+        material: &Arc<dyn Material>,
+    ) -> Self {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in points {
+            p.x.to_bits().hash(&mut h);
+            p.y.to_bits().hash(&mut h);
+            p.z.to_bits().hash(&mut h);
+        }
+        counts.hash(&mut h);
+        indices.hash(&mut h);
+        MeshKey {
+            geo_hash: h.finish(),
+            n_points: points.len(),
+            n_indices: indices.len(),
+            material: Arc::as_ptr(material) as *const u8 as usize,
+        }
+    }
+}
+
 fn emit_mesh(
     world: &mut HittableList,
     prim: &Prim,
     mesh: &UsdMesh,
     world_xf: GMat4,
     material: Arc<dyn Material>,
+    meshes: &mut HashMap<MeshKey, Arc<Bvh>>,
 ) {
     let points: Option<Vec<Vec3f>> = mesh
         .points_attr()
@@ -471,17 +514,64 @@ fn emit_mesh(
         }
     };
 
-    let verts: Vec<Vec3A> = points
-        .iter()
-        .map(|p| {
-            let v = world_xf.transform_point3(Vec3::new(p.x, p.y, p.z));
-            Vec3A::new(v.x, v.y, v.z)
-        })
-        .collect();
+    // Non-invertible placements (a zero scale axis) cannot be instanced —
+    // bake the degenerate transform into world-space triangles as before.
+    if world_xf.determinant().abs() < 1e-12 {
+        warn!(
+            "Mesh at {} has a non-invertible transform — baking instead of instancing",
+            prim.path()
+        );
+        let verts: Vec<Vec3A> = points
+            .iter()
+            .map(|p| {
+                let v = world_xf.transform_point3(Vec3::new(p.x, p.y, p.z));
+                Vec3A::new(v.x, v.y, v.z)
+            })
+            .collect();
+        match build_triangles(&verts, &counts, &indices, &material) {
+            Some(tris) => world.add(Box::new(Bvh::new(tris))),
+            None => debug!("Mesh at {} produced no triangles", prim.path()),
+        }
+        return;
+    }
 
+    // The triangle BVH is built in the prim's *local* space and shared by
+    // every prim with identical geometry + material; the Instance carries
+    // the placement.
+    let key = MeshKey::new(&points, &counts, &indices, &material);
+    let bvh = match meshes.get(&key) {
+        Some(shared) => {
+            debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
+            shared.clone()
+        }
+        None => {
+            let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+            let Some(tris) = build_triangles(&verts, &counts, &indices, &material) else {
+                debug!("Mesh at {} produced no triangles", prim.path());
+                return;
+            };
+            let bvh = Arc::new(Bvh::new(tris));
+            meshes.insert(key, bvh.clone());
+            bvh
+        }
+    };
+
+    world.add(Box::new(Instance::new(
+        bvh,
+        Affine3A::from_mat4(world_xf),
+    )));
+}
+
+/// Fan-triangulates the faces into `Triangle`s; `None` if nothing survives.
+fn build_triangles(
+    verts: &[Vec3A],
+    counts: &[i32],
+    indices: &[i32],
+    material: &Arc<dyn Material>,
+) -> Option<Vec<Box<dyn Hittable>>> {
     let mut tris: Vec<Box<dyn Hittable>> = Vec::new();
     let mut offset = 0usize;
-    for &fc in &counts {
+    for &fc in counts {
         let fc = fc as usize;
         if fc < 3 || offset + fc > indices.len() {
             offset += fc;
@@ -503,13 +593,7 @@ fn emit_mesh(
         }
         offset += fc;
     }
-
-    if tris.is_empty() {
-        debug!("Mesh at {} produced no triangles", prim.path());
-        return;
-    }
-
-    world.add(Box::new(Bvh::new(tris)));
+    if tris.is_empty() { None } else { Some(tris) }
 }
 
 // -----------------------------------------------------------------------
@@ -745,15 +829,46 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
 // Materials
 // -----------------------------------------------------------------------
 
-fn resolve_material(stage: &Stage, prim: &Prim) -> Arc<dyn Material> {
+/// Memoizes resolved materials by binding path (and shares one default),
+/// so prims bound to the same USD material get pointer-identical Arcs —
+/// which is what lets `MeshKey` recognize shared mesh geometry.
+#[derive(Default)]
+struct MaterialCache {
+    by_path: HashMap<String, Arc<dyn Material>>,
+    default: Option<Arc<dyn Material>>,
+}
+
+impl MaterialCache {
+    fn default_material(&mut self) -> Arc<dyn Material> {
+        self.default.get_or_insert_with(default_material).clone()
+    }
+}
+
+fn resolve_material(
+    stage: &Stage,
+    prim: &Prim,
+    cache: &mut MaterialCache,
+) -> Arc<dyn Material> {
     let mat_path = MaterialBindingAPI::get(stage, prim.path().clone())
         .ok()
         .flatten()
         .and_then(|b| b.direct_binding("").ok().flatten());
 
     let Some(mat_path) = mat_path else {
-        return default_material();
+        return cache.default_material();
     };
+
+    if let Some(hit) = cache.by_path.get(mat_path.as_str()) {
+        return hit.clone();
+    }
+    let resolved = resolve_material_uncached(stage, &mat_path);
+    cache
+        .by_path
+        .insert(mat_path.as_str().to_string(), resolved.clone());
+    resolved
+}
+
+fn resolve_material_uncached(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Material> {
 
     let mat = match UsdMaterial::get(stage, mat_path.clone()) {
         Ok(Some(m)) => m,
