@@ -131,27 +131,30 @@ Crust's equivalent surface is deliberately small and lives in safe Rust:
 
 ### Head-to-head on the kernel ground
 
+*(Table updated after the adoption pass — the ✅⁺ rows were ❌ or weaker
+when this document was first written; see the addendum in §4.)*
+
 | | Embree 4.4 | Crust |
 |---|---|---|
 | Language / safety | C++ (+ ISPC, SYCL), unsafe by nature | 100 % safe Rust |
-| Triangles | ✅ watertight | ✅ Möller–Trumbore (non-watertight) |
+| Triangles | ✅ watertight | ✅⁺ watertight (Woop 2013, f64 tie fallback) |
 | Spheres / points | ✅ spheres + 2 disc types | ✅ analytic sphere (also a `LightShape`) |
 | Quads / grids / subdivision | ✅ | ❌ (USD import triangulates) |
-| Curves / hair | ✅ 5 bases × 3 modes | ❌ |
+| Curves / hair | ✅ 5 bases × 3 modes | ✅⁺ round linear segments; cubic bezier/bspline/catmullRom flattened |
 | User geometry | ✅ callbacks | ✅-ish (`Hittable` trait — same idea, idiomatic Rust) |
-| Instancing | ✅ multi-level + arrays | ❌ (world-baked copies) |
-| Motion blur | ✅ 2–129 steps, quaternion | ❌ |
-| BVH arity | 4–8 wide, SIMD node tests | binary |
-| Build quality tiers | low / medium / high(SBVH) / refit | medium only (binned SAH) |
-| Parallel build | ✅ TBB, many-core | ❌ serial (deterministic by design) |
-| Two-level structure | ✅ (scene of instances) | ✅ (scene of meshes; but no shared/instanced BLAS) |
+| Instancing | ✅ multi-level + arrays | ✅⁺ single-level `Instance`, shared local-space BLAS with content dedup |
+| Motion blur | ✅ 2–129 steps, quaternion | ✅⁺ 2-step transform blur (linear matrix lerp) |
+| BVH arity | 4–8 wide, SIMD node tests | ✅⁺ 4-wide SoA nodes, `Vec4` slab tests |
+| Build quality tiers | low / medium / high(SBVH) / refit | ✅⁺ medium + SBVH spatial splits (α-gated) |
+| Parallel build | ✅ TBB, many-core | ✅⁺ rayon subtree tasks, deterministic |
+| Two-level structure | ✅ (scene of instances) | ✅⁺ scene of instances sharing BLASes |
 | Closest-hit query | ✅ 1/4/8/16 | ✅ single ray |
-| Occlusion query | ✅ early-exit `rtcOccluded` | ❌ reuses closest-hit |
+| Occlusion query | ✅ early-exit `rtcOccluded` | ✅⁺ early-exit `hit_any` on every shadow ray |
 | Filter / any-hit callbacks | ✅ | ❌ (no alpha-cutout shadows) |
-| Ray masks | ✅ | ❌ |
+| Ray masks | ✅ | ✅⁺ camera/shadow/indirect bits via `crust:rayMask` |
 | Point queries / collision | ✅ | ❌ |
-| ISA dispatch / packets | SSE2→AVX-512, NEON, SYCL GPUs | scalar + glam's 4-wide vectors |
-| Memory options | compact/quantized nodes | one node layout (AABB + 2×u32 + u8) |
+| ISA dispatch / packets | SSE2→AVX-512, NEON, SYCL GPUs | scalar rays + 4-wide node tests via glam |
+| Memory options | compact/quantized nodes | one wide-node layout |
 
 The honest performance summary: for the scenes crust targets (a few meshes, up to a
 few hundred thousand triangles), a well-built binary SAH BVH with ordered traversal is
@@ -209,6 +212,23 @@ narrow query interface (`hit(ray, t_min, t_max)`) would make straightforward to 
 in and A/B against the native BVH.
 
 ### Route B: adopt Embree's ideas natively (recommended order)
+
+> **Addendum (implemented).** All seven items below have since been adopted
+> natively, in safe Rust:
+> 1. `Hittable::hit_any` early-exit occlusion traversal, used by every NEE
+>    shadow ray.
+> 2. Watertight Woop-2013 triangle intersection shared by
+>    `Triangle`/`SmoothTriangle`, pinned by 10k-sample shared-edge tests.
+> 3. `Instance` (shared local-space mesh BVHs, content-hash dedup at USD
+>    import).
+> 4. Parallel deterministic BVH build (`rayon::join` subtrees).
+> 5. BVH4: post-build collapse into 4-wide SoA nodes with `Vec4` slab tests.
+> 6. SBVH spatial splits with exact triangle clipping (`clipped_aabb`).
+> 7. Ray masks (`crust:rayMask`), transform motion blur
+>    (`crust:motion:translate` + shutter time on rays), and round curve
+>    primitives (`UsdGeomBasisCurves` → sphere-swept cones).
+>
+> The original recommendation text is kept below as the design rationale.
 
 1. **Dedicated occlusion query** — add `hit_any(ray, t_min, t_max) -> bool` to
    `Hittable` (default-implemented via `hit`) with a real early-exit BVH traversal

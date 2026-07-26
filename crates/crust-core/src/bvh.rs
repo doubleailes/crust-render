@@ -57,8 +57,6 @@ struct Node {
     /// immediately follows the node itself in depth-first order.
     first_or_right: u32,
     count: u32,
-    /// Split axis of an internal node, for front-to-back child ordering.
-    axis: u8,
 }
 
 /// Marks an unused lane of a [`WideNode`] (together with `count == 0`).
@@ -449,7 +447,6 @@ fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
             bbox,
             first_or_right: 0,
             count: refs.len() as u32,
-            axis: 0,
         }],
         indices: refs.iter().map(|r| r.idx).collect(),
     }
@@ -457,14 +454,13 @@ fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
 
 /// Splices `left`/`right` under a fresh internal node, rewriting the
 /// children's local node indices and leaf offsets into the merged frame.
-fn merge(bbox: AABB, axis: u8, left: Subtree, right: Subtree) -> Subtree {
+fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
     let mut nodes = Vec::with_capacity(1 + left.nodes.len() + right.nodes.len());
     let right_node_offset = 1 + left.nodes.len() as u32;
     nodes.push(Node {
         bbox,
         first_or_right: right_node_offset,
         count: 0,
-        axis,
     });
     for mut n in left.nodes {
         if n.count == 0 {
@@ -705,7 +701,7 @@ fn build_subtree(
         _ => None,
     };
 
-    let (axis, left_refs, right_refs) = if let Some(s) = spatial {
+    let (left_refs, right_refs) = if let Some(s) = spatial {
         // Chop: straddling references are clipped into both children.
         let mut left = Vec::with_capacity(count);
         let mut right = Vec::with_capacity(count);
@@ -737,7 +733,7 @@ fn build_subtree(
             refs.extend(right);
             return object_partition_or_leaf(prims, refs, bbox, object, depth, root_area);
         }
-        (s.axis, left, right)
+        (left, right)
     } else {
         match object {
             Some(o) => {
@@ -746,13 +742,13 @@ fn build_subtree(
                     return leaf(bbox, &refs);
                 }
                 let (l, r) = partition_by_bin(&mut refs, &o);
-                (o.axis, l, r)
+                (l, r)
             }
             // Every centroid coincides: median split by input order.
             None => {
                 let mid = count / 2;
                 let right = refs.split_off(mid);
-                (0, refs, right)
+                (refs, right)
             }
         }
     };
@@ -769,7 +765,7 @@ fn build_subtree(
             build_subtree(prims, right_refs, depth + 1, root_area),
         )
     };
-    merge(bbox, axis as u8, l, r)
+    merge(bbox, l, r)
 }
 
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
@@ -791,10 +787,9 @@ fn object_partition_or_leaf(
                 all.extend(r);
                 return leaf(bbox, &all);
             }
-            let axis = o.axis as u8;
             let left = build_subtree(prims, l, depth + 1, root_area);
             let right = build_subtree(prims, r, depth + 1, root_area);
-            merge(bbox, axis, left, right)
+            merge(bbox, left, right)
         }
         _ => leaf(bbox, &refs),
     }

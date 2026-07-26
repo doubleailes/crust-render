@@ -66,6 +66,25 @@ cargo run --release -- -i samples/cornellbox.usda -o cornell.exr
 cargo run --release
 ```
 
+### 📐 Geometry & acceleration
+
+Meshes triangulate with a **watertight** ray/triangle test (Woop et al. 2013 —
+no pinholes along shared edges) and build a **BVH4**: a parallel, deterministic,
+reference-based SAH build with SBVH **spatial splits** (Stich et al. 2009),
+collapsed into 4-wide SIMD nodes whose slab tests run on `Vec4` lanes. Shadow
+rays use a dedicated early-exit **occlusion query** (`hit_any`, the
+`rtcIntersect`/`rtcOccluded` split). Each mesh's BVH is built in local space
+and **instanced**: prims sharing points/topology/material share one triangle
+BVH under an `Instance` transform. `UsdGeomBasisCurves` import as **round
+curve segments** (sphere-swept cones; cubic bezier/bspline/catmullRom spans
+flatten to polylines) — see `samples/curves.usda`. Two per-prim extras:
+
+- `crust:motion:translate = (x, y, z)` — **transform motion blur**: the prim
+  streaks through that world-space translation over the shutter
+  (`samples/motionblur.usda`).
+- `crust:rayMask = <int>` — **ray visibility mask** (bit 0 camera, bit 1
+  shadow, bit 2 indirect): e.g. `6` is a shadow-caster hidden from the camera.
+
 ### 🎨 Materials
 
 Every `UsdGeomMesh` / `UsdGeomSphere` binds a `UsdShadeMaterial` via

@@ -156,14 +156,30 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 
 ## Core traits (extension points)
 
-- **`Hittable`** (`hittable.rs`) — `hit(ray, t_min, t_max) -> Option<Hit>` + `bounding_box()`.
+- **`Hittable`** (`hittable.rs`) — `hit(ray, t_min, t_max) -> Option<Hit>` + `bounding_box()`,
+  plus two defaulted methods: `hit_any` (boolean occlusion query — `Bvh` overrides it with an
+  early-exit traversal; NEE shadow rays go through it, never through closest-hit) and
+  `clipped_aabb(axis, min, max)` (conservative slab-clipped bounds for the BVH's spatial
+  splits; triangles override with exact Sutherland-Hodgman clipping).
   `HitRecord` is `Copy` geometry only (point, normal, `t`, `front_face`); `Hit` pairs it with
   a **borrowed** `&dyn Material`, so traversal never touches an `Arc` refcount. Implemented by
-  `Sphere`, `Triangle`, `SmoothTriangle`, `Mesh`, `HittableList`, `Bvh`. Rendering uses a
-  **two-level BVH**: `Renderer::new` builds a top-level `Bvh` (`bvh.rs`) over the scene's
-  `HittableList`, and each imported mesh carries its own nested `Bvh` over triangles
-  (`usd_import.rs`). `Bvh` is a flat node array with binned-SAH splits and iterative
-  traversal — deterministic for a given scene.
+  `Sphere`, `Triangle`/`SmoothTriangle` (one shared **watertight** intersector — Woop et al.
+  2013: dominant-axis shear, 2D edge functions with f64 fallback on exact-zero ties; no
+  pinholes along shared edges), `Mesh`, `RoundCurveSegment` (sphere-swept cone for
+  hair/curves), `Instance` (an `Arc`'d object placed by a transform — rays transform into
+  local space with unnormalized direction so `t` carries over, normals map back by
+  inverse-transpose; an optional end-of-shutter transform lerps per-ray for motion blur),
+  `Masked` (gates intersection on `ray.mask() & mask` — see the `MASK_*` consts in `ray.rs`),
+  `HittableList`, `Bvh`. Rendering uses a **two-level BVH**: `Renderer::new` builds a
+  top-level `Bvh` (`bvh.rs`) over the scene's `HittableList`, and each imported mesh carries
+  its own nested `Bvh` over *local-space* triangles, shared across identical prims via
+  `Instance` (`usd_import.rs`). The build is reference-based **SBVH** (binned object SAH +
+  spatial splits gated by the α-overlap test, references clipped and duplicated across
+  children — leaves index a shared `indices` array), runs subtrees in parallel via
+  `rayon::join` above 4096 refs, and is **deterministic** (input-only decisions, pinned by a
+  build-twice test). The binary tree is then **collapsed to BVH4**: 4-wide SoA nodes whose
+  slab tests run on `Vec4` lanes (`safe_inv` keeps zero-direction components NaN-free;
+  closest-hit traversal orders lanes near-to-far, occlusion traversal early-exits).
 - **`Material`** (`material/material.rs`) —
   `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
   (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a
@@ -212,7 +228,18 @@ The only scene format. `load_scene` opens the stage, imports `RenderSettings` fi
 camera needs the aspect ratio), then traverses prims with an explicit stack that bakes the
 Xform hierarchy into world matrices. Schema mapping:
 
-- `UsdGeomMesh` → world-baked triangles wrapped in a `BVHNode`; `UsdGeomSphere` → analytic `Sphere`.
+- `UsdGeomMesh` → triangles in *local* space wrapped in a nested `Bvh` and placed by an
+  `Instance`; prims with identical points/topology/material share one triangle BVH (content
+  hash + memoized material Arcs, so binding paths compare by pointer). Non-invertible
+  transforms fall back to world-space baking. `UsdGeomSphere` → analytic `Sphere`.
+- `UsdGeomBasisCurves` → `RoundCurveSegment` chains under an `Instance`: `linear` curves
+  directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
+  (USD diameters) resolve per-vertex / per-curve / constant by array length.
+- Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2
+  indirect — default all) to hide from ray categories, and `crust:motion:translate`
+  (float3, world-space) to streak through that translation over the shutter (transform
+  motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
+  inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
 - Materials resolve via `MaterialBindingAPI`, dispatched on the bound shader's `info:id`:
   - `UsdPreviewSurface` → mapped into `OpenPBR` (portable; `diffuseColor→baseColor`,
     `metallic→baseMetalness`, `roughness→specularRoughness`, etc.).
@@ -246,6 +273,16 @@ Note: `openusd` is a hard dependency and USD is always compiled in — there is 
 feature flag.
 
 ## Known incomplete work
+
+- **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
+  linearly (no deformation blur, no quaternion motion — a large shutter rotation bows
+  slightly, but the union-of-endpoints bbox stays conservative). Curve import flattens
+  cubic spans to polylines (no exact cubic intersector) and lerps widths across a span in
+  parameter; the rounded-cone can report an interior sphere surface for rays *starting
+  inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
+  points/topology *and* material binding — `UsdGeomPointInstancer` and `instanceable`
+  composition arcs are not consumed. Emissive curves/instances are not light-list entries
+  (BSDF-sampled only, like emissive volumes).
 
 - **Upstream `openusd` xformOp bug, worked around locally.** `openusd` 0.5.0 (latest as
   of 2026-06) composes multi-op `xformOpOrder` stacks in the wrong order (the authored
