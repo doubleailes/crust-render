@@ -15,7 +15,7 @@ use crate::aabb::AABB;
 use crate::medium::hg_phase;
 use crate::ray::Ray;
 use glam::{Mat4, Vec3, Vec3A};
-use sampler::Sampler;
+use openqmc::pcg::Rng;
 
 /// Spatial density in local box coordinates, normalized to `[0, 1]^3`.
 /// Values are dimensionless multipliers on the region's coefficients.
@@ -299,9 +299,11 @@ impl PhaseMix {
     }
 
     /// Sample an outgoing direction given the incoming propagation
-    /// direction `wi` (normalized).
-    pub fn sample(&self, wi: Vec3A, sampler: &mut dyn Sampler) -> Vec3A {
-        let mut pick = sampler.next_1d();
+    /// direction `wi` (normalized). `lobe_u` picks the phase lobe and `hg_uv`
+    /// samples the Henyey-Greenstein direction — the caller draws all three
+    /// stratified dimensions from one QMC domain.
+    pub fn sample(&self, wi: Vec3A, lobe_u: f32, hg_uv: [f32; 2]) -> Vec3A {
+        let mut pick = lobe_u;
         let mut g = self.lobes[self.lobes.len() - 1].1;
         for &(w, lg) in &self.lobes {
             if pick < w {
@@ -310,8 +312,7 @@ impl PhaseMix {
             }
             pick -= w;
         }
-        let uv = sampler.next_2d();
-        crate::medium::sample_henyey_greenstein(wi, g, uv[0], uv[1])
+        crate::medium::sample_henyey_greenstein(wi, g, hg_uv[0], hg_uv[1])
     }
 
     /// Solid-angle pdf of `sample` — also the phase-function value.
@@ -410,7 +411,7 @@ impl Volumes {
         ray: &Ray,
         t_eps: f32,
         t_max: f32,
-        sampler: &mut dyn Sampler,
+        rng: &mut Rng,
     ) -> VolumeEvent {
         let (spans, majorant) = self.active_intervals(ray, t_eps, t_max);
         if spans.is_empty() || majorant <= 0.0 {
@@ -426,7 +427,7 @@ impl Volumes {
         let mut w = Vec3A::ONE;
         let mut emitted = Vec3A::ZERO;
         loop {
-            t += -(1.0 - sampler.next_1d()).ln() / majorant;
+            t += -(1.0 - rng.next_f32()).ln() / majorant;
             if t >= end {
                 return VolumeEvent::Passthrough {
                     transmittance: w,
@@ -459,7 +460,7 @@ impl Volumes {
             }
 
             let p_scatter = (sigma_s_x.max_element() / majorant).clamp(0.0, 1.0);
-            if sampler.next_1d() < p_scatter {
+            if rng.next_f32() < p_scatter {
                 let total: f32 = lobes.iter().map(|l| l.0).sum();
                 for l in &mut lobes {
                     l.0 /= total;
@@ -493,7 +494,7 @@ impl Volumes {
         ray: &Ray,
         t_eps: f32,
         t_max: f32,
-        sampler: &mut dyn Sampler,
+        rng: &mut Rng,
     ) -> Vec3A {
         let (spans, majorant) = self.active_intervals(ray, t_eps, t_max);
         if spans.is_empty() || majorant <= 0.0 {
@@ -514,7 +515,7 @@ impl Volumes {
         let mut t = start;
         let mut w = Vec3A::ONE;
         loop {
-            t += -(1.0 - sampler.next_1d()).ln() / majorant;
+            t += -(1.0 - rng.next_f32()).ln() / majorant;
             if t >= end {
                 return w;
             }
@@ -538,7 +539,7 @@ impl Volumes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sampler::RngSampler;
+    use openqmc::pcg::Rng;
 
     fn unit_region(sigma_s: Vec3A, sigma_a: Vec3A, g: f32, field: DensityField) -> VolumeRegion {
         VolumeRegion::new(
@@ -565,7 +566,7 @@ mod tests {
             0.0,
             DensityField::Homogeneous,
         )]);
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let tr = volumes.transmittance(&x_ray(), 1e-3, 10.0, &mut s);
         let sigma_t = Vec3A::splat(0.7) + Vec3A::new(0.2, 0.4, 0.9);
         let expect = Vec3A::new(
@@ -595,7 +596,7 @@ mod tests {
                 data: vec![d; 64],
             },
         )]);
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let n = 20_000;
         let mut mean = Vec3A::ZERO;
         for _ in 0..n {
@@ -620,7 +621,7 @@ mod tests {
             0.0,
             DensityField::Homogeneous,
         )]);
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let n = 20_000;
         let mut scatters = 0u32;
         for _ in 0..n {
@@ -654,7 +655,7 @@ mod tests {
             DensityField::Homogeneous,
         );
         let volumes = Volumes::new(vec![region]);
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let n = 40_000;
         let mut mean = Vec3A::ZERO;
         for _ in 0..n {
@@ -783,7 +784,7 @@ mod tests {
             DensityField::Homogeneous,
         );
         let volumes = Volumes::new(vec![a, b]);
-        let mut s = RngSampler::default();
+        let mut s = Rng::new(0xC0FFEE);
         let tr = volumes.transmittance(&x_ray(), 1e-3, 10.0, &mut s);
         let expect = (-0.5f32 - 0.75).exp();
         assert!((tr.x - expect).abs() < 1e-5, "{tr} vs {expect}");

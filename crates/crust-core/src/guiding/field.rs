@@ -7,7 +7,6 @@ use super::dtree::{canonical_to_dir, dir_to_canonical};
 use super::sdtree::SDTree;
 use crate::aabb::AABB;
 use glam::Vec3A;
-use sampler::Sampler;
 
 /// Tuning knobs for the guiding field. Defaults follow the PPG paper, with a
 /// smaller spatial split constant suited to small scenes.
@@ -85,8 +84,9 @@ impl GuidingField {
 
     /// Draw a world-space direction from the local guiding distribution with
     /// its solid-angle pdf. `None` while the local distribution is untrained.
-    pub fn sample(&self, pos: Vec3A, sampler: &mut dyn Sampler) -> Option<(Vec3A, f32)> {
-        let (canonical, pdf) = self.tree.dtree_at(pos).sample(sampler)?;
+    /// `seed` is a single 2D QMC domain draw (see [`crate::guiding::DTree::sample`]).
+    pub fn sample(&self, pos: Vec3A, seed: [f32; 2]) -> Option<(Vec3A, f32)> {
+        let (canonical, pdf) = self.tree.dtree_at(pos).sample(seed)?;
         Some((canonical_to_dir(canonical), pdf))
     }
 
@@ -120,9 +120,9 @@ mod tests {
     fn field_trains_and_samples() {
         let bounds = AABB::new(Vec3A::ZERO, Vec3A::ONE);
         let mut field = GuidingField::new(bounds, GuidingConfig::default());
-        let mut s = sampler::RngSampler::default();
+        let mut s = openqmc::pcg::Rng::new(1);
         assert!(!field.trained_at(Vec3A::splat(0.5)));
-        assert!(field.sample(Vec3A::splat(0.5), &mut s).is_none());
+        assert!(field.sample(Vec3A::splat(0.5), s.next_2d()).is_none());
 
         let samples: Vec<SampleData> = (0..1000)
             .map(|i| SampleData {
@@ -134,7 +134,7 @@ mod tests {
         field.update(&samples, 1);
 
         assert!(field.trained_at(Vec3A::splat(0.5)));
-        let (dir, pdf) = field.sample(Vec3A::splat(0.5), &mut s).unwrap();
+        let (dir, pdf) = field.sample(Vec3A::splat(0.5), s.next_2d()).unwrap();
         assert!(pdf > 0.0);
         assert!(dir.z > 0.0, "trained on +z but sampled {dir}");
         assert!(field.pdf(Vec3A::splat(0.5), dir) > 0.0);

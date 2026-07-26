@@ -1,6 +1,5 @@
 use crate::material::{Emissive, Material};
 use glam::Vec3A;
-use sampler::Sampler;
 use std::sync::Arc;
 
 /// The emitting surface of an area light, decoupled from any material: pure
@@ -174,18 +173,18 @@ impl LightList {
         self.lights.push(light);
     }
 
-    /// Randomly samples a light source from the `LightList` using the given
-    /// sampler for the uniform pick.
+    /// Uniformly picks a light source from the `LightList` from a single
+    /// `[0, 1)` sample `u`.
     ///
     /// # Returns
     /// - `Some(&Arc<dyn Light>)` if the list is not empty.
     /// - `None` if the list is empty.
-    pub fn sample(&self, sampler: &mut dyn Sampler) -> Option<&Arc<dyn Light>> {
+    pub fn pick(&self, u: f32) -> Option<&Arc<dyn Light>> {
         if self.lights.is_empty() {
             None
         } else {
-            let i = (sampler.next_1d() * self.lights.len() as f32) as usize;
-            // Guard against `next_1d() == 1.0 - epsilon` rounding to len.
+            let i = (u * self.lights.len() as f32) as usize;
+            // Guard against `u == 1.0 - epsilon` rounding to len.
             let i = i.min(self.lights.len() - 1);
             self.lights.get(i)
         }

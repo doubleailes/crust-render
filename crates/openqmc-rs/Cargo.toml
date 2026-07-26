@@ -1,0 +1,12 @@
+[package]
+name = "openqmc-rs"
+version = "0.1.0"
+edition = { workspace = true }
+license = "Apache-2.0"
+description = "A faithful Rust port of AcademySoftwareFoundation/openqmc — quasi-Monte Carlo samplers (Sobol, Lattice, PMJ) with a domain-tree API and blue-noise variants."
+
+[lib]
+name = "openqmc"
+path = "src/lib.rs"
+
+[dependencies]

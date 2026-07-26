@@ -1,7 +1,7 @@
 use crate::hittable::HitRecord;
 use crate::ray::Ray;
+use crate::PathSampler;
 use glam::Vec3A;
-use sampler::Sampler;
 
 /// One direction sampled from a material's importance distribution.
 #[derive(Clone)]
@@ -30,7 +30,8 @@ pub trait Material: Send + Sync {
     /// # Parameters
     /// - `r_in`: The incoming ray.
     /// - `rec`: The hit record containing information about the intersection.
-    /// - `sampler`: The active QMC sampler, from which any random samples must be drawn.
+    /// - `sampler`: A QMC sampler domain (by value) dedicated to this scatter
+    ///   event; the material draws its own ≤4-dimension block from it.
     ///
     /// # Returns
     /// - `Some(sample)` describing the sampled bounce (see [`ScatterSample`]).
@@ -39,7 +40,7 @@ pub trait Material: Send + Sync {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: &mut dyn Sampler,
+        sampler: PathSampler,
     ) -> Option<ScatterSample>;
 
     /// Evaluates the *continuous* part of the BSDF toward a given

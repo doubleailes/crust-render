@@ -40,8 +40,8 @@ use crate::material::{Material, ScatterSample};
 use crate::material::brdf::*;
 use crate::medium::Medium;
 use crate::ray::Ray;
+use crate::PathSampler;
 use glam::Vec3A;
-use sampler::Sampler;
 use std::f32::consts::PI;
 use std::sync::Arc;
 use utils::{Lerp, align_to_normal, cosine_hemisphere};
@@ -878,14 +878,14 @@ fn sample_transmission_rough(
     m: &OpenPBR,
     v_local: Vec3A,
     entering: bool,
-    sampler: &mut dyn Sampler,
+    dispersion_u: f32,
+    vndf_uv: [f32; 2],
 ) -> Option<Vec3A> {
     let iors = transmission_iors(m);
     let ior = if m.transmission_dispersion_scale > 0.0 {
-        let u = sampler.next_1d();
-        if u < 1.0 / 3.0 {
+        if dispersion_u < 1.0 / 3.0 {
             iors.x
-        } else if u < 2.0 / 3.0 {
+        } else if dispersion_u < 2.0 / 3.0 {
             iors.y
         } else {
             iors.z
@@ -897,7 +897,7 @@ fn sample_transmission_rough(
     let eta_rel = eta_i / eta_t;
     let (ax, ay) = transmission_alphas(m);
 
-    let h = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
+    let h = sample_vndf_ggx_aniso_local(v_local, ax, ay, vndf_uv);
     let cos_i = v_local.dot(h);
     if cos_i <= 1e-6 {
         return None;
@@ -920,7 +920,7 @@ impl Material for OpenPBR {
         &self,
         r_in: &Ray,
         rec: &HitRecord,
-        sampler: &mut dyn Sampler,
+        sampler: PathSampler,
     ) -> Option<ScatterSample> {
         let frame = Frame::new(rec.normal);
         let v_world = -r_in.direction().normalize();
@@ -929,8 +929,14 @@ impl Material for OpenPBR {
             return None;
         }
 
+        // One 4D block from the BSDF domain: `s[0]` picks the lobe, `s[1..3]`
+        // is the 2D direction sample, and `s[3]` selects the dispersion channel
+        // for thick transmission.
+        let s = sampler.draw_sample_f32::<4>();
+        let dir_uv = [s[1], s[2]];
+
         let pmf = LobePmf::from_params(self);
-        let lobe = pmf.pick(sampler.next_1d());
+        let lobe = pmf.pick(s[0]);
 
         if matches!(lobe, Lobe::Transmission) {
             // Thick refraction — dispersive or not — is a continuous Walter
@@ -941,7 +947,7 @@ impl Material for OpenPBR {
             // BTDF value and the channel-averaged mixture pdf.
             if transmission_is_continuous(self) {
                 let l_local =
-                    sample_transmission_rough(self, v_local, rec.front_face, sampler)?;
+                    sample_transmission_rough(self, v_local, rec.front_face, s[3], dir_uv)?;
                 let l_world = frame.to_world(l_local);
                 let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
                 let brdf = eval_all(self, v_local, l_local, rec.front_face);
@@ -975,13 +981,13 @@ impl Material for OpenPBR {
 
         // Reflection lobes — sample a direction from the picked lobe.
         let l_local = match lobe {
-            Lobe::Diffuse | Lobe::Fuzz => cosine_hemisphere(sampler.next_2d()),
+            Lobe::Diffuse | Lobe::Fuzz => cosine_hemisphere(dir_uv),
             Lobe::Specular => {
                 let (ax, ay) = roughness_to_alpha_aniso(
                     self.specular_roughness,
                     self.specular_roughness_anisotropy,
                 );
-                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
+                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, dir_uv);
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
                     return None;
@@ -993,7 +999,7 @@ impl Material for OpenPBR {
                     self.coat_roughness,
                     self.coat_roughness_anisotropy,
                 );
-                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, sampler.next_2d());
+                let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, dir_uv);
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
                     return None;
@@ -1100,10 +1106,20 @@ fn _lerp_ping(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sampler::RngSampler;
+    use crate::PathSampler;
 
-    fn s() -> RngSampler {
-        RngSampler::default()
+    /// A tiny test helper yielding a fresh QMC sampler domain per draw, so a
+    /// loop of `scatter_importance` calls sees independent samples (the
+    /// production integrator derives an analogous per-vertex domain).
+    struct S(i32);
+    impl S {
+        fn next(&mut self) -> PathSampler {
+            self.0 += 1;
+            PathSampler::new(0, 0, 0, self.0)
+        }
+    }
+    fn s() -> S {
+        S(0)
     }
 
     #[test]
@@ -1118,7 +1134,7 @@ mod tests {
 
         let mut checked = 0;
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 assert!(!sample.delta, "opaque OpenPBR has no delta lobe");
                 let wi = sample.ray.direction().normalize();
                 let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("opaque OpenPBR is evaluable");
@@ -1156,7 +1172,7 @@ mod tests {
 
         let (mut transmitted, mut reflected) = (0, 0);
         for _ in 0..256 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 assert!(!sample.delta, "thick non-dispersive glass has no delta lobe");
                 let wi = sample.ray.direction().normalize();
                 if wi.z < 0.0 {
@@ -1191,7 +1207,7 @@ mod tests {
         // agree within a loose relative tolerance.
         let smooth = OpenPBR::glass(1.5);
         for _ in 0..128 {
-            if let Some(sample) = smooth.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = smooth.scatter_importance(&r_in, &rec, sampler.next()) {
                 let wi = sample.ray.direction().normalize();
                 let (_, epdf) = smooth.eval(&r_in, &rec, wi).expect("evaluable");
                 assert!(
@@ -1220,7 +1236,7 @@ mod tests {
 
         let mut checked = 0;
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 let wi = sample.ray.direction().normalize();
                 if wi.z < 0.0 {
                     assert!(
@@ -1247,7 +1263,7 @@ mod tests {
         let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
         let mut deltas = 0;
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 if sample.ray.direction().z < 0.0 {
                     assert!(sample.delta, "thin-walled transmission must stay delta");
                     deltas += 1;
@@ -1438,7 +1454,7 @@ mod tests {
         let mut got_positive = false;
         let mut smp = s();
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
                 if sample.value.length_squared() > 0.0 {
                     got_positive = true;
                     break;
@@ -1529,7 +1545,7 @@ mod tests {
 
         let mut transmitted = 0;
         for _ in 0..256 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 assert!(!sample.delta, "dispersive thick glass has no delta lobe");
                 let wi = sample.ray.direction().normalize();
                 if wi.z < 0.0 {
@@ -1841,7 +1857,7 @@ mod tests {
         rec.front_face = true;
         let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
         for _ in 0..256 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, &mut sampler) {
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 if sample.ray.direction().z < 0.0 {
                     return sample.ray.medium().cloned();
                 }
@@ -2010,10 +2026,10 @@ mod tests {
         let n = 512;
         let mut smp = s();
         for _ in 0..n {
-            if let Some(sample) = m_sss.scatter_importance(&ray, &rec, &mut smp) {
+            if let Some(sample) = m_sss.scatter_importance(&ray, &rec, smp.next()) {
                 sum_sss += sample.value;
             }
-            if let Some(sample) = m_no_sss.scatter_importance(&ray, &rec, &mut smp) {
+            if let Some(sample) = m_no_sss.scatter_importance(&ray, &rec, smp.next()) {
                 sum_no += sample.value;
             }
         }
@@ -2055,7 +2071,7 @@ mod tests {
         let mut got_downward = false;
         let mut smp = s();
         for _ in 0..64 {
-            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
                 if sample.ray.direction().y < 0.0 {
                     assert!(sample.delta, "transmission must be flagged delta");
                     got_downward = true;
@@ -2083,7 +2099,7 @@ mod tests {
         // Run many samples: none should be NaN or negative.
         let mut smp = s();
         for _ in 0..64 {
-            if let Some(sample) = m.scatter_importance(&ray, &rec, &mut smp) {
+            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
                 assert!(sample.pdf.is_finite() && sample.pdf > 0.0, "pdf = {}", sample.pdf);
                 assert!(sample.value.is_finite(), "value = {:?}", sample.value);
                 assert!(
