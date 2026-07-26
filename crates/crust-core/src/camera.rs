@@ -66,7 +66,9 @@ impl Camera {
     /// - `lens_uv`: A 2D uniform sample used to sample the lens for depth of
     ///   field. Ignored when the camera has zero aperture. Callers pass a QMC
     ///   sample so this dimension is decorrelated from the pixel jitter.
-    pub fn get_ray(&self, s: f32, t: f32, lens_uv: [f32; 2]) -> Ray {
+    /// - `time`: Shutter time in `[0, 1)`, carried on the ray for motion
+    ///   blur (moving instances interpolate their transform at this time).
+    pub fn get_ray(&self, s: f32, t: f32, lens_uv: [f32; 2], time: f32) -> Ray {
         let offset = if self.lens_radius > 0.0 {
             let rd = self.lens_radius * concentric_disk(lens_uv);
             self.u * rd.x + self.v * rd.y
@@ -77,5 +79,7 @@ impl Camera {
             self.origin + offset,
             self.lower_left_corner + s * self.horizontal + t * self.vertical - self.origin - offset,
         )
+        .with_time(time)
+        .with_mask(crate::ray::MASK_CAMERA)
     }
 }

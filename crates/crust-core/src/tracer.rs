@@ -17,6 +17,7 @@ use tracing::{info, warn};
 // current vertex domain. Distinct keys give independent 4D sub-patterns.
 const K_CAMERA: i32 = 0; // off root: jitter (0,1) + lens uv (2,3)
 const K_PATH: i32 = 1; // off root: the bounce subtree
+const K_TIME: i32 = 2; // off root: shutter time for motion blur
 const K_NEE: i32 = 0; // off vertex: light pick (0) + area uv (1,2)
 const K_NEE_SHADOW: i32 = 1; // off vertex: shadow-ray volume transmittance
 const K_BSDF: i32 = 2; // off vertex: material scatter block
@@ -474,7 +475,8 @@ impl Renderer {
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
             let u = ((i as f32) + cam[0]) / (self.settings.width - 1) as f32;
             let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
-            let r = self.camera.get_ray(u, v, [cam[2], cam[3]]);
+            let time = root.new_domain(K_TIME).draw_sample_f32::<1>()[0];
+            let r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
             let color = trace_path(
                 &r,
                 &self.world,
@@ -817,6 +819,7 @@ fn volume_nee(
     lights: &LightList,
     strategy: SamplingStrategy,
     vertex: PathSampler,
+    time: f32,
 ) -> Vec3A {
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
@@ -830,7 +833,9 @@ fn volume_nee(
     let light_dir = light_point - p;
     let light_distance = light_dir.length();
     let light_dir_unit = light_dir / light_distance.max(1e-6);
-    let shadow_ray = Ray::new(p, light_dir_unit);
+    let shadow_ray = Ray::new(p, light_dir_unit)
+        .with_time(time)
+        .with_mask(crate::ray::MASK_SHADOW);
     let tr = shadow_transmittance(world, volumes, &shadow_ray, light_distance, vertex);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
@@ -952,7 +957,8 @@ fn trace_path(
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee = volume_nee(p, wi, &phase, world, volumes, lights, strategy, v);
+                let nee =
+                    volume_nee(p, wi, &phase, world, volumes, lights, strategy, v, ray.time());
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -994,7 +1000,9 @@ fn trace_path(
                 ray = match ray.medium() {
                     Some(m) => Ray::new_in_medium(p, dir, m.clone()),
                     None => Ray::new(p, dir),
-                };
+                }
+                .with_time(ray.time())
+                .with_mask(crate::ray::MASK_INDIRECT);
                 remaining -= 1;
                 continue;
             }
@@ -1057,7 +1065,9 @@ fn trace_path(
                 break;
             }
             records.push(vrec);
-            ray = Ray::new_in_medium(pos, dir, medium);
+            ray = Ray::new_in_medium(pos, dir, medium)
+                .with_time(ray.time())
+                .with_mask(crate::ray::MASK_INDIRECT);
             remaining -= 1;
             prev = None;
             continue;
@@ -1137,7 +1147,9 @@ fn trace_path(
             let light_distance = light_dir.length();
             let light_dir_unit = light_dir.normalize();
 
-            let shadow_ray = Ray::new(rec.p, light_dir_unit);
+            let shadow_ray = Ray::new(rec.p, light_dir_unit)
+                .with_time(ray.time())
+                .with_mask(crate::ray::MASK_SHADOW);
 
             let shadow_tr =
                 shadow_transmittance(world, volumes, &shadow_ray, light_distance, v);
@@ -1238,7 +1250,12 @@ fn trace_path(
                     delta: sample.delta,
                 }));
                 records.push(vrec);
-                ray = sample.ray;
+                // Materials build the scattered ray without path context;
+                // stamp the path's shutter time and the indirect category.
+                ray = sample
+                    .ray
+                    .with_time(ray.time())
+                    .with_mask(crate::ray::MASK_INDIRECT);
                 remaining -= 1;
                 continue;
             }
