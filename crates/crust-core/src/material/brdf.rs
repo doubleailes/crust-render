@@ -1,13 +1,19 @@
 use glam::Vec3A;
 use std::f32::consts::PI;
 
+// `powi(5)` rather than `powf(_, 5.0)`: an integer exponent lowers to a
+// multiply chain in registers, where `powf` is an opaque libm call that
+// costs tens of cycles *and* acts as a barrier the surrounding vector code
+// cannot be optimized across. Same idiom as the `powi(6)` in
+// `fresnel_f82_tint` below. Fresnel is evaluated on every glossy lobe of
+// every shading event, so this sits in the hottest loop in the renderer.
 pub fn fresnel_schlick(cos_theta: f32, f0: Vec3A) -> Vec3A {
-    f0 + (Vec3A::new(1.0, 1.0, 1.0) - f0) * f32::powf(1.0 - cos_theta, 5.0)
+    f0 + (Vec3A::ONE - f0) * (1.0 - cos_theta).powi(5)
 }
 
 // Clearcoat Fresnel approx
 pub fn fresnel_schlick_scalar(cos_theta: f32, f0: f32) -> f32 {
-    f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
+    f0 + (1.0 - f0) * (1.0 - cos_theta).powi(5)
 }
 
 // -------- OpenPBR helpers --------
@@ -211,7 +217,7 @@ pub fn eon_diffuse(rho: Vec3A, roughness: f32, v_local: Vec3A, l_local: Vec3A) -
 pub fn fresnel_f82_tint(cos_theta: f32, f0: Vec3A, tint: Vec3A) -> Vec3A {
     const MU_BAR: f32 = 1.0 / 7.0;
     let mu = cos_theta.clamp(0.0, 1.0);
-    let f_schlick = |m: f32| f0 + (Vec3A::ONE - f0) * (1.0 - m).powf(5.0);
+    let f_schlick = |m: f32| f0 + (Vec3A::ONE - f0) * (1.0 - m).powi(5);
     let denom = MU_BAR * (1.0 - MU_BAR).powi(6);
     let a = f_schlick(MU_BAR) * (Vec3A::ONE - tint) / denom;
     (f_schlick(mu) - a * mu * (1.0 - mu).powi(6)).clamp(Vec3A::ZERO, Vec3A::ONE)

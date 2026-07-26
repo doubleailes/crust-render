@@ -27,6 +27,11 @@ cargo test -p crust-core loads_cornellbox_usda     # run a single test by name
 
 # Benchmarks (criterion)
 cargo bench -p crust-core            # bench targets: "vec3 dot", "simple world", "simple world guided"
+cargo bench -p crust-rt              # kernel traversal: intersect/occluded over 3 scene kinds + build
+
+# Perf probes (better than criterion for kernel A/B: min-of-N, not a drifting mean)
+cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
+cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 
 # CI runs: cargo build --verbose && cargo test --verbose
 ```
@@ -191,10 +196,23 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   SAH + spatial splits gated by the α-overlap test, references clipped via exact
   Sutherland-Hodgman for triangles and duplicated across children), runs subtrees in
   parallel via `rayon::join` above 4096 refs, is **deterministic** (input-only
-  decisions, pinned by a build-twice test), and is then **collapsed to BVH4**: 4-wide
-  SoA nodes whose slab tests run on `Vec4` lanes (`safe_inv` keeps zero-direction
-  components NaN-free; closest-hit traversal orders lanes near-to-far, occlusion
-  traversal early-exits).
+  decisions, pinned by a build-twice test), and is then **collapsed to BVH4**: 128-byte
+  4-wide SoA nodes whose slab tests run on `Vec4` lanes (`safe_inv3` keeps
+  zero-direction components NaN-free; closest-hit traversal orders lanes near-to-far,
+  occlusion traversal early-exits). Traversal is mask-driven: `RaySlab` pre-splats the
+  ray once per query, `cmple(..).bitmask()` yields all four lane verdicts at once, and
+  a validity nibble in `WideNode::flags` masks unused lanes (they cannot just be given
+  empty bounds — the slab test's per-axis min/max un-inverts an inverted box).
+  Leaf payloads live in a side `Leaf` table (keeping the node at two cache lines), and
+  each leaf's triangles are packed into **4-wide `Tri4` SIMD packets**: the Woop shear
+  is per-*ray* (`RayShear`, derived once per traversal), so four triangles are
+  intersected per vector round, with lanes whose edge functions come out exactly `0.0`
+  handed back to the scalar path for its f64 tie-break — watertightness intact. The
+  packet and scalar intersectors are **bit-identical** (pinned by
+  `simd_matches_scalar_bitwise`); change one and you must change the other.
+  `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
+  while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
+  the measurements, and why `std::simd` is not used (nightly-only on stable).
 - **`Material`** (`material/material.rs`) —
   `scatter_importance(r_in, rec) -> Option<ScatterSample>` used by the integrator
   (`ScatterSample.delta` marks singular lobes like transmission: never mixed with a
@@ -299,6 +317,17 @@ feature flag.
   points/topology *and* material binding — `UsdGeomPointInstancer` and `instanceable`
   composition arcs are not consumed. Emissive curves/instances are not light-list entries
   (BSDF-sampled only, like emissive volumes).
+
+- **SIMD stops at 4 lanes** (`docs/simd.md`). Everything vectorized — `glam`'s `Vec3A`/
+  `Vec4`, the BVH4 slab test, `Tri4` leaf packets — is SSE2-width, because `std::simd` is
+  still nightly-only and crust builds on stable; 8-wide (AVX2) nodes or packets would
+  need the `wide` crate or `core::arch` + `#[target_feature]` runtime dispatch. Only
+  *triangles* pack: sphere, curve and instance leaves still run scalar (no `Sphere4`).
+  Rays are traced one at a time — there is no coherent ray-packet tracing, which would
+  need the integrator restructured, not just the kernel. `-C target-cpu` is left at the
+  baseline so the binary stays distributable. And the checked-in sample scenes are
+  shading-bound, so kernel speedups barely show up there — use
+  `scripts/gen_stress_scene.py` to benchmark traversal changes end to end.
 
 - **Upstream `openusd` xformOp bug, worked around locally.** `openusd` 0.5.0 (latest as
   of 2026-06) composes multi-op `xformOpOrder` stacks in the wrong order (the authored
