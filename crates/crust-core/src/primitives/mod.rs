@@ -9,3 +9,5 @@ mod smooth_triangle;
 pub use smooth_triangle::SmoothTriangle;
 mod instance;
 pub use instance::Instance;
+mod curve;
+pub use curve::RoundCurveSegment;

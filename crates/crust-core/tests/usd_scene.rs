@@ -285,3 +285,98 @@ fn openpbr_showcase_materials_all_decode() {
         bound
     );
 }
+
+#[test]
+fn loads_curves_usda() {
+    let scene = Scene::from_usd(&sample("curves.usda")).expect("failed to open curves.usda");
+
+    // Tuft instance + Tripod instance + floor instance + 2 light triangles.
+    assert_eq!(
+        scene.world.count(),
+        5,
+        "expected 5 hittables (2 curve batches, floor, 2 light tris), got {}",
+        scene.world.count()
+    );
+
+    // The linear Tripod strand's first segment rises from (1.6, 0, -0.5)
+    // to (1.6, 0.8, -0.3) (after the prim's translate); a -Z ray at its
+    // mid-height must hit it, and slightly to the side must miss it.
+    let on_axis = crust_core::Ray::new(
+        crust_core::Vec3A::new(1.6, 0.4, 5.0),
+        -crust_core::Vec3A::Z,
+    );
+    let hit = scene
+        .world
+        .hit(&on_axis, 0.001, f32::INFINITY)
+        .expect("ray through the strand must hit");
+    assert!(
+        (hit.rec.t - 5.4).abs() < 0.1,
+        "strand hit at t={} (expected ~5.4)",
+        hit.rec.t
+    );
+    let wide = crust_core::Ray::new(
+        crust_core::Vec3A::new(2.6, 0.4, 5.0),
+        -crust_core::Vec3A::Z,
+    );
+    // The wide ray flies past every strand and over the floor edge... but the
+    // floor extends to z=-8, so aim slightly upward to clear it entirely.
+    let wide_up = crust_core::Ray::new(
+        crust_core::Vec3A::new(2.6, 0.4, 5.0),
+        (crust_core::Vec3A::new(2.6, 3.0, -8.0) - crust_core::Vec3A::new(2.6, 0.4, 5.0)).normalize(),
+    );
+    assert!(scene.world.hit(&wide, 0.001, 4.0).is_none());
+    assert!(scene.world.hit(&wide_up, 0.001, f32::INFINITY).is_none());
+}
+
+#[test]
+fn loads_motionblur_usda() {
+    let scene =
+        Scene::from_usd(&sample("motionblur.usda")).expect("failed to open motionblur.usda");
+
+    // Mover sphere, Riser cube, floor, shadow card, 2 light triangles.
+    assert_eq!(
+        scene.world.count(),
+        6,
+        "expected 6 hittables, got {}",
+        scene.world.count()
+    );
+
+    // The sphere starts at (-1.5, 0.6, 0) and streaks +1 in x over the
+    // shutter: a time-0 ray down its start position hits, a time-1 ray at
+    // the same spot misses, and a time-1 ray at the end position hits.
+    let at = |x: f32, time: f32| {
+        crust_core::Ray::new(
+            crust_core::Vec3A::new(x, 0.6, 6.0),
+            -crust_core::Vec3A::Z,
+        )
+        .with_time(time)
+    };
+    assert!(scene.world.hit(&at(-1.5, 0.0), 0.001, 5.9).is_some());
+    assert!(scene.world.hit(&at(-1.5, 1.0), 0.001, 5.9).is_none());
+    assert!(scene.world.hit(&at(-0.5, 1.0), 0.001, 5.9).is_some());
+
+    // The shadow card (crust:rayMask = 6) is invisible to camera rays but
+    // opaque to shadow rays.
+    let down = crust_core::Ray::new(
+        crust_core::Vec3A::new(0.0, 5.0, 0.0),
+        -crust_core::Vec3A::Y,
+    );
+    let cam_hit = scene
+        .world
+        .hit(&down.clone().with_mask(crust_core::MASK_CAMERA), 0.001, f32::INFINITY)
+        .expect("camera ray passes the card and hits the floor");
+    assert!(
+        (cam_hit.rec.t - 5.0).abs() < 1e-3,
+        "camera ray should reach the floor at t=5, got {}",
+        cam_hit.rec.t
+    );
+    let shadow_hit = scene
+        .world
+        .hit(&down.clone().with_mask(crust_core::MASK_SHADOW), 0.001, f32::INFINITY)
+        .expect("shadow ray must be blocked by the card");
+    assert!(
+        (shadow_hit.rec.t - 3.0).abs() < 1e-3,
+        "shadow ray should stop at the card at t=3, got {}",
+        shadow_hit.rec.t
+    );
+}
