@@ -3,6 +3,7 @@ use crust_core::Buffer;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::Scene;
+use crust_core::TileOrder;
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
@@ -33,9 +34,12 @@ struct Cli {
     /// Verbose level
     #[arg(short, long, default_value = "info")]
     level: LoggerLevel,
-    /// Bucket rendering
-    #[arg(short, long, default_value_t = false)]
+    /// Deprecated: rendering is always tile-based now; see --tile-order.
+    #[arg(short, long, default_value_t = false, hide = true)]
     bucket: bool,
+    /// Tile visit order. Overrides the scene's `crust:tileOrder` when set.
+    #[arg(long, value_enum)]
+    tile_order: Option<TileOrderArg>,
     /// Samples per pixel. Overrides the scene / default value when set.
     #[arg(short, long)]
     samples: Option<u32>,
@@ -44,6 +48,29 @@ struct Cli {
     /// strategy alone to visualize what MIS balances between.
     #[arg(long, value_enum)]
     strategy: Option<Strategy>,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, Copy)]
+enum TileOrderArg {
+    /// Morton (Z-curve) order — spatially coherent, the default
+    Morton,
+    /// Outward spiral from the image center
+    Spiral,
+    /// Row-major, top row first
+    Scanline,
+    /// Deterministic seeded shuffle
+    Random,
+}
+
+impl From<TileOrderArg> for TileOrder {
+    fn from(o: TileOrderArg) -> Self {
+        match o {
+            TileOrderArg::Morton => TileOrder::Morton,
+            TileOrderArg::Spiral => TileOrder::Spiral,
+            TileOrderArg::Scanline => TileOrder::Scanline,
+            TileOrderArg::Random => TileOrder::Random,
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -146,6 +173,9 @@ fn main() {
     if let Some(strategy) = cli.strategy {
         settings = settings.with_sampling_strategy(strategy.into());
     }
+    if let Some(order) = cli.tile_order {
+        settings = settings.with_tile_order(order.into());
+    }
     debug!("Render Settings: {:#?}", settings);
     // Timer
     let start = Instant::now();
@@ -157,9 +187,7 @@ fn main() {
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!("Let's start rendering...");
     if cli.bucket {
-        info!("Bucket rendering is enabled");
-    } else {
-        info!("Bucket rendering is disabled");
+        info!("--bucket is deprecated: rendering is always tile-based (see --tile-order)");
     }
     // Progress bar over the engine's (completed, total) callback — the
     // total (rows vs. tiles) is only known once the pass starts.

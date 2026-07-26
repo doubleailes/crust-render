@@ -16,6 +16,7 @@ use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
 use crate::scene::Scene;
 use crust_rt::{CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder};
+use crate::scheduler::TileOrder;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Vec3, Vec3A};
@@ -1438,6 +1439,21 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     let guiding_prob =
         custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
 
+    // Tile visit order: `morton` (default) | `spiral` | `scanline` | `random`.
+    let tile_order = match custom_token(&prim, "crust:tileOrder").as_deref() {
+        None | Some("morton") => TileOrder::Morton,
+        Some("spiral") => TileOrder::Spiral,
+        Some("scanline") => TileOrder::Scanline,
+        Some("random") => TileOrder::Random,
+        Some(other) => {
+            warn!(
+                "Unknown crust:tileOrder \"{}\" (expected morton | spiral | scanline | random) — using morton",
+                other
+            );
+            TileOrder::Morton
+        }
+    };
+
     // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
     let strategy = match custom_token(&prim, "crust:samplingStrategy").as_deref() {
         None | Some("power") | Some("mis") => SamplingStrategy::PowerMis,
@@ -1456,6 +1472,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
         .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)
+        .with_tile_order(tile_order)
 }
 
 fn default_settings() -> RenderSettings {

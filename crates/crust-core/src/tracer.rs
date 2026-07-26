@@ -5,10 +5,10 @@ use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
+use crate::scheduler::{TileOrder, TileScheduler, TileWorkQueue};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
@@ -28,9 +28,9 @@ const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
 const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
 
 /// Render-progress callback: invoked with `(completed, total)` work units
-/// (scanline rows, or tiles under bucket rendering) as a pass advances.
-/// Called from worker threads, hence `Sync`. Presentation (progress bars,
-/// logging) is the caller's concern — the engine has no UI dependencies.
+/// (tiles) as a pass advances. Called from worker threads, hence `Sync`.
+/// Presentation (progress bars, logging) is the caller's concern — the
+/// engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
 /// Training-only clamp on recorded radiance so a single firefly cannot
@@ -114,7 +114,7 @@ struct GuidingContext<'a> {
 struct PassConfig {
     spp: u32,
     seed: u32,
-    tiled: bool,
+    order: TileOrder,
     adaptive: bool,
 }
 
@@ -166,35 +166,37 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None)
+        self.render_impl(None)
     }
 
+    /// Alias of [`Self::render`], kept for compatibility: all rendering is
+    /// tile-based now (see [`TileOrder`] / `RenderSettings::with_tile_order`).
     pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None)
+        self.render_impl(None)
     }
 
     /// Renders with a progress callback — see [`ProgressCallback`]. With
     /// guiding enabled, only the final pass reports (training passes are
-    /// silent, as before).
-    pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
-        self.render_impl(tiled, Some(progress))
+    /// silent, as before). The `_tiled` flag is vestigial: rendering is
+    /// always tile-based, the visit order coming from the settings.
+    pub fn render_with_progress(&self, _tiled: bool, progress: ProgressCallback) -> Buffer {
+        self.render_impl(Some(progress))
     }
 
-    fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
+    fn render_impl(&self, progress: Option<ProgressCallback>) -> Buffer {
         if self.settings.guiding {
-            return self.render_guided(tiled, progress);
+            return self.render_guided(progress);
         }
-        self.render_pass(self.final_pass_config(tiled), None, progress)
-            .0
+        self.render_pass(self.final_pass_config(), None, progress).0
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
     /// sampling.
-    fn final_pass_config(&self, tiled: bool) -> PassConfig {
+    fn final_pass_config(&self) -> PassConfig {
         PassConfig {
             spp: self.settings.samples_per_pixel,
             seed: self.settings.frame as u32,
-            tiled,
+            order: self.settings.tile_order,
             adaptive: true,
         }
     }
@@ -219,14 +221,12 @@ impl Renderer {
     /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
-    fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
+    fn render_guided(&self, progress: Option<ProgressCallback>) -> Buffer {
         let bounds = match self.world.bounds() {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self
-                    .render_pass(self.final_pass_config(tiled), None, progress)
-                    .0;
+                return self.render_pass(self.final_pass_config(), None, progress).0;
             }
         };
         let cfg = GuidingConfig {
@@ -257,7 +257,7 @@ impl Renderer {
             let train_cfg = PassConfig {
                 spp,
                 seed,
-                tiled,
+                order: self.settings.tile_order,
                 adaptive: false,
             };
             let start = std::time::Instant::now();
@@ -324,7 +324,7 @@ impl Renderer {
         };
         let final_gctx = if guide_final { Some(&gctx) } else { None };
         let (final_buffer, _, final_stats) =
-            self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
+            self.render_pass(self.final_pass_config(), final_gctx, progress);
         passes.push((final_buffer, final_stats.variance));
 
         self.blend_passes(passes)
@@ -379,61 +379,56 @@ impl Renderer {
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
     ) -> (Buffer, Vec<SampleData>, PassStats) {
-        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        let (width, height) = (self.settings.width, self.settings.height);
+        let mut buffer = Buffer::new(width, height);
         let mut all_samples = Vec::new();
         let mut variance_sum = 0.0f64;
-        let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
-        let pixel_count = (self.settings.width * self.settings.height) as f64;
+        let mut var_map = vec![0.0f64; width * height];
+        let pixel_count = (width * height) as f64;
 
-        if cfg.tiled {
-            let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
-            let total = tiles.len() as u64;
-            let done = AtomicU64::new(0);
-            let results: Vec<(Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>)> = tiles
-                .into_par_iter()
-                .map(|tile| {
-                    let mut pixels = Vec::with_capacity(tile.width * tile.height);
-                    let mut samples = Vec::new();
-                    for j in tile.y..tile.y + tile.height {
-                        for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
-                            pixels.push((i, j, color, v));
-                            samples.append(&mut s);
+        let scheduler = TileScheduler::new(width, height, cfg.order, cfg.seed);
+        let total = scheduler.tiles.len() as u64;
+        let done = AtomicU64::new(0);
+        let queue = TileWorkQueue::new(scheduler.tiles.len() as u32, rayon::current_num_threads());
+        // Every pool thread drains the virtual work queue; per-tile results
+        // are buffered thread-locally and merged serially afterwards.
+        let mut results: Vec<(u32, Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>)> =
+            rayon::broadcast(|_| {
+                let mut out = Vec::new();
+                while let Some(group) = queue.next_group() {
+                    for t in group.start..group.end {
+                        let tile = scheduler.tiles[t as usize];
+                        let mut pixels = Vec::with_capacity(tile.w * tile.h);
+                        let mut samples = Vec::new();
+                        for j in tile.y..tile.y + tile.h {
+                            for i in tile.x..tile.x + tile.w {
+                                let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
+                                pixels.push((i, j, color, v));
+                                samples.append(&mut s);
+                            }
                         }
+                        if let Some(cb) = progress {
+                            cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                        }
+                        out.push((t, pixels, samples));
                     }
-                    if let Some(cb) = progress {
-                        cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
-                    }
-                    (pixels, samples)
-                })
-                .collect();
-            for (pixels, samples) in results {
-                for (i, j, color, var) in pixels {
-                    buffer.set_pixel(i, j, color);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
                 }
-                all_samples.extend(samples);
+                out
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+        // Tiles are disjoint, so pixel writes commute — but the guiding
+        // training samples must be merged in a scheduling-independent order
+        // to keep renders deterministic.
+        results.sort_unstable_by_key(|&(t, ..)| t);
+        for (_, pixels, samples) in results {
+            for (i, j, color, var) in pixels {
+                buffer.set_pixel(i, j, color);
+                var_map[j * width + i] = var;
+                variance_sum += var;
             }
-        } else {
-            let total = self.settings.height as u64;
-            let mut done = 0u64;
-            for j in (0..self.settings.height).rev() {
-                let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
-                    .into_par_iter()
-                    .map(|i| self.render_pixel(i, j, &cfg, gctx))
-                    .collect();
-                for (i, (color, samples, var)) in row.into_iter().enumerate() {
-                    buffer.set_pixel(i, j, color);
-                    all_samples.extend(samples);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
-                }
-                done += 1;
-                if let Some(cb) = progress {
-                    cb(done, total);
-                }
-            }
+            all_samples.extend(samples);
         }
 
         (
@@ -536,6 +531,8 @@ pub struct RenderSettings {
     // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
     // `--strategy`).
     sampling_strategy: SamplingStrategy,
+    // Tile visit order (`crust:tileOrder` / `--tile-order`).
+    tile_order: TileOrder,
 }
 impl RenderSettings {
     pub fn new(
@@ -559,6 +556,7 @@ impl RenderSettings {
             guiding_train_iterations: 4,
             guiding_prob: 0.5,
             sampling_strategy: SamplingStrategy::default(),
+            tile_order: TileOrder::default(),
         }
     }
 
@@ -586,6 +584,17 @@ impl RenderSettings {
 
     pub fn sampling_strategy(&self) -> SamplingStrategy {
         self.sampling_strategy
+    }
+
+    /// Select the tile visit order — see [`TileOrder`]. A scheduling choice
+    /// only; every order renders the same image.
+    pub fn with_tile_order(mut self, order: TileOrder) -> Self {
+        self.tile_order = order;
+        self
+    }
+
+    pub fn tile_order(&self) -> TileOrder {
+        self.tile_order
     }
 
     pub fn get_dimensions(&self) -> (usize, usize) {
@@ -1339,13 +1348,6 @@ fn mean_relative_error(var_map: &[f64], ref_lum: &[f64]) -> f64 {
         / n
 }
 
-struct Tile {
-    pub x: usize,
-    pub y: usize,
-    pub width: usize,
-    pub height: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::SamplingStrategy;
@@ -1404,19 +1406,3 @@ mod tests {
     }
 }
 
-fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
-    let mut tiles = Vec::new();
-    for y in (0..image_height).step_by(tile_size) {
-        for x in (0..image_width).step_by(tile_size) {
-            let w = (x + tile_size).min(image_width) - x;
-            let h = (y + tile_size).min(image_height) - y;
-            tiles.push(Tile {
-                x,
-                y,
-                width: w,
-                height: h,
-            });
-        }
-    }
-    tiles
-}
