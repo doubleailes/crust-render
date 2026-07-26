@@ -1,0 +1,14 @@
+[package]
+name = "crust-rt"
+version = "0.1.0"
+edition = { workspace = true }
+license-file = { workspace = true }
+description = "Crust Render's ray tracing kernel: Embree-shaped scene/geometry API over a parallel SBVH build collapsed to BVH4, in safe Rust"
+
+[lib]
+name = "crust_rt"
+path = "src/lib.rs"
+
+[dependencies]
+glam.workspace = true
+rayon = "1.10.0"
