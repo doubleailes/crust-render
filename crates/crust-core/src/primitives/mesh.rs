@@ -58,6 +58,20 @@ impl Hittable for Mesh {
             mat: self.material.as_ref(),
         })
     }
+
+    fn hit_any(&self, r: &Ray, t_min: f32, t_max: f32) -> bool {
+        self.indices.chunks_exact(3).any(|tri| {
+            triangle_hit(
+                r,
+                self.vertices[tri[0] as usize],
+                self.vertices[tri[1] as usize],
+                self.vertices[tri[2] as usize],
+                t_min,
+                t_max,
+            )
+            .is_some()
+        })
+    }
 }
 
 fn indexed_mesh_hit(

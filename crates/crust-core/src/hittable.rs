@@ -73,4 +73,15 @@ pub trait Hittable: Send + Sync {
     ///   or `None` if the ray misses the object.
     fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<Hit<'_>>;
     fn bounding_box(&self) -> Option<AABB>;
+
+    /// Occlusion query: does the ray hit *anything* in `(t_min, t_max)`?
+    ///
+    /// Semantically `self.hit(ray, t_min, t_max).is_some()` (the default
+    /// implementation), but implementors with an acceleration structure
+    /// override it to accept the first confirmed hit instead of searching
+    /// for the closest one — the shadow-ray fast path (Embree's
+    /// `rtcOccluded` split).
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        self.hit(ray, t_min, t_max).is_some()
+    }
 }

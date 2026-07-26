@@ -60,6 +60,10 @@ impl Hittable for HittableList {
 
         best
     }
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        self.objects.iter().any(|o| o.hit_any(ray, t_min, t_max))
+    }
+
     fn bounding_box(&self) -> Option<AABB> {
         if self.objects.is_empty() {
             return None;
