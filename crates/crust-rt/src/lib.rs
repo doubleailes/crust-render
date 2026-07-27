@@ -41,7 +41,9 @@ mod triangle;
 
 pub use aabb::AABB;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
-pub use scene::{CubicCurveSegment, CurveSegment, Geometry, RayHit, Scene, SceneBuilder};
+pub use scene::{
+    CubicCurveSegment, CurveSegment, Geometry, PrimitiveBreakdown, RayHit, Scene, SceneBuilder,
+};
 
 /// The `geom_id`/`prim_id` value that never names a real geometry.
 pub const INVALID_ID: u32 = u32::MAX;

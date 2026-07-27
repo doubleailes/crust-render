@@ -19,7 +19,11 @@ cargo run --release                 # no -i → hard-coded procedural fallback (
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf)
+# -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf),
+# --stats (per-phase profile + scene statistics)
+
+# Where did the time and memory actually go? (parse vs build vs render vs output)
+cargo run --release -- -i samples/curves.usda --stats
 
 # Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
 cargo test
@@ -66,6 +70,16 @@ Five crates under `crates/`:
   UI-free by design: no progress-bar or image-encoding dependencies; progress is
   reported through a `ProgressCallback`, and fallible entry points return
   `crust_core::Error` instead of exiting.
+  **`stats.rs`** collects per-phase timings and scene counts (`RenderStats`,
+  inspired by Guerilla Render's "Profiling And Statistics"): the importer fills
+  in its own phases and the counters onto `Scene::stats`, the host appends
+  render/output phases, and the report prints three blocks — statistics, profile
+  by execution tree, profile by time. Collection is one `Instant` per *phase*,
+  never per ray, so it costs nothing in the integrator and is always on; only
+  printing is gated (`--stats`). Two primitive views are reported because for an
+  instanced scene they answer different questions: `top_level` is what the root
+  BVH traverses, `unique` descends into instances counting each distinct
+  prototype **once** and is therefore what occupies memory.
 - **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene`, calls the
   `Renderer` (wiring an `indicatif` bar to the progress callback), writes the EXR and
   the tone-mapped PNG. `main.rs` is the only file.

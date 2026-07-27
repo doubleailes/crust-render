@@ -139,6 +139,10 @@ struct Cli {
     /// strategy alone to visualize what MIS balances between.
     #[arg(long, value_enum)]
     strategy: Option<Strategy>,
+    /// Print render statistics and a per-phase profile (parse, build,
+    /// render, output) when the render finishes.
+    #[arg(long, default_value_t = false)]
+    stats: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -234,6 +238,9 @@ fn main() {
     let world = scene.world;
     let lights = scene.lights;
     let volumes = scene.volumes;
+    // Import phases and scene counts come from the loader; render and
+    // output are timed here.
+    let mut stats = scene.stats;
     let mut settings = match cli.samples {
         Some(spp) => scene.settings.with_samples_per_pixel(spp),
         None => scene.settings,
@@ -242,6 +249,10 @@ fn main() {
         settings = settings.with_sampling_strategy(strategy.into());
     }
     debug!("Render Settings: {:#?}", settings);
+    // The loader recorded the scene's own settings; re-read them now that
+    // the CLI's --samples / --strategy overrides have been applied, so the
+    // report describes the render that actually ran.
+    stats.image = (&settings).into();
     // Timer
     let start = Instant::now();
     // World
@@ -277,8 +288,10 @@ fn main() {
     bar.finish();
     // Close Timer
     let duration: Duration = start.elapsed();
+    stats.record("Render", 0, duration);
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
+    let output_start = Instant::now();
     let (img_width, img_height) = settings.get_dimensions();
     match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
         Ok(_) => info!("Image written to: {:?}", output),
@@ -294,6 +307,14 @@ fn main() {
             error!("Error writing PNG: {}", e);
             std::process::exit(1);
         }
+    }
+    stats.record("Write output", 0, output_start.elapsed());
+
+    if cli.stats {
+        // Straight to stdout, not through `tracing`: this is a report to
+        // read, not a log line, and it should not be filtered out by the
+        // log level or interleaved with per-prim messages.
+        println!("{stats}");
     }
 }
 

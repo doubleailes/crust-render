@@ -591,6 +591,14 @@ impl RenderSettings {
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
+
+    pub fn samples_per_pixel(&self) -> u32 {
+        self.samples_per_pixel
+    }
+
+    pub fn max_depth(&self) -> u32 {
+        self.max_depth
+    }
 }
 
 pub fn ray_color(
