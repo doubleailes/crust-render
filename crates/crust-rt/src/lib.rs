@@ -25,8 +25,8 @@
 //! What Embree calls `rtcIntersect1` / `rtcOccluded1` are
 //! [`Scene::intersect`] / [`Scene::occluded`]; geometry types map to the
 //! [`Geometry`] enum (triangle meshes with optional per-vertex shading
-//! normals, analytic spheres, round curve segments, and single-level
-//! instances with optional transform motion blur); per-geometry visibility
+//! normals, analytic spheres, round curve segments, and instances — which
+//! nest — with optional transform motion blur); per-geometry visibility
 //! masks test against the ray's category bit exactly like Embree's. Hits
 //! carry `geom_id`/`prim_id` — the application owns the mapping from IDs
 //! to materials or anything else; this crate never sees shading data.

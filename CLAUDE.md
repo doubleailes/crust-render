@@ -49,7 +49,7 @@ Five crates under `crates/`:
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
   (triangle meshes with optional per-vertex shading normals, analytic spheres, round
-  curve segments, single-level `Instance`s with transform motion blur) attach to a
+  curve segments, `Instance`s — which nest — with transform motion blur) attach to a
   `SceneBuilder` with per-geometry visibility masks; `commit()` builds the acceleration
   structure; `Scene::intersect`/`Scene::occluded` mirror `rtcIntersect1`/`rtcOccluded1`.
   Hits are plain `Copy` `RayHit`s carrying `geom_id`/`prim_id` — the kernel never sees
@@ -290,6 +290,14 @@ Xform hierarchy into world matrices. Schema mapping:
     (`/__Prototype_N`) is built once and shared by every instance; the instance's own proxy
     subtree is never descended into. Without this the importer re-read and re-hashed each
     instance's geometry (~30% of load time on a 2000-instance scene).
+  - **Nesting.** A `PointInstancer` inside a prototype expands into real nested sub-scenes
+    (`nested_instancer_parts`), one part per (prototype, part) so the grouping stays
+    per-material: M nested placements of a K-part prototype become K parts, each a
+    committed scene holding M instances. Flattening instead would multiply the outer
+    instance count by the inner one — the blow-up instancing exists to prevent. The kernel
+    nests to arbitrary depth. A nested *native* instance is skipped (upstream bug, below).
+    Sample scene: `samples/nested_instancing.usda`. `MAX_INSTANCE_NESTING` (8) is a
+    backstop against a malformed stage describing an instancing cycle.
   - `class` prims are abstract and never drawn on their own — only reached through the
     prototypes that reference them. `collect_proto_parts` deliberately ignores that rule,
     since naming a class as a prototype is how "geometry that exists only to be instanced"
@@ -344,10 +352,16 @@ feature flag.
   points/topology *and* material binding. Emissive curves/instances are not light-list
   entries (BSDF-sampled only, like emissive volumes).
 
-- **Instancing caveats.** Single-level only, as the kernel is: a prototype containing a
-  nested `PointInstancer` warns and skips it (an instance of an instance would need the
-  kernel's `Instance` to nest). Volumes inside prototypes are skipped — they live outside
-  the surface BVH by design and cannot ride an instance transform. `PointInstancer`
+- **Instancing caveats.** The kernel nests instances to arbitrary depth (transforms
+  compose, normals map back through every level, masks gate per level — pinned by
+  `instances_nest`, `nested_instances_compose_transforms_and_normals` and
+  `nested_instances_respect_masks_at_each_level` in `crust-rt`), and the importer expands
+  a `PointInstancer` inside a prototype into real nested sub-scenes. What is *not*
+  supported is a natively-instanced (`instanceable`) prim inside another instance's
+  prototype: `openusd` 0.5 cannot read its contents at all (see the upstream bug below),
+  so the importer skips it with a warning. Volumes inside prototypes are skipped — they
+  live outside the surface BVH by design and cannot ride an instance transform.
+  `PointInstancer`
   `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
   do not motion-blur (`crust:motion:translate` still works on ordinary prims), and all
   per-instance arrays are read at the default time sample. Top-level `UsdGeomSphere` prims
@@ -381,6 +395,22 @@ feature flag.
   composition — with a warning — only for op kinds it cannot decode. Regression test:
   `cornellbox_transforms_compose_correctly`. If upstream fixes the bug, the fallback
   (`local_matrix_via_openusd`) and possibly the whole composer can be dropped.
+
+- **Upstream `openusd` nested-native-instancing bug, skipped locally.** An `instanceable`
+  prim *inside another instance's prototype* cannot be read with `openusd` 0.5.0.
+  Resolving its prototype — or reading the type name of any prim beneath it — reaches
+  `pcp/instancing.rs::materialize_prototype`, whose `debug_assert!` ("materialized
+  prototype root's instanceable must be inert") fires: debug builds abort, release builds
+  have the assertion compiled out. The instance prim itself is safe to inspect
+  (`is_instance`, `children`, `type_name` all succeed); only its *contents* are
+  unreachable, so there is no proxy-traversal fallback either. It reproduces in four lines
+  of USDA with `class` or `def` prototypes alike, and is independent of crust. Single-level
+  native instancing and nested `PointInstancer`s are unaffected. `collect_proto_parts`
+  therefore tests `is_instance()` **before** any schema lookup (a schema `get()` reads the
+  type name, which is what aborts) and skips such prims with a warning. Regression test:
+  `nested_native_instance_degrades_gracefully`. When upstream is fixed, delete that arm and
+  splice the inner prototype's parts in with composed transforms — a native instance is a
+  single placement, so it needs no extra level of kernel indirection.
 - USD lux light schemas beyond `SphereLight`/`RectLight` are skipped (see above). Disk
   lights need a disk primitive; distant/dome lights need non-area `Light` impls and
   integrator support for lights without scene geometry.

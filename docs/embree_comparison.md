@@ -142,7 +142,7 @@ when this document was first written; see the addendum in §4.)*
 | Quads / grids / subdivision | ✅ | ❌ (USD import triangulates) |
 | Curves / hair | ✅ 5 bases × 3 modes | ✅⁺ round linear segments; cubic bezier/bspline/catmullRom flattened |
 | User geometry | ✅ callbacks | ✅-ish (`Hittable` trait — same idea, idiomatic Rust) |
-| Instancing | ✅ multi-level + arrays | ✅⁺ single-level `Instance`, shared local-space BLAS with content dedup |
+| Instancing | ✅ multi-level + arrays | ✅ multi-level `Instance` (nests to any depth), shared local-space BLAS with content dedup; no instance *arrays* |
 | Motion blur | ✅ 2–129 steps, quaternion | ✅⁺ 2-step transform blur (linear matrix lerp) |
 | BVH arity | 4–8 wide, SIMD node tests | ✅⁺ 4-wide SoA nodes, `Vec4` slab tests |
 | Build quality tiers | low / medium / high(SBVH) / refit | ✅⁺ medium + SBVH spatial splits (α-gated) |
