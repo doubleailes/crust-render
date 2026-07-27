@@ -227,6 +227,10 @@ MIS matches the cleaner of the two everywhere.
 
 ![veach](images/veach_mis_test.png)
 
+### Moana Benchmark
+
+![moana](images/moana_island_full.png)
+
 ### CLI
 
 ```bash
