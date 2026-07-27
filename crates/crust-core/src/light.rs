@@ -1,6 +1,7 @@
 use crate::material::{Emissive, Material};
 use glam::Vec3A;
 use std::sync::Arc;
+use utils;
 
 /// The emitting surface of an area light, decoupled from any material: pure
 /// geometry that knows how to sample itself uniformly by area. One shape
@@ -211,6 +212,97 @@ impl Light for AreaLight {
     }
 }
 
+/// A `UsdLuxDistantLight`: parallel light from infinitely far away, as the
+/// sun is.
+///
+/// Two conventions worth stating, because renderers differ.
+///
+/// **The cone is always real.** UsdLux gives the source an angular diameter
+/// (`inputs:angle`, default 0.53° — the sun's), and authors may set it to
+/// zero for perfectly sharp shadows. Rather than making that a delta light,
+/// which would need a second MIS path through the integrator, a zero angle
+/// is widened to [`MIN_DISTANT_ANGLE_DEG`]. The resulting penumbra is far
+/// below a pixel at any sane scene scale, and MIS handles the rest: when a
+/// bounce ray happens into the tiny cone the light pdf is enormous, so the
+/// bounce side's weight collapses to nothing and no firefly survives.
+///
+/// **`intensity × color` is irradiance, not radiance.** The radiance the
+/// light emits is derived as `E / Ω` over the cone's solid angle, so
+/// widening the angle softens shadows without changing exposure — the
+/// behaviour Hydra and most production renderers normalize to. Treating the
+/// input as radiance instead would make a sun-sized source almost black.
+pub struct DistantLight {
+    /// Unit direction the light travels *toward* (the direction photons
+    /// move), so a shading point is lit from `-direction`.
+    direction: Vec3A,
+    /// Irradiance on a surface facing the light.
+    irradiance: Vec3A,
+    /// Half-angle of the source cone, in radians.
+    cos_half_angle: f32,
+    /// Solid angle of the cone, `2π(1 − cos θ)`.
+    solid_angle: f32,
+}
+
+/// The floor a `DistantLight`'s angular diameter is clamped to, in degrees.
+/// Small enough to read as a sharp shadow, large enough that the cone stays
+/// a genuine solid angle with a finite pdf.
+pub const MIN_DISTANT_ANGLE_DEG: f32 = 0.05;
+
+impl DistantLight {
+    /// `direction` is the direction the light travels toward (UsdLux's
+    /// convention: a distant light points down its local -Z). `angle_deg`
+    /// is the source's angular *diameter*, as `inputs:angle` gives it.
+    pub fn new(direction: Vec3A, irradiance: Vec3A, angle_deg: f32) -> Self {
+        let diameter = angle_deg.max(MIN_DISTANT_ANGLE_DEG).min(179.0);
+        let half_angle = 0.5 * diameter.to_radians();
+        let cos_half_angle = half_angle.cos();
+        Self {
+            direction: direction.normalize(),
+            irradiance,
+            cos_half_angle,
+            solid_angle: 2.0 * std::f32::consts::PI * (1.0 - cos_half_angle),
+        }
+    }
+
+    /// Radiance within the cone: irradiance spread over its solid angle.
+    fn radiance(&self) -> Vec3A {
+        self.irradiance / self.solid_angle.max(1e-12)
+    }
+
+    /// Uniform-cone pdf, constant inside the cone.
+    fn cone_pdf(&self) -> f32 {
+        1.0 / self.solid_angle.max(1e-12)
+    }
+
+    /// Is `direction` (pointing away from the shaded point) inside the
+    /// cone of directions this light occupies?
+    fn covers(&self, direction: Vec3A) -> bool {
+        direction.dot(-self.direction) >= self.cos_half_angle
+    }
+}
+
+impl Light for DistantLight {
+    fn sample_li(&self, _from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
+        // Uniform direction within the cone around `-direction`.
+        let cos_theta = 1.0 - u * (1.0 - self.cos_half_angle);
+        let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+        let phi = 2.0 * std::f32::consts::PI * v;
+        let local = Vec3A::new(sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta);
+        Some(LightSample {
+            direction: utils::align_to_normal(local, -self.direction).normalize(),
+            // Nothing beyond the scene can occlude a light at infinity.
+            distance: f32::INFINITY,
+            radiance: self.radiance(),
+            pdf: self.cone_pdf(),
+        })
+    }
+
+    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
+        self.covers(direction)
+            .then(|| (self.radiance(), self.cone_pdf()))
+    }
+}
+
 /// The `LightList` struct manages a collection of light sources in the scene.
 pub struct LightList {
     /// A vector of light sources stored as `Arc<dyn Light>` for shared ownership.
@@ -340,6 +432,107 @@ mod tests {
         // An area light has geometry and no escaped-ray contribution.
         assert_eq!(light.geom_id(), Some(0));
         assert!(light.escaped(Vec3A::ZERO, Vec3A::Y).is_none());
+    }
+
+    /// The cone convention: every sampled direction lies inside the
+    /// source cone, and `escaped` agrees about exactly which directions
+    /// those are. Disagreement here would mean NEE and the bounce side
+    /// find the light in different sets of directions.
+    #[test]
+    fn distant_light_cone_is_consistent() {
+        let dir = Vec3A::new(0.3, -1.0, 0.2).normalize();
+        let light = DistantLight::new(dir, Vec3A::splat(2.0), 10.0);
+
+        let mut rng = openqmc::pcg::Rng::new(7);
+        for _ in 0..2000 {
+            let s = light
+                .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
+                .expect("a distant light is reachable from anywhere");
+            assert!(s.direction.is_normalized());
+            assert!(
+                s.distance.is_infinite(),
+                "a light at infinity cannot be occluded by anything in the scene"
+            );
+            // Sampled directions must be ones `escaped` also covers.
+            let (radiance, pdf) = light
+                .escaped(Vec3A::ZERO, s.direction)
+                .expect("sample_li produced a direction escaped() does not cover");
+            assert_eq!(radiance, s.radiance);
+            assert!(
+                (pdf - s.pdf).abs() < 1e-3 * s.pdf,
+                "MIS sides disagree on the pdf: {} vs {}",
+                s.pdf,
+                pdf
+            );
+        }
+
+        // And nothing outside the cone is covered: the opposite hemisphere
+        // and a direction just past the half-angle both miss.
+        assert!(light.escaped(Vec3A::ZERO, dir).is_none());
+        let outside = utils::align_to_normal(
+            Vec3A::new(20f32.to_radians().sin(), 0.0, 20f32.to_radians().cos()),
+            -dir,
+        )
+        .normalize();
+        assert!(
+            light.escaped(Vec3A::ZERO, outside).is_none(),
+            "a direction 20° off-axis is outside a 10° cone"
+        );
+    }
+
+    /// The energy convention: `intensity × color` is the *irradiance* on a
+    /// surface facing the light, and radiance is derived over the cone. So
+    /// widening the angle must soften shadows without changing exposure —
+    /// `L · Ω` stays put.
+    ///
+    /// This is the assumption most easily got backwards; treating the input
+    /// as radiance instead would make a sun-sized source ~5 orders of
+    /// magnitude too dark.
+    #[test]
+    fn distant_light_irradiance_is_angle_invariant() {
+        let dir = -Vec3A::Y;
+        let e = Vec3A::new(3.0, 2.0, 1.0);
+        for angle in [0.0f32, 0.53, 5.0, 30.0] {
+            let light = DistantLight::new(dir, e, angle);
+            let s = light.sample_li(Vec3A::ZERO, 0.4, 0.6).expect("reachable");
+            // Radiance integrated over the cone's solid angle (1/pdf)
+            // returns the authored irradiance, whatever the angle.
+            let recovered = s.radiance / s.pdf;
+            assert!(
+                (recovered - e).length() < 1e-3 * e.length(),
+                "angle {angle}°: irradiance {recovered:?} != authored {e:?}"
+            );
+        }
+    }
+
+    /// A zero angle is widened rather than made singular, so the pdf stays
+    /// finite and the integrator needs no delta-light path.
+    #[test]
+    fn distant_light_zero_angle_stays_finite() {
+        let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 0.0);
+        let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).expect("reachable");
+        assert!(s.pdf.is_finite() && s.pdf > 0.0, "pdf = {}", s.pdf);
+        assert!(
+            s.radiance.is_finite(),
+            "radiance must stay finite: {:?}",
+            s.radiance
+        );
+        // Still a *tight* cone: a degree off-axis is outside it.
+        let off = utils::align_to_normal(
+            Vec3A::new(1f32.to_radians().sin(), 0.0, 1f32.to_radians().cos()),
+            Vec3A::Y,
+        )
+        .normalize();
+        assert!(light.escaped(Vec3A::ZERO, off).is_none());
+    }
+
+    /// A distant light has no scene geometry, so bounce rays must never try
+    /// to attribute a *hit* to it.
+    #[test]
+    fn distant_light_has_no_geometry() {
+        let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0);
+        assert_eq!(light.geom_id(), None);
+        assert_eq!(light.pdf_at_point(Vec3A::ZERO, Vec3A::Y), 0.0);
     }
 
     #[test]

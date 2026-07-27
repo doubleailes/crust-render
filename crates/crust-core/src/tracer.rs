@@ -780,6 +780,62 @@ fn bounce_emission_weight(
     }
 }
 
+/// The infinite-light half of bounce-side MIS: what a ray that left the
+/// scene along `direction` picks up.
+///
+/// This is [`bounce_emission_weight`]'s mirror. A light with geometry is
+/// found by a bounce ray *hitting* it and weighted by `pdf_at_point`; a
+/// light at infinity is found by a bounce ray *escaping* along a direction
+/// it covers, and weighted by the pdf reported from `Light::escaped`. Both
+/// must use the same density NEE used, or emission is double-counted.
+///
+/// Returns the MIS-weighted radiance and whether any light covered the
+/// direction — the caller falls back to the sky gradient when nothing did.
+fn escaped_emission(
+    prev: &Option<PrevVertex>,
+    lights: &LightList,
+    direction: Vec3A,
+    strategy: SamplingStrategy,
+) -> (Vec3A, bool) {
+    if lights.count() == 0 {
+        return (Vec3A::ZERO, false);
+    }
+    // As on the bounce-hit path, a delta or non-evaluable previous vertex
+    // means NEE could not have found this light, so there is no competing
+    // strategy and the emission is taken whole.
+    let competing = match prev {
+        Some(PrevVertex::Surface(p)) => {
+            (!p.delta && p.mat.eval(&p.ray, &p.rec, p.dir).is_some()).then_some((p.rec.p, p.pdf))
+        }
+        Some(PrevVertex::Phase { pos, pdf }) => Some((*pos, *pdf)),
+        // Primary rays, and rays leaving a carried-medium scatter, run no
+        // NEE — full weight, exactly as `prev = None` means elsewhere.
+        None => None,
+    };
+    let n_lights = lights.count() as f32;
+
+    let mut radiance = Vec3A::ZERO;
+    let mut covered = false;
+    for light in &lights.lights {
+        let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+        let Some((emitted, pdf)) = light.escaped(from, direction) else {
+            continue;
+        };
+        covered = true;
+        let weight = match competing {
+            Some((_, bounce_pdf)) if strategy.samples_lights() => {
+                let light_pdf = (pdf / n_lights).max(1e-6);
+                strategy.bounce_weight(bounce_pdf, light_pdf)
+            }
+            // No NEE ran for this vertex (or the strategy does not sample
+            // lights at all), so nothing competes.
+            _ => 1.0,
+        };
+        radiance += emitted * weight;
+    }
+    (radiance, covered)
+}
+
 /// NEE shadow test used at surface and volume vertices alike: ZERO when a
 /// surface occludes the segment, otherwise the volumetric transmittance
 /// through every region it crosses (stochastic for heterogeneous regions,
@@ -1073,12 +1129,23 @@ fn trace_path(
 
         let Some(hit) = hit_opt else {
             // === Background ===
+            // A ray leaving the scene is how lights at infinity are found
+            // by chance, so it is a bounce-side MIS event just like hitting
+            // an emissive surface.
             let unit_direction = Vec3A::normalize(ray.direction());
-            let t = 0.5 * (unit_direction.y + 1.0);
-            let sky = (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
-            // Segment emission is already weighted; the sky pays the
+            let (mut background, covered) =
+                escaped_emission(&prev, lights, unit_direction, strategy);
+            if !covered {
+                // Nothing at infinity covers this direction — keep the
+                // built-in sky gradient so scenes without an environment
+                // light look as they always have.
+                let t = 0.5 * (unit_direction.y + 1.0);
+                background +=
+                    (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
+            }
+            // Segment emission is already weighted; the background pays the
             // volume transmittance of the final segment.
-            terminal = vol_emit + vol_tr * sky;
+            terminal = vol_emit + vol_tr * background;
             break;
         };
         let rec: HitRecord = hit.rec;
