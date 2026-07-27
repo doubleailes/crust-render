@@ -66,7 +66,18 @@ fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
 }
 
 fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
-    let decoded = image::open(path)
+    // `image::open`'s default 512MiB decode-allocation limit is well below a
+    // production-scale panorama (e.g. a 16k HDRI): lift it for this trusted,
+    // locally-authored asset rather than have large dome lights fail to load.
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
+        .ok()?
+        .with_guessed_format()
+        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
+        .ok()?;
+    reader.no_limits();
+    let decoded = reader
+        .decode()
         .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
         .ok()?;
     let rgb = decoded.to_rgb32f();

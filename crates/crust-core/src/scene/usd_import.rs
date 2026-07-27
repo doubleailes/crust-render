@@ -88,6 +88,13 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             debug!("Skipping abstract (class) prim {}", prim.path());
             continue;
         }
+        // USD prunes an inactive prim and its whole namespace subtree from
+        // the composed scene — the standard way a stage disables geometry
+        // (e.g. an LOD or a too-dense archive) without editing its source.
+        if !prim.is_active().unwrap_or(true) {
+            debug!("Skipping inactive prim {}", prim.path());
+            continue;
+        }
 
         let local = local_matrix_at(&stage, &prim);
         let resets = resets_xform_stack_at(&stage, &prim);
@@ -823,6 +830,13 @@ fn collect_proto_parts(
     let mut stack: Vec<(Prim, GMat4)> = vec![(root.clone(), GMat4::IDENTITY)];
 
     while let Some((prim, parent_local)) = stack.pop() {
+        // Same pruning as the top-level traversal: an inactive prim (and
+        // its subtree) is absent from the composed scene, prototype or not.
+        if !prim.is_active().unwrap_or(true) {
+            debug!("Skipping inactive prim {} (prototype {})", prim.path(), root.path());
+            continue;
+        }
+
         // The prototype root's own transform is deliberately excluded: a
         // `PointInstancer` prototype is placed entirely by its per-instance
         // transform, and a native prototype root carries none.
