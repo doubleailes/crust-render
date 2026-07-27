@@ -618,7 +618,7 @@ fn emit_mesh(
         Geometry::Instance {
             scene: inner,
             transform: l2w,
-            transform_end: motion.map(|v| Affine3A::from_translation(v) * l2w),
+            transform_end: motion.map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
         },
         material,
         mask,
@@ -750,7 +750,7 @@ fn emit_sphere(
                 Geometry::Instance {
                     scene: Arc::new(b.commit()),
                     transform: Affine3A::IDENTITY,
-                    transform_end: Some(Affine3A::from_translation(v)),
+                    transform_end: Some(Box::new(Affine3A::from_translation(v))),
                 },
                 material,
                 mask,
@@ -1261,6 +1261,14 @@ fn emit_point_instancer(
         return;
     };
     let proto_parts = instancer_proto_parts(stage, &layout, caches, 0);
+
+    // A dense scatter can place millions of instances in this one call;
+    // reserving the exact total up front avoids both the doubling-copy
+    // cost and the over-allocation of growing the geometry table
+    // incrementally (see `WorldBuilder::reserve`).
+    let part_counts: Vec<usize> = proto_parts.iter().map(|p| p.len()).collect();
+    let total_geometries: usize = layout.placements.iter().map(|&(k, _)| part_counts[k]).sum();
+    world.reserve(total_geometries);
 
     let mut attached = 0usize;
     for &(k, xf) in &layout.placements {

@@ -48,6 +48,17 @@ impl WorldBuilder {
         self.materials.len()
     }
 
+    /// Reserves capacity for `additional` more geometries — see
+    /// `crust_rt::SceneBuilder::reserve`. Callers importing a known-size
+    /// batch (a `PointInstancer` with N placements) should call this
+    /// first: growing `materials` and the kernel's geometry table by
+    /// repeated doubling otherwise re-copies everything so far at each
+    /// step, and can leave up to ~2x the final size over-allocated.
+    pub fn reserve(&mut self, additional: usize) {
+        self.rt.reserve(additional);
+        self.materials.reserve(additional);
+    }
+
     /// Builds the acceleration structure (parallel, deterministic).
     pub fn commit(self) -> World {
         World {
