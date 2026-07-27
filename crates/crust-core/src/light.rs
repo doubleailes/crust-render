@@ -79,30 +79,74 @@ impl LightShape for RectShape {
     }
 }
 
+/// One sampled connection from a shading point to a light: where to aim
+/// the shadow ray, how far it must reach, the radiance arriving from that
+/// direction, and the solid-angle density of having chosen it.
+///
+/// Directions rather than points, because a light can be at infinity — a
+/// `DistantLight` or a `DomeLight` has no surface point to aim at.
+#[derive(Clone, Copy, Debug)]
+pub struct LightSample {
+    /// Unit direction from the shading point toward the light.
+    pub direction: Vec3A,
+    /// How far the shadow ray must be traced. `f32::INFINITY` for lights
+    /// at infinity — nothing beyond the scene can occlude them.
+    pub distance: f32,
+    /// Radiance arriving along `direction`.
+    pub radiance: Vec3A,
+    /// Solid-angle pdf of this direction under the light's own sampling.
+    ///
+    /// Always finite and positive: crust has no delta lights. A
+    /// `DistantLight` with a zero `angle` is widened to a small but real
+    /// cone rather than being made singular, which keeps one MIS path
+    /// through the integrator instead of two.
+    pub pdf: f32,
+}
+
 /// The `Light` trait is what the integrator's light-sampling strategy (NEE)
-/// needs from a light: a surface point to aim a shadow ray at, the
-/// solid-angle density of that choice for MIS, the emitted radiance, and —
-/// for lights with scene geometry — the geometry id that lets a bounce
-/// ray recognize the light it hit.
+/// needs from a light: a direction to aim a shadow ray, the solid-angle
+/// density of that choice for MIS, the radiance it carries, and — for
+/// lights with scene geometry — the geometry id that lets a bounce ray
+/// recognize the light it hit.
+///
+/// The MIS pairing is the thing to be careful with. Every light has two
+/// ways of being found: NEE samples it directly, and a bounce ray may
+/// arrive at it by chance. Both sides must evaluate the *same* density or
+/// emission is double-counted. For lights with geometry that second path
+/// is a bounce hit, weighted with [`Light::pdf_at_point`]; for lights at
+/// infinity it is a ray escaping the scene, weighted with
+/// [`Light::escaped`]. A light implements whichever applies.
 pub trait Light: Send + Sync {
-    /// Samples a point on the light source, uniform by area.
+    /// Samples a direction from `from` toward the light. `None` when the
+    /// light cannot be reached from there (below a dome's horizon, say).
     ///
     /// # Parameters
     /// - `u`, `v`: Unit random numbers driving the sample.
-    fn sample_point(&self, u: f32, v: f32) -> Vec3A;
+    fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample>;
 
-    /// Solid-angle pdf, as seen from `hit_point`, of `sample_point` having
-    /// produced `light_point` (which must lie on the light's surface).
-    fn pdf(&self, hit_point: Vec3A, light_point: Vec3A) -> f32;
+    /// Solid-angle pdf, as seen from `from`, of [`Light::sample_li`] having
+    /// produced `light_point` — the bounce side of MIS for a light whose
+    /// geometry a ray hit. Lights at infinity have no such point and keep
+    /// the default.
+    fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A) -> f32 {
+        0.0
+    }
 
-    /// Radiance emitted by the light surface. Matches `emitted()` of the
-    /// material bound to the light's scene geometry.
-    fn emission(&self) -> Vec3A;
+    /// For a ray that escaped the scene along `direction`: the radiance it
+    /// picks up and the solid-angle pdf NEE would have used for that
+    /// direction, as `(radiance, pdf)`. This is the bounce side of MIS for
+    /// lights at infinity. `None` for lights with finite geometry, and for
+    /// directions this light does not cover.
+    fn escaped(&self, _from: Vec3A, _direction: Vec3A) -> Option<(Vec3A, f32)> {
+        None
+    }
 
     /// The `geom_id` of this light's scene geometry in the world, used to
     /// recognize the light when a bounce ray hits it. `None` for lights
     /// with no geometry in the world.
-    fn geom_id(&self) -> Option<u32>;
+    fn geom_id(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// A geometric area light: any [`LightShape`] paired with the [`Emissive`]
@@ -124,31 +168,42 @@ impl AreaLight {
             geom_id,
         }
     }
-}
 
-impl Light for AreaLight {
-    fn sample_point(&self, u: f32, v: f32) -> Vec3A {
-        self.shape.sample_point(u, v)
-    }
-
-    fn pdf(&self, hit_point: Vec3A, light_point: Vec3A) -> f32 {
-        let direction = light_point - hit_point;
+    /// Solid-angle pdf of sampling `light_point` uniformly by area, as seen
+    /// from `from`: `dist² / (cos(θ_light) · area)`, where θ_light is the
+    /// angle between the light's surface normal at `light_point` and the
+    /// direction back toward the shaded point. Back-facing points clamp the
+    /// cosine to zero, so their pdf explodes and both MIS strategies agree
+    /// the contribution is negligible — area lights are effectively
+    /// one-sided.
+    fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> f32 {
+        let direction = light_point - from;
         let distance_squared = direction.length_squared();
         let dir_to_light = direction.normalize();
-        // Solid-angle pdf of sampling this point uniformly by area:
-        // dist^2 / (cos(theta_light) * area), where theta_light is the angle
-        // between the light's surface normal at `light_point` and the
-        // direction back toward the shaded point. Back-facing points clamp
-        // the cosine to zero, so their pdf explodes and both MIS strategies
-        // agree the contribution is negligible — area lights are effectively
-        // one-sided.
         let light_normal = self.shape.normal_at(light_point);
         let cosine = f32::max(light_normal.dot(-dir_to_light), 0.0);
         distance_squared / (cosine * self.shape.area() + 1e-4)
     }
+}
 
-    fn emission(&self) -> Vec3A {
-        self.material.emitted()
+impl Light for AreaLight {
+    fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
+        let light_point = self.shape.sample_point(u, v);
+        let to_light = light_point - from;
+        let distance = to_light.length();
+        if distance < 1e-6 {
+            return None;
+        }
+        Some(LightSample {
+            direction: to_light / distance,
+            distance,
+            radiance: self.material.emitted(),
+            pdf: self.solid_angle_pdf(from, light_point),
+        })
+    }
+
+    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A) -> f32 {
+        self.solid_angle_pdf(from, light_point)
     }
 
     fn geom_id(&self) -> Option<u32> {
@@ -257,9 +312,34 @@ mod tests {
             0,
         );
         // Nearest point on the sphere as seen from below.
-        let pdf = light.pdf(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0));
+        let pdf = light.pdf_at_point(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0));
         assert!(pdf.is_finite() && pdf > 0.0);
-        assert_eq!(light.emission(), Vec3A::splat(10.0));
+
+        // The sampled connection agrees: it aims upward at the light, stops
+        // at a finite distance, and reports the same emission and a pdf of
+        // the same shape.
+        let s = light
+            .sample_li(Vec3A::ZERO, 0.3, 0.7)
+            .expect("a sphere overhead is always reachable");
+        assert!(s.direction.is_normalized());
+        assert!(s.distance.is_finite() && s.distance > 0.0);
+        assert_eq!(s.radiance, Vec3A::splat(10.0));
+        assert!(s.pdf.is_finite() && s.pdf > 0.0);
+
+        // `sample_li` and `pdf_at_point` are the two MIS sides of one
+        // strategy and must agree on the density of the same direction.
+        let point = Vec3A::ZERO + s.direction * s.distance;
+        let from_point = light.pdf_at_point(Vec3A::ZERO, point);
+        assert!(
+            (s.pdf - from_point).abs() <= 1e-3 * s.pdf.max(from_point),
+            "MIS sides disagree: sample_li {} vs pdf_at_point {}",
+            s.pdf,
+            from_point
+        );
+
+        // An area light has geometry and no escaped-ray contribution.
+        assert_eq!(light.geom_id(), Some(0));
+        assert!(light.escaped(Vec3A::ZERO, Vec3A::Y).is_none());
     }
 
     #[test]

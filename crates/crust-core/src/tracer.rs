@@ -772,7 +772,8 @@ fn bounce_emission_weight(
     };
     match lights.find_by_geom(hit.geom_id) {
         Some(light) => {
-            let light_pdf = (light.pdf(from, hit.rec.p) / lights.count() as f32).max(1e-6);
+            let light_pdf =
+                (light.pdf_at_point(from, hit.rec.p) / lights.count() as f32).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
         None => 1.0,
@@ -827,21 +828,20 @@ fn volume_nee(
         return Vec3A::ZERO;
     };
     let n_lights = lights.count() as f32;
-    let light_point = light.sample_point(nee[1], nee[2]);
-    let light_dir = light_point - p;
-    let light_distance = light_dir.length();
-    let light_dir_unit = light_dir / light_distance.max(1e-6);
-    let shadow_ray = Ray::new(p, light_dir_unit)
+    let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
+        return Vec3A::ZERO;
+    };
+    let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
         .with_mask(crate::ray::MASK_SHADOW);
-    let tr = shadow_transmittance(world, volumes, &shadow_ray, light_distance, vertex);
+    let tr = shadow_transmittance(world, volumes, &shadow_ray, s.distance, vertex);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
-    let light_pdf = (light.pdf(p, light_point) / n_lights).max(1e-6);
-    let phase_val = phase.pdf(wi.dot(light_dir_unit));
+    let light_pdf = (s.pdf / n_lights).max(1e-6);
+    let phase_val = phase.pdf(wi.dot(s.direction));
     let weight = strategy.light_weight(light_pdf, phase_val);
-    light.emission() * phase_val * tr * weight / light_pdf
+    s.radiance * phase_val * tr * weight / light_pdf
 }
 
 /// The integrator: an iterative path tracer in two passes. The forward walk
@@ -1134,29 +1134,30 @@ fn trace_path(
         // describe the same strategy or emission is double-counted.
         let mut nee = Vec3A::ZERO;
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
+        // `sample_li` returns `None` when the light cannot be reached from
+        // this point at all — below a dome's horizon, or a degenerate
+        // coincident point.
         if let Some(light) = strategy
             .samples_lights()
             .then(|| lights.pick(nee_s[0]))
             .flatten()
+            && let Some(ls) = light.sample_li(rec.p, nee_s[1], nee_s[2])
         {
             let n_lights = lights.count() as f32;
-            let light_point = light.sample_point(nee_s[1], nee_s[2]);
-            let light_dir = light_point - rec.p;
-            let light_distance = light_dir.length();
-            let light_dir_unit = light_dir.normalize();
+            let light_dir_unit = ls.direction;
 
             let shadow_ray = Ray::new(rec.p, light_dir_unit)
                 .with_time(ray.time())
                 .with_mask(crate::ray::MASK_SHADOW);
 
             let shadow_tr =
-                shadow_transmittance(world, volumes, &shadow_ray, light_distance, v);
+                shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v);
             if shadow_tr != Vec3A::ZERO {
                 // Unsigned: lights behind the ray-facing normal are reachable
                 // through a continuous transmission lobe (opaque materials
                 // evaluate to zero there anyway).
                 let cosine = rec.normal.dot(light_dir_unit).abs();
-                let light_pdf = (light.pdf(rec.p, light_point) / n_lights).max(1e-6);
+                let light_pdf = (ls.pdf / n_lights).max(1e-6);
 
                 // Evaluate the BSDF toward the light direction. Delta and
                 // transmissive materials return None — they cannot see a
@@ -1178,7 +1179,7 @@ fn trace_path(
                         _ => brdf_pdf,
                     };
                     let weight = strategy.light_weight(light_pdf, bounce_pdf);
-                    nee += light.emission() * brdf_value * cosine * shadow_tr * weight
+                    nee += ls.radiance * brdf_value * cosine * shadow_tr * weight
                         / light_pdf;
                 }
             }
