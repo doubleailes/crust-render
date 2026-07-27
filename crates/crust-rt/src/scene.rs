@@ -48,7 +48,13 @@ pub enum Geometry {
     Instance {
         scene: Arc<Scene>,
         transform: Affine3A,
-        transform_end: Option<Affine3A>,
+        /// Boxed because it's `None` for the overwhelming majority of
+        /// instances (only motion-blurred placements set it): inline it
+        /// and every `Geometry` value — the enum is sized by its largest
+        /// variant — pays an extra 64 bytes it never uses. A scene with
+        /// millions of `PointInstancer` placements makes that the
+        /// dominant cost of the whole geometry table.
+        transform_end: Option<Box<Affine3A>>,
     },
 }
 
@@ -94,6 +100,16 @@ impl SceneBuilder {
     pub fn attach_masked(&mut self, geometry: Geometry, mask: u32) -> u32 {
         self.geoms.push((geometry, mask));
         (self.geoms.len() - 1) as u32
+    }
+
+    /// Reserves capacity for `additional` more geometries. Purely a
+    /// performance/memory hint — callers that know an upcoming batch size
+    /// (a `PointInstancer` with N placements, say) should use it: without
+    /// it, growing a multi-million-entry `Vec` by repeated doubling both
+    /// re-copies everything so far at each doubling and can leave up to
+    /// ~2x the final size over-allocated.
+    pub fn reserve(&mut self, additional: usize) {
+        self.geoms.reserve(additional);
     }
 
     /// Number of geometries attached so far.
@@ -176,7 +192,7 @@ impl SceneBuilder {
                         l2w: transform,
                         normal_mat: w2l.matrix3.transpose(),
                         w2l,
-                        l2w_end: transform_end,
+                        l2w_end: transform_end.map(|end| *end),
                         bounds,
                         geom_id,
                         mask,
@@ -591,7 +607,7 @@ mod tests {
         b.attach(Geometry::Instance {
             scene: unit_sphere_scene(),
             transform: Affine3A::IDENTITY,
-            transform_end: Some(Affine3A::from_translation(glam::Vec3::new(4.0, 0.0, 0.0))),
+            transform_end: Some(Box::new(Affine3A::from_translation(glam::Vec3::new(4.0, 0.0, 0.0)))),
         });
         let scene = b.commit();
         // At time 0 the sphere is at the origin...
