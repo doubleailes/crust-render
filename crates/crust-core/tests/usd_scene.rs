@@ -709,3 +709,133 @@ def Xform "W" {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// A host that decodes nothing real, so the importer's asset plumbing can
+/// be tested without an image dependency in `crust-core`: it records what
+/// was asked for and hands back a synthetic two-texel map.
+struct FakeAssets {
+    requested: std::sync::Mutex<Vec<PathBuf>>,
+}
+
+impl crust_core::AssetLoader for FakeAssets {
+    fn load_environment(&self, path: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+        self.requested.lock().unwrap().push(path.to_path_buf());
+        crust_core::EnvironmentMap::new(
+            2,
+            1,
+            vec![
+                crust_core::Vec3A::new(9.0, 0.0, 0.0),
+                crust_core::Vec3A::new(0.0, 9.0, 0.0),
+            ],
+        )
+    }
+}
+
+/// Lights at infinity carry no scene geometry, so they must reach the light
+/// list without adding hittables.
+#[test]
+fn loads_domelight_usda() {
+    let scene = Scene::from_usd(&sample("domelight.usda"))
+        .expect("failed to open domelight.usda");
+
+    assert_eq!(
+        scene.lights.count(),
+        2,
+        "expected the dome and the distant sun, got {}",
+        scene.lights.count()
+    );
+    // Two spheres and the floor — neither infinite light contributes
+    // geometry.
+    assert_eq!(
+        scene.world.count(),
+        3,
+        "infinite lights must not add hittables, got {} geometries",
+        scene.world.count()
+    );
+}
+
+/// `inputs:texture:file` is resolved against the USD layer's directory and
+/// handed to the host — `crust-core` never opens the file itself.
+#[test]
+fn dome_texture_is_resolved_and_requested_from_the_host() {
+    let assets = FakeAssets {
+        requested: std::sync::Mutex::new(Vec::new()),
+    };
+    let scene = Scene::from_usd_with_assets(&sample("domelight.usda"), &assets)
+        .expect("failed to open domelight.usda");
+    assert_eq!(scene.lights.count(), 2);
+
+    let requested = assets.requested.lock().unwrap();
+    assert_eq!(
+        requested.len(),
+        1,
+        "expected exactly one environment request, got {requested:?}"
+    );
+    let path = &requested[0];
+    assert!(
+        path.ends_with("sky_env.exr"),
+        "unexpected asset requested: {}",
+        path.display()
+    );
+    assert!(
+        path.is_absolute() || path.exists(),
+        "the relative asset path was not resolved against the layer: {}",
+        path.display()
+    );
+    assert!(
+        path.exists(),
+        "resolved path does not point at the checked-in map: {}",
+        path.display()
+    );
+}
+
+/// Both infinite lights must answer for escaping rays — that is the only
+/// way a bounce ray can find them — and neither may claim scene geometry.
+#[test]
+fn infinite_lights_are_found_by_escaping_rays() {
+    let scene = Scene::from_usd(&sample("domelight.usda"))
+        .expect("failed to open domelight.usda");
+
+    let mut dome_like = 0;
+    let mut cone_like = 0;
+    for light in &scene.lights.lights {
+        assert_eq!(
+            light.geom_id(),
+            None,
+            "a light at infinity must not claim scene geometry"
+        );
+        // A dome covers every direction; the sun covers only its cone.
+        let covered = [
+            crust_core::Vec3A::Y,
+            -crust_core::Vec3A::Y,
+            crust_core::Vec3A::X,
+            -crust_core::Vec3A::Z,
+        ]
+        .iter()
+        .filter(|d| light.escaped(crust_core::Vec3A::ZERO, **d).is_some())
+        .count();
+        if covered == 4 {
+            dome_like += 1;
+        } else {
+            cone_like += 1;
+        }
+
+        // Whatever it is, sampling it must agree with `escaped` about the
+        // pdf — the two MIS sides of one strategy.
+        let s = light
+            .sample_li(crust_core::Vec3A::ZERO, 0.37, 0.62)
+            .expect("an infinite light is reachable from anywhere");
+        assert!(s.distance.is_infinite(), "a light at infinity cannot be occluded");
+        let (_, pdf) = light
+            .escaped(crust_core::Vec3A::ZERO, s.direction)
+            .expect("sample_li produced a direction escaped() does not cover");
+        assert!(
+            (pdf - s.pdf).abs() <= 1e-3 * s.pdf.max(pdf),
+            "MIS sides disagree: sample_li {} vs escaped {}",
+            s.pdf,
+            pdf
+        );
+    }
+    assert_eq!(dome_like, 1, "expected exactly one all-direction dome");
+    assert_eq!(cone_like, 1, "expected exactly one cone-shaped distant light");
+}

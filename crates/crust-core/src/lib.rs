@@ -2,6 +2,7 @@ mod aabb;
 mod buffer;
 mod camera;
 mod error;
+mod environment;
 mod guiding;
 mod hittable;
 mod light;
@@ -30,7 +31,12 @@ pub use error::Error;
 pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::HitRecord;
-pub use light::{AreaLight, Light, LightList, LightShape, RectShape, SphereShape};
+pub use environment::EnvironmentMap;
+pub use scene::{AssetLoader, NoAssets};
+pub use light::{
+    AreaLight, DistantLight, DomeLight, Light, LightList, LightSample, LightShape, RectShape,
+    SphereShape,
+};
 pub use material::*;
 pub use medium::Medium;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};

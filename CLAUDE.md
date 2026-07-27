@@ -323,10 +323,25 @@ Xform hierarchy into world matrices. Schema mapping:
   the radiance is derived as `E / Ω` — widening the angle softens shadows without changing
   exposure (Hydra's normalized convention). Bounce rays find it by *escaping* along a
   direction inside its cone, which is the `Light::escaped` half of MIS.
+- `UsdLuxDomeLight` → a `DomeLight`: an infinite environment covering every direction, so
+  once one exists it **replaces the built-in sky gradient** (`Light::escaped` answers for
+  every escaping ray). Radiance is `intensity × color × 2^exposure` times an optional
+  lat-long `EnvironmentMap`; only `latlong`/`automatic` `texture:format` is supported and
+  anything else warns and falls back to the uniform colour. The prim's *rotation* orients
+  the sky (a dome is at infinity, so its translation and scale are meaningless). The map
+  is importance-sampled by luminance × sinθ — the Jacobian matters, without it polar
+  texels are over-sampled — which is what keeps a small bright sun in an HDRI from
+  becoming a firefly farm.
+  - **crust-core decodes nothing.** `inputs:texture:file` is resolved against the USD
+    layer's directory and handed to the host through the `AssetLoader` trait
+    (`Scene::from_usd_with_assets`); `Scene::from_usd` passes `NoAssets`, which warns and
+    falls back to the uniform colour. `crust-render` implements it with `exr` (OpenEXR)
+    and `image` (`.hdr` and LDR, the latter un-gamma'd to linear). This is the seam
+    general texture support should grow through.
 - `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
   `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
   emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
-  Other lux types (`DiskLight`, `DomeLight`, `CylinderLight`) warn once and are skipped.
+  Other lux types (`DiskLight`, `CylinderLight`) warn once and are skipped.
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
   shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
@@ -418,9 +433,12 @@ feature flag.
   `nested_native_instance_degrades_gracefully`. When upstream is fixed, delete that arm and
   splice the inner prototype's parts in with composed transforms — a native instance is a
   single placement, so it needs no extra level of kernel indirection.
-- USD lux light schemas beyond `SphereLight`/`RectLight` are skipped (see above). Disk
-  lights need a disk primitive; distant/dome lights need non-area `Light` impls and
-  integrator support for lights without scene geometry.
+- **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
+  skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
+  low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
+  than `latlong` are refused rather than mapped wrongly; and light-list picking stays
+  uniform, so a dim dome costs as many shadow rays as a bright sun. Neither infinite light
+  is visible to the guiding field's spatial structure (they have no position).
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
   (no chromatic distributions). Thick transmission — dispersive or not — is a
   continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable

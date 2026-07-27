@@ -1,7 +1,7 @@
+use crate::environment::EnvironmentMap;
 use crate::material::{Emissive, Material};
-use glam::Vec3A;
+use glam::{Mat3A, Vec3A};
 use std::sync::Arc;
-use utils;
 
 /// The emitting surface of an area light, decoupled from any material: pure
 /// geometry that knows how to sample itself uniformly by area. One shape
@@ -253,7 +253,7 @@ impl DistantLight {
     /// convention: a distant light points down its local -Z). `angle_deg`
     /// is the source's angular *diameter*, as `inputs:angle` gives it.
     pub fn new(direction: Vec3A, irradiance: Vec3A, angle_deg: f32) -> Self {
-        let diameter = angle_deg.max(MIN_DISTANT_ANGLE_DEG).min(179.0);
+        let diameter = angle_deg.clamp(MIN_DISTANT_ANGLE_DEG, 179.0);
         let half_angle = 0.5 * diameter.to_radians();
         let cos_half_angle = half_angle.cos();
         Self {
@@ -300,6 +300,91 @@ impl Light for DistantLight {
     fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
         self.covers(direction)
             .then(|| (self.radiance(), self.cone_pdf()))
+    }
+}
+
+/// A `UsdLuxDomeLight`: an infinite environment surrounding the scene.
+///
+/// Covers every direction, so once one exists it *is* the background — the
+/// integrator's built-in sky gradient stops applying, because
+/// [`Light::escaped`] answers for every ray that leaves.
+///
+/// Radiance is a uniform `tint` multiplied by an optional lat-long
+/// [`EnvironmentMap`]. With a map, directions are importance-sampled from
+/// its luminance so a small bright sun in an HDRI does not become a firefly
+/// farm; without one, directions are sampled uniformly over the sphere.
+///
+/// `orientation` maps *world* directions into the dome's own space, so a
+/// rotated dome prim rotates the sky. It is the inverse of the prim's
+/// world transform, cached once.
+pub struct DomeLight {
+    tint: Vec3A,
+    map: Option<Arc<EnvironmentMap>>,
+    /// World → dome-local rotation.
+    world_to_light: Mat3A,
+    /// Dome-local → world rotation.
+    light_to_world: Mat3A,
+}
+
+impl DomeLight {
+    pub fn new(tint: Vec3A, map: Option<Arc<EnvironmentMap>>, light_to_world: Mat3A) -> Self {
+        Self {
+            tint,
+            map,
+            world_to_light: light_to_world.inverse(),
+            light_to_world,
+        }
+    }
+
+    /// Radiance arriving from a world-space `direction`.
+    fn radiance_toward(&self, direction: Vec3A) -> Vec3A {
+        match &self.map {
+            Some(map) => self.tint * map.radiance(self.world_to_light * direction),
+            None => self.tint,
+        }
+    }
+
+    /// Solid-angle pdf of a world-space `direction` under this dome's own
+    /// sampling: the map's distribution, or uniform over the sphere.
+    fn pdf_toward(&self, direction: Vec3A) -> f32 {
+        match &self.map {
+            Some(map) => map.pdf(self.world_to_light * direction),
+            None => 1.0 / (4.0 * std::f32::consts::PI),
+        }
+    }
+}
+
+impl Light for DomeLight {
+    fn sample_li(&self, _from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
+        let (direction, radiance, pdf) = match &self.map {
+            Some(map) => {
+                let (local, radiance, pdf) = map.sample(u, v)?;
+                ((self.light_to_world * local).normalize(), radiance, pdf)
+            }
+            None => {
+                // Uniform over the sphere.
+                let z = 1.0 - 2.0 * u;
+                let r = (1.0 - z * z).max(0.0).sqrt();
+                let phi = std::f32::consts::TAU * v;
+                (
+                    Vec3A::new(r * phi.cos(), z, r * phi.sin()),
+                    Vec3A::ONE,
+                    1.0 / (4.0 * std::f32::consts::PI),
+                )
+            }
+        };
+        (pdf > 0.0).then(|| LightSample {
+            direction,
+            // Nothing in the scene can occlude the environment beyond it.
+            distance: f32::INFINITY,
+            radiance: self.tint * radiance,
+            pdf,
+        })
+    }
+
+    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
+        // A dome covers every direction, so every escaping ray finds it.
+        Some((self.radiance_toward(direction), self.pdf_toward(direction)))
     }
 }
 

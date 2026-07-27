@@ -10,7 +10,11 @@ use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
 
 use crate::camera::Camera;
-use crate::light::{AreaLight, DistantLight as CoreDistantLight, LightList, RectShape, SphereShape};
+use crate::light::{
+    AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight, LightList, RectShape,
+    SphereShape,
+};
+use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
@@ -18,7 +22,7 @@ use crate::scene::Scene;
 use crust_rt::{CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder};
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
-use glam::{Affine3A, Vec3, Vec3A};
+use glam::{Affine3A, Mat3A, Vec3, Vec3A};
 
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
@@ -49,7 +53,7 @@ const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// above any plausible authoring depth.
 const MAX_INSTANCE_NESTING: usize = 8;
 
-pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
+pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
     let path_str = path
         .to_str()
         .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
@@ -156,6 +160,8 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
             emit_rect_light(&mut world, &mut lights, &light, this_world);
         } else if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
             emit_distant_light(&mut lights, &light, this_world);
+        } else if let Ok(Some(light)) = DomeLight::get(&stage, prim.path().clone()) {
+            emit_dome_light(&mut lights, &prim, &light, this_world, path, assets);
         } else {
             warn_unsupported_light(&stage, &prim);
         }
@@ -1722,6 +1728,107 @@ fn emit_distant_light(lights: &mut LightList, light: &UsdDistantLight, world_xf:
     )));
 }
 
+/// Imports a `UsdLuxDomeLight` as an infinite environment.
+///
+/// `inputs:texture:file` is resolved against the USD layer's directory and
+/// handed to the host's [`AssetLoader`] — crust-core decodes nothing
+/// itself. Without a file, or when the host declines, the dome is its
+/// uniform `intensity × color × 2^exposure`.
+///
+/// Only `latlong` is supported; `inputs:texture:format` values that mean
+/// anything else warn and fall back to the uniform colour rather than
+/// silently mapping the image wrongly. The prim's rotation orients the sky.
+fn emit_dome_light(
+    lights: &mut LightList,
+    prim: &Prim,
+    light: &DomeLight,
+    world_xf: GMat4,
+    stage_path: &Path,
+    assets: &dyn AssetLoader,
+) {
+    let tint = lux_emission(light);
+
+    let format = light
+        .texture_format_attr()
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .and_then(|v| match v {
+            sdf::Value::Token(t) => Some(t.to_string()),
+            _ => None,
+        });
+    let map = match dome_texture_path(light, stage_path) {
+        Some(texture) => match format.as_deref() {
+            // `automatic` infers from the image; for the equirectangular
+            // images a dome light normally carries that means latlong.
+            None | Some("latlong") | Some("automatic") => {
+                let loaded = assets.load_environment(&texture);
+                if loaded.is_none() {
+                    warn!(
+                        "DomeLight at {}: could not load {} — falling back to \
+                         the uniform colour",
+                        prim.path(),
+                        texture.display()
+                    );
+                }
+                loaded.map(Arc::new)
+            }
+            Some(other) => {
+                warn!(
+                    "DomeLight at {}: texture:format \"{other}\" is not supported \
+                     (only latlong) — falling back to the uniform colour",
+                    prim.path()
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Only the rotation orients the sky; a dome is at infinity, so its
+    // translation and scale are meaningless.
+    let m = world_xf.to_cols_array_2d();
+    let rotation = Mat3A::from_cols(
+        Vec3A::new(m[0][0], m[0][1], m[0][2]).normalize_or(Vec3A::X),
+        Vec3A::new(m[1][0], m[1][1], m[1][2]).normalize_or(Vec3A::Y),
+        Vec3A::new(m[2][0], m[2][1], m[2][2]).normalize_or(Vec3A::Z),
+    );
+
+    info!(
+        "Imported DomeLight at {} (tint={:?}, {})",
+        prim.path(),
+        tint,
+        match &map {
+            Some(m) => format!("{}x{} environment map", m.width(), m.height()),
+            None => "uniform".to_string(),
+        }
+    );
+    lights.add(Arc::new(CoreDomeLight::new(tint, map, rotation)));
+}
+
+/// The dome's `inputs:texture:file`, resolved against the USD layer's
+/// directory when it is relative — the usual way an asset path is authored.
+fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
+    let asset = match light.texture_file_attr().get::<sdf::Value>().ok().flatten()? {
+        sdf::Value::AssetPath(p) => p.to_string(),
+        sdf::Value::String(p) => p,
+        _ => return None,
+    };
+    if asset.is_empty() {
+        return None;
+    }
+    let candidate = std::path::Path::new(&asset);
+    if candidate.is_absolute() {
+        return Some(candidate.to_path_buf());
+    }
+    Some(
+        stage_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(candidate),
+    )
+}
+
 fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
     let warn_type = |name: &str| {
         warn!(
@@ -1736,12 +1843,6 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
         .is_some()
     {
         warn_type("DiskLight");
-    } else if DomeLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("DomeLight");
     } else if CylinderLight::get(stage, prim.path().clone())
         .ok()
         .flatten()

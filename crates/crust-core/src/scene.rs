@@ -1,4 +1,5 @@
 use crate::camera::Camera;
+use crate::environment::EnvironmentMap;
 use crate::light::LightList;
 use crate::rt_world::World;
 use crate::tracer::RenderSettings;
@@ -58,6 +59,50 @@ impl Scene {
     /// * `UsdRenderSettings` (plus `crust:*` custom attrs for spp / depth
     ///   / etc.) → `RenderSettings`. Falls back to sensible defaults.
     pub fn from_usd(path: &std::path::Path) -> Result<Scene, crate::Error> {
-        usd_import::load_scene(path)
+        Scene::from_usd_with_assets(path, &NoAssets)
+    }
+
+    /// [`Scene::from_usd`], with the host supplying decoded images.
+    ///
+    /// crust-core has no image-decoding dependencies by design, so it never
+    /// opens a texture itself: when a `UsdLuxDomeLight` authors
+    /// `inputs:texture:file`, the importer resolves the asset path against
+    /// the USD layer and asks `assets` for the pixels. A host that cannot
+    /// (or will not) decode returns `None` and the dome falls back to its
+    /// uniform colour.
+    pub fn from_usd_with_assets(
+        path: &std::path::Path,
+        assets: &dyn AssetLoader,
+    ) -> Result<Scene, crate::Error> {
+        usd_import::load_scene(path, assets)
+    }
+}
+
+/// How the engine asks its host to decode an image.
+///
+/// The seam exists so `crust-core` stays free of image-format
+/// dependencies — the CLI already links `exr` and `image`, so decoding
+/// belongs there. It is also the natural place to grow general texture
+/// support.
+pub trait AssetLoader: Send + Sync {
+    /// Decodes a lat-long environment map. `path` has already been resolved
+    /// against the USD layer's directory. `None` — for an unreadable file,
+    /// an unsupported format, or a host that does not decode at all — is
+    /// not an error: the caller falls back.
+    fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap>;
+}
+
+/// The default host: decodes nothing. `Scene::from_usd` uses it, so a
+/// caller that does not care about textures needs no extra ceremony.
+pub struct NoAssets;
+
+impl AssetLoader for NoAssets {
+    fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap> {
+        tracing::warn!(
+            "No asset loader: environment map {} ignored — the dome falls back \
+             to its uniform colour. Use Scene::from_usd_with_assets to supply one.",
+            path.display()
+        );
+        None
     }
 }
