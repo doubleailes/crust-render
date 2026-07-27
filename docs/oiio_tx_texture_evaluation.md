@@ -10,7 +10,11 @@ produced by OIIO's own `make_texture` (the library entry point behind `maketx`).
 1. **A `.tx` is not a new format.** By default it is a **tiled, MIP-mapped TIFF**:
    64×64 tiles, one TIFF sub-IFD per MIP level, `zip` (deflate) compressed, texture
    metadata in the Pixar private TIFF tags. OIIO simply associates the `.tx`, `.env`,
-   `.sm`, `.vsm` extensions with its TIFF plugin.
+   `.sm`, `.vsm` extensions with its TIFF plugin. The container is chosen from the
+   **output extension alone** — never from bit depth — so a 32-bit float `.tx` is still
+   a TIFF (§1.4). But a tiled MIP-mapped **OpenEXR** is just as common in float
+   pipelines, normally named `.exr`, and `--format exr` can put one behind a `.tx`
+   name. Both containers need support, and dispatch must be on magic bytes (§1.5).
 2. **You do not need OpenImageIO to read one.** The pure-Rust `tiff` crate already has
    exactly the API this needs: `seek_to_image(level)` selects a MIP level (each level is
    one IFD) and `read_chunk(tile_index)` decodes **one tile**, seeking straight to
@@ -21,8 +25,10 @@ produced by OIIO's own `make_texture` (the library entry point behind `maketx`).
    32–64 KiB (0.02–0.04 % of the file) that is O(tile), not O(image).
 4. **Recommendation: pure Rust**, a new `crust-tex` crate (an OIIO-`ImageCache`-shaped
    tile cache + a small `TextureSystem` on top), `tiff` for the TIFF flavour and the
-   already-present `exr` for the OpenEXR flavour. Do *not* take an FFI dependency on
-   OIIO — it would cost this project the property that makes it what it is (§2).
+   already-present `exr` for the OpenEXR flavour — **both from the start**, since a
+   float/half pipeline will hand you tiled MIP-mapped EXRs at least as often as TIFF
+   `.tx` files. Do *not* take an FFI dependency on OIIO — it would cost this project
+   the property that makes it what it is (§2).
 5. **But reading tiles is the small part of the job.** This renderer currently has
    **no UVs anywhere** (`HitRecord` has no `uv`; `crust-rt` reports barycentrics only),
    no texturable material inputs, no `UsdUVTexture` import, and no ray differentials —
@@ -109,19 +115,73 @@ it is the natural cache key for deduplicating identical textures.
 `wrapmodes` matters: honour it (`black` | `clamp` | `periodic` | `mirror`) or textures
 will differ from every other renderer's interpretation of the same file.
 
-### 1.4 The trap: a `.tx` is not *necessarily* a TIFF
+### 1.4 The container is chosen by extension only — *never* by bit depth
 
-`maketx --format exr` (or `maketx:fileformatname`) writes a **tiled MIP-mapped
-OpenEXR** with a `.tx` extension. Confirmed by generating one and checking the magic:
+It is natural to assume that high-bit-depth textures switch to OpenEXR, since EXR is
+the VFX float format and TIFF cannot carry `half`. **They do not.** The decision is
+made in one place, `maketexture.cpp`:
 
+```cpp
+std::string outformat
+    = configspec.get_string_attribute("maketx:fileformatname", outputfilename);
+auto out = ImageOutput::create(outformat.c_str());
+if (!out) { /* error */ }
+if (!out->supports("tiles")) { /* error */ }
 ```
-=== exrflavour.tx  [magic says: OpenEXR]     <- 0x76 0x2f 0x31 0x01
-    exr crate: 256x256, 3 channels, 9 mip levels
-```
 
-**Dispatch on the magic bytes, never the extension.** Four bytes is enough:
-`II*\0` / `MM\0*` → classic TIFF, `II+\0` / `MM\0+` → BigTIFF, `0x76 0x2f 0x31 0x01`
-→ OpenEXR.
+The only inputs are `maketx:fileformatname` (i.e. `maketx --format`) and the **output
+filename**. The source's data type, bit depth, and channel count play no part.
+`ImageOutput::create` resolves `.tx` to the TIFF plugin because OIIO associates that
+extension with TIFF (§1.1). Measured, by writing `.tx` files from various sources and
+checking the first four bytes:
+
+| Source / request | Magic | Container | Data type in the file |
+|---|---|---|---|
+| `float` source, defaults | `49 49 2a 00` | TIFF | `float` |
+| `half` source, defaults | `49 49 2a 00` | TIFF | **`float`** |
+| `half` explicitly requested | `49 49 2a 00` | TIFF | **`float`** |
+| `half` EXR read from disk | `49 49 2a 00` | TIFF | **`float`** |
+| `half` + `tiff:half=1` | `49 49 2a 00` | TIFF | `half` |
+| `maketx:fileformatname=openexr` | `76 2f 31 01` | **OpenEXR** | as requested |
+
+So **a 32-bit float `.tx` is a TIFF**, and TIFF handles it natively
+(`SampleFormat = IEEEFP`, `BitsPerSample = 32`) — the `tiff` crate decodes it as
+`DecodingResult::F32`, which is what every measurement in §3 was taken on.
+
+Two consequences worth knowing:
+
+- **`half` is silently promoted to `float`.** `tiffoutput.cpp` comments
+  *"Silently change requests for unsupported 'half' to 'float'"* and sets
+  `m_bitspersample = 32` unless `tiff:half` is nonzero (the default is off because,
+  per the code comment, "Nuke 9.0, and probably many other apps we care about, cannot
+  read 16 bit float TIFFs correctly"). Ask for a half `.tx` and you get a float one at
+  **twice the data size**, with no warning. This is a good reason for a pipeline to
+  prefer `.exr` for float-ish textures — but that is a *choice about the filename*, not
+  something `.tx` does on its own.
+- **With `tiff:half=1` a genuine `half` TIFF `.tx` does exist** (verified: magic
+  `II*\0`, format `half`, 64×64 tiles, 9 levels), and the `tiff` crate reads it
+  correctly — but **widened to `DecodingResult::F32`**, not `F16`
+  (`SampleFormat = [3,3,3]`, `BitsPerSample = [16,16,16]`, 12 288 samples for a
+  64×64×3 tile, values and tile sum identical to OIIO's `read_tiles`). Note also that
+  `colortype()` reports `RGB(16)` for this file: **the bit depth in `ColorType` does
+  not tell you the buffer variant.** Match on the `DecodingResult` variant, and be
+  ready for `F16` as well since the crate does have that variant for other inputs.
+
+### 1.5 …but the EXR flavour is not exotic, and that changes the plan
+
+The corollary of the above is that a *tiled, MIP-mapped OpenEXR* is the normal way to
+ship float and half textures — it is just usually named `.exr` rather than `.tx`.
+Verified: requesting `half` with an `.exr` output name yields OpenEXR, 64×64 tiles,
+9 MIP levels, `half` preserved. OIIO's `TextureSystem` consumes that file exactly as
+it consumes a `.tx`; the extension carries no meaning beyond plugin selection.
+
+For this renderer — which is float-throughout and already writes EXR — **the EXR path
+should be treated as a first-class input, not a later addition.** See §7.
+
+**Dispatch on the magic bytes, never the extension**, in both directions: a `.tx` may
+be an OpenEXR, and the tiled MIP-mapped EXR you actually want to read may be named
+`.exr`. Four bytes is enough: `II*\0` / `MM\0*` → classic TIFF, `II+\0` / `MM\0+` →
+BigTIFF, `76 2f 31 01` → OpenEXR.
 
 ---
 
@@ -346,11 +406,14 @@ bounded by the `BufReader` capacity and is transient — steady-state RAM is una
 not set it tiny (which makes it read-syscall-bound) or huge (which inflates the
 over-read).
 
-### 4.5 `half` is effectively unavailable in the TIFF flavour
+### 4.5 A requested `half` `.tx` silently becomes `float` — but a `half` TIFF is legal
 
-OIIO's TIFF plugin does not write `half` unless the non-standard `tiff:half` hint is
-set. If you want 16-bit float texture data, that argues for the EXR flavour. The
-`tiff` crate *does* decode `F16` if it encounters it.
+Covered in detail in §1.4. Summary for implementers: by default OIIO promotes `half` to
+`float` when writing TIFF (silently, doubling the data), so most float-ish `.tx` files
+in the wild are `f32`. With `tiff:half=1` a real `half` TIFF exists; the `tiff` crate
+decodes it correctly but hands it back as `F32`, and `colortype()` reports `RGB(16)`
+while the buffer is `f32`. **Dispatch on the `DecodingResult` variant, never on
+`ColorType`'s bit depth** — and cover `F16` too, since the variant exists.
 
 ### 4.6 The EXR flavour needs a different, clumsier access pattern
 
@@ -379,9 +442,14 @@ while let Some(block) = dec.decompress_next_block() { /* block.data */ }
 
 `filter_chunks` reads and sorts the whole offset table on every call, so it is a
 *streaming* filter, not random access. For a texture cache you would parse `MetaData`
-once, keep the offset tables, and drive `Chunk` reads yourself. Pragmatic staging:
-**support the TIFF flavour with true per-tile reads first**, and for the EXR flavour
-either accept a whole-level read initially or do the offset-table work later.
+once, keep the offset tables, and drive `Chunk` reads yourself — everything needed for
+that is public (`exr::block`, `MetaData::read_offset_tables`, `UncompressedBlock`), it
+is just more code than TIFF's one-line `read_chunk`.
+
+Do not defer this on the assumption that EXR is the rare case: per §1.4/§1.5 it is the
+*normal* container for float and half textures. Budget the offset-table work as part of
+the first implementation rather than as a follow-up, and expect the EXR backend to be
+the more expensive of the two to write (the TIFF one is nearly free).
 
 ### 4.7 Things not tested here
 
@@ -487,8 +555,10 @@ it is the reason every production renderer works this way.
 
 Integration points in the existing code, in dependency order:
 
-1. `crust-tex` standalone, with a `.tx` fixture in `samples/` and unit tests that
-   pin tile values (the golden-value style already used by `openqmc-rs`).
+1. `crust-tex` standalone, with **both** a TIFF `.tx` and a tiled MIP-mapped `.exr`
+   fixture in `samples/` and unit tests that pin tile values (the golden-value style
+   already used by `openqmc-rs`). Cover `u8`/`u16`/`f32`/`f16` sample types and assert
+   the guards of §4.1/§4.2 fire rather than returning mis-strided data.
 2. `crust-rt`: optional per-vertex UVs on `TriangleMesh`, interpolated by the hit
    barycentrics. Alternatively keep UVs entirely in `crust-core` and look them up by
    `geom_id`/`prim_id` — which fits `rt_world.rs`'s existing `geom_id`-indexed
@@ -509,11 +579,17 @@ Integration points in the existing code, in dependency order:
 
 ## 7. Recommendation
 
-Build **Option B**: a `crust-tex` crate, `tiff` for the TIFF flavour with true
-per-tile/per-level reads, magic-byte dispatch, and the `exr` crate for the EXR
-flavour (whole-level first, per-tile later). Guard hard against the >4-channel and
-`planarconfig separate` cases (§4.1, §4.2) — both are silent-wrong-data bugs, not
-errors. Size the cache in bytes and expose it as a render setting.
+Build **Option B**: a `crust-tex` crate with magic-byte dispatch over **two backends** —
+`tiff` for the TIFF flavour (true per-tile/per-level reads, nearly free to write) and
+`exr` for the OpenEXR flavour (per-tile reads via the block/offset-table route, the
+more expensive of the two). Treat EXR as first-class from the start: the container is
+selected by extension and never by bit depth (§1.4), so a float or half pipeline yields
+tiled MIP-mapped EXRs at least as often as TIFF `.tx` files (§1.5).
+
+Guard hard against the >4-channel and `planarconfig separate` cases (§4.1, §4.2) — both
+are silent-wrong-data bugs, not errors — and support `F16` as well as
+`u8`/`u16`/`f32` samples (§4.5). Size the cache in bytes and expose it as a render
+setting.
 
 Sequence the work so the reader lands first (it is independently testable), but budget
 realistically: UVs, texturable material inputs, USD texture binding, and a LOD
@@ -522,8 +598,9 @@ something can ask for a level other than 0.
 
 ## 8. Open questions
 
-- **Scope of the first cut** — RGB/RGBA `uint8`/`uint16`/`float` TIFF `.tx` only, or
-  the EXR flavour from the start?
+- **Scope of the first cut** — this doc now recommends both containers up front (§7).
+  If that is too much for one pass, which single one matches your actual texture
+  pipeline: TIFF `.tx` from `maketx`, or tiled MIP-mapped `.exr`?
 - **Which LOD mechanism** — distance heuristic (cheap, approximate), ray cones
   (a scalar on `Ray`), or full differentials (two `Vec3A`s on `Ray`, and touching
   every ray-spawning site)?

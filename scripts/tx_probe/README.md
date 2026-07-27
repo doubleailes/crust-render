@@ -12,6 +12,11 @@ Needs the OpenImageIO Python wheel (`pip install OpenImageIO numpy`, tested with
 via `ImageBufAlgo.make_texture` — the same code path as `maketx` — and prints the
 MIP/tile structure OIIO itself reports.
 
+`gen_formats.py` answers "is a `.tx` always a TIFF?" by writing the same source as a
+`.tx` and a `.exr` across `float`/`half` requests and printing each result's magic
+bytes, container, and stored data type. It reproduces the table in doc §1.4 and the
+`fmt_half_tiff.tx` fixture that `half.rs` reads.
+
 The larger fixtures used for the RAM and throughput tables are generated inline in
 the doc's §3.3–§3.5 measurements: a 4096² RGB float source written as
 `big_f32.tx` (zip), `big_none.tx` (`compression=none`) and `big_u8.tx` (uint8).
@@ -28,6 +33,7 @@ Create a scratch binary crate, `cargo add tiff exr`, and drop the probe in as
 | `cost.rs` | where per-tile time goes: `seek_to_image` vs `read_chunk` vs buffer reuse vs level switching |
 | `compat.rs` | magic-byte sniffing and a compatibility matrix over RGBA / `planarconfig separate` / 8-channel / EXR-flavoured `.tx` |
 | `chan8.rs` | the >4-channel mis-striding bug (doc §4.1), against OIIO ground truth |
+| `half.rs` | that a `tiff:half` `.tx` decodes correctly, and into which `DecodingResult` variant (doc §4.5) |
 
 Numbers in the doc were taken in a 4-core container with a warm page cache,
 `--release`, single runs — indicative, not a rigorous benchmark.
