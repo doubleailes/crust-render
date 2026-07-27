@@ -5,7 +5,8 @@
 use crate::aabb::AABB;
 use crate::bvh::Bvh;
 use crate::prim::{
-    CurvePrim, InstancePrim, Prim, PrimHit, SpherePrim, TrianglePrim, transformed_aabb,
+    CubicCurvePrim, CurvePrim, InstancePrim, PrimHit, PrimNode, SpherePrim, TrianglePrim,
+    transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray};
 use glam::{Affine3A, Vec3A};
@@ -17,6 +18,18 @@ use std::sync::Arc;
 pub struct CurveSegment {
     pub p0: Vec3A,
     pub p1: Vec3A,
+    pub r0: f32,
+    pub r1: f32,
+}
+
+/// One authored cubic curve span — its own Bézier control points and end
+/// radii, intersected analytically (`crate::curve::cubic_curve_intersect`)
+/// rather than pre-flattened into several [`CurveSegment`]s. Round, same
+/// as `RoundCurves` — this only changes how a span is stored and
+/// intersected, not the surface it represents.
+#[derive(Clone, Copy, Debug)]
+pub struct CubicCurveSegment {
+    pub cp: [Vec3A; 4],
     pub r0: f32,
     pub r1: f32,
 }
@@ -40,6 +53,11 @@ pub enum Geometry {
     },
     RoundCurves {
         segments: Vec<CurveSegment>,
+    },
+    /// Cubic curve spans, intersected as true curves instead of being
+    /// flattened to `RoundCurves` polylines — see [`CubicCurveSegment`].
+    CubicCurves {
+        segments: Vec<CubicCurveSegment>,
     },
     /// Another committed scene placed by `transform` (local-to-world).
     /// With `transform_end`, the placement interpolates linearly (per
@@ -120,7 +138,7 @@ impl SceneBuilder {
     /// Expands every geometry into primitives and builds the BVH.
     pub fn commit(self) -> Scene {
         let n_geoms = self.geoms.len() as u32;
-        let mut prims: Vec<Box<dyn Prim>> = Vec::new();
+        let mut prims: Vec<PrimNode> = Vec::new();
         for (geom_id, (geom, mask)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
             match geom {
@@ -129,6 +147,7 @@ impl SceneBuilder {
                     indices,
                     normals,
                 } => {
+                    prims.reserve(indices.len());
                     for (prim_id, tri) in indices.into_iter().enumerate() {
                         let [i0, i1, i2] = tri;
                         let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
@@ -139,7 +158,7 @@ impl SceneBuilder {
                             (i0 < ns.len() && i1 < ns.len() && i2 < ns.len())
                                 .then(|| [ns[i0], ns[i1], ns[i2]])
                         });
-                        prims.push(Box::new(TrianglePrim {
+                        prims.push(PrimNode::Triangle(TrianglePrim {
                             v0: vertices[i0],
                             v1: vertices[i1],
                             v2: vertices[i2],
@@ -151,7 +170,7 @@ impl SceneBuilder {
                     }
                 }
                 Geometry::Sphere { center, radius } => {
-                    prims.push(Box::new(SpherePrim {
+                    prims.push(PrimNode::Sphere(SpherePrim {
                         center,
                         radius,
                         geom_id,
@@ -159,8 +178,9 @@ impl SceneBuilder {
                     }));
                 }
                 Geometry::RoundCurves { segments } => {
+                    prims.reserve(segments.len());
                     for (prim_id, s) in segments.into_iter().enumerate() {
-                        prims.push(Box::new(CurvePrim {
+                        prims.push(PrimNode::Curve(CurvePrim {
                             p0: s.p0,
                             p1: s.p1,
                             r0: s.r0,
@@ -169,6 +189,19 @@ impl SceneBuilder {
                             prim_id: prim_id as u32,
                             mask,
                         }));
+                    }
+                }
+                Geometry::CubicCurves { segments } => {
+                    prims.reserve(segments.len());
+                    for (prim_id, s) in segments.into_iter().enumerate() {
+                        prims.push(PrimNode::CubicCurve(Box::new(CubicCurvePrim {
+                            cp: s.cp,
+                            r0: s.r0,
+                            r1: s.r1,
+                            geom_id,
+                            prim_id: prim_id as u32,
+                            mask,
+                        })));
                     }
                 }
                 Geometry::Instance {
@@ -187,7 +220,7 @@ impl SceneBuilder {
                         ),
                         None => transformed_aabb(&inner_bounds, &transform),
                     };
-                    prims.push(Box::new(InstancePrim {
+                    prims.push(PrimNode::Instance(Box::new(InstancePrim {
                         scene,
                         l2w: transform,
                         normal_mat: w2l.matrix3.transpose(),
@@ -196,7 +229,7 @@ impl SceneBuilder {
                         bounds,
                         geom_id,
                         mask,
-                    }));
+                    })));
                 }
             }
         }

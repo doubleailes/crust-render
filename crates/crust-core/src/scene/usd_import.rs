@@ -19,7 +19,9 @@ use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
 use crate::scene::Scene;
-use crust_rt::{CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder};
+use crust_rt::{
+    CubicCurveSegment, CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder,
+};
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Mat3A, Vec3, Vec3A};
@@ -918,9 +920,16 @@ fn collect_proto_parts(
             });
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, &mut caches.materials);
-            if let Some(segments) = curve_segments(&prim, &curves) {
+            if let Some((segments, cubic_segments)) = curve_segments(&prim, &curves) {
                 let mut b = RtSceneBuilder::new();
-                b.attach(Geometry::RoundCurves { segments });
+                if !segments.is_empty() {
+                    b.attach(Geometry::RoundCurves { segments });
+                }
+                if !cubic_segments.is_empty() {
+                    b.attach(Geometry::CubicCurves {
+                        segments: cubic_segments,
+                    });
+                }
                 parts.push(ProtoPart {
                     scene: Arc::new(b.commit()),
                     local: this_local,
@@ -1350,6 +1359,9 @@ const CATMULL_ROM_M: [[f32; 4]; 4] = [
     [0.0, 1.0, 0.0, 0.0],
 ];
 
+/// Only `basis_to_bezier`'s tests evaluate a basis matrix directly now —
+/// production code always converts to Bézier form first.
+#[cfg(test)]
 fn eval_cubic(m: &[[f32; 4]; 4], cp: &[Vec3A; 4], t: f32) -> Vec3A {
     let pow = [t * t * t, t * t, t, 1.0];
     let mut p = Vec3A::ZERO;
@@ -1361,19 +1373,56 @@ fn eval_cubic(m: &[[f32; 4]; 4], cp: &[Vec3A; 4], t: f32) -> Vec3A {
     p
 }
 
-/// Segments each cubic span is flattened into before intersection.
-const CURVE_FLATTEN_SEGS: usize = 8;
+/// Converts 4 control points from a cubic basis (`BEZIER_M`, `BSPLINE_M`,
+/// `CATMULL_ROM_M`) to the equivalent standard (Bernstein) Bézier control
+/// points tracing the *same* curve. Needed because the analytic curve
+/// intersector (`crust_rt::curve::cubic_curve_intersect`) subdivides via
+/// de Casteljau, which only has its usual convex-hull/subdivision
+/// properties in Bézier form.
+///
+/// `eval_cubic`'s row `r` gives the curve's monomial coefficient of `t^(3-r)`
+/// (row 0 → t³, …, row 3 → the constant term) as `Σ_c m[r][c]·cp[c]`.
+/// Matching those same four coefficients against the expansion of the
+/// Bernstein basis — `B(t) = P0(1-t)³ + 3P1·t(1-t)² + 3P2·t²(1-t) + P3·t³`
+/// — inverts cleanly to: `P0 = d`, `P1 = d + c/3`, `P2 = d + 2c/3 + b/3`,
+/// `P3 = a+b+c+d`, where `a,b,c,d` are those coefficients of
+/// `t³,t²,t,1`. Passing `BEZIER_M` itself through this is the identity
+/// (pinned by `bezier_basis_round_trips_unchanged`).
+fn basis_to_bezier(m: &[[f32; 4]; 4], cp: &[Vec3A; 4]) -> [Vec3A; 4] {
+    let coeff = |row: usize| -> Vec3A {
+        let mut s = Vec3A::ZERO;
+        for c in 0..4 {
+            s += cp[c] * m[row][c];
+        }
+        s
+    };
+    let (a, b, c, d) = (coeff(0), coeff(1), coeff(2), coeff(3));
+    let p0 = d;
+    let p1 = d + c / 3.0;
+    let p2 = d + c * (2.0 / 3.0) + b / 3.0;
+    let p3 = a + b + c + d;
+    [p0, p1, p2, p3]
+}
 
-/// Import a `UsdGeomBasisCurves` batch as round (sphere-swept) curve
-/// segments: `linear` curves directly, `cubic` curves (bezier / bspline /
-/// catmullRom) flattened to a polyline at `CURVE_FLATTEN_SEGS` samples per
-/// span. Widths (diameters, per USD) may be authored per point (`vertex`),
-/// per curve, or constant; anything else falls back to the first value.
-/// The segments live in local space under an `Instance`, like meshes.
-/// The curve batch flattened into round segments, in the prim's *local*
-/// space. Shared by the top-level emitter and the prototype collector; the
-/// caller supplies the placement.
-fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Vec<CurveSegment>> {
+/// Import a `UsdGeomBasisCurves` batch as round (sphere-swept) curves:
+/// `linear` curves directly as [`CurveSegment`]s, `cubic` curves (bezier /
+/// bspline / catmullRom) as one [`CubicCurveSegment`] per span — its
+/// control points converted to Bézier form (`basis_to_bezier`) and
+/// intersected analytically (`crust_rt::curve::cubic_curve_intersect`)
+/// rather than flattened to a polyline. A dense xgen-style archive (grass,
+/// needles) attaches tens of millions of these; one primitive per
+/// authored span instead of several flattened straight segments is the
+/// difference between that fitting in memory and not.
+///
+/// Widths (diameters, per USD) may be authored per point (`vertex`), per
+/// curve, or constant; anything else falls back to the first value. Both
+/// vectors live in local space under an `Instance`, like meshes. Shared by
+/// the top-level emitter and the prototype collector; the caller supplies
+/// the placement.
+fn curve_segments(
+    prim: &Prim,
+    curves: &UsdBasisCurves,
+) -> Option<(Vec<CurveSegment>, Vec<CubicCurveSegment>)> {
     let points: Option<Vec<Vec3f>> = curves
         .points_attr()
         .get::<sdf::Value>()
@@ -1447,6 +1496,7 @@ fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Vec<CurveSegme
     };
 
     let mut segments: Vec<CurveSegment> = Vec::new();
+    let mut cubic_segments: Vec<CubicCurveSegment> = Vec::new();
     let mut offset = 0usize;
     for (curve_idx, &cnt) in counts.iter().enumerate() {
         let cnt = cnt as usize;
@@ -1471,9 +1521,10 @@ fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Vec<CurveSegme
                 });
             }
         } else {
-            // Cubic: flatten each span. Span k uses control points
-            // [k·vstep .. k·vstep+3]; widths interpolate linearly over the
-            // curve parameter between the span's end control points.
+            // Cubic: one CubicCurveSegment per span. Span k uses control
+            // points [k·vstep .. k·vstep+3], converted to Bézier form;
+            // widths interpolate linearly over the curve parameter
+            // between the span's end control points.
             if cnt < 4 {
                 offset += cnt;
                 continue;
@@ -1482,39 +1533,30 @@ fn curve_segments(prim: &Prim, curves: &UsdBasisCurves) -> Option<Vec<CurveSegme
             for s in 0..n_spans {
                 let base = s * vstep;
                 let ctrl = [cp[base], cp[base + 1], cp[base + 2], cp[base + 3]];
-                let (w0, w1) = (radius(base), radius(base + 3));
-                let mut prev_p = eval_cubic(basis, &ctrl, 0.0);
-                let mut prev_r = w0;
-                for i in 1..=CURVE_FLATTEN_SEGS {
-                    let t = i as f32 / CURVE_FLATTEN_SEGS as f32;
-                    let p = eval_cubic(basis, &ctrl, t);
-                    let r = w0 + (w1 - w0) * t;
-                    segments.push(CurveSegment {
-                        p0: prev_p,
-                        p1: p,
-                        r0: prev_r,
-                        r1: r,
-                    });
-                    prev_p = p;
-                    prev_r = r;
-                }
+                let (r0, r1) = (radius(base), radius(base + 3));
+                cubic_segments.push(CubicCurveSegment {
+                    cp: basis_to_bezier(basis, &ctrl),
+                    r0,
+                    r1,
+                });
             }
         }
         offset += cnt;
     }
 
-    if segments.is_empty() {
+    if segments.is_empty() && cubic_segments.is_empty() {
         debug!("BasisCurves at {} produced no segments", prim.path());
         return None;
     }
     info!(
-        "Imported BasisCurves at {} ({} {} curves, {} segments)",
+        "Imported BasisCurves at {} ({} {} curves, {} segments, {} cubic spans)",
         prim.path(),
         counts.len(),
         ty,
-        segments.len()
+        segments.len(),
+        cubic_segments.len()
     );
-    Some(segments)
+    Some((segments, cubic_segments))
 }
 
 fn emit_curves(
@@ -1524,7 +1566,7 @@ fn emit_curves(
     world_xf: GMat4,
     material: Arc<dyn Material>,
 ) {
-    let Some(segments) = curve_segments(prim, curves) else {
+    let Some((segments, cubic_segments)) = curve_segments(prim, curves) else {
         return;
     };
     if world_xf.determinant().abs() < 1e-12 {
@@ -1535,7 +1577,14 @@ fn emit_curves(
         return;
     }
     let mut b = RtSceneBuilder::new();
-    b.attach(Geometry::RoundCurves { segments });
+    if !segments.is_empty() {
+        b.attach(Geometry::RoundCurves { segments });
+    }
+    if !cubic_segments.is_empty() {
+        b.attach(Geometry::CubicCurves {
+            segments: cubic_segments,
+        });
+    }
     world.attach_masked(
         Geometry::Instance {
             scene: Arc::new(b.commit()),
@@ -2303,5 +2352,50 @@ fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
         // color3f is stored as Vec3f in sdf::Value
         sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod curve_basis_tests {
+    use super::*;
+
+    #[test]
+    fn bezier_basis_round_trips_unchanged() {
+        let cp = [
+            Vec3A::new(0.0, 0.0, 0.0),
+            Vec3A::new(1.0, 2.0, 0.0),
+            Vec3A::new(2.0, -1.0, 1.0),
+            Vec3A::new(3.0, 0.0, 0.0),
+        ];
+        let out = basis_to_bezier(&BEZIER_M, &cp);
+        for i in 0..4 {
+            assert!(out[i].abs_diff_eq(cp[i], 1e-5), "index {i}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn bspline_and_catmull_rom_convert_to_the_same_curve() {
+        // The converted Bézier control points, evaluated via the standard
+        // Bernstein formula, must trace exactly the curve the original
+        // basis matrix evaluates directly — checked densely over the
+        // span, not just at the endpoints.
+        let cp = [
+            Vec3A::new(0.0, 0.0, 0.0),
+            Vec3A::new(1.0, 2.0, 0.5),
+            Vec3A::new(2.0, -1.0, 1.0),
+            Vec3A::new(3.5, 1.0, -0.5),
+        ];
+        for basis in [&BSPLINE_M, &CATMULL_ROM_M] {
+            let bezier_cp = basis_to_bezier(basis, &cp);
+            for i in 0..=10 {
+                let t = i as f32 / 10.0;
+                let direct = eval_cubic(basis, &cp, t);
+                let via_bezier = eval_cubic(&BEZIER_M, &bezier_cp, t);
+                assert!(
+                    direct.abs_diff_eq(via_bezier, 1e-4),
+                    "t={t}: direct={direct:?} via_bezier={via_bezier:?}"
+                );
+            }
+        }
     }
 }

@@ -34,13 +34,6 @@ pub(crate) trait Prim: Send + Sync {
 
     fn bbox(&self) -> AABB;
 
-    /// `Some` for triangles, which the BVH groups into 4-wide SIMD packets
-    /// when it builds its leaves. Avoids downcasting: a primitive simply
-    /// declares whether it can join a packet.
-    fn as_triangle(&self) -> Option<&TrianglePrim> {
-        None
-    }
-
     /// Conservative bounds of the part inside the axis slab, for the
     /// BVH's spatial splits. Default: bbox clipped to the slab.
     fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
@@ -118,10 +111,6 @@ impl Prim for TrianglePrim {
 
     fn bbox(&self) -> AABB {
         triangle_aabb(self.v0, self.v1, self.v2)
-    }
-
-    fn as_triangle(&self) -> Option<&TrianglePrim> {
-        Some(self)
     }
 
     fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
@@ -214,6 +203,53 @@ impl Prim for CurvePrim {
         let a = AABB::new(self.p0 - Vec3A::splat(self.r0), self.p0 + Vec3A::splat(self.r0));
         let b = AABB::new(self.p1 - Vec3A::splat(self.r1), self.p1 + Vec3A::splat(self.r1));
         AABB::surrounding_box(a, b)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Cubic curve span (round, analytically subdivided — see curve.rs)
+// ---------------------------------------------------------------------
+
+/// One authored cubic curve span, stored as its own Bézier control
+/// points rather than pre-flattened into several `CurvePrim`s: a dense
+/// xgen-style curve archive (grass, needles) attaches tens of millions of
+/// these, so cutting each span's primitive count by the flattening factor
+/// (`CURVE_FLATTEN_SEGS` in the USD importer, default 8) is the single
+/// biggest lever on that memory. The full round-tube fidelity survives —
+/// see `crate::curve::cubic_curve_intersect`.
+pub(crate) struct CubicCurvePrim {
+    pub cp: [Vec3A; 4],
+    pub r0: f32,
+    pub r1: f32,
+    pub geom_id: u32,
+    pub prim_id: u32,
+    pub mask: u32,
+}
+
+impl Prim for CubicCurvePrim {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        if masked_out(ray, self.mask) {
+            return None;
+        }
+        let (t, outward) =
+            crate::curve::cubic_curve_intersect(ray, &self.cp, self.r0, self.r1, t_min, t_max)?;
+        Some(PrimHit {
+            t,
+            outward,
+            u: 0.0,
+            v: 0.0,
+            geom_id: self.geom_id,
+            prim_id: self.prim_id,
+        })
+    }
+
+    fn bbox(&self) -> AABB {
+        let radius = self.r0.max(self.r1);
+        let min = self.cp[0].min(self.cp[1]).min(self.cp[2]).min(self.cp[3])
+            - Vec3A::splat(radius);
+        let max = self.cp[0].max(self.cp[1]).max(self.cp[2]).max(self.cp[3])
+            + Vec3A::splat(radius);
+        AABB::new(min, max)
     }
 }
 
@@ -324,5 +360,92 @@ impl Prim for InstancePrim {
 
     fn bbox(&self) -> AABB {
         self.bounds
+    }
+}
+
+// ---------------------------------------------------------------------
+// PrimNode: a closed, unboxed sum of the four prim kinds.
+// ---------------------------------------------------------------------
+
+/// The BVH's actual primitive storage. A trait object (`Box<dyn Prim>`)
+/// puts every primitive in its own heap allocation — fine for a handful
+/// of meshes, but a dense `PointInstancer`-free curve archive (xgen
+/// "grass"/"groundcover") attaches tens of millions of individual curve
+/// segments, and tens of millions of separate small allocations cost real
+/// memory in allocator bookkeeping alone, on top of losing locality
+/// during traversal. `PrimNode` stores the same four kinds inline in one
+/// contiguous `Vec`, dispatching by match instead of vtable.
+///
+/// `Instance` is boxed because `InstancePrim` (two cached transforms plus
+/// an optional motion-blur end transform) is far larger than the other
+/// three variants — an enum's size is its largest variant's, so leaving
+/// it inline would make every triangle and curve pay Instance's size for
+/// nothing. The other three stay inline: none of them are worth an
+/// allocation on their own.
+pub(crate) enum PrimNode {
+    Triangle(TrianglePrim),
+    Sphere(SpherePrim),
+    Curve(CurvePrim),
+    /// Boxed for the same reason as `Instance`: at 4 `Vec3A` control
+    /// points, this is bigger than every other variant, and an enum's
+    /// size is its largest variant's — inlining it would tax every
+    /// triangle, sphere and linear-curve segment everywhere in the
+    /// kernel for a variant most of them will never be.
+    CubicCurve(Box<CubicCurvePrim>),
+    Instance(Box<InstancePrim>),
+}
+
+impl PrimNode {
+    #[inline]
+    pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        match self {
+            PrimNode::Triangle(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Sphere(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Curve(p) => p.hit(ray, t_min, t_max),
+            PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Instance(p) => p.hit(ray, t_min, t_max),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        match self {
+            PrimNode::Triangle(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::Curve(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::CubicCurve(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::Instance(p) => p.hit_any(ray, t_min, t_max),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn bbox(&self) -> AABB {
+        match self {
+            PrimNode::Triangle(p) => p.bbox(),
+            PrimNode::Sphere(p) => p.bbox(),
+            PrimNode::Curve(p) => p.bbox(),
+            PrimNode::CubicCurve(p) => p.bbox(),
+            PrimNode::Instance(p) => p.bbox(),
+        }
+    }
+
+    /// `Some` for triangles only — see `Prim::as_triangle`.
+    #[inline]
+    pub(crate) fn as_triangle(&self) -> Option<&TrianglePrim> {
+        match self {
+            PrimNode::Triangle(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        match self {
+            PrimNode::Triangle(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::Sphere(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::Curve(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::CubicCurve(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::Instance(p) => p.clipped_aabb(axis, min, max),
+        }
     }
 }
