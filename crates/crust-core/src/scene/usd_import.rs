@@ -10,7 +10,7 @@ use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
 
 use crate::camera::Camera;
-use crate::light::{AreaLight, LightList, RectShape, SphereShape};
+use crate::light::{AreaLight, DistantLight as CoreDistantLight, LightList, RectShape, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
@@ -26,7 +26,8 @@ use openusd::schemas::geom::{
     PointBased, PointInstancer, Sphere as UsdSphere, Xform, Xformable,
 };
 use openusd::schemas::lux::{
-    CylinderLight, DiskLight, DistantLight, DomeLight, Light as UsdLight, RectLight, SphereLight,
+    CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
+    RectLight, SphereLight,
 };
 use openusd::schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use openusd::schemas::shade::{self, Material as UsdMaterial, MaterialBindingAPI, Shader};
@@ -153,6 +154,8 @@ pub(crate) fn load_scene(path: &Path) -> Result<Scene, crate::Error> {
             emit_sphere_light(&mut world, &mut lights, &light, this_world);
         } else if let Ok(Some(light)) = RectLight::get(&stage, prim.path().clone()) {
             emit_rect_light(&mut world, &mut lights, &light, this_world);
+        } else if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
+            emit_distant_light(&mut lights, &light, this_world);
         } else {
             warn_unsupported_light(&stage, &prim);
         }
@@ -1691,6 +1694,34 @@ fn emit_rect_light(
     );
 }
 
+/// Imports a `UsdLuxDistantLight`. The light points down its local -Z, so
+/// the world direction it travels toward is that axis under the prim's
+/// transform. `inputs:angle` is the source's angular *diameter* in degrees
+/// (default 0.53 — the sun's).
+///
+/// `intensity × color × 2^exposure` is taken as the irradiance on a surface
+/// facing the light; [`DistantLight`] derives the radiance over the cone.
+/// The light has no scene geometry, so it is light-list-only: bounce rays
+/// find it by escaping along a direction inside its cone.
+fn emit_distant_light(lights: &mut LightList, light: &UsdDistantLight, world_xf: GMat4) {
+    let direction = world_xf.transform_vector3(Vec3::NEG_Z);
+    if direction.length_squared() < 1e-12 {
+        warn!("DistantLight has a degenerate orientation — skipped");
+        return;
+    }
+    let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53);
+    let irradiance = lux_emission(light);
+    debug!(
+        "DistantLight: direction={:?} angle={}° irradiance={:?}",
+        direction, angle, irradiance
+    );
+    lights.add(Arc::new(CoreDistantLight::new(
+        Vec3A::new(direction.x, direction.y, direction.z),
+        irradiance,
+        angle,
+    )));
+}
+
 fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
     let warn_type = |name: &str| {
         warn!(
@@ -1699,13 +1730,7 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
             prim.path()
         );
     };
-    if DistantLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("DistantLight");
-    } else if DiskLight::get(stage, prim.path().clone())
+    if DiskLight::get(stage, prim.path().clone())
         .ok()
         .flatten()
         .is_some()

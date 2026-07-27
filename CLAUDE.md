@@ -315,11 +315,18 @@ Xform hierarchy into world matrices. Schema mapping:
   - `crust:openpbr` → decoded 1:1 into `OpenPBR`; every input is the camelCase mirror of the
     Rust field name (lossless but non-portable). Reference scene: `samples/openpbr_showcase.usda`.
   - Unbound geometry → grey diffuse `OpenPBR`.
+- `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
+  points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
+  0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
+  made singular, so the integrator keeps one MIS path instead of a delta special case.
+  `intensity × color × 2^exposure` is the **irradiance** on a surface facing the light and
+  the radiance is derived as `E / Ω` — widening the angle softens shadows without changing
+  exposure (Hydra's normalized convention). Bounce rays find it by *escaping* along a
+  direction inside its cone, which is the `Light::escaped` half of MIS.
 - `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
   `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
   emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
-  Other lux types (`DiskLight`, `DistantLight`, `DomeLight`, `CylinderLight`) warn once and
-  are skipped.
+  Other lux types (`DiskLight`, `DomeLight`, `CylinderLight`) warn once and are skipped.
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
   shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
