@@ -24,7 +24,7 @@
 //! change *when* subtrees are built, never *what*.
 
 use crate::aabb::AABB;
-use crate::prim::{Prim, PrimHit, TrianglePrim};
+use crate::prim::{PrimHit, PrimNode, TrianglePrim};
 use crate::ray::Ray;
 use crate::triangle::{RayShear, Tri4};
 use glam::{Vec3A, Vec4};
@@ -162,7 +162,7 @@ pub(crate) struct Bvh {
     /// primitive in more than one leaf.
     indices: Vec<u32>,
     /// The primitives, stored once each, in input order.
-    prims: Vec<Box<dyn Prim>>,
+    prims: Vec<PrimNode>,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
 }
@@ -189,7 +189,7 @@ struct Subtree {
 }
 
 impl Bvh {
-    pub(crate) fn new(prims: Vec<Box<dyn Prim>>) -> Self {
+    pub(crate) fn new(prims: Vec<PrimNode>) -> Self {
         let refs: Vec<PrimRef> = prims
             .iter()
             .enumerate()
@@ -699,7 +699,7 @@ fn best_object_split(refs: &[PrimRef]) -> Option<ObjSplit> {
 /// Binned spatial split on the node's longest axis: references straddling
 /// a bin contribute their *clipped* bounds to it (entry/exit counting), so
 /// the candidate children reflect what duplication would actually produce.
-fn best_spatial_split(prims: &[Box<dyn Prim>], refs: &[PrimRef], bbox: &AABB) -> Option<SpatSplit> {
+fn best_spatial_split(prims: &[PrimNode], refs: &[PrimRef], bbox: &AABB) -> Option<SpatSplit> {
     let extent = bbox.maximum - bbox.minimum;
     let axis = if extent.x >= extent.y && extent.x >= extent.z {
         0
@@ -785,7 +785,7 @@ fn best_spatial_split(prims: &[Box<dyn Prim>], refs: &[PrimRef], bbox: &AABB) ->
 /// (locally indexed — `merge` rebases children). `root_area` normalizes
 /// the SBVH overlap test.
 fn build_subtree(
-    prims: &[Box<dyn Prim>],
+    prims: &[PrimNode],
     mut refs: Vec<PrimRef>,
     depth: usize,
     root_area: f32,
@@ -883,7 +883,7 @@ fn build_subtree(
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
 /// fallback: object-partition when possible, else leaf.
 fn object_partition_or_leaf(
-    prims: &[Box<dyn Prim>],
+    prims: &[PrimNode],
     mut refs: Vec<PrimRef>,
     bbox: AABB,
     object: Option<ObjSplit>,
@@ -910,7 +910,7 @@ fn object_partition_or_leaf(
 /// The leaf-size floor for this range: [`MIN_LEAF_PACKED`] when every
 /// reference is a triangle (so the leaf becomes exactly one SIMD packet),
 /// [`MIN_LEAF`] otherwise.
-fn min_leaf_for(prims: &[Box<dyn Prim>], refs: &[PrimRef]) -> usize {
+fn min_leaf_for(prims: &[PrimNode], refs: &[PrimRef]) -> usize {
     if refs
         .iter()
         .all(|r| prims[r.idx as usize].as_triangle().is_some())
@@ -954,7 +954,7 @@ impl LeafData {
     ///
     /// Packets are emitted contiguously per leaf, so a leaf's packets are
     /// one linear sweep of memory at traversal time.
-    fn push_leaf(&mut self, range: &[u32], prims: &[Box<dyn Prim>]) -> u32 {
+    fn push_leaf(&mut self, range: &[u32], prims: &[PrimNode]) -> u32 {
         let pkt_first = self.packets.len() as u32;
         let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, u32)> = Vec::with_capacity(4);
         let idx_first = self.indices.len() as u32;
@@ -1000,7 +1000,7 @@ impl LeafData {
 fn collapse(
     binary: &[Node],
     indices: &[u32],
-    prims: &[Box<dyn Prim>],
+    prims: &[PrimNode],
 ) -> (Vec<WideNode>, LeafData) {
     let mut out = Vec::with_capacity(binary.len() / 2 + 1);
     let mut data = LeafData::default();
@@ -1029,7 +1029,7 @@ fn leaf_range<'a>(node: &Node, indices: &'a [u32]) -> &'a [u32] {
 fn collapse_node(
     binary: &[Node],
     indices: &[u32],
-    prims: &[Box<dyn Prim>],
+    prims: &[PrimNode],
     b_idx: u32,
     out: &mut Vec<WideNode>,
     data: &mut LeafData,
@@ -1081,12 +1081,12 @@ mod tests {
     use crate::prim::{SpherePrim, TrianglePrim};
     use crate::ray::MASK_ALL;
 
-    fn sphere_grid(n: i32) -> Vec<Box<dyn Prim>> {
-        let mut out: Vec<Box<dyn Prim>> = Vec::new();
+    fn sphere_grid(n: i32) -> Vec<PrimNode> {
+        let mut out: Vec<PrimNode> = Vec::new();
         for x in 0..n {
             for y in 0..n {
                 for z in 0..n {
-                    out.push(Box::new(SpherePrim {
+                    out.push(PrimNode::Sphere(SpherePrim {
                         center: Vec3A::new(x as f32, y as f32, z as f32) * 3.0,
                         radius: 0.5,
                         geom_id: (x * n * n + y * n + z) as u32,
@@ -1101,11 +1101,11 @@ mod tests {
     /// Long thin diagonal triangles — the geometry spatial splits exist
     /// for. Built so object splits alone leave heavily overlapping
     /// children.
-    fn diagonal_shards(n: i32) -> Vec<Box<dyn Prim>> {
-        let mut out: Vec<Box<dyn Prim>> = Vec::new();
+    fn diagonal_shards(n: i32) -> Vec<PrimNode> {
+        let mut out: Vec<PrimNode> = Vec::new();
         for i in 0..n {
             let o = i as f32 * 0.35;
-            out.push(Box::new(TrianglePrim {
+            out.push(PrimNode::Triangle(TrianglePrim {
                 v0: Vec3A::new(o, o, o),
                 v1: Vec3A::new(o + 10.0, o + 10.0, o + 10.2),
                 v2: Vec3A::new(o + 10.0, o + 10.3, o + 10.0),
@@ -1118,7 +1118,7 @@ mod tests {
         out
     }
 
-    fn linear_scan(prims: &[Box<dyn Prim>], ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+    fn linear_scan(prims: &[PrimNode], ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         let mut closest = t_max;
         let mut best = None;
         for p in prims {
@@ -1130,7 +1130,7 @@ mod tests {
         best
     }
 
-    fn assert_matches_linear(objects: impl Fn() -> Vec<Box<dyn Prim>>) {
+    fn assert_matches_linear(objects: impl Fn() -> Vec<PrimNode>) {
         let bvh = Bvh::new(objects());
         let reference = objects();
 
@@ -1344,7 +1344,7 @@ mod lane_width {
     use crate::ray::MASK_ALL;
     use glam::Vec3A;
 
-    fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<Box<dyn Prim>> {
+    fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
         let mut v = Vec::new();
         for r in 0..=rings {
             let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
@@ -1358,7 +1358,7 @@ mod lane_width {
             }
         }
         let row = segs + 1;
-        let mut out: Vec<Box<dyn Prim>> = Vec::new();
+        let mut out: Vec<PrimNode> = Vec::new();
         let mut id = 0u32;
         for r in 0..rings {
             for s in 0..segs {
@@ -1369,7 +1369,7 @@ mod lane_width {
                     (r + 1) * row + s,
                 );
                 for (i, j, k) in [(a, b, c), (a, c, d)] {
-                    out.push(Box::new(TrianglePrim {
+                    out.push(PrimNode::Triangle(TrianglePrim {
                         v0: v[i],
                         v1: v[j],
                         v2: v[k],
