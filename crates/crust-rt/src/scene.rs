@@ -23,7 +23,9 @@ pub struct CurveSegment {
 
 /// A geometry to attach to a scene. The variants mirror Embree's geometry
 /// types (the subset crust needs): triangle meshes, analytic spheres,
-/// round curves, and single-level instances of another committed scene.
+/// round curves, and instances of another committed scene. Instances nest:
+/// an instanced scene may itself contain instances, and transforms,
+/// normals and ray masks compose correctly through every level.
 pub enum Geometry {
     TriangleMesh {
         vertices: Vec<Vec3A>,
@@ -312,6 +314,157 @@ mod tests {
             .expect("inside hit");
         assert!(!inside.front_face);
         assert!(inside.normal.abs_diff_eq(-Vec3A::Z, 1e-4));
+    }
+
+    /// Does the kernel already nest instances? An `Instance` holds an
+    /// `Arc<Scene>`, and nothing stops that scene from containing
+    /// instances of its own — this asks whether the recursion actually
+    /// works end to end, or only looks like it should.
+    #[test]
+    fn instances_nest() {
+        // Level 0: a unit sphere at the origin.
+        let leaf = unit_sphere_scene();
+
+        // Level 1: two spheres, at local x = ±2.
+        let mut mid = SceneBuilder::new();
+        for x in [-2.0f32, 2.0] {
+            mid.attach(Geometry::Instance {
+                scene: Arc::clone(&leaf),
+                transform: Affine3A::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
+                transform_end: None,
+            });
+        }
+        let mid = Arc::new(mid.commit());
+
+        // Level 2: two copies of that pair, at world y = ±5. Four spheres
+        // in total, from one copy of the sphere's geometry.
+        let mut root = SceneBuilder::new();
+        for y in [-5.0f32, 5.0] {
+            root.attach(Geometry::Instance {
+                scene: Arc::clone(&mid),
+                transform: Affine3A::from_translation(glam::Vec3::new(0.0, y, 0.0)),
+                transform_end: None,
+            });
+        }
+        let scene = root.commit();
+
+        // Two top-level primitives hold four spheres.
+        assert_eq!(scene.primitive_count(), 2);
+
+        for (x, y) in [(-2.0f32, -5.0f32), (2.0, -5.0), (-2.0, 5.0), (2.0, 5.0)] {
+            let ray = Ray::new(Vec3A::new(x, y, -8.0), Vec3A::Z);
+            let hit = scene
+                .intersect(&ray, 0.001, 100.0)
+                .unwrap_or_else(|| panic!("nested sphere at ({x}, {y}) was missed"));
+            assert!(
+                (hit.t - 7.0).abs() < 1e-3,
+                "nested sphere at ({x}, {y}): t = {} (want 7)",
+                hit.t
+            );
+            assert!(
+                hit.normal.abs_diff_eq(-Vec3A::Z, 1e-4),
+                "nested normal wrong at ({x}, {y}): {:?}",
+                hit.normal
+            );
+            assert!(scene.occluded(&ray, 0.001, 100.0));
+        }
+
+        // And nothing where the spheres are not.
+        assert!(
+            scene
+                .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z), 0.001, 100.0)
+                .is_none(),
+            "hit between the nested spheres"
+        );
+    }
+
+    /// Nested instances must compose transforms in the right order, and
+    /// map normals back through both levels. A rotation at the outer level
+    /// and a non-uniform scale at the inner level do not commute, so this
+    /// fails loudly if the composition is inverted.
+    #[test]
+    fn nested_instances_compose_transforms_and_normals() {
+        // Inner: a unit sphere squashed to an ellipsoid by the mid level.
+        let leaf = unit_sphere_scene();
+        let mut mid = SceneBuilder::new();
+        mid.attach(Geometry::Instance {
+            scene: leaf,
+            // 2x along local X only.
+            transform: Affine3A::from_scale(glam::Vec3::new(2.0, 1.0, 1.0)),
+            transform_end: None,
+        });
+        let mid = Arc::new(mid.commit());
+
+        // Outer: rotate that ellipsoid 90 degrees about Z, so its long
+        // axis ends up along world Y.
+        let mut root = SceneBuilder::new();
+        root.attach(Geometry::Instance {
+            scene: mid,
+            transform: Affine3A::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            transform_end: None,
+        });
+        let scene = root.commit();
+
+        // Long axis is now Y: a ray down the Y axis meets the surface at
+        // |y| = 2, while one down X meets it at |x| = 1.
+        let along_y = scene
+            .intersect(&Ray::new(Vec3A::new(0.0, -8.0, 0.0), Vec3A::Y), 0.001, 100.0)
+            .expect("ray along Y must hit the rotated ellipsoid");
+        assert!(
+            (along_y.t - 6.0).abs() < 1e-3,
+            "long axis is not along Y: t = {} (want 6)",
+            along_y.t
+        );
+        let along_x = scene
+            .intersect(&Ray::new(Vec3A::new(-8.0, 0.0, 0.0), Vec3A::X), 0.001, 100.0)
+            .expect("ray along X must hit the rotated ellipsoid");
+        assert!(
+            (along_x.t - 7.0).abs() < 1e-3,
+            "short axis is not along X: t = {} (want 7)",
+            along_x.t
+        );
+
+        // The normal at the Y pole points back down -Y; an inverse
+        // transpose applied at only one level would tilt it.
+        assert!(
+            along_y.normal.abs_diff_eq(-Vec3A::Y, 1e-4),
+            "nested normal not mapped through both levels: {:?}",
+            along_y.normal
+        );
+    }
+
+    /// A ray mask must gate at every level of nesting: hiding the outer
+    /// instance hides everything beneath it.
+    #[test]
+    fn nested_instances_respect_masks_at_each_level() {
+        let leaf = unit_sphere_scene();
+        let mut mid = SceneBuilder::new();
+        mid.attach_masked(
+            Geometry::Instance {
+                scene: leaf,
+                transform: Affine3A::IDENTITY,
+                transform_end: None,
+            },
+            MASK_SHADOW,
+        );
+        let mid = Arc::new(mid.commit());
+
+        let mut root = SceneBuilder::new();
+        root.attach_masked(
+            Geometry::Instance {
+                scene: mid,
+                transform: Affine3A::IDENTITY,
+                transform_end: None,
+            },
+            MASK_SHADOW | MASK_CAMERA,
+        );
+        let scene = root.commit();
+
+        let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
+        // The inner level only admits shadow rays, so a camera ray is
+        // rejected there even though the outer level would allow it.
+        assert!(scene.intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0).is_none());
+        assert!(scene.intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0).is_some());
     }
 
     #[test]

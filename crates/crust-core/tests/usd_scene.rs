@@ -506,3 +506,206 @@ fn point_instancer_honours_invisible_ids() {
     assert!(hit_above(2.2, 1.6), "gem id 14 missing");
     assert!(hit_above(3.8, 2.1), "gem id 15 missing");
 }
+
+/// Nested instancing. `samples/nested_instancing.usda` puts a
+/// `PointInstancer` inside another instancer's prototype, and a natively
+/// instanced prim inside a second prototype.
+#[test]
+fn loads_nested_instancing_usda() {
+    let scene = Scene::from_usd(&sample("nested_instancing.usda"))
+        .expect("failed to open nested_instancing.usda");
+
+    // The Branch prototype expands to 3 parts (leaf, bud husk, bud tip —
+    // one per distinct geometry, since a part carries one material), so
+    // the outer instancer's 5 placements attach 15. Plus 2 planters x 2
+    // parts, the floor and the light.
+    assert_eq!(
+        scene.world.count(),
+        21,
+        "expected 21 geometries (5x3 grove + 2x2 planters + floor + light), got {}",
+        scene.world.count()
+    );
+}
+
+/// Nesting must *nest*, not flatten. Each branch's three leaves live in
+/// one sub-scene placed once, so a branch costs one top-level primitive
+/// per part — not one per leaf. Flattening would multiply the outer
+/// instance count by the inner one, which is the blow-up instancing exists
+/// to prevent.
+#[test]
+fn nested_instancing_does_not_flatten() {
+    let scene = Scene::from_usd(&sample("nested_instancing.usda"))
+        .expect("failed to open nested_instancing.usda");
+
+    // 5 branches x 3 parts + 2 planters x 2 parts + floor (2 tris) +
+    // light (2 tris). Flattening the inner instancer would put each of the
+    // 5x4 = 20 nested placements at the top level instead.
+    assert!(
+        scene.world.primitive_count() <= 24,
+        "nested instances look flattened: {} kernel primitives",
+        scene.world.primitive_count()
+    );
+}
+
+/// Two levels of instancing must compose transforms, and each nested part
+/// must keep the material bound inside the innermost prototype.
+#[test]
+fn nested_instances_compose_transforms_and_keep_materials() {
+    let scene = Scene::from_usd(&sample("nested_instancing.usda"))
+        .expect("failed to open nested_instancing.usda");
+
+    // Shoot along -Z through a point, from well in front of the grove.
+    let at = |x: f32, y: f32| {
+        let ray = crust_core::Ray::new(
+            crust_core::Vec3A::new(x, y, 10.0),
+            -crust_core::Vec3A::Z,
+        );
+        scene.world.intersect(&ray, 0.001, 40.0)
+    };
+
+    // Branch 0 is at (-6.4, 0, -1), unrotated and unscaled. Its first leaf
+    // sits at branch-local (0.45, 1.0, 0) → world (-5.95, 1.0, -1).
+    assert!(at(-5.95, 1.0).is_some(), "branch 0's first leaf is missing");
+    // ...and nothing a metre to its left, where no leaf was placed.
+    assert!(
+        at(-5.95, 1.0 + 1.0).is_none(),
+        "unexpected geometry above branch 0's first leaf"
+    );
+
+    // The bud sits on the branch axis at local y = 3.0, its tip 0.3 above.
+    // Both are hit, and they must be *different* geometries: the husk
+    // binds Leafy and the tip Blossom, so collapsing the nested prototype
+    // into one part would lose a material.
+    let husk = at(-6.4, 3.0).expect("branch 0's bud husk is missing");
+    let tip = at(-6.4, 3.3).expect("branch 0's bud tip is missing");
+    assert_ne!(
+        husk.geom_id, tip.geom_id,
+        "husk and tip collapsed into one geometry — a material was lost"
+    );
+
+    // Branch 1 is scaled 1.25 in y. The bud is on its rotation axis, so
+    // the outer scale is the only thing moving it: local y = 3.0 → 3.75,
+    // and the tip 3.3 → 4.125. That composes the outer instance's scale
+    // with the inner instance's placement, two levels down.
+    assert!(
+        at(-3.2, 3.75).is_some(),
+        "branch 1's bud is not where the outer scale puts it"
+    );
+    assert!(
+        at(-3.2, 4.125).is_some(),
+        "branch 1's bud tip is not where the outer scale puts it"
+    );
+    // Unscaled, it would have been at 3.0 / 3.3 — nothing should be there.
+    assert!(
+        at(-3.2, 3.3).is_none(),
+        "branch 1 was placed as if unscaled"
+    );
+}
+
+/// A multi-part prototype placed by ordinary native instancing: both
+/// planters show their post and their orb, as separate geometries so both
+/// materials survive.
+#[test]
+fn multi_part_prototype_keeps_every_part() {
+    let scene = Scene::from_usd(&sample("nested_instancing.usda"))
+        .expect("failed to open nested_instancing.usda");
+
+    let at = |x: f32, y: f32| {
+        let ray = crust_core::Ray::new(
+            crust_core::Vec3A::new(x, y, 10.0),
+            -crust_core::Vec3A::Z,
+        );
+        scene.world.intersect(&ray, 0.001, 40.0)
+    };
+
+    for x in [-1.9f32, 1.9] {
+        // The post spans y in [0, 1.1] and the orb sits at y = 1.35.
+        let post = at(x, 0.6).unwrap_or_else(|| panic!("planter post at x = {x} is missing"));
+        let orb = at(x, 1.35).unwrap_or_else(|| panic!("planter orb at x = {x} is missing"));
+        assert_ne!(
+            post.geom_id, orb.geom_id,
+            "post and orb must stay separate geometries so both materials survive"
+        );
+    }
+
+    // The `class` prototype is authored at the origin and must not be
+    // drawn there in its own right.
+    assert!(
+        at(0.0, 0.6).is_none(),
+        "a class prototype was drawn at the origin"
+    );
+}
+
+/// An `instanceable` prim *inside* another instance's prototype cannot be
+/// read at all with openusd 0.5.0, so the importer must skip it rather
+/// than abort.
+///
+/// The upstream bug: resolving such a prim's prototype — or reading the
+/// type name of any prim beneath it — reaches
+/// `pcp/instancing.rs::materialize_prototype`, whose `debug_assert!`
+/// ("materialized prototype root's instanceable must be inert") fires.
+/// Debug builds abort; release builds have the assertion compiled out.
+/// The prim itself is safe to inspect (`is_instance`, `children`,
+/// `type_name` all succeed) — only its *contents* are unreachable, which
+/// is why there is no proxy-traversal fallback either.
+///
+/// It is a property of the composed stage, not of crust: it reproduces
+/// with `class` and `def` prototypes alike, and single-level native
+/// instancing and nested `PointInstancer`s are both unaffected.
+///
+/// This test pins graceful degradation — the outer instance still renders,
+/// the unreadable inner one is dropped with a warning. When upstream fixes
+/// it, this test will start seeing the inner geometry and should be
+/// replaced with one asserting the nested content *is* imported.
+#[test]
+fn nested_native_instance_degrades_gracefully() {
+    let dir = std::env::temp_dir().join("crust_nested_native_probe");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("nested_native.usda");
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+(defaultPrim = "W")
+def Xform "W" {
+    class Xform "_Inner" { def Sphere "s" { double radius = 0.5 } }
+    class Xform "_Outer" {
+        def Sphere "outer" { double radius = 0.4 }
+        def Xform "i" (instanceable = true; references = </W/_Inner>) {
+            double3 xformOp:translate = (3, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def Xform "A" (instanceable = true; references = </W/_Outer>) {}
+}
+"#,
+    )
+    .expect("write probe stage");
+
+    // The load must complete. Before the guard this aborted the process.
+    let scene = Scene::from_usd(&path).expect("stage with a nested native instance must load");
+
+    // The outer prototype's own geometry survives; only the unreadable
+    // nested instance is missing.
+    assert_eq!(
+        scene.world.count(),
+        1,
+        "expected the outer sphere only (the nested instance is unreadable upstream), got {}",
+        scene.world.count()
+    );
+
+    let hit = |x: f32| {
+        let ray = crust_core::Ray::new(
+            crust_core::Vec3A::new(x, 0.0, 10.0),
+            -crust_core::Vec3A::Z,
+        );
+        scene.world.intersect(&ray, 0.001, 40.0).is_some()
+    };
+    assert!(hit(0.0), "the outer prototype's own sphere should render");
+    assert!(
+        !hit(3.0),
+        "the nested instance is expected to be missing — if this now hits, \
+         openusd has been fixed and the skip in collect_proto_parts can go"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
