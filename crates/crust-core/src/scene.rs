@@ -2,6 +2,7 @@ use crate::camera::Camera;
 use crate::environment::EnvironmentMap;
 use crate::light::LightList;
 use crate::rt_world::World;
+use crate::stats::RenderStats;
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
@@ -18,6 +19,10 @@ pub struct Scene {
     /// Participating-media regions (smoke, fog, …), kept outside `world`
     /// so their bounds never act as occluding geometry.
     pub volumes: Vec<VolumeRegion>,
+    /// Import phase timings and scene counts. Populated by
+    /// [`Scene::from_usd`]; empty for a hand-assembled scene. The host adds
+    /// its own render and output phases before reporting.
+    pub stats: RenderStats,
 }
 
 impl Scene {
@@ -33,6 +38,7 @@ impl Scene {
             lights,
             settings,
             volumes: Vec::new(),
+            stats: RenderStats::new(),
         }
     }
 

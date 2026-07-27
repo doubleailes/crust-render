@@ -26,6 +26,7 @@
 use crate::aabb::AABB;
 use crate::prim::{PrimHit, PrimNode, TrianglePrim};
 use crate::ray::Ray;
+use crate::scene::PrimitiveBreakdown;
 use crate::triangle::{RayShear, Tri4};
 use glam::{Vec3A, Vec4};
 
@@ -220,6 +221,46 @@ impl Bvh {
 
     pub(crate) fn prim_count(&self) -> usize {
         self.prims.len()
+    }
+
+    pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
+        let mut b = PrimitiveBreakdown::default();
+        for p in &self.prims {
+            match p {
+                PrimNode::Triangle(_) => b.triangles += 1,
+                PrimNode::Sphere(_) => b.spheres += 1,
+                PrimNode::Curve(_) => b.curve_segments += 1,
+                PrimNode::CubicCurve(_) => b.cubic_curve_spans += 1,
+                PrimNode::Instance(_) => b.instances += 1,
+            }
+        }
+        b
+    }
+
+    /// Adds this BVH's primitives to `acc`, descending into each *distinct*
+    /// instanced scene exactly once — `visited` holds the `Arc` addresses
+    /// already counted. The result is the geometry actually resident in
+    /// memory: a prototype shared by a thousand placements is counted once,
+    /// which is precisely what distinguishes instanced from baked geometry.
+    pub(crate) fn accumulate_unique(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut PrimitiveBreakdown,
+    ) {
+        for p in &self.prims {
+            match p {
+                PrimNode::Triangle(_) => acc.triangles += 1,
+                PrimNode::Sphere(_) => acc.spheres += 1,
+                PrimNode::Curve(_) => acc.curve_segments += 1,
+                PrimNode::CubicCurve(_) => acc.cubic_curve_spans += 1,
+                PrimNode::Instance(i) => {
+                    acc.instances += 1;
+                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                        i.scene.accumulate_unique_into(visited, acc);
+                    }
+                }
+            }
+        }
     }
 
     /// The per-ray Woop shear, derived once per traversal — but only for

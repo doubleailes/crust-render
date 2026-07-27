@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
@@ -19,6 +20,7 @@ use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
 use crate::scene::Scene;
+use crate::stats::{ImageCounters, RenderStats, SceneCounters};
 use crust_rt::{
     CubicCurveSegment, CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
@@ -56,14 +58,19 @@ const DEFAULT_GUIDING_PROB: f32 = 0.5;
 const MAX_INSTANCE_NESTING: usize = 8;
 
 pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
+    let import_start = Instant::now();
+    let mut stats = RenderStats::new();
+
     let path_str = path
         .to_str()
         .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
 
+    let open_start = Instant::now();
     let stage = Stage::open(path_str).map_err(|e| crate::Error::UsdOpen {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
+    let open_elapsed = open_start.elapsed();
 
     // Render settings come first — the camera importer needs the aspect ratio.
     let settings = import_render_settings(&stage);
@@ -77,7 +84,11 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     // scene through instancing — N placements of a mesh cost one copy of
     // its triangles.
     let mut caches = ImportCaches::default();
+    // Time the host spends decoding assets, subtracted out of the traverse
+    // phase below so the two costs are not conflated.
+    let mut asset_time = Duration::ZERO;
 
+    let traverse_start = Instant::now();
     let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
 
     while let Some((prim, parent_world)) = stack.pop() {
@@ -170,7 +181,15 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         } else if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
             emit_distant_light(&mut lights, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(&stage, prim.path().clone()) {
-            emit_dome_light(&mut lights, &prim, &light, this_world, path, assets);
+            emit_dome_light(
+                &mut lights,
+                &prim,
+                &light,
+                this_world,
+                path,
+                assets,
+                &mut asset_time,
+            );
         } else {
             warn_unsupported_light(&stage, &prim);
         }
@@ -184,12 +203,46 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         }
     }
 
+    // The traverse also builds each mesh's and prototype's kernel scene,
+    // so its own BVH work is inside this figure; the separate "Commit
+    // acceleration structure" phase below is the *top-level* build.
+    let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
+
     let camera = camera_candidate.unwrap_or_else(|| {
         warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
         crate::world::get_settings().0
     });
 
-    Ok(Scene::new(camera, world.commit(), lights, settings).with_volumes(volumes))
+    let commit_start = Instant::now();
+    let committed = world.commit();
+    let commit_elapsed = commit_start.elapsed();
+
+    stats.record("Parse USD stage", 0, import_start.elapsed());
+    stats.record("Open stage", 1, open_elapsed);
+    stats.record("Traverse prims", 1, traverse_elapsed);
+    if !asset_time.is_zero() {
+        stats.record("Load assets", 1, asset_time);
+    }
+    stats.record("Commit acceleration structure", 1, commit_elapsed);
+
+    stats.scene = SceneCounters {
+        geometries: committed.count(),
+        top_level: committed.primitive_breakdown().into(),
+        unique: committed.unique_primitive_breakdown().into(),
+        lights: lights.count(),
+        volumes: volumes.len(),
+    };
+    let (w, h) = settings.get_dimensions();
+    stats.image = ImageCounters {
+        width: w,
+        height: h,
+        samples_per_pixel: settings.samples_per_pixel(),
+        max_depth: settings.max_depth(),
+    };
+
+    let mut scene = Scene::new(camera, committed, lights, settings).with_volumes(volumes);
+    scene.stats = stats;
+    Ok(scene)
 }
 
 // -----------------------------------------------------------------------
@@ -1816,6 +1869,9 @@ fn emit_dome_light(
     world_xf: GMat4,
     stage_path: &Path,
     assets: &dyn AssetLoader,
+    // Accumulates time spent in the host's decoder, so the report can
+    // separate "decoding a 14k HDRI" from the rest of the traversal.
+    asset_time: &mut Duration,
 ) {
     let tint = lux_emission(light);
 
@@ -1833,7 +1889,9 @@ fn emit_dome_light(
             // `automatic` infers from the image; for the equirectangular
             // images a dome light normally carries that means latlong.
             None | Some("latlong") | Some("automatic") => {
+                let started = Instant::now();
                 let loaded = assets.load_environment(&texture);
+                *asset_time += started.elapsed();
                 if loaded.is_none() {
                     warn!(
                         "DomeLight at {}: could not load {} — falling back to \

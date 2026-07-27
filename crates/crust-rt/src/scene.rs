@@ -22,6 +22,17 @@ pub struct CurveSegment {
     pub r1: f32,
 }
 
+/// Top-level primitives of a committed [`Scene`], split by kind. See
+/// [`Scene::primitive_breakdown`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrimitiveBreakdown {
+    pub triangles: usize,
+    pub spheres: usize,
+    pub curve_segments: usize,
+    pub cubic_curve_spans: usize,
+    pub instances: usize,
+}
+
 /// One authored cubic curve span — its own Bézier control points and end
 /// radii, intersected analytically (`crate::curve::cubic_curve_intersect`)
 /// rather than pre-flattened into several [`CurveSegment`]s. Round, same
@@ -284,6 +295,39 @@ impl Scene {
         self.bvh.prim_count()
     }
 
+    /// Top-level primitives split by kind, for reporting. Instances count
+    /// as one primitive each and are *not* descended into — the instanced
+    /// scene's own contents are its own `Scene`'s business, and a
+    /// prototype shared by a thousand placements would otherwise be
+    /// counted a thousand times.
+    pub fn primitive_breakdown(&self) -> PrimitiveBreakdown {
+        self.bvh.primitive_breakdown()
+    }
+
+    /// Primitives actually resident in memory: like
+    /// [`Scene::primitive_breakdown`], but descending into instanced
+    /// scenes, counting each distinct prototype **once** however many
+    /// placements reference it.
+    ///
+    /// This is the count that tracks memory. `primitive_breakdown` says
+    /// what the top-level BVH traverses; this says what is stored. For an
+    /// instance-heavy scene the two differ enormously, and the gap is the
+    /// whole benefit of instancing.
+    pub fn unique_primitive_breakdown(&self) -> PrimitiveBreakdown {
+        let mut visited = std::collections::HashSet::new();
+        let mut acc = PrimitiveBreakdown::default();
+        self.accumulate_unique_into(&mut visited, &mut acc);
+        acc
+    }
+
+    pub(crate) fn accumulate_unique_into(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut PrimitiveBreakdown,
+    ) {
+        self.bvh.accumulate_unique(visited, acc);
+    }
+
     /// Internal closest-hit that keeps the *outward* (unoriented) normal,
     /// so instance transforms can map it without re-deriving orientation.
     pub(crate) fn intersect_outward(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
@@ -425,6 +469,44 @@ mod tests {
                 .is_none(),
             "hit between the nested spheres"
         );
+    }
+
+    /// The reporting counts: the top-level view sees instances, the unique
+    /// view descends but counts a shared prototype only once — the whole
+    /// point being that four placed spheres cost one sphere of memory.
+    #[test]
+    fn unique_breakdown_counts_shared_prototypes_once() {
+        let leaf = unit_sphere_scene();
+        let mut mid = SceneBuilder::new();
+        for x in [-2.0f32, 2.0] {
+            mid.attach(Geometry::Instance {
+                scene: Arc::clone(&leaf),
+                transform: Affine3A::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
+                transform_end: None,
+            });
+        }
+        let mid = Arc::new(mid.commit());
+        let mut root = SceneBuilder::new();
+        for y in [-5.0f32, 5.0] {
+            root.attach(Geometry::Instance {
+                scene: Arc::clone(&mid),
+                transform: Affine3A::from_translation(glam::Vec3::new(0.0, y, 0.0)),
+                transform_end: None,
+            });
+        }
+        let scene = root.commit();
+
+        // Top level: the two outer placements, no spheres visible yet.
+        let top = scene.primitive_breakdown();
+        assert_eq!(top.instances, 2);
+        assert_eq!(top.spheres, 0);
+
+        // Unique: descends both levels, but `mid` is one Arc shared by two
+        // placements and `leaf` one Arc shared by two more — so exactly one
+        // sphere is resident, reached through 2 + 2 instance primitives.
+        let unique = scene.unique_primitive_breakdown();
+        assert_eq!(unique.spheres, 1, "shared prototype counted more than once");
+        assert_eq!(unique.instances, 4);
     }
 
     /// Nested instances must compose transforms in the right order, and

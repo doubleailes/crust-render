@@ -126,6 +126,18 @@ impl World {
         self.scene.primitive_count()
     }
 
+    /// Top-level primitives split by kind — see
+    /// [`crust_rt::Scene::primitive_breakdown`].
+    pub fn primitive_breakdown(&self) -> crust_rt::PrimitiveBreakdown {
+        self.scene.primitive_breakdown()
+    }
+
+    /// Primitives resident in memory, counting each distinct instanced
+    /// prototype once — see [`crust_rt::Scene::unique_primitive_breakdown`].
+    pub fn unique_primitive_breakdown(&self) -> crust_rt::PrimitiveBreakdown {
+        self.scene.unique_primitive_breakdown()
+    }
+
     /// The material bound to a geometry.
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()
