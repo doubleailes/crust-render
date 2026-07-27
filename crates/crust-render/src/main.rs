@@ -2,13 +2,97 @@ use clap::Parser;
 use crust_core::Buffer;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
-use crust_core::Scene;
+use crust_core::{AssetLoader, EnvironmentMap, Scene, Vec3A};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{Level, debug, error, info};
+
+/// The host side of `crust_core::AssetLoader`: the engine asks for pixels,
+/// the CLI decodes them. That split is why `crust-core` carries no image
+/// dependencies — everything that knows a file format lives here.
+///
+/// Formats follow the dependencies already linked for writing output:
+/// OpenEXR through `exr`, Radiance `.hdr` and LDR images through `image`.
+/// LDR pixels are un-gamma'd to linear, since the renderer works in linear
+/// light and an sRGB-encoded sky would be noticeably wrong.
+struct CliAssets;
+
+impl AssetLoader for CliAssets {
+    fn load_environment(&self, path: &Path) -> Option<EnvironmentMap> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let started = Instant::now();
+        let loaded = match ext.as_str() {
+            "exr" => load_exr_environment(path),
+            _ => load_image_environment(path),
+        };
+        match &loaded {
+            Some(map) => info!(
+                "Loaded environment {} ({}x{}) in {:?}",
+                path.display(),
+                map.width(),
+                map.height(),
+                started.elapsed()
+            ),
+            None => error!("Could not load environment {}", path.display()),
+        }
+        loaded
+    }
+}
+
+fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
+    let image = read_first_rgba_layer_from_file(
+        path,
+        |resolution, _| {
+            let (w, h) = (resolution.width(), resolution.height());
+            (w, h, vec![Vec3A::ZERO; w * h])
+        },
+        |(w, _h, pixels): &mut (usize, usize, Vec<Vec3A>),
+         pos,
+         (r, g, b, _a): (f32, f32, f32, f32)| {
+            pixels[pos.y() * *w + pos.x()] = Vec3A::new(r, g, b);
+        },
+    )
+    .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
+    .ok()?;
+    let (w, h, pixels) = image.layer_data.channel_data.pixels;
+    EnvironmentMap::new(w, h, pixels)
+}
+
+fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
+    let decoded = image::open(path)
+        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
+        .ok()?;
+    let rgb = decoded.to_rgb32f();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    // `to_rgb32f` keeps HDR values as authored, but rescales integer
+    // formats to 0..1 *without* removing their sRGB transfer curve. Undo it
+    // for those, so an LDR sky lights the scene in linear light.
+    let is_hdr = matches!(
+        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("hdr")
+    );
+    let to_linear = |c: f32| {
+        if is_hdr {
+            c
+        } else if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let pixels = rgb
+        .pixels()
+        .map(|p| Vec3A::new(to_linear(p[0]), to_linear(p[1]), to_linear(p[2])))
+        .collect();
+    EnvironmentMap::new(w, h, pixels)
+}
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 enum LoggerLevel {
@@ -123,7 +207,7 @@ fn main() {
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
         debug!("Scene loaded at path: {:?}", input_path);
-        match Scene::from_usd(input_path) {
+        match Scene::from_usd_with_assets(input_path, &CliAssets) {
             Ok(scene) => scene,
             Err(e) => {
                 error!("Failed to load USD scene: {}", e);
@@ -199,5 +283,71 @@ fn main() {
             error!("Error writing PNG: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host side of the asset seam: an EXR written to disk must come
+    /// back as pixels the engine can build a map from, with the geometry
+    /// and values intact. `crust-core` cannot test this — it has no
+    /// decoder, which is the whole point of the split.
+    #[test]
+    fn exr_environment_round_trips() {
+        let dir = std::env::temp_dir().join("crust_env_round_trip");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("env.exr");
+
+        let (w, h) = (8usize, 4usize);
+        // A value per texel that is unmistakable and not 0..1, so an
+        // accidental LDR clamp or gamma would show up.
+        let value = |x: usize, y: usize| (x as f32 + 10.0 * y as f32, 2.0, 0.5);
+        exr::prelude::write_rgb_file(&path, w, h, |x, y| value(x, y)).expect("write exr");
+
+        let map = load_exr_environment(&path).expect("decode the EXR we just wrote");
+        assert_eq!((map.width(), map.height()), (w, h));
+
+        // Row 0 is the +Y pole by convention, so straight up must read the
+        // first row. Sampling nearest-texel, +Y lands in column 0.
+        let up = map.radiance(Vec3A::Y);
+        assert!(
+            (up.x - value(0, 0).0).abs() < 1e-4 && (up.y - 2.0).abs() < 1e-4,
+            "top-row lookup returned {up:?}"
+        );
+
+        // And a high dynamic range value survives unclamped.
+        let low = map.radiance(-Vec3A::Y);
+        assert!(low.x > 20.0, "bottom row was clamped or gamma'd: {low:?}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// LDR images are sRGB-encoded; the renderer works in linear light, so
+    /// the loader must undo the transfer curve or an image-based sky is
+    /// noticeably wrong.
+    #[test]
+    fn ldr_images_are_converted_to_linear() {
+        let dir = std::env::temp_dir().join("crust_env_round_trip");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("env.png");
+
+        // Mid-grey in sRGB (188/255 ~ 0.7373) is ~0.5 in linear light.
+        let mut img = image::RgbImage::new(4, 2);
+        for p in img.pixels_mut() {
+            *p = image::Rgb([188, 188, 188]);
+        }
+        img.save(&path).expect("write png");
+
+        let map = load_image_environment(&path).expect("decode the PNG we just wrote");
+        let c = map.radiance(Vec3A::Y);
+        assert!(
+            (c.x - 0.5).abs() < 0.02,
+            "sRGB 188 should be ~0.5 linear, got {}",
+            c.x
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

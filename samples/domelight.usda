@@ -1,0 +1,119 @@
+#usda 1.0
+(
+    doc = "Lights at infinity: a UsdLuxDomeLight carrying a lat-long HDRI (sky_env.exr, with a small very bright sun disc that importance sampling has to find) and a UsdLuxDistantLight for the sharp key. Neither has scene geometry — bounce rays find them by escaping, so the dome replaces the built-in sky gradient."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 28
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 2.3, 8.5)
+        float xformOp:rotateX = -8
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # The environment. `intensity` scales the map; the prim's rotation
+    # turns the sky, which is why the sun in the HDRI lands where it does.
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 1.0
+        color3f inputs:color = (1, 1, 1)
+        asset inputs:texture:file = @sky_env.exr@
+        token inputs:texture:format = "latlong"
+        float xformOp:rotateY = 20
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+    }
+
+    # The key. `inputs:angle` is the source's angular diameter, so widening
+    # it softens the shadow without changing exposure.
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 2.2
+        float inputs:angle = 1.5
+        color3f inputs:color = (1.0, 0.94, 0.82)
+        float xformOp:rotateY = 40
+        float xformOp:rotateX = -48
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def Sphere "Chrome" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 1.0
+        rel material:binding = </World/Looks/Metal>
+        double3 xformOp:translate = (-1.6, 1.0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Matte" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 1.0
+        rel material:binding = </World/Looks/Clay>
+        double3 xformOp:translate = (1.6, 1.0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/Ground>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-40, 0, -40), (40, 0, -40), (40, 0, 40), (-40, 0, 40)]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Metal"
+        {
+            token outputs:surface.connect = </World/Looks/Metal/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.92, 0.9, 0.86)
+                float inputs:baseMetalness = 1.0
+                float inputs:specularRoughness = 0.08
+                token outputs:surface
+            }
+        }
+
+        def Material "Clay"
+        {
+            token outputs:surface.connect = </World/Looks/Clay/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.72, 0.36, 0.28)
+                float inputs:specularRoughness = 0.65
+                token outputs:surface
+            }
+        }
+
+        def Material "Ground"
+        {
+            token outputs:surface.connect = </World/Looks/Ground/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.48, 0.47, 0.45)
+                float inputs:specularRoughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (480, 270)
+        int crust:samplesPerPixel = 96
+        int crust:maxDepth = 8
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+        int crust:frame = 0
+    }
+}
