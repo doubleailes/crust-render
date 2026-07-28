@@ -362,6 +362,26 @@ impl Scene {
         self.bvh.accumulate_unique(visited, acc);
     }
 
+    /// How big this scene's top-level primitives are relative to the
+    /// scene itself: `(count, scene diagonal, mean prim diagonal, max prim
+    /// diagonal)`.
+    ///
+    /// Diagnostic for a BVH that will not cull. A hierarchy can only
+    /// separate primitives whose bounds are small against the whole; when
+    /// the mean ratio approaches 1 every box covers everything, no split
+    /// can divide them, and traversal degenerates to a linear scan however
+    /// good the builder is.
+    pub fn primitive_extents(&self) -> (usize, f32, f32, f32) {
+        let scene_diag = self
+            .bvh
+            .bounds()
+            .map(|b| (b.maximum - b.minimum).length())
+            .unwrap_or(0.0);
+        let (n, sum, max) = self.bvh.primitive_extent_sum();
+        let mean = if n == 0 { 0.0 } else { sum / n as f32 };
+        (n, scene_diag, mean, max)
+    }
+
     /// Exact resident bytes of this scene and every distinct scene it
     /// instances — see [`MemoryFootprint`].
     pub fn memory_footprint(&self) -> MemoryFootprint {

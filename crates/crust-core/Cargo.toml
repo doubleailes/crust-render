@@ -8,6 +8,10 @@ license-file = { workspace = true }
 name = "crust_core"
 path = "src/lib.rs"
 
+[features]
+# Forwards crust-rt's traversal counters; see that crate's feature.
+traversal-stats = ["crust-rt/traversal-stats"]
+
 [dependencies]
 utils = { path = "../utils" }
 openqmc = { path = "../openqmc-rs", package = "openqmc-rs" }

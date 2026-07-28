@@ -309,6 +309,20 @@ impl Bvh {
         self.prims.len()
     }
 
+    /// `(count, sum of bbox diagonals, max diagonal)` over top-level
+    /// primitives — feeds [`crate::Scene::primitive_extents`].
+    pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
+        let mut sum = 0.0f32;
+        let mut max = 0.0f32;
+        for p in &self.prims {
+            let b = p.bbox();
+            let d = (b.maximum - b.minimum).length();
+            sum += d;
+            max = max.max(d);
+        }
+        (self.prims.len(), sum, max)
+    }
+
     pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
         let mut b = PrimitiveBreakdown::default();
         for p in &self.prims {

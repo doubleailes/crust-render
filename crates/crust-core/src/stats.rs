@@ -469,8 +469,24 @@ impl fmt::Display for RenderStats {
             {
                 let secs = render.duration.as_secs_f64();
                 if secs > 0.0 {
-                    let mray = r.total_rays() as f64 / secs / 1e6;
-                    writeln!(f, "  {:<28} {:.2} Mray/s", "throughput", mray)?;
+                    // Scale the unit: a pathological scene can sit near a
+                    // few thousand rays a second, and "0.00 Mray/s" hides
+                    // exactly the number worth looking at.
+                    let rps = r.total_rays() as f64 / secs;
+                    let (v, unit) = if rps >= 1e6 {
+                        (rps / 1e6, "Mray/s")
+                    } else if rps >= 1e3 {
+                        (rps / 1e3, "Kray/s")
+                    } else {
+                        (rps, "ray/s")
+                    };
+                    writeln!(f, "  {:<28} {:.2} {}", "throughput", v, unit)?;
+                    writeln!(
+                        f,
+                        "  {:<28} {:.2} us",
+                        "mean time per ray query",
+                        1e6 * secs / r.total_rays().max(1) as f64
+                    )?;
                 }
             }
             writeln!(
