@@ -138,6 +138,12 @@ impl World {
         self.scene.unique_primitive_breakdown()
     }
 
+    /// Top-level primitive extents relative to the scene — see
+    /// [`crust_rt::Scene::primitive_extents`].
+    pub fn primitive_extents(&self) -> (usize, f32, f32, f32) {
+        self.scene.primitive_extents()
+    }
+
     /// Exact kernel-resident bytes — see
     /// [`crust_rt::Scene::memory_footprint`].
     pub fn memory_footprint(&self) -> crust_rt::MemoryFootprint {

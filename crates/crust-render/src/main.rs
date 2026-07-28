@@ -248,6 +248,20 @@ fn main() {
     if let Some(strategy) = cli.strategy {
         settings = settings.with_sampling_strategy(strategy.into());
     }
+    // A BVH can only cull primitives whose bounds are small against the
+    // whole scene. Report the ratio so a scene whose instance boxes all
+    // span everything -- where no split can help -- is visible.
+    {
+        let (n, scene_diag, mean_diag, max_diag) = world.primitive_extents();
+        if n > 0 && scene_diag > 0.0 {
+            info!(
+                "top-level extents: {n} prims, scene diagonal {scene_diag:.1}, \
+                 mean prim {mean_diag:.1} ({:.4} of scene), max prim {max_diag:.1} ({:.4})",
+                mean_diag / scene_diag,
+                max_diag / scene_diag
+            );
+        }
+    }
     debug!("Render Settings: {:#?}", settings);
     // The loader recorded the scene's own settings; re-read them now that
     // the CLI's --samples / --strategy overrides have been applied, so the
@@ -310,6 +324,33 @@ fn main() {
         }
     }
     stats.record("Write output", 0, output_start.elapsed());
+
+    // Traversal counts, when built with the diagnostic feature. Printed
+    // separately from RenderStats because they come from the kernel and
+    // only exist in a feature-on build.
+    #[cfg(feature = "traversal-stats")]
+    if cli.stats {
+        use crust_core::rt::traversal_stats as ts;
+        let rays = ray_stats.camera_rays.max(1) as f64;
+        let per = |n: u64| n as f64 / rays;
+        println!("{}", "-".repeat(84));
+        println!("BVH Traversal (per camera ray)");
+        println!("{}", "-".repeat(84));
+        for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
+            let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
+            if q == 0 {
+                continue;
+            }
+            println!(
+                "  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
+                per(q),
+                per(nodes),
+                per(leaves),
+                per(packets),
+                per(scalars),
+            );
+        }
+    }
 
     if cli.stats {
         // Straight to stdout, not through `tracing`: this is a report to

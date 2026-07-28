@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 license-file.workspace = true
 
+[features]
+# Print per-ray BVH traversal counts in --stats. Diagnostic: the counters
+# are global atomics, so counts are trustworthy and timings are not.
+traversal-stats = ["crust-core/traversal-stats"]
+
 [dependencies]
 crust-core = {path = "../crust-core"}
 clap = { version = "4.5.48", features = ["derive"] }
