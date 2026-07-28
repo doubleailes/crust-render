@@ -27,6 +27,56 @@ use crate::aabb::AABB;
 use crate::prim::{PrimHit, PrimNode, TrianglePrim};
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
+
+/// Diagnostic traversal counters, compiled out unless the
+/// `traversal-stats` feature is on — they sit in the innermost loop.
+///
+/// Deliberately global relaxed atomics rather than per-thread state:
+/// this exists to answer "how many nodes does a ray touch", and the
+/// contention that makes the timings meaningless does not affect the
+/// counts. Read the counts from a feature-on build and the timings from a
+/// feature-off one.
+#[cfg(feature = "traversal-stats")]
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static NODES_VISITED: AtomicU64 = AtomicU64::new(0);
+    pub static LEAVES_VISITED: AtomicU64 = AtomicU64::new(0);
+    pub static PRIM_TESTS: AtomicU64 = AtomicU64::new(0);
+    pub static PACKET_TESTS: AtomicU64 = AtomicU64::new(0);
+    pub static QUERIES: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn bump(c: &AtomicU64, n: u64) {
+        c.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// `(queries, nodes, leaves, packet tests, scalar prim tests)`
+    pub fn read() -> (u64, u64, u64, u64, u64) {
+        (
+            QUERIES.load(Ordering::Relaxed),
+            NODES_VISITED.load(Ordering::Relaxed),
+            LEAVES_VISITED.load(Ordering::Relaxed),
+            PACKET_TESTS.load(Ordering::Relaxed),
+            PRIM_TESTS.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn reset() {
+        for c in [&QUERIES, &NODES_VISITED, &LEAVES_VISITED, &PACKET_TESTS, &PRIM_TESTS] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Increments a traversal counter when the diagnostic feature is on, and
+/// compiles to nothing when it is off.
+macro_rules! tstat {
+    ($name:ident, $n:expr) => {{
+        #[cfg(feature = "traversal-stats")]
+        stats::bump(&stats::$name, $n);
+    }};
+}
 use crate::triangle::{RayShear, Tri4};
 use glam::{Vec3A, Vec4};
 
@@ -321,6 +371,7 @@ impl Bvh {
         if self.wide.is_empty() {
             return None;
         }
+        tstat!(QUERIES, 1);
         let mut closest = t_max;
         let mut best: Option<PrimHit> = None;
 
@@ -336,6 +387,7 @@ impl Bvh {
 
         while sp > 0 {
             sp -= 1;
+            tstat!(NODES_VISITED, 1);
             let node = &self.wide[stack[sp] as usize];
             let (tnear, tfar) = rs.slab4(node, closest);
 
@@ -401,6 +453,9 @@ impl Bvh {
         t_max: f32,
     ) -> Option<PrimHit> {
         let leaf = &self.leaves[leaf_idx as usize];
+        tstat!(LEAVES_VISITED, 1);
+        tstat!(PACKET_TESTS, leaf.pkt_count as u64);
+        tstat!(PRIM_TESTS, leaf.idx_count as u64);
         let mut closest = t_max;
         let mut best: Option<PrimHit> = None;
 

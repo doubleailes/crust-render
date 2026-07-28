@@ -9,6 +9,14 @@ description = "Crust Render's ray tracing kernel: Embree-shaped scene/geometry A
 name = "crust_rt"
 path = "src/lib.rs"
 
+[features]
+# Diagnostic traversal counters (nodes visited, leaf primitive tests).
+# Off by default and compiled out entirely, because they sit in the
+# innermost loop: with the feature on the counters are global atomics, so
+# trust the *counts* from a feature-on build and the *timings* from a
+# feature-off one, never both from the same run.
+traversal-stats = []
+
 [dependencies]
 glam.workspace = true
 rayon = "1.10.0"
@@ -19,3 +27,8 @@ criterion = "0.8"
 [[bench]]
 name = "traversal"
 harness = false
+
+[[example]]
+name = "traversal_probe"
+# Needs the counters it reads, so it is not built for a default `cargo test`.
+required-features = ["traversal-stats"]
