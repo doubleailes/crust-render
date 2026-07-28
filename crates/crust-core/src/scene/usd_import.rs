@@ -2,10 +2,11 @@
 //! (camera, world, lights, render settings). See `Scene::from_usd`.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use rayon::prelude::*;
 
 use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
@@ -34,7 +35,7 @@ use openusd::schemas::geom::{
     PointBased, PointInstancer, Sphere as UsdSphere, Xform, Xformable,
 };
 use openusd::schemas::lux::{
-    CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
+    DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
     RectLight, SphereLight,
 };
 use openusd::schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
@@ -75,7 +76,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     // Render settings come first — the camera importer needs the aspect ratio.
     let settings = import_render_settings(&stage);
 
-    let mut world = WorldBuilder::new();
+    let mut world = GeometryQueue::new();
     let mut lights = LightList::new();
     let mut volumes: Vec<VolumeRegion> = Vec::new();
     let mut camera_candidate: Option<Camera> = None;
@@ -109,8 +110,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             continue;
         }
 
-        let local = local_matrix_at(&stage, &prim);
-        let resets = resets_xform_stack_at(&stage, &prim);
+        let (local, resets) = local_transform_at(&stage, &prim);
         let this_world = if resets { local } else { parent_world * local };
 
         // Native instancing: an `instanceable` prim with a composition arc
@@ -138,60 +138,94 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             }
         }
 
-        // Dispatch by schema. Volume prims are checked first: a prim
-        // carrying `crust:volume:type` imports as a participating-media
-        // region only — never as geometry, so its bounds cannot occlude
-        // shadow rays. Otherwise order matters only for Meshes vs Sphere
-        // prims — both check first so we don't recurse into their
-        // materials as prims.
-        if let Ok(Some(instancer)) = PointInstancer::get(&stage, prim.path().clone()) {
-            emit_point_instancer(&stage, &mut world, &prim, &instancer, this_world, &mut caches);
-            // Prototypes are conventionally authored beneath the
-            // instancer; they are drawn through it, never on their own.
-            continue;
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
+        // Dispatch on the prim's type, read once (see `PrimKind`). Volumes
+        // are checked before geometry: a prim carrying `crust:volume:type`
+        // imports as a participating-media region only — never as
+        // geometry, so its bounds cannot occlude shadow rays.
+        let kind = kind_of(&prim);
+        if may_be_volume(kind) && custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut volumes);
-        } else if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut caches.meshes);
-        } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_sphere(&mut world, &prim, &sphere, this_world, mat);
-        } else if let Ok(Some(curves)) = UsdBasisCurves::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_curves(&mut world, &prim, &curves, this_world, mat);
-        } else if UsdCamera::get(&stage, prim.path().clone())
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            if camera_candidate.is_none() {
-                match build_camera(&stage, &prim, &settings) {
-                    Some(c) => {
-                        info!("Imported USD camera at {}", prim.path());
-                        camera_candidate = Some(c);
-                    }
-                    None => warn!("Failed to build camera from {}", prim.path()),
-                }
-            }
-        } else if let Ok(Some(light)) = SphereLight::get(&stage, prim.path().clone()) {
-            emit_sphere_light(&mut world, &mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = RectLight::get(&stage, prim.path().clone()) {
-            emit_rect_light(&mut world, &mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
-            emit_distant_light(&mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = DomeLight::get(&stage, prim.path().clone()) {
-            emit_dome_light(
-                &mut lights,
-                &prim,
-                &light,
-                this_world,
-                path,
-                assets,
-                &mut asset_time,
-            );
         } else {
-            warn_unsupported_light(&stage, &prim);
+            match kind {
+                PrimKind::PointInstancer => {
+                    if let Ok(Some(instancer)) = PointInstancer::get(&stage, prim.path().clone()) {
+                        emit_point_instancer(
+                            &stage,
+                            &mut world,
+                            &prim,
+                            &instancer,
+                            this_world,
+                            &mut caches,
+                        );
+                    }
+                    // Prototypes are conventionally authored beneath the
+                    // instancer; they are drawn through it, never on their own.
+                    continue;
+                }
+                PrimKind::Mesh => {
+                    if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
+                        let mat = resolve_material(&stage, &prim, &mut caches.materials);
+                        emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut caches.meshes);
+                    }
+                }
+                PrimKind::Sphere => {
+                    if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
+                        let mat = resolve_material(&stage, &prim, &mut caches.materials);
+                        emit_sphere(&mut world, &prim, &sphere, this_world, mat);
+                    }
+                }
+                PrimKind::BasisCurves => {
+                    if let Ok(Some(curves)) = UsdBasisCurves::get(&stage, prim.path().clone()) {
+                        let mat = resolve_material(&stage, &prim, &mut caches.materials);
+                        emit_curves(&mut world, &prim, &curves, this_world, mat);
+                    }
+                }
+                PrimKind::Camera => {
+                    if camera_candidate.is_none() {
+                        match build_camera(&stage, &prim, &settings) {
+                            Some(c) => {
+                                info!("Imported USD camera at {}", prim.path());
+                                camera_candidate = Some(c);
+                            }
+                            None => warn!("Failed to build camera from {}", prim.path()),
+                        }
+                    }
+                }
+                PrimKind::SphereLight => {
+                    if let Ok(Some(light)) = SphereLight::get(&stage, prim.path().clone()) {
+                        emit_sphere_light(&mut world, &mut lights, &light, this_world);
+                    }
+                }
+                PrimKind::RectLight => {
+                    if let Ok(Some(light)) = RectLight::get(&stage, prim.path().clone()) {
+                        emit_rect_light(&mut world, &mut lights, &light, this_world);
+                    }
+                }
+                PrimKind::DistantLight => {
+                    if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
+                        emit_distant_light(&mut lights, &light, this_world);
+                    }
+                }
+                PrimKind::DomeLight => {
+                    if let Ok(Some(light)) = DomeLight::get(&stage, prim.path().clone()) {
+                        emit_dome_light(
+                            &mut lights,
+                            &prim,
+                            &light,
+                            this_world,
+                            path,
+                            assets,
+                            &mut asset_time,
+                        );
+                    }
+                }
+                PrimKind::UnsupportedLight(name) => warn!(
+                    "USD light type '{}' at {} is not yet supported — skipped",
+                    name,
+                    prim.path()
+                ),
+                PrimKind::Other => {}
+            }
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -203,9 +237,14 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         }
     }
 
-    // The traverse also builds each mesh's and prototype's kernel scene,
-    // so its own BVH work is inside this figure; the separate "Commit
-    // acceleration structure" phase below is the *top-level* build.
+    // Every geometry the traversal queued is now built (whatever is left
+    // of it), and the buffered attachments go into the world in traversal
+    // order — so `geom_id`s, and the image, do not depend on the batching.
+    let (world, build_elapsed) = world.finish();
+    // The traverse also builds each mesh's and prototype's kernel scene;
+    // that work is inside this figure and broken out as "Build geometry"
+    // below. The separate "Commit acceleration structure" phase is the
+    // *top-level* build over everything attached.
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
 
     let camera = camera_candidate.unwrap_or_else(|| {
@@ -220,6 +259,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     stats.record("Parse USD stage", 0, import_start.elapsed());
     stats.record("Open stage", 1, open_elapsed);
     stats.record("Traverse prims", 1, traverse_elapsed);
+    stats.record("Build geometry (parallel)", 2, build_elapsed);
     if !asset_time.is_zero() {
         stats.record("Load assets", 1, asset_time);
     }
@@ -357,8 +397,18 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
     ])
 }
 
-/// Local-to-parent transform of `prim`, composed from its authored
-/// `xformOp:*` attributes by [`compose_xform_ops`].
+/// Local-to-parent transform of `prim` **and** whether its stack resets the
+/// inherited one, composed from the authored `xformOp:*` attributes by
+/// [`compose_xform_ops`].
+///
+/// The two answers come back together because they come from one read: both
+/// live in `xformOpOrder`, and on a Moana-scale stage a composed attribute
+/// read is ~1 µs — worth paying once per prim, not twice. (The reset flag
+/// used to be a separate `resets_xform_stack_at` that tried up to six
+/// schema `get()`s to find an `Xformable` view of the prim, and then re-read
+/// the same array. It also silently ignored the reset on any prim outside
+/// those six types; reading the token directly applies it to every prim, as
+/// UsdGeomXformable specifies.)
 ///
 /// This deliberately does NOT use openusd's `local_to_parent_transform`:
 /// openusd 0.5.0 composes multi-op `xformOpOrder` stacks in the wrong
@@ -368,7 +418,7 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
 /// floating objects against sky. Stacks with an op we cannot decode fall
 /// back to openusd's composition with a warning, so unusual scenes behave
 /// no worse than before.
-fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
+fn local_transform_at(stage: &Stage, prim: &Prim) -> (GMat4, bool) {
     match compose_xform_ops(prim) {
         Some(m) => m,
         None => {
@@ -377,7 +427,7 @@ fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
                  composition (known to be wrong for multi-op stacks)",
                 prim.path()
             );
-            local_matrix_via_openusd(stage, prim)
+            (local_matrix_via_openusd(stage, prim), false)
         }
     }
 }
@@ -392,19 +442,24 @@ fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
 /// and translates last: the composed translation equals the authored
 /// translate.)
 ///
-/// Returns `None` if any op token or value cannot be decoded.
-fn compose_xform_ops(prim: &Prim) -> Option<GMat4> {
+/// Returns `(local matrix, resets inherited stack)`, or `None` if any op
+/// token or value cannot be decoded.
+fn compose_xform_ops(prim: &Prim) -> Option<(GMat4, bool)> {
     let order = match prim.attribute("xformOpOrder").get::<sdf::Value>() {
         Ok(Some(sdf::Value::TokenVec(order))) => order,
         Ok(Some(_)) => return None,
         // No order authored: authored xformOp attrs (if any) do not apply.
-        _ => return Some(GMat4::IDENTITY),
+        _ => return Some((GMat4::IDENTITY, false)),
     };
+
+    // UsdGeomXformable: only a *leading* `!resetXformStack!` resets the
+    // stack; elsewhere in the list it is not an op either way.
+    let resets = order.first().is_some_and(|t| t == "!resetXformStack!");
 
     let mut local = GMat4::IDENTITY;
     for token in &order {
-        // Not a transform op: it truncates the inherited stack, which
-        // `resets_xform_stack_at` reports separately.
+        // Not a transform op: it truncates the inherited stack, which the
+        // `resets` flag above reports.
         if token == "!resetXformStack!" {
             continue;
         }
@@ -418,7 +473,7 @@ fn compose_xform_ops(prim: &Prim) -> Option<GMat4> {
         }
         local *= m;
     }
-    Some(local)
+    Some((local, resets))
 }
 
 /// Matrix of a single `xformOp:<kind>[:<suffix>]` attribute on `prim`, or
@@ -525,26 +580,66 @@ fn local_matrix_via_openusd(stage: &Stage, prim: &Prim) -> GMat4 {
     GMat4::IDENTITY
 }
 
-fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
-    if let Ok(Some(x)) = Xform::get(stage, prim.path().clone()) {
-        return x.resets_xform_stack().unwrap_or(false);
+// -----------------------------------------------------------------------
+// Prim dispatch
+// -----------------------------------------------------------------------
+
+/// What a prim is, as far as the importer cares.
+///
+/// Resolved with **one** composed `typeName` read. The importer used to ask
+/// "are you a Mesh? a Sphere? a BasisCurves? a Camera? a SphereLight? …"
+/// by calling `Schema::get` down a chain of ten alternatives, and every one
+/// of those re-read and re-allocated the same type name — ~5 µs of pure
+/// dispatch per prim, on stages that have millions of them. The type name
+/// is the only thing all ten were looking at, so read it once and match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PrimKind {
+    Mesh,
+    Sphere,
+    BasisCurves,
+    PointInstancer,
+    Camera,
+    SphereLight,
+    RectLight,
+    DistantLight,
+    DomeLight,
+    /// A light type we recognize by name but do not import yet.
+    UnsupportedLight(&'static str),
+    /// Anything else — Xform, Scope, GeomSubset, a Cube standing in for a
+    /// volume, a typeless over, …
+    Other,
+}
+
+fn prim_kind(type_name: Option<&str>) -> PrimKind {
+    match type_name.unwrap_or("") {
+        "Mesh" => PrimKind::Mesh,
+        "Sphere" => PrimKind::Sphere,
+        "BasisCurves" => PrimKind::BasisCurves,
+        "PointInstancer" => PrimKind::PointInstancer,
+        "Camera" => PrimKind::Camera,
+        "SphereLight" => PrimKind::SphereLight,
+        "RectLight" => PrimKind::RectLight,
+        "DistantLight" => PrimKind::DistantLight,
+        "DomeLight" => PrimKind::DomeLight,
+        "DiskLight" => PrimKind::UnsupportedLight("DiskLight"),
+        "CylinderLight" => PrimKind::UnsupportedLight("CylinderLight"),
+        _ => PrimKind::Other,
     }
-    if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone()) {
-        return m.resets_xform_stack().unwrap_or(false);
-    }
-    if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone()) {
-        return s.resets_xform_stack().unwrap_or(false);
-    }
-    if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone()) {
-        return c.resets_xform_stack().unwrap_or(false);
-    }
-    if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone()) {
-        return l.resets_xform_stack().unwrap_or(false);
-    }
-    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone()) {
-        return l.resets_xform_stack().unwrap_or(false);
-    }
-    false
+}
+
+/// A prim's kind from its composed `typeName`.
+fn kind_of(prim: &Prim) -> PrimKind {
+    prim_kind(prim.type_name().ok().flatten().as_deref())
+}
+
+/// Whether a prim of this kind can carry a `crust:volume:*` description.
+///
+/// Volumes are authored on a `Cube` (for its `size`) or on a bare
+/// `Xform`/`Scope`, never on geometry that already has a meaning — and the
+/// check runs on *every* prim, so restricting it to kinds that can actually
+/// be one saves a composed attribute read per geometry prim.
+fn may_be_volume(kind: PrimKind) -> bool {
+    matches!(kind, PrimKind::Other)
 }
 
 // -----------------------------------------------------------------------
@@ -567,6 +662,276 @@ fn prim_motion_translate(prim: &Prim) -> Option<Vec3> {
 }
 
 // -----------------------------------------------------------------------
+// Deferred, parallel geometry building
+// -----------------------------------------------------------------------
+
+/// A committed kernel scene that may not exist yet.
+///
+/// Building a piece of geometry's BVH is the most expensive thing the
+/// importer does per *unique* mesh, and it is pure CPU work over arrays
+/// USD has already handed over — so it does not belong on the traversal
+/// thread, which is stuck being serial (openusd's `Stage` is `Rc`-based).
+/// A `SceneSlot` is what the traversal gets back instead: an index that
+/// [`GeometryQueue::flush`] fills in, building every outstanding slot in
+/// parallel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SceneSlot(usize);
+
+/// Geometry whose acceleration structure has not been built yet.
+enum PendingScene {
+    /// A local-space triangle mesh — the case that matters at scale.
+    Mesh {
+        vertices: Vec<Vec3A>,
+        indices: Vec<[u32; 3]>,
+    },
+    Sphere {
+        center: Vec3A,
+        radius: f32,
+    },
+    Curves {
+        segments: Vec<CurveSegment>,
+        cubic: Vec<CubicCurveSegment>,
+    },
+    /// A sub-scene of instances — a `PointInstancer` nested inside a
+    /// prototype. Its inner scenes are already built (resolving them is
+    /// what forces the flush that precedes creating this job).
+    Instances(Vec<(Arc<RtScene>, Affine3A, u32)>),
+}
+
+impl PendingScene {
+    /// Roughly how much memory this job's raw arrays hold, so the queue can
+    /// bound how much un-built geometry it accumulates.
+    fn bytes(&self) -> usize {
+        match self {
+            PendingScene::Mesh { vertices, indices } => {
+                vertices.len() * size_of::<Vec3A>() + indices.len() * size_of::<[u32; 3]>()
+            }
+            PendingScene::Sphere { .. } => 0,
+            PendingScene::Curves { segments, cubic } => {
+                segments.len() * size_of::<CurveSegment>()
+                    + cubic.len() * size_of::<CubicCurveSegment>()
+            }
+            PendingScene::Instances(v) => v.len() * size_of::<(Arc<RtScene>, Affine3A, u32)>(),
+        }
+    }
+
+    /// Builds the scene. Runs on a worker thread.
+    fn build(self) -> RtScene {
+        let mut b = RtSceneBuilder::new();
+        match self {
+            PendingScene::Mesh { vertices, indices } => {
+                b.attach(Geometry::TriangleMesh {
+                    vertices,
+                    indices,
+                    normals: None,
+                });
+            }
+            PendingScene::Sphere { center, radius } => {
+                b.attach(Geometry::Sphere { center, radius });
+            }
+            PendingScene::Curves { segments, cubic } => {
+                if !segments.is_empty() {
+                    b.attach(Geometry::RoundCurves { segments });
+                }
+                if !cubic.is_empty() {
+                    b.attach(Geometry::CubicCurves { segments: cubic });
+                }
+            }
+            PendingScene::Instances(instances) => {
+                b.reserve(instances.len());
+                for (scene, transform, mask) in instances {
+                    b.attach_masked(
+                        Geometry::Instance {
+                            scene,
+                            transform,
+                            transform_end: None,
+                        },
+                        mask,
+                    );
+                }
+            }
+        }
+        b.commit()
+    }
+}
+
+/// A geometry waiting to be attached to the world.
+enum PendingGeometry {
+    /// Needs nothing built: world-baked triangles, a top-level sphere, a
+    /// light's emitting surface.
+    Ready(Geometry),
+    /// An instance of a scene that may still be building.
+    Instance {
+        slot: SceneSlot,
+        transform: Affine3A,
+        transform_end: Option<Box<Affine3A>>,
+    },
+}
+
+struct PendingAttach {
+    geometry: PendingGeometry,
+    material: Arc<dyn Material>,
+    mask: u32,
+}
+
+/// How much un-built geometry may pile up before the queue builds it.
+/// Bounds the importer's extra peak memory: the raw arrays of a batch are
+/// held only until that batch is built.
+const BUILD_BYTE_BUDGET: usize = 128 << 20;
+/// How many attachments may wait on the pending builds. Attachments are
+/// small (a transform and two pointers), so this is about latency, not
+/// memory: it caps how far the world lags the traversal.
+const ATTACH_WINDOW: usize = 8192;
+
+/// The importer's write end of the world: geometry builds are deferred and
+/// run in parallel, attachments are buffered so their order — and so every
+/// `geom_id` — is exactly the traversal order it would have had.
+///
+/// The traversal cannot be parallelized (openusd composes on an `Rc`-based
+/// stage, and giving each thread its own stage measures *slower*), but
+/// almost everything the traversal produces can be. This queue is that
+/// seam.
+struct GeometryQueue {
+    world: WorldBuilder,
+    /// Slot → its committed scene, once built.
+    scenes: Vec<Option<Arc<RtScene>>>,
+    /// Slots that still need building, with their geometry.
+    jobs: Vec<(usize, PendingScene)>,
+    pending_bytes: usize,
+    /// Attachments waiting for the pending builds, in traversal order.
+    window: Vec<PendingAttach>,
+    /// Wall-clock spent inside parallel builds, for the stats report.
+    build_time: Duration,
+}
+
+impl GeometryQueue {
+    fn new() -> Self {
+        GeometryQueue {
+            world: WorldBuilder::new(),
+            scenes: Vec::new(),
+            jobs: Vec::new(),
+            pending_bytes: 0,
+            window: Vec::new(),
+            build_time: Duration::ZERO,
+        }
+    }
+
+    /// Queues a scene to be built and returns the slot that will hold it.
+    fn scene(&mut self, job: PendingScene) -> SceneSlot {
+        let slot = SceneSlot(self.scenes.len());
+        self.scenes.push(None);
+        self.pending_bytes += job.bytes();
+        self.jobs.push((slot.0, job));
+        if self.pending_bytes >= BUILD_BYTE_BUDGET {
+            self.flush();
+        }
+        slot
+    }
+
+    /// The committed scene in `slot`, building any outstanding work first.
+    /// Only the nested-instancer path needs this — everything else refers
+    /// to a slot by index and never has to look inside it.
+    fn resolve(&mut self, slot: SceneSlot) -> Arc<RtScene> {
+        if self.scenes[slot.0].is_none() {
+            self.flush();
+        }
+        self.scenes[slot.0]
+            .clone()
+            .expect("flush builds every queued slot")
+    }
+
+    /// Queues an attachment and returns the `geom_id` it will get. The id
+    /// is the running attachment count, exactly as `WorldBuilder::attach`
+    /// would assign it — every attachment goes through here, so predicting
+    /// it is exact.
+    fn attach(&mut self, geometry: PendingGeometry, material: Arc<dyn Material>, mask: u32) -> u32 {
+        let id = (self.world.count() + self.window.len()) as u32;
+        self.window.push(PendingAttach {
+            geometry,
+            material,
+            mask,
+        });
+        if self.window.len() >= ATTACH_WINDOW {
+            self.drain();
+        }
+        id
+    }
+
+    /// Attaches an instance of `slot`.
+    fn attach_instance(
+        &mut self,
+        slot: SceneSlot,
+        transform: Affine3A,
+        transform_end: Option<Box<Affine3A>>,
+        material: Arc<dyn Material>,
+        mask: u32,
+    ) -> u32 {
+        self.attach(
+            PendingGeometry::Instance {
+                slot,
+                transform,
+                transform_end,
+            },
+            material,
+            mask,
+        )
+    }
+
+    /// See [`WorldBuilder::reserve`].
+    fn reserve(&mut self, additional: usize) {
+        self.world.reserve(additional);
+    }
+
+    /// Builds every queued scene, in parallel.
+    fn flush(&mut self) {
+        if self.jobs.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let jobs = std::mem::take(&mut self.jobs);
+        self.pending_bytes = 0;
+        let built: Vec<(usize, Arc<RtScene>)> = jobs
+            .into_par_iter()
+            .map(|(slot, job)| (slot, Arc::new(job.build())))
+            .collect();
+        for (slot, scene) in built {
+            self.scenes[slot] = Some(scene);
+        }
+        self.build_time += started.elapsed();
+    }
+
+    /// Moves the buffered attachments into the world, in order.
+    fn drain(&mut self) {
+        self.flush();
+        self.world.reserve(self.window.len());
+        for attach in self.window.drain(..) {
+            let geometry = match attach.geometry {
+                PendingGeometry::Ready(g) => g,
+                PendingGeometry::Instance {
+                    slot,
+                    transform,
+                    transform_end,
+                } => Geometry::Instance {
+                    scene: self.scenes[slot.0]
+                        .clone()
+                        .expect("flush builds every queued slot"),
+                    transform,
+                    transform_end,
+                },
+            };
+            self.world.attach_masked(geometry, attach.material, attach.mask);
+        }
+    }
+
+    /// Drains everything and hands back the world, plus the wall-clock the
+    /// parallel builds took.
+    fn finish(mut self) -> (WorldBuilder, Duration) {
+        self.drain();
+        (self.world, self.build_time)
+    }
+}
+
+// -----------------------------------------------------------------------
 // Mesh
 // -----------------------------------------------------------------------
 
@@ -581,6 +946,84 @@ struct MeshKey {
     material: usize,
 }
 
+/// A fast content hash for the mesh arrays.
+///
+/// This runs over every coordinate of every point and every index of every
+/// mesh prim — including the duplicates it exists to detect — so on a
+/// Moana-scale stage it is gigabytes of hashing. `DefaultHasher`
+/// (SipHash-1-3, and one `write_u32` call per component) is the wrong tool:
+/// this is xxHash64's mixing over four lanes, ~5x its throughput, and
+/// deterministic across runs and platforms (no `RandomState` seed).
+///
+/// As before, mesh identity is decided by this digest plus the array
+/// lengths — never by comparing the arrays — so dedup trusts 64 bits not to
+/// collide. That is the same bet a content-addressed cache makes, and the
+/// reason a *good* mixer is worth more here than a fast weak one.
+#[derive(Default)]
+struct ContentHasher {
+    lanes: [u64; 4],
+    n: usize,
+    len: u64,
+}
+
+impl ContentHasher {
+    const P1: u64 = 0x9E37_79B1_85EB_CA87;
+    const P2: u64 = 0xC2B2_AE3D_27D4_EB4F;
+    const P3: u64 = 0x1656_67B1_9E37_79F9;
+
+    fn new() -> Self {
+        ContentHasher {
+            lanes: [
+                Self::P1.wrapping_add(Self::P2),
+                Self::P2,
+                0,
+                0u64.wrapping_sub(Self::P1),
+            ],
+            n: 0,
+            len: 0,
+        }
+    }
+
+    fn write_u32(&mut self, v: u32) {
+        let lane = &mut self.lanes[self.n & 3];
+        *lane = lane
+            .wrapping_add((v as u64).wrapping_mul(Self::P2))
+            .rotate_left(31)
+            .wrapping_mul(Self::P1);
+        self.n += 1;
+        self.len += 1;
+    }
+
+    fn write_f32s(&mut self, values: impl IntoIterator<Item = f32>) {
+        for v in values {
+            // Hash the bits: two meshes are the same mesh only if their
+            // coordinates are bit-identical (NaN payloads included).
+            self.write_u32(v.to_bits());
+        }
+    }
+
+    fn write_i32s(&mut self, values: &[i32]) {
+        for &v in values {
+            self.write_u32(v as u32);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        let mut h = self.lanes[0]
+            .rotate_left(1)
+            .wrapping_add(self.lanes[1].rotate_left(7))
+            .wrapping_add(self.lanes[2].rotate_left(12))
+            .wrapping_add(self.lanes[3].rotate_left(18))
+            .wrapping_add(self.len.wrapping_mul(Self::P3));
+        // Final avalanche (xxHash64's).
+        h ^= h >> 33;
+        h = h.wrapping_mul(Self::P2);
+        h ^= h >> 29;
+        h = h.wrapping_mul(Self::P3);
+        h ^ (h >> 32)
+    }
+}
+
 impl MeshKey {
     fn new(
         points: &[Vec3f],
@@ -588,14 +1031,10 @@ impl MeshKey {
         indices: &[i32],
         material: &Arc<dyn Material>,
     ) -> Self {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for p in points {
-            p.x.to_bits().hash(&mut h);
-            p.y.to_bits().hash(&mut h);
-            p.z.to_bits().hash(&mut h);
-        }
-        counts.hash(&mut h);
-        indices.hash(&mut h);
+        let mut h = ContentHasher::new();
+        h.write_f32s(points.iter().flat_map(|p| [p.x, p.y, p.z]));
+        h.write_i32s(counts);
+        h.write_i32s(indices);
         MeshKey {
             geo_hash: h.finish(),
             n_points: points.len(),
@@ -606,12 +1045,12 @@ impl MeshKey {
 }
 
 fn emit_mesh(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     prim: &Prim,
     mesh: &UsdMesh,
     world_xf: GMat4,
     material: Arc<dyn Material>,
-    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
+    meshes: &mut HashMap<MeshKey, SceneSlot>,
 ) {
     let Some((points, counts, indices)) = mesh_arrays(mesh) else {
         debug!(
@@ -646,12 +1085,12 @@ fn emit_mesh(
             .collect();
         match triangulate(&counts, &indices, verts.len()) {
             Some(tris) => {
-                world.attach_masked(
-                    Geometry::TriangleMesh {
+                world.attach(
+                    PendingGeometry::Ready(Geometry::TriangleMesh {
                         vertices: verts,
                         indices: tris,
                         normals: None,
-                    },
+                    }),
                     material,
                     mask,
                 );
@@ -664,17 +1103,16 @@ fn emit_mesh(
     // The mesh's kernel scene is built in the prim's *local* space and
     // shared by every prim with identical geometry + material; the
     // Instance geometry carries the placement.
-    let Some(inner) = shared_mesh_scene(prim, &points, &counts, &indices, &material, meshes) else {
+    let Some(inner) = shared_mesh_scene(world, prim, &points, &counts, &indices, &material, meshes)
+    else {
         return;
     };
 
     let l2w = Affine3A::from_mat4(world_xf);
-    world.attach_masked(
-        Geometry::Instance {
-            scene: inner,
-            transform: l2w,
-            transform_end: motion.map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
-        },
+    world.attach_instance(
+        inner,
+        l2w,
+        motion.map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
         material,
         mask,
     );
@@ -702,32 +1140,33 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
 /// whether by repeated authoring, by a `PointInstancer`, or by native
 /// instancing — cost one copy of its triangles and one BVH.
 fn shared_mesh_scene(
+    world: &mut GeometryQueue,
     prim: &Prim,
     points: &[Vec3f],
     counts: &[i32],
     indices: &[i32],
     material: &Arc<dyn Material>,
-    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
-) -> Option<Arc<RtScene>> {
+    meshes: &mut HashMap<MeshKey, SceneSlot>,
+) -> Option<SceneSlot> {
     let key = MeshKey::new(points, counts, indices, material);
     if let Some(shared) = meshes.get(&key) {
         debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
-        return Some(shared.clone());
+        return Some(*shared);
     }
     let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+    // Triangulation stays on this thread so "this mesh has no triangles"
+    // is still answered before anything is queued; the BVH build — the
+    // expensive part by orders of magnitude — is what gets deferred.
     let Some(tris) = triangulate(counts, indices, verts.len()) else {
         debug!("Mesh at {} produced no triangles", prim.path());
         return None;
     };
-    let mut b = RtSceneBuilder::new();
-    b.attach(Geometry::TriangleMesh {
+    let slot = world.scene(PendingScene::Mesh {
         vertices: verts,
         indices: tris,
-        normals: None,
     });
-    let scene = Arc::new(b.commit());
-    meshes.insert(key, scene.clone());
-    Some(scene)
+    meshes.insert(key, slot);
+    Some(slot)
 }
 
 /// Fan-triangulates the faces into an index-triple list; `None` if
@@ -779,7 +1218,7 @@ fn sphere_radius(sphere: &UsdSphere) -> f32 {
 }
 
 fn emit_sphere(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     prim: &Prim,
     sphere: &UsdSphere,
     world_xf: GMat4,
@@ -799,20 +1238,21 @@ fn emit_sphere(
         // A moving sphere rides an identity-placed instance whose end
         // transform is the shutter translation.
         Some(v) => {
-            let mut b = RtSceneBuilder::new();
-            b.attach(Geometry::Sphere { center, radius });
-            world.attach_masked(
-                Geometry::Instance {
-                    scene: Arc::new(b.commit()),
-                    transform: Affine3A::IDENTITY,
-                    transform_end: Some(Box::new(Affine3A::from_translation(v))),
-                },
+            let slot = world.scene(PendingScene::Sphere { center, radius });
+            world.attach_instance(
+                slot,
+                Affine3A::IDENTITY,
+                Some(Box::new(Affine3A::from_translation(v))),
                 material,
                 mask,
             );
         }
         None => {
-            world.attach_masked(Geometry::Sphere { center, radius }, material, mask);
+            world.attach(
+                PendingGeometry::Ready(Geometry::Sphere { center, radius }),
+                material,
+                mask,
+            );
         }
     }
 }
@@ -843,7 +1283,7 @@ struct ImportCaches {
     /// Material path (memoized) → shared material.
     materials: MaterialCache,
     /// Mesh content + material → the mesh's local-space kernel scene.
-    meshes: HashMap<MeshKey, Arc<RtScene>>,
+    meshes: HashMap<MeshKey, SceneSlot>,
     /// Prototype path → its parts, for both instancing mechanisms.
     protos: HashMap<String, Arc<Vec<ProtoPart>>>,
 }
@@ -853,7 +1293,7 @@ struct ImportCaches {
 /// and the material and visibility mask authored on it.
 #[derive(Clone)]
 struct ProtoPart {
-    scene: Arc<RtScene>,
+    scene: SceneSlot,
     /// Prototype-root-relative placement. An instance's world transform is
     /// composed onto the left of this.
     local: GMat4,
@@ -870,6 +1310,7 @@ struct ProtoPart {
 /// "geometry that exists only to be instanced".
 fn collect_proto_parts(
     stage: &Stage,
+    world: &mut GeometryQueue,
     root: &Prim,
     caches: &mut ImportCaches,
     depth: usize,
@@ -897,10 +1338,9 @@ fn collect_proto_parts(
         // transform, and a native prototype root carries none.
         let this_local = if prim.path() == root.path() {
             GMat4::IDENTITY
-        } else if resets_xform_stack_at(stage, &prim) {
-            local_matrix_at(stage, &prim)
         } else {
-            parent_local * local_matrix_at(stage, &prim)
+            let (local, resets) = local_transform_at(stage, &prim);
+            if resets { local } else { parent_local * local }
         };
 
         let mask = prim_ray_mask(&prim);
@@ -934,63 +1374,8 @@ fn collect_proto_parts(
             continue;
         }
 
-        if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
-            if let Some((points, counts, indices)) = mesh_arrays(&mesh)
-                && let Some(scene) = shared_mesh_scene(
-                    &prim,
-                    &points,
-                    &counts,
-                    &indices,
-                    &material,
-                    &mut caches.meshes,
-                )
-            {
-                parts.push(ProtoPart {
-                    scene,
-                    local: this_local,
-                    material,
-                    mask,
-                });
-            }
-        } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
-            let radius = sphere_radius(&sphere);
-            let mut b = RtSceneBuilder::new();
-            // Local-space sphere at the origin: unlike the top-level
-            // sphere path, which bakes the centre into world space, this
-            // lets the instance transform scale it (a non-uniform scale
-            // correctly yields an ellipsoid, since rays enter local space).
-            b.attach(Geometry::Sphere {
-                center: Vec3A::ZERO,
-                radius,
-            });
-            parts.push(ProtoPart {
-                scene: Arc::new(b.commit()),
-                local: this_local,
-                material,
-                mask,
-            });
-        } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
-            if let Some((segments, cubic_segments)) = curve_segments(&prim, &curves) {
-                let mut b = RtSceneBuilder::new();
-                if !segments.is_empty() {
-                    b.attach(Geometry::RoundCurves { segments });
-                }
-                if !cubic_segments.is_empty() {
-                    b.attach(Geometry::CubicCurves {
-                        segments: cubic_segments,
-                    });
-                }
-                parts.push(ProtoPart {
-                    scene: Arc::new(b.commit()),
-                    local: this_local,
-                    material,
-                    mask,
-                });
-            }
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
+        let kind = kind_of(&prim);
+        if may_be_volume(kind) && custom_token(&prim, "crust:volume:type").is_some() {
             // Volumes live outside the surface BVH entirely (their bounds
             // must not occlude shadow rays), so they cannot ride an
             // instance transform. Say so rather than dropping silently.
@@ -998,24 +1383,91 @@ fn collect_proto_parts(
                 "Volume at {} is inside a prototype — volumes cannot be instanced, skipped",
                 prim.path()
             );
-        } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
-            // A PointInstancer inside a prototype: expand it into nested
-            // sub-scenes rather than flattening. Flattening would multiply
-            // the *outer* instance count by this instancer's, which is
-            // exactly the blow-up instancing exists to avoid — a prototype
-            // holding 500 leaves, itself placed 500 times, must stay 500
-            // outer instances, not 250 000.
-            parts.extend(nested_instancer_parts(
-                stage,
-                &prim,
-                &instancer,
-                this_local,
-                mask,
-                caches,
-                depth + 1,
-            ));
-            // Its prototypes are reached through it, never drawn directly.
-            continue;
+        } else {
+            match kind {
+                PrimKind::Mesh => {
+                    if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+                        let material = resolve_material(stage, &prim, &mut caches.materials);
+                        if let Some((points, counts, indices)) = mesh_arrays(&mesh)
+                            && let Some(scene) = shared_mesh_scene(
+                                world,
+                                &prim,
+                                &points,
+                                &counts,
+                                &indices,
+                                &material,
+                                &mut caches.meshes,
+                            )
+                        {
+                            parts.push(ProtoPart {
+                                scene,
+                                local: this_local,
+                                material,
+                                mask,
+                            });
+                        }
+                    }
+                }
+                PrimKind::Sphere => {
+                    if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
+                        let material = resolve_material(stage, &prim, &mut caches.materials);
+                        let radius = sphere_radius(&sphere);
+                        // Local-space sphere at the origin: unlike the
+                        // top-level sphere path, which bakes the centre into
+                        // world space, this lets the instance transform scale
+                        // it (a non-uniform scale correctly yields an
+                        // ellipsoid, since rays enter local space).
+                        let scene = world.scene(PendingScene::Sphere {
+                            center: Vec3A::ZERO,
+                            radius,
+                        });
+                        parts.push(ProtoPart {
+                            scene,
+                            local: this_local,
+                            material,
+                            mask,
+                        });
+                    }
+                }
+                PrimKind::BasisCurves => {
+                    if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
+                        let material = resolve_material(stage, &prim, &mut caches.materials);
+                        if let Some((segments, cubic)) = curve_segments(&prim, &curves) {
+                            let scene = world.scene(PendingScene::Curves { segments, cubic });
+                            parts.push(ProtoPart {
+                                scene,
+                                local: this_local,
+                                material,
+                                mask,
+                            });
+                        }
+                    }
+                }
+                PrimKind::PointInstancer => {
+                    // A PointInstancer inside a prototype: expand it into
+                    // nested sub-scenes rather than flattening. Flattening
+                    // would multiply the *outer* instance count by this
+                    // instancer's, which is exactly the blow-up instancing
+                    // exists to avoid — a prototype holding 500 leaves,
+                    // itself placed 500 times, must stay 500 outer
+                    // instances, not 250 000.
+                    if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+                        parts.extend(nested_instancer_parts(
+                            stage,
+                            world,
+                            &prim,
+                            &instancer,
+                            this_local,
+                            mask,
+                            caches,
+                            depth + 1,
+                        ));
+                    }
+                    // Its prototypes are reached through it, never drawn directly.
+                    continue;
+                }
+                _ => {}
+            }
         }
 
         if let Ok(children) = prim.children() {
@@ -1036,6 +1488,7 @@ fn collect_proto_parts(
 /// therefore share a material.
 fn nested_instancer_parts(
     stage: &Stage,
+    world: &mut GeometryQueue,
     prim: &Prim,
     instancer: &PointInstancer,
     local: GMat4,
@@ -1046,36 +1499,37 @@ fn nested_instancer_parts(
     let Some(layout) = read_instancer(prim, instancer) else {
         return Vec::new();
     };
-    let proto_parts = instancer_proto_parts(stage, &layout, caches, depth);
+    let proto_parts = instancer_proto_parts(stage, world, &layout, caches, depth);
 
     // Group placements by (prototype, part), so each output part collects
     // every placement that draws that one piece of geometry.
     let mut out: Vec<ProtoPart> = Vec::new();
     for (k, parts) in proto_parts.iter().enumerate() {
         for part in parts.iter() {
-            let mut sub = RtSceneBuilder::new();
-            let mut placed = 0usize;
+            // A sub-scene *of* the inner geometry, so this one place where
+            // the importer has to look inside a slot forces the pending
+            // builds. Nested instancers are rare and the parts are shared,
+            // so the flush costs a handful of extra batch boundaries.
+            let inner = world.resolve(part.scene);
+            let mut instances = Vec::new();
             for &(target, xf) in layout.placements.iter().filter(|(t, _)| *t == k) {
                 let _ = target;
                 let placement = xf * part.local;
                 if placement.determinant().abs() < 1e-12 {
                     continue; // zero scale: the "hide this instance" idiom
                 }
-                sub.attach_masked(
-                    Geometry::Instance {
-                        scene: part.scene.clone(),
-                        transform: Affine3A::from_mat4(placement),
-                        transform_end: None,
-                    },
+                instances.push((
+                    inner.clone(),
+                    Affine3A::from_mat4(placement),
                     part.mask,
-                );
-                placed += 1;
+                ));
             }
-            if placed == 0 {
+            if instances.is_empty() {
                 continue;
             }
+            let scene = world.scene(PendingScene::Instances(instances));
             out.push(ProtoPart {
-                scene: Arc::new(sub.commit()),
+                scene,
                 local,
                 material: part.material.clone(),
                 mask,
@@ -1102,13 +1556,13 @@ fn nested_instancer_parts(
 /// kernel scenes, and costs only its transforms.
 fn emit_native_instance(
     stage: &Stage,
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     prim: &Prim,
     proto_path: &sdf::Path,
     world_xf: GMat4,
     caches: &mut ImportCaches,
 ) {
-    let parts = prototype_parts(stage, proto_path, caches, 0);
+    let parts = prototype_parts(stage, world, proto_path, caches, 0);
     debug!(
         "Instance {} uses prototype {proto_path} ({} part(s))",
         prim.path(),
@@ -1122,7 +1576,7 @@ fn emit_native_instance(
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
 fn attach_proto_parts(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     parts: &[ProtoPart],
     placement: GMat4,
     what: &str,
@@ -1134,12 +1588,10 @@ fn attach_proto_parts(
             debug!("{what}: non-invertible instance transform — skipped");
             continue;
         }
-        world.attach_masked(
-            Geometry::Instance {
-                scene: part.scene.clone(),
-                transform: Affine3A::from_mat4(xf),
-                transform_end: None,
-            },
+        world.attach_instance(
+            part.scene,
+            Affine3A::from_mat4(xf),
+            None,
             part.material.clone(),
             part.mask,
         );
@@ -1275,6 +1727,7 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
 /// by path.
 fn instancer_proto_parts(
     stage: &Stage,
+    world: &mut GeometryQueue,
     layout: &InstancerLayout,
     caches: &mut ImportCaches,
     depth: usize,
@@ -1282,13 +1735,14 @@ fn instancer_proto_parts(
     layout
         .targets
         .iter()
-        .map(|target| prototype_parts(stage, target, caches, depth))
+        .map(|target| prototype_parts(stage, world, target, caches, depth))
         .collect()
 }
 
 /// A prototype's parts, from the cache or freshly built.
 fn prototype_parts(
     stage: &Stage,
+    world: &mut GeometryQueue,
     proto_path: &sdf::Path,
     caches: &mut ImportCaches,
     depth: usize,
@@ -1298,7 +1752,7 @@ fn prototype_parts(
         return parts.clone();
     }
     let root = stage.prim_at(proto_path.clone());
-    let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
+    let parts = Arc::new(collect_proto_parts(stage, world, &root, caches, depth));
     if parts.is_empty() {
         warn!("Prototype {key} contributed no geometry");
     }
@@ -1313,7 +1767,7 @@ fn prototype_parts(
 /// its geometry plus N transforms, instead of N baked copies.
 fn emit_point_instancer(
     stage: &Stage,
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     prim: &Prim,
     instancer: &PointInstancer,
     world_xf: GMat4,
@@ -1322,7 +1776,7 @@ fn emit_point_instancer(
     let Some(layout) = read_instancer(prim, instancer) else {
         return;
     };
-    let proto_parts = instancer_proto_parts(stage, &layout, caches, 0);
+    let proto_parts = instancer_proto_parts(stage, world, &layout, caches, 0);
 
     // A dense scatter can place millions of instances in this one call;
     // reserving the exact total up front avoids both the doubling-copy
@@ -1613,13 +2067,13 @@ fn curve_segments(
 }
 
 fn emit_curves(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     prim: &Prim,
     curves: &UsdBasisCurves,
     world_xf: GMat4,
     material: Arc<dyn Material>,
 ) {
-    let Some((segments, cubic_segments)) = curve_segments(prim, curves) else {
+    let Some((segments, cubic)) = curve_segments(prim, curves) else {
         return;
     };
     if world_xf.determinant().abs() < 1e-12 {
@@ -1629,23 +2083,14 @@ fn emit_curves(
         );
         return;
     }
-    let mut b = RtSceneBuilder::new();
-    if !segments.is_empty() {
-        b.attach(Geometry::RoundCurves { segments });
-    }
-    if !cubic_segments.is_empty() {
-        b.attach(Geometry::CubicCurves {
-            segments: cubic_segments,
-        });
-    }
-    world.attach_masked(
-        Geometry::Instance {
-            scene: Arc::new(b.commit()),
-            transform: Affine3A::from_mat4(world_xf),
-            transform_end: None,
-        },
+    let mask = prim_ray_mask(prim);
+    let slot = world.scene(PendingScene::Curves { segments, cubic });
+    world.attach_instance(
+        slot,
+        Affine3A::from_mat4(world_xf),
+        None,
         material,
-        prim_ray_mask(prim),
+        mask,
     );
 }
 
@@ -1717,8 +2162,7 @@ fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     ancestors.reverse();
     let mut acc = GMat4::IDENTITY;
     for p in &ancestors {
-        let local = local_matrix_at(stage, p);
-        let resets = resets_xform_stack_at(stage, p);
+        let (local, resets) = local_transform_at(stage, p);
         acc = if resets { local } else { acc * local };
     }
     acc
@@ -1739,7 +2183,7 @@ fn lux_emission(light: &impl UsdLight) -> Vec3A {
 }
 
 fn emit_sphere_light(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     lights: &mut LightList,
     light: &SphereLight,
     world_xf: GMat4,
@@ -1754,11 +2198,12 @@ fn emit_sphere_light(
     // geometry id the attach returns.
     let material = Arc::new(Emissive::new(effective));
     let geom_id = world.attach(
-        Geometry::Sphere {
+        PendingGeometry::Ready(Geometry::Sphere {
             center: position,
             radius,
-        },
+        }),
         material.clone(),
+        MASK_ALL,
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape {
@@ -1775,7 +2220,7 @@ fn emit_sphere_light(
 }
 
 fn emit_rect_light(
-    world: &mut WorldBuilder,
+    world: &mut GeometryQueue,
     lights: &mut LightList,
     light: &RectLight,
     world_xf: GMat4,
@@ -1806,12 +2251,13 @@ fn emit_rect_light(
         origin + edge_v,
     );
     let geom_id = world.attach(
-        Geometry::TriangleMesh {
+        PendingGeometry::Ready(Geometry::TriangleMesh {
             vertices: vec![c00, c10, c11, c01],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,
-        },
+        }),
         material.clone(),
+        MASK_ALL,
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(RectShape::new(origin, edge_u, edge_v, normal)),
@@ -1956,29 +2402,6 @@ fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(candidate),
     )
-}
-
-fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
-    let warn_type = |name: &str| {
-        warn!(
-            "USD light type '{}' at {} is not yet supported — skipped",
-            name,
-            prim.path()
-        );
-    };
-    if DiskLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("DiskLight");
-    } else if CylinderLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("CylinderLight");
-    }
 }
 
 // -----------------------------------------------------------------------
