@@ -137,9 +137,37 @@ throughput at four such threads. The approach also multiplies the
 composition cache by the thread count, which is the wrong trade for the
 one scene it is meant to help.
 
-So the probe stays in the tree as a measurement, not as a feature. The
-fix for this half of the cost is upstream: cache `child_names`, and take
-the `TODO(rayon)` in `pcp::IndexCache`.
+So the probe stays in the tree as a measurement, not as a feature.
+
+### Which leaves the reader itself
+
+Crust is pure Rust and that is not negotiable, so binding the C++
+OpenUSD — whose composition engine really is threaded — is off the table,
+and so is any replacement reader that is not itself pure Rust. The route
+is a fork of `openusd` (0.5.0 is still the latest release as of
+2026-06-08), measured with `usd_probe` and upstreamed.
+
+Worth saying plainly before anyone reaches for threads there: **46 µs to
+compose one empty `Xform` on a flat, single-layer stage is one to two
+orders of magnitude off what composition should cost.** The constant
+factor is the bug; the serialism is a symptom of it, since it is the
+allocation volume that makes per-thread stages lose to a single one.
+Ranked by payoff over risk:
+
+1. **Cache `compute_prim_child_names`.** `PrimIndexRef::child_names`
+   recomputes it per call — 13 µs/prim, ~21% of the traverse — and the
+   cache would sit next to the `indices` map it already has.
+2. **Stop allocating paths.** `sdf::Path` is a `String`, so every cache
+   lookup hashes a path and every derived path (`prim_path()`,
+   `append_path`, `effective_path`) allocates a new one. Interning is the
+   broad fix for the 46 µs and makes everything downstream cheaper.
+3. **`anchor_asset_paths` re-runs `Resolver::resolve` — a filesystem hit
+   — on every asset-path read** (its own `TODO(perf)`). Invisible on a
+   synthetic single-layer stage; potentially large on a scene built from
+   references, which is exactly the Moana shape.
+4. **Then, and only then, `Rc` → `Arc` with a concurrent index map** —
+   the crate's `TODO(rayon)`. It is pervasive, and the numbers above say
+   it does not pay until 1–3 land.
 
 ## Committing the top-level BVH
 

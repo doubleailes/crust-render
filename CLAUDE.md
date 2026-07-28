@@ -410,8 +410,11 @@ feature flag.
   ~94% of "Traverse prims" is inside openusd 0.5: the per-prim index build (charged to
   whichever composed query runs first) and `children()`, whose `compute_prim_child_names`
   is recomputed per call. It composes on an `Rc`/`RefCell` stage, so it cannot be threaded,
-  and per-thread stages measure 0.35x at four threads. Fixing this half means upstream work
-  (the crate carries its own `TODO(rayon)` at that boundary) or a different USD reader.
+  and per-thread stages measure 0.35x at four threads. Fixing this half means work *in the
+  reader* — the crate carries its own `TODO(rayon)` at that boundary — reached by forking
+  `openusd` and upstreaming, since **pure Rust is a hard project constraint**: binding the
+  C++ OpenUSD is not an option here however tempting its threaded composition looks, and
+  any replacement reader has to be pure Rust too.
   `docs/usd_import_performance.md` has the full breakdown and the diagnosis recipe.
   Also unaddressed on the crust side: `collapse` (the BVH's binary→BVH4 layout pass) is a
   sequential ~0.85s over 2.4M nodes on a 2M-instance scene, and `Geometry`/`PrimNode` are
