@@ -71,37 +71,27 @@ const MIN_STREAM_CHUNKS: usize = 4;
 /// when there are too few chunks for streaming to be worth it, which
 /// tells the caller to import the whole stage in one pass.
 ///
-/// # Streaming is incomplete — opt-in only
+/// # Why this is worth the extra opens
 ///
-/// Importing per element is a large win where it works: on the Moana
-/// island it takes peak memory from 117.10 GiB to 42.53 GiB and runtime
-/// from 13:20 to 08:57, because composing one element costs openusd
-/// 1.10 GiB where composing the whole stage costs 75.74 GiB.
+/// Composing the whole Moana island costs openusd 75.74 GiB and 6m19s;
+/// composing a stage masked to one element costs 1.10 GiB and 2.6s. So
+/// importing element by element, dropping each stage when done, bounds
+/// the composed set at roughly one element instead of all twenty:
+/// **117.10 GiB and 13:20 become 43.76 GiB and 09:19**, with output
+/// pixel-identical to the single-stage import.
 ///
-/// But it currently **loses geometry**. On the island it imports
-/// 50 990 392 triangles against the single-stage importer's 56 825 650,
-/// and 1.5% of pixels differ. Curves and instances match exactly; only
-/// meshes are affected.
+/// The re-opens are not free — each masked open re-composes the root
+/// layer — which is what [`MIN_STREAM_CHUNKS`] guards against on scenes
+/// too small for the excluded payloads to pay for them.
 ///
-/// The cause is native instancing. Each element's root is `instanceable`,
-/// so its content lives in a prototype materialised at a stage-root path
-/// (`/__Prototype_N`) *outside* the element's own subtree. Under a mask
-/// naming only that element, nine of the island's prototypes resolve
-/// empty — logged as "Prototype /__Prototype_0 contributed no geometry",
-/// against one such warning for the whole single-stage import. openusd's
-/// `Stage::mask_includes` is meant to cover exactly this (a prototype is
-/// populated when any of its instances is in the mask, per spec 11.3.3),
-/// so this is either a subtlety not yet pinned down or a limitation of
-/// openusd 0.5's masking; it is not simply a missing path in the mask.
-///
-/// Verified *not* to be the cause: the prototype-cache epoch (the fix in
-/// [`ImportCaches::epoch`] left the triangle count byte-identical), and
-/// ten of the twenty elements, which A/B identical in both modes.
+/// Getting this right depends on the caches distinguishing paths that
+/// are stable across stages from paths that are not; see
+/// [`MaterialCache::key`] and [`ImportCaches::epoch`].
 fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
-    // Opt-in, because it is not correct yet: see the module note on
-    // streaming below. `CRUST_STREAM_IMPORT=1` enables it for
-    // experimentation and for A/B-ing the two paths on one scene.
-    if !std::env::var("CRUST_STREAM_IMPORT").is_ok_and(|v| v == "1") {
+    // Escape hatch, and the way to A/B the two import paths against each
+    // other on one scene: `CRUST_STREAM_IMPORT=0` forces a single stage.
+    if std::env::var("CRUST_STREAM_IMPORT").is_ok_and(|v| v == "0") {
+        debug!("Streaming import disabled by CRUST_STREAM_IMPORT=0");
         return Vec::new();
     }
     let pseudo_root = stage.prim_at(sdf::Path::abs_root());
@@ -362,6 +352,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             // mesh cache keys materials by Arc address, so nothing may
             // be freed while it is live.
             ctx.caches.epoch += 1;
+            ctx.caches.materials.epoch = ctx.caches.epoch;
         }
     }
 
@@ -2180,13 +2171,40 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
 /// which is what lets `MeshKey` recognize shared mesh geometry.
 #[derive(Default)]
 struct MaterialCache {
-    by_path: HashMap<String, Arc<dyn Material>>,
+    by_path: HashMap<(u32, String), Arc<dyn Material>>,
     default: Option<Arc<dyn Material>>,
+    /// Which stage the prototype-scoped entries belong to; see
+    /// [`MaterialCache::key`]. Kept in step with [`ImportCaches::epoch`].
+    epoch: u32,
 }
 
 impl MaterialCache {
     fn default_material(&mut self) -> Arc<dyn Material> {
         self.default.get_or_insert_with(default_material).clone()
+    }
+
+    /// Cache key for a bound material path.
+    ///
+    /// Authored scene paths are stable across stages, so they key on the
+    /// path alone and a material shared by several subtrees resolves to
+    /// one `Arc` — which is what lets the mesh cache deduplicate across
+    /// them. Paths *inside* a prototype are not stable: prototypes are
+    /// numbered per composition, so under the streaming importer every
+    /// stage has its own `/__Prototype_0`, and keying those on the path
+    /// alone hands one chunk's material to the next chunk's geometry.
+    /// Those are therefore scoped by epoch.
+    ///
+    /// This bit the streaming importer for real: on the Moana island it
+    /// silently merged distinct meshes onto shared materials, losing
+    /// 5 835 258 triangles. No single element reproduces it — it needs
+    /// two chunks that both carry prototype-internal materials.
+    fn key(&self, path: &str) -> (u32, String) {
+        let epoch = if path.starts_with("/__Prototype") {
+            self.epoch
+        } else {
+            0
+        };
+        (epoch, path.to_string())
     }
 }
 
@@ -2204,13 +2222,12 @@ fn resolve_material(
         return cache.default_material();
     };
 
-    if let Some(hit) = cache.by_path.get(mat_path.as_str()) {
+    let key = cache.key(mat_path.as_str());
+    if let Some(hit) = cache.by_path.get(&key) {
         return hit.clone();
     }
     let resolved = resolve_material_uncached(stage, &mat_path);
-    cache
-        .by_path
-        .insert(mat_path.as_str().to_string(), resolved.clone());
+    cache.by_path.insert(key, resolved.clone());
     resolved
 }
 
