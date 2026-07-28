@@ -37,6 +37,12 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 
+# USD import probes (see docs/usd_import_performance.md)
+cargo run --release -p crust-core --example usd_probe -- scene.usda           # cost per composed query
+cargo run --release -p crust-core --example usd_parallel_probe -- scene.usda  # does traversal thread?
+cargo run --release -p crust-core --example tousdc -- in.usda out.usdc        # text -> binary layer
+python3 scripts/gen_moana_like_scene.py big.usda   # a Moana-shaped stage to profile the importer on
+
 # Kernel correctness is stated in exact float bits, so it must hold under every
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
@@ -277,7 +283,26 @@ randomness use `openqmc::pcg::Rng`.
 
 The only scene format. `load_scene` opens the stage, imports `RenderSettings` first (the
 camera needs the aspect ratio), then traverses prims with an explicit stack that bakes the
-Xform hierarchy into world matrices. Schema mapping:
+Xform hierarchy into world matrices.
+
+**The traversal is serial and everything downstream of it is not.** openusd composes on an
+`Rc`/`RefCell` `Stage`, so the walk cannot be threaded (giving each thread its own stage
+measures *slower* — `usd_parallel_probe`, and `docs/usd_import_performance.md` for the
+numbers). What the walk *produces* is therefore handed to a **`GeometryQueue`**: a queued
+build returns a `SceneSlot` rather than a scene, `flush()` builds every outstanding slot
+with rayon, and attachments are buffered and drained **in traversal order** so every
+`geom_id` is the one a serial importer would have assigned (an `AreaLight` records the id
+of its own surface — get this wrong and lights point at the wrong geometry). Batching is
+bounded both ways (`BUILD_BYTE_BUDGET`, `ATTACH_WINDOW`) so peak memory does not grow with
+the scene, and an attachment waiting on nothing is passed straight through. The one place
+that must look *inside* a slot — a `PointInstancer` nested in a prototype, which builds a
+sub-scene of the inner geometry — calls `resolve()`, which flushes first.
+
+Per-prim cost is the other half. Each composed query is a `String`-keyed lookup, so the
+dispatch reads `typeName` **once** into a `PrimKind` and matches on it instead of trying ten
+`Schema::get`s, and `compose_xform_ops` returns the local matrix *and* the
+`!resetXformStack!` flag from one `xformOpOrder` read. Add a query per prim only when it
+buys something. Schema mapping:
 
 - `UsdGeomMesh` → a *local-space* committed `rt::Scene` (one `TriangleMesh` geometry)
   placed by an `rt::Geometry::Instance`; prims with identical points/topology/material
@@ -356,9 +381,11 @@ Xform hierarchy into world matrices. Schema mapping:
   `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
   emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
   Other lux types (`DiskLight`, `CylinderLight`) warn once and are skipped.
-- **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
-  *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
-  shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
+- **Volumes**: a prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
+  *before* geometry in the dispatch, so it never becomes geometry — its bounds must not
+  occlude shadow rays). Author it on a `Cube` or a bare `Xform`/`Scope`: the probe is
+  skipped on prims whose `typeName` already says what they are (`may_be_volume`), because
+  it would otherwise cost a composed attribute read on every mesh prim in the stage. The local box is `[-size/2, size/2]³` when the prim authors `size` (a
   `Cube`; USD's default size is 2), else the unit cube; placement/orientation/scale come
   from the composed prim transform. Attributes (all in `crust:volume:`, defaults in
   parentheses): `type` = `homogeneous` | `smoke` | `grid` (required); `densityScale` (1);
@@ -378,6 +405,18 @@ Note: `openusd` is a hard dependency and USD is always compiled in — there is 
 feature flag.
 
 ## Known incomplete work
+
+- **USD import is bounded by openusd's composition engine.** On a prim-count-bound stage
+  ~94% of "Traverse prims" is inside openusd 0.5: the per-prim index build (charged to
+  whichever composed query runs first) and `children()`, whose `compute_prim_child_names`
+  is recomputed per call. It composes on an `Rc`/`RefCell` stage, so it cannot be threaded,
+  and per-thread stages measure 0.35x at four threads. Fixing this half means upstream work
+  (the crate carries its own `TODO(rayon)` at that boundary) or a different USD reader.
+  `docs/usd_import_performance.md` has the full breakdown and the diagnosis recipe.
+  Also unaddressed on the crust side: `collapse` (the BVH's binary→BVH4 layout pass) is a
+  sequential ~0.85s over 2.4M nodes on a 2M-instance scene, and `Geometry`/`PrimNode` are
+  sized by their largest variant (112 B per attached geometry), which is what makes an
+  instance-heavy scene's peak RSS ~750 B per instance.
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
   linearly (no deformation blur, no quaternion motion — a large shutter rotation bows

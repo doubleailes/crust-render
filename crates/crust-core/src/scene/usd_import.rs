@@ -845,6 +845,14 @@ impl GeometryQueue {
     /// would assign it — every attachment goes through here, so predicting
     /// it is exact.
     fn attach(&mut self, geometry: PendingGeometry, material: Arc<dyn Material>, mask: u32) -> u32 {
+        // Nothing outstanding: attach straight through. Same order, one
+        // less copy — and this is the path a dense `PointInstancer` takes
+        // for every one of its placements, since its prototype was built
+        // before the first of them.
+        if self.jobs.is_empty() && self.window.is_empty() {
+            let geometry = self.materialize(geometry);
+            return self.world.attach_masked(geometry, material, mask);
+        }
         let id = (self.world.count() + self.window.len()) as u32;
         self.window.push(PendingAttach {
             geometry,
@@ -855,6 +863,26 @@ impl GeometryQueue {
             self.drain();
         }
         id
+    }
+
+    /// Resolves a pending geometry against the built slots. Every slot it
+    /// can name is built by the time this runs — `drain` flushes first,
+    /// and the pass-through path only runs with no jobs outstanding.
+    fn materialize(&self, geometry: PendingGeometry) -> Geometry {
+        match geometry {
+            PendingGeometry::Ready(g) => g,
+            PendingGeometry::Instance {
+                slot,
+                transform,
+                transform_end,
+            } => Geometry::Instance {
+                scene: self.scenes[slot.0]
+                    .clone()
+                    .expect("flush builds every queued slot"),
+                transform,
+                transform_end,
+            },
+        }
     }
 
     /// Attaches an instance of `slot`.
@@ -904,21 +932,8 @@ impl GeometryQueue {
     fn drain(&mut self) {
         self.flush();
         self.world.reserve(self.window.len());
-        for attach in self.window.drain(..) {
-            let geometry = match attach.geometry {
-                PendingGeometry::Ready(g) => g,
-                PendingGeometry::Instance {
-                    slot,
-                    transform,
-                    transform_end,
-                } => Geometry::Instance {
-                    scene: self.scenes[slot.0]
-                        .clone()
-                        .expect("flush builds every queued slot"),
-                    transform,
-                    transform_end,
-                },
-            };
+        for attach in std::mem::take(&mut self.window) {
+            let geometry = self.materialize(attach.geometry);
             self.world.attach_masked(geometry, attach.material, attach.mask);
         }
     }

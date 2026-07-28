@@ -231,6 +231,22 @@ MIS matches the cleaner of the two everywhere.
 
 ![moana](images/moana_island_full.png)
 
+A scene this size is a *loading* benchmark before it is a rendering one, so
+`--stats` breaks the load into phases and says which one you are paying for:
+
+```bash
+cargo run --release -- -i island.usd --stats -s 1
+```
+
+Turning authored meshes into kernel geometry — hashing, triangulating, BVH
+building — now happens off the traversal thread on a rayon pool (3.7x on a
+1M-triangle stage, four cores). The walk itself stays serial because openusd
+composes on an `Rc`-based `Stage`; on a prim-count-bound stage that walk is
+~94% of the load and almost all of it is inside openusd.
+[`docs/usd_import_performance.md`](docs/usd_import_performance.md) has the
+measurements, including what happened when each thread was given its own
+stage (it got slower).
+
 ### CLI
 
 ```bash

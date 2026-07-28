@@ -839,3 +839,189 @@ fn infinite_lights_are_found_by_escaping_rays() {
     assert_eq!(dome_like, 1, "expected exactly one all-direction dome");
     assert_eq!(cone_like, 1, "expected exactly one cone-shaped distant light");
 }
+
+// -----------------------------------------------------------------------
+// Import performance refactor: what the importer must keep answering the
+// same way now that it dispatches on one `typeName` read and builds
+// geometry off the traversal thread.
+// -----------------------------------------------------------------------
+
+/// Writes `body` to a temporary `.usda` and loads it.
+fn load_inline(name: &str, body: &str) -> Scene {
+    let path = std::env::temp_dir().join(format!("crust_test_{name}.usda"));
+    std::fs::write(&path, body).expect("write temp stage");
+    let scene = Scene::from_usd(&path).unwrap_or_else(|e| panic!("load {name}: {e}"));
+    let _ = std::fs::remove_file(&path);
+    scene
+}
+
+/// `!resetXformStack!` truncates the inherited transform on *any*
+/// Xformable prim.
+///
+/// The reset used to be read through a chain of schema views that only
+/// covered Xform / Mesh / Sphere / Camera / SphereLight / RectLight, so a
+/// reset authored on a `BasisCurves` (or a Scope, or anything else) was
+/// silently ignored. It now comes from the same `xformOpOrder` read that
+/// composes the matrix, which applies it everywhere — as
+/// UsdGeomXformable specifies.
+#[test]
+fn reset_xform_stack_applies_to_any_prim_type() {
+    // The parent translates by +100 in x. The child resets the stack and
+    // translates to x = 1, so it must sit at x = 1, not x = 101.
+    let scene = load_inline(
+        "reset_xform",
+        r#"#usda 1.0
+(
+    upAxis = "Y"
+)
+
+def Xform "Parent" {
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    double3 xformOp:translate = (100, 0, 0)
+
+    def BasisCurves "Hair" {
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token type = "linear"
+        int[] curveVertexCounts = [2]
+        point3f[] points = [(0, 0, 0), (0, 2, 0)]
+        float[] widths = [0.4]
+    }
+}
+"#,
+    );
+
+    let down = |x: f32| {
+        crust_core::Ray::new(
+            crust_core::Vec3A::new(x, 5.0, 0.0),
+            -crust_core::Vec3A::Y,
+        )
+    };
+    assert!(
+        scene.world.intersect(&down(1.0), 0.001, 20.0).is_some(),
+        "the reset stack should place the curve at x = 1"
+    );
+    assert!(
+        scene.world.intersect(&down(101.0), 0.001, 20.0).is_none(),
+        "the parent's translation must not survive !resetXformStack!"
+    );
+}
+
+/// Geometry builds are deferred and batched, so the world is filled in
+/// after the traversal — but every `geom_id` must still be the one the
+/// traversal order implies, because that is how an `AreaLight` finds its
+/// own surface again.
+#[test]
+fn deferred_builds_keep_light_geom_ids() {
+    // A light authored *before* the geometry: with buffered attachment its
+    // id is predicted rather than returned, so getting this wrong points
+    // the light at the wrong surface.
+    let scene = load_inline(
+        "light_first",
+        r#"#usda 1.0
+(
+    upAxis = "Y"
+)
+
+def RectLight "Key" {
+    float inputs:width = 2
+    float inputs:height = 2
+    float inputs:intensity = 5
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    double3 xformOp:translate = (0, 4, 0)
+}
+
+def Mesh "Floor" {
+    point3f[] points = [(-5, 0, -5), (5, 0, -5), (5, 0, 5), (-5, 0, 5)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+}
+
+def Sphere "Ball" {
+    double radius = 1
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    double3 xformOp:translate = (0, 1, 0)
+}
+"#,
+    );
+
+    assert_eq!(scene.lights.count(), 1, "the RectLight should be imported");
+    let light = scene.lights.pick(0.0).expect("one light");
+    let light_geom = light
+        .geom_id()
+        .expect("a RectLight owns its emitting geometry");
+
+    // A UsdLux RectLight is a quad in its local XY plane facing -Z, so it
+    // stands upright at z = 0 spanning y in [3, 5]. Shooting at its face
+    // hits the light's own geometry, and that hit must carry the id the
+    // light recorded.
+    let at_face = crust_core::Ray::new(
+        crust_core::Vec3A::new(0.0, 4.0, -3.0),
+        crust_core::Vec3A::Z,
+    );
+    let hit = scene
+        .world
+        .intersect(&at_face, 0.001, 20.0)
+        .expect("the light's quad stands at z = 0, y in [3, 5]");
+    assert_eq!(
+        hit.geom_id, light_geom,
+        "the light's recorded geom_id must match the surface it owns"
+    );
+
+    // And the other two geometries are still there, distinctly.
+    let down = crust_core::Ray::new(
+        crust_core::Vec3A::new(3.0, 5.0, 0.0),
+        -crust_core::Vec3A::Y,
+    );
+    let floor = scene
+        .world
+        .intersect(&down, 0.001, 20.0)
+        .expect("the floor should be hit away from the ball");
+    assert_ne!(floor.geom_id, light_geom, "floor and light must differ");
+}
+
+/// Meshes with identical points, topology and material share one built
+/// scene however many prims author them — the dedup the content hash
+/// exists for, and the reason a Moana-scale stage fits in memory at all.
+#[test]
+fn identical_meshes_share_one_built_scene() {
+    let mesh = |name: &str, x: f32| {
+        format!(
+            r#"
+def Mesh "{name}" {{
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    double3 xformOp:translate = ({x}, 0, 0)
+    point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+}}
+"#
+        )
+    };
+    let body = format!(
+        "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n{}{}{}",
+        mesh("A", -4.0),
+        mesh("B", 0.0),
+        mesh("C", 4.0)
+    );
+    let scene = load_inline("mesh_dedup", &body);
+
+    // Three placements...
+    assert_eq!(
+        scene.world.count(),
+        3,
+        "each prim is its own instance, so each gets a geom_id"
+    );
+    // ...of one prototype: the unique view descends into instances and
+    // counts each distinct piece of geometry once.
+    assert_eq!(
+        scene.world.unique_primitive_breakdown().triangles,
+        2,
+        "identical meshes must share one triangle list, not copy it per prim"
+    );
+    assert_eq!(
+        scene.world.primitive_breakdown().instances,
+        3,
+        "all three placements should be instances of the shared scene"
+    );
+}
