@@ -38,33 +38,69 @@ use crate::scene::PrimitiveBreakdown;
 /// feature-off one.
 #[cfg(feature = "traversal-stats")]
 pub mod stats {
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    pub static NODES_VISITED: AtomicU64 = AtomicU64::new(0);
-    pub static LEAVES_VISITED: AtomicU64 = AtomicU64::new(0);
-    pub static PRIM_TESTS: AtomicU64 = AtomicU64::new(0);
-    pub static PACKET_TESTS: AtomicU64 = AtomicU64::new(0);
-    pub static QUERIES: AtomicU64 = AtomicU64::new(0);
-
-    #[inline]
-    pub fn bump(c: &AtomicU64, n: u64) {
-        c.fetch_add(n, Ordering::Relaxed);
+    thread_local! {
+        /// Instance-nesting depth of the traversal running on this thread.
+        /// A top-level query is depth 0; descending into an instanced
+        /// scene raises it, so work can be attributed to the tree it
+        /// happened in rather than lumped together.
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
     }
 
-    /// `(queries, nodes, leaves, packet tests, scalar prim tests)`
-    pub fn read() -> (u64, u64, u64, u64, u64) {
+    /// Counters are `[top-level, inside an instance]`.
+    pub static QUERIES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    pub static NODES_VISITED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    pub static LEAVES_VISITED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    pub static PRIM_TESTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    pub static PACKET_TESTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+    /// Which half of each counter pair the current traversal belongs to.
+    #[inline]
+    pub fn slot() -> usize {
+        DEPTH.with(|d| usize::from(d.get() > 0))
+    }
+
+    /// Bracket a descent into an instanced scene.
+    #[inline]
+    pub fn enter_instance() {
+        DEPTH.with(|d| d.set(d.get() + 1));
+    }
+
+    #[inline]
+    pub fn leave_instance() {
+        DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+
+    #[inline]
+    pub fn bump(c: &[AtomicU64; 2], n: u64) {
+        c[slot()].fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// One tree level's totals: `(queries, nodes, leaves, packets, scalars)`.
+    pub fn read_level(level: usize) -> (u64, u64, u64, u64, u64) {
+        let g = |c: &[AtomicU64; 2]| c[level].load(Ordering::Relaxed);
         (
-            QUERIES.load(Ordering::Relaxed),
-            NODES_VISITED.load(Ordering::Relaxed),
-            LEAVES_VISITED.load(Ordering::Relaxed),
-            PACKET_TESTS.load(Ordering::Relaxed),
-            PRIM_TESTS.load(Ordering::Relaxed),
+            g(&QUERIES),
+            g(&NODES_VISITED),
+            g(&LEAVES_VISITED),
+            g(&PACKET_TESTS),
+            g(&PRIM_TESTS),
         )
     }
 
     pub fn reset() {
-        for c in [&QUERIES, &NODES_VISITED, &LEAVES_VISITED, &PACKET_TESTS, &PRIM_TESTS] {
-            c.store(0, Ordering::Relaxed);
+        for c in [
+            &QUERIES,
+            &NODES_VISITED,
+            &LEAVES_VISITED,
+            &PACKET_TESTS,
+            &PRIM_TESTS,
+        ] {
+            for half in c {
+                half.store(0, Ordering::Relaxed);
+            }
         }
     }
 }

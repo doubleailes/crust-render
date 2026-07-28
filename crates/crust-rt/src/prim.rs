@@ -348,7 +348,14 @@ impl Prim for InstancePrim {
         }
         let (w2l, normal_mat) = self.transforms_at(ray.time);
         let local = self.to_local(ray, &w2l);
-        let mut hit = self.scene.intersect_outward(&local, t_min, t_max)?;
+        // Attribute the nested traversal to the instance level, so
+        // top-level and instanced work can be told apart.
+        #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::enter_instance();
+        let inner = self.scene.intersect_outward(&local, t_min, t_max);
+        #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::leave_instance();
+        let mut hit = inner?;
         hit.outward = (normal_mat * hit.outward).normalize();
         // The hit is attributed to the *instance's* geometry id: the
         // application maps materials per top-level geometry. The inner
@@ -362,7 +369,12 @@ impl Prim for InstancePrim {
             return false;
         }
         let (w2l, _) = self.transforms_at(ray.time);
-        self.scene.occluded(&self.to_local(ray, &w2l), t_min, t_max)
+        #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::enter_instance();
+        let occluded = self.scene.occluded(&self.to_local(ray, &w2l), t_min, t_max);
+        #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::leave_instance();
+        occluded
     }
 
     fn bbox(&self) -> AABB {

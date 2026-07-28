@@ -80,36 +80,62 @@ fn probe(label: &str, geom: Geometry) {
         }
     }
 
-    let (queries, nodes, leaves, packets, scalars) = crust_rt::traversal_stats::read();
-    let per = |n: u64| n as f64 / queries.max(1) as f64;
+    report(label, prims, hits, (4 * N * N) as u64);
+}
+
+/// Prints both tree levels. Per-ray figures divide by the number of
+/// *top-level* queries, i.e. rays cast, so instance work is expressed as
+/// what it adds per ray rather than averaged into a query count that the
+/// descents themselves inflated.
+fn report(label: &str, prims: usize, hits: u64, rays: u64) {
+    let (q0, n0, l0, pk0, sc0) = crust_rt::traversal_stats::read_level(0);
+    let (q1, n1, l1, pk1, sc1) = crust_rt::traversal_stats::read_level(1);
+    let per = |n: u64| n as f64 / q0.max(1) as f64;
     println!(
-        "{label:<22} prims {prims:>9}  queries {queries:>8}  hit {:>5.1}%\n\
-         {:<22} nodes/ray {:>7.1}  leaves/ray {:>6.1}  packet-tests/ray {:>6.1}  scalar/ray {:>6.1}",
-        100.0 * hits as f64 / (4 * N * N) as f64,
-        "",
-        per(nodes),
-        per(leaves),
-        per(packets),
-        per(scalars),
+        "{label:<22} prims {prims:>9}  rays {q0:>8}  hit {:>5.1}%",
+        100.0 * hits as f64 / rays as f64
     );
+    println!(
+        "  {:<10} nodes/ray {:>7.1}  leaves/ray {:>6.1}  packets/ray {:>6.1}  scalar/ray {:>6.1}",
+        "top-level",
+        per(n0),
+        per(l0),
+        per(pk0),
+        per(sc0)
+    );
+    if q1 > 0 {
+        println!(
+            "  {:<10} nodes/ray {:>7.1}  leaves/ray {:>6.1}  packets/ray {:>6.1}  scalar/ray {:>6.1}                descents/ray {:>5.2}",
+            "instanced",
+            per(n1),
+            per(l1),
+            per(pk1),
+            per(sc1),
+            per(q1)
+        );
+    }
 }
 
 /// The same triangle budget reached through N instances of one prototype.
 ///
-/// **Read with care.** `QUERIES` counts every [`crust_rt::Scene::intersect`],
-/// and an instance descent is one of those, so the per-ray figures below
-/// average the outer tree and the inner ones together and are *not*
-/// comparable with the flat probe. Left in because the scalar/ray column
-/// still shows the instance tests a ray performs, but drawing conclusions
-/// about instancing overhead from these needs the counters split by tree
-/// level first.
+/// Counters are split by tree level, so the `instanced` row is the work a
+/// ray does *inside* prototypes and is directly comparable with the flat
+/// probe's `top-level` row.
 fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
     let mut inner = SceneBuilder::new();
     inner.attach(uv_sphere(segs, rings));
     let proto = std::sync::Arc::new(inner.commit());
 
-    let mut b = SceneBuilder::new();
+    // Spacing must exceed the prototype's diameter. Packing unit spheres
+    // closer makes every instance box overlap every other, so a ray
+    // descends into hundreds of them and the measurement says more about
+    // the layout than about instancing.
+    const SPACING: f32 = 2.5;
     let side = (copies as f64).cbrt().ceil() as i32;
+    let extent = SPACING * side as f32;
+    let centre = extent * 0.5;
+
+    let mut b = SceneBuilder::new();
     let mut placed = 0usize;
     'outer: for z in 0..side {
         for y in 0..side {
@@ -117,9 +143,11 @@ fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
                 if placed == copies {
                     break 'outer;
                 }
-                // Packed tightly around the origin so the same ray fan
-                // still lands on geometry.
-                let t = glam::Vec3::new(x as f32 * 0.05, y as f32 * 0.05, z as f32 * 0.05);
+                let t = glam::Vec3::new(
+                    x as f32 * SPACING - centre,
+                    y as f32 * SPACING - centre,
+                    z as f32 * SPACING - centre,
+                );
                 b.attach(Geometry::Instance {
                     scene: std::sync::Arc::clone(&proto),
                     transform: glam::Affine3A::from_translation(t),
@@ -135,29 +163,114 @@ fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
 
     crust_rt::traversal_stats::reset();
     const N: i32 = 200;
+    // Far enough back to see the whole grid, with the fan sized to it.
+    let dist = extent * 1.6;
+    let spread = (centre * 1.1) / dist;
     let mut hits = 0u64;
+    let t0 = std::time::Instant::now();
     for y in -N..N {
         for x in -N..N {
-            let dir = Vec3A::new(0.28 * x as f32 / N as f32, 0.28 * y as f32 / N as f32, 1.0);
-            let ray = Ray::new(Vec3A::new(0.0, 0.0, -4.0), dir);
+            let dir = Vec3A::new(
+                spread * x as f32 / N as f32,
+                spread * y as f32 / N as f32,
+                1.0,
+            );
+            let ray = Ray::new(Vec3A::new(0.0, 0.0, -dist), dir);
             if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
                 hits += 1;
             }
         }
     }
-    let (queries, nodes, leaves, packets, scalars) = crust_rt::traversal_stats::read();
-    let per = |n: u64| n as f64 / queries.max(1) as f64;
-    println!(
-        "{label:<22} top {prims:>9}  resident {:>9}  hit {:>5.1}%\n\
-         {:<22} nodes/ray {:>7.1}  leaves/ray {:>6.1}  packet-tests/ray {:>6.1}  scalar/ray {:>6.1}",
-        unique.triangles + unique.instances,
-        100.0 * hits as f64 / (4 * N * N) as f64,
-        "",
-        per(nodes),
-        per(leaves),
-        per(packets),
-        per(scalars),
+    let el = t0.elapsed();
+    report(
+        &format!("{label} [{} res]", unique.triangles + unique.instances),
+        prims,
+        hits,
+        (4 * N * N) as u64,
     );
+    println!("  {:<10} wall {:?} (counters on -- relative only)", "", el);
+}
+
+/// Identical geometry and layout, reached through two levels of instances
+/// instead of one: `groups` sub-scenes each holding `per_group` placements.
+///
+/// This is the controlled form of a difference seen on real data, where
+/// the same element imported with a nested structure rendered 4.7x slower
+/// than the flat one at an identical closest-hit count. Every extra level
+/// costs a scalar instance test, a ray transform, and a cold descent into
+/// another tree's root.
+fn probe_nested(label: &str, groups: usize, per_group: usize, segs: usize, rings: usize) {
+    let mut leaf = SceneBuilder::new();
+    leaf.attach(uv_sphere(segs, rings));
+    let proto = std::sync::Arc::new(leaf.commit());
+
+    const SPACING: f32 = 2.5;
+    let total = groups * per_group;
+    let side = (total as f64).cbrt().ceil() as i32;
+    let extent = SPACING * side as f32;
+    let centre = extent * 0.5;
+
+    // Same global placement as the flat probe, just partitioned into
+    // `groups` mid-level scenes.
+    let mut placements: Vec<glam::Vec3> = Vec::with_capacity(total);
+    'outer: for z in 0..side {
+        for y in 0..side {
+            for x in 0..side {
+                if placements.len() == total {
+                    break 'outer;
+                }
+                placements.push(glam::Vec3::new(
+                    x as f32 * SPACING - centre,
+                    y as f32 * SPACING - centre,
+                    z as f32 * SPACING - centre,
+                ));
+            }
+        }
+    }
+
+    let mut root = SceneBuilder::new();
+    for chunk in placements.chunks(per_group) {
+        let mut mid = SceneBuilder::new();
+        for t in chunk {
+            mid.attach(Geometry::Instance {
+                scene: std::sync::Arc::clone(&proto),
+                transform: glam::Affine3A::from_translation(*t),
+                transform_end: None,
+            });
+        }
+        root.attach(Geometry::Instance {
+            scene: std::sync::Arc::new(mid.commit()),
+            transform: glam::Affine3A::IDENTITY,
+            transform_end: None,
+        });
+    }
+    let scene = root.commit();
+    let prims = scene.primitive_count();
+    let unique = scene.unique_primitive_breakdown();
+
+    crust_rt::traversal_stats::reset();
+    const N: i32 = 200;
+    let dist = extent * 1.6;
+    let spread = (centre * 1.1) / dist;
+    let mut hits = 0u64;
+    let t0 = std::time::Instant::now();
+    for y in -N..N {
+        for x in -N..N {
+            let dir = Vec3A::new(spread * x as f32 / N as f32, spread * y as f32 / N as f32, 1.0);
+            let ray = Ray::new(Vec3A::new(0.0, 0.0, -dist), dir);
+            if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
+                hits += 1;
+            }
+        }
+    }
+    let el = t0.elapsed();
+    report(
+        &format!("{label} [{} res]", unique.triangles + unique.instances),
+        prims,
+        hits,
+        (4 * N * N) as u64,
+    );
+    println!("  {:<10} wall {:?} (counters on -- relative only)", "", el);
 }
 
 fn main() {
@@ -177,4 +290,9 @@ fn main() {
     probe_instanced("inst 64 x 16k tris", 64, 128, 64);
     probe_instanced("inst 4096 x 1k tris", 4096, 32, 16);
     probe_instanced("inst 32768 x 1k tris", 32768, 32, 16);
+
+    // Flat vs nested, same 32768 placements of the same prototype.
+    println!();
+    probe_nested("nested 32x1024", 32, 1024, 32, 16);
+    probe_nested("nested 1024x32", 1024, 32, 32, 16);
 }
