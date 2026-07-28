@@ -182,11 +182,80 @@ impl PrimRef {
     }
 }
 
-/// A built subtree with node indices and leaf offsets local to itself;
-/// `merge` splices children under a parent, offsetting as it goes.
-struct Subtree {
-    nodes: Vec<Node>,
-    indices: Vec<u32>,
+/// A built subtree, still in linked form.
+///
+/// The build produces this and [`Subtree::flatten`] turns it into the flat
+/// `(nodes, indices)` arrays `collapse` consumes — one pass at the end,
+/// rather than re-copying every child array into its parent at each of the
+/// ~30 levels of a large tree. Each `Inner` caches its subtree's node and
+/// reference totals so the flatten can reserve exactly once.
+enum Subtree {
+    Leaf {
+        bbox: AABB,
+        indices: Vec<u32>,
+    },
+    Inner {
+        bbox: AABB,
+        left: Box<Subtree>,
+        right: Box<Subtree>,
+        /// Nodes in this subtree, this one included.
+        nodes: usize,
+        /// Primitive references in this subtree's leaves.
+        refs: usize,
+    },
+}
+
+impl Subtree {
+    fn node_count(&self) -> usize {
+        match self {
+            Subtree::Leaf { .. } => 1,
+            Subtree::Inner { nodes, .. } => *nodes,
+        }
+    }
+
+    fn ref_count(&self) -> usize {
+        match self {
+            Subtree::Leaf { indices, .. } => indices.len(),
+            Subtree::Inner { refs, .. } => *refs,
+        }
+    }
+
+    /// Lays the tree out depth-first — parent, then its whole left
+    /// subtree, then its right — which is exactly the order the old
+    /// concatenating merge produced, so the flat tree is unchanged.
+    fn flatten(self) -> (Vec<Node>, Vec<u32>) {
+        let mut nodes = Vec::with_capacity(self.node_count());
+        let mut indices = Vec::with_capacity(self.ref_count());
+        self.flatten_into(&mut nodes, &mut indices);
+        (nodes, indices)
+    }
+
+    fn flatten_into(self, nodes: &mut Vec<Node>, indices: &mut Vec<u32>) {
+        match self {
+            Subtree::Leaf { bbox, indices: own } => nodes.push(Node {
+                bbox,
+                first_or_right: indices.len() as u32,
+                count: {
+                    let n = own.len() as u32;
+                    indices.extend(own);
+                    n
+                },
+            }),
+            Subtree::Inner {
+                bbox, left, right, ..
+            } => {
+                let me = nodes.len();
+                nodes.push(Node {
+                    bbox,
+                    first_or_right: 0,
+                    count: 0,
+                });
+                left.flatten_into(nodes, indices);
+                nodes[me].first_or_right = nodes.len() as u32;
+                right.flatten_into(nodes, indices);
+            }
+        }
+    }
 }
 
 impl Bvh {
@@ -205,7 +274,8 @@ impl Bvh {
         } else {
             let root_bbox = union_all(&refs);
             let subtree = build_subtree(&prims, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+            let (tree_nodes, tree_indices) = subtree.flatten();
+            let (wide, collected) = collapse(&tree_nodes, &tree_indices, &prims);
             (wide, collected, Some(root_bbox))
         };
 
@@ -600,44 +670,32 @@ fn intersect_aabb(a: &AABB, b: &AABB) -> Option<AABB> {
 }
 
 fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
-    Subtree {
-        nodes: vec![Node {
-            bbox,
-            first_or_right: 0,
-            count: refs.len() as u32,
-        }],
+    Subtree::Leaf {
+        bbox,
         indices: refs.iter().map(|r| r.idx).collect(),
     }
 }
 
-/// Splices `left`/`right` under a fresh internal node, rewriting the
-/// children's local node indices and leaf offsets into the merged frame.
+/// Splices `left`/`right` under a fresh internal node.
+///
+/// This used to *concatenate* the children's finished node and index
+/// arrays, rewriting every child index into the merged frame. That is
+/// correct but quadratic-ish in practice: the same node is copied once per
+/// level above it, so a 2M-primitive build memcpy'd tens of millions of
+/// nodes and did it on the parent thread, right where `rayon::join` had
+/// just finished — serializing the top of the tree and drowning the build
+/// in allocator traffic (a 2M-instance scene spent 5s in commit, most of
+/// it in the kernel). Linking instead is O(1), so the join returns
+/// immediately and [`Subtree::flatten`] lays the whole tree out once, in
+/// the same depth-first order the merge produced.
 fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
-    let mut nodes = Vec::with_capacity(1 + left.nodes.len() + right.nodes.len());
-    let right_node_offset = 1 + left.nodes.len() as u32;
-    nodes.push(Node {
+    Subtree::Inner {
         bbox,
-        first_or_right: right_node_offset,
-        count: 0,
-    });
-    for mut n in left.nodes {
-        if n.count == 0 {
-            n.first_or_right += 1;
-        }
-        nodes.push(n);
+        nodes: 1 + left.node_count() + right.node_count(),
+        refs: left.ref_count() + right.ref_count(),
+        left: Box::new(left),
+        right: Box::new(right),
     }
-    let leaf_offset = left.indices.len() as u32;
-    for mut n in right.nodes {
-        if n.count == 0 {
-            n.first_or_right += right_node_offset;
-        } else {
-            n.first_or_right += leaf_offset;
-        }
-        nodes.push(n);
-    }
-    let mut indices = left.indices;
-    indices.extend(right.indices);
-    Subtree { nodes, indices }
 }
 
 /// The winning object split: partition predicate parameters plus the SAH

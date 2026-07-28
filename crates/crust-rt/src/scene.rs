@@ -149,7 +149,22 @@ impl SceneBuilder {
     /// Expands every geometry into primitives and builds the BVH.
     pub fn commit(self) -> Scene {
         let n_geoms = self.geoms.len() as u32;
-        let mut prims: Vec<PrimNode> = Vec::new();
+        // Size the primitive table exactly before filling it. A dense
+        // instancer attaches millions of geometries, and growing this
+        // vector by doubling re-copies every `PrimNode` written so far at
+        // each step — hundreds of megabytes of memcpy, and the page faults
+        // that come with it, for a count that is free to compute.
+        let n_prims: usize = self
+            .geoms
+            .iter()
+            .map(|(geom, _)| match geom {
+                Geometry::TriangleMesh { indices, .. } => indices.len(),
+                Geometry::RoundCurves { segments } => segments.len(),
+                Geometry::CubicCurves { segments } => segments.len(),
+                Geometry::Sphere { .. } | Geometry::Instance { .. } => 1,
+            })
+            .sum();
+        let mut prims: Vec<PrimNode> = Vec::with_capacity(n_prims);
         for (geom_id, (geom, mask)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
             match geom {
@@ -158,7 +173,6 @@ impl SceneBuilder {
                     indices,
                     normals,
                 } => {
-                    prims.reserve(indices.len());
                     for (prim_id, tri) in indices.into_iter().enumerate() {
                         let [i0, i1, i2] = tri;
                         let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
