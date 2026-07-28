@@ -5,6 +5,7 @@ use crate::material::{Material, ScatterSample};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
+use crate::stats::RayStats;
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
@@ -128,6 +129,8 @@ struct PassStats {
     /// guiding efficiency estimate, which normalizes it against a reference
     /// image shared by every pass being compared (`mean_relative_error`).
     var_map: Vec<f64>,
+    /// Integrator work this pass did.
+    rays: RayStats,
 }
 
 pub struct Renderer {
@@ -166,26 +169,45 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None)
+        self.render_impl(false, None).0
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None)
+        self.render_impl(true, None).0
     }
 
     /// Renders with a progress callback — see [`ProgressCallback`]. With
     /// guiding enabled, only the final pass reports (training passes are
     /// silent, as before).
     pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
+        self.render_impl(tiled, Some(progress)).0
+    }
+
+    /// As [`Renderer::render_with_progress`], also returning what the
+    /// integrator did — see [`RayStats`]. Counting is unconditional and
+    /// costs an increment per ray, so this is the same render either way;
+    /// the other entry points simply discard the numbers.
+    ///
+    /// With guiding enabled the counters cover **every** pass, training
+    /// included, since all of them spend time.
+    pub fn render_with_stats(
+        &self,
+        tiled: bool,
+        progress: ProgressCallback,
+    ) -> (Buffer, RayStats) {
         self.render_impl(tiled, Some(progress))
     }
 
-    fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
+    fn render_impl(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+    ) -> (Buffer, RayStats) {
         if self.settings.guiding {
             return self.render_guided(tiled, progress);
         }
-        self.render_pass(self.final_pass_config(tiled), None, progress)
-            .0
+        let (buf, _, pass) = self.render_pass(self.final_pass_config(tiled), None, progress);
+        (buf, pass.rays)
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
@@ -219,14 +241,21 @@ impl Renderer {
     /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
-    fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> Buffer {
+    fn render_guided(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+    ) -> (Buffer, RayStats) {
+        // Every pass costs time, training included, so the counters cover
+        // all of them rather than the final pass alone.
+        let mut rays = RayStats::default();
         let bounds = match self.world.bounds() {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                return self
-                    .render_pass(self.final_pass_config(tiled), None, progress)
-                    .0;
+                let (buf, _, pass) =
+                    self.render_pass(self.final_pass_config(tiled), None, progress);
+                return (buf, pass.rays);
             }
         };
         let cfg = GuidingConfig {
@@ -262,6 +291,7 @@ impl Renderer {
             };
             let start = std::time::Instant::now();
             let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
+            rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
             drop(gctx);
             info!(
@@ -325,9 +355,10 @@ impl Renderer {
         let final_gctx = if guide_final { Some(&gctx) } else { None };
         let (final_buffer, _, final_stats) =
             self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
+        rays.merge(&final_stats.rays);
         passes.push((final_buffer, final_stats.variance));
 
-        self.blend_passes(passes)
+        (self.blend_passes(passes), rays)
     }
 
     /// Inverse-variance blend of independent unbiased passes. Passes whose
@@ -382,6 +413,7 @@ impl Renderer {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
         let mut all_samples = Vec::new();
         let mut variance_sum = 0.0f64;
+        let mut rays = RayStats::default();
         let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
         let pixel_count = (self.settings.width * self.settings.height) as f64;
 
@@ -389,14 +421,19 @@ impl Renderer {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
             let total = tiles.len() as u64;
             let done = AtomicU64::new(0);
-            let results: Vec<(Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>)> = tiles
+            type TileOut = (Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>, RayStats);
+            let results: Vec<TileOut> = tiles
                 .into_par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     let mut samples = Vec::new();
+                    // Private to this tile, so no two threads share a
+                    // counter and there is nothing to synchronise.
+                    let mut tile_rays = RayStats::default();
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) = self.render_pixel(i, j, &cfg, gctx);
+                            let (color, mut s, v) =
+                                self.render_pixel(i, j, &cfg, gctx, &mut tile_rays);
                             pixels.push((i, j, color, v));
                             samples.append(&mut s);
                         }
@@ -404,10 +441,11 @@ impl Renderer {
                     if let Some(cb) = progress {
                         cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     }
-                    (pixels, samples)
+                    (pixels, samples, tile_rays)
                 })
                 .collect();
-            for (pixels, samples) in results {
+            for (pixels, samples, tile_rays) in results {
+                rays.merge(&tile_rays);
                 for (i, j, color, var) in pixels {
                     buffer.set_pixel(i, j, color);
                     var_map[j * self.settings.width + i] = var;
@@ -419,11 +457,16 @@ impl Renderer {
             let total = self.settings.height as u64;
             let mut done = 0u64;
             for j in (0..self.settings.height).rev() {
-                let row: Vec<(Vec3A, Vec<SampleData>, f64)> = (0..self.settings.width)
+                let row: Vec<(Vec3A, Vec<SampleData>, f64, RayStats)> = (0..self.settings.width)
                     .into_par_iter()
-                    .map(|i| self.render_pixel(i, j, &cfg, gctx))
+                    .map(|i| {
+                        let mut px = RayStats::default();
+                        let (c, s, v) = self.render_pixel(i, j, &cfg, gctx, &mut px);
+                        (c, s, v, px)
+                    })
                     .collect();
-                for (i, (color, samples, var)) in row.into_iter().enumerate() {
+                for (i, (color, samples, var, px_rays)) in row.into_iter().enumerate() {
+                    rays.merge(&px_rays);
                     buffer.set_pixel(i, j, color);
                     all_samples.extend(samples);
                     var_map[j * self.settings.width + i] = var;
@@ -442,6 +485,7 @@ impl Renderer {
             PassStats {
                 variance: variance_sum / pixel_count,
                 var_map,
+                rays,
             },
         )
     }
@@ -452,6 +496,7 @@ impl Renderer {
         j: usize,
         cfg: &PassConfig,
         gctx: Option<&GuidingContext>,
+        stats: &mut RayStats,
     ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sum = Vec3A::ZERO;
         let mut samples = Vec::new();
@@ -475,6 +520,7 @@ impl Renderer {
             let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
             let time = root.new_domain(K_TIME).draw_sample_f32::<1>()[0];
             let r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
+            stats.camera_rays += 1;
             let color = trace_path(
                 &r,
                 &self.world,
@@ -485,6 +531,7 @@ impl Renderer {
                 root,
                 gctx,
                 &mut samples,
+                stats,
             );
             sum += color;
             let lum = luminance(color) as f64;
@@ -611,6 +658,7 @@ pub fn ray_color(
     sampler: PathSampler,
 ) -> Vec3A {
     let mut no_training = Vec::new();
+    let mut stats = RayStats::default();
     trace_path(
         r,
         world,
@@ -621,6 +669,7 @@ pub fn ray_color(
         sampler,
         None,
         &mut no_training,
+        &mut stats,
     )
 }
 
@@ -855,9 +904,11 @@ fn shadow_transmittance(
     shadow_ray: &Ray,
     distance: f32,
     vertex: PathSampler,
+    stats: &mut RayStats,
 ) -> Vec3A {
     // Dedicated occlusion query: any hit in range means full shadow, so the
     // early-exit traversal beats searching for the closest hit.
+    stats.shadow_rays += 1;
     if world.occluded(shadow_ray, 0.001, distance - 0.001) {
         return Vec3A::ZERO;
     }
@@ -883,6 +934,7 @@ fn volume_nee(
     strategy: SamplingStrategy,
     vertex: PathSampler,
     time: f32,
+    stats: &mut RayStats,
 ) -> Vec3A {
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
@@ -898,7 +950,7 @@ fn volume_nee(
     let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
         .with_mask(crate::ray::MASK_SHADOW);
-    let tr = shadow_transmittance(world, volumes, &shadow_ray, s.distance, vertex);
+    let tr = shadow_transmittance(world, volumes, &shadow_ray, s.distance, vertex, stats);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
@@ -926,6 +978,7 @@ fn trace_path(
     sampler: PathSampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
+    stats: &mut RayStats,
 ) -> Vec3A {
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
@@ -949,11 +1002,13 @@ fn trace_path(
         let v = path.new_domain(records.len() as i32);
 
         if remaining <= 0 {
+            stats.ended_depth += 1;
             // Depth exhausted. The old recursion still counted bounce-hit
             // emission at the last vertex (its `add_emission` term traced
             // the ray itself) but never the background — reproduce both,
             // attenuating through any media the final segment crosses.
             if let Some(p) = &prev {
+                stats.closest_hit += 1;
                 if let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let mut emitted = hit.mat.emitted_directional(cos_o);
@@ -974,6 +1029,7 @@ fn trace_path(
             break;
         }
 
+        stats.closest_hit += 1;
         let hit_opt = world.intersect(&ray, 0.001, f32::INFINITY);
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
@@ -1020,7 +1076,7 @@ fn trace_path(
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
                 let nee =
-                    volume_nee(p, wi, &phase, world, volumes, lights, strategy, v, ray.time());
+                    volume_nee(p, wi, &phase, world, volumes, lights, strategy, v, ray.time(), stats);
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -1040,10 +1096,12 @@ fn trace_path(
                 beta *= weight;
                 let mut survived = true;
                 if records.len() >= RR_START_BOUNCE {
+                    stats.rr_tested += 1;
                     let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                     if p_survive < 1.0 {
                         if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                             survived = false;
+                            stats.rr_killed += 1;
                             vrec.factor = Vec3A::ZERO;
                         } else {
                             vrec.factor /= p_survive;
@@ -1052,10 +1110,12 @@ fn trace_path(
                     }
                 }
                 if !survived {
+                    stats.vertices += 1;
                     records.push(vrec);
                     break;
                 }
                 prev = Some(PrevVertex::Phase { pos: p, pdf: phase_pdf });
+                stats.vertices += 1;
                 records.push(vrec);
                 // Preserve the carried medium: scattering in fog inside a
                 // glass interior must keep attenuating in the glass.
@@ -1111,10 +1171,12 @@ fn trace_path(
             beta *= vol_tr * factor;
             let mut survived = true;
             if records.len() >= RR_START_BOUNCE {
+                stats.rr_tested += 1;
                 let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                 if p_survive < 1.0 {
                     if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                         survived = false;
+                        stats.rr_killed += 1;
                         vrec.factor = Vec3A::ZERO;
                     } else {
                         vrec.factor /= p_survive;
@@ -1123,9 +1185,11 @@ fn trace_path(
                 }
             }
             if !survived {
+                stats.vertices += 1;
                 records.push(vrec);
                 break;
             }
+            stats.vertices += 1;
             records.push(vrec);
             ray = Ray::new_in_medium(pos, dir, medium)
                 .with_time(ray.time())
@@ -1136,6 +1200,7 @@ fn trace_path(
         }
 
         let Some(hit) = hit_opt else {
+            stats.ended_escaped += 1;
             // === Background ===
             // A ray leaving the scene is how lights at infinity are found
             // by chance, so it is a bounce-side MIS event just like hitting
@@ -1226,7 +1291,7 @@ fn trace_path(
                 .with_mask(crate::ray::MASK_SHADOW);
 
             let shadow_tr =
-                shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v);
+                shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
             if shadow_tr != Vec3A::ZERO {
                 // Unsigned: lights behind the ray-facing normal are reachable
                 // through a continuous transmission lobe (opaque materials
@@ -1292,10 +1357,12 @@ fn trace_path(
             beta *= atten * factor;
             let mut survived = true;
             if records.len() >= RR_START_BOUNCE {
+                stats.rr_tested += 1;
                 let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
                 if p_survive < 1.0 {
                     if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
                         survived = false;
+                        stats.rr_killed += 1;
                     } else {
                         factor /= p_survive;
                         beta /= p_survive;
@@ -1323,6 +1390,7 @@ fn trace_path(
                     pdf: sample.pdf,
                     delta: sample.delta,
                 }));
+                stats.vertices += 1;
                 records.push(vrec);
                 // Materials build the scattered ray without path context;
                 // stamp the path's shutter time and the indirect category.
@@ -1337,6 +1405,7 @@ fn trace_path(
 
         // Absorbed or roulette-killed: this vertex's own gathers stand
         // (factor stays zero), the path ends here.
+        stats.vertices += 1;
         records.push(vrec);
         break;
     }
