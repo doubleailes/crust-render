@@ -113,6 +113,77 @@ pub struct SceneCounters {
     pub footprint: crate::rt::MemoryFootprint,
 }
 
+/// Work the integrator did, in rays and path vertices.
+///
+/// Counters, not timers: a `Instant::now()` pair costs tens of nanoseconds
+/// against a few hundred for a ray query, so timing individual rays would
+/// both slow the render and distort what it measured. Counting is a
+/// register increment, and dividing the totals by the render phase's
+/// wall-clock gives throughput without either problem.
+///
+/// Accumulated per work unit (a tile or a scanline) and summed when the
+/// pass collects its results, so no two threads ever touch the same
+/// counter and there is nothing to contend on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RayStats {
+    /// Primary rays cast from the camera.
+    pub camera_rays: u64,
+    /// Closest-hit queries: camera and bounce rays both.
+    pub closest_hit: u64,
+    /// Occlusion queries — the shadow rays next-event estimation casts.
+    pub shadow_rays: u64,
+    /// Vertices shaded, over surfaces and volume scatters alike.
+    pub vertices: u64,
+    /// Russian-roulette decisions reached, and how many ended the path.
+    /// Their ratio says whether roulette is doing anything worth tuning.
+    pub rr_tested: u64,
+    pub rr_killed: u64,
+    /// Paths that ended by leaving the scene.
+    pub ended_escaped: u64,
+    /// Paths that ended by exhausting `max_depth` — if this is ~0, the
+    /// depth ceiling is not what a render is paying for.
+    pub ended_depth: u64,
+}
+
+impl RayStats {
+    /// All ray queries, of every kind.
+    pub fn total_rays(&self) -> u64 {
+        self.closest_hit + self.shadow_rays
+    }
+
+    /// Mean shaded vertices per camera ray — the effective path length.
+    pub fn mean_path_length(&self) -> f64 {
+        if self.camera_rays == 0 {
+            return 0.0;
+        }
+        self.vertices as f64 / self.camera_rays as f64
+    }
+
+    /// Fraction of roulette decisions that terminated the path.
+    pub fn rr_kill_rate(&self) -> f64 {
+        if self.rr_tested == 0 {
+            return 0.0;
+        }
+        self.rr_killed as f64 / self.rr_tested as f64
+    }
+
+    /// Sums another unit's counters into this one.
+    pub fn merge(&mut self, o: &RayStats) {
+        self.camera_rays += o.camera_rays;
+        self.closest_hit += o.closest_hit;
+        self.shadow_rays += o.shadow_rays;
+        self.vertices += o.vertices;
+        self.rr_tested += o.rr_tested;
+        self.rr_killed += o.rr_killed;
+        self.ended_escaped += o.ended_escaped;
+        self.ended_depth += o.ended_depth;
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == RayStats::default()
+    }
+}
+
 /// Image-level parameters worth reporting next to the costs they drove.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ImageCounters {
@@ -144,6 +215,8 @@ pub struct RenderStats {
     pub phases: Vec<Phase>,
     pub scene: SceneCounters,
     pub image: ImageCounters,
+    /// Integrator work; empty unless the host asked the renderer for it.
+    pub rays: RayStats,
 }
 
 impl RenderStats {
@@ -373,6 +446,43 @@ impl fmt::Display for RenderStats {
         }
         if let Some(peak) = peak_memory_bytes() {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
+        }
+
+        // -- Ray statistics -------------------------------------------
+        let r = &self.rays;
+        if !r.is_empty() {
+            writeln!(f, "{rule}")?;
+            writeln!(f, "Ray Statistics")?;
+            writeln!(f, "{rule}")?;
+            writeln!(f, "  {:<28} {}", "camera rays", thousands(r.camera_rays as usize))?;
+            writeln!(f, "  {:<28} {}", "closest-hit queries", thousands(r.closest_hit as usize))?;
+            writeln!(f, "  {:<28} {}", "shadow rays", thousands(r.shadow_rays as usize))?;
+            writeln!(f, "  {:<28} {}", "total ray queries", thousands(r.total_rays() as usize))?;
+            writeln!(f, "  {:<28} {}", "vertices shaded", thousands(r.vertices as usize))?;
+            writeln!(f, "  {:<28} {:.2}", "mean path length", r.mean_path_length())?;
+            // Throughput needs the render phase alone, not the whole run:
+            // dividing by total would credit rays to time spent parsing.
+            if let Some(render) = self
+                .phases
+                .iter()
+                .find(|p| p.depth == 0 && p.name == "Render")
+            {
+                let secs = render.duration.as_secs_f64();
+                if secs > 0.0 {
+                    let mray = r.total_rays() as f64 / secs / 1e6;
+                    writeln!(f, "  {:<28} {:.2} Mray/s", "throughput", mray)?;
+                }
+            }
+            writeln!(
+                f,
+                "  {:<28} {} of {} ({:.1}%)",
+                "roulette kills",
+                thousands(r.rr_killed as usize),
+                thousands(r.rr_tested as usize),
+                100.0 * r.rr_kill_rate()
+            )?;
+            writeln!(f, "  {:<28} {}", "paths ended: escaped", thousands(r.ended_escaped as usize))?;
+            writeln!(f, "  {:<28} {}", "paths ended: depth cap", thousands(r.ended_depth as usize))?;
         }
 
         if self.phases.is_empty() {

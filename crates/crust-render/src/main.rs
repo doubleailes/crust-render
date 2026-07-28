@@ -284,11 +284,12 @@ fn main() {
         }
         progress_bar.set_position(done);
     };
-    let buffer = renderer.render_with_progress(cli.bucket, &progress);
+    let (buffer, ray_stats) = renderer.render_with_stats(cli.bucket, &progress);
     bar.finish();
     // Close Timer
     let duration: Duration = start.elapsed();
     stats.record("Render", 0, duration);
+    stats.rays = ray_stats;
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
