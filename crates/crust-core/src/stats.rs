@@ -20,11 +20,36 @@ use std::time::Duration;
 /// One timed phase. `depth` gives the nesting used by the execution-tree
 /// view: a phase at depth 1 is a sub-phase of the nearest preceding
 /// depth-0 phase, and its time is *included* in that parent's.
+///
+/// The two memory figures are sampled when the phase ends. `rss_end` is
+/// what is still resident; `peak_end` is the high-water mark reached at
+/// any point up to then. A large gap between them says the phase
+/// allocated far more than it kept — transient build churn, which costs
+/// page faults and time even though the final structures are small.
 #[derive(Clone, Debug)]
 pub struct Phase {
     pub name: String,
     pub depth: u8,
     pub duration: Duration,
+    pub rss_end: Option<u64>,
+    pub peak_end: Option<u64>,
+}
+
+/// Resident and peak memory at one instant. Capture at a phase boundary
+/// with [`MemorySample::now`] and hand to [`RenderStats::record_at`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemorySample {
+    pub rss: Option<u64>,
+    pub peak: Option<u64>,
+}
+
+impl MemorySample {
+    pub fn now() -> Self {
+        MemorySample {
+            rss: current_memory_bytes(),
+            peak: peak_memory_bytes(),
+        }
+    }
 }
 
 /// Primitives split by kind. Mirrors [`crate::rt::PrimitiveBreakdown`].
@@ -81,6 +106,11 @@ pub struct SceneCounters {
     pub unique: PrimitiveCounts,
     pub lights: usize,
     pub volumes: usize,
+    /// Exact kernel-resident bytes, by structure. Everything outside
+    /// `crust-rt` — materials, the USD stage, import caches — is *not*
+    /// counted, so this being well under peak RSS is expected and the gap
+    /// is itself informative.
+    pub footprint: crate::rt::MemoryFootprint,
 }
 
 /// Image-level parameters worth reporting next to the costs they drove.
@@ -121,14 +151,30 @@ impl RenderStats {
         Self::default()
     }
 
-    /// Records a completed phase. `depth` 0 is top level; deeper phases are
-    /// sub-phases of the nearest preceding shallower one, and their time is
-    /// counted inside it.
+    /// Records a completed phase, sampling memory **now**. Correct only
+    /// when called at the moment the phase ends; a caller that records
+    /// several phases together must capture a [`MemorySample`] at each
+    /// boundary and use [`RenderStats::record_at`] instead, or every phase
+    /// will report the same figures.
     pub fn record(&mut self, name: impl Into<String>, depth: u8, duration: Duration) {
+        self.record_at(name, depth, duration, MemorySample::now());
+    }
+
+    /// Records a completed phase with memory captured earlier — at the
+    /// phase's actual end rather than at reporting time.
+    pub fn record_at(
+        &mut self,
+        name: impl Into<String>,
+        depth: u8,
+        duration: Duration,
+        mem: MemorySample,
+    ) {
         self.phases.push(Phase {
             name: name.into(),
             depth,
             duration,
+            rss_end: mem.rss,
+            peak_end: mem.peak,
         });
     }
 
@@ -149,6 +195,19 @@ impl RenderStats {
     }
 }
 
+/// Reads one `VmXxx:` field of `/proc/self/status`, in bytes.
+#[cfg(target_os = "linux")]
+fn proc_status_bytes(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(field) {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
 /// Peak resident set size in bytes, if the platform can report it.
 ///
 /// Peak rather than current: the interesting number for a renderer is the
@@ -157,14 +216,21 @@ impl RenderStats {
 pub fn peak_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-                return Some(kb * 1024);
-            }
-        }
+        proc_status_bytes("VmHWM:")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
         None
+    }
+}
+
+/// Currently resident set size in bytes. Paired with
+/// [`peak_memory_bytes`], the difference exposes transient allocation:
+/// memory a phase took and gave back.
+pub fn current_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        proc_status_bytes("VmRSS:")
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -217,7 +283,7 @@ impl fmt::Display for RenderStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Wide enough that the longest phase name ("Commit acceleration
         // structure", nested one level) still clears the time column.
-        const WIDTH: usize = 62;
+        const WIDTH: usize = 84;
         const NAME: usize = 36;
         let rule = "-".repeat(WIDTH);
         let total = self.total();
@@ -280,6 +346,31 @@ impl fmt::Display for RenderStats {
         if s.volumes > 0 {
             writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;
         }
+
+        // Exact kernel bytes, then peak RSS. The difference is everything
+        // the kernel does not own — materials, the USD stage, caches — so
+        // showing both says where to look next.
+        let fp = &s.footprint;
+        if fp.total() > 0 {
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "kernel memory",
+                human_bytes(fp.total() as u64)
+            )?;
+            for (label, bytes) in [
+                ("primitive nodes", fp.prim_nodes),
+                ("boxed primitives", fp.boxed_prims),
+                ("BVH nodes", fp.bvh_nodes),
+                ("triangle packets", fp.packets),
+                ("leaf indices", fp.indices),
+                ("leaves", fp.leaves),
+            ] {
+                if bytes > 0 {
+                    writeln!(f, "    {:<26} {}", label, human_bytes(bytes as u64))?;
+                }
+            }
+        }
         if let Some(peak) = peak_memory_bytes() {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
@@ -291,16 +382,22 @@ impl fmt::Display for RenderStats {
         // -- Profile by execution tree ---------------------------------
         writeln!(f, "{rule}")?;
         writeln!(f, "Profile by execution tree")?;
+        // `rss` is what the phase left resident; `peak` the high-water
+        // reached by its end. peak >> rss means transient churn.
+        writeln!(f, "{:<NAME$} {:>9}  {:>5}  {:>9} {:>9}", "", "time", "%", "rss", "peak")?;
         writeln!(f, "{rule}")?;
         for p in &self.phases {
             let indent = "  ".repeat(1 + p.depth as usize);
             let name_width = NAME.saturating_sub(indent.len());
+            let mem = |b: Option<u64>| b.map(human_bytes).unwrap_or_default();
             writeln!(
                 f,
-                "{indent}{:<name_width$} {:>9}  {:>5.1}%",
+                "{indent}{:<name_width$} {:>9}  {:>5.1}%  {:>9} {:>9}",
                 p.name,
                 human_duration(p.duration),
                 pct(p.duration),
+                mem(p.rss_end),
+                mem(p.peak_end),
             )?;
         }
         writeln!(

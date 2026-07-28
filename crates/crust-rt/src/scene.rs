@@ -22,6 +22,40 @@ pub struct CurveSegment {
     pub r1: f32,
 }
 
+/// Exact bytes a committed [`Scene`] holds, by structure — the kernel's
+/// side of a memory report. Counts `capacity`, not `len`, because unused
+/// capacity is resident too, and deduplicates shared instanced scenes so
+/// a prototype placed a thousand times is counted once.
+///
+/// Only the kernel's own allocations: the application's material tables,
+/// the USD stage and anything else outside `crust-rt` are not visible
+/// from here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryFootprint {
+    /// The `PrimNode` arrays — every primitive, whatever its kind.
+    pub prim_nodes: usize,
+    /// Payloads of the boxed variants (instances, cubic curves).
+    pub boxed_prims: usize,
+    /// 4-wide BVH nodes.
+    pub bvh_nodes: usize,
+    pub leaves: usize,
+    /// Triangle SIMD packets.
+    pub packets: usize,
+    /// Leaf primitive indices.
+    pub indices: usize,
+}
+
+impl MemoryFootprint {
+    pub fn total(&self) -> usize {
+        self.prim_nodes
+            + self.boxed_prims
+            + self.bvh_nodes
+            + self.leaves
+            + self.packets
+            + self.indices
+    }
+}
+
 /// Top-level primitives of a committed [`Scene`], split by kind. See
 /// [`Scene::primitive_breakdown`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -236,7 +270,7 @@ impl SceneBuilder {
                         l2w: transform,
                         normal_mat: w2l.matrix3.transpose(),
                         w2l,
-                        l2w_end: transform_end.map(|end| *end),
+                        l2w_end: transform_end,
                         bounds,
                         geom_id,
                         mask,
@@ -326,6 +360,23 @@ impl Scene {
         acc: &mut PrimitiveBreakdown,
     ) {
         self.bvh.accumulate_unique(visited, acc);
+    }
+
+    /// Exact resident bytes of this scene and every distinct scene it
+    /// instances — see [`MemoryFootprint`].
+    pub fn memory_footprint(&self) -> MemoryFootprint {
+        let mut visited = std::collections::HashSet::new();
+        let mut acc = MemoryFootprint::default();
+        self.accumulate_footprint_into(&mut visited, &mut acc);
+        acc
+    }
+
+    pub(crate) fn accumulate_footprint_into(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut MemoryFootprint,
+    ) {
+        self.bvh.accumulate_footprint(visited, acc);
     }
 
     /// Internal closest-hit that keeps the *outward* (unoriented) normal,

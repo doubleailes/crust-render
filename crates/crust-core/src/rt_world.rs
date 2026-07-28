@@ -138,6 +138,12 @@ impl World {
         self.scene.unique_primitive_breakdown()
     }
 
+    /// Exact kernel-resident bytes — see
+    /// [`crust_rt::Scene::memory_footprint`].
+    pub fn memory_footprint(&self) -> crust_rt::MemoryFootprint {
+        self.scene.memory_footprint()
+    }
+
     /// The material bound to a geometry.
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()

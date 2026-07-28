@@ -266,7 +266,14 @@ pub(crate) struct InstancePrim {
     pub w2l: Affine3A,
     pub normal_mat: Mat3A,
     /// Local-to-world at shutter time 1, when the instance moves.
-    pub l2w_end: Option<Affine3A>,
+    ///
+    /// Boxed for the same reason as [`crate::Geometry::Instance`]'s
+    /// `transform_end`, and it matters far more here: `Geometry` values
+    /// are transient build inputs, whereas an `InstancePrim` is resident
+    /// for the whole render. Inline, the `Option` costs 80 bytes on every
+    /// instance — a scene with tens of millions of static placements pays
+    /// gigabytes for a field none of them use.
+    pub l2w_end: Option<Box<Affine3A>>,
     pub bounds: AABB,
     pub geom_id: u32,
     pub mask: u32,
@@ -316,7 +323,7 @@ impl InstancePrim {
     fn transforms_at(&self, time: f32) -> (Affine3A, Mat3A) {
         match &self.l2w_end {
             Some(end) if time > 0.0 => {
-                let w2l = lerp_affine(&self.l2w, end, time).inverse();
+                let w2l = lerp_affine(&self.l2w, end.as_ref(), time).inverse();
                 (w2l, w2l.matrix3.transpose())
             }
             _ => (self.w2l, self.normal_mat),

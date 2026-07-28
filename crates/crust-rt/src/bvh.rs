@@ -237,6 +237,37 @@ impl Bvh {
         b
     }
 
+    /// Adds this BVH's resident bytes to `acc`, descending into each
+    /// distinct instanced scene once. Uses `capacity`, not `len`: unused
+    /// capacity is resident too, and over-allocation is exactly the kind
+    /// of waste a memory report should not hide.
+    pub(crate) fn accumulate_footprint(
+        &self,
+        visited: &mut std::collections::HashSet<usize>,
+        acc: &mut crate::scene::MemoryFootprint,
+    ) {
+        use std::mem::size_of;
+        acc.prim_nodes += self.prims.capacity() * size_of::<PrimNode>();
+        acc.bvh_nodes += self.wide.capacity() * size_of::<WideNode>();
+        acc.leaves += self.leaves.capacity() * size_of::<Leaf>();
+        acc.packets += self.packets.capacity() * size_of::<Tri4>();
+        acc.indices += self.indices.capacity() * size_of::<u32>();
+        for p in &self.prims {
+            match p {
+                PrimNode::Instance(i) => {
+                    acc.boxed_prims += size_of::<crate::prim::InstancePrim>();
+                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                        i.scene.accumulate_footprint_into(visited, acc);
+                    }
+                }
+                PrimNode::CubicCurve(_) => {
+                    acc.boxed_prims += size_of::<crate::prim::CubicCurvePrim>();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Adds this BVH's primitives to `acc`, descending into each *distinct*
     /// instanced scene exactly once — `visited` holds the `Arc` addresses
     /// already counted. The result is the geometry actually resident in
@@ -857,8 +888,22 @@ fn build_subtree(
 
     let (left_refs, right_refs) = if let Some(s) = spatial {
         // Chop: straddling references are clipped into both children.
-        let mut left = Vec::with_capacity(count);
-        let mut right = Vec::with_capacity(count);
+        // Size each side first (bbox compares only, no clipping): a
+        // straddling reference may land in both, so this is an upper
+        // bound, but a far tighter one than the input length twice over.
+        let (mut n_left, mut n_right) = (0usize, 0usize);
+        for r in &refs {
+            if r.bbox.maximum[s.axis] <= s.pos {
+                n_left += 1;
+            } else if r.bbox.minimum[s.axis] >= s.pos {
+                n_right += 1;
+            } else {
+                n_left += 1;
+                n_right += 1;
+            }
+        }
+        let mut left = Vec::with_capacity(n_left);
+        let mut right = Vec::with_capacity(n_right);
         for r in refs {
             if r.bbox.maximum[s.axis] <= s.pos {
                 left.push(r);
@@ -895,7 +940,9 @@ fn build_subtree(
                 if count <= MAX_LEAF && o.cost >= surface_area(&bbox) * count as f32 {
                     return leaf(bbox, &refs);
                 }
-                partition_by_bin(&mut refs, &o)
+                // By value: the parent's buffer is freed here rather than
+                // staying alive through both children's parallel builds.
+                partition_by_bin(refs, &o)
             }
             // Every centroid coincides: median split by input order.
             None => {
@@ -925,7 +972,7 @@ fn build_subtree(
 /// fallback: object-partition when possible, else leaf.
 fn object_partition_or_leaf(
     prims: &[PrimNode],
-    mut refs: Vec<PrimRef>,
+    refs: Vec<PrimRef>,
     bbox: AABB,
     object: Option<ObjSplit>,
     depth: usize,
@@ -934,7 +981,7 @@ fn object_partition_or_leaf(
     let count = refs.len();
     match object {
         Some(o) if count > min_leaf_for(prims, &refs) => {
-            let (l, r) = partition_by_bin(&mut refs, &o);
+            let (l, r) = partition_by_bin(refs, &o);
             if l.is_empty() || r.is_empty() {
                 let mut all = l;
                 all.extend(r);
@@ -964,12 +1011,23 @@ fn min_leaf_for(prims: &[PrimNode], refs: &[PrimRef]) -> usize {
 
 /// Order-preserving partition of `refs` by the object split's centroid
 /// bin — deterministic for a given input order.
-fn partition_by_bin(refs: &mut Vec<PrimRef>, o: &ObjSplit) -> (Vec<PrimRef>, Vec<PrimRef>) {
-    let mut left = Vec::with_capacity(refs.len());
-    let mut right = Vec::with_capacity(refs.len());
-    for r in refs.drain(..) {
-        let bin = (((r.centroid()[o.axis] - o.cmin) * o.scale) as usize).min(BINS - 1);
-        if bin <= o.split_bin {
+///
+/// Takes `refs` **by value** and counts each side before allocating, so
+/// the two children together hold exactly one copy of the input rather
+/// than two. Sizing both sides at the full input length instead — the
+/// obvious one-pass version — wastes an allocation the size of the input
+/// at every node of the recursion, and hands the parent's buffer down
+/// alive into a parallel subtree build. On a scene with 100M references
+/// that is the difference between a build that fits and one that does
+/// not. The extra pass is a few flops per reference against an
+/// allocation it avoids touching at all.
+fn partition_by_bin(refs: Vec<PrimRef>, o: &ObjSplit) -> (Vec<PrimRef>, Vec<PrimRef>) {
+    let bin_of = |r: &PrimRef| (((r.centroid()[o.axis] - o.cmin) * o.scale) as usize).min(BINS - 1);
+    let n_left = refs.iter().filter(|r| bin_of(r) <= o.split_bin).count();
+    let mut left = Vec::with_capacity(n_left);
+    let mut right = Vec::with_capacity(refs.len() - n_left);
+    for r in refs {
+        if bin_of(&r) <= o.split_bin {
             left.push(r);
         } else {
             right.push(r);
