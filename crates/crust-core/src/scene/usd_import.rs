@@ -57,40 +57,29 @@ const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// above any plausible authoring depth.
 const MAX_INSTANCE_NESTING: usize = 8;
 
-pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
-    let import_start = Instant::now();
-    let mut stats = RenderStats::new();
+/// Everything a traversal accumulates, kept separate from the stage that
+/// feeds it so several stages can be walked into the same scene and each
+/// dropped when done — see [`traverse_into`].
+struct ImportCtx<'a> {
+    world: WorldBuilder,
+    lights: LightList,
+    volumes: Vec<VolumeRegion>,
+    camera: Option<Camera>,
+    caches: ImportCaches,
+    /// Time the host spent decoding assets, so the profile can separate it
+    /// from the traversal proper.
+    asset_time: Duration,
+    settings: RenderSettings,
+    /// The stage file, for resolving asset paths against its directory.
+    stage_path: &'a Path,
+    assets: &'a dyn AssetLoader,
+}
 
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
-
-    let open_start = Instant::now();
-    let stage = Stage::open(path_str).map_err(|e| crate::Error::UsdOpen {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    let open_elapsed = open_start.elapsed();
-    let open_mem = MemorySample::now();
-
-    // Render settings come first — the camera importer needs the aspect ratio.
-    let settings = import_render_settings(&stage);
-
-    let mut world = WorldBuilder::new();
-    let mut lights = LightList::new();
-    let mut volumes: Vec<VolumeRegion> = Vec::new();
-    let mut camera_candidate: Option<Camera> = None;
-    // Prims binding the same material path share one Arc, and prims with
-    // identical local geometry + material share one committed kernel
-    // scene through instancing — N placements of a mesh cost one copy of
-    // its triangles.
-    let mut caches = ImportCaches::default();
-    // Time the host spends decoding assets, subtracted out of the traverse
-    // phase below so the two costs are not conflated.
-    let mut asset_time = Duration::ZERO;
-
-    let traverse_start = Instant::now();
-    let mut stack: Vec<(Prim, GMat4)> = vec![(stage.prim_at(sdf::Path::abs_root()), GMat4::IDENTITY)];
+/// Walks `root` and its subtree, emitting geometry, lights and volumes
+/// into `ctx`. Takes the stage by reference and keeps nothing borrowed
+/// from it, so the caller may drop the stage afterwards and walk another.
+fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx) {
+    let mut stack: Vec<(Prim, GMat4)> = vec![(root, root_xf)];
 
     while let Some((prim, parent_world)) = stack.pop() {
         // `class` prims (and their descendants) describe geometry that
@@ -110,8 +99,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             continue;
         }
 
-        let local = local_matrix_at(&stage, &prim);
-        let resets = resets_xform_stack_at(&stage, &prim);
+        let local = local_matrix_at(stage, &prim);
+        let resets = resets_xform_stack_at(stage, &prim);
         let this_world = if resets { local } else { parent_world * local };
 
         // Native instancing: an `instanceable` prim with a composition arc
@@ -123,12 +112,12 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             match prim.prototype() {
                 Ok(Some(proto_path)) => {
                     emit_native_instance(
-                        &stage,
-                        &mut world,
+                        stage,
+                        &mut ctx.world,
                         &prim,
                         &proto_path,
                         this_world,
-                        &mut caches,
+                        &mut ctx.caches,
                     );
                     continue;
                 }
@@ -145,54 +134,68 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         // shadow rays. Otherwise order matters only for Meshes vs Sphere
         // prims — both check first so we don't recurse into their
         // materials as prims.
-        if let Ok(Some(instancer)) = PointInstancer::get(&stage, prim.path().clone()) {
-            emit_point_instancer(&stage, &mut world, &prim, &instancer, this_world, &mut caches);
+        if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+            emit_point_instancer(
+                stage,
+                &mut ctx.world,
+                &prim,
+                &instancer,
+                this_world,
+                &mut ctx.caches,
+            );
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
         } else if custom_token(&prim, "crust:volume:type").is_some() {
-            emit_volume(&prim, this_world, &mut volumes);
-        } else if let Ok(Some(mesh)) = UsdMesh::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_mesh(&mut world, &prim, &mesh, this_world, mat, &mut caches.meshes);
-        } else if let Ok(Some(sphere)) = UsdSphere::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_sphere(&mut world, &prim, &sphere, this_world, mat);
-        } else if let Ok(Some(curves)) = UsdBasisCurves::get(&stage, prim.path().clone()) {
-            let mat = resolve_material(&stage, &prim, &mut caches.materials);
-            emit_curves(&mut world, &prim, &curves, this_world, mat);
-        } else if UsdCamera::get(&stage, prim.path().clone())
+            emit_volume(&prim, this_world, &mut ctx.volumes);
+        } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            emit_mesh(
+                &mut ctx.world,
+                &prim,
+                &mesh,
+                this_world,
+                mat,
+                &mut ctx.caches.meshes,
+            );
+        } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
+            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
+        } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
+            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            emit_curves(&mut ctx.world, &prim, &curves, this_world, mat);
+        } else if UsdCamera::get(stage, prim.path().clone())
             .ok()
             .flatten()
             .is_some()
         {
-            if camera_candidate.is_none() {
-                match build_camera(&stage, &prim, &settings) {
+            if ctx.camera.is_none() {
+                match build_camera(stage, &prim, &ctx.settings) {
                     Some(c) => {
                         info!("Imported USD camera at {}", prim.path());
-                        camera_candidate = Some(c);
+                        ctx.camera = Some(c);
                     }
                     None => warn!("Failed to build camera from {}", prim.path()),
                 }
             }
-        } else if let Ok(Some(light)) = SphereLight::get(&stage, prim.path().clone()) {
-            emit_sphere_light(&mut world, &mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = RectLight::get(&stage, prim.path().clone()) {
-            emit_rect_light(&mut world, &mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = UsdDistantLight::get(&stage, prim.path().clone()) {
-            emit_distant_light(&mut lights, &light, this_world);
-        } else if let Ok(Some(light)) = DomeLight::get(&stage, prim.path().clone()) {
+        } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
+            emit_sphere_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+        } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
+            emit_rect_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+        } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
+            emit_distant_light(&mut ctx.lights, &light, this_world);
+        } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
             emit_dome_light(
-                &mut lights,
+                &mut ctx.lights,
                 &prim,
                 &light,
                 this_world,
-                path,
-                assets,
-                &mut asset_time,
+                ctx.stage_path,
+                ctx.assets,
+                &mut ctx.asset_time,
             );
         } else {
-            warn_unsupported_light(&stage, &prim);
+            warn_unsupported_light(stage, &prim);
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -203,20 +206,64 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             }
         }
     }
+}
+
+pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
+    let import_start = Instant::now();
+    let mut stats = RenderStats::new();
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
+
+    let open_start = Instant::now();
+    let stage = Stage::open(path_str).map_err(|e| crate::Error::UsdOpen {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let open_elapsed = open_start.elapsed();
+    let open_mem = MemorySample::now();
+
+    // Render settings come first — the camera importer needs the aspect ratio.
+    let settings = import_render_settings(&stage);
+
+    let mut ctx = ImportCtx {
+        world: WorldBuilder::new(),
+        lights: LightList::new(),
+        volumes: Vec::new(),
+        camera: None,
+        // Prims binding the same material path share one Arc, and prims
+        // with identical local geometry + material share one committed
+        // kernel scene through instancing — N placements of a mesh cost
+        // one copy of its triangles.
+        caches: ImportCaches::default(),
+        asset_time: Duration::ZERO,
+        settings,
+        stage_path: path,
+        assets,
+    };
+
+    let traverse_start = Instant::now();
+    traverse_into(
+        &stage,
+        stage.prim_at(sdf::Path::abs_root()),
+        GMat4::IDENTITY,
+        &mut ctx,
+    );
 
     // The traverse also builds each mesh's and prototype's kernel scene,
     // so its own BVH work is inside this figure; the separate "Commit
     // acceleration structure" phase below is the *top-level* build.
-    let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
+    let traverse_elapsed = traverse_start.elapsed().saturating_sub(ctx.asset_time);
     let traverse_mem = MemorySample::now();
 
-    let camera = camera_candidate.unwrap_or_else(|| {
+    let camera = ctx.camera.unwrap_or_else(|| {
         warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
         crate::world::get_settings().0
     });
 
     let commit_start = Instant::now();
-    let committed = world.commit();
+    let committed = ctx.world.commit();
     let commit_elapsed = commit_start.elapsed();
     let commit_mem = MemorySample::now();
 
@@ -226,8 +273,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     stats.record_at("Parse USD stage", 0, import_start.elapsed(), commit_mem);
     stats.record_at("Open stage", 1, open_elapsed, open_mem);
     stats.record_at("Traverse prims", 1, traverse_elapsed, traverse_mem);
-    if !asset_time.is_zero() {
-        stats.record_at("Load assets", 1, asset_time, traverse_mem);
+    if !ctx.asset_time.is_zero() {
+        stats.record_at("Load assets", 1, ctx.asset_time, traverse_mem);
     }
     stats.record_at(
         "Commit acceleration structure",
@@ -241,8 +288,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         top_level: committed.primitive_breakdown().into(),
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
-        lights: lights.count(),
-        volumes: volumes.len(),
+        lights: ctx.lights.count(),
+        volumes: ctx.volumes.len(),
     };
     let (w, h) = settings.get_dimensions();
     stats.image = ImageCounters {
@@ -252,7 +299,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         max_depth: settings.max_depth(),
     };
 
-    let mut scene = Scene::new(camera, committed, lights, settings).with_volumes(volumes);
+    let mut scene =
+        Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
     Ok(scene)
 }
