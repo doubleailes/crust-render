@@ -277,7 +277,25 @@ randomness use `openqmc::pcg::Rng`.
 
 The only scene format. `load_scene` opens the stage, imports `RenderSettings` first (the
 camera needs the aspect ratio), then traverses prims with an explicit stack that bakes the
-Xform hierarchy into world matrices. Schema mapping:
+Xform hierarchy into world matrices.
+
+**Streaming import.** A production stage is dominated by USD itself, not by the
+renderer's own structures: composing all of Moana costs openusd 75.74 GiB and 6m19s,
+against 1.10 GiB and 2.6s for a stage masked to one element. So `load_scene` opens a
+cheap index stage (`InitialLoadSet::LoadNone`) for the settings and the list of
+top-level subtrees, then composes, traverses and **drops one masked stage per subtree**
+(`stream_roots` + `traverse_into`), bounding the composed set at about one element.
+On the island: 117.10 GiB / 13:20 → 43.76 GiB / 09:19, output pixel-identical.
+`MIN_STREAM_CHUNKS` keeps the single-stage path for scenes too small to repay the
+re-opens; `CRUST_STREAM_IMPORT=0` forces it.
+The subtlety is cache keying: prototype paths (`/__Prototype_N`) are **numbered per
+composition**, so every masked stage has its own `/__Prototype_0`. Anything keyed on
+such a path must be scoped per stage, or one chunk's data is silently handed to the
+next — see `MaterialCache::key` and `ImportCaches::epoch`. Keying materials on the bare
+path cost 5 835 258 triangles before it was caught, and *no single element reproduces
+it*: it needs two chunks that both carry prototype-internal materials.
+
+Schema mapping:
 
 - `UsdGeomMesh` → a *local-space* committed `rt::Scene` (one `TriangleMesh` geometry)
   placed by an `rt::Geometry::Instance`; prims with identical points/topology/material
