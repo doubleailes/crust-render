@@ -20,7 +20,7 @@ use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
 use crate::rt_world::WorldBuilder;
 use crate::scene::Scene;
-use crate::stats::{ImageCounters, RenderStats, SceneCounters};
+use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
 use crust_rt::{
     CubicCurveSegment, CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
@@ -71,6 +71,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         message: e.to_string(),
     })?;
     let open_elapsed = open_start.elapsed();
+    let open_mem = MemorySample::now();
 
     // Render settings come first — the camera importer needs the aspect ratio.
     let settings = import_render_settings(&stage);
@@ -207,6 +208,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     // so its own BVH work is inside this figure; the separate "Commit
     // acceleration structure" phase below is the *top-level* build.
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
+    let traverse_mem = MemorySample::now();
 
     let camera = camera_candidate.unwrap_or_else(|| {
         warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
@@ -216,19 +218,29 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     let commit_start = Instant::now();
     let committed = world.commit();
     let commit_elapsed = commit_start.elapsed();
+    let commit_mem = MemorySample::now();
 
-    stats.record("Parse USD stage", 0, import_start.elapsed());
-    stats.record("Open stage", 1, open_elapsed);
-    stats.record("Traverse prims", 1, traverse_elapsed);
+    // Memory is sampled where each phase actually ended, not here — the
+    // phases are all recorded together, so `record`'s sample-now would
+    // give every one of them the same figures.
+    stats.record_at("Parse USD stage", 0, import_start.elapsed(), commit_mem);
+    stats.record_at("Open stage", 1, open_elapsed, open_mem);
+    stats.record_at("Traverse prims", 1, traverse_elapsed, traverse_mem);
     if !asset_time.is_zero() {
-        stats.record("Load assets", 1, asset_time);
+        stats.record_at("Load assets", 1, asset_time, traverse_mem);
     }
-    stats.record("Commit acceleration structure", 1, commit_elapsed);
+    stats.record_at(
+        "Commit acceleration structure",
+        1,
+        commit_elapsed,
+        commit_mem,
+    );
 
     stats.scene = SceneCounters {
         geometries: committed.count(),
         top_level: committed.primitive_breakdown().into(),
         unique: committed.unique_primitive_breakdown().into(),
+        footprint: committed.memory_footprint(),
         lights: lights.count(),
         volumes: volumes.len(),
     };
