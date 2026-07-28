@@ -31,6 +31,9 @@
 //! carry `geom_id`/`prim_id` — the application owns the mapping from IDs
 //! to materials or anything else; this crate never sees shading data.
 
+#[cfg(feature = "traversal-stats")]
+pub use bvh::stats as traversal_stats;
+
 mod aabb;
 mod bvh;
 mod curve;
