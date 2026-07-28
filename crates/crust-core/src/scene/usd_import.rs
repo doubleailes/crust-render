@@ -40,7 +40,7 @@ use openusd::schemas::lux::{
 use openusd::schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use openusd::schemas::shade::{self, Material as UsdMaterial, MaterialBindingAPI, Shader};
 use openusd::sdf;
-use openusd::usd::{Prim, Stage};
+use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask};
 
 const DEFAULT_SPP: u32 = 128;
 const DEFAULT_MAX_DEPTH: u32 = 32;
@@ -56,6 +56,72 @@ const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// each level multiplies traversal cost — so this is a backstop, set far
 /// above any plausible authoring depth.
 const MAX_INSTANCE_NESTING: usize = 8;
+
+/// Below this many streamable chunks, importing under one stage is
+/// simpler and no slower — masked opens each re-compose the root layer,
+/// so they only pay off when the payloads they exclude are the bulk of
+/// the cost.
+const MIN_STREAM_CHUNKS: usize = 4;
+
+/// The subtrees to import one at a time, each under its own masked stage.
+///
+/// Returns the children of the stage's single top-level prim — the shape
+/// every scene here takes, a `/world`-style root holding one prim per
+/// element — or the top-level prims when there is not exactly one. Empty
+/// when there are too few chunks for streaming to be worth it, which
+/// tells the caller to import the whole stage in one pass.
+///
+/// # Streaming is incomplete — opt-in only
+///
+/// Importing per element is a large win where it works: on the Moana
+/// island it takes peak memory from 117.10 GiB to 42.53 GiB and runtime
+/// from 13:20 to 08:57, because composing one element costs openusd
+/// 1.10 GiB where composing the whole stage costs 75.74 GiB.
+///
+/// But it currently **loses geometry**. On the island it imports
+/// 50 990 392 triangles against the single-stage importer's 56 825 650,
+/// and 1.5% of pixels differ. Curves and instances match exactly; only
+/// meshes are affected.
+///
+/// The cause is native instancing. Each element's root is `instanceable`,
+/// so its content lives in a prototype materialised at a stage-root path
+/// (`/__Prototype_N`) *outside* the element's own subtree. Under a mask
+/// naming only that element, nine of the island's prototypes resolve
+/// empty — logged as "Prototype /__Prototype_0 contributed no geometry",
+/// against one such warning for the whole single-stage import. openusd's
+/// `Stage::mask_includes` is meant to cover exactly this (a prototype is
+/// populated when any of its instances is in the mask, per spec 11.3.3),
+/// so this is either a subtlety not yet pinned down or a limitation of
+/// openusd 0.5's masking; it is not simply a missing path in the mask.
+///
+/// Verified *not* to be the cause: the prototype-cache epoch (the fix in
+/// [`ImportCaches::epoch`] left the triangle count byte-identical), and
+/// ten of the twenty elements, which A/B identical in both modes.
+fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
+    // Opt-in, because it is not correct yet: see the module note on
+    // streaming below. `CRUST_STREAM_IMPORT=1` enables it for
+    // experimentation and for A/B-ing the two paths on one scene.
+    if !std::env::var("CRUST_STREAM_IMPORT").is_ok_and(|v| v == "1") {
+        return Vec::new();
+    }
+    let pseudo_root = stage.prim_at(sdf::Path::abs_root());
+    let Ok(top) = pseudo_root.children() else {
+        return Vec::new();
+    };
+
+    let chunks: Vec<sdf::Path> = match top.as_slice() {
+        [only] => match only.children() {
+            Ok(children) => children.iter().map(|c| c.path().clone()).collect(),
+            Err(_) => return Vec::new(),
+        },
+        many => many.iter().map(|p| p.path().clone()).collect(),
+    };
+
+    if chunks.len() < MIN_STREAM_CHUNKS {
+        return Vec::new();
+    }
+    chunks
+}
 
 /// Everything a traversal accumulates, kept separate from the stage that
 /// feeds it so several stages can be walked into the same scene and each
@@ -208,6 +274,22 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
     }
 }
 
+/// Opens the stage with payloads loaded, optionally masked to one subtree.
+fn open_stage(
+    path: &Path,
+    path_str: &str,
+    mask: Option<sdf::Path>,
+) -> Result<Stage, crate::Error> {
+    let mut builder = Stage::builder().load(InitialLoadSet::LoadAll);
+    if let Some(p) = mask {
+        builder = builder.mask(StagePopulationMask::new([p]));
+    }
+    builder.open(path_str).map_err(|e| crate::Error::UsdOpen {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })
+}
+
 pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
@@ -216,16 +298,24 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         .to_str()
         .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
 
+    // Open once without payloads: enough to read render settings and see
+    // the stage's shape, but none of the geometry. On a production scene
+    // the payloads *are* the cost — composing the whole Moana island
+    // costs openusd 75.74 GiB, where this costs a fraction of that.
     let open_start = Instant::now();
-    let stage = Stage::open(path_str).map_err(|e| crate::Error::UsdOpen {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    let index = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(path_str)
+        .map_err(|e| crate::Error::UsdOpen {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    // Render settings come first — the camera importer needs the aspect ratio.
+    let settings = import_render_settings(&index);
+    let chunks = stream_roots(&index);
+    drop(index);
     let open_elapsed = open_start.elapsed();
     let open_mem = MemorySample::now();
-
-    // Render settings come first — the camera importer needs the aspect ratio.
-    let settings = import_render_settings(&stage);
 
     let mut ctx = ImportCtx {
         world: WorldBuilder::new(),
@@ -244,12 +334,36 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     };
 
     let traverse_start = Instant::now();
-    traverse_into(
-        &stage,
-        stage.prim_at(sdf::Path::abs_root()),
-        GMat4::IDENTITY,
-        &mut ctx,
-    );
+    if chunks.is_empty() {
+        // Small or flat stage: one pass, exactly as before.
+        let stage = open_stage(path, path_str, None)?;
+        traverse_into(
+            &stage,
+            stage.prim_at(sdf::Path::abs_root()),
+            GMat4::IDENTITY,
+            &mut ctx,
+        );
+    } else {
+        debug!("Streaming import over {} subtrees", chunks.len());
+        for chunk in &chunks {
+            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
+            // Traverse from the root, not from `chunk`: a mask keeps the
+            // masked path's *ancestors* populated, so starting at the
+            // root picks up their transforms exactly as a full traversal
+            // would, while everything outside the chunk stays absent.
+            traverse_into(
+                &stage,
+                stage.prim_at(sdf::Path::abs_root()),
+                GMat4::IDENTITY,
+                &mut ctx,
+            );
+            // Separate this stage's prototypes from the next stage's —
+            // see ImportCaches::epoch. Deliberately not a clear: the
+            // mesh cache keys materials by Arc address, so nothing may
+            // be freed while it is live.
+            ctx.caches.epoch += 1;
+        }
+    }
 
     // The traverse also builds each mesh's and prototype's kernel scene,
     // so its own BVH work is inside this figure; the separate "Commit
@@ -904,8 +1018,24 @@ struct ImportCaches {
     materials: MaterialCache,
     /// Mesh content + material → the mesh's local-space kernel scene.
     meshes: HashMap<MeshKey, Arc<RtScene>>,
-    /// Prototype path → its parts, for both instancing mechanisms.
-    protos: HashMap<String, Arc<Vec<ProtoPart>>>,
+    /// `(epoch, prototype path)` → its parts, for both instancing
+    /// mechanisms. See [`ImportCaches::epoch`] for the epoch.
+    protos: HashMap<(u32, String), Arc<Vec<ProtoPart>>>,
+    /// Which stage the entries above came from.
+    ///
+    /// Prototype paths (`/__Prototype_N`) are numbered per composition, so
+    /// under the streaming importer the same name denotes different
+    /// geometry in each stage. Bumping the epoch between stages keeps
+    /// those apart.
+    ///
+    /// It bumps rather than clearing because [`MeshKey`] identifies a
+    /// material by its `Arc` *address*: dropping the parts would free
+    /// material `Arc`s whose addresses a later allocation could reuse,
+    /// and a stale mesh-cache entry would then match the wrong material.
+    /// Nothing here is freed before the import ends, so those addresses
+    /// stay unique — and the mesh and material caches keep deduplicating
+    /// across stages, which is what stops streaming costing extra memory.
+    epoch: u32,
 }
 
 /// One leaf geometry of a prototype: a committed kernel scene in its own
@@ -1353,14 +1483,14 @@ fn prototype_parts(
     caches: &mut ImportCaches,
     depth: usize,
 ) -> Arc<Vec<ProtoPart>> {
-    let key = proto_path.to_string();
+    let key = (caches.epoch, proto_path.to_string());
     if let Some(parts) = caches.protos.get(&key) {
         return parts.clone();
     }
     let root = stage.prim_at(proto_path.clone());
     let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
     if parts.is_empty() {
-        warn!("Prototype {key} contributed no geometry");
+        warn!("Prototype {} contributed no geometry", key.1);
     }
     caches.protos.insert(key, parts.clone());
     parts
