@@ -310,6 +310,16 @@ different bytes for identical pixels. Use `exr_diff`.
   `Tri8` packets are ruled out by the occupancy data above — this is about
   nodes only.
 
+  Re-measure before starting. The traversal counters previously said node
+  visits were the cost and pointed at widening (or compressing) the node — but
+  a large share of those visits should never have happened: every imported mesh
+  was wrapped in an instance whether or not its geometry was shared, so a ray
+  paid a transform and a cold descent into a second tree per mesh. Baking
+  single-placement meshes flat took cornellbox from 3.85 instance descents per
+  camera ray to 0.13. Widening the node would have optimised traversal that no
+  longer occurs. The general lesson: confirm the work is *necessary* before
+  making it faster.
+
   It is not just a matter of writing the 8-wide slab test, because the width
   has to be *reachable at runtime*. The options, in the terms the article
   lays out:
@@ -330,6 +340,28 @@ different bytes for identical pixels. Use `exr_diff`.
 - **`-C target-cpu`.** Not set, so the shipped binary stays baseline
   x86-64. Measured above at 2–4% on the current 4-lane code; not a portable
   default.
+
+  It is, however, worth *offering*, because the 2–4% is real and costs
+  nothing but a rebuild. The opt-in to document is the **microarchitecture
+  level**, not `native`:
+
+  ```bash
+  RUSTFLAGS='-C target-cpu=x86-64-v3' cargo build --release
+  ```
+
+  `x86-64-v3` is exactly AVX2 + FMA + BMI — the level every processor since
+  Haswell/Excavator implements, and precisely what the machine these
+  measurements come from (Xeon E5-2699 v4, Broadwell) supports. Prefer it to
+  `native` for two reasons: it is reproducible across machines, so two
+  developers comparing timings are comparing the same program; and it names a
+  published ISA baseline, so a binary built with it has a stateable
+  compatibility requirement rather than "whatever the build host happened to
+  be". `.cargo/config.toml` ships the same flags commented out, so opting in
+  is uncommenting two lines.
+
+  Note this only lets LLVM pick FMA and better instruction selection for the
+  existing 4-lane algorithm — it does not widen anything, for the reasons in
+  the previous bullet.
 - **NEON / wasm32.** Only x86-64 was measured. `glam` uses NEON on aarch64,
   so the 128-bit paths carry over unchanged; nothing here is
   x86-specific (no intrinsics, no `#[cfg(target_arch)]`), which is itself an
