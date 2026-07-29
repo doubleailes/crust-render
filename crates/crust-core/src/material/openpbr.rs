@@ -332,6 +332,21 @@ impl LobePmf {
 
         // The coat reflection is untinted — coat_color only attenuates the
         // substrate — so its lobe weight ignores the color.
+        //
+        // KNOWN ISSUE (variance, not bias). These floors keep `total > 0` for
+        // a fully black material, but they also keep an *absent* lobe in the
+        // mixture: at `coat_weight == 0` the coat still holds
+        // `p_coat ≈ 1e-6/total` of the selection mass, and because the
+        // default `coat_roughness` of 0 floors its α at 1e-4, `pdf_coat`
+        // reaches ~3e7 near the mirror direction. So a zero-energy lobe both
+        // gets picked one sample in a million (contributing black) and
+        // inflates the mixture density that every specular sample divides by.
+        // The estimator stays unbiased — sampling really does have that
+        // density — but samples are wasted and near-mirror specular is
+        // slightly darkened. The fix is to set absent weights to exactly 0.0
+        // and guard `total` instead; that changes the image, so it needs a
+        // converged A/B against `eval_matches_scatter_importance` rather than
+        // being folded into a bit-identical change.
         let w_coat = (m.coat_weight * f0_coat).max(1e-6);
         let w_fuzz = (m.fuzz_weight * fuzz_luma).max(1e-6);
 
@@ -392,6 +407,17 @@ fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) ->
         return Vec3A::ZERO;
     }
 
+    // The presence weights scale the entire lobe, so when they cancel it
+    // there is nothing to evaluate. Skipping is exact rather than
+    // approximate: `eon_diffuse` at ρ = 0 returns `f_ss + f_ms` where both
+    // terms are products containing ρ, so both are ±0 and their sum is +0.
+    // Worth the branch — it removes two quartic albedo fits and a `Vec3A`
+    // divide for every pure metal and every fully transmissive surface.
+    let presence = m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight);
+    if presence <= 0.0 {
+        return Vec3A::ZERO;
+    }
+
     // Subsurface behaves as a colour-shifted diffuse when the walk length
     // is short relative to feature size: surface the directional diffuse
     // response with the SSS tint so the average colour matches (the full
@@ -403,8 +429,7 @@ fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) ->
     // fraction`): the multiple-scattering term is nonlinear in ρ and should
     // saturate with the *effective* albedo, not the raw color.
     // Transmission displaces the diffuse base — see `LobePmf::from_params`.
-    let rho = diffuse_color
-        * (m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight));
+    let rho = diffuse_color * presence;
 
     // Energy left after specular reflection: `1 - F_dielectric_avg`. Using
     // the directional Fresnel here would double-count with the specular
@@ -431,7 +456,6 @@ fn eval_specular(
     );
 
     let f0_diel_scalar = f0_from_ior(m.specular_ior);
-    let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
 
     // OpenPBR spec places thin-film between coat and base; when there is
     // no coat the outer medium is air.
@@ -443,60 +467,79 @@ fn eval_specular(
     // OpenPBR thickness is in μm; the thin-film helpers want nm.
     let tf_thickness_nm = m.thin_film_thickness * 1000.0;
 
-    // Thin-film interference (Phase 2): replaces the Fresnel with an
-    // iridescent one at 3 wavelengths, blended by thin_film_weight.
-    let f_diel = if m.thin_film_weight > 0.0 {
-        let f_normal = fresnel_schlick(v_dot_h, f0_diel_base);
-        let f_iri = thin_film_fresnel(
-            v_dot_h,
-            outer_ior,
-            m.thin_film_ior,
-            m.specular_ior,
-            tf_thickness_nm,
-        );
-        f_normal * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
-    } else {
-        fresnel_schlick(v_dot_h, f0_diel_base)
-    };
+    // `base_metalness` blends two *independent* Fresnel models, so at either
+    // end of the blend one of them is multiplied by exactly zero. Computing
+    // it anyway is what made a plain diffuse surface pay for the whole F82
+    // metal chain (three `powi` on `Vec3A`) and a pure metal pay for the
+    // thin-film/thin-wall dielectric chain. Skipping is bit-identical: both
+    // Fresnels are non-negative and finite (`fresnel_f82_tint` clamps to
+    // [0,1]), so the dropped term is exactly +0.0 and `x + 0.0 == x`.
 
-    // Thin-walled window reflectance: the transmissive fraction of a thin
-    // sheet reflects from both surfaces including all internal bounces —
-    // `R_window = 2R/(1+R)` (Adobe reference `openpbr_thin_wall_fresnel`)
-    // instead of the single-interface `R`. Scale the dielectric Fresnel by
-    // the physical boost `2/(1+R)`, blended by how transmissive the sheet
-    // is; together with the `(1−R)/(1+R)` window transmittance a clear
-    // sheet reflects + transmits exactly unit energy.
-    let f_diel = if m.geometry_thin_walled && m.transmission_weight > 0.0 {
-        let f_phys = fresnel_schlick_scalar(v_dot_h, f0_diel_scalar);
-        let boost = 2.0 / (1.0 + f_phys);
-        f_diel * (1.0 + (boost - 1.0) * m.transmission_weight)
+    // Dielectric-specular path: F_dielectric · brdf · (1 − metalness)
+    let diel_term = if m.base_metalness < 1.0 {
+        let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
+
+        // Thin-film interference (Phase 2): replaces the Fresnel with an
+        // iridescent one at 3 wavelengths, blended by thin_film_weight.
+        let f_diel = if m.thin_film_weight > 0.0 {
+            let f_normal = fresnel_schlick(v_dot_h, f0_diel_base);
+            let f_iri = thin_film_fresnel(
+                v_dot_h,
+                outer_ior,
+                m.thin_film_ior,
+                m.specular_ior,
+                tf_thickness_nm,
+            );
+            f_normal * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+        } else {
+            fresnel_schlick(v_dot_h, f0_diel_base)
+        };
+
+        // Thin-walled window reflectance: the transmissive fraction of a thin
+        // sheet reflects from both surfaces including all internal bounces —
+        // `R_window = 2R/(1+R)` (Adobe reference `openpbr_thin_wall_fresnel`)
+        // instead of the single-interface `R`. Scale the dielectric Fresnel by
+        // the physical boost `2/(1+R)`, blended by how transmissive the sheet
+        // is; together with the `(1−R)/(1+R)` window transmittance a clear
+        // sheet reflects + transmits exactly unit energy.
+        let f_diel = if m.geometry_thin_walled && m.transmission_weight > 0.0 {
+            let f_phys = fresnel_schlick_scalar(v_dot_h, f0_diel_scalar);
+            let boost = 2.0 / (1.0 + f_phys);
+            f_diel * (1.0 + (boost - 1.0) * m.transmission_weight)
+        } else {
+            f_diel
+        };
+        f_diel * (1.0 - m.base_metalness)
     } else {
-        f_diel
+        Vec3A::ZERO
     };
 
     // Metal slab per the MaterialX reference `generalized_schlick_bsdf`:
     // F0 = base_color · base_weight, F82 edge tint = specular_color, the
     // whole lobe scaled by specular_weight — with its own thin-film variant
     // (`metal_bsdf_tf`) blended in by thin_film_weight.
-    let metal_f0 = m.base_color * m.base_weight;
-    let f_metal_base = fresnel_f82_tint(v_dot_h, metal_f0, m.specular_color);
-    let f_metal = (if m.thin_film_weight > 0.0 {
-        let f_iri = thin_film_fresnel_metal(
-            v_dot_h,
-            outer_ior,
-            m.thin_film_ior,
-            metal_f0,
-            tf_thickness_nm,
-        );
-        f_metal_base * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+    let metal_term = if m.base_metalness > 0.0 {
+        let metal_f0 = m.base_color * m.base_weight;
+        let f_metal_base = fresnel_f82_tint(v_dot_h, metal_f0, m.specular_color);
+        let f_metal = (if m.thin_film_weight > 0.0 {
+            let f_iri = thin_film_fresnel_metal(
+                v_dot_h,
+                outer_ior,
+                m.thin_film_ior,
+                metal_f0,
+                tf_thickness_nm,
+            );
+            f_metal_base * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
+        } else {
+            f_metal_base
+        }) * m.specular_weight;
+        f_metal * m.base_metalness
     } else {
-        f_metal_base
-    }) * m.specular_weight;
+        Vec3A::ZERO
+    };
 
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    // Metal path: F82-tinted Fresnel * brdf * metalness
-    // Dielectric-specular path: F_dielectric * brdf * (1 - metalness)
-    (f_metal * m.base_metalness + f_diel * (1.0 - m.base_metalness)) * brdf
+    (metal_term + diel_term) * brdf
 }
 
 fn eval_coat(
@@ -591,14 +634,36 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
     let h_local = (v_local + l_local).normalize();
 
     let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
-    let (ax_coat, ay_coat) =
-        roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
     let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
     let specular = eval_specular(m, v_local, l_local, h_local, ax, ay);
-    let coat = eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat);
-    let fuzz = eval_fuzz(m, v_local, l_local, h_local);
+
+    // Absent layers are skipped, not multiplied by zero. Both lobes end in a
+    // multiply by their weight, and both are finite for every input — every
+    // GGX denominator is floored (`roughness_to_alpha_aniso` clamps α ≥ 1e-4,
+    // the cosines at 1e-4) and `sheen_charlie` is bounded because
+    // `sheen_charlie_d` clamps α ≥ 0.05, so its `powf` argument stays in
+    // [0,1]. A finite value times 0.0 is exactly +0.0, and `+0.0 + x == x`,
+    // so this is bit-identical rather than merely close.
+    //
+    // It is also where most of the default material's cost was: `eval_fuzz`
+    // holds the only unconditional `powf` on that path (85M instructions on
+    // cornellbox, one call per `eval_all`), and `eval_coat` a full
+    // anisotropic GGX D + Smith G2 with two `sqrt`s — both for `fuzz_weight`
+    // and `coat_weight` of zero, which is the default.
+    let coat = if m.coat_weight > 0.0 {
+        let (ax_coat, ay_coat) =
+            roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+        eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat)
+    } else {
+        Vec3A::ZERO
+    };
+    let fuzz = if m.fuzz_weight > 0.0 {
+        eval_fuzz(m, v_local, l_local, h_local)
+    } else {
+        Vec3A::ZERO
+    };
 
     // Layered composition (top→bottom): fuzz over coat over base.
     //  throughput = fuzz + (1 - fuzz_weight) · (coat + coat_atten · base)
@@ -629,15 +694,23 @@ fn pdf_all(m: &OpenPBR, pmf: &LobePmf, v_local: Vec3A, l_local: Vec3A, entering:
     let (ax_coat, ay_coat) =
         roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
 
-    let pdf_diffuse = l_local.z.max(0.0) / PI;
+    // Diffuse and fuzz are both sampled cosine-weighted, so their densities
+    // are the same expression — evaluate it once. (Not folded into
+    // `(p_diffuse + p_fuzz) * cosine`: `a·x + b·x` and `(a+b)·x` differ in
+    // float, and the point here is to keep the value identical.)
+    let pdf_cosine = l_local.z.max(0.0) / PI;
     let pdf_specular = pdf_vndf_ggx_aniso_local(v_local, h_local, ax, ay);
+    // The coat density is *not* skippable the way `eval_coat` is: even at
+    // `coat_weight == 0`, `LobePmf::from_params` floors the coat's selection
+    // weight at 1e-6, so `p_coat` is nonzero and this term genuinely belongs
+    // in the mixture density that sampling divides by. Dropping it would
+    // change the image — see the note in `from_params`.
     let pdf_coat = pdf_vndf_ggx_aniso_local(v_local, h_local, ax_coat, ay_coat);
-    let pdf_fuzz = l_local.z.max(0.0) / PI;
 
-    pmf.p_diffuse * pdf_diffuse
+    pmf.p_diffuse * pdf_cosine
         + pmf.p_specular * pdf_specular
         + pmf.p_coat * pdf_coat
-        + pmf.p_fuzz * pdf_fuzz
+        + pmf.p_fuzz * pdf_cosine
 }
 
 // ---------------------------------------------------------------------------
