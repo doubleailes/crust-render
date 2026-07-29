@@ -1,6 +1,6 @@
 [package]
 name = "crust-rt"
-version = "0.1.0"
+version = { workspace = true }
 edition = { workspace = true }
 license-file = { workspace = true }
 description = "Crust Render's ray tracing kernel: Embree-shaped scene/geometry API over a parallel SBVH build collapsed to BVH4, in safe Rust"
