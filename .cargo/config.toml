@@ -1,0 +1,23 @@
+# Cargo configuration for crust-render.
+#
+# Nothing here is active. The block below is an opt-in for building a faster
+# binary for *your own* machine, and it is commented out because what this
+# repository ships must stay baseline x86-64 and distributable.
+#
+# Uncommenting it targets `x86-64-v3` — exactly AVX2 + FMA + BMI, the level
+# every x86 processor since Haswell implements. On the 4-lane code in
+# `crust-rt` that is worth 2-4% (measured; see docs/simd.md). It does not
+# widen any algorithm to 256 bits — it only lets LLVM pick FMA and better
+# instruction selection for the vectors already there.
+#
+# Prefer `x86-64-v3` to `target-cpu=native`: it is reproducible across
+# machines, so two people comparing timings compare the same program, and it
+# names a published ISA baseline, so the resulting binary has a stateable
+# compatibility requirement instead of "whatever the build host was".
+#
+# Caveat if you do enable it: the kernel's correctness claims are about exact
+# float bit patterns, so re-run `scripts/test_simd_matrix.sh -p crust-rt`
+# afterwards rather than assuming the codegen change was neutral.
+
+# [target.'cfg(target_arch = "x86_64")']
+# rustflags = ["-C", "target-cpu=x86-64-v3"]
