@@ -20,11 +20,34 @@ rand = "0.9.2"
 # LTO, cross-crate calls survive as real calls and the vectorized bodies
 # never fuse. LTO + a single codegen unit is what lets the SIMD already in
 # the code actually reach the machine code.
+#
+# `fat` rather than `thin`: measured at 3.989G instructions against thin's
+# 4.050G on `cornellbox -s 2` (-1.5%), for link time only, and the image
+# stays bit-identical across all sample scenes — Rust does not enable
+# fast-math and LLVM will not reassociate float arithmetic without it, so
+# whole-program inlining moves no bits. Wall clock cannot resolve this on a
+# loaded machine (the run-to-run spread reaches 15%), which is why the
+# number above is an instruction count; see scripts/bench_scenes.sh.
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
+# No `catch_unwind` and no `should_panic` anywhere in the workspace, and
+# crust-core's "return `Error`, never exit" contract is about *recoverable*
+# errors — those are `Result` values, not panics — so nothing depends on
+# unwinding. Dropping it removes the landing pads around the `expect()`s and
+# the indexing in the bounce loop. Cargo forces `unwind` for the `test` and
+# `bench` profiles regardless, so `cargo test` is unaffected.
+panic = "abort"
+# Deliberately no `debug` setting. Callgrind and perf already name functions
+# from the symbol table, which is how every measurement behind these settings
+# was taken; `debug = "line-tables-only"` adds only *line*-level attribution
+# and quadruples the binary (5 MiB -> 20 MiB). Ask for it per-invocation when
+# you actually want to annotate inside a function:
+#     RUSTFLAGS='-C debuginfo=line-tables-only' cargo build --release
 
-# Benchmarks and tests inherit `release`, so they measure the same codegen.
+# Benchmarks inherit their own profile, not `release`, so mirror the codegen
+# or they measure a different program than the one that ships. (`panic` is
+# ignored here by Cargo — the harness needs to unwind.)
 [profile.bench]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
