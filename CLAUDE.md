@@ -41,10 +41,55 @@ cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did th
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
 
+# --- The optimization loop (see "Measuring a change" below) --------------
+scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
+scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
+scripts/check_images.sh check  <dir>           # re-render and diff; exits non-zero on any change
+scripts/bench_ab.sh -a <binA> -b <binB> [scenes...]   # interleaved A/B of two binaries
+
 # CI runs: cargo build --verbose && cargo test --verbose
 ```
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
+
+Environment overrides, all of which exist to A/B an optimization against the behaviour it
+replaced: `CRUST_STREAM_IMPORT=0` forces the single-stage USD import; `CRUST_MESH_BAKE=0`
+forces every mesh to be instanced instead of baking single-placement geometry flat (output
+is bit-identical with it set, which is what separates a deferral bug from a baking
+difference).
+
+## Measuring a change
+
+Three things about this codebase make naive measurement actively misleading, so the
+tooling above exists to work around each.
+
+1. **Sequential wall-clock comparisons lie.** On a busy machine, measuring before and
+   after minutes apart reported a **12% regression** for a change `bench_ab.sh` then showed
+   to be a 4-5% *improvement* — the difference was background load. Always compare two
+   binaries with `bench_ab.sh`, which alternates A and B within the same seconds so load
+   lands on both. Report min *and* mean.
+2. **Small steps are below the noise floor.** The run-to-run spread reaches 15%, so a
+   1-5% change cannot be resolved by timing at all. Count instructions instead — they are
+   deterministic:
+
+   ```bash
+   RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+       target/release/crust-render -i samples/cornellbox.usda -o /tmp/x.exr -s 2
+   callgrind_annotate --inclusive=no callgrind.out.<pid>
+   ```
+
+   Function names resolve from the symbol table with no debug info; add
+   `RUSTFLAGS='-C debuginfo=line-tables-only'` only when you want line-level detail.
+   Note callgrind counts instructions, not cycles, so it under-reports anything whose gain
+   is cache behaviour — and it cannot see `panic = "abort"` at all.
+3. **Compare images at `-s 16`, never higher.** `min_samples_per_pixel` defaults to 32 and
+   the adaptive early-stop needs `taken >= min_spp`, so at 16 spp every pixel takes exactly
+   16 samples. Above that a single-ulp difference changes a pixel's sample budget and
+   cascades, making a bit-identical change look structural. `check_images.sh` pins this.
+
+For a change that *does* legitimately alter output (a different BVH reorders exact ties),
+prove it is noise rather than bias by checking the difference falls as 1/√N across spp
+rather than plateauing.
 
 ## Workspace layout
 
@@ -297,10 +342,26 @@ it*: it needs two chunks that both carry prototype-internal materials.
 
 Schema mapping:
 
-- `UsdGeomMesh` → a *local-space* committed `rt::Scene` (one `TriangleMesh` geometry)
-  placed by an `rt::Geometry::Instance`; prims with identical points/topology/material
-  share one kernel scene (content hash + memoized material Arcs, so binding paths
-  compare by pointer). Non-invertible transforms fall back to world-space baking.
+- `UsdGeomMesh` → **either** world-space triangles in the top-level BVH **or** a
+  local-space committed `rt::Scene` placed by an `rt::Geometry::Instance`, decided by how
+  many times the geometry is placed. Prims with identical points/topology/material are one
+  *distinct mesh* (content hash + memoized material Arcs, so binding paths compare by
+  pointer); a distinct mesh placed **exactly once** is baked flat, anything placed more
+  than once keeps one shared kernel scene and an instance per placement. Instancing what
+  is placed once buys no sharing and costs every entering ray a transform, a slab setup and
+  a cold descent into a second tree — and presents the parent BVH a box-of-a-box that
+  spatial splits cannot tighten. On cornellbox this took instance descents from 3.85 to
+  0.13 per camera ray.
+  The decision is deferred: `emit_mesh` interns the triangles and reserves a `geom_id`
+  (`WorldBuilder::reserve_slot`), and `flush_meshes` fills the slots in after the last
+  streamed chunk — placement counts are only final then, and deciding **per chunk** would
+  both make results depend on stage layout and give geometry shared between two elements
+  one resident copy each. `CRUST_MESH_BAKE=0` forces the all-instanced behaviour; with it
+  set the output is bit-identical, which is what separates a deferral bug from a baking
+  difference. Baking a mirrored (`det < 0`) placement **swaps two indices**: world-space
+  vertices wind the opposite way, so without it `front_face` inverts.
+  Non-invertible transforms still bake immediately, and a mesh authoring
+  `crust:motion:translate` always instances (a baked mesh has no transform left to lerp).
   `UsdGeomSphere` → analytic `Sphere` geometry.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
@@ -405,6 +466,16 @@ feature flag.
   inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
   points/topology *and* material binding. Emissive curves/instances are not light-list
   entries (BSDF-sampled only, like emissive volumes).
+  Baking single-placement meshes (above) leaves *resident* memory unchanged — the same
+  triangles, one fewer BVH — but it moves work into a single large top-level SBVH build,
+  and that build's **transient** peak is higher: on `Kitchen_set` (1 394 meshes baked,
+  414 599 top-level triangles) kernel memory went 134.59 → 134.44 MiB while peak RSS went
+  374 → 579 MiB. The cause is pre-existing and not specific to baking: `PrimRef` and the
+  binary `Node` are 48 bytes each, and `merge` concatenates child node arrays while both
+  children are still alive, so one build over ~600 K references (with SBVH duplication)
+  transiently holds a few hundred MiB where 1 788 small builds held almost nothing. If that
+  peak ever matters more than the ~20% render win, the lever is a triangle-count cap on
+  baking; the real fix is a builder that does not materialise the whole binary tree.
 
 - **Instancing caveats.** The kernel nests instances to arbitrary depth (transforms
   compose, normals map back through every level, masks gate per level — pinned by

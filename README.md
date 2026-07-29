@@ -76,9 +76,14 @@ ray/triangle test (Woop et al. 2013 — no pinholes along shared edges) and
 build a **BVH4**: a parallel, deterministic, reference-based SAH build with
 SBVH **spatial splits** (Stich et al. 2009), collapsed into 4-wide SIMD nodes
 whose slab tests run on `Vec4` lanes. Shadow rays use a dedicated early-exit
-**occlusion query** (the `rtcIntersect`/`rtcOccluded` split). Each mesh's
-kernel scene is built in local space and **instanced**: prims sharing
-points/topology/material share one triangle BVH under an instance transform.
+**occlusion query** (the `rtcIntersect`/`rtcOccluded` split). Mesh geometry is
+**instanced only when it is actually reused**: prims sharing
+points/topology/material share one triangle BVH under an instance transform,
+while geometry placed exactly once is baked into world space so its triangles
+sit directly in the top-level BVH. Instancing a single placement buys no
+sharing and costs every entering ray a transform plus a cold descent into a
+second tree — dropping it took instance descents from 3.85 to 0.13 per camera
+ray on `samples/cornellbox.usda`.
 `UsdGeomBasisCurves` import as **round curve segments** (sphere-swept cones;
 cubic bezier/bspline/catmullRom spans flatten to polylines) — see
 `samples/curves.usda`. Two per-prim extras:

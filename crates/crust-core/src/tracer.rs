@@ -428,12 +428,15 @@ impl Renderer {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     let mut samples = Vec::new();
                     // Private to this tile, so no two threads share a
-                    // counter and there is nothing to synchronise.
+                    // counter and there is nothing to synchronise. The path
+                    // scratch has the same ownership story: one buffer serves
+                    // every sample of every pixel in the tile.
                     let mut tile_rays = RayStats::default();
+                    let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
                             let (color, mut s, v) =
-                                self.render_pixel(i, j, &cfg, gctx, &mut tile_rays);
+                                self.render_pixel(i, j, &cfg, gctx, &mut scratch, &mut tile_rays);
                             pixels.push((i, j, color, v));
                             samples.append(&mut s);
                         }
@@ -457,13 +460,21 @@ impl Renderer {
             let total = self.settings.height as u64;
             let mut done = 0u64;
             for j in (0..self.settings.height).rev() {
+                // `map_init` rather than `map`: the path scratch is reused
+                // across every pixel rayon hands one worker, instead of being
+                // rebuilt per pixel. (This path parallelises over pixels, so
+                // unlike the tiled path there is no per-work-unit closure to
+                // hang the buffer on.)
                 let row: Vec<(Vec3A, Vec<SampleData>, f64, RayStats)> = (0..self.settings.width)
                     .into_par_iter()
-                    .map(|i| {
-                        let mut px = RayStats::default();
-                        let (c, s, v) = self.render_pixel(i, j, &cfg, gctx, &mut px);
-                        (c, s, v, px)
-                    })
+                    .map_init(
+                        || PathScratch::new(self.settings.max_depth as usize),
+                        |scratch, i| {
+                            let mut px = RayStats::default();
+                            let (c, s, v) = self.render_pixel(i, j, &cfg, gctx, scratch, &mut px);
+                            (c, s, v, px)
+                        },
+                    )
                     .collect();
                 for (i, (color, samples, var, px_rays)) in row.into_iter().enumerate() {
                     rays.merge(&px_rays);
@@ -496,6 +507,7 @@ impl Renderer {
         j: usize,
         cfg: &PassConfig,
         gctx: Option<&GuidingContext>,
+        scratch: &mut PathScratch,
         stats: &mut RayStats,
     ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sum = Vec3A::ZERO;
@@ -512,13 +524,33 @@ impl Renderer {
         // decorrelated (the frame seed alone is constant within one render).
         let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
 
+        // Is the shutter coordinate worth sampling at all? `ray.time` is read
+        // by exactly one thing — a moving instance interpolating its
+        // transform — so on a scene where nothing moves, every value of it
+        // produces the same image and drawing one is pure waste. It is not
+        // cheap waste: `draw_sample_f32::<N>` computes a whole 4-dimensional
+        // Owen-scrambled Sobol block whatever `N` is, which measured 4.2% of
+        // the render on cornellbox, one block per camera ray for one float.
+        //
+        // Skipping the draw cannot perturb the other dimensions: `new_domain`
+        // is a pure function of the parent state and takes `&self`, so a
+        // domain that is never derived leaves `root` untouched.
+        let motion = self.world.has_motion();
+
         for sample in 0..cfg.spp {
             let root =
                 PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
             let u = ((i as f32) + cam[0]) / (self.settings.width - 1) as f32;
             let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
-            let time = root.new_domain(K_TIME).draw_sample_f32::<1>()[0];
+            // `Ray::new` defaults `time` to 0.0, and `transforms_at` takes the
+            // start transform at time 0, so this is the value a static scene
+            // was already effectively using.
+            let time = if motion {
+                root.new_domain(K_TIME).draw_sample_f32::<1>()[0]
+            } else {
+                0.0
+            };
             let r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
             stats.camera_rays += 1;
             let color = trace_path(
@@ -531,6 +563,7 @@ impl Renderer {
                 root,
                 gctx,
                 &mut samples,
+                scratch,
                 stats,
             );
             sum += color;
@@ -659,6 +692,9 @@ pub fn ray_color(
 ) -> Vec3A {
     let mut no_training = Vec::new();
     let mut stats = RayStats::default();
+    // The one-shot entry point (benches and tests), so a scratch per call is
+    // the right trade — the renderer's own paths reuse one per work unit.
+    let mut scratch = PathScratch::new(depth.max(0) as usize);
     trace_path(
         r,
         world,
@@ -669,6 +705,7 @@ pub fn ray_color(
         sampler,
         None,
         &mut no_training,
+        &mut scratch,
         &mut stats,
     )
 }
@@ -776,6 +813,31 @@ struct TrainRec {
     pos: Vec3A,
     dir: Vec3A,
     cos: f32,
+}
+
+/// Buffers a path walk needs, owned by the worker rather than the walk.
+///
+/// The forward pass records one [`VertexRec`] per vertex and the backward
+/// gather reads them, so the walk needs somewhere to put them — but it does
+/// not need *fresh* storage. Allocating per camera sample cost one
+/// `malloc`/`free` pair per sample, measured at 4.4% of the render on
+/// cornellbox (460 800 pairs for 460 800 samples). A work unit renders
+/// thousands of samples through the same buffer instead.
+///
+/// Held per tile (or, in the scanline path, per rayon worker) — the same
+/// granularity as `RayStats`, so it is private to one thread by construction
+/// and there is nothing to synchronise.
+pub(crate) struct PathScratch {
+    records: Vec<VertexRec>,
+}
+
+impl PathScratch {
+    /// `max_depth` is a capacity hint only; the walk may push fewer.
+    pub(crate) fn new(max_depth: usize) -> Self {
+        Self {
+            records: Vec::with_capacity(max_depth),
+        }
+    }
 }
 
 /// The state of the previous surface bounce that the next vertex needs to
@@ -978,12 +1040,16 @@ fn trace_path(
     sampler: PathSampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
+    scratch: &mut PathScratch,
     stats: &mut RayStats,
 ) -> Vec3A {
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
     let path = sampler.new_domain(K_PATH);
-    let mut records: Vec<VertexRec> = Vec::with_capacity(depth.max(0) as usize);
+    // Borrowed, not allocated — see `PathScratch`. Capacity carries over from
+    // the previous sample, so after the first walk this is free.
+    let records = &mut scratch.records;
+    records.clear();
     let mut ray = r.clone();
     let mut remaining = depth;
     // Set after surface bounces and volume-region phase scatters; `None`

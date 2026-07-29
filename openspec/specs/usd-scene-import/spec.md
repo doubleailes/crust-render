@@ -29,14 +29,60 @@ transforms.
 
 ### Requirement: Geometry schema mapping
 
-The importer SHALL map `UsdGeomMesh` to world-baked triangles wrapped in a
-`BVHNode`, and `UsdGeomSphere` to an analytic `Sphere`. The top-level world
-remains a linear list; BVH acceleration is built only per imported mesh.
+The importer SHALL map `UsdGeomMesh` to kernel triangle geometry and
+`UsdGeomSphere` to an analytic `Sphere`, attaching both to the single
+`crust-rt` scene whose BVH4 the kernel builds in `commit()`.
 
-#### Scenario: Mesh prim
+Mesh prims sharing identical points, topology and material binding SHALL be
+treated as one *distinct mesh*. The importer SHALL choose that mesh's
+representation by how many times it is placed:
 
-- **WHEN** a `UsdGeomMesh` prim is traversed
-- **THEN** its triangles are baked into world space and added as a BVH-wrapped mesh
+- placed **exactly once** → its triangles are transformed into world space and
+  attached directly, so they live in the top-level BVH;
+- placed **more than once** → one shared local-space kernel scene, attached
+  once per placement as an instance carrying that placement's transform.
+
+Instancing geometry that is placed once buys no sharing while costing every
+entering ray a transform into local space, a fresh traversal setup and a cold
+descent into a second tree, and presents the parent BVH the transformed
+bounding box of the inner tree's bounding box — a box of a box that spatial
+splits cannot tighten.
+
+Because a placement count is only final once the whole stage has been walked,
+the decision SHALL be deferred: the importer reserves the `geom_id` during
+traversal and fills the geometry in afterwards. The decision SHALL be made
+across all streamed chunks together, never per chunk.
+
+#### Scenario: Mesh prim placed once
+
+- **WHEN** a `UsdGeomMesh` prim is traversed and no other prim shares its
+  points, topology and material
+- **THEN** its triangles are transformed into world space and attached
+  directly, appearing in the top-level BVH
+
+#### Scenario: Mesh geometry placed more than once
+
+- **WHEN** two or more prims share points, topology and material
+- **THEN** one local-space kernel scene is built for that geometry and each
+  prim attaches an instance of it
+
+#### Scenario: Mirrored placement is baked
+
+- **WHEN** a mesh placed once has a transform with negative determinant
+- **THEN** the baked triangle winding is reversed, so the surface orientation
+  and hence `front_face` match what the instanced path would report
+
+#### Scenario: Mesh prim that moves
+
+- **WHEN** a mesh prim authors `crust:motion:translate`
+- **THEN** it is attached as an instance regardless of placement count, since
+  baked triangles carry no transform to interpolate over the shutter
+
+#### Scenario: Non-invertible placement
+
+- **WHEN** a mesh prim's transform is not invertible
+- **THEN** its triangles are baked into world space, as an instance requires an
+  invertible transform
 
 #### Scenario: Sphere prim
 

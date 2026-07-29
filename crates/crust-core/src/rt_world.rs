@@ -48,6 +48,31 @@ impl WorldBuilder {
         self.materials.len()
     }
 
+    /// Claims a `geom_id` and binds its material now, leaving the geometry to
+    /// be supplied later by [`WorldBuilder::set_geometry`].
+    ///
+    /// `geom_id`s are handed out in attach order and index the material
+    /// table, so a caller that wants to *decide* a geometry's representation
+    /// late — but keep its position in the table — reserves the slot here.
+    /// The importer uses this to defer the instance-vs-bake choice for a mesh
+    /// until it knows how many times that mesh is placed, without perturbing
+    /// the id every other part of the import (lights especially) already
+    /// depends on.
+    ///
+    /// A slot never filled in commits to zero primitives: harmless, just
+    /// invisible.
+    pub fn reserve_slot(&mut self, material: Arc<dyn Material>, mask: u32) -> u32 {
+        self.attach_masked(SceneBuilder::empty_geometry(), material, mask)
+    }
+
+    /// Fills in a slot from [`WorldBuilder::reserve_slot`].
+    ///
+    /// # Panics
+    /// If `id` was never reserved.
+    pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
+        self.rt.set_geometry(id, geometry);
+    }
+
     /// Reserves capacity for `additional` more geometries — see
     /// `crust_rt::SceneBuilder::reserve`. Callers importing a known-size
     /// batch (a `PointInstancer` with N placements) should call this
@@ -142,6 +167,13 @@ impl World {
     /// [`crust_rt::Scene::primitive_extents`].
     pub fn primitive_extents(&self) -> (usize, f32, f32, f32) {
         self.scene.primitive_extents()
+    }
+
+    /// Does anything move over the shutter interval — see
+    /// [`crust_rt::Scene::has_motion`]. When `false` the integrator can skip
+    /// sampling the shutter coordinate entirely, because nothing reads it.
+    pub fn has_motion(&self) -> bool {
+        self.scene.has_motion()
     }
 
     /// Exact kernel-resident bytes — see

@@ -122,6 +122,11 @@ struct ImportCtx<'a> {
     volumes: Vec<VolumeRegion>,
     camera: Option<Camera>,
     caches: ImportCaches,
+    /// Direct mesh placements whose representation is not yet decided, in
+    /// traversal order. Drained by [`flush_meshes`] after the last chunk —
+    /// the decision needs every chunk's placement counts, so it cannot be
+    /// made while walking. Holds ~88 bytes per mesh prim, not per triangle.
+    pending_meshes: Vec<MeshPlacement>,
     /// Time the host spent decoding assets, so the profile can separate it
     /// from the traversal proper.
     asset_time: Duration,
@@ -213,6 +218,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 this_world,
                 mat,
                 &mut ctx.caches.meshes,
+                &mut ctx.pending_meshes,
             );
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
@@ -313,10 +319,11 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         volumes: Vec::new(),
         camera: None,
         // Prims binding the same material path share one Arc, and prims
-        // with identical local geometry + material share one committed
-        // kernel scene through instancing — N placements of a mesh cost
-        // one copy of its triangles.
+        // with identical local geometry + material share one copy of that
+        // geometry — placed by an instance when it is placed more than once,
+        // baked flat into the parent BVH when it is placed exactly once.
         caches: ImportCaches::default(),
+        pending_meshes: Vec::new(),
         asset_time: Duration::ZERO,
         settings,
         stage_path: path,
@@ -366,6 +373,12 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
         crate::world::get_settings().0
     });
+
+    // Every chunk has been walked, so each mesh's placement count is final
+    // and the deferred instance-vs-bake decisions can be made. Must happen
+    // before `commit`, which is what consumes the geometry table.
+    let pending = std::mem::take(&mut ctx.pending_meshes);
+    flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
 
     let commit_start = Instant::now();
     let committed = ctx.world.commit();
@@ -770,13 +783,116 @@ impl MeshKey {
     }
 }
 
+/// Local-space triangles of one distinct mesh, held only while that mesh
+/// might still be baked flat into the parent BVH rather than instanced.
+struct MeshGeom {
+    verts: Vec<Vec3A>,
+    tris: Vec<[u32; 3]>,
+}
+
+/// What the importer knows about one distinct mesh (one [`MeshKey`]).
+struct MeshSlot {
+    /// The triangles, kept until the instance-vs-bake decision is made.
+    /// Dropped as soon as `committed` is set: a committed slot is already
+    /// resident as a kernel scene, so every placement of it instances and
+    /// baking would only add a second copy.
+    local: Option<MeshGeom>,
+    /// Set once some path needed this mesh as a real kernel scene — which
+    /// prototypes always do, since an instance is the only way to place one.
+    committed: Option<Arc<RtScene>>,
+    /// Instanceable direct placements recorded so far. World-space-baked
+    /// placements (a non-invertible transform) are not counted: they never
+    /// reference the slot again.
+    n_place: u32,
+}
+
+/// Distinct meshes seen so far, and the index of each by content.
+///
+/// Replaces a bare `HashMap<MeshKey, Arc<RtScene>>`: the same content-hash
+/// deduplication, but a mesh's *representation* is no longer decided the
+/// moment it is first seen.
+#[derive(Default)]
+struct MeshArena {
+    /// Indexed by the `u32` in `by_key`. Iterate this, never `by_key` — a
+    /// `HashMap`'s order is not stable and the build must be deterministic.
+    slots: Vec<MeshSlot>,
+    by_key: HashMap<MeshKey, u32>,
+}
+
+/// A direct mesh prim whose geometry is recorded but not yet attached.
+struct MeshPlacement {
+    /// Reserved during traversal, so ids keep their traversal order.
+    geom_id: u32,
+    /// Index into [`MeshArena::slots`].
+    slot: u32,
+    l2w: Affine3A,
+    motion: Option<Vec3>,
+}
+
+impl MeshArena {
+    /// Interns a mesh by content, returning its slot index. Triangulates on
+    /// first sight; `None` if nothing survives triangulation (matching the
+    /// old behaviour, which also did not cache a failed mesh).
+    fn intern(
+        &mut self,
+        prim: &Prim,
+        points: &[Vec3f],
+        counts: &[i32],
+        indices: &[i32],
+        material: &Arc<dyn Material>,
+    ) -> Option<u32> {
+        let key = MeshKey::new(points, counts, indices, material);
+        if let Some(&slot) = self.by_key.get(&key) {
+            debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
+            return Some(slot);
+        }
+        let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+        let tris = triangulate(counts, indices, verts.len()).or_else(|| {
+            debug!("Mesh at {} produced no triangles", prim.path());
+            None
+        })?;
+        let slot = self.slots.len() as u32;
+        self.slots.push(MeshSlot {
+            local: Some(MeshGeom { verts, tris }),
+            committed: None,
+            n_place: 0,
+        });
+        self.by_key.insert(key, slot);
+        Some(slot)
+    }
+
+    /// The slot's geometry as a committed local-space kernel scene, built on
+    /// first demand and shared thereafter. Once this is called the slot can
+    /// no longer be baked — see [`MeshSlot::local`].
+    fn committed_scene(&mut self, slot: u32) -> Arc<RtScene> {
+        let s = &mut self.slots[slot as usize];
+        if let Some(scene) = &s.committed {
+            return Arc::clone(scene);
+        }
+        let geom = s
+            .local
+            .take()
+            .expect("a slot is either still local or already committed");
+        let mut b = RtSceneBuilder::new();
+        b.attach(Geometry::TriangleMesh {
+            vertices: geom.verts,
+            indices: geom.tris,
+            normals: None,
+        });
+        let scene = Arc::new(b.commit());
+        s.committed = Some(Arc::clone(&scene));
+        scene
+    }
+}
+
 fn emit_mesh(
     world: &mut WorldBuilder,
     prim: &Prim,
     mesh: &UsdMesh,
     world_xf: GMat4,
     material: Arc<dyn Material>,
-    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
+    meshes: &mut MeshArena,
+    pending: &mut Vec<MeshPlacement>,
 ) {
     let Some((points, counts, indices)) = mesh_arrays(mesh) else {
         debug!(
@@ -826,23 +942,133 @@ fn emit_mesh(
         return;
     }
 
-    // The mesh's kernel scene is built in the prim's *local* space and
-    // shared by every prim with identical geometry + material; the
-    // Instance geometry carries the placement.
-    let Some(inner) = shared_mesh_scene(prim, &points, &counts, &indices, &material, meshes) else {
+    // Record the placement rather than attaching it. Whether this mesh is
+    // better placed by an instance or baked into world-space triangles
+    // depends on how many times it is placed in total, which is not known
+    // until the whole stage has been walked — so claim the `geom_id` now (it
+    // must keep its traversal order) and decide in `flush_meshes`.
+    let Some(slot) = meshes.intern(prim, &points, &counts, &indices, &material) else {
         return;
     };
+    meshes.slots[slot as usize].n_place += 1;
 
-    let l2w = Affine3A::from_mat4(world_xf);
-    world.attach_masked(
-        Geometry::Instance {
-            scene: inner,
-            transform: l2w,
-            transform_end: motion.map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
-        },
-        material,
-        mask,
-    );
+    let geom_id = world.reserve_slot(material, mask);
+    pending.push(MeshPlacement {
+        geom_id,
+        slot,
+        l2w: Affine3A::from_mat4(world_xf),
+        motion,
+    });
+}
+
+/// Turns the deferred [`MeshPlacement`]s into real geometry, now that every
+/// mesh's placement count is final.
+///
+/// A mesh placed exactly once is baked into world-space triangles in the
+/// parent BVH; anything placed more than once keeps one shared kernel scene
+/// and an instance per placement.
+///
+/// Why baking a single placement is worth it: an instance costs every ray
+/// that enters its box a transform into local space, a fresh ray/slab setup,
+/// and a cold descent into a second tree — and the box the parent BVH sees is
+/// the transformed AABB of the inner tree's root AABB, a box of a box, which
+/// spatial splits cannot tighten. For geometry that exists in exactly one
+/// place that buys nothing at all: there is no sharing to amortise it
+/// against. It is also *less* memory, not more, since the inner tree's nodes,
+/// leaf table and packets all go away and the triangles exist once either
+/// way.
+///
+/// The decision has to be global — made after every streamed chunk, not
+/// per chunk. Per-chunk would make it depend on stage layout (cornellbox
+/// streams, so each of its meshes would look like a per-chunk singleton and
+/// results would differ under `CRUST_STREAM_IMPORT=0`), and geometry
+/// referenced from two elements of a production stage would get one resident
+/// copy per element — a memory regression in exactly the case sharing exists
+/// for.
+///
+/// `CRUST_MESH_BAKE=0` forces every placement to instance, i.e. the old
+/// behaviour. That is the A/B switch: with it set the output must be
+/// bit-identical, which is what separates "the deferral is wrong" from "the
+/// baking changed something".
+fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<MeshPlacement>) {
+    let bake_enabled = std::env::var("CRUST_MESH_BAKE").as_deref() != Ok("0");
+    let mut baked = 0usize;
+    let mut instanced = 0usize;
+
+    for p in pending {
+        let slot = &meshes.slots[p.slot as usize];
+        // Bake only when this is the mesh's sole placement, nothing has
+        // already made it resident as a kernel scene, and it does not move —
+        // a baked mesh has no transform left to interpolate over the shutter.
+        let bake = bake_enabled
+            && slot.n_place == 1
+            && slot.committed.is_none()
+            && p.motion.is_none();
+
+        if bake {
+            let geom = meshes.slots[p.slot as usize]
+                .local
+                .take()
+                .expect("an unbaked, uncommitted slot still holds its triangles");
+            world.set_geometry(
+                p.geom_id,
+                Geometry::TriangleMesh {
+                    vertices: bake_verts(&geom.verts, &p.l2w),
+                    indices: bake_indices(geom.tris, &p.l2w),
+                    normals: None,
+                },
+            );
+            baked += 1;
+        } else {
+            let scene = meshes.committed_scene(p.slot);
+            let l2w = p.l2w;
+            world.set_geometry(
+                p.geom_id,
+                Geometry::Instance {
+                    scene,
+                    transform: l2w,
+                    transform_end: p
+                        .motion
+                        .map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
+                },
+            );
+            instanced += 1;
+        }
+    }
+
+    if baked + instanced > 0 {
+        debug!(
+            "Direct meshes: {baked} baked flat, {instanced} instanced ({} distinct)",
+            meshes.slots.len()
+        );
+    }
+}
+
+/// Local-space vertices into world space.
+fn bake_verts(verts: &[Vec3A], l2w: &Affine3A) -> Vec<Vec3A> {
+    verts.iter().map(|v| l2w.transform_point3a(*v)).collect()
+}
+
+/// Triangle winding for baked geometry, flipped under a mirroring transform.
+///
+/// The instanced path derives its geometric normal inside the prototype and
+/// maps it out through the inverse transpose. Baking derives it from the
+/// world-space vertices instead, and for `det(M) < 0` those disagree in sign:
+/// `(p1−p0)×(p2−p0) = det(M)·(M⁻¹)ᵀn`. Left unhandled, every mirrored prim
+/// would render inside-out — `front_face` inverted, which flips which side of
+/// a refractive interface the ray thinks it is on. Swapping two indices
+/// restores the original orientation.
+///
+/// (This also swaps the roles of the barycentric `u`/`v` a hit reports.
+/// Nothing reads them today — `HitRecord` carries no UVs — but whoever adds
+/// texture coordinates needs to know.)
+fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
+    if l2w.matrix3.determinant() < 0.0 {
+        for t in &mut tris {
+            t.swap(1, 2);
+        }
+    }
+    tris
 }
 
 /// Reads a mesh prim's authored arrays. `None` when any of the three
@@ -859,40 +1085,6 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
     let counts = int_vec(mesh.face_vertex_counts_attr().get::<sdf::Value>().ok().flatten()?)?;
     let indices = int_vec(mesh.face_vertex_indices_attr().get::<sdf::Value>().ok().flatten()?)?;
     Some((points, counts, indices))
-}
-
-/// The mesh's triangles as a committed kernel scene in the prim's *local*
-/// space, shared with every earlier prim whose points/topology/material
-/// match. This is the unit of geometry sharing: N placements of a mesh —
-/// whether by repeated authoring, by a `PointInstancer`, or by native
-/// instancing — cost one copy of its triangles and one BVH.
-fn shared_mesh_scene(
-    prim: &Prim,
-    points: &[Vec3f],
-    counts: &[i32],
-    indices: &[i32],
-    material: &Arc<dyn Material>,
-    meshes: &mut HashMap<MeshKey, Arc<RtScene>>,
-) -> Option<Arc<RtScene>> {
-    let key = MeshKey::new(points, counts, indices, material);
-    if let Some(shared) = meshes.get(&key) {
-        debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
-        return Some(shared.clone());
-    }
-    let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
-    let Some(tris) = triangulate(counts, indices, verts.len()) else {
-        debug!("Mesh at {} produced no triangles", prim.path());
-        return None;
-    };
-    let mut b = RtSceneBuilder::new();
-    b.attach(Geometry::TriangleMesh {
-        vertices: verts,
-        indices: tris,
-        normals: None,
-    });
-    let scene = Arc::new(b.commit());
-    meshes.insert(key, scene.clone());
-    Some(scene)
 }
 
 /// Fan-triangulates the faces into an index-triple list; `None` if
@@ -1007,8 +1199,10 @@ fn emit_sphere(
 struct ImportCaches {
     /// Material path (memoized) → shared material.
     materials: MaterialCache,
-    /// Mesh content + material → the mesh's local-space kernel scene.
-    meshes: HashMap<MeshKey, Arc<RtScene>>,
+    /// Distinct meshes by content + material. Holds each one's triangles
+    /// until its representation is decided (see [`flush_meshes`]), then its
+    /// committed kernel scene if it needed one.
+    meshes: MeshArena,
     /// `(epoch, prototype path)` → its parts, for both instancing
     /// mechanisms. See [`ImportCaches::epoch`] for the epoch.
     protos: HashMap<(u32, String), Arc<Vec<ProtoPart>>>,
@@ -1117,18 +1311,18 @@ fn collect_proto_parts(
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, &mut caches.materials);
+            // A prototype part is placed by an instance by definition, so it
+            // always needs a real kernel scene — committing here is also what
+            // marks the slot as ineligible for baking, so a mesh used both
+            // directly and as a prototype is not stored twice.
             if let Some((points, counts, indices)) = mesh_arrays(&mesh)
-                && let Some(scene) = shared_mesh_scene(
-                    &prim,
-                    &points,
-                    &counts,
-                    &indices,
-                    &material,
-                    &mut caches.meshes,
-                )
+                && let Some(slot) =
+                    caches
+                        .meshes
+                        .intern(&prim, &points, &counts, &indices, &material)
             {
                 parts.push(ProtoPart {
-                    scene,
+                    scene: caches.meshes.committed_scene(slot),
                     local: this_local,
                     material,
                     mask,
@@ -2617,6 +2811,115 @@ fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
         // color3f is stored as Vec3f in sdf::Value
         sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod bake_tests {
+    use super::*;
+    use crate::material::OpenPBR;
+
+    /// A unit quad in the z = 0 plane, wound counter-clockwise seen from +z.
+    fn quad() -> MeshGeom {
+        MeshGeom {
+            verts: vec![
+                Vec3A::new(-1.0, -1.0, 0.0),
+                Vec3A::new(1.0, -1.0, 0.0),
+                Vec3A::new(1.0, 1.0, 0.0),
+                Vec3A::new(-1.0, 1.0, 0.0),
+            ],
+            tris: vec![[0, 1, 2], [0, 2, 3]],
+        }
+    }
+
+    /// Places `geom` by `l2w` two ways — baked into world-space triangles,
+    /// and as an instance of the local-space mesh — and returns what a ray
+    /// down -z sees of each: `(t, front_face, normal.z)`.
+    fn baked_vs_instanced(l2w: Affine3A) -> ((f32, bool, f32), (f32, bool, f32)) {
+        let mat = || -> Arc<dyn Material> { Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))) };
+        let geom = quad();
+
+        let mut baked = WorldBuilder::new();
+        baked.attach(
+            Geometry::TriangleMesh {
+                vertices: bake_verts(&geom.verts, &l2w),
+                indices: bake_indices(geom.tris.clone(), &l2w),
+                normals: None,
+            },
+            mat(),
+        );
+        let baked = baked.commit();
+
+        let mut inner = RtSceneBuilder::new();
+        inner.attach(Geometry::TriangleMesh {
+            vertices: geom.verts.clone(),
+            indices: geom.tris.clone(),
+            normals: None,
+        });
+        let mut inst = WorldBuilder::new();
+        inst.attach(
+            Geometry::Instance {
+                scene: Arc::new(inner.commit()),
+                transform: l2w,
+                transform_end: None,
+            },
+            mat(),
+        );
+        let inst = inst.commit();
+
+        let ray = crate::ray::Ray::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::new(0.0, 0.0, -1.0));
+        let probe = |w: &crate::rt_world::World| {
+            let h = w.intersect(&ray, 1e-4, f32::MAX).expect("the quad is hit");
+            (h.rec.t, h.rec.front_face, h.rec.normal.z)
+        };
+        (probe(&baked), probe(&inst))
+    }
+
+    #[test]
+    fn baking_matches_instancing_for_an_ordinary_transform() {
+        let l2w = Affine3A::from_scale_rotation_translation(
+            glam::Vec3::new(2.0, 1.5, 1.0),
+            glam::Quat::from_rotation_z(0.7),
+            glam::Vec3::new(0.3, -0.2, 0.0),
+        );
+        let (baked, inst) = baked_vs_instanced(l2w);
+        assert_eq!(baked, inst, "baked {baked:?} vs instanced {inst:?}");
+    }
+
+    /// The regression this guards: for `det(M) < 0` the world-space vertices
+    /// wind the opposite way round, so a geometric normal derived from them
+    /// points *against* the one the instanced path maps out through the
+    /// inverse transpose. Without the compensating index swap in
+    /// [`bake_indices`], `front_face` inverts — which silently flips which
+    /// side of a refractive interface a ray believes it is on.
+    #[test]
+    fn baking_a_mirrored_transform_keeps_the_original_orientation() {
+        // Negative x scale: a mirror, det < 0.
+        let l2w = Affine3A::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0));
+        assert!(l2w.matrix3.determinant() < 0.0, "this test needs a mirror");
+
+        let (baked, inst) = baked_vs_instanced(l2w);
+        assert_eq!(
+            baked, inst,
+            "mirrored: baked {baked:?} vs instanced {inst:?}"
+        );
+        // And state the expected value outright, so the test still means
+        // something if both paths ever break together.
+        assert!(baked.1, "a ray down -z hits the front of a +z-facing quad");
+        assert!(baked.2 > 0.0, "the ray-facing normal points back up +z");
+    }
+
+    /// Without the swap the test above would pass for the wrong reason if
+    /// `bake_indices` were a no-op and the kernel happened to agree, so pin
+    /// the swap itself.
+    #[test]
+    fn bake_indices_swaps_winding_only_when_mirrored() {
+        let tris = vec![[0u32, 1, 2]];
+        let plain = Affine3A::from_scale(glam::Vec3::new(2.0, 3.0, 4.0));
+        assert_eq!(bake_indices(tris.clone(), &plain), vec![[0, 1, 2]]);
+
+        let mirror = Affine3A::from_scale(glam::Vec3::new(-2.0, 3.0, 4.0));
+        assert_eq!(bake_indices(tris, &mirror), vec![[0, 2, 1]]);
     }
 }
 

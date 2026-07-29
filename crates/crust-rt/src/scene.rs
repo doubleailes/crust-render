@@ -180,10 +180,63 @@ impl SceneBuilder {
         self.geoms.len()
     }
 
+    /// Replaces the geometry already attached at `id`, keeping its mask.
+    ///
+    /// For callers that must claim a `geom_id` before they can decide what
+    /// geometry belongs in it. The importer needs this: whether a mesh is
+    /// better placed by an instance or baked into world-space triangles
+    /// depends on how many times it turns out to be placed, which is not
+    /// known until the whole stage has been walked — but `geom_id`s are
+    /// handed out in traversal order and are the key the host's material
+    /// table is indexed by, so they cannot be assigned later.
+    ///
+    /// Attach a placeholder, keep the id, and fill it in here once the
+    /// decision is made. Only valid before [`SceneBuilder::commit`], which is
+    /// enforced by taking `&mut self`.
+    ///
+    /// # Panics
+    /// If `id` was never attached.
+    pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
+        self.geoms[id as usize].0 = geometry;
+    }
+
+    /// A geometry that expands to no primitives — the placeholder to pair
+    /// with [`SceneBuilder::set_geometry`]. Allocates nothing.
+    pub fn empty_geometry() -> Geometry {
+        Geometry::TriangleMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            normals: None,
+        }
+    }
+
+    /// How many primitives a geometry expands into. An upper bound: the
+    /// expansion skips degenerate entries (out-of-range indices, an empty
+    /// instanced scene), so the real count can be lower.
+    fn prim_upper_bound(geom: &Geometry) -> usize {
+        match geom {
+            Geometry::TriangleMesh { indices, .. } => indices.len(),
+            Geometry::RoundCurves { segments } => segments.len(),
+            Geometry::CubicCurves { segments } => segments.len(),
+            Geometry::Sphere { .. } | Geometry::Instance { .. } => 1,
+        }
+    }
+
     /// Expands every geometry into primitives and builds the BVH.
     pub fn commit(self) -> Scene {
         let n_geoms = self.geoms.len() as u32;
-        let mut prims: Vec<PrimNode> = Vec::new();
+        // Size the primitive array exactly once, from the total the
+        // geometries will expand into, instead of letting per-geometry
+        // `reserve` calls grow it by doubling. With many geometries that
+        // doubling leaves up to ~2x over-allocated — and since a primitive
+        // node is 128 bytes, on a scene of a few hundred thousand baked
+        // triangles the waste was tens of MiB of genuinely committed memory
+        // (`MemoryFootprint` counts capacity, not length, which is why it
+        // showed up). The bound can only over-shoot by the number of
+        // degenerate primitives skipped below, normally zero.
+        let total: usize = self.geoms.iter().map(|(g, _)| Self::prim_upper_bound(g)).sum();
+        let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
+        let mut has_motion = false;
         for (geom_id, (geom, mask)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
             match geom {
@@ -192,7 +245,6 @@ impl SceneBuilder {
                     indices,
                     normals,
                 } => {
-                    prims.reserve(indices.len());
                     for (prim_id, tri) in indices.into_iter().enumerate() {
                         let [i0, i1, i2] = tri;
                         let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
@@ -223,7 +275,6 @@ impl SceneBuilder {
                     }));
                 }
                 Geometry::RoundCurves { segments } => {
-                    prims.reserve(segments.len());
                     for (prim_id, s) in segments.into_iter().enumerate() {
                         prims.push(PrimNode::Curve(CurvePrim {
                             p0: s.p0,
@@ -237,7 +288,6 @@ impl SceneBuilder {
                     }
                 }
                 Geometry::CubicCurves { segments } => {
-                    prims.reserve(segments.len());
                     for (prim_id, s) in segments.into_iter().enumerate() {
                         prims.push(PrimNode::CubicCurve(Box::new(CubicCurvePrim {
                             cp: s.cp,
@@ -265,6 +315,11 @@ impl SceneBuilder {
                         ),
                         None => transformed_aabb(&inner_bounds, &transform),
                     };
+                    // A scene moves if this placement is blurred, or if the
+                    // thing being placed already moves. The inner scene
+                    // carries its own committed flag, so this stays O(1) per
+                    // instance however deeply they nest.
+                    has_motion |= transform_end.is_some() || scene.has_motion();
                     prims.push(PrimNode::Instance(Box::new(InstancePrim {
                         scene,
                         l2w: transform,
@@ -281,6 +336,7 @@ impl SceneBuilder {
         Scene {
             bvh: Bvh::new(prims),
             n_geoms,
+            has_motion,
         }
     }
 }
@@ -289,6 +345,7 @@ impl SceneBuilder {
 pub struct Scene {
     bvh: Bvh,
     n_geoms: u32,
+    has_motion: bool,
 }
 
 impl Scene {
@@ -322,6 +379,21 @@ impl Scene {
     /// Number of attached geometries (`geom_id`s are `0..count`).
     pub fn geometry_count(&self) -> u32 {
         self.n_geoms
+    }
+
+    /// Does anything in this scene move over the shutter interval — i.e. can
+    /// `ray.time` change what a query returns?
+    ///
+    /// Transform motion blur is the only thing that reads `ray.time`
+    /// (`InstancePrim::transforms_at`), so when this is `false` the shutter
+    /// coordinate is unobservable and a host need not sample it. That is
+    /// worth asking about: drawing one costs a full 4-dimensional
+    /// quasi-random sample, which was 4.2% of the render on a static scene.
+    ///
+    /// True if any instance carries an end-of-shutter transform, at any depth
+    /// of nesting (each level folds in its inner scene's answer at commit).
+    pub fn has_motion(&self) -> bool {
+        self.has_motion
     }
 
     /// Number of primitives the geometries expanded into.
@@ -421,6 +493,49 @@ mod tests {
         Arc::new(b.commit())
     }
 
+    /// A reserved slot must keep its `geom_id` (so ids stay dense and every
+    /// later attach is unperturbed) and contribute nothing until filled.
+    #[test]
+    fn reserved_slots_keep_ids_dense_and_stay_invisible() {
+        let mut b = SceneBuilder::new();
+        let a = b.attach(Geometry::Sphere {
+            center: Vec3A::new(-5.0, 0.0, 0.0),
+            radius: 1.0,
+        });
+        let placeholder = b.attach(SceneBuilder::empty_geometry());
+        let c = b.attach(Geometry::Sphere {
+            center: Vec3A::new(5.0, 0.0, 0.0),
+            radius: 1.0,
+        });
+        assert_eq!((a, placeholder, c), (0, 1, 2), "ids stay dense");
+
+        // Never filled in: the two spheres are all there is.
+        let scene = b.commit();
+        assert_eq!(scene.geometry_count(), 3);
+        assert_eq!(scene.primitive_count(), 2);
+
+        // Filling it in later puts real geometry under the id it claimed.
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Sphere {
+            center: Vec3A::new(-5.0, 0.0, 0.0),
+            radius: 1.0,
+        });
+        let slot = b.attach(SceneBuilder::empty_geometry());
+        b.set_geometry(
+            slot,
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+        );
+        let scene = b.commit();
+        assert_eq!(scene.primitive_count(), 2);
+        let hit = scene
+            .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z), 1e-4, f32::MAX)
+            .expect("the filled-in sphere is hit");
+        assert_eq!(hit.geom_id, slot, "and reports the id it reserved");
+    }
+
     #[test]
     fn ids_map_back_to_geometries() {
         let mut b = SceneBuilder::new();
@@ -484,6 +599,58 @@ mod tests {
     /// `Arc<Scene>`, and nothing stops that scene from containing
     /// instances of its own — this asks whether the recursion actually
     /// works end to end, or only looks like it should.
+    #[test]
+    fn motion_flag_reports_a_static_scene_as_static() {
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        });
+        assert!(!b.commit().has_motion());
+
+        // A *static* placement of static geometry is still static.
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Instance {
+            scene: unit_sphere_scene(),
+            transform: Affine3A::from_translation(glam::Vec3::new(3.0, 0.0, 0.0)),
+            transform_end: None,
+        });
+        assert!(!b.commit().has_motion());
+    }
+
+    /// The way `has_motion` can be wrong that matters: motion authored on an
+    /// *inner* instance, placed by an outer one that does not itself move.
+    /// If the flag only looked at its own `transform_end`, the renderer would
+    /// stop sampling the shutter and silently drop the blur.
+    #[test]
+    fn motion_flag_propagates_through_nesting() {
+        let leaf = unit_sphere_scene();
+
+        // Level 1: the sphere streaks along X over the shutter.
+        let mut mid = SceneBuilder::new();
+        mid.attach(Geometry::Instance {
+            scene: leaf,
+            transform: Affine3A::IDENTITY,
+            transform_end: Some(Box::new(Affine3A::from_translation(glam::Vec3::new(
+                4.0, 0.0, 0.0,
+            )))),
+        });
+        let mid = Arc::new(mid.commit());
+        assert!(mid.has_motion(), "the level that authored the motion");
+
+        // Level 2: a static placement of that moving scene. Still moving.
+        let mut root = SceneBuilder::new();
+        root.attach(Geometry::Instance {
+            scene: Arc::clone(&mid),
+            transform: Affine3A::from_translation(glam::Vec3::new(0.0, 7.0, 0.0)),
+            transform_end: None,
+        });
+        assert!(
+            root.commit().has_motion(),
+            "a static placement of moving geometry still moves"
+        );
+    }
+
     #[test]
     fn instances_nest() {
         // Level 0: a unit sphere at the origin.
