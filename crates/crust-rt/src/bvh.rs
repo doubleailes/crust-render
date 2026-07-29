@@ -56,6 +56,26 @@ pub mod stats {
     pub static PRIM_TESTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
     pub static PACKET_TESTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
+    /// Deepest the traversal stack got, over every query — the measurement
+    /// that sizes [`super::STACK_INLINE`]. Not a pair: stack depth is a
+    /// property of one tree, and the interesting number is the maximum over
+    /// all of them, so both levels share it.
+    pub static STACK_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn note_stack_depth(depth: usize) {
+        STACK_HIGH_WATER.fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    pub fn stack_high_water() -> u64 {
+        STACK_HIGH_WATER.load(Ordering::Relaxed)
+    }
+
+    /// What [`stack_high_water`] has to stay under to avoid the heap.
+    pub fn stack_inline_capacity() -> usize {
+        super::STACK_INLINE
+    }
+
     /// Which half of each counter pair the current traversal belongs to.
     #[inline]
     pub fn slot() -> usize {
@@ -102,6 +122,7 @@ pub mod stats {
                 half.store(0, Ordering::Relaxed);
             }
         }
+        STACK_HIGH_WATER.store(0, Ordering::Relaxed);
     }
 }
 
@@ -431,14 +452,11 @@ impl Bvh {
         let rs = RaySlab::new(ray, t_min);
         let shear = self.shear(ray);
 
-        let mut stack = [0u32; WIDE_STACK];
-        stack[0] = 0;
-        let mut sp = 1usize;
+        let mut stack = TraversalStack::new(0);
 
-        while sp > 0 {
-            sp -= 1;
+        while let Some(node_idx) = stack.pop() {
             tstat!(NODES_VISITED, 1);
-            let node = &self.wide[stack[sp] as usize];
+            let node = &self.wide[node_idx as usize];
             let (tnear, tfar) = rs.slab4(node, closest);
 
             // One vector compare + one movmskps gives all four lane
@@ -482,8 +500,7 @@ impl Bvh {
             for i in (0..n_hit).rev() {
                 let l = order[i].1;
                 if !node.is_leaf(l) {
-                    stack[sp] = node.child[l];
-                    sp += 1;
+                    stack.push(node.child[l]);
                 }
             }
         }
@@ -572,13 +589,10 @@ impl Bvh {
         let rs = RaySlab::new(ray, t_min);
         let shear = self.shear(ray);
 
-        let mut stack = [0u32; WIDE_STACK];
-        stack[0] = 0;
-        let mut sp = 1usize;
+        let mut stack = TraversalStack::new(0);
 
-        while sp > 0 {
-            sp -= 1;
-            let node = &self.wide[stack[sp] as usize];
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.wide[node_idx as usize];
             let (tnear, tfar) = rs.slab4(node, t_max);
             let mut mask = tnear.cmple(tfar).bitmask() & node.flags & VALID_MASK;
             while mask != 0 {
@@ -589,8 +603,7 @@ impl Bvh {
                         return true;
                     }
                 } else {
-                    stack[sp] = node.child[l];
-                    sp += 1;
+                    stack.push(node.child[l]);
                 }
             }
         }
@@ -654,10 +667,92 @@ fn safe_inv3(d: Vec3A) -> Vec3A {
     Vec3A::select(d.abs().cmplt(Vec3A::splat(TINY)), huge, d.recip())
 }
 
-/// Traversal stack: wide depth ≤ binary `MAX_DEPTH`, and each visited node
-/// leaves at most 3 deferred lanes behind, so 3·MAX_DEPTH + 4 slots hold
-/// the worst case.
-const WIDE_STACK: usize = 3 * MAX_DEPTH + 4;
+/// Inline capacity of the traversal stack, in node indices.
+///
+/// Sized from measurement rather than from a worst-case bound. With the
+/// `traversal-stats` feature on, `traversal_probe` reports the deepest stack
+/// any query reached (see [`stats::stack_high_water`]); it grows
+/// logarithmically, as a good tree should:
+///
+/// | primitives in one tree | deepest stack |
+/// | --- | --- |
+/// | 1 024 | 6 |
+/// | 16 384 | 8 |
+/// | 262 144 | 11 |
+/// | 1 048 576 | 12 |
+///
+/// Instanced and nested-instanced layouts stay at 9-10, since each level is
+/// a separate tree with its own stack.
+///
+/// 32 is therefore ~2.7x the deepest figure observed on a million-primitive
+/// tree, and the trend says reaching it would take a tree orders of
+/// magnitude larger. Do not tighten it to hug the measurement: the point of
+/// the headroom is that overflowing costs a heap allocation *per traversal*,
+/// which would be worse than the `memset` this design removed. Shrinking to
+/// 16 was measured at ~0.3% — not worth moving that cliff closer.
+const STACK_INLINE: usize = 32;
+
+/// The node indices a traversal still has to visit.
+///
+/// The obvious spelling is a fixed `[u32; 3 * MAX_DEPTH + 4]` array — the
+/// bound is genuinely worst-case, since a wide node can advance the binary
+/// depth by as little as one level and leaves 3 deferred lanes behind. But
+/// that array is 736 bytes and Rust zeroes it on entry to *every* traversal,
+/// including every instance descent (which re-enters `hit` recursively).
+/// Callgrind attributed 180M of cornellbox's 187M `memset` instructions to
+/// exactly those two declarations — 4.8% of the render, and 5.4% on
+/// veach_mis, all of it clearing memory that is written before it is read.
+///
+/// So: a small inline array plus a `Vec` that stays unallocated until a tree
+/// is deep enough to overflow it. What matters is that the spill makes
+/// correctness *unconditional* — [`STACK_INLINE`] becomes a tuning knob, and
+/// the old "prove 3·MAX_DEPTH + 4 is always enough" argument goes away
+/// rather than being replaced by a smaller and shakier one.
+struct TraversalStack {
+    inline: [u32; STACK_INLINE],
+    /// Entries at logical depth ≥ [`STACK_INLINE`], in order. `Vec::new`
+    /// does not allocate, so a query that never gets that deep pays nothing.
+    spill: Vec<u32>,
+    sp: usize,
+}
+
+impl TraversalStack {
+    /// A stack holding just `root`.
+    #[inline]
+    fn new(root: u32) -> Self {
+        let mut inline = [0u32; STACK_INLINE];
+        inline[0] = root;
+        Self {
+            inline,
+            spill: Vec::new(),
+            sp: 1,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, node: u32) {
+        if self.sp < STACK_INLINE {
+            self.inline[self.sp] = node;
+        } else {
+            self.spill.push(node);
+        }
+        self.sp += 1;
+        #[cfg(feature = "traversal-stats")]
+        stats::note_stack_depth(self.sp);
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<u32> {
+        self.sp = self.sp.checked_sub(1)?;
+        if self.sp < STACK_INLINE {
+            Some(self.inline[self.sp])
+        } else {
+            // Mirrors `push`: everything at depth ≥ STACK_INLINE lives in
+            // the spill, so this side is never empty when we take it.
+            self.spill.pop()
+        }
+    }
+}
 
 /// The ray, pre-broadcast into the SoA layout the 4-wide slab test wants.
 /// Built once per traversal: the six splats and the reciprocal used to be
@@ -1284,6 +1379,46 @@ mod tests {
     use super::*;
     use crate::prim::{SpherePrim, TrianglePrim};
     use crate::ray::MASK_ALL;
+
+    /// The traversal stack must behave identically either side of the
+    /// inline/spill boundary. Tested directly rather than through a tree
+    /// deep enough to spill, which would need millions of primitives.
+    #[test]
+    fn traversal_stack_spills_and_unspills_in_order() {
+        // Well past STACK_INLINE, so the sequence crosses the boundary
+        // twice: filling and draining.
+        let n = STACK_INLINE * 3 + 7;
+        let mut s = TraversalStack::new(0);
+        for i in 1..n as u32 {
+            s.push(i);
+        }
+        // LIFO all the way back down, including across the boundary.
+        for i in (1..n as u32).rev() {
+            assert_eq!(s.pop(), Some(i), "at depth {i}");
+        }
+        assert_eq!(s.pop(), Some(0), "the root seeded by `new`");
+        assert_eq!(s.pop(), None, "empty stack yields None, and stays there");
+        assert_eq!(s.pop(), None);
+    }
+
+    /// Interleaved push/pop across the boundary: the failure mode a
+    /// straight fill-then-drain test would miss is the spill and the inline
+    /// array disagreeing about who owns depth STACK_INLINE.
+    #[test]
+    fn traversal_stack_interleaves_across_the_boundary() {
+        let mut s = TraversalStack::new(100);
+        for round in 0..4u32 {
+            // Climb just past the boundary, then come back below it.
+            for i in 0..(STACK_INLINE as u32 + 3) {
+                s.push(round * 1000 + i);
+            }
+            for i in (0..(STACK_INLINE as u32 + 3)).rev() {
+                assert_eq!(s.pop(), Some(round * 1000 + i));
+            }
+        }
+        assert_eq!(s.pop(), Some(100));
+        assert_eq!(s.pop(), None);
+    }
 
     fn sphere_grid(n: i32) -> Vec<PrimNode> {
         let mut out: Vec<PrimNode> = Vec::new();

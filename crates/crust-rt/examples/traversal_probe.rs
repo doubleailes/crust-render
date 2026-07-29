@@ -114,6 +114,15 @@ fn report(label: &str, prims: usize, hits: u64, rays: u64) {
             per(q1)
         );
     }
+    // Sizes STACK_INLINE. Anything at or above it means this scene spilled
+    // to the heap on its deepest query — correct, but slower, so it is the
+    // signal to raise the inline capacity.
+    println!(
+        "  {:<10} deepest traversal stack {:>4}  (inline capacity {})",
+        "stack",
+        crust_rt::traversal_stats::stack_high_water(),
+        crust_rt::traversal_stats::stack_inline_capacity(),
+    );
 }
 
 /// The same triangle budget reached through N instances of one prototype.
