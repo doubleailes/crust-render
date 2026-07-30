@@ -565,8 +565,13 @@ impl Renderer {
             // box filter this is exactly `(cam[k], 1.0)`.
             let (fx, wx) = filter.sample(cam[0]);
             let (fy, wy) = filter.sample(cam[1]);
-            let u = ((i as f32) + fx) / (self.settings.width - 1) as f32;
-            let v = ((j as f32) + fy) / (self.settings.height - 1) as f32;
+            // Raster → NDC divides by the full resolution: pixel i covers
+            // [i/w, (i+1)/w) and its center sits at (i+0.5)/w, tiling [0, 1)
+            // exactly. The historical `/ (w-1)` divisor stretched the pixel
+            // grid over a plane 1 pixel too wide — a sub-pixel zoom of ~1/w
+            // that also let the last row and column sample past v = 1.
+            let u = ((i as f32) + fx) / self.settings.width as f32;
+            let v = ((j as f32) + fy) / self.settings.height as f32;
             // `Ray::new` defaults `time` to 0.0, and `transforms_at` takes the
             // start transform at time 0, so this is the value a static scene
             // was already effectively using.
