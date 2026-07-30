@@ -20,6 +20,7 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf),
+# --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --stats (per-phase profile + scene statistics)
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
@@ -158,6 +159,13 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
    - `render()` — parallel over pixels within each scanline row.
    - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
+   Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
+   importance sampling**, not splatting: each pixel warps its jitter through the
+   filter's distribution and weights radiance by `f/p`, keeping every per-pixel
+   mechanism (adaptive early-stop, QMC domains, pass blending) intact. The default —
+   box at radius 0.5 — is bit-identical to the historical in-pixel jitter, which is
+   what keeps `check_images.sh` goldens valid; Mitchell is the only kind with
+   negative weights.
 3. **`trace_path()`** (`tracer.rs`, public wrapper `ray_color()`) is the integrator — an
    **iterative** path tracer in two passes: a forward walk that traces one segment per
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
@@ -450,8 +458,10 @@ Schema mapping:
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
-  `balance` | `light` | `bsdf`). Missing attrs fall back to defaults (128 spp,
-  depth 32, 640×360, power MIS) defined as consts at the top of the file.
+  `balance` | `light` | `bsdf`, `crust:pixelFilter` token = `box` | `triangle` |
+  `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float). Missing attrs
+  fall back to defaults (128 spp, depth 32, 640×360, power MIS, box filter at radius
+  0.5 — the bit-identical historical jitter) defined as consts at the top of the file.
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
