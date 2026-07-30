@@ -80,6 +80,21 @@ pub trait Material: Send + Sync {
         Ray::new(rec.p, wi)
     }
 
+    /// The per-face (Ptex) texture this material samples, if any — i.e.
+    /// whether it reads [`HitRecord::face_id`] and `face_uv`.
+    ///
+    /// Resolving a triangle hit back to its source polygon needs a side table
+    /// as large as the triangle list, so the importer builds one only for
+    /// geometry whose material will actually consult it. A production stage is
+    /// overwhelmingly untextured meshes; they should pay nothing.
+    ///
+    /// The importer also uses this to cross-check the texture's face count
+    /// against the mesh's, which is the one cheap way to catch a texture bound
+    /// to the wrong geometry before it silently mis-shades everything.
+    fn face_texture(&self) -> Option<&dyn crate::PtexTexture> {
+        None
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

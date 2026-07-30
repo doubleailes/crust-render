@@ -118,6 +118,13 @@ pub struct OpenPBR {
     // --- geometry -------------------------------------------------------
     pub geometry_opacity: f32,
     pub geometry_thin_walled: bool,
+
+    // --- textures -------------------------------------------------------
+    /// Per-face texture driving `base_color`. When present and the hit carries
+    /// a face id, it *replaces* `base_color` — which stays authored as the
+    /// fallback for hits with no face identity (and for hosts that decode no
+    /// Ptex), so an unresolved texture degrades to a flat plausible colour.
+    pub base_color_ptex: Option<crate::PtexRef>,
 }
 
 impl Default for OpenPBR {
@@ -160,6 +167,7 @@ impl Default for OpenPBR {
             emission_color: Vec3A::ONE,
             geometry_opacity: 1.0,
             geometry_thin_walled: false,
+            base_color_ptex: None,
         }
     }
 }
@@ -988,8 +996,34 @@ fn sample_transmission_rough(
 // Material impl
 // ---------------------------------------------------------------------------
 
-impl Material for OpenPBR {
-    fn scatter_importance(
+impl OpenPBR {
+    /// Substitutes any per-face texture lookups for this hit, yielding the
+    /// parameter set the BSDF should actually be evaluated with — or `None`
+    /// when nothing is textured and `self` can be used directly.
+    ///
+    /// Resolving here, once, keeps every lobe downstream oblivious to
+    /// texturing: `LobePmf::from_params` then derives its lobe-selection
+    /// probabilities from the *textured* albedo for free, which matters —
+    /// sampling a black region as though it had a mid-grey diffuse lobe would
+    /// be unbiased but needlessly noisy.
+    ///
+    /// The returned copy carries no texture, so it cannot recurse.
+    fn shaded(&self, rec: &HitRecord) -> Option<OpenPBR> {
+        let tex = self.base_color_ptex.as_ref()?;
+        if rec.face_id == HitRecord::NO_FACE {
+            // Geometry the importer could not give a face identity (a sphere,
+            // a curve, an n-gon): fall back to the authored constant.
+            return None;
+        }
+        let (u, v) = rec.face_uv;
+        Some(OpenPBR {
+            base_color: tex.eval(rec.face_id, u, v),
+            base_color_ptex: None,
+            ..self.clone()
+        })
+    }
+
+    fn scatter_resolved(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
@@ -1101,7 +1135,7 @@ impl Material for OpenPBR {
         })
     }
 
-    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+    fn eval_resolved(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
         // Evaluates the continuous component over the full sphere: the
         // reflection lobes above the ray-facing hemisphere and — for thick
         // transmissive surfaces, dispersive or not — the Walter BTDF below
@@ -1121,6 +1155,32 @@ impl Material for OpenPBR {
             eval_all(self, v_local, l_local, rec.front_face) * l_local.z.abs(),
             pdf,
         ))
+    }
+
+}
+
+impl Material for OpenPBR {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+    ) -> Option<ScatterSample> {
+        match self.shaded(rec) {
+            Some(m) => m.scatter_resolved(r_in, rec, sampler),
+            None => self.scatter_resolved(r_in, rec, sampler),
+        }
+    }
+
+    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        match self.shaded(rec) {
+            Some(m) => m.eval_resolved(r_in, rec, wi),
+            None => self.eval_resolved(r_in, rec, wi),
+        }
+    }
+
+    fn face_texture(&self) -> Option<&dyn crate::PtexTexture> {
+        self.base_color_ptex.as_ref().map(|t| &*t.0)
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {

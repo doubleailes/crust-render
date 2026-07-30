@@ -18,7 +18,7 @@ use crate::light::{
 use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::MASK_ALL;
-use crate::rt_world::WorldBuilder;
+use crate::rt_world::{FaceMap, FanSlice, WorldBuilder};
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
 use crust_rt::{
@@ -122,7 +122,7 @@ struct ImportCtx<'a> {
     lights: LightList,
     volumes: Vec<VolumeRegion>,
     camera: Option<Camera>,
-    caches: ImportCaches,
+    caches: ImportCaches<'a>,
     /// Direct mesh placements whose representation is not yet decided, in
     /// traversal order. Drained by [`flush_meshes`] after the last chunk —
     /// the decision needs every chunk's placement counts, so it cannot be
@@ -211,7 +211,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut ctx.volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_mesh(
                 &mut ctx.world,
                 &prim,
@@ -222,10 +222,10 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 &mut ctx.pending_meshes,
             );
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
-            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_sphere(&mut ctx.world, &prim, &sphere, this_world, mat);
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
-            let mat = resolve_material(stage, &prim, &mut ctx.caches.materials);
+            let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_curves(&mut ctx.world, &prim, &curves, this_world, mat);
         } else if UsdCamera::get(stage, prim.path().clone())
             .ok()
@@ -323,7 +323,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         // with identical local geometry + material share one copy of that
         // geometry — placed by an instance when it is placed more than once,
         // baked flat into the parent BVH when it is placed exactly once.
-        caches: ImportCaches::default(),
+        caches: ImportCaches::new(assets, path),
         pending_meshes: Vec::new(),
         asset_time: Duration::ZERO,
         settings,
@@ -798,6 +798,12 @@ struct MeshSlot {
     /// resident as a kernel scene, so every placement of it instances and
     /// baking would only add a second copy.
     local: Option<MeshGeom>,
+    /// Triangle-to-source-face table, for a mesh whose material samples a
+    /// per-face texture. Lives here rather than on [`MeshGeom`] because it has
+    /// to outlive both endings — baking *and* committing drop `local`, but
+    /// every placement still needs to resolve face ids at render time. Shared
+    /// by `Arc` across the placements of one distinct mesh.
+    faces: Option<Arc<FaceMap>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
     committed: Option<Arc<RtScene>>,
@@ -848,13 +854,17 @@ impl MeshArena {
             return Some(slot);
         }
         let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
-        let tris = triangulate(counts, indices, verts.len()).or_else(|| {
-            debug!("Mesh at {} produced no triangles", prim.path());
-            None
-        })?;
+        let want_faces = material.face_texture().is_some();
+        let (tris, faces) =
+            triangulate(counts, indices, verts.len(), want_faces).or_else(|| {
+                debug!("Mesh at {} produced no triangles", prim.path());
+                None
+            })?;
+        check_face_count(prim, counts, material.as_ref());
         let slot = self.slots.len() as u32;
         self.slots.push(MeshSlot {
             local: Some(MeshGeom { verts, tris }),
+            faces: faces.map(Arc::new),
             committed: None,
             n_place: 0,
         });
@@ -926,9 +936,11 @@ fn emit_mesh(
                 Vec3A::new(v.x, v.y, v.z)
             })
             .collect();
-        match triangulate(&counts, &indices, verts.len()) {
-            Some(tris) => {
-                world.attach_masked(
+        let want_faces = material.face_texture().is_some();
+        check_face_count(prim, &counts, material.as_ref());
+        match triangulate(&counts, &indices, verts.len(), want_faces) {
+            Some((tris, faces)) => {
+                let geom_id = world.attach_masked(
                     Geometry::TriangleMesh {
                         vertices: verts,
                         indices: tris,
@@ -937,6 +949,12 @@ fn emit_mesh(
                     material,
                     mask,
                 );
+                // This path bakes world-space vertices directly without going
+                // through `bake_indices`, so the winding — and with it the
+                // barycentric order — is whatever the transform produced.
+                if let Some(map) = faces {
+                    world.set_face_map(geom_id, Arc::new(map), false);
+                }
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
         }
@@ -1006,6 +1024,7 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             && slot.committed.is_none()
             && p.motion.is_none();
 
+        let faces = slot.faces.clone();
         if bake {
             let geom = meshes.slots[p.slot as usize]
                 .local
@@ -1019,6 +1038,12 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
                     normals: None,
                 },
             );
+            // `bake_indices` swaps a triangle's second and third vertices for a
+            // mirroring placement, which exchanges the barycentrics the kernel
+            // reports — so the face lookup has to exchange them back.
+            if let Some(map) = faces {
+                world.set_face_map(p.geom_id, map, p.l2w.matrix3.determinant() < 0.0);
+            }
             baked += 1;
         } else {
             let scene = meshes.committed_scene(p.slot);
@@ -1033,6 +1058,11 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
                         .map(|v| Box::new(Affine3A::from_translation(v) * l2w)),
                 },
             );
+            // An instance keeps the prototype's own winding: the transform is
+            // applied to the ray, not to the triangles, so no swap.
+            if let Some(map) = faces {
+                world.set_face_map(p.geom_id, map, false);
+            }
             instanced += 1;
         }
     }
@@ -1088,12 +1118,47 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
     Some((points, counts, indices))
 }
 
+/// Warns when a per-face texture's face count disagrees with the mesh's.
+///
+/// A Ptex face id *is* a mesh face index, so the two counts must match
+/// exactly. When they do not, the texture belongs to different geometry and
+/// every lookup is quietly wrong — the render still completes, and still looks
+/// like a plausible rock, which is precisely what makes it worth a warning.
+fn check_face_count(prim: &Prim, counts: &[i32], material: &dyn Material) {
+    let Some(tex) = material.face_texture() else {
+        return;
+    };
+    if tex.num_faces() != counts.len() {
+        warn!(
+            "Mesh at {} has {} faces but its per-face texture has {} — \
+             the texture does not match this geometry, so shading will be wrong",
+            prim.path(),
+            counts.len(),
+            tex.num_faces()
+        );
+    }
+}
+
 /// Fan-triangulates the faces into an index-triple list; `None` if
 /// nothing survives.
-fn triangulate(counts: &[i32], indices: &[i32], n_verts: usize) -> Option<Vec<[u32; 3]>> {
+///
+/// With `want_faces`, also returns the table mapping each emitted triangle
+/// back to the source face it was cut from — what a per-face (Ptex) texture
+/// needs, since its face ids index `counts`, not the triangles. The two
+/// outputs are index-parallel by construction: every `push` to one pushes to
+/// the other in the same statement, so the skip paths cannot desynchronise
+/// them.
+fn triangulate(
+    counts: &[i32],
+    indices: &[i32],
+    n_verts: usize,
+    want_faces: bool,
+) -> Option<(Vec<[u32; 3]>, Option<FaceMap>)> {
     let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut faces: Vec<u32> = Vec::new();
+    let mut slices: Vec<FanSlice> = Vec::new();
     let mut offset = 0usize;
-    for &fc in counts {
+    for (face, &fc) in counts.iter().enumerate() {
         let fc = fc as usize;
         if fc < 3 || offset + fc > indices.len() {
             offset += fc;
@@ -1111,10 +1176,28 @@ fn triangulate(counts: &[i32], indices: &[i32], n_verts: usize) -> Option<Vec<[u
                 continue;
             }
             tris.push([i0, i1, i2]);
+            if want_faces {
+                faces.push(face as u32);
+                // Ptex defines quad and triangle faces only, so a larger
+                // polygon has no addressable texture — mark it rather than
+                // inventing a parameterisation for it.
+                slices.push(match (fc, k) {
+                    (3, _) => FanSlice::Triangle,
+                    (4, 1) => FanSlice::QuadLower,
+                    (4, 2) => FanSlice::QuadUpper,
+                    _ => FanSlice::Unmappable,
+                });
+            }
         }
         offset += fc;
     }
-    if tris.is_empty() { None } else { Some(tris) }
+    if tris.is_empty() {
+        return None;
+    }
+    // `then_some` rather than `then`: the value is two already-built vectors
+    // being moved, so there is no work for a closure to defer.
+    let map = want_faces.then_some(FaceMap { faces, slices });
+    Some((tris, map))
 }
 
 // -----------------------------------------------------------------------
@@ -1196,8 +1279,7 @@ fn emit_sphere(
 /// All three caches exist for the same reason — authored geometry should
 /// be turned into kernel geometry exactly once, however many prims,
 /// instances or prototypes refer to it.
-#[derive(Default)]
-struct ImportCaches {
+struct ImportCaches<'a> {
     /// Material path (memoized) → shared material.
     materials: MaterialCache,
     /// Distinct meshes by content + material. Holds each one's triangles
@@ -1222,6 +1304,28 @@ struct ImportCaches {
     /// stay unique — and the mesh and material caches keep deduplicating
     /// across stages, which is what stops streaming costing extra memory.
     epoch: u32,
+    /// The host's decoder, for materials that carry a texture asset.
+    assets: &'a dyn AssetLoader,
+    /// Root layer, the fallback anchor for an asset path openusd handed back
+    /// unresolved.
+    stage_path: &'a Path,
+    /// Time the host spent opening Ptex files, folded into the import
+    /// profile's asset phase.
+    ptex_time: Duration,
+}
+
+impl<'a> ImportCaches<'a> {
+    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path) -> Self {
+        ImportCaches {
+            materials: MaterialCache::default(),
+            meshes: MeshArena::default(),
+            protos: HashMap::new(),
+            epoch: 0,
+            assets,
+            stage_path,
+            ptex_time: Duration::ZERO,
+        }
+    }
 }
 
 /// One leaf geometry of a prototype: a committed kernel scene in its own
@@ -1235,6 +1339,16 @@ struct ProtoPart {
     local: GMat4,
     material: Arc<dyn Material>,
     mask: u32,
+    /// Triangle-to-source-face table, when this part's material samples a
+    /// per-face texture.
+    ///
+    /// A part is always exactly one leaf geometry — the walk splits per bound
+    /// mesh, and a nested instancer groups its output per (prototype, part) —
+    /// so one table serves every placement of it, and the `prim_id` a hit
+    /// reports indexes that table unambiguously however many levels of
+    /// instancing it passed through (the kernel forwards the innermost
+    /// `prim_id` unchanged).
+    faces: Option<Arc<FaceMap>>,
 }
 
 /// Walks a prototype subtree and builds its [`ProtoPart`]s, in the
@@ -1247,7 +1361,7 @@ struct ProtoPart {
 fn collect_proto_parts(
     stage: &Stage,
     root: &Prim,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
     depth: usize,
 ) -> Vec<ProtoPart> {
     let mut parts = Vec::new();
@@ -1311,7 +1425,7 @@ fn collect_proto_parts(
         }
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
+            let material = resolve_material(stage, &prim, caches);
             // A prototype part is placed by an instance by definition, so it
             // always needs a real kernel scene — committing here is also what
             // marks the slot as ineligible for baking, so a mesh used both
@@ -1322,15 +1436,17 @@ fn collect_proto_parts(
                         .meshes
                         .intern(&prim, &points, &counts, &indices, &material)
             {
+                let faces = caches.meshes.slots[slot as usize].faces.clone();
                 parts.push(ProtoPart {
                     scene: caches.meshes.committed_scene(slot),
                     local: this_local,
                     material,
                     mask,
+                    faces,
                 });
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
+            let material = resolve_material(stage, &prim, caches);
             let radius = sphere_radius(&sphere);
             let mut b = RtSceneBuilder::new();
             // Local-space sphere at the origin: unlike the top-level
@@ -1346,9 +1462,10 @@ fn collect_proto_parts(
                 local: this_local,
                 material,
                 mask,
+                faces: None,
             });
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, &mut caches.materials);
+            let material = resolve_material(stage, &prim, caches);
             if let Some((segments, cubic_segments)) = curve_segments(&prim, &curves) {
                 let mut b = RtSceneBuilder::new();
                 if !segments.is_empty() {
@@ -1364,6 +1481,7 @@ fn collect_proto_parts(
                     local: this_local,
                     material,
                     mask,
+                    faces: None,
                 });
             }
         } else if custom_token(&prim, "crust:volume:type").is_some() {
@@ -1416,7 +1534,7 @@ fn nested_instancer_parts(
     instancer: &PointInstancer,
     local: GMat4,
     mask: u32,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
     depth: usize,
 ) -> Vec<ProtoPart> {
     let Some(layout) = read_instancer(prim, instancer) else {
@@ -1455,6 +1573,7 @@ fn nested_instancer_parts(
                 local,
                 material: part.material.clone(),
                 mask,
+                faces: part.faces.clone(),
             });
         }
     }
@@ -1482,7 +1601,7 @@ fn emit_native_instance(
     prim: &Prim,
     proto_path: &sdf::Path,
     world_xf: GMat4,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
 ) {
     let parts = prototype_parts(stage, proto_path, caches, 0);
     debug!(
@@ -1510,7 +1629,7 @@ fn attach_proto_parts(
             debug!("{what}: non-invertible instance transform — skipped");
             continue;
         }
-        world.attach_masked(
+        let geom_id = world.attach_masked(
             Geometry::Instance {
                 scene: part.scene.clone(),
                 transform: Affine3A::from_mat4(xf),
@@ -1519,6 +1638,11 @@ fn attach_proto_parts(
             part.material.clone(),
             part.mask,
         );
+        // An instance transforms the ray, not the triangles, so the winding —
+        // and with it the barycentric order — is the prototype's own: no swap.
+        if let Some(map) = &part.faces {
+            world.set_face_map(geom_id, map.clone(), false);
+        }
         attached += 1;
     }
     attached
@@ -1652,7 +1776,7 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
 fn instancer_proto_parts(
     stage: &Stage,
     layout: &InstancerLayout,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
     depth: usize,
 ) -> Vec<Arc<Vec<ProtoPart>>> {
     layout
@@ -1666,7 +1790,7 @@ fn instancer_proto_parts(
 fn prototype_parts(
     stage: &Stage,
     proto_path: &sdf::Path,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
     depth: usize,
 ) -> Arc<Vec<ProtoPart>> {
     let key = (caches.epoch, proto_path.to_string());
@@ -1693,7 +1817,7 @@ fn emit_point_instancer(
     prim: &Prim,
     instancer: &PointInstancer,
     world_xf: GMat4,
-    caches: &mut ImportCaches,
+    caches: &mut ImportCaches<'_>,
 ) {
     let Some(layout) = read_instancer(prim, instancer) else {
         return;
@@ -2311,27 +2435,17 @@ fn emit_dome_light(
     lights.add(Arc::new(CoreDomeLight::new(tint, map, rotation)));
 }
 
-/// The dome's `inputs:texture:file`, resolved against the USD layer's
-/// directory when it is relative — the usual way an asset path is authored.
+/// The dome's `inputs:texture:file` as a filesystem path.
+///
+/// Goes through [`asset_value_path`], which prefers openusd's `resolved_path()`
+/// — anchored against the layer that *authored* the path, not the root layer.
+/// That distinction only shows up once a stage has depth: the Moana island's
+/// lights author `../textures/islandsun.exr` relative to `usd/island.usda`, so
+/// a root layer sitting anywhere else would otherwise resolve it against the
+/// wrong directory and silently fall back to the dome's uniform colour.
 fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
-    let asset = match light.texture_file_attr().get::<sdf::Value>().ok().flatten()? {
-        sdf::Value::AssetPath(p) => p.to_string(),
-        sdf::Value::String(p) => p,
-        _ => return None,
-    };
-    if asset.is_empty() {
-        return None;
-    }
-    let candidate = std::path::Path::new(&asset);
-    if candidate.is_absolute() {
-        return Some(candidate.to_path_buf());
-    }
-    Some(
-        stage_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(candidate),
-    )
+    let value = light.texture_file_attr().get::<sdf::Value>().ok().flatten()?;
+    asset_value_path(&value, stage_path)
 }
 
 fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
@@ -2368,6 +2482,9 @@ fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
 struct MaterialCache {
     by_path: HashMap<(u32, String), Arc<dyn Material>>,
     default: Option<Arc<dyn Material>>,
+    /// Resolved `.ptx` path -> the opened texture, or `None` if it could not
+    /// be opened. Keyed by filesystem path, so it needs no epoch scoping.
+    ptex: HashMap<String, Option<Arc<dyn crate::PtexTexture>>>,
     /// Which stage the prototype-scoped entries belong to; see
     /// [`MaterialCache::key`]. Kept in step with [`ImportCaches::epoch`].
     epoch: u32,
@@ -2403,30 +2520,30 @@ impl MaterialCache {
     }
 }
 
-fn resolve_material(
-    stage: &Stage,
-    prim: &Prim,
-    cache: &mut MaterialCache,
-) -> Arc<dyn Material> {
+fn resolve_material(stage: &Stage, prim: &Prim, caches: &mut ImportCaches<'_>) -> Arc<dyn Material> {
     let mat_path = MaterialBindingAPI::get(stage, prim.path().clone())
         .ok()
         .flatten()
         .and_then(|b| b.direct_binding("").ok().flatten());
 
     let Some(mat_path) = mat_path else {
-        return cache.default_material();
+        return caches.materials.default_material();
     };
 
-    let key = cache.key(mat_path.as_str());
-    if let Some(hit) = cache.by_path.get(&key) {
+    let key = caches.materials.key(mat_path.as_str());
+    if let Some(hit) = caches.materials.by_path.get(&key) {
         return hit.clone();
     }
-    let resolved = resolve_material_uncached(stage, &mat_path);
-    cache.by_path.insert(key, resolved.clone());
+    let resolved = resolve_material_uncached(stage, &mat_path, caches);
+    caches.materials.by_path.insert(key, resolved.clone());
     resolved
 }
 
-fn resolve_material_uncached(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Material> {
+fn resolve_material_uncached(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> Arc<dyn Material> {
 
     let mat = match UsdMaterial::get(stage, mat_path.clone()) {
         Ok(Some(m)) => m,
@@ -2438,6 +2555,19 @@ fn resolve_material_uncached(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Mat
             return default_material();
         }
     };
+
+    // Checked before asking for the surface source, because that answer cannot
+    // be trusted to name the network that matters. A material carrying several
+    // render-context outputs — the Moana island authors `outputs:ri:surface`
+    // (PxrDisneyBsdf), `outputs:glslfx:surface` (UsdPreviewSurface) and
+    // `outputs:ri:displacement` on every prim — resolves through
+    // `compute_surface_source` to the *preview* shader, whose inputs are all
+    // `.connect`ed to the material's interface rather than authored as values.
+    // Decoding that gives a material with every parameter at its default: the
+    // island rendered uniformly pale and glossy instead of matte dark rock.
+    if has_shader_id(stage, mat_path, "PxrDisneyBsdf") {
+        return Arc::new(disney_to_openpbr(stage, mat_path, caches));
+    }
 
     let shader = match mat.compute_surface_source() {
         Ok(Some(s)) => s,
@@ -2451,9 +2581,18 @@ fn resolve_material_uncached(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Mat
     };
 
     let shader_id = shader_info_id(&shader);
+    debug!("Material {mat_path}: surface shader id = {shader_id:?}");
     match shader_id.as_deref() {
         Some("crust:openpbr") => decode_crust_openpbr(&shader),
-        Some("UsdPreviewSurface") => preview_surface_to_openpbr(stage, &mat_path),
+        Some("UsdPreviewSurface") => {
+            // The preview surface may still be the Ptex-driven one — the Moana
+            // island wires its `diffuseColor` to a Ptex node — so consult the
+            // material's own interface input either way.
+            let mut o = preview_surface_openpbr(stage, mat_path);
+            o.base_color_ptex = material_ptex(stage, mat_path, caches);
+            Arc::new(o)
+        }
+        Some("PxrDisneyBsdf") => Arc::new(disney_to_openpbr(stage, mat_path, caches)),
         Some(other) => {
             warn!(
                 "Unrecognized shader id '{}' at {} — using default grey OpenPBR",
@@ -2489,18 +2628,18 @@ fn shader_info_id(shader: &Shader) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|v| match v {
-            // `Token` carries an interned `tf::Token` and `String` a plain
-            // `String`, so the two arms can no longer bind one name.
+            // `Token` carries an interned `tf::Token`, `String` a plain
+            // `String`, so the two arms cannot bind the same name.
             sdf::Value::Token(t) => Some(t.as_str().to_owned()),
             sdf::Value::String(t) => Some(t),
             _ => None,
         })
 }
 
-fn preview_surface_to_openpbr(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Material> {
+fn preview_surface_openpbr(stage: &Stage, mat_path: &sdf::Path) -> OpenPBR {
     let ps = match shade::read_preview_surface(stage, mat_path) {
         Ok(Some(ps)) => ps,
-        _ => return default_material(),
+        _ => return OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)),
     };
 
     let mut o = OpenPBR::default();
@@ -2536,7 +2675,201 @@ fn preview_surface_to_openpbr(stage: &Stage, mat_path: &sdf::Path) -> Arc<dyn Ma
         o.coat_roughness = *cr;
     }
 
-    Arc::new(o)
+    o
+}
+
+/// Whether the material has a child `Shader` prim with this `info:id`.
+///
+/// Cheaper and more reliable than resolving a render-context output for the
+/// question actually being asked — "does this material shade with X" — since a
+/// material may declare several context outputs and USD gives no ordering
+/// between them without a configured render context.
+fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
+    let Ok(children) = stage.prim(mat_path.clone()).children() else {
+        return false;
+    };
+    children.iter().any(|c| {
+        match c.attribute("info:id").get::<sdf::Value>() {
+            Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
+            Ok(Some(sdf::Value::String(t))) => t == id,
+            _ => false,
+        }
+    })
+}
+
+/// Maps RenderMan's `PxrDisneyBsdf` onto [`OpenPBR`].
+///
+/// The Moana island — the reason this exists — shades every surface with it,
+/// so without this arm the whole dataset resolves to flat grey. Both models
+/// descend from Burley's, which makes most of the mapping direct; the
+/// parameters are read off the **Material** prim rather than the shader, since
+/// that is where the island authors them (the shader's inputs are all
+/// `.connect`ed to the material's interface inputs, and following those
+/// connections would buy nothing here).
+///
+/// Not mapped, because OpenPBR has no equivalent lobe: `subsurface*`,
+/// `diffuseTransmission`, `specularTint`, `scatter*`. Those surfaces render as
+/// opaque dielectrics.
+///
+/// `sheen` is deliberately **not** mapped onto `fuzz_weight`, despite both
+/// being "the retroreflective one". Disney's sheen is a small term *added* at
+/// grazing angles; OpenPBR's fuzz is a Charlie layer *mixed over* everything
+/// beneath it, so at the island's authored `sheen = 1` the fuzz lobe replaced
+/// the base entirely — the lava rocks lost their Ptex detail and rendered as
+/// smooth blue-grey plastic. A weight is not a weight just because it shares a
+/// name, and there is no honest scalar between the two.
+fn disney_to_openpbr(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> OpenPBR {
+    let prim = stage.prim(mat_path.clone());
+    let f = |n: &str| custom_f32(&prim, &format!("inputs:{n}"));
+    let c = |n: &str| custom_vec3(&prim, &format!("inputs:{n}"));
+
+    let mut o = OpenPBR::default();
+
+    // `inputs:baseColor` reaches the BSDF through a `PxrColorCorrect` with
+    // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
+    // decodes it to linear. Do the same, or every surface renders washed out.
+    if let Some(rgb) = c("baseColor") {
+        o.base_color = srgb_to_linear(rgb);
+    }
+    if let Some(v) = f("metallic") {
+        o.base_metalness = v;
+    }
+    if let Some(v) = f("roughness") {
+        o.specular_roughness = v;
+    }
+    if let Some(v) = f("ior") {
+        o.specular_ior = v;
+    }
+    if let Some(v) = f("anisotropic") {
+        o.specular_roughness_anisotropy = v;
+    }
+    if let Some(v) = f("clearcoat") {
+        o.coat_weight = v;
+    }
+    // Gloss is the complement of roughness.
+    if let Some(v) = f("clearcoatGloss") {
+        o.coat_roughness = (1.0 - v).clamp(0.0, 1.0);
+    }
+    // Either name turns up across the island's materials.
+    if let Some(v) = f("specularTransmission").or_else(|| f("refractionGain")) {
+        o.transmission_weight = v;
+    }
+    if let Some(v) = f("alpha") {
+        o.geometry_opacity = v;
+    }
+    if let Some(v) = f("thinSurface") {
+        o.geometry_thin_walled = v != 0.0;
+    }
+
+    o.base_color_ptex = material_ptex(stage, mat_path, caches);
+    debug!(
+        "PxrDisneyBsdf {mat_path}: baseColor={:?} (authored {:?}) roughness={} metalness={} \
+         fuzz={} coat={} ior={} ptex={}",
+        o.base_color,
+        c("baseColor"),
+        o.specular_roughness,
+        o.base_metalness,
+        o.fuzz_weight,
+        o.coat_weight,
+        o.specular_ior,
+        o.base_color_ptex.is_some()
+    );
+    o
+}
+
+/// The per-face colour texture a material binds, if any.
+///
+/// `inputs:surfaceMap` is the interface input both of the island's Ptex shader
+/// paths read — `PxrPtexture.filename` for RenderMan and
+/// `HwPtexTexture_1.file` for the GL preview both `.connect` to it — so
+/// reading it directly gets the file without walking either network.
+fn material_ptex(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> Option<crate::PtexRef> {
+    let prim = stage.prim(mat_path.clone());
+    let value = prim
+        .attribute("inputs:surfaceMap")
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()?;
+    let path = asset_value_path(&value, caches.stage_path)?;
+
+    // Keyed on the resolved filesystem path, which — unlike a prototype-scoped
+    // scene path — is stable across the streaming importer's stages, so one
+    // texture is opened once however many materials or chunks reference it.
+    // Negative results are cached too: a 600 MB file that failed to open
+    // should not be retried per material.
+    let key = path.to_string_lossy().into_owned();
+    if let Some(hit) = caches.materials.ptex.get(&key) {
+        return hit.clone().map(crate::PtexRef);
+    }
+    let started = Instant::now();
+    let loaded = caches.assets.load_ptex(&path);
+    caches.ptex_time += started.elapsed();
+    caches.materials.ptex.insert(key, loaded.clone());
+    loaded.map(crate::PtexRef)
+}
+
+/// An `asset`-valued attribute as a filesystem path.
+///
+/// openusd anchors default-sourced asset paths against the layer that authored
+/// them and reports the result in `resolved_path` — which is what makes a
+/// production stage's `../../../textures/foo.ptx` work at all, since the layer
+/// authoring it is nested several directories below the root. The authored
+/// string is only a fallback, anchored against the root layer.
+fn asset_value_path(value: &sdf::Value, stage_path: &Path) -> Option<std::path::PathBuf> {
+    let (authored, resolved) = match value {
+        sdf::Value::AssetPath(p) => (p.as_str().to_string(), p.resolved_path()),
+        sdf::Value::String(p) => (p.clone(), None),
+        _ => return None,
+    };
+    if let Some(r) = resolved
+        && !r.is_empty()
+    {
+        return Some(std::path::PathBuf::from(r));
+    }
+    if authored.is_empty() {
+        return None;
+    }
+    let candidate = std::path::Path::new(&authored);
+    if candidate.is_absolute() {
+        return Some(candidate.to_path_buf());
+    }
+    Some(
+        stage_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(candidate),
+    )
+}
+
+/// sRGB transfer function, decoding a display-referred colour to linear.
+///
+/// The plain 2.2 power law rather than the piecewise sRGB curve: it is what
+/// the `PxrColorCorrect` gamma node in the island's materials actually
+/// applies, and matching the reference render matters more here than matching
+/// the standard.
+fn srgb_to_linear(c: Vec3A) -> Vec3A {
+    Vec3A::new(
+        c.x.max(0.0).powf(2.2),
+        c.y.max(0.0).powf(2.2),
+        c.z.max(0.0).powf(2.2),
+    )
+}
+
+fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
+    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    match v {
+        sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
+        sdf::Value::Vec3d(p) => Some(Vec3A::new(p.x as f32, p.y as f32, p.z as f32)),
+        _ => None,
+    }
 }
 
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input
@@ -2987,5 +3320,82 @@ mod curve_basis_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod face_table_tests {
+    use super::*;
+
+    /// The triangle list and the face table must stay index-parallel, because
+    /// the kernel's `prim_id` indexes one to look up the other.
+    #[test]
+    fn quad_mesh_face_table_is_parallel_to_triangles() {
+        // Three quads, 4 verts each, sharing a vertex pool of 12.
+        let counts = [4, 4, 4];
+        let indices: Vec<i32> = (0..12).collect();
+        let (tris, map) = triangulate(&counts, &indices, 12, true).unwrap();
+        let map = map.unwrap();
+
+        assert_eq!(tris.len(), 6, "a quad fans into two triangles");
+        assert_eq!(map.faces.len(), tris.len());
+        assert_eq!(map.slices.len(), tris.len());
+        assert_eq!(map.faces, vec![0, 0, 1, 1, 2, 2]);
+        assert_eq!(
+            map.slices,
+            vec![
+                FanSlice::QuadLower,
+                FanSlice::QuadUpper,
+                FanSlice::QuadLower,
+                FanSlice::QuadUpper,
+                FanSlice::QuadLower,
+                FanSlice::QuadUpper,
+            ]
+        );
+        // The fan is anchored at each face's first vertex.
+        assert_eq!(tris[2], [4, 5, 6]);
+        assert_eq!(tris[3], [4, 6, 7]);
+    }
+
+    /// A face the importer drops must not consume a face id, or every triangle
+    /// after it addresses the wrong texture face — the failure mode that looks
+    /// like plausible-but-wrong shading rather than an obvious break.
+    #[test]
+    fn skipped_faces_do_not_shift_later_face_ids() {
+        // A degenerate 2-gon between two quads: skipped, but still numbered.
+        let counts = [4, 2, 4];
+        let indices: Vec<i32> = (0..10).collect();
+        let (tris, map) = triangulate(&counts, &indices, 10, true).unwrap();
+        let map = map.unwrap();
+        assert_eq!(tris.len(), 4);
+        // Face 1 contributed nothing; face 2 keeps its own index.
+        assert_eq!(map.faces, vec![0, 0, 2, 2]);
+    }
+
+    /// Ptex has no n-gon faces, so those triangles must be marked unmappable
+    /// rather than given a made-up parameterisation.
+    #[test]
+    fn ngons_and_triangles_get_their_own_slices() {
+        let counts = [3, 5];
+        let indices: Vec<i32> = (0..8).collect();
+        let (_, map) = triangulate(&counts, &indices, 8, true).unwrap();
+        let map = map.unwrap();
+        assert_eq!(map.slices[0], FanSlice::Triangle);
+        // A pentagon fans into three triangles, none of them addressable.
+        assert_eq!(
+            &map.slices[1..],
+            &[FanSlice::Unmappable, FanSlice::Unmappable, FanSlice::Unmappable]
+        );
+    }
+
+    /// No table unless a material asks for one: the common case is an
+    /// untextured stage, which should allocate nothing.
+    #[test]
+    fn face_table_is_not_built_unless_requested() {
+        let counts = [4];
+        let indices = [0, 1, 2, 3];
+        let (tris, map) = triangulate(&counts, &indices, 4, false).unwrap();
+        assert_eq!(tris.len(), 2);
+        assert!(map.is_none());
     }
 }

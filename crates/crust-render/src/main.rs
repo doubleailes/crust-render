@@ -1,3 +1,5 @@
+mod ptex_color;
+
 use clap::Parser;
 use crust_core::Buffer;
 use crust_core::PixelFilter;
@@ -44,6 +46,34 @@ impl AssetLoader for CliAssets {
             None => error!("Could not load environment {}", path.display()),
         }
         loaded
+    }
+
+    fn load_ptex(&self, path: &Path) -> Option<std::sync::Arc<dyn crust_core::PtexTexture>> {
+        // A/B switch, in the spirit of CRUST_MESH_BAKE: decline every texture
+        // so the same scene renders on its constant `baseColor` fallback. That
+        // is how you tell "the Ptex lookup is wrong" from "the material or the
+        // lighting is wrong", since both show up as an off-colour surface.
+        if std::env::var("CRUST_PTEX").as_deref() == Ok("0") {
+            debug!("CRUST_PTEX=0: ignoring {}", path.display());
+            return None;
+        }
+        let started = Instant::now();
+        match ptex_color::PtexColor::open(path) {
+            Ok(tex) => {
+                info!(
+                    "Loaded Ptex {} ({} faces, {:.1} MiB resident) in {:?}",
+                    path.display(),
+                    crust_core::PtexTexture::num_faces(&tex),
+                    tex.bytes() as f64 / (1024.0 * 1024.0),
+                    started.elapsed()
+                );
+                Some(std::sync::Arc::new(tex))
+            }
+            Err(e) => {
+                error!("Could not load Ptex {}: {e}", path.display());
+                None
+            }
+        }
     }
 }
 
