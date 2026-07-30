@@ -180,9 +180,9 @@ impl From<Strategy> for SamplingStrategy {
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 enum Filter {
-    /// One-pixel box (default)
+    /// One-pixel box (the pre-filter jitter, bit-identical at radius 0.5)
     Box,
-    /// Tent filter
+    /// Tent filter (default)
     Triangle,
     /// Truncated Gaussian
     Gaussian,

@@ -13,10 +13,11 @@
 //! sample `|f|` and carry the sign in the weight, which is how a filter with
 //! negative lobes stays unbiased under FIS.
 //!
-//! The default — [`PixelFilter::BoxFilter`] at radius 0.5 — reduces to the
-//! uniform in-pixel jitter the renderer always used, **bit-identically**
-//! (pinned by `box_half_radius_is_the_identity_jitter`), so scenes that
-//! author no filter render exactly as before.
+//! The default is [`PixelFilter::Triangle`] at radius 1.0. The historical
+//! behavior — the uniform in-pixel jitter — is still available as `box` at
+//! radius 0.5, which reduces to it **bit-identically** (pinned by
+//! `box_half_radius_is_the_identity_jitter`); select it explicitly to
+//! compare against renders from before filtering existed.
 
 /// Which reconstruction filter shapes each pixel's measurement, and over what
 /// radius (in pixels, from the pixel center; a radius of 0.5 covers exactly
@@ -24,9 +25,10 @@
 /// `crust:pixelFilterRadius` or the `--filter` / `--filter-radius` CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PixelFilter {
-    /// Uniform box. Radius 0.5 (the default) is the classic one-pixel box.
+    /// Uniform box. At radius 0.5, the classic one-pixel box — bit-identical
+    /// to the unfiltered jitter the renderer used before filters existed.
     BoxFilter { radius: f32 },
-    /// Tent / triangle filter.
+    /// Tent / triangle filter — the default, at radius 1.0.
     Triangle { radius: f32 },
     /// Truncated Gaussian, σ = radius/3 (so the kernel reaches ~zero at the
     /// radius), with the tail value subtracted so it is exactly zero there.
@@ -41,7 +43,7 @@ pub enum PixelFilter {
 
 impl Default for PixelFilter {
     fn default() -> Self {
-        PixelFilter::BoxFilter { radius: 0.5 }
+        PixelFilter::Triangle { radius: 1.0 }
     }
 }
 
@@ -184,9 +186,10 @@ impl FilterSampler {
     /// stratified in the warped position.
     ///
     /// For the box at radius 0.5 this is the identity `(u, 1.0)` —
-    /// bit-exactly, which is what keeps default renders unchanged: the
-    /// arithmetic below evaluates as `(0.5 - 0.5) + (2.0·0.5)·u = 0.0 + 1.0·u`,
-    /// and both of those operations are exact in IEEE 754.
+    /// bit-exactly, which is what makes it the escape hatch back to the
+    /// pre-filter jitter: the arithmetic below evaluates as
+    /// `(0.5 - 0.5) + (2.0·0.5)·u = 0.0 + 1.0·u`, and both of those
+    /// operations are exact in IEEE 754.
     pub fn sample(&self, u: f32) -> (f32, f32) {
         let r = self.filter.radius();
         match self.filter {
@@ -263,11 +266,11 @@ mod tests {
     use openqmc::pcg::Rng;
 
     /// The renderer's historical camera jitter is `pixel + u` with `u`
-    /// uniform in [0,1). The default filter must reproduce it bit-exactly —
-    /// this is what keeps every filter-less scene's output byte-identical.
+    /// uniform in [0,1). Box at radius 0.5 must reproduce it bit-exactly —
+    /// it is the escape hatch for comparing against pre-filter renders.
     #[test]
     fn box_half_radius_is_the_identity_jitter() {
-        let s = FilterSampler::new(PixelFilter::default());
+        let s = FilterSampler::new(PixelFilter::BoxFilter { radius: 0.5 });
         let mut rng = Rng::new(7);
         for _ in 0..10_000 {
             let u = rng.next_f32();

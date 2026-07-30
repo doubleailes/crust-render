@@ -149,20 +149,21 @@ def RenderSettings "settings" {
     int crust:guidingTrainIterations = 8
     float crust:guidingProb = 0.5
     token crust:samplingStrategy = "power"   # power | balance | light | bsdf
-    token crust:pixelFilter = "box"          # box | triangle | gaussian | blackman | mitchell
-    float crust:pixelFilterRadius = 0.5      # pixels from the pixel center
+    token crust:pixelFilter = "triangle"     # box | triangle | gaussian | blackman | mitchell
+    float crust:pixelFilterRadius = 1.0      # pixels from the pixel center
 }
 ```
 
 Missing attrs fall back to sensible defaults (128 spp, 32 depth, 640×360,
-guiding off, one-pixel box filter).
+guiding off, triangle filter at radius 1).
 
-The pixel filter reconstructs the image from the samples: `box` at radius
-0.5 (the default) is the classic one-sample-per-pixel-footprint jitter,
-`triangle`/`gaussian`/`blackman` trade a little sharpness for smoother
-edges and less pixel-to-pixel noise, and `mitchell` sharpens with negative
-lobes (may ring next to hard contrast). Each filter has its own default
-radius (box 0.5, triangle 1, gaussian/blackman 1.5, mitchell 2);
+The pixel filter reconstructs the image from the samples: `triangle` (the
+default), `gaussian` and `blackman` trade a little sharpness for smoother
+edges and less pixel-to-pixel noise, `mitchell` sharpens with negative
+lobes (may ring next to hard contrast), and `box` at radius 0.5 is the
+classic one-sample-per-pixel-footprint jitter — bit-identical to renders
+from before filtering existed. Each filter has its own default radius
+(box 0.5, triangle 1, gaussian/blackman 1.5, mitchell 2);
 `crust:pixelFilterRadius` overrides it. Filtering is applied by filter
 importance sampling — sample positions are drawn from the filter's own
 distribution — so it costs nothing per sample and adaptive sampling keeps

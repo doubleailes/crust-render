@@ -153,15 +153,15 @@ fn loads_veach_mis_usda() {
 }
 
 /// `crust:pixelFilter` / `crust:pixelFilterRadius` round-trip into
-/// [`crust_core::PixelFilter`]; absent attrs keep the bit-identical default
-/// (box, radius 0.5). Fails if parsing silently falls back.
+/// [`crust_core::PixelFilter`]; absent attrs keep the default (triangle,
+/// radius 1.0). Fails if parsing silently falls back.
 #[test]
 fn pixel_filter_settings_round_trip() {
     // No scene authors the attr — the default must hold.
     let scene = Scene::from_usd(&sample("cornellbox.usda")).expect("failed to open cornellbox");
     assert_eq!(
         scene.settings.pixel_filter(),
-        crust_core::PixelFilter::BoxFilter { radius: 0.5 }
+        crust_core::PixelFilter::Triangle { radius: 1.0 }
     );
 
     let dir = std::env::temp_dir().join("crust_pixel_filter_probe");

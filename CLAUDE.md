@@ -162,10 +162,10 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
    importance sampling**, not splatting: each pixel warps its jitter through the
    filter's distribution and weights radiance by `f/p`, keeping every per-pixel
-   mechanism (adaptive early-stop, QMC domains, pass blending) intact. The default —
-   box at radius 0.5 — is bit-identical to the historical in-pixel jitter, which is
-   what keeps `check_images.sh` goldens valid; Mitchell is the only kind with
-   negative weights.
+   mechanism (adaptive early-stop, QMC domains, pass blending) intact. The default
+   is triangle at radius 1.0; box at radius 0.5 reproduces the historical in-pixel
+   jitter bit-identically (`--filter box` when comparing against pre-filter
+   renders). Mitchell is the only kind with negative weights.
 3. **`trace_path()`** (`tracer.rs`, public wrapper `ray_color()`) is the integrator — an
    **iterative** path tracer in two passes: a forward walk that traces one segment per
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
@@ -460,8 +460,8 @@ Schema mapping:
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
   `balance` | `light` | `bsdf`, `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float). Missing attrs
-  fall back to defaults (128 spp, depth 32, 640×360, power MIS, box filter at radius
-  0.5 — the bit-identical historical jitter) defined as consts at the top of the file.
+  fall back to defaults (128 spp, depth 32, 640×360, power MIS, triangle filter at
+  radius 1.0) defined as consts at the top of the file.
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
