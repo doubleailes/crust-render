@@ -149,11 +149,24 @@ def RenderSettings "settings" {
     int crust:guidingTrainIterations = 8
     float crust:guidingProb = 0.5
     token crust:samplingStrategy = "power"   # power | balance | light | bsdf
+    token crust:pixelFilter = "box"          # box | triangle | gaussian | blackman | mitchell
+    float crust:pixelFilterRadius = 0.5      # pixels from the pixel center
 }
 ```
 
 Missing attrs fall back to sensible defaults (128 spp, 32 depth, 640×360,
-guiding off).
+guiding off, one-pixel box filter).
+
+The pixel filter reconstructs the image from the samples: `box` at radius
+0.5 (the default) is the classic one-sample-per-pixel-footprint jitter,
+`triangle`/`gaussian`/`blackman` trade a little sharpness for smoother
+edges and less pixel-to-pixel noise, and `mitchell` sharpens with negative
+lobes (may ring next to hard contrast). Each filter has its own default
+radius (box 0.5, triangle 1, gaussian/blackman 1.5, mitchell 2);
+`crust:pixelFilterRadius` overrides it. Filtering is applied by filter
+importance sampling — sample positions are drawn from the filter's own
+distribution — so it costs nothing per sample and adaptive sampling keeps
+working per pixel.
 
 ### 🧭 Path guiding
 
@@ -243,6 +256,8 @@ cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
     -o out.exr                         # output EXR (+ tone-mapped PNG next to it)
     -s 256                             # override samples per pixel
     --strategy power                   # power | balance | light | bsdf
+    --filter gaussian                  # box | triangle | gaussian | blackman | mitchell
+    --filter-radius 1.5                # filter radius in pixels
     -b                                 # bucket (16×16 tile) rendering
     -l debug                           # log level
 ```

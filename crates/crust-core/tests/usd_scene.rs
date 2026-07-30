@@ -152,6 +152,43 @@ fn loads_veach_mis_usda() {
     );
 }
 
+/// `crust:pixelFilter` / `crust:pixelFilterRadius` round-trip into
+/// [`crust_core::PixelFilter`]; absent attrs keep the bit-identical default
+/// (box, radius 0.5). Fails if parsing silently falls back.
+#[test]
+fn pixel_filter_settings_round_trip() {
+    // No scene authors the attr — the default must hold.
+    let scene = Scene::from_usd(&sample("cornellbox.usda")).expect("failed to open cornellbox");
+    assert_eq!(
+        scene.settings.pixel_filter(),
+        crust_core::PixelFilter::BoxFilter { radius: 0.5 }
+    );
+
+    let dir = std::env::temp_dir().join("crust_pixel_filter_probe");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("pixel_filter.usda");
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+(defaultPrim = "W")
+def Xform "W" { def Sphere "s" { double radius = 0.5 } }
+def Scope "Render" {
+    def RenderSettings "settings" {
+        int2 resolution = (64, 64)
+        token crust:pixelFilter = "mitchell"
+        float crust:pixelFilterRadius = 1.25
+    }
+}
+"#,
+    )
+    .expect("write probe stage");
+    let scene = Scene::from_usd(&path).expect("stage with a pixel filter must load");
+    assert_eq!(
+        scene.settings.pixel_filter(),
+        crust_core::PixelFilter::Mitchell { radius: 1.25 }
+    );
+}
+
 #[test]
 fn loads_fog_usda() {
     let scene = Scene::from_usd(&sample("fog.usda")).expect("failed to open fog.usda");

@@ -1,4 +1,5 @@
 use crate::buffer::Buffer;
+use crate::filter::{FilterSampler, PixelFilter};
 use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
@@ -416,6 +417,8 @@ impl Renderer {
         let mut rays = RayStats::default();
         let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
         let pixel_count = (self.settings.width * self.settings.height) as f64;
+        // One tabulation per pass, shared read-only by every worker.
+        let filter = FilterSampler::new(self.settings.pixel_filter);
 
         if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
@@ -435,8 +438,15 @@ impl Renderer {
                     let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) =
-                                self.render_pixel(i, j, &cfg, gctx, &mut scratch, &mut tile_rays);
+                            let (color, mut s, v) = self.render_pixel(
+                                i,
+                                j,
+                                &cfg,
+                                &filter,
+                                gctx,
+                                &mut scratch,
+                                &mut tile_rays,
+                            );
                             pixels.push((i, j, color, v));
                             samples.append(&mut s);
                         }
@@ -471,7 +481,8 @@ impl Renderer {
                         || PathScratch::new(self.settings.max_depth as usize),
                         |scratch, i| {
                             let mut px = RayStats::default();
-                            let (c, s, v) = self.render_pixel(i, j, &cfg, gctx, scratch, &mut px);
+                            let (c, s, v) =
+                                self.render_pixel(i, j, &cfg, &filter, gctx, scratch, &mut px);
                             (c, s, v, px)
                         },
                     )
@@ -506,11 +517,17 @@ impl Renderer {
         i: usize,
         j: usize,
         cfg: &PassConfig,
+        filter: &FilterSampler,
         gctx: Option<&GuidingContext>,
         scratch: &mut PathScratch,
         stats: &mut RayStats,
     ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sum = Vec3A::ZERO;
+        // FIS weight sum (see `filter.rs`): the pixel estimate is the
+        // weighted average Σwᵢ·Lᵢ / Σwᵢ. For the box filter every wᵢ is
+        // exactly 1.0, so the sum is exactly `taken as f32` and the estimate
+        // is bit-identical to the historical unweighted mean.
+        let mut weight_sum = 0.0f32;
         let mut samples = Vec::new();
         let mut lum_sum = 0.0f64;
         let mut lum_sq = 0.0f64;
@@ -541,8 +558,15 @@ impl Renderer {
             let root =
                 PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
-            let u = ((i as f32) + cam[0]) / (self.settings.width - 1) as f32;
-            let v = ((j as f32) + cam[1]) / (self.settings.height - 1) as f32;
+            // Warp the in-pixel jitter through the reconstruction filter's
+            // distribution (filter importance sampling): the offset places
+            // the sample inside the filter footprint (possibly reaching into
+            // neighboring pixels' area), the weight is f/p. For the default
+            // box filter this is exactly `(cam[k], 1.0)`.
+            let (fx, wx) = filter.sample(cam[0]);
+            let (fy, wy) = filter.sample(cam[1]);
+            let u = ((i as f32) + fx) / (self.settings.width - 1) as f32;
+            let v = ((j as f32) + fy) / (self.settings.height - 1) as f32;
             // `Ray::new` defaults `time` to 0.0, and `transforms_at` takes the
             // start transform at time 0, so this is the value a static scene
             // was already effectively using.
@@ -565,8 +589,9 @@ impl Renderer {
                 &mut samples,
                 scratch,
                 stats,
-            );
+            ) * (wx * wy);
             sum += color;
+            weight_sum += wx * wy;
             let lum = luminance(color) as f64;
             lum_sum += lum;
             lum_sq += lum * lum;
@@ -593,7 +618,15 @@ impl Renderer {
         } else {
             f64::INFINITY
         };
-        (sum / taken as f32, samples, variance)
+        // Weighted-average film estimator. A Mitchell pixel whose few
+        // samples all landed on negative lobes could zero the denominator;
+        // the plain mean is the sane fallback there.
+        let mean = if weight_sum > 0.0 {
+            sum / weight_sum
+        } else {
+            sum / taken as f32
+        };
+        (mean, samples, variance)
     }
 }
 
@@ -616,6 +649,9 @@ pub struct RenderSettings {
     // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
     // `--strategy`).
     sampling_strategy: SamplingStrategy,
+    // Pixel reconstruction filter (see `PixelFilter`; `crust:pixelFilter` /
+    // `--filter`). Applied by filter importance sampling in `render_pixel`.
+    pixel_filter: PixelFilter,
 }
 impl RenderSettings {
     pub fn new(
@@ -639,6 +675,7 @@ impl RenderSettings {
             guiding_train_iterations: 4,
             guiding_prob: 0.5,
             sampling_strategy: SamplingStrategy::default(),
+            pixel_filter: PixelFilter::default(),
         }
     }
 
@@ -666,6 +703,16 @@ impl RenderSettings {
 
     pub fn sampling_strategy(&self) -> SamplingStrategy {
         self.sampling_strategy
+    }
+
+    /// Select the pixel reconstruction filter — see [`PixelFilter`].
+    pub fn with_pixel_filter(mut self, filter: PixelFilter) -> Self {
+        self.pixel_filter = filter;
+        self
+    }
+
+    pub fn pixel_filter(&self) -> PixelFilter {
+        self.pixel_filter
     }
 
     pub fn get_dimensions(&self) -> (usize, usize) {

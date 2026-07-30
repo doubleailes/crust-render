@@ -1,5 +1,6 @@
 use clap::Parser;
 use crust_core::Buffer;
+use crust_core::PixelFilter;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
 use crust_core::{AssetLoader, EnvironmentMap, Scene, Vec3A};
@@ -139,6 +140,15 @@ struct Cli {
     /// strategy alone to visualize what MIS balances between.
     #[arg(long, value_enum)]
     strategy: Option<Strategy>,
+    /// Pixel reconstruction filter. Overrides the scene's
+    /// `crust:pixelFilter` when set.
+    #[arg(long, value_enum)]
+    filter: Option<Filter>,
+    /// Pixel filter radius in pixels, measured from the pixel center
+    /// (each filter has its own default: box 0.5, triangle 1, gaussian /
+    /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
+    #[arg(long)]
+    filter_radius: Option<f32>,
     /// Print render statistics and a per-phase profile (parse, build,
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
@@ -165,6 +175,34 @@ impl From<Strategy> for SamplingStrategy {
             Strategy::Light => SamplingStrategy::LightOnly,
             Strategy::Bsdf => SamplingStrategy::BsdfOnly,
         }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, Copy)]
+enum Filter {
+    /// One-pixel box (default)
+    Box,
+    /// Tent filter
+    Triangle,
+    /// Truncated Gaussian
+    Gaussian,
+    /// 4-term Blackman-Harris window
+    Blackman,
+    /// Mitchell-Netravali (negative lobes: sharp, may ring)
+    Mitchell,
+}
+
+impl From<Filter> for PixelFilter {
+    fn from(f: Filter) -> Self {
+        // The names match `PixelFilter::from_name`'s and cannot miss.
+        PixelFilter::from_name(match f {
+            Filter::Box => "box",
+            Filter::Triangle => "triangle",
+            Filter::Gaussian => "gaussian",
+            Filter::Blackman => "blackman",
+            Filter::Mitchell => "mitchell",
+        })
+        .expect("CLI filter names mirror PixelFilter::from_name")
     }
 }
 
@@ -247,6 +285,15 @@ fn main() {
     };
     if let Some(strategy) = cli.strategy {
         settings = settings.with_sampling_strategy(strategy.into());
+    }
+    // --filter replaces the scene's filter (at the filter's default radius);
+    // --filter-radius then resizes whichever filter is in effect, so it also
+    // works alone to widen the scene-authored one.
+    if let Some(filter) = cli.filter {
+        settings = settings.with_pixel_filter(filter.into());
+    }
+    if let Some(radius) = cli.filter_radius {
+        settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
     }
     // A BVH can only cull primitives whose bounds are small against the
     // whole scene. Report the ratio so a scene whose instance boxes all

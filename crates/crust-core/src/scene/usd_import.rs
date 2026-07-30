@@ -24,6 +24,7 @@ use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
 use crust_rt::{
     CubicCurveSegment, CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
+use crate::filter::PixelFilter;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Mat3A, Vec3, Vec3A};
@@ -2715,9 +2716,27 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     };
 
+    // Pixel reconstruction filter: `box` (default) | `triangle` | `gaussian`
+    // | `blackman` | `mitchell`, each at its conventional radius unless
+    // `crust:pixelFilterRadius` overrides it (in pixels, from the center).
+    let mut filter = match custom_token(&prim, "crust:pixelFilter") {
+        None => PixelFilter::default(),
+        Some(name) => PixelFilter::from_name(&name).unwrap_or_else(|| {
+            warn!(
+                "Unknown crust:pixelFilter \"{}\" (expected box | triangle | gaussian | blackman | mitchell) — using the box filter",
+                name
+            );
+            PixelFilter::default()
+        }),
+    };
+    if let Some(radius) = custom_f32(&prim, "crust:pixelFilterRadius") {
+        filter = filter.with_radius(radius);
+    }
+
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
         .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)
+        .with_pixel_filter(filter)
 }
 
 fn default_settings() -> RenderSettings {
