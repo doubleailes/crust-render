@@ -1,0 +1,11 @@
+#usda 1.0
+( defaultPrim = "P" )
+def Xform "P"
+{
+    def Mesh "M"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    }
+}

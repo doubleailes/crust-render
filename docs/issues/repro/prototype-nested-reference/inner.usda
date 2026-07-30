@@ -1,0 +1,11 @@
+#usda 1.0
+( defaultPrim = "Root" )
+def Xform "Root"
+{
+    def Xform "A" (
+        instanceable = true
+        payload = @./proto.usda@</P>
+    )
+    {
+    }
+}

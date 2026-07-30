@@ -1,0 +1,19 @@
+#usda 1.0
+( defaultPrim = "C" )
+def Xform "C" (
+    variants = {
+        string element = "v1"
+    }
+    prepend variantSets = "element"
+)
+{
+    variantSet "element" = {
+        "v1" {
+            def Xform "geometry" (
+                prepend payload = @./bundle.usda@</bundle>
+            )
+            {
+            }
+        }
+    }
+}

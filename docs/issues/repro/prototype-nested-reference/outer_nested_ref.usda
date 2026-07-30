@@ -1,0 +1,10 @@
+#usda 1.0
+( defaultPrim = "World" )
+def Xform "World"
+{
+    def Xform "G" (
+        prepend references = @./inner_ref.usda@</Root>
+    )
+    {
+    }
+}
