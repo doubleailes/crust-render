@@ -95,7 +95,7 @@ fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
         debug!("Streaming import disabled by CRUST_STREAM_IMPORT=0");
         return Vec::new();
     }
-    let pseudo_root = stage.prim_at(sdf::Path::abs_root());
+    let pseudo_root = stage.prim(sdf::Path::abs_root());
     let Ok(top) = pseudo_root.children() else {
         return Vec::new();
     };
@@ -337,7 +337,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         let stage = open_stage(path, path_str, None)?;
         traverse_into(
             &stage,
-            stage.prim_at(sdf::Path::abs_root()),
+            stage.prim(sdf::Path::abs_root()),
             GMat4::IDENTITY,
             &mut ctx,
         );
@@ -351,7 +351,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             // would, while everything outside the chunk stays absent.
             traverse_into(
                 &stage,
-                stage.prim_at(sdf::Path::abs_root()),
+                stage.prim(sdf::Path::abs_root()),
                 GMat4::IDENTITY,
                 &mut ctx,
             );
@@ -1673,7 +1673,7 @@ fn prototype_parts(
     if let Some(parts) = caches.protos.get(&key) {
         return parts.clone();
     }
-    let root = stage.prim_at(proto_path.clone());
+    let root = stage.prim(proto_path.clone());
     let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
     if parts.is_empty() {
         warn!("Prototype {} contributed no geometry", key.1);
@@ -2082,10 +2082,10 @@ fn build_camera(stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Option
 fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     let mut ancestors: Vec<Prim> = Vec::new();
     let mut cur_path = prim.path().clone();
-    ancestors.push(stage.prim_at(cur_path.clone()));
+    ancestors.push(stage.prim(cur_path.clone()));
     while let Some(parent) = cur_path.parent() {
         cur_path = parent;
-        ancestors.push(stage.prim_at(cur_path.clone()));
+        ancestors.push(stage.prim(cur_path.clone()));
         if cur_path.as_str() == "/" {
             break;
         }
@@ -2489,7 +2489,10 @@ fn shader_info_id(shader: &Shader) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|v| match v {
-            sdf::Value::Token(t) | sdf::Value::String(t) => Some(t),
+            // `Token` carries an interned `tf::Token` and `String` a plain
+            // `String`, so the two arms can no longer bind one name.
+            sdf::Value::Token(t) => Some(t.as_str().to_owned()),
+            sdf::Value::String(t) => Some(t),
             _ => None,
         })
 }
@@ -2684,7 +2687,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     }
 
     // Custom `crust:*` attrs. We look them up on the RenderSettings prim.
-    let prim = stage.prim_at(path);
+    let prim = stage.prim(path);
     let spp = custom_i32(&prim, "crust:samplesPerPixel").unwrap_or(DEFAULT_SPP as i32) as u32;
     let max_depth = custom_i32(&prim, "crust:maxDepth").unwrap_or(DEFAULT_MAX_DEPTH as i32) as u32;
     let min_spp = custom_i32(&prim, "crust:minSamplesPerPixel").unwrap_or(DEFAULT_MIN_SPP as i32)
@@ -2781,7 +2784,7 @@ fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
 fn custom_token(prim: &Prim, name: &str) -> Option<String> {
     let v = prim.attribute(name).get::<sdf::Value>().ok()??;
     match v {
-        sdf::Value::Token(t) => Some(t),
+        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
         sdf::Value::String(s) => Some(s),
         _ => None,
     }
