@@ -38,6 +38,22 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 
+# Placing a camera in a downloaded production asset, and settling whether a
+# texture is display-encoded or linear (see "Ptex" under USD import).
+cargo run --release -p crust-render --example scene_bounds -- scene.usda
+cargo run --release -p crust-render --example tex_probe -- texture.ptx
+cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 y1]
+
+# Is a Ptex file actually being addressed correctly? Neither check renders
+# anything -- a wrong Ptex lookup still produces a plausible-looking surface,
+# so both answer in numbers instead. See "Ptex" under USD import.
+#   1. face ids: does the .ptx's embedded base cage match the mesh it is bound
+#      to, face for face and vertex order for vertex order?
+cargo run --release -p crust-render --example ptex_verify -- model.usd /mesh/prim color.ptx
+#   2. (u,v) orientation: are texels continuous across the seams the file's own
+#      adjacency data declares, and more so than transposed or than chance?
+cargo run --release -p crust-render --example ptex_seams -- color.ptx
+
 # Kernel correctness is stated in exact float bits, so it must hold under every
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
@@ -57,7 +73,9 @@ Environment overrides, all of which exist to A/B an optimization against the beh
 replaced: `CRUST_STREAM_IMPORT=0` forces the single-stage USD import; `CRUST_MESH_BAKE=0`
 forces every mesh to be instanced instead of baking single-placement geometry flat (output
 is bit-identical with it set, which is what separates a deferral bug from a baking
-difference).
+difference); `CRUST_PTEX=0` declines every Ptex texture so surfaces fall back to their
+constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution loaded
+(log2 edge length, default 5 = 32x32).
 
 ## Measuring a change
 
@@ -415,7 +433,85 @@ Schema mapping:
     `metallic→baseMetalness`, `roughness→specularRoughness`, etc.).
   - `crust:openpbr` → decoded 1:1 into `OpenPBR`; every input is the camelCase mirror of the
     Rust field name (lossless but non-portable). Reference scene: `samples/openpbr_showcase.usda`.
+  - `PxrDisneyBsdf` → mapped into `OpenPBR` (both descend from Burley's model). Checked
+    **before** `compute_surface_source()`, by looking for a child shader with that
+    `info:id` — a material with several render-context outputs resolves through that call
+    to whichever one USD prefers, and on the Moana island (which authors
+    `outputs:ri:surface`, `outputs:glslfx:surface` and `outputs:ri:displacement` on every
+    material) that is the *preview* shader, whose inputs are all `.connect`ed to the
+    material interface rather than authored as values. Decoding it yields every parameter
+    at its default. Parameters are therefore read off the **Material** prim, where the
+    island authors them. `sheen` is deliberately **not** mapped to `fuzz_weight`: Disney
+    adds sheen at grazing angles, OpenPBR mixes fuzz *over* the layers beneath, so the
+    island's `sheen = 1` erased all base colour (Ptex included) and rendered smooth
+    plastic. `subsurface*`, `diffuseTransmission` and `specularTint` have no equivalent
+    lobe and are dropped.
   - Unbound geometry → grey diffuse `OpenPBR`.
+- **Ptex** (`texture.rs`, `crust-render/src/ptex_color.rs`) — per-face colour textures via
+  the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
+  `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
+  island's Ptex shader paths — `PxrPtexture.filename` and `HwPtexTexture_1.file` —
+  `.connect` to it, so no network walk is needed). Asset paths come from openusd's
+  `resolved_path()`, which anchors against the *authoring* layer — essential here, since a
+  production stage's `../../../textures/foo.ptx` is authored several directories below the
+  root layer.
+  - **crust-core still decodes nothing**, but the `AssetLoader` seam *inverts* for Ptex:
+    an environment map crosses it as a decoded pixel buffer, whereas a `.ptx` — a per-face
+    mip pyramid that can reach gigabytes — crosses it as a **sampler**
+    (`load_ptex → Arc<dyn PtexTexture>`) the host owns. Defaulted to `None`, so existing
+    hosts are unaffected.
+  - **Face ids are mesh face indices**, so `triangulate` records per emitted triangle its
+    source face plus which slice of that face's fan it is (`FanSlice`), and `World`
+    resolves a hit's barycentrics into `(face_id, u, v)` — Ptex parameterises a quad
+    `v0=(0,0) v1=(1,0) v2=(1,1) v3=(0,1)`, so the lower fan half gives `(u+v, v)` and the
+    upper `(u, u+v)`. The table lives on `World` keyed by `geom_id`, **not** on `MeshGeom`,
+    which is dropped the moment a mesh is baked or committed. A skipped face must still
+    consume its face id or everything after it shades from the wrong texel
+    (`face_table_tests`). `bake_indices`' mirror swap exchanges `u` and `v`, so the table
+    carries that flag per placement. Built only when the material reports a
+    `face_texture()`, so an untextured stage allocates nothing.
+  - The table is carried on **both** geometry paths. A direct mesh gets it in
+    `flush_meshes`; a prototype carries it on its `ProtoPart` and
+    `attach_proto_parts` records it against the instance's `geom_id`. Wiring only
+    the direct path is not enough and is not obviously broken either: the island's
+    geometry is almost entirely prototype-based, so Ptex silently applied to none
+    of it and every textured surface fell back to its constant `baseColor` — which
+    for a `PtexBaseMaterial` is an unused placeholder, so the gardenias rendered
+    flat red. A part is always exactly one leaf geometry (the walk splits per bound
+    mesh; a nested instancer groups per (prototype, part)), so one table serves
+    every placement and the `prim_id` a hit reports indexes it unambiguously
+    however many instance levels it passed through.
+  - The host **preloads every face** into one immutable buffer: `PtexReader` reads from
+    disk on each call (`&mut self`, pixel data uncached), and a path tracer asks from every
+    thread in an unpredictable order. Faces load **mip-reduced**, capped at 32×32 by
+    default (`CRUST_PTEX_MAX_LOG2` overrides as a log2 edge length) — full resolution is
+    authored for close-ups, so `isLavaRocks`' 631 MB / 11 384-face colour file costs
+    130 MiB instead of several GB, at a resolution far past what a 595×520 framing
+    resolves. Texels are decoded to linear once at load (the island's graph gammas raw
+    Ptex, and `HwPtexTexture_1` declares `sourceColorSpace = "sRGB"`; treating the data as
+    already linear overshoots albedo ~4×, which `examples/tex_probe` exists to settle).
+  - `CRUST_PTEX=0` declines every texture so the same scene renders on its constant
+    `baseColor` — the A/B switch that separates a wrong Ptex lookup from a wrong material
+    or wrong lighting.
+  - **Verified numerically, not by eye** — a wrong face id or a transposed `(u,v)` still
+    renders as plausible rock, so appearance proves nothing and the reference image
+    (different camera, lighting, displacement and subdivision) proves less. Two
+    render-free checks, both passing on the island:
+    `ptex_verify` exploits the fact that each island `.ptx` embeds the base cage it was
+    baked against (`PtexFaceVertCounts` / `PtexFaceVertIndices` / `PtexVertPositions`), so
+    the texture can be asked which vertices *its* face N has and the answer compared with
+    the mesh's face N. All 10 isLavaRocks meshes and isMountainA pass with face-vertex
+    index sequences equal **in order** (45 536 and 134 012 indices respectively) — which
+    pins the face correspondence *and* the corner ordering that fixes the UV orientation.
+    `ptex_seams` then tests the quad convention itself against the file's `adjface` /
+    `adjedge` data: mean texel difference across shared edges is 1.5–16x lower under
+    `v0=(0,0)` than transposed, and 1.9–97x lower than between unrelated faces.
+    Alongside those, 10 textures / 28 816 faces against 57 632 triangles (exactly 2 per
+    quad). The importer warns when a texture's `numFaces` disagrees with its mesh. Not reproduced: no
+    displacement (`inputs:displacementMap` is unread), no subdivision (meshes are
+    `catmullClark`; the base cage is rendered, which Ptex is indifferent to since its
+    faces *are* cage faces), and the reference's `islandsunEnv.tex` environment is a
+    RenderMan-only format.
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
@@ -465,6 +561,48 @@ Schema mapping:
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
+
+**The workspace patches `openusd` to a fork.** `[patch.crates-io]` in the root
+`Cargo.toml` points it at `doubleailes/openusd` at a commit that fixes the
+prototype-through-nested-reference bug below — without it the Moana island cannot be
+read from its own root layer. That commit sits on a later openusd than 0.5.0, so it
+also brings API changes the importer is written against: `Stage::prim_at` is now
+`Stage::prim`, and `sdf::Value::Token` carries a `tf::Token` (use `as_str()`) rather
+than a `String`. Reverting to crates.io 0.5.0 means undoing those two renames as well.
+The variant/relationship bug below still reproduces on that commit.
+
+## Rendering the Moana island
+
+**`usd/island.usda` imports directly** with the patched openusd (see the note at the end
+of "USD import"): 3 151 837 geometries, 21 904 375 top-level BVH primitives, 4:51 to
+parse, 47.6 GiB peak. On crates.io 0.5.0 it yields almost nothing instead, because of the
+prototype-through-nested-reference bug below.
+
+`renders/moana_island/island_root.usda` (gitignored) is the hand-assembled workaround kept
+for that case: identical content, but every element referenced onto a prim at **stage
+root** rather than under a common `/island` parent. `/island` carries no transform, so it
+is geometrically equivalent — it reports the same top-level counts, differing only ~0.06%
+in the *unique* (resident) triangle count, which is prototype-sharing accounting rather
+than rendered geometry. The likely cause is that `/island` is a single top-level subtree,
+so the streaming importer's `MIN_STREAM_CHUNKS` threshold keeps the direct read
+single-stage while the 22-prim workaround layer streams, and the two take different
+`MaterialCache` epochs. It also carries a camera authored inline as a copy of `shotCam`,
+because the importer takes the *first* `UsdGeomCamera` it meets and traversal order is
+unspecified — reading `island.usda` directly gets whichever of its seven cameras comes
+first.
+
+Measured per element (Ptex declined, so geometry only): **~57.7 M top-level triangles**
+across the 20 elements, the largest being `osOcean` (15.6 M), `isCoral` (14.5 M),
+`isMountainA` (6.7 M) and `isMountainB` (6.4 M). Worst single-element openusd composition
+peak is ~12.9 GiB (`isCoral`), which streaming keeps as a transient rather than a sum.
+Ptex over the whole island is 2 576 238 faces: **4.58 GiB** at the default 32x32 cap,
+1.84 GiB at 16x16, 736 MiB at 8x8 — and **494 GiB** at full resolution, which is why the
+cap is not an optimisation but the thing that makes the island possible.
+
+Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust
+has no per-light camera-visibility, so both light the scene (the sky is doubled) and both
+textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB. Dropping
+`sky_dome_cam_llc` (`active = false`) is the first lever if memory or exposure matters.
 
 ## Known incomplete work
 
@@ -530,6 +668,46 @@ feature flag.
   composition — with a warning — only for op kinds it cannot decode. Regression test:
   `cornellbox_transforms_compose_correctly`. If upstream fixes the bug, the fallback
   (`local_matrix_via_openusd`) and possibly the whole composer can be dropped.
+
+- **Upstream `openusd` prototype-through-nested-reference bug — blocks `island.usda`.**
+  A native instance's prototype fails to materialize when the `instanceable` prim is
+  composed in through a reference on a **non-root** prim. `prim.prototype()` still returns
+  `/__Prototype_N`, but that prim does not exist on the composed stage: `prim_at` gives an
+  invalid prim with no children and no type, so `collect_proto_parts` walks nothing and
+  `prototype_parts` warns "contributed no geometry". Every element that places geometry
+  through `instanceable = true` — nearly all of the Moana island — then imports as *empty*.
+  Three-file repro, with only the reference depth changing:
+
+  | wrapper | instance lands at | prototype |
+  |---|---|---|
+  | `def Xform "World" (references = @inner.usda@</Root>)` | `/World/A` | valid |
+  | `def Xform "World" { def Xform "G" (references = @inner.usda@</Root>) {} }` | `/World/G/A` | **invalid** |
+
+  `usd/island.usda` is the second shape (`def Xform "island"` → `def Xform "isBayCedarA1"
+  (references = …)`), so **the island cannot be rendered from `island.usda` directly**.
+  Diagnose with `examples/proto_probe`, which walks a prototype and reports whether each
+  prim is reachable by path and still answers a schema `get()`.
+  Workaround, verified: author a root layer that references each element at **stage root**
+  (`def Xform "isGardeniaA" (references = @…/element.usda@</isGardeniaA>)`). `/island`
+  carries no transform of its own, so this is geometrically equivalent. Opening an
+  `element.usda` directly also works. A durable in-importer alternative would be to fall
+  back to traversing the instance's own proxy subtree when a prototype comes back empty —
+  the mesh arena's content hashing would re-derive the sharing, since identical
+  points/topology/material intern to one slot and a slot placed more than once instances.
+
+- **Upstream `openusd` relationship targets do not always resolve inside a prototype.**
+  A `PointInstancer` *inside* a native instance's prototype can come back with its
+  `prototypes` relationship present but resolving to **zero targets**, so the importer
+  skips it ("has no `prototypes` targets") and the vegetation it places is lost. The prim
+  is otherwise intact — `prototypes`, `protoIndices`, `positions`, `scales`,
+  `invisibleIds` all present — so this is target *resolution* into the prototype
+  namespace, not missing data. It is authoring-dependent, not universal: on the island
+  `isGardeniaA`'s prototype-internal instancer resolves 12 targets fine, while
+  `isBayCedarA1` (2 instancers) and `isDunesB` (4) resolve none — 6 lost across the
+  20 elements, and only those two elements are affected. Diagnose with
+  `examples/rel_probe`, which reports each instancer's target count and whether it sits
+  inside a prototype. Opening the element directly rather than through a reference does
+  not help, so it is distinct from the bug above.
 
 - **Upstream `openusd` nested-native-instancing bug, skipped locally.** An `instanceable`
   prim *inside another instance's prototype* cannot be read with `openusd` 0.5.0.
