@@ -1,0 +1,11 @@
+#usda 1.0
+( defaultPrim = "Root" )
+def Xform "Root"
+{
+    def Xform "Inst" (
+        instanceable = true
+        payload = @./content_variant.usda@</C>
+    )
+    {
+    }
+}

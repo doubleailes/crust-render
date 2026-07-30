@@ -1,0 +1,21 @@
+#usda 1.0
+( defaultPrim = "bundle" )
+def Xform "bundle"
+{
+    def PointInstancer "instancer"
+    {
+        rel prototypes = [ </bundle/instancer/Proto1> ]
+        int[] protoIndices = [0]
+        point3f[] positions = [(0, 0, 0)]
+
+        def Xform "Proto1"
+        {
+            def Mesh "M"
+            {
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+            }
+        }
+    }
+}
