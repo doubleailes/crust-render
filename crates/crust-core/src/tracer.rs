@@ -524,9 +524,10 @@ impl Renderer {
     ) -> (Vec3A, Vec<SampleData>, f64) {
         let mut sum = Vec3A::ZERO;
         // FIS weight sum (see `filter.rs`): the pixel estimate is the
-        // weighted average Σwᵢ·Lᵢ / Σwᵢ. For the box filter every wᵢ is
+        // weighted average Σwᵢ·Lᵢ / Σwᵢ. For box and triangle every wᵢ is
         // exactly 1.0, so the sum is exactly `taken as f32` and the estimate
-        // is bit-identical to the historical unweighted mean.
+        // is the plain mean — box at radius 0.5 stays bit-identical to the
+        // historical unweighted, unfiltered estimator.
         let mut weight_sum = 0.0f32;
         let mut samples = Vec::new();
         let mut lum_sum = 0.0f64;
@@ -561,8 +562,8 @@ impl Renderer {
             // Warp the in-pixel jitter through the reconstruction filter's
             // distribution (filter importance sampling): the offset places
             // the sample inside the filter footprint (possibly reaching into
-            // neighboring pixels' area), the weight is f/p. For the default
-            // box filter this is exactly `(cam[k], 1.0)`.
+            // neighboring pixels' area), the weight is f/p. For box at
+            // radius 0.5 this is exactly `(cam[k], 1.0)`.
             let (fx, wx) = filter.sample(cam[0]);
             let (fy, wy) = filter.sample(cam[1]);
             // Raster → NDC divides by the full resolution: pixel i covers

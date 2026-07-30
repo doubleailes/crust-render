@@ -2716,14 +2716,14 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     };
 
-    // Pixel reconstruction filter: `box` (default) | `triangle` | `gaussian`
+    // Pixel reconstruction filter: `box` | `triangle` (default) | `gaussian`
     // | `blackman` | `mitchell`, each at its conventional radius unless
     // `crust:pixelFilterRadius` overrides it (in pixels, from the center).
     let mut filter = match custom_token(&prim, "crust:pixelFilter") {
         None => PixelFilter::default(),
         Some(name) => PixelFilter::from_name(&name).unwrap_or_else(|| {
             warn!(
-                "Unknown crust:pixelFilter \"{}\" (expected box | triangle | gaussian | blackman | mitchell) — using the box filter",
+                "Unknown crust:pixelFilter \"{}\" (expected box | triangle | gaussian | blackman | mitchell) — using the triangle filter",
                 name
             );
             PixelFilter::default()
