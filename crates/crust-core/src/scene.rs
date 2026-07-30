@@ -96,6 +96,27 @@ pub trait AssetLoader: Send + Sync {
     /// an unsupported format, or a host that does not decode at all — is
     /// not an error: the caller falls back.
     fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap>;
+
+    /// Opens a Ptex file and returns something that can sample it.
+    ///
+    /// Unlike [`Self::load_environment`], the host keeps ownership of the
+    /// pixels and hands back a sampler — see [`crate::PtexTexture`] for why
+    /// per-face textures cannot cross this seam as a pixel buffer. `path` has
+    /// already been resolved against the USD layer's directory. `None` means
+    /// the surface falls back to its constant `baseColor`, which is authored
+    /// alongside the texture in every Ptex material the Moana island ships,
+    /// so the fallback is a plausible flat colour rather than a black hole.
+    ///
+    /// Defaulted to `None` so a host that only cares about environment maps —
+    /// and [`NoAssets`] — needs no extra ceremony.
+    fn load_ptex(&self, path: &std::path::Path) -> Option<std::sync::Arc<dyn crate::PtexTexture>> {
+        tracing::warn!(
+            "Asset loader does not decode Ptex: {} ignored — the surface falls \
+             back to its constant baseColor.",
+            path.display()
+        );
+        None
+    }
 }
 
 /// The default host: decodes nothing. `Scene::from_usd` uses it, so a

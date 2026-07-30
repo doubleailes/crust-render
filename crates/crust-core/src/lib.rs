@@ -13,6 +13,7 @@ mod ray;
 mod rt_world;
 mod scene;
 mod stats;
+mod texture;
 mod tracer;
 mod volume;
 mod world;
@@ -43,12 +44,13 @@ pub use light::{
 pub use material::*;
 pub use medium::Medium;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
-pub use rt_world::{World, WorldBuilder, WorldHit};
+pub use rt_world::{FaceMap, FanSlice, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderStats, SceneCounters,
     peak_memory_bytes,
 };
+pub use texture::{PtexRef, PtexTexture};
 pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

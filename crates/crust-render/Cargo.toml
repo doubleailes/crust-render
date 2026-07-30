@@ -12,13 +12,18 @@ traversal-stats = ["crust-core/traversal-stats"]
 [dependencies]
 crust-core = {path = "../crust-core"}
 clap = { version = "4.5.48", features = ["derive"] }
+# Pure-Rust Ptex reader (crate/lib name `ptex`). Host-side only: crust-core
+# decodes nothing, so the per-face texture decoder lives with the other
+# format dependencies here.
+ptex-rs = { git = "https://github.com/doubleailes/ptex-rs" }
 image = { version = "0.25.6", default-features = false, features = ["png", "hdr"] }
 indicatif = "0.18.0"
 tracing.workspace = true
 exr.workspace = true
 
-# Only the openusd probe examples need to read a stage directly, to diagnose
-# composition bugs against the prims the importer actually sees.
+# The probe examples read a stage directly: `ptex_verify` to check a .ptx file's
+# embedded base cage against the geometry it is bound to, `proto_probe` /
+# `rel_probe` to diagnose composition bugs against the prims the importer sees.
 [dev-dependencies]
 openusd = { version = "0.5", default-features = false, features = ["geom"] }
 
