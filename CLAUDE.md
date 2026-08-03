@@ -497,6 +497,10 @@ Schema mapping:
     resolves. Texels are decoded to linear once at load (the island's graph gammas raw
     Ptex, and `HwPtexTexture_1` declares `sourceColorSpace = "sRGB"`; treating the data as
     already linear overshoots albedo ~4×, which `examples/tex_probe` exists to settle).
+    `docs/color_management.md` is the per-input inventory of which colour space every
+    input is assumed to be in and what curve is applied — including the two gaps that
+    are still open (`UsdPreviewSurface` colours are read undecoded, and nothing enforces
+    that a new colour input states its space at all).
   - `CRUST_PTEX=0` declines every texture so the same scene renders on its constant
     `baseColor` — the A/B switch that separates a wrong Ptex lookup from a wrong material
     or wrong lighting.
