@@ -454,7 +454,7 @@ Schema mapping:
     plastic. `subsurface*`, `diffuseTransmission` and `specularTint` have no equivalent
     lobe and are dropped.
   - Unbound geometry → grey diffuse `OpenPBR`.
-- **Ptex** (`texture.rs`, `crust-render/src/ptex_color.rs`) — per-face colour textures via
+- **Ptex** (`texture.rs`, plus the decoder in `crust-render/src/main.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
   island's Ptex shader paths — `PxrPtexture.filename` and `HwPtexTexture_1.file` —
