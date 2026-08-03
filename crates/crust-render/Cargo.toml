@@ -13,9 +13,11 @@ traversal-stats = ["crust-core/traversal-stats"]
 crust-core = {path = "../crust-core"}
 clap = { version = "4.5.48", features = ["derive"] }
 # Pure-Rust Ptex reader (crate/lib name `ptex`). Host-side only: crust-core
-# decodes nothing, so the per-face texture decoder lives with the other
-# format dependencies here.
-ptex-rs = { git = "https://github.com/doubleailes/ptex-rs" }
+# decodes nothing, so the per-face texture decoder sits in `main.rs` alongside
+# the image decoders, which is where everything that knows a file format lives.
+# Pinned by `rev` because the crate is not published and `Cargo.lock` is not
+# checked in — without it a fresh clone silently takes whatever `main` points at.
+ptex-rs = { git = "https://github.com/doubleailes/ptex-rs", rev = "36212f65dbd4caf7fb8786b34da5c041cc59d7f1" }
 image = { version = "0.25.6", default-features = false, features = ["png", "hdr"] }
 indicatif = "0.18.0"
 tracing.workspace = true
