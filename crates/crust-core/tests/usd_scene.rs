@@ -876,3 +876,129 @@ fn infinite_lights_are_found_by_escaping_rays() {
     assert_eq!(dome_like, 1, "expected exactly one all-direction dome");
     assert_eq!(cone_like, 1, "expected exactly one cone-shaped distant light");
 }
+
+/// A host whose Ptex decode takes a measurable, known-minimum amount of time.
+struct SlowPtexAssets {
+    delay: std::time::Duration,
+    loaded: std::sync::Mutex<Vec<PathBuf>>,
+}
+
+/// A texture that answers every lookup with one colour — enough to be handed
+/// back as `Some`, which is what makes the importer time the load.
+struct ConstTexture;
+
+impl crust_core::PtexTexture for ConstTexture {
+    fn eval(&self, _face_id: u32, _u: f32, _v: f32) -> crust_core::Vec3A {
+        crust_core::Vec3A::splat(0.25)
+    }
+    fn num_faces(&self) -> usize {
+        1
+    }
+}
+
+impl crust_core::AssetLoader for SlowPtexAssets {
+    fn load_environment(&self, _path: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+        None
+    }
+
+    fn load_ptex(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<std::sync::Arc<dyn crust_core::PtexTexture>> {
+        std::thread::sleep(self.delay);
+        self.loaded.lock().unwrap().push(path.to_path_buf());
+        Some(std::sync::Arc::new(ConstTexture))
+    }
+}
+
+/// Time the host spends decoding assets is reported as "Load assets" and taken
+/// back out of "Traverse prims" — for Ptex exactly as for environment maps.
+///
+/// This is worth pinning because getting it wrong is invisible: a second,
+/// unfolded accumulator (there used to be a `ptex_time` beside `asset_time`)
+/// silently bills every texture load to traversal instead, and on a Ptex-heavy
+/// stage the host's decode can dominate the import.
+#[test]
+fn ptex_load_time_is_billed_to_the_asset_phase() {
+    let dir = std::env::temp_dir().join(format!("crust_ptex_phase_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let stage_path = dir.join("ptex_phase.usda");
+
+    // A mesh bound to a PxrDisneyBsdf material carrying `inputs:surfaceMap`.
+    // The .ptx need not exist: resolving the asset path is the importer's job,
+    // and deciding whether it can be opened is the host's.
+    std::fs::write(
+        &stage_path,
+        r#"#usda 1.0
+( defaultPrim = "World" )
+
+def Xform "World"
+{
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/Rock>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Rock"
+        {
+            asset inputs:surfaceMap = @./nonexistent.ptx@
+            float inputs:roughness = 0.5
+            token outputs:ri:surface.connect = </World/Looks/Rock/Bxdf.outputs:bxdf_out>
+
+            def Shader "Bxdf"
+            {
+                uniform token info:id = "PxrDisneyBsdf"
+                token outputs:bxdf_out
+            }
+        }
+    }
+}
+"#,
+    )
+    .expect("write stage");
+
+    let delay = std::time::Duration::from_millis(120);
+    let assets = SlowPtexAssets {
+        delay,
+        loaded: std::sync::Mutex::new(Vec::new()),
+    };
+    let scene =
+        Scene::from_usd_with_assets(&stage_path, &assets).expect("failed to open the ptex stage");
+
+    let loaded = assets.loaded.lock().unwrap().clone();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "expected exactly one Ptex load, got {loaded:?}"
+    );
+
+    let phase = |name: &str| {
+        scene
+            .stats
+            .phases
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no {name:?} phase in {:?}", scene.stats.phases))
+            .duration
+    };
+
+    // The sleep is a lower bound on the decode, so it is a lower bound on the
+    // asset phase and must *not* be inside the traversal figure.
+    assert!(
+        phase("Load assets") >= delay,
+        "Ptex load time missing from the asset phase: {:?} < {delay:?}",
+        phase("Load assets")
+    );
+    assert!(
+        phase("Traverse prims") < delay,
+        "asset time was billed to traversal: {:?} should exclude the {delay:?} decode",
+        phase("Traverse prims")
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
