@@ -128,9 +128,6 @@ struct ImportCtx<'a> {
     /// the decision needs every chunk's placement counts, so it cannot be
     /// made while walking. Holds ~88 bytes per mesh prim, not per triangle.
     pending_meshes: Vec<MeshPlacement>,
-    /// Time the host spent decoding assets, so the profile can separate it
-    /// from the traversal proper.
-    asset_time: Duration,
     settings: RenderSettings,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
@@ -255,7 +252,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 this_world,
                 ctx.stage_path,
                 ctx.assets,
-                &mut ctx.asset_time,
+                &mut ctx.caches.asset_time,
             );
         } else {
             warn_unsupported_light(stage, &prim);
@@ -325,7 +322,6 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         // baked flat into the parent BVH when it is placed exactly once.
         caches: ImportCaches::new(assets, path),
         pending_meshes: Vec::new(),
-        asset_time: Duration::ZERO,
         settings,
         stage_path: path,
         assets,
@@ -367,7 +363,10 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     // The traverse also builds each mesh's and prototype's kernel scene,
     // so its own BVH work is inside this figure; the separate "Commit
     // acceleration structure" phase below is the *top-level* build.
-    let traverse_elapsed = traverse_start.elapsed().saturating_sub(ctx.asset_time);
+    // Host asset decoding (environment maps, Ptex) happens *during* traversal but
+    // is reported as its own phase, so it comes back out of this figure.
+    let asset_time = ctx.caches.asset_time;
+    let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
     let traverse_mem = MemorySample::now();
 
     let camera = ctx.camera.unwrap_or_else(|| {
@@ -392,8 +391,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     stats.record_at("Parse USD stage", 0, import_start.elapsed(), commit_mem);
     stats.record_at("Open stage", 1, open_elapsed, open_mem);
     stats.record_at("Traverse prims", 1, traverse_elapsed, traverse_mem);
-    if !ctx.asset_time.is_zero() {
-        stats.record_at("Load assets", 1, ctx.asset_time, traverse_mem);
+    if !asset_time.is_zero() {
+        stats.record_at("Load assets", 1, asset_time, traverse_mem);
     }
     stats.record_at(
         "Commit acceleration structure",
@@ -1309,9 +1308,14 @@ struct ImportCaches<'a> {
     /// Root layer, the fallback anchor for an asset path openusd handed back
     /// unresolved.
     stage_path: &'a Path,
-    /// Time the host spent opening Ptex files, folded into the import
-    /// profile's asset phase.
-    ptex_time: Duration,
+    /// Time the host spent decoding assets — environment maps *and* Ptex files.
+    ///
+    /// One accumulator for both, deliberately: it is reported as the "Load
+    /// assets" phase and subtracted out of the traversal figure, so a second
+    /// one that nobody folded in would silently bill texture loading to
+    /// traversal. That is exactly what a separate `ptex_time` did, and on a
+    /// Ptex-heavy stage the host's decode can dominate the import.
+    asset_time: Duration,
 }
 
 impl<'a> ImportCaches<'a> {
@@ -1323,7 +1327,7 @@ impl<'a> ImportCaches<'a> {
             epoch: 0,
             assets,
             stage_path,
-            ptex_time: Duration::ZERO,
+            asset_time: Duration::ZERO,
         }
     }
 }
@@ -2811,7 +2815,7 @@ fn material_ptex(
     }
     let started = Instant::now();
     let loaded = caches.assets.load_ptex(&path);
-    caches.ptex_time += started.elapsed();
+    caches.asset_time += started.elapsed();
     caches.materials.ptex.insert(key, loaded.clone());
     loaded.map(crate::PtexRef)
 }
