@@ -37,14 +37,18 @@ against the same mechanism.
   sRGB→linear like every other portable color input, instead of read raw.
   **BREAKING**: any scene currently relying on `UsdPreviewSurface` colors being
   passed through unconverted will render differently (darker, correctly).
-- Distinguish "color-like" fields (`base_color`, `specular_color`,
-  `transmission_color`, `subsurface_color`, `fuzz_color`, `coat_color`,
-  `emission_color`, …) from "scalar-like" fields (`roughness`, `weight`, `ior`,
-  anisotropy, …) on the `OpenPBR` struct at the type level, per the OpenPBR
-  parameter reference's own `color3`/`float` typing
-  (https://academysoftwarefoundation.github.io/OpenPBR/#parameterreference), so
-  a color-space conversion cannot be applied to a scalar field or omitted from
-  a color field by accident.
+- Enforce the color/scalar distinction at the **importer boundary**, not on the
+  `OpenPBR` struct: the three attribute-reading primitives
+  (`shader_input_vec3`, `attr_color3f`, `custom_color3`) return a `RawColor3`
+  newtype whose only accessor is `RawColor3::decode(space: ColorSpace) -> Vec3A`.
+  Every color-valued call site must therefore name a color space — including the
+  ones whose answer is `Linear` — so a conversion can no longer be omitted from a
+  color input by accident. Which inputs count as colors follows the OpenPBR
+  parameter reference's own `color3` vs `float` typing
+  (https://academysoftwarefoundation.github.io/OpenPBR/#parameterreference).
+  `OpenPBR`'s field types are **unchanged**: scalars are already `f32` and so
+  cannot reach a `Vec3A` decode, meaning only the "color never decoded at all"
+  direction needs new enforcement.
 - Document, per material-input source, which color space is assumed and why:
   `UsdPreviewSurface` → sRGB (fixed by this change); `PxrDisneyBsdf.baseColor`
   → flat gamma 2.2 (preserved — matches a specific island `PxrColorCorrect`
@@ -69,9 +73,8 @@ against the same mechanism.
 ### New Capabilities
 
 - `color-management`: defines the `ColorSpace` conversions available to the
-  importer and texture loaders, and the type-level distinction between
-  color-valued and scalar-valued material inputs that prevents misapplying one
-  as the other.
+  importer and texture loaders, and which inputs are color-valued versus scalar,
+  so a conversion is never applied to a scalar or omitted from a color.
 
 ### Modified Capabilities
 
@@ -87,9 +90,10 @@ against the same mechanism.
 - `crates/crust-core/src/scene/usd_import.rs`: `preview_surface_openpbr`,
   `disney_to_openpbr`, `decode_crust_openpbr`, and the existing `srgb_to_linear`
   helper.
-- `crates/crust-core/src/material/openpbr.rs`: the `OpenPBR` struct's field
-  types, if the design phase settles on typed wrappers rather than a
-  documentation-only convention.
+- `crates/crust-core/src/material/openpbr.rs`: **not** affected — the `OpenPBR`
+  struct's field types stay as they are. Enforcement lives at the importer
+  boundary instead, keeping this change out of the `materials` capability and
+  away from every BRDF read site.
 - `crates/crust-render/src/main.rs`: `PtexColor::open`'s texel decode, as a
   candidate to route through the shared conversion instead of its own inline
   `powf(2.2)`.
