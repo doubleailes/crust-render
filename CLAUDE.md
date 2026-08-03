@@ -54,6 +54,13 @@ cargo run --release -p crust-render --example ptex_verify -- model.usd /mesh/pri
 #      adjacency data declares, and more so than transposed or than chance?
 cargo run --release -p crust-render --example ptex_seams -- color.ptx
 
+# openusd composition probes. Each was written to pin down a bug that is now
+# fixed upstream (see docs/issues/ and "Known incomplete work"); keep them as the
+# regression check to run when bumping openusd.
+cargo run --release -p crust-render --example proto_probe -- stage.usda [/prim]   # prototypes
+cargo run --release -p crust-render --example rel_probe   -- stage.usda [relName] # rel targets
+cargo run --release -p crust-render --example xform_probe -- stage.usda /prim     # xformOpOrder
+
 # Kernel correctness is stated in exact float bits, so it must hold under every
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
@@ -562,31 +569,30 @@ Schema mapping:
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
 
-**The workspace patches `openusd` to a fork.** `[patch.crates-io]` in the root
-`Cargo.toml` points it at `doubleailes/openusd` at a commit that fixes the
-prototype-through-nested-reference bug below — without it the Moana island cannot be
-read from its own root layer. That commit sits on a later openusd than 0.5.0, so it
-also brings API changes the importer is written against: `Stage::prim_at` is now
-`Stage::prim`, and `sdf::Value::Token` carries a `tf::Token` (use `as_str()`) rather
-than a `String`. Reverting to crates.io 0.5.0 means undoing those two renames as well.
-The variant/relationship bug below still reproduces on that commit.
+**`openusd` is tracked at `0.6`**, not 0.5. Two composition bugs that made the Moana
+island unreadable were fixed in 0.6.0 (both written up under `docs/issues/`), and the
+importer is written against that release's API: `Stage::prim` (0.5's `prim_at`) and
+`sdf::Value::Token` carrying an interned `tf::Token` rather than a `String`. Going back
+to 0.5 means undoing those two renames *and* reinstating the island workaround.
 
 ## Rendering the Moana island
 
-**`usd/island.usda` imports directly** with the patched openusd (see the note at the end
-of "USD import"): 3 151 837 geometries, 21 904 375 top-level BVH primitives, 4:51 to
-parse, 47.6 GiB peak. On crates.io 0.5.0 it yields almost nothing instead, because of the
-prototype-through-nested-reference bug below.
+**`usd/island.usda` imports directly**: 3 151 850 geometries, 21 904 388 top-level BVH
+primitives, ~6:18 to parse (~4:45 of it traversal), ~47.6 GiB peak. It reads from its own
+root layer with no preparation — the openusd bugs that used to prevent that are fixed in
+0.6.0. The only geometry still lost is 35 empty xgen prototypes (beach shells, fibers,
+seaweed, palm debris); the six `PointInstancer`s that used to vanish with them now import,
+which is worth ~74 500 resident instances of bay cedar understory.
 
-`renders/moana_island/island_root.usda` (gitignored) is the hand-assembled workaround kept
-for that case: identical content, but every element referenced onto a prim at **stage
-root** rather than under a common `/island` parent. `/island` carries no transform, so it
-is geometrically equivalent — it reports the same top-level counts, differing only ~0.06%
-in the *unique* (resident) triangle count, which is prototype-sharing accounting rather
-than rendered geometry. The likely cause is that `/island` is a single top-level subtree,
-so the streaming importer's `MIN_STREAM_CHUNKS` threshold keeps the direct read
-single-stage while the 22-prim workaround layer streams, and the two take different
-`MaterialCache` epochs. It also carries a camera authored inline as a copy of `shotCam`,
+`renders/moana_island/island_root.usda` (gitignored) is a hand-assembled root layer that
+references each element at **stage root** instead of under `/island`. It is no longer
+needed, and is kept only as the workaround for openusd 0.5, where the nested-reference
+bug otherwise yields almost no geometry. `/island` carries no transform, so the two are
+geometrically equivalent; they differ ~0.06% in the *unique* (resident) triangle count,
+which is prototype-sharing accounting rather than rendered geometry — the likely cause
+being that `/island` is a single top-level subtree, so `MIN_STREAM_CHUNKS` keeps the
+direct read single-stage while the 22-prim layer streams, giving the two different
+`MaterialCache` epochs. That layer also authors a camera inline as a copy of `shotCam`,
 because the importer takes the *first* `UsdGeomCamera` it meets and traversal order is
 unspecified — reading `island.usda` directly gets whichever of its seven cameras comes
 first.
@@ -658,72 +664,49 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   sample scenes are shading-bound, so kernel speedups barely show up there — use
   `scripts/gen_stress_scene.py` to benchmark traversal changes end to end.
 
-- **Upstream `openusd` xformOp bug, worked around locally.** `openusd` 0.5.0 (latest as
-  of 2026-06) composes multi-op `xformOpOrder` stacks in the wrong order (the authored
-  translate comes back multiplied by the scale), which used to make
+- **`openusd` xformOp bug, worked around locally; fixed upstream in 0.6.0.** `openusd`
+  0.5.0 composed multi-op `xformOpOrder` stacks in the wrong order (the authored
+  translate came back multiplied by the scale), which used to make
   `samples/cornellbox.usda` render as floating objects against sky. `usd_import.rs`
   therefore composes the individual `xformOp:*` attributes itself
   (`compose_xform_ops`: translate/scale/rotateX·Y·Z/rotate-Euler-triples/orient/
   transform, `!invert!` prefixes, namespaced suffixes), falling back to openusd's
   composition — with a warning — only for op kinds it cannot decode. Regression test:
-  `cornellbox_transforms_compose_correctly`. If upstream fixes the bug, the fallback
-  (`local_matrix_via_openusd`) and possibly the whole composer can be dropped.
+  `cornellbox_transforms_compose_correctly`.
+  **On 0.6.0 the case that motivated it is fixed**: a translate+scale stack composes to the
+  authored translation with the scale on the diagonal (`examples/xform_probe`). That is one
+  case, not the whole surface — rotations, Euler triples, `orient`, `!invert!` prefixes and
+  namespaced suffixes are unverified — so the local composer stays authoritative and the
+  fallback stays in place. Retiring either means checking those kinds first.
 
-- **Upstream `openusd` prototype-through-nested-reference bug — blocks `island.usda`.**
-  A native instance's prototype fails to materialize when the `instanceable` prim is
-  composed in through a reference on a **non-root** prim. `prim.prototype()` still returns
-  `/__Prototype_N`, but that prim does not exist on the composed stage: `prim_at` gives an
-  invalid prim with no children and no type, so `collect_proto_parts` walks nothing and
-  `prototype_parts` warns "contributed no geometry". Every element that places geometry
-  through `instanceable = true` — nearly all of the Moana island — then imports as *empty*.
-  Three-file repro, with only the reference depth changing:
+- **Fixed in openusd 0.6.0, keep in mind when reading old branches.** Two composition
+  bugs used to make the Moana island import as almost nothing, and both failed silently —
+  the data was readable, the API reported success, and the importer just saw less than was
+  there. A prototype did not materialize when the `instanceable` prim arrived through a
+  reference on a non-root prim (which is exactly `island.usda`'s shape), and a
+  relationship's targets resolved to zero when its prim reached the prototype through a
+  variant selection (worth six `PointInstancer`s, all isBayCedarA1's variant geometry).
+  Written up with minimal reproductions under `docs/issues/`, kept because the symptoms
+  are worth recognising, and because pinning to 0.5 brings both back. `examples/proto_probe`
+  and `examples/rel_probe` are the diagnostics.
 
-  | wrapper | instance lands at | prototype |
-  |---|---|---|
-  | `def Xform "World" (references = @inner.usda@</Root>)` | `/World/A` | valid |
-  | `def Xform "World" { def Xform "G" (references = @inner.usda@</Root>) {} }` | `/World/G/A` | **invalid** |
-
-  `usd/island.usda` is the second shape (`def Xform "island"` → `def Xform "isBayCedarA1"
-  (references = …)`), so **the island cannot be rendered from `island.usda` directly**.
-  Diagnose with `examples/proto_probe`, which walks a prototype and reports whether each
-  prim is reachable by path and still answers a schema `get()`.
-  Workaround, verified: author a root layer that references each element at **stage root**
-  (`def Xform "isGardeniaA" (references = @…/element.usda@</isGardeniaA>)`). `/island`
-  carries no transform of its own, so this is geometrically equivalent. Opening an
-  `element.usda` directly also works. A durable in-importer alternative would be to fall
-  back to traversing the instance's own proxy subtree when a prototype comes back empty —
-  the mesh arena's content hashing would re-derive the sharing, since identical
-  points/topology/material intern to one slot and a slot placed more than once instances.
-
-- **Upstream `openusd` relationship targets do not always resolve inside a prototype.**
-  A `PointInstancer` *inside* a native instance's prototype can come back with its
-  `prototypes` relationship present but resolving to **zero targets**, so the importer
-  skips it ("has no `prototypes` targets") and the vegetation it places is lost. The prim
-  is otherwise intact — `prototypes`, `protoIndices`, `positions`, `scales`,
-  `invisibleIds` all present — so this is target *resolution* into the prototype
-  namespace, not missing data. It is authoring-dependent, not universal: on the island
-  `isGardeniaA`'s prototype-internal instancer resolves 12 targets fine, while
-  `isBayCedarA1` (2 instancers) and `isDunesB` (4) resolve none — 6 lost across the
-  20 elements, and only those two elements are affected. Diagnose with
-  `examples/rel_probe`, which reports each instancer's target count and whether it sits
-  inside a prototype. Opening the element directly rather than through a reference does
-  not help, so it is distinct from the bug above.
-
-- **Upstream `openusd` nested-native-instancing bug, skipped locally.** An `instanceable`
-  prim *inside another instance's prototype* cannot be read with `openusd` 0.5.0.
-  Resolving its prototype — or reading the type name of any prim beneath it — reaches
-  `pcp/instancing.rs::materialize_prototype`, whose `debug_assert!` ("materialized
-  prototype root's instanceable must be inert") fires: debug builds abort, release builds
-  have the assertion compiled out. The instance prim itself is safe to inspect
-  (`is_instance`, `children`, `type_name` all succeed); only its *contents* are
-  unreachable, so there is no proxy-traversal fallback either. It reproduces in four lines
-  of USDA with `class` or `def` prototypes alike, and is independent of crust. Single-level
-  native instancing and nested `PointInstancer`s are unaffected. `collect_proto_parts`
-  therefore tests `is_instance()` **before** any schema lookup (a schema `get()` reads the
-  type name, which is what aborts) and skips such prims with a warning. Regression test:
-  `nested_native_instance_degrades_gracefully`. When upstream is fixed, delete that arm and
-  splice the inner prototype's parts in with composed transforms — a native instance is a
-  single placement, so it needs no extra level of kernel indirection.
+- **Nested native instances are still skipped, but no longer have to be.** An
+  `instanceable` prim *inside another instance's prototype* could not be read on
+  `openusd` 0.5.0: resolving its prototype, or reading the type name of anything beneath
+  it, tripped a `debug_assert!` in `pcp/instancing.rs::materialize_prototype` (debug builds
+  aborted, release had it compiled out). So `collect_proto_parts` tests `is_instance()`
+  **before** any schema lookup — a schema `get()` reads the type name, which is what
+  aborted — and skips such prims with a warning. Regression test:
+  `nested_native_instance_degrades_gracefully`.
+  **On 0.6.0 that abort is gone**: a debug build resolves the nested prototype to a valid
+  prim with its geometry (checked with `examples/proto_probe` on a four-line stage). The
+  skip arm is therefore now conservative rather than necessary, and deleting it would
+  recover this geometry — splice the inner prototype's parts in with composed transforms,
+  since a native instance is a single placement and needs no extra level of kernel
+  indirection. Not done yet, and it costs the Moana island nothing (that arm never fires
+  there), so it is a correctness improvement for other stages rather than a fix for this
+  one. The regression test would need rewriting to assert the geometry arrives instead of
+  that it is skipped.
 - **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
   skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
