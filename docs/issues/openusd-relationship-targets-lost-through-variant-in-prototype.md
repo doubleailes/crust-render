@@ -3,7 +3,12 @@
 **Target repository:** <https://github.com/mxpv/openusd>
 **Affected version:** `openusd` 0.5.0 (latest on crates.io as of 2026-06)
 **Severity:** silent data loss — a populated relationship reads as empty
-**Status:** minimal reproduction confirmed, isolated to a single variable
+**Status:** **fixed upstream in openusd 0.6.0** — the reproduction below now
+reports 1 target for the variant case, where 0.5.0 (and the interim fork) reported
+0. On the island this recovers all six lost `PointInstancer`s — the
+"has no `prototypes` targets" warnings are gone entirely, worth ~74 500 resident
+instances of bay cedar understory. `isBayCedarA1` alone imports at 136 133
+geometries / 4 060 638 triangles, against 136 124 / 4 058 910 before.
 
 ---
 

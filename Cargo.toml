@@ -14,16 +14,6 @@ tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
 rand = "0.9.2"
 
-# openusd 0.5.0 will not materialize a native instance's prototype when the
-# `instanceable` prim is composed in through a reference on a non-root prim,
-# which is the shape `usd/island.usda` is authored in — see
-# `docs/issues/openusd-prototype-through-nested-reference.md`. Patched to a fork
-# carrying the fix so the island can be read from its own root layer instead of
-# through a hand-authored one. Applies to crust-core's dependency and
-# crust-render's dev-dependency alike, so neither manifest has to know.
-[patch.crates-io]
-openusd = { git = "https://github.com/doubleailes/openusd", rev = "45fc15c62581cf9957ad237b5476ea0665aee50c" }
-
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.
 # Every one of those is a small `#[inline]` function whose whole point is

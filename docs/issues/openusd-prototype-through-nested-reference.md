@@ -3,13 +3,12 @@
 **Target repository:** <https://github.com/mxpv/openusd>
 **Affected version:** `openusd` 0.5.0 (latest on crates.io as of 2026-06)
 **Severity:** blocker for reading production stages — silently yields empty geometry
-**Status:** **fixed** on <https://github.com/doubleailes/openusd> branch
-`a-native-instance's-prototype-does-not-materialize-when-the-instanceable-prim-is-composed-through-a-reference-on-a-non-root-prim`,
-commit `45fc15c62581cf9957ad237b5476ea0665aee50c` — verified against the
-reproduction below (all three nested cases now materialize the prototype). That
-commit is based on a later openusd than 0.5.0, so it also carries unrelated API
-changes: `Stage::prim_at` is renamed `Stage::prim`, and `sdf::Value::Token`
-carries a `tf::Token` rather than a `String`.
+**Status:** **fixed upstream in openusd 0.6.0** — verified against the
+reproduction below; all three nested cases now materialize the prototype. The
+workspace tracks `openusd = "0.6"` from crates.io and no longer patches to a
+fork. 0.6.0 also renames `Stage::prim_at` to `Stage::prim` and gives
+`sdf::Value::Token` an interned `tf::Token` in place of a `String`, which is what
+an importer written against 0.5.0 has to migrate.
 
 ---
 

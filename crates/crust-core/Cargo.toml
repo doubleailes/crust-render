@@ -19,7 +19,7 @@ crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
-openusd = { version = "0.5", default-features = false, features = ["geom", "lux", "shade", "render"] }
+openusd = { version = "0.6", default-features = false, features = ["geom", "lux", "shade", "render"] }
 
 [dev-dependencies]
 criterion = "0.8"

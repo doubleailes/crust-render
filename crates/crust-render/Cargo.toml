@@ -25,7 +25,7 @@ exr.workspace = true
 # embedded base cage against the geometry it is bound to, `proto_probe` /
 # `rel_probe` to diagnose composition bugs against the prims the importer sees.
 [dev-dependencies]
-openusd = { version = "0.5", default-features = false, features = ["geom"] }
+openusd = { version = "0.6", default-features = false, features = ["geom"] }
 
 [dependencies.tracing-subscriber]
 version = "0.3.20"

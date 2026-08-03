@@ -7,13 +7,15 @@ under `repro/` and the driver output taken from an actual run.
 
 | report | target | status |
 | --- | --- | --- |
-| [openusd: prototype does not materialize through a non-root reference](openusd-prototype-through-nested-reference.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | fixed in the [doubleailes fork](https://github.com/doubleailes/openusd) (`45fc15c`), which the workspace now patches to |
-| [openusd: relationship targets lost through a variant inside a prototype](openusd-relationship-targets-lost-through-variant-in-prototype.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | still open — reproduces on `45fc15c` |
+| [openusd: prototype does not materialize through a non-root reference](openusd-prototype-through-nested-reference.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | fixed in [0.6.0](https://github.com/mxpv/openusd/releases/tag/v0.6.0) |
+| [openusd: relationship targets lost through a variant inside a prototype](openusd-relationship-targets-lost-through-variant-in-prototype.md) | [mxpv/openusd](https://github.com/mxpv/openusd) | fixed in [0.6.0](https://github.com/mxpv/openusd/releases/tag/v0.6.0) |
 
 Both were found while adding Ptex support and rendering Disney's Moana Island
-Scene; together they account for essentially all of the geometry the importer
-loses on that stage. See "Known incomplete work" in `CLAUDE.md` for how the
-importer works around them today.
+Scene, and both are fixed in openusd 0.6.0, which the workspace now tracks from
+crates.io. They are kept as a record of what the symptoms looked like from the
+consumer side: in each case the data was present and readable, the API reported
+success, and the importer simply saw less than was there. Nothing errored, which
+is what made them expensive to find and worth writing down.
 
 Not filed here, because it was our own bug rather than a library one: Ptex face
 tables were wired only through the direct-mesh import path and not through
