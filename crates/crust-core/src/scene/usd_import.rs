@@ -17,7 +17,7 @@ use crate::light::{
 };
 use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::ray::MASK_ALL;
+use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
 use crate::rt_world::{FaceMap, FanSlice, WorldBuilder};
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
@@ -239,9 +239,9 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 }
             }
         } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
-            emit_sphere_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+            emit_sphere_light(&mut ctx.world, &mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
-            emit_rect_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+            emit_rect_light(&mut ctx.world, &mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
             emit_distant_light(&mut ctx.lights, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
@@ -736,6 +736,20 @@ fn prim_ray_mask(prim: &Prim) -> u32 {
     custom_i32(prim, "crust:rayMask")
         .map(|m| m as u32)
         .unwrap_or(MASK_ALL)
+}
+
+/// Ray mask for a light's *source geometry*. Industry default (Arnold,
+/// RenderMan, Karma): the surface is invisible to camera rays — lights sit
+/// in frame without showing up — while shadow and indirect rays still see
+/// it, so occlusion and the bounce side of MIS are unchanged.
+/// `crust:light:cameraVisible = true` opts the surface back in (classic
+/// Cornell-box look); an authored `crust:rayMask` wins outright.
+fn light_ray_mask(prim: &Prim) -> u32 {
+    if let Some(m) = custom_i32(prim, "crust:rayMask") {
+        return m as u32;
+    }
+    let visible = custom_bool(prim, "crust:light:cameraVisible").unwrap_or(false);
+    MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { 0 }
 }
 
 /// `crust:motion:translate` — a world-space translation the prim moves
@@ -2245,6 +2259,7 @@ fn lux_emission(light: &impl UsdLight) -> Vec3A {
 fn emit_sphere_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,
+    prim: &Prim,
     light: &SphereLight,
     world_xf: GMat4,
 ) {
@@ -2253,16 +2268,18 @@ fn emit_sphere_light(
     let pos_v = world_xf.transform_point3(Vec3::ZERO);
     let position = Vec3A::new(pos_v.x, pos_v.y, pos_v.z);
 
-    // The visible sphere geometry and the AreaLight share one surface;
-    // the integrator attributes a bounce hit to the light by the
-    // geometry id the attach returns.
+    // The sphere geometry and the AreaLight share one surface; the
+    // integrator attributes a bounce hit to the light by the geometry id
+    // the attach returns. The mask hides the surface from camera rays
+    // unless the prim opts in (see light_ray_mask).
     let material = Arc::new(Emissive::new(effective));
-    let geom_id = world.attach(
+    let geom_id = world.attach_masked(
         Geometry::Sphere {
             center: position,
             radius,
         },
         material.clone(),
+        light_ray_mask(prim),
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape {
@@ -2281,6 +2298,7 @@ fn emit_sphere_light(
 fn emit_rect_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,
+    prim: &Prim,
     light: &RectLight,
     world_xf: GMat4,
 ) {
@@ -2299,9 +2317,10 @@ fn emit_rect_light(
     let edge_v = Vec3A::new(ev.x, ev.y, ev.z);
     let normal = Vec3A::new(nz.x, nz.y, nz.z);
 
-    // The visible geometry (one mesh: two triangles spanning the
-    // rectangle) and the AreaLight share one surface; bounce hits are
-    // attributed to the light by the geometry id.
+    // The geometry (one mesh: two triangles spanning the rectangle) and
+    // the AreaLight share one surface; bounce hits are attributed to the
+    // light by the geometry id. The mask hides the surface from camera
+    // rays unless the prim opts in (see light_ray_mask).
     let material = Arc::new(Emissive::new(effective));
     let (c00, c10, c11, c01) = (
         origin,
@@ -2309,13 +2328,14 @@ fn emit_rect_light(
         origin + edge_u + edge_v,
         origin + edge_v,
     );
-    let geom_id = world.attach(
+    let geom_id = world.attach_masked(
         Geometry::TriangleMesh {
             vertices: vec![c00, c10, c11, c01],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,
         },
         material.clone(),
+        light_ray_mask(prim),
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(RectShape::new(origin, edge_u, edge_v, normal)),

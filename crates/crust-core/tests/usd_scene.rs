@@ -365,6 +365,47 @@ fn loads_curves_usda() {
     assert!(scene.world.intersect(&wide_up, 0.001, f32::INFINITY).is_none());
 }
 
+/// Light source geometry is camera-invisible by default (the industry
+/// convention); `crust:light:cameraVisible` opts a light back in, and an
+/// authored `crust:rayMask` wins outright. Shadow and indirect rays see
+/// every light either way — occlusion and the bounce side of MIS depend
+/// on that.
+#[test]
+fn light_geometry_camera_visibility() {
+    let scene = Scene::from_usd(&sample("light_visibility.usda"))
+        .expect("failed to open light_visibility.usda");
+
+    // Floor + three light spheres, all three in the light list.
+    assert_eq!(scene.world.count(), 4, "expected 4 geometries, got {}", scene.world.count());
+    assert_eq!(scene.lights.count(), 3, "expected 3 lights, got {}", scene.lights.count());
+
+    // Each light: radius 0.5 sphere at (x, 2, 0); a ray straight down from
+    // (x, 5, 0) meets its top at t = 2.5 and the floor at t = 5.
+    let down = |x: f32| {
+        crust_core::Ray::new(crust_core::Vec3A::new(x, 5.0, 0.0), -crust_core::Vec3A::Y)
+    };
+    let hit_t = |x: f32, mask: u32| {
+        scene
+            .world
+            .intersect(&down(x).with_mask(mask), 0.001, f32::INFINITY)
+            .expect("the floor backstops every ray")
+            .rec
+            .t
+    };
+
+    // Camera rays: the unauthored light is skipped (floor at t=5); the
+    // bool-visible and rayMask-override lights are hit (t=2.5).
+    assert!((hit_t(-3.0, crust_core::MASK_CAMERA) - 5.0).abs() < 1e-3);
+    assert!((hit_t(0.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
+    assert!((hit_t(3.0, crust_core::MASK_CAMERA) - 2.5).abs() < 1e-3);
+
+    // Shadow and indirect rays see all three light surfaces.
+    for x in [-3.0, 0.0, 3.0] {
+        assert!((hit_t(x, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
+        assert!((hit_t(x, crust_core::MASK_INDIRECT) - 2.5).abs() < 1e-3);
+    }
+}
+
 #[test]
 fn loads_motionblur_usda() {
     let scene =
