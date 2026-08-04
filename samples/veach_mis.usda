@@ -29,12 +29,16 @@ def Xform "World"
     # -------------------------------------------------------------------
     # Lights: equal power, so radiance x radius^2 is constant (~21.9).
     # Tinted so each reflection band is attributable to its light.
+    # All four author crust:rayMask = 7 so their surfaces stay visible to the
+    # camera (a light's shape is hidden from primary rays by default): seeing
+    # the four source sizes above the plate stack is the point of the scene.
     # -------------------------------------------------------------------
     def SphereLight "LightTiny"
     {
         float inputs:radius = 0.05
         color3f inputs:color = (1.0, 0.45, 0.35)
         float inputs:intensity = 8748
+        int crust:rayMask = 7
         double3 xformOp:translate = (-3.375, 6, -3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -44,6 +48,7 @@ def Xform "World"
         float inputs:radius = 0.15
         color3f inputs:color = (1.0, 0.85, 0.45)
         float inputs:intensity = 972
+        int crust:rayMask = 7
         double3 xformOp:translate = (-1.125, 6, -3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -53,6 +58,7 @@ def Xform "World"
         float inputs:radius = 0.45
         color3f inputs:color = (0.45, 1.0, 0.55)
         float inputs:intensity = 108
+        int crust:rayMask = 7
         double3 xformOp:translate = (1.125, 6, -3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -62,6 +68,7 @@ def Xform "World"
         float inputs:radius = 1.35
         color3f inputs:color = (0.4, 0.6, 1.0)
         float inputs:intensity = 12
+        int crust:rayMask = 7
         double3 xformOp:translate = (3.375, 6, -3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }

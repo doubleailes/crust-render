@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    doc = "Light surface camera visibility. Two identical SphereLights sit side by side in front of a back wall: the left one authors nothing, so its emissive surface is hidden from camera rays (the industry default — a light placed in shot does not photograph its own shape), and the right one authors crust:rayMask = 7 to put its surface back in the picture. Both light the scene identically; both still occlude, still show in bounces, and still carry the bounce half of MIS. Exercises the light-surface ray-mask default and its opt-in."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Back wall at z = -5, so a camera ray that passes *through* the hidden
+    # light has something to land on. The test asserts on that distance.
+    def Mesh "BackWall"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, -1, -5), (6, -1, -5), (6, 6, -5), (-6, 6, -5)]
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -5), (6, 0, -5), (6, 0, 7), (-6, 0, 7)]
+    }
+
+    # No crust:rayMask: the surface defaults to every ray category except the
+    # camera. A camera ray down x = -1.5 passes through it and reaches the
+    # back wall; a shadow or indirect ray down the same line hits it at t=4.5.
+    def SphereLight "HiddenLight"
+    {
+        float inputs:radius = 0.5
+        color3f inputs:color = (5, 7, 14)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (-1.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # crust:rayMask = 7 (camera | shadow | indirect) restores the historical
+    # behaviour: this light's surface is photographed like any other geometry.
+    def SphereLight "VisibleLight"
+    {
+        float inputs:radius = 0.5
+        color3f inputs:color = (14, 9, 5)
+        float inputs:intensity = 1.0
+        int crust:rayMask = 7
+        double3 xformOp:translate = (1.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}

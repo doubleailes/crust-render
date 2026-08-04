@@ -1002,3 +1002,102 @@ def Xform "World"
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A UsdLux light's emissive surface is hidden from camera rays by default —
+/// the industry convention, since rigs get placed in shot — but stays visible
+/// to shadow and indirect rays. That last part is load-bearing rather than
+/// cosmetic: `AreaLight`'s `geom_id` is how a bounce ray's arrival at the light
+/// is attributed to it, so hiding the surface from `MASK_INDIRECT` would drop
+/// the bounce half of MIS. Authoring `crust:rayMask` overrides the default.
+///
+/// The `MASK_INDIRECT` assertions below are the first anywhere in the
+/// workspace; nothing previously covered that category through a mask.
+#[test]
+fn light_surface_is_hidden_from_the_camera_unless_authored() {
+    let scene = Scene::from_usd(&sample("light_visibility.usda"))
+        .expect("failed to open light_visibility.usda");
+
+    // Back wall, floor, and the two light spheres — masking a surface must not
+    // stop it being attached.
+    assert_eq!(
+        scene.world.count(),
+        4,
+        "expected 4 geometries (wall, floor, 2 light spheres), got {}",
+        scene.world.count()
+    );
+    // ...nor drop the light-list entry that actually illuminates the scene.
+    assert_eq!(
+        scene.lights.count(),
+        2,
+        "expected 2 sphere lights, got {}",
+        scene.lights.count()
+    );
+
+    // Down the line x = -1.5, y = 1: the "HiddenLight" sphere (r = 0.5,
+    // centred at z = 0) sits at t = 4.5 and the back wall (z = -5) at t = 10.
+    let hidden = crust_core::Ray::new(
+        crust_core::Vec3A::new(-1.5, 1.0, 5.0),
+        -crust_core::Vec3A::Z,
+    );
+
+    let cam = scene
+        .world
+        .intersect(
+            &hidden.clone().with_mask(crust_core::MASK_CAMERA),
+            0.001,
+            f32::INFINITY,
+        )
+        .expect("camera ray passes the light and reaches the back wall");
+    assert!(
+        (cam.rec.t - 10.0).abs() < 1e-3,
+        "camera ray should pass the light surface and hit the wall at t=10, got {}",
+        cam.rec.t
+    );
+
+    // The bounce half of MIS depends on this hit existing.
+    let indirect = scene
+        .world
+        .intersect(
+            &hidden.clone().with_mask(crust_core::MASK_INDIRECT),
+            0.001,
+            f32::INFINITY,
+        )
+        .expect("indirect ray must still find the light surface");
+    assert!(
+        (indirect.rec.t - 4.5).abs() < 1e-3,
+        "indirect ray should hit the light surface at t=4.5, got {}",
+        indirect.rec.t
+    );
+
+    // And NEE occlusion is unchanged from before the default flipped.
+    let shadow = scene
+        .world
+        .intersect(
+            &hidden.clone().with_mask(crust_core::MASK_SHADOW),
+            0.001,
+            f32::INFINITY,
+        )
+        .expect("shadow ray must still find the light surface");
+    assert!(
+        (shadow.rec.t - 4.5).abs() < 1e-3,
+        "shadow ray should hit the light surface at t=4.5, got {}",
+        shadow.rec.t
+    );
+
+    // "VisibleLight" authors crust:rayMask = 7, so its surface is photographed
+    // like any other geometry: the camera ray stops at the sphere, not the wall.
+    let opted_in = crust_core::Ray::new(
+        crust_core::Vec3A::new(1.5, 1.0, 5.0),
+        -crust_core::Vec3A::Z,
+    )
+    .with_mask(crust_core::MASK_CAMERA);
+    let hit = scene
+        .world
+        .intersect(&opted_in, 0.001, f32::INFINITY)
+        .expect("an opted-in light surface is visible to the camera");
+    assert!(
+        (hit.rec.t - 4.5).abs() < 1e-3,
+        "camera ray should hit the opted-in light surface at t=4.5, got {}",
+        hit.rec.t
+    );
+}

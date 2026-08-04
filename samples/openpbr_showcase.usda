@@ -216,13 +216,17 @@ def Xform "World"
     # emitted `color=(15,15,15)` and `color=(18,12,9)` — encode that as
     # color*intensity with intensity=1 so the effective radiance is
     # unchanged. Each SphereLight is also rendered as visible geometry
-    # (the importer adds both a `Light` entry and a sphere hittable).
+    # (the importer adds both a `Light` entry and a sphere hittable) —
+    # but a light's surface is hidden from camera rays by default, so each
+    # authors crust:rayMask = 7 (camera | shadow | indirect) to be seen
+    # directly. Both spheres are in frame above the material row.
     # ---------------------------------------------------------------------
     def SphereLight "Light1"
     {
         float inputs:radius = 1.5
         color3f inputs:color = (15, 15, 15)
         float inputs:intensity = 1.0
+        int crust:rayMask = 7
         double3 xformOp:translate = (-2, 8, 3)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -232,6 +236,7 @@ def Xform "World"
         float inputs:radius = 1.5
         color3f inputs:color = (18, 12, 9)
         float inputs:intensity = 1.0
+        int crust:rayMask = 7
         double3 xformOp:translate = (4, 8, -2)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }

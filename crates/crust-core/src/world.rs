@@ -15,7 +15,13 @@ fn add_sphere(world: &mut WorldBuilder, center: Vec3A, radius: f32, material: Ar
 
 /// Adds a sphere light to the scene: emissive sphere geometry in `world`
 /// plus an `AreaLight` over the same surface in `lights`, tied together by
-/// the geometry id (Cornell-box semantics — one surface, both roles).
+/// the geometry id (one surface, both roles).
+///
+/// Unlike a USD light, this surface stays **camera-visible**. That asymmetry is
+/// deliberate: the USD importer hides a light's shape by default because a prim
+/// can author `crust:rayMask` to opt back in, whereas this scene is built in
+/// Rust with no prim and no attribute, so hiding these spheres would leave no
+/// way to get them back.
 fn add_sphere_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,

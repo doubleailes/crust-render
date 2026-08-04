@@ -40,11 +40,15 @@ used at their authored value with no such conversion.
 
 ### Requirement: Light schema mapping
 
-The importer SHALL map `UsdLuxSphereLight` to an `Emissive` sphere that is both a
-light and visible geometry, and `UsdLuxRectLight` to two emissive triangles
-plus an `AreaLight(RectShape)` (local XY plane, emitting along -Z per UsdLux —
-effectively one-sided). Other lux schemas (`DiskLight`, `DistantLight`,
-`DomeLight`, `CylinderLight`) SHALL warn once and be skipped.
+The importer SHALL map `UsdLuxSphereLight` to an `Emissive` sphere and
+`UsdLuxRectLight` to two emissive triangles plus an `AreaLight(RectShape)`
+(local XY plane, emitting along -Z per UsdLux — effectively one-sided). Each
+becomes both a light-list entry and scene geometry, whose emissive surface is
+attached visible to every ray category except the camera unless the prim
+authors `crust:rayMask` (see the `hide-light-surface-from-camera` change).
+`UsdLuxDistantLight` and `UsdLuxDomeLight` SHALL be mapped as light-list-only
+entries with no scene geometry. Other lux schemas (`DiskLight`,
+`CylinderLight`) SHALL warn once and be skipped.
 
 Every mapped light's color (`inputs:color` on any of `UsdLuxDistantLight`,
 `UsdLuxDomeLight`, `UsdLuxSphereLight`, `UsdLuxRectLight`) SHALL be treated as
@@ -64,8 +68,7 @@ applied, since it is authored in the rendering color space.
 
 #### Scenario: Unsupported lux light
 
-- **WHEN** a `DiskLight`, `DistantLight`, `DomeLight`, or `CylinderLight` prim
-  is traversed
+- **WHEN** a `DiskLight` or `CylinderLight` prim is traversed
 - **THEN** a warning is emitted and the light is skipped
 
 #### Scenario: Light color passes through unconverted

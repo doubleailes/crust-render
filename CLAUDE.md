@@ -329,9 +329,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
   `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
-  emissive geometry (Cornell-box semantics: a light is both light and visible object) —
-  the `AreaLight` records the geometry's `geom_id`, which is how the integrator
-  attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
+  emissive geometry — the `AreaLight` records the geometry's `geom_id`, which is how the
+  integrator attributes a bounce-hit emissive surface to its light
+  (`LightList::find_by_geom`). That surface is attached **camera-hidden by default**
+  (`MASK_ALL & !MASK_CAMERA`): a light's shape is not photographed unless the prim
+  authors `crust:rayMask`, matching the convention that rigs may sit inside the frustum.
+  The *indirect* bit is load-bearing and must stay set — `find_by_geom` feeding
+  `bounce_emission_weight` is the bounce half of MIS, so hiding a light from bounce rays
+  would delete that half while NEE keeps its down-weighted `light_weight` factor (energy
+  loss growing with `bounce_pdf / light_pdf`, plus a sky-gradient hole where the light
+  was, since `AreaLight` implements no `Light::escaped`). The camera bit is the only one
+  no estimator depends on: the direct-view term is the `prev == None` branch, unweighted.
   **NEE samples one light per vertex** (uniform pick), so the light strategy's MIS
   density is `light.pdf / n_lights` — the bounce side evaluates the exact same
   expression for the light it hit; keep the two sides identical or emission is
@@ -431,7 +439,10 @@ Schema mapping:
   - Non-invertible instance placements (a zero scale — a common "hide this" idiom) are
     skipped: `rt::Geometry::Instance` requires an invertible transform.
 - Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2
-  indirect — default all) to hide from ray categories, and `crust:motion:translate`
+  indirect — default all) to hide from ray categories. It is honoured on `SphereLight` /
+  `RectLight` prims too, where the *default* differs: a light's emissive surface defaults
+  to all categories **except** camera (see the `Light` section), so `crust:rayMask = 7`
+  is how you put a light back in the picture. Also `crust:motion:translate`
   (float3, world-space) to streak through that translation over the shutter (transform
   motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
@@ -548,7 +559,10 @@ Schema mapping:
     general texture support should grow through.
 - `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
   `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
-  emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
+  emitting along -Z per UsdLux; effectively one-sided). In both cases the emissive surface
+  is attached hidden from camera rays unless the prim authors `crust:rayMask` — see the
+  `Light` section for why only that bit comes off. Sample scenes:
+  `samples/rectlight.usda`, `samples/light_visibility.usda` (both defaults side by side).
   Other lux types (`DiskLight`, `CylinderLight`) warn once and are skipped.
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
@@ -610,9 +624,12 @@ Ptex over the whole island is 2 576 238 faces: **4.58 GiB** at the default 32x32
 cap is not an optimisation but the thing that makes the island possible.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust
-has no per-light camera-visibility, so both light the scene (the sky is doubled) and both
-textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB. Dropping
-`sky_dome_cam_llc` (`active = false`) is the first lever if memory or exposure matters.
+has no way to disable a light's *contribution*, so both light the scene (the sky is
+doubled) and both textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks
+at ~11 GiB. Dropping `sky_dome_cam_llc` (`active = false`) is the first lever if memory or
+exposure matters. Note the `crust:rayMask` camera-visibility default on light *surfaces*
+does not help here: a `DomeLight` carries no geometry at all, so there is no surface to
+hide — what is missing is a per-light enable, which is a different axis and still open.
 
 ## Known incomplete work
 

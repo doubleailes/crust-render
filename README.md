@@ -93,6 +93,9 @@ cubic bezier/bspline/catmullRom spans flatten to polylines) — see
   (`samples/motionblur.usda`).
 - `crust:rayMask = <int>` — **ray visibility mask** (bit 0 camera, bit 1
   shadow, bit 2 indirect): e.g. `6` is a shadow-caster hidden from the camera.
+  Also honoured on `SphereLight`/`RectLight` prims, where the default is
+  "everything except camera" rather than "everything", so `7` is what makes a
+  light's surface directly visible.
 
 ### 🎨 Materials
 
@@ -113,12 +116,24 @@ Unbound geometry falls back to a grey diffuse OpenPBR.
 
 ### 💡 Lights
 
-`UsdLuxSphereLight` maps to an `Emissive` sphere that acts as both light and
-visible geometry (matching classic Cornell-box scene semantics).
+`UsdLuxSphereLight` maps to an `Emissive` sphere plus an `AreaLight`;
 `UsdLuxRectLight` maps to two emissive triangles + an `AreaLight` (local XY
 plane, emitting along -Z per UsdLux; effectively one-sided) — see
-`samples/rectlight.usda`. Other lux types (`DiskLight`, `DistantLight`,
-`DomeLight`, `CylinderLight`) warn once and are skipped — follow-up work.
+`samples/rectlight.usda`.
+
+In both cases the light's emissive **surface is hidden from camera rays by
+default**, so a light placed in shot does not photograph its own shape — the
+usual production convention, and what lets you build lighting rigs that no
+real set could hold. The surface stays visible to shadow and indirect rays, so
+it still occludes, still shows up in reflections, and still carries the bounce
+half of MIS. Author `int crust:rayMask = 7` on the light prim to make it
+directly visible again; `samples/light_visibility.usda` shows both defaults
+side by side.
+
+`UsdLuxDistantLight` and `UsdLuxDomeLight` are supported as light-list-only
+entries with no geometry (a dome replaces the built-in sky gradient and can
+carry a lat-long environment map) — see `samples/domelight.usda`. `DiskLight`
+and `CylinderLight` warn once and are skipped — follow-up work.
 
 ### 🌫️ Volumes
 

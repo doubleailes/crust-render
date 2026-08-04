@@ -31,12 +31,18 @@ def Xform "World"
 
     # Rect area light in front of and above the ball, emitting along its
     # local -Z (toward the ball, which sits further down -Z).
+    #
+    # crust:rayMask = 7 (camera | shadow | indirect) keeps the light's own
+    # surface visible to the camera. Without it a light's surface defaults to
+    # hidden from camera rays, and this light's lower edge is inside the
+    # frustum — the point here is to show the RectShape, so it opts in.
     def RectLight "KeyLight"
     {
         float inputs:width = 2
         float inputs:height = 1.5
         color3f inputs:color = (8, 8, 8)
         float inputs:intensity = 1.0
+        int crust:rayMask = 7
         double3 xformOp:translate = (0, 2.5, 4)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }

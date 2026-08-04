@@ -44,12 +44,16 @@ def Xform "World"
     }
 
     # Ceiling light, rotated so its local -Z emits downward.
+    # crust:rayMask = 7 keeps the light's surface visible to the camera; the
+    # default hides a light's shape from primary rays, and this panel reads as
+    # a bright patch just under the ceiling in frame.
     def RectLight "CeilingLight"
     {
         float inputs:width = 1.6
         float inputs:height = 1.6
         color3f inputs:color = (10, 10, 10)
         float inputs:intensity = 1.0
+        int crust:rayMask = 7
         float xformOp:rotateX = -90
         double3 xformOp:translate = (0, 3.98, 0)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]

@@ -17,7 +17,7 @@ use crate::light::{
 };
 use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::ray::MASK_ALL;
+use crate::ray::{MASK_ALL, MASK_CAMERA};
 use crate::rt_world::{FaceMap, FanSlice, WorldBuilder};
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
@@ -239,9 +239,21 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 }
             }
         } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
-            emit_sphere_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+            emit_sphere_light(
+                &mut ctx.world,
+                &mut ctx.lights,
+                &light,
+                this_world,
+                light_ray_mask(&prim),
+            );
         } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
-            emit_rect_light(&mut ctx.world, &mut ctx.lights, &light, this_world);
+            emit_rect_light(
+                &mut ctx.world,
+                &mut ctx.lights,
+                &light,
+                this_world,
+                light_ray_mask(&prim),
+            );
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
             emit_distant_light(&mut ctx.lights, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
@@ -736,6 +748,35 @@ fn prim_ray_mask(prim: &Prim) -> u32 {
     custom_i32(prim, "crust:rayMask")
         .map(|m| m as u32)
         .unwrap_or(MASK_ALL)
+}
+
+/// `crust:rayMask` for a UsdLux light's emissive *surface* — same attribute as
+/// [`prim_ray_mask`], different default.
+///
+/// A light's shape is not photographed unless it is asked for: rigs are placed
+/// inside the frustum and built in ways no real set could hold, and the camera
+/// is expected not to see them. So the surface defaults to every category
+/// *except* the camera, and authoring `crust:rayMask` overrides that verbatim
+/// (`7` puts the light back in the picture).
+///
+/// Only the camera bit comes off, and that is a correctness constraint rather
+/// than a preference. `AreaLight` records this geometry's `geom_id`, and
+/// `LightList::find_by_geom` feeding `bounce_emission_weight` is the *bounce
+/// half* of MIS — hiding the surface from `MASK_INDIRECT` would delete that
+/// half while NEE keeps its down-weighted `light_weight` factor, losing energy
+/// as `bounce_pdf` outruns `light_pdf` and leaving a sky-gradient hole where
+/// the light was (`AreaLight` implements no `Light::escaped`). `MASK_SHADOW`
+/// stays set to preserve NEE occlusion exactly as it was. The camera term is
+/// the `prev == None` branch of the forward walk, which carries no MIS weight,
+/// so dropping that bit alone is safe by construction.
+///
+/// Written as "all except camera" rather than `MASK_SHADOW | MASK_INDIRECT` so
+/// that a ray category added later defaults to visible, keeping the "everything
+/// unless stated" meaning [`MASK_ALL`] already carries.
+fn light_ray_mask(prim: &Prim) -> u32 {
+    custom_i32(prim, "crust:rayMask")
+        .map(|m| m as u32)
+        .unwrap_or(MASK_ALL & !MASK_CAMERA)
 }
 
 /// `crust:motion:translate` — a world-space translation the prim moves
@@ -2247,22 +2288,27 @@ fn emit_sphere_light(
     lights: &mut LightList,
     light: &SphereLight,
     world_xf: GMat4,
+    mask: u32,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let effective = lux_emission(light);
     let pos_v = world_xf.transform_point3(Vec3::ZERO);
     let position = Vec3A::new(pos_v.x, pos_v.y, pos_v.z);
 
-    // The visible sphere geometry and the AreaLight share one surface;
-    // the integrator attributes a bounce hit to the light by the
-    // geometry id the attach returns.
+    // The sphere geometry and the AreaLight share one surface; the
+    // integrator attributes a bounce hit to the light by the geometry id
+    // the attach returns. `mask` hides that surface from the camera unless
+    // the prim asked otherwise (see `light_ray_mask`) — the shadow and
+    // indirect bits stay set, so NEE and the bounce half of MIS are
+    // untouched.
     let material = Arc::new(Emissive::new(effective));
-    let geom_id = world.attach(
+    let geom_id = world.attach_masked(
         Geometry::Sphere {
             center: position,
             radius,
         },
         material.clone(),
+        mask,
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape {
@@ -2283,6 +2329,7 @@ fn emit_rect_light(
     lights: &mut LightList,
     light: &RectLight,
     world_xf: GMat4,
+    mask: u32,
 ) {
     let width = attr_f32(&light.width_attr()).unwrap_or(1.0);
     let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
@@ -2299,9 +2346,11 @@ fn emit_rect_light(
     let edge_v = Vec3A::new(ev.x, ev.y, ev.z);
     let normal = Vec3A::new(nz.x, nz.y, nz.z);
 
-    // The visible geometry (one mesh: two triangles spanning the
-    // rectangle) and the AreaLight share one surface; bounce hits are
-    // attributed to the light by the geometry id.
+    // The geometry (one mesh: two triangles spanning the rectangle) and the
+    // AreaLight share one surface; bounce hits are attributed to the light by
+    // the geometry id. `mask` hides that surface from the camera unless the
+    // prim asked otherwise (see `light_ray_mask`) — the shadow and indirect
+    // bits stay set, so NEE and the bounce half of MIS are untouched.
     let material = Arc::new(Emissive::new(effective));
     let (c00, c10, c11, c01) = (
         origin,
@@ -2309,13 +2358,14 @@ fn emit_rect_light(
         origin + edge_u + edge_v,
         origin + edge_v,
     );
-    let geom_id = world.attach(
+    let geom_id = world.attach_masked(
         Geometry::TriangleMesh {
             vertices: vec![c00, c10, c11, c01],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,
         },
         material.clone(),
+        mask,
     );
     lights.add(Arc::new(AreaLight::new(
         Box::new(RectShape::new(origin, edge_u, edge_v, normal)),

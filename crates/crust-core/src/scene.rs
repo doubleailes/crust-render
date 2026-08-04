@@ -60,8 +60,10 @@ impl Scene {
     /// * `UsdGeomMesh` → triangulated BVH with world-baked vertices. Bound
     ///   material resolved via `MaterialBindingAPI`.
     /// * `UsdGeomSphere` → analytic `crust::Sphere`.
-    /// * `UsdLuxSphereLight` → an `Emissive` sphere that acts as both
-    ///   geometry and light. Other lux schemas warn and are skipped.
+    /// * `UsdLuxSphereLight` → an `Emissive` sphere that both lights and is
+    ///   scene geometry, though its surface is hidden from camera rays unless
+    ///   the prim authors `crust:rayMask`. Other lux schemas warn and are
+    ///   skipped.
     /// * `UsdRenderSettings` (plus `crust:*` custom attrs for spp / depth
     ///   / etc.) → `RenderSettings`. Falls back to sensible defaults.
     pub fn from_usd(path: &std::path::Path) -> Result<Scene, crate::Error> {

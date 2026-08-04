@@ -151,8 +151,14 @@ pub trait Light: Send + Sync {
 }
 
 /// A geometric area light: any [`LightShape`] paired with the [`Emissive`]
-/// material its scene geometry carries (Cornell-box semantics — the same
-/// surface is both light and visible object).
+/// material its scene geometry carries — one surface serving both roles.
+///
+/// Whether that surface is *photographed* is a separate question from whether
+/// it lights: the USD importer attaches a light's geometry hidden from camera
+/// rays by default (`crust:rayMask` opts back in), while keeping it visible to
+/// shadow and indirect rays. The indirect bit matters here — the `geom_id` below
+/// is how a bounce ray's arrival at this light is attributed to it, which is the
+/// bounce half of MIS.
 pub struct AreaLight {
     shape: Box<dyn LightShape>,
     material: Arc<Emissive>,
