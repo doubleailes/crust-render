@@ -14,7 +14,7 @@ traversal-stats = ["crust-rt/traversal-stats"]
 
 [dependencies]
 utils = { path = "../utils" }
-openqmc = { path = "../openqmc-rs", package = "openqmc-rs" }
+openqmc-rs = "0.1"
 crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
