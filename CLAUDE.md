@@ -329,7 +329,9 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
   `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
-  emissive geometry (Cornell-box semantics: a light is both light and visible object) —
+  emissive geometry — masked out of **camera** rays by default (the industry convention:
+  a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
+  an authored `crust:rayMask` wins outright, and shadow/indirect rays always see it) —
   the `AreaLight` records the geometry's `geom_id`, which is how the integrator
   attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
   **NEE samples one light per vertex** (uniform pick), so the light strategy's MIS
@@ -431,7 +433,10 @@ Schema mapping:
   - Non-invertible instance placements (a zero scale — a common "hide this" idiom) are
     skipped: `rt::Geometry::Instance` requires an invertible transform.
 - Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2
-  indirect — default all) to hide from ray categories, and `crust:motion:translate`
+  indirect — default all, except **light** source geometry which defaults to shadow|indirect;
+  `crust:light:cameraVisible = 1` on a light prim re-adds the camera bit, an authored
+  `crust:rayMask` wins outright — sample: `samples/light_visibility.usda`) to hide from
+  ray categories, and `crust:motion:translate`
   (float3, world-space) to streak through that translation over the shutter (transform
   motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
@@ -549,6 +554,8 @@ Schema mapping:
 - `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
   `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
   emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
+  The source geometry is camera-invisible by default (`light_ray_mask`) — see the
+  `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
   Other lux types (`DiskLight`, `CylinderLight`) warn once and are skipped.
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude

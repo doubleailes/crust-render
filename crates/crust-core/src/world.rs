@@ -2,6 +2,7 @@ use crate::RenderSettings;
 use crate::camera::Camera;
 use crate::light::{AreaLight, LightList, SphereShape};
 use crate::material::{Emissive, Material, OpenPBR};
+use crate::ray::{MASK_INDIRECT, MASK_SHADOW};
 use crate::rt_world::{World, WorldBuilder};
 use crust_rt::Geometry;
 use glam::Vec3A;
@@ -15,7 +16,9 @@ fn add_sphere(world: &mut WorldBuilder, center: Vec3A, radius: f32, material: Ar
 
 /// Adds a sphere light to the scene: emissive sphere geometry in `world`
 /// plus an `AreaLight` over the same surface in `lights`, tied together by
-/// the geometry id (Cornell-box semantics — one surface, both roles).
+/// the geometry id (one surface, both roles). The geometry is masked out
+/// of camera rays — the industry default for light sources — while shadow
+/// and indirect rays still see it (occlusion and the bounce side of MIS).
 fn add_sphere_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,
@@ -24,7 +27,11 @@ fn add_sphere_light(
     radius: f32,
 ) {
     let material = Arc::new(Emissive::new(color));
-    let geom_id = world.attach(Geometry::Sphere { center, radius }, material.clone());
+    let geom_id = world.attach_masked(
+        Geometry::Sphere { center, radius },
+        material.clone(),
+        MASK_INDIRECT | MASK_SHADOW,
+    );
     lights.add(Arc::new(AreaLight::new(
         Box::new(SphereShape { center, radius }),
         material,

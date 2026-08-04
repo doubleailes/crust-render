@@ -113,12 +113,21 @@ Unbound geometry falls back to a grey diffuse OpenPBR.
 
 ### 💡 Lights
 
-`UsdLuxSphereLight` maps to an `Emissive` sphere that acts as both light and
-visible geometry (matching classic Cornell-box scene semantics).
-`UsdLuxRectLight` maps to two emissive triangles + an `AreaLight` (local XY
-plane, emitting along -Z per UsdLux; effectively one-sided) — see
-`samples/rectlight.usda`. Other lux types (`DiskLight`, `DistantLight`,
-`DomeLight`, `CylinderLight`) warn once and are skipped — follow-up work.
+`UsdLuxSphereLight` maps to an `Emissive` sphere + an `AreaLight` over the
+same surface. `UsdLuxRectLight` maps to two emissive triangles + an
+`AreaLight` (local XY plane, emitting along -Z per UsdLux; effectively
+one-sided) — see `samples/rectlight.usda`. Following the industry
+convention (Arnold, RenderMan, Karma), a light's source geometry is
+**invisible to camera rays by default** — park lights inside the frame
+without them showing up — while shadow and indirect rays still see it, so
+occlusion and reflections of lights are unchanged. Author
+`custom bool crust:light:cameraVisible = 1` on the light prim to render
+the source itself (the classic Cornell-box look), or author
+`crust:rayMask` for full per-category control (it wins outright when
+present). See `samples/light_visibility.usda` for all three spellings.
+`UsdLuxDistantLight` and `UsdLuxDomeLight` import as infinite lights with
+no scene geometry; `DiskLight` and `CylinderLight` warn once and are
+skipped — follow-up work.
 
 ### 🌫️ Volumes
 
