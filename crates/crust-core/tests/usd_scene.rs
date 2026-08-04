@@ -404,6 +404,16 @@ fn light_geometry_camera_visibility() {
         assert!((hit_t(x, crust_core::MASK_SHADOW) - 2.5).abs() < 1e-3);
         assert!((hit_t(x, crust_core::MASK_INDIRECT) - 2.5).abs() < 1e-3);
     }
+
+    // The default is subtractive (MASK_ALL & !MASK_CAMERA), not an
+    // enumeration of today's bits: a ray category that doesn't exist yet
+    // sees the default and bool-visible lights like any other geometry.
+    // The rayMask-override light authored an exact mask (7), so the future
+    // bit misses it and reaches the floor.
+    let future_bit = 1u32 << 3;
+    assert!((hit_t(-3.0, future_bit) - 2.5).abs() < 1e-3);
+    assert!((hit_t(0.0, future_bit) - 2.5).abs() < 1e-3);
+    assert!((hit_t(3.0, future_bit) - 5.0).abs() < 1e-3);
 }
 
 #[test]

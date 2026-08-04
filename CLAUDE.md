@@ -433,7 +433,7 @@ Schema mapping:
   - Non-invertible instance placements (a zero scale — a common "hide this" idiom) are
     skipped: `rt::Geometry::Instance` requires an invertible transform.
 - Any geometry prim may author `crust:rayMask` (int; bit 0 camera, bit 1 shadow, bit 2
-  indirect — default all, except **light** source geometry which defaults to shadow|indirect;
+  indirect — default all, except **light** source geometry which defaults to all-but-camera;
   `crust:light:cameraVisible = 1` on a light prim re-adds the camera bit, an authored
   `crust:rayMask` wins outright — sample: `samples/light_visibility.usda`) to hide from
   ray categories, and `crust:motion:translate`

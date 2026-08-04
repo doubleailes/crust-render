@@ -119,7 +119,7 @@ same surface. `UsdLuxRectLight` maps to two emissive triangles + an
 one-sided) — see `samples/rectlight.usda`. Following the industry
 convention (Arnold, RenderMan, Karma), a light's source geometry is
 **invisible to camera rays by default** — park lights inside the frame
-without them showing up — while shadow and indirect rays still see it, so
+without them showing up — while every other ray category still sees it, so
 occlusion and reflections of lights are unchanged. Author
 `custom bool crust:light:cameraVisible = 1` on the light prim to render
 the source itself (the classic Cornell-box look), or author

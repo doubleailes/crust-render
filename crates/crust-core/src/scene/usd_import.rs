@@ -17,7 +17,7 @@ use crate::light::{
 };
 use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
-use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
+use crate::ray::{MASK_ALL, MASK_CAMERA};
 use crate::rt_world::{FaceMap, FanSlice, WorldBuilder};
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
@@ -740,8 +740,10 @@ fn prim_ray_mask(prim: &Prim) -> u32 {
 
 /// Ray mask for a light's *source geometry*. Industry default (Arnold,
 /// RenderMan, Karma): the surface is invisible to camera rays — lights sit
-/// in frame without showing up — while shadow and indirect rays still see
-/// it, so occlusion and the bounce side of MIS are unchanged.
+/// in frame without showing up — while every other ray category still sees
+/// it, so occlusion and the bounce side of MIS are unchanged. The default is
+/// subtractive (`MASK_ALL & !MASK_CAMERA`), not an enumeration of the known
+/// bits, so a future ray category sees light geometry like any other.
 /// `crust:light:cameraVisible = true` opts the surface back in (classic
 /// Cornell-box look); an authored `crust:rayMask` wins outright.
 fn light_ray_mask(prim: &Prim) -> u32 {
@@ -749,7 +751,7 @@ fn light_ray_mask(prim: &Prim) -> u32 {
         return m as u32;
     }
     let visible = custom_bool(prim, "crust:light:cameraVisible").unwrap_or(false);
-    MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { 0 }
+    if visible { MASK_ALL } else { MASK_ALL & !MASK_CAMERA }
 }
 
 /// `crust:motion:translate` — a world-space translation the prim moves
