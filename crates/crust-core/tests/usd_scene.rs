@@ -1043,3 +1043,134 @@ def Xform "World"
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `samples/subdivision.usda`: five identical cube cages, four at
+/// `crust:subdivisionLevel` 0–3 and one fully edge-creased at level 3.
+/// Probed with rays rather than counts — the *shape* is what subdivision
+/// changes: the limit surface sags strictly inside the cage and rounds its
+/// corners away, while infinite creases pin the cage exactly.
+#[test]
+fn loads_subdivision_usda() {
+    let scene =
+        Scene::from_usd(&sample("subdivision.usda")).expect("failed to open subdivision.usda");
+
+    // 5 cubes + floor + rect-light mesh.
+    assert_eq!(
+        scene.world.count(),
+        7,
+        "expected 7 geometries (5 cubes, floor, rect-light mesh), got {}",
+        scene.world.count()
+    );
+
+    // Cube centers sit at x = -6 (L0), -3 (L1), 0 (L2), 3 (L3), 6 (creased),
+    // all spanning y in [0, 2]. Rays fire straight down from y = 8; the
+    // floor at y = 0 answers t = 8 for anything the cube no longer covers.
+    let down = -crust_core::Vec3A::Y;
+    let probe = |x: f32, z: f32| {
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 8.0, z), down);
+        scene
+            .world
+            .intersect(&ray, 0.001, f32::INFINITY)
+            .unwrap_or_else(|| panic!("the floor backs every probe (x={x}, z={z})"))
+            .rec
+            .t
+    };
+
+    // Down the centers: the cage tops out at y = 2 (t = 6); every subdivided
+    // top sags strictly below it, deeper than any float slop; the creased
+    // limit surface *is* the cage.
+    let t_l0 = probe(-6.0, 0.0);
+    let t_l3 = probe(3.0, 0.0);
+    let t_creased = probe(6.0, 0.0);
+    assert!((t_l0 - 6.0).abs() < 1e-3, "L0 cage top at t={t_l0}");
+    assert!(
+        t_l3 > t_l0 + 0.1,
+        "the level-3 limit surface must sag below the cage (t={t_l3})"
+    );
+    assert!(
+        (t_creased - 6.0).abs() < 1e-3,
+        "infinite creases keep the cage top (t={t_creased})"
+    );
+
+    // Near a top corner: the cage still stands at y = 2 there, the rounded
+    // level-3 surface has pulled away entirely (the ray falls through to the
+    // floor), and the creased cube again keeps its corner.
+    let (dx, dz) = (0.95, 0.95);
+    let c_l0 = probe(-6.0 + dx, dz);
+    let c_l3 = probe(3.0 + dx, dz);
+    let c_creased = probe(6.0 + dx, dz);
+    assert!((c_l0 - 6.0).abs() < 1e-3, "L0 corner at t={c_l0}");
+    assert!(
+        (c_l3 - 8.0).abs() < 1e-3,
+        "the rounded corner must miss to the floor (t={c_l3})"
+    );
+    assert!(
+        (c_creased - 6.0).abs() < 1e-3,
+        "the creased corner stays sharp (t={c_creased})"
+    );
+
+    // Subdivided geometry carries smooth shading normals: on the level-3
+    // dome the ray-facing normal at an off-center point tilts away from
+    // straight up, which a faceted cage top could never report; the level-0
+    // cage top reports exactly +Y.
+    let normal_at = |x: f32, z: f32| {
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 8.0, z), down);
+        scene
+            .world
+            .intersect(&ray, 0.001, f32::INFINITY)
+            .expect("probe hits")
+            .rec
+            .normal
+    };
+    let n_l0 = normal_at(-6.0 + 0.5, 0.5);
+    assert!(
+        (n_l0.y - 1.0).abs() < 1e-5,
+        "the cage top is flat, normal {n_l0:?}"
+    );
+    let n_l3 = normal_at(3.0 + 0.5, 0.5);
+    assert!(
+        n_l3.y < 0.999 && n_l3.x > 1e-3 && n_l3.z > 1e-3,
+        "the dome's smooth normal must tilt outward, got {n_l3:?}"
+    );
+}
+
+/// `subdivisionScheme = none` refuses refinement no matter what level is
+/// asked for — warn-and-ignore, so the cage renders unchanged.
+#[test]
+fn subdivision_scheme_none_keeps_the_cage() {
+    let dir = std::env::temp_dir().join("crust_subdiv_none_probe");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("subdiv_none.usda");
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+(defaultPrim = "W")
+def Xform "W" {
+    def Mesh "Cube" {
+        int crust:subdivisionLevel = 2
+        uniform token subdivisionScheme = "none"
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7,
+                                   1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0]
+    }
+}
+"#,
+    )
+    .expect("write probe stage");
+    let scene = Scene::from_usd(&path).expect("stage must load");
+    // The cage's corner must still be there: a down ray just inside (1,1)
+    // hits the flat top at y = 1 exactly.
+    let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.95, 8.0, 0.95), -crust_core::Vec3A::Y);
+    let hit = scene
+        .world
+        .intersect(&ray, 0.001, f32::INFINITY)
+        .expect("the unsubdivided cage corner still stands");
+    assert!(
+        (hit.rec.t - 7.0).abs() < 1e-3,
+        "cage top expected at t=7, got {}",
+        hit.rec.t
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

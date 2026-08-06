@@ -20,6 +20,11 @@ rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
 openusd = { version = "0.6", default-features = false, features = ["geom", "lux", "shade", "render"] }
+# Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
+# Catmull-Clark subdivision at USD import. Not published on crates.io, so a
+# git dependency; pinned to a tag because `Cargo.lock` is not checked in —
+# same reasoning as ptex-rs in crust-render.
+opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0.1.2" }
 
 [dev-dependencies]
 criterion = "0.8"

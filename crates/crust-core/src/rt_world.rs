@@ -45,6 +45,13 @@ pub struct FaceMap {
     pub faces: Vec<u32>,
     /// Which slice of that polygon's fan the triangle is.
     pub slices: Vec<FanSlice>,
+    /// Explicit per-triangle corner UVs in the source face's unit square,
+    /// index-parallel with `faces`. Subdivided meshes only: their triangles
+    /// cover a *sub*-rectangle of the base-cage face, which no fan slice can
+    /// express — `faces` then carries base-cage ids and each triangle's
+    /// corners carry its patch of the cage face. `None` for unsubdivided
+    /// meshes, whose triangles resolve through `slices` alone.
+    pub uvs: Option<Vec<[[f32; 2]; 3]>>,
 }
 
 impl FaceMap {
@@ -65,6 +72,21 @@ impl FaceMap {
         let i = prim_id as usize;
         let (&face, &slice) = (self.faces.get(i)?, self.slices.get(i)?);
         let (u, v) = if swapped { (v, u) } else { (u, v) };
+        if let Some(uvs) = &self.uvs {
+            if slice == FanSlice::Unmappable {
+                return None;
+            }
+            // Corner UVs are stored in the triangle's *original* vertex
+            // order, so the swap above already restored the barycentrics to
+            // that order and plain interpolation is right for mirrors too.
+            let [a, b, c] = *uvs.get(i)?;
+            let w = 1.0 - u - v;
+            return Some((
+                face,
+                (w * a[0] + u * b[0] + v * c[0]).clamp(0.0, 1.0),
+                (w * a[1] + u * b[1] + v * c[1]).clamp(0.0, 1.0),
+            ));
+        }
         let (fu, fv) = match slice {
             // (v0,v1,v2) -> u·(1,0) + v·(1,1)
             FanSlice::QuadLower => (u + v, v),
@@ -302,6 +324,7 @@ mod tests {
         FaceMap {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
+            uvs: None,
         }
     }
 
@@ -356,6 +379,7 @@ mod tests {
         let m = FaceMap {
             faces: vec![3],
             slices: vec![FanSlice::Unmappable],
+            uvs: None,
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
     }
@@ -365,5 +389,61 @@ mod tests {
     #[test]
     fn out_of_range_prim_id_declines() {
         assert_eq!(quad().resolve(99, 0.0, 0.0, false), None);
+    }
+
+    /// A subdivided quad's upper-left quadrant, fan-triangulated: the child
+    /// quad's corners are (0,0.5) (0.5,0.5) (0.5,1) (0,1) in the base face.
+    fn sub_quad() -> FaceMap {
+        FaceMap {
+            faces: vec![7, 7],
+            slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
+            uvs: Some(vec![
+                [[0.0, 0.5], [0.5, 0.5], [0.5, 1.0]],
+                [[0.0, 0.5], [0.5, 1.0], [0.0, 1.0]],
+            ]),
+        }
+    }
+
+    /// Explicit UVs resolve each triangle corner to its patch of the *base*
+    /// face — the whole point of carrying them for subdivided meshes.
+    #[test]
+    fn explicit_uvs_map_to_the_sub_rectangle() {
+        let m = sub_quad();
+        assert_eq!(m.resolve(0, 0.0, 0.0, false), Some((7, 0.0, 0.5)));
+        assert_eq!(m.resolve(0, 1.0, 0.0, false), Some((7, 0.5, 0.5)));
+        assert_eq!(m.resolve(0, 0.0, 1.0, false), Some((7, 0.5, 1.0)));
+        assert_eq!(m.resolve(1, 1.0, 0.0, false), Some((7, 0.5, 1.0)));
+        assert_eq!(m.resolve(1, 0.0, 1.0, false), Some((7, 0.0, 1.0)));
+    }
+
+    /// Both halves land on the same point along their shared diagonal, same
+    /// contract as the fan-slice path.
+    #[test]
+    fn explicit_uv_halves_agree_on_the_shared_diagonal() {
+        let m = sub_quad();
+        assert_eq!(m.resolve(0, 0.0, 0.5, false), m.resolve(1, 0.5, 0.0, false));
+    }
+
+    /// The mirror swap composes with explicit UVs exactly as with fan
+    /// slices: corner UVs are stored in original vertex order, so unswapping
+    /// the barycentrics is the whole fix.
+    #[test]
+    fn explicit_uvs_unswap_mirrored_barycentrics() {
+        let m = sub_quad();
+        // Same hit as triangle 0's second vertex, reported swapped.
+        assert_eq!(m.resolve(0, 0.0, 1.0, true), Some((7, 0.5, 0.5)));
+    }
+
+    /// Descendants of a non-quad cage face decline even though the table
+    /// carries UVs for their neighbours.
+    #[test]
+    fn explicit_uv_unmappable_declines() {
+        let m = FaceMap {
+            faces: vec![u32::MAX],
+            slices: vec![FanSlice::Unmappable],
+            uvs: Some(vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]),
+        };
+        assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
+        assert_eq!(m.resolve(9, 0.25, 0.25, false), None);
     }
 }
