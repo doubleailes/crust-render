@@ -662,4 +662,134 @@ mod tests {
         assert_eq!(out.counts.len(), 8, "each triangle splits in four");
         assert!(out.counts.iter().all(|&c| c == 3));
     }
+
+    // -------------------------------------------------------------------
+    // Memory probe
+    // -------------------------------------------------------------------
+
+    /// `System` wrapped in two counters, so the probe below measures
+    /// *requested* bytes — deterministic across platforms and allocators,
+    /// unlike RSS. Registered for the whole `crust_core` test binary (a
+    /// `#[global_allocator]` cannot be scoped tighter), which costs every
+    /// other test two relaxed atomics per allocation and changes nothing
+    /// else.
+    struct CountingAlloc;
+
+    static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            use std::sync::atomic::Ordering::Relaxed;
+            let now = LIVE.fetch_add(layout.size(), Relaxed) + layout.size();
+            PEAK.fetch_max(now, Relaxed);
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            LIVE.fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
+
+    /// An open N×N quad grid on the z = 0 plane — (N+1)² points, N² quads.
+    fn quad_grid(n: usize) -> (Vec<Vec3f>, Vec<i32>, Vec<i32>) {
+        let mut points = Vec::with_capacity((n + 1) * (n + 1));
+        for j in 0..=n {
+            for i in 0..=n {
+                points.push(Vec3f::from([i as f32, j as f32, 0.0]));
+            }
+        }
+        let mut counts = Vec::with_capacity(n * n);
+        let mut indices = Vec::with_capacity(4 * n * n);
+        for j in 0..n {
+            for i in 0..n {
+                let v0 = (j * (n + 1) + i) as i32;
+                let v1 = v0 + 1;
+                let v2 = v1 + (n + 1) as i32;
+                let v3 = v0 + (n + 1) as i32;
+                counts.push(4);
+                indices.extend_from_slice(&[v0, v1, v2, v3]);
+            }
+        }
+        (points, counts, indices)
+    }
+
+    /// What subdivision costs in memory, measured at the `subdivide()`
+    /// boundary: `transient` is the peak of live requested bytes while it
+    /// runs (dominated by the refiner, which retains every level 0..L —
+    /// a ×4/3 geometric series over the last level — plus the position
+    /// copies at the tail of the function), `resident` is what the returned
+    /// [`SubdividedMesh`] itself holds. The ceilings pin the per-face costs
+    /// so a regression (say, an accidentally retained per-level buffer)
+    /// fails loudly; they sit ~25% above the values measured at the time of
+    /// writing, printed by the table for recalibration.
+    ///
+    /// Ignored because the counters are process-global: run it alone —
+    /// `cargo test -p crust-core --lib subdivision_memory_probe -- --ignored --nocapture --test-threads=1`
+    #[test]
+    #[ignore = "allocation probe; run alone with --ignored --nocapture --test-threads=1"]
+    fn subdivision_memory_probe() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        const GRID: usize = 64; // 4096 cage quads
+        let (points, counts, indices) = quad_grid(GRID);
+
+        println!(
+            "\n{:>5} {:>4} {:>14} {:>14} {:>10} {:>10}",
+            "level", "uvs", "faces", "transient", "B/face", "resid B/f"
+        );
+        for level in 1..=4u32 {
+            for want_uvs in [false, true] {
+                let req = SubdivRequest {
+                    want_face_uvs: want_uvs,
+                    ..request(level)
+                };
+
+                let before = LIVE.load(Relaxed);
+                PEAK.store(before, Relaxed);
+                let out = subdivide(&points, &counts, &indices, &req).unwrap();
+                let peak = PEAK.load(Relaxed);
+                let after = LIVE.load(Relaxed);
+
+                let n_faces = out.counts.len();
+                let transient = peak - before;
+                let resident = after - before;
+                let per_face = transient as f64 / n_faces as f64;
+                let res_per_face = resident as f64 / n_faces as f64;
+                println!(
+                    "{:>5} {:>4} {:>14} {:>14} {:>10.1} {:>10.1}",
+                    level,
+                    if want_uvs { "yes" } else { "no" },
+                    n_faces,
+                    transient,
+                    per_face,
+                    res_per_face
+                );
+
+                assert_eq!(n_faces, counts.len() * 4usize.pow(level));
+                // Ceilings only bind once the per-cage-face constants have
+                // amortized away; shallow levels are all fixed overhead.
+                if level >= 3 {
+                    // Measured on a 64×64 cage: ~313 B/face without UVs,
+                    // ~556-564 with; resident 48.1 / 84.1. Ceilings ~25%
+                    // above those.
+                    let ceiling = if want_uvs { 700.0 } else { 400.0 };
+                    assert!(
+                        per_face < ceiling,
+                        "transient {per_face:.1} B/face at level {level} \
+                         (uvs: {want_uvs}) exceeds the {ceiling} B/face ceiling"
+                    );
+                    assert!(
+                        res_per_face < 105.0,
+                        "resident {res_per_face:.1} B/face at level {level} \
+                         (uvs: {want_uvs}) exceeds the 105 B/face ceiling"
+                    );
+                }
+                drop(out);
+            }
+        }
+    }
 }
