@@ -427,6 +427,20 @@ Schema mapping:
   kernel's instance path exactly — mirrors included. Sample scene:
   `samples/subdivision.usda` (levels 0–3 plus a fully edge-creased cube that stays a
   cube); `CRUST_SUBDIV=0` is the kill switch.
+  **Memory, measured** (the refiner retains every level 0..L, a ×4/3 geometric series
+  over the last level): `subdivide()` transiently allocates **~313 B per refined face**,
+  ~556–592 B when the material needs Ptex sub-face UVs (the synthetic fvar channel is a
+  full parallel hierarchy); the returned mesh holds 48 B/face (84 with UVs). Pinned by
+  the allocation-counting probe `cargo test -p crust-core --lib
+  subdivision_memory_probe -- --ignored --nocapture --test-threads=1` (deterministic
+  requested-byte ceilings ~25% above those numbers). End to end
+  (`scripts/gen_subdiv_stress.py`, 1.18 M refined quads at level 3, A/B'd with
+  `CRUST_SUBDIV=0`): traverse-phase peak +310 MiB — within 6% of the model — and
+  kernel-resident memory scaling exactly ×4 per level (34.67 MiB at level 1 → 2.17 GiB
+  at level 4). The whole-process peak is **not** opensubdiv: at level 4 traversal peaks
+  at 1.16 GiB while the SBVH build over the baked result peaks at 2.19 GiB — the
+  pre-existing build transient (see "Known incomplete work"), which subdivision merely
+  feeds 4^L× more triangles.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
   (USD diameters) resolve per-vertex / per-curve / constant by array length.
@@ -672,6 +686,14 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   transiently holds a few hundred MiB where 1 788 small builds held almost nothing. If that
   peak ever matters more than the ~20% render win, the lever is a triangle-count cap on
   baking; the real fix is a builder that does not materialise the whole binary tree.
+  Subdivision surfaces sharpen this: a level-L cage feeds 4^L× more triangles into the
+  same build, and on the `gen_subdiv_stress.py` scene at level 4 the SBVH commit peak
+  (2.19 GiB) is nearly twice the refiner's own traverse-phase peak (1.16 GiB) — so the
+  build transient, not opensubdiv, is the first lever if a subdivided scene runs out of
+  memory. Within `subdivide()` itself the tail holds ~5 copies of the last level's
+  positions (`verts`, `limit`, `points`, `verts_a`, `normals`) plus the whole retained
+  refiner; restructuring to drop the refiner before the copies would shave roughly a
+  third off its ~313 B/face transient if that ever matters.
 
 - **Instancing caveats.** The kernel nests instances to arbitrary depth (transforms
   compose, normals map back through every level, masks gate per level — pinned by
