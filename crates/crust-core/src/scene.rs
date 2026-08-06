@@ -48,6 +48,7 @@ impl Scene {
     }
 }
 
+mod subdiv;
 mod usd_import;
 
 impl Scene {
