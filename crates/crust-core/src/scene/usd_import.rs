@@ -29,10 +29,12 @@ use crate::tracer::{RenderSettings, SamplingStrategy};
 use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Mat3A, Vec3, Vec3A};
 
+use super::subdiv;
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
-    BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, Mesh as UsdMesh,
-    PointBased, PointInstancer, Sphere as UsdSphere, Xform, Xformable,
+    BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, InterpolateBoundary,
+    Mesh as UsdMesh, PointBased, PointInstancer, Sphere as UsdSphere, SubdivisionScheme, Xform,
+    Xformable,
 };
 use openusd::schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
@@ -758,6 +760,37 @@ fn prim_motion_translate(prim: &Prim) -> Option<Vec3> {
     custom_color3(prim, "crust:motion:translate").map(|v| Vec3::new(v.x, v.y, v.z))
 }
 
+/// Hard cap on `crust:subdivisionLevel` — each level quadruples the face
+/// count, so 6 turns one quad into 4096 and is already past what any of the
+/// checked-in scenes could resolve.
+const MAX_SUBDIV_LEVEL: i32 = 6;
+
+/// `crust:subdivisionLevel` — uniform subdivision-surface refinement depth
+/// (default 0 = render the base cage). Deliberately opt-in per prim rather
+/// than triggered by `subdivisionScheme`: USD's fallback scheme is
+/// `catmullClark`, so honouring the scheme alone would subdivide virtually
+/// every mesh ever authored (all of the Moana island included), and USD has
+/// no standard per-prim refinement level — Hydra treats refinement as a
+/// render setting. The scheme still decides *how* to subdivide once a level
+/// asks for it.
+///
+/// `CRUST_SUBDIV=0` forces 0 everywhere — the A/B switch that separates a
+/// subdivision artifact from a material or lighting one, like
+/// `CRUST_MESH_BAKE`.
+fn subdiv_level(prim: &Prim) -> u32 {
+    if std::env::var("CRUST_SUBDIV").as_deref() == Ok("0") {
+        return 0;
+    }
+    let level = custom_i32(prim, "crust:subdivisionLevel").unwrap_or(0);
+    if level > MAX_SUBDIV_LEVEL {
+        warn!(
+            "Mesh at {}: crust:subdivisionLevel = {level} clamped to {MAX_SUBDIV_LEVEL}",
+            prim.path()
+        );
+    }
+    level.clamp(0, MAX_SUBDIV_LEVEL) as u32
+}
+
 // -----------------------------------------------------------------------
 // Mesh
 // -----------------------------------------------------------------------
@@ -802,6 +835,9 @@ impl MeshKey {
 struct MeshGeom {
     verts: Vec<Vec3A>,
     tris: Vec<[u32; 3]>,
+    /// Smooth shading normals, parallel to `verts` — only subdivided meshes
+    /// carry them.
+    normals: Option<Vec<Vec3A>>,
 }
 
 /// What the importer knows about one distinct mesh (one [`MeshKey`]).
@@ -853,30 +889,37 @@ impl MeshArena {
     /// Interns a mesh by content, returning its slot index. Triangulates on
     /// first sight; `None` if nothing survives triangulation (matching the
     /// old behaviour, which also did not cache a failed mesh).
-    fn intern(
-        &mut self,
-        prim: &Prim,
-        points: &[Vec3f],
-        counts: &[i32],
-        indices: &[i32],
-        material: &Arc<dyn Material>,
-    ) -> Option<u32> {
-        let key = MeshKey::new(points, counts, indices, material);
+    fn intern(&mut self, prim: &Prim, src: &MeshSource, material: &Arc<dyn Material>) -> Option<u32> {
+        let key = MeshKey::new(&src.points, &src.counts, &src.indices, material);
         if let Some(&slot) = self.by_key.get(&key) {
             debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
             return Some(slot);
         }
-        let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+        let verts: Vec<Vec3A> = src
+            .points
+            .iter()
+            .map(|p| Vec3A::new(p.x, p.y, p.z))
+            .collect();
         let want_faces = material.face_texture().is_some();
-        let (tris, faces) =
-            triangulate(counts, indices, verts.len(), want_faces).or_else(|| {
+        let (tris, faces) = triangulate(&src.counts, &src.indices, verts.len(), want_faces)
+            .or_else(|| {
                 debug!("Mesh at {} produced no triangles", prim.path());
                 None
             })?;
-        check_face_count(prim, counts, material.as_ref());
+        // A subdivided face table numbers *refined* faces; rewrite it to the
+        // base-cage ids Ptex actually indexes before anything caches it.
+        let faces = match (&src.subdiv_faces, faces) {
+            (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
+            (_, faces) => faces,
+        };
+        check_face_count(prim, src.base_face_count, material.as_ref());
         let slot = self.slots.len() as u32;
         self.slots.push(MeshSlot {
-            local: Some(MeshGeom { verts, tris }),
+            local: Some(MeshGeom {
+                verts,
+                tris,
+                normals: src.normals.clone(),
+            }),
             faces: faces.map(Arc::new),
             committed: None,
             n_place: 0,
@@ -901,7 +944,7 @@ impl MeshArena {
         b.attach(Geometry::TriangleMesh {
             vertices: geom.verts,
             indices: geom.tris,
-            normals: None,
+            normals: geom.normals,
         });
         let scene = Arc::new(b.commit());
         s.committed = Some(Arc::clone(&scene));
@@ -918,7 +961,8 @@ fn emit_mesh(
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
 ) {
-    let Some((points, counts, indices)) = mesh_arrays(mesh) else {
+    let want_faces = material.face_texture().is_some();
+    let Some(src) = mesh_source(prim, mesh, want_faces) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
@@ -942,22 +986,33 @@ fn emit_mesh(
                 prim.path()
             );
         }
-        let verts: Vec<Vec3A> = points
+        let verts: Vec<Vec3A> = src
+            .points
             .iter()
             .map(|p| {
                 let v = world_xf.transform_point3(Vec3::new(p.x, p.y, p.z));
                 Vec3A::new(v.x, v.y, v.z)
             })
             .collect();
-        let want_faces = material.face_texture().is_some();
-        check_face_count(prim, &counts, material.as_ref());
-        match triangulate(&counts, &indices, verts.len(), want_faces) {
+        check_face_count(prim, src.base_face_count, material.as_ref());
+        match triangulate(&src.counts, &src.indices, verts.len(), want_faces) {
             Some((tris, faces)) => {
+                // A singular transform has no inverse-transpose to push the
+                // prototype's normals through, but the smooth normals of the
+                // *transformed* mesh are still well-defined — recompute them.
+                let normals = src
+                    .normals
+                    .is_some()
+                    .then(|| subdiv::smooth_normals(&verts, &src.counts, &src.indices));
+                let faces = match (&src.subdiv_faces, faces) {
+                    (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
+                    (_, faces) => faces,
+                };
                 let geom_id = world.attach_masked(
                     Geometry::TriangleMesh {
                         vertices: verts,
                         indices: tris,
-                        normals: None,
+                        normals,
                     },
                     material,
                     mask,
@@ -979,7 +1034,7 @@ fn emit_mesh(
     // depends on how many times it is placed in total, which is not known
     // until the whole stage has been walked — so claim the `geom_id` now (it
     // must keep its traversal order) and decide in `flush_meshes`.
-    let Some(slot) = meshes.intern(prim, &points, &counts, &indices, &material) else {
+    let Some(slot) = meshes.intern(prim, &src, &material) else {
         return;
     };
     meshes.slots[slot as usize].n_place += 1;
@@ -1048,7 +1103,7 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
                 Geometry::TriangleMesh {
                     vertices: bake_verts(&geom.verts, &p.l2w),
                     indices: bake_indices(geom.tris, &p.l2w),
-                    normals: None,
+                    normals: geom.normals.map(|ns| bake_normals(&ns, &p.l2w)),
                 },
             );
             // `bake_indices` swaps a triangle's second and third vertices for a
@@ -1093,6 +1148,15 @@ fn bake_verts(verts: &[Vec3A], l2w: &Affine3A) -> Vec<Vec3A> {
     verts.iter().map(|v| l2w.transform_point3a(*v)).collect()
 }
 
+/// Local-space shading normals into world space: the inverse transpose —
+/// exactly the matrix the kernel's instance path applies (`normal_mat` in
+/// `crust-rt`), so a baked placement shades identically to an instanced one,
+/// mirrors included.
+fn bake_normals(normals: &[Vec3A], l2w: &Affine3A) -> Vec<Vec3A> {
+    let m = l2w.matrix3.inverse().transpose();
+    normals.iter().map(|n| (m * *n).normalize()).collect()
+}
+
 /// Triangle winding for baked geometry, flipped under a mirroring transform.
 ///
 /// The instanced path derives its geometric normal inside the prototype and
@@ -1131,22 +1195,199 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
     Some((points, counts, indices))
 }
 
+/// One mesh's geometry as the rest of the importer consumes it — either the
+/// authored cage verbatim, or its subdivision-surface refinement when the
+/// prim opts in (see [`subdiv_level`]). Refinement happens *here*, before
+/// interning, so every downstream path — direct bake, deferred
+/// instance-vs-bake, prototypes — sees it exactly once, and [`MeshKey`]
+/// dedupes on the refined arrays (two prims sharing a cage at different
+/// levels hash differently, at the same level they still share).
+struct MeshSource {
+    points: Vec<Vec3f>,
+    counts: Vec<i32>,
+    indices: Vec<i32>,
+    /// Smooth shading normals — `Some` iff subdivided (a cage renders
+    /// faceted, exactly as before).
+    normals: Option<Vec<Vec3A>>,
+    /// Refined-face → base-cage-face mapping, `Some` iff subdivided and the
+    /// material wants a face table.
+    subdiv_faces: Option<subdiv::SubdivFaces>,
+    /// The *authored* cage's face count — what Ptex face ids index, whether
+    /// or not the mesh was refined.
+    base_face_count: usize,
+}
+
+/// Reads a mesh prim's arrays and applies subdivision when requested.
+/// `None` when the required attributes are missing (matching
+/// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
+fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSource> {
+    let (points, counts, indices) = mesh_arrays(mesh)?;
+    let base_face_count = counts.len();
+    let cage = |points, counts, indices| MeshSource {
+        points,
+        counts,
+        indices,
+        normals: None,
+        subdiv_faces: None,
+        base_face_count,
+    };
+
+    let level = subdiv_level(prim);
+    if level == 0 {
+        return Some(cage(points, counts, indices));
+    }
+
+    let usd_scheme = mesh
+        .subdivision_scheme_attr()
+        .get::<SubdivisionScheme>()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let scheme = match usd_scheme {
+        SubdivisionScheme::CatmullClark => subdiv::SubdivScheme::CatmullClark,
+        SubdivisionScheme::Bilinear => subdiv::SubdivScheme::Bilinear,
+        SubdivisionScheme::Loop => {
+            if counts.iter().any(|&c| c != 3) {
+                warn!(
+                    "Mesh at {}: subdivisionScheme = loop needs an all-triangle \
+                     mesh — rendering the base cage",
+                    prim.path()
+                );
+                return Some(cage(points, counts, indices));
+            }
+            subdiv::SubdivScheme::Loop
+        }
+        SubdivisionScheme::None => {
+            warn!(
+                "Mesh at {}: crust:subdivisionLevel = {level} ignored \
+                 (subdivisionScheme = none)",
+                prim.path()
+            );
+            return Some(cage(points, counts, indices));
+        }
+    };
+
+    let boundary = match mesh
+        .interpolate_boundary_attr()
+        .get::<InterpolateBoundary>()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
+        InterpolateBoundary::None => opensubdiv_rs::sdc::VtxBoundaryInterpolation::None,
+        InterpolateBoundary::EdgeOnly => opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeOnly,
+        InterpolateBoundary::EdgeAndCorner => {
+            opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeAndCorner
+        }
+    };
+
+    let int_array = |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten() {
+        Some(sdf::Value::IntVec(v)) => v,
+        _ => Vec::new(),
+    };
+    let float_array =
+        |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten() {
+            Some(sdf::Value::FloatVec(v)) => v,
+            _ => Vec::new(),
+        };
+    let crease_indices = int_array(mesh.crease_indices_attr());
+    let crease_lengths = int_array(mesh.crease_lengths_attr());
+    let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());
+    let corner_indices = int_array(mesh.corner_indices_attr());
+    let corner_sharpnesses = float_array(mesh.corner_sharpnesses_attr());
+
+    let req = subdiv::SubdivRequest {
+        scheme,
+        level,
+        boundary,
+        crease_indices: &crease_indices,
+        crease_lengths: &crease_lengths,
+        crease_sharpnesses: &crease_sharpnesses,
+        corner_indices: &corner_indices,
+        corner_sharpnesses: &corner_sharpnesses,
+        want_face_uvs: want_faces,
+    };
+    match subdiv::subdivide(&points, &counts, &indices, &req) {
+        Ok(refined) => {
+            debug!(
+                "Mesh at {}: subdivided to level {level} ({} -> {} faces)",
+                prim.path(),
+                base_face_count,
+                refined.counts.len()
+            );
+            Some(MeshSource {
+                points: refined.points,
+                counts: refined.counts,
+                indices: refined.indices,
+                normals: Some(refined.normals),
+                subdiv_faces: refined.faces,
+                base_face_count,
+            })
+        }
+        Err(e) => {
+            warn!(
+                "Mesh at {}: subdivision failed ({e}) — rendering the base cage",
+                prim.path()
+            );
+            Some(cage(points, counts, indices))
+        }
+    }
+}
+
+/// Rewrites a [`FaceMap`] built by triangulating *refined* quads — whose
+/// `faces` therefore number refined faces — into base-cage face ids plus
+/// explicit sub-face UVs. The fan of a refined quad is `k=1 -> (v0,v1,v2)`
+/// (`QuadLower`) and `k=2 -> (v0,v2,v3)` (`QuadUpper`), so each triangle
+/// takes the matching three of its face's four corner UVs.
+fn remap_subdivided_faces(map: FaceMap, sub: &subdiv::SubdivFaces) -> FaceMap {
+    let n = map.faces.len();
+    let mut faces = Vec::with_capacity(n);
+    let mut slices = Vec::with_capacity(n);
+    let mut uvs = Vec::with_capacity(n);
+    for (&refined, &slice) in map.faces.iter().zip(&map.slices) {
+        let base = sub.base_face[refined as usize];
+        if base == u32::MAX {
+            faces.push(u32::MAX);
+            slices.push(FanSlice::Unmappable);
+            uvs.push([[0.0f32; 2]; 3]);
+            continue;
+        }
+        let [c0, c1, c2, c3] = sub.corner_uvs[refined as usize];
+        faces.push(base);
+        slices.push(slice);
+        uvs.push(match slice {
+            FanSlice::QuadUpper => [c0, c2, c3],
+            // Refined faces are always quads, so anything else is the lower
+            // half. (Loop never builds a face table.)
+            _ => [c0, c1, c2],
+        });
+    }
+    FaceMap {
+        faces,
+        slices,
+        uvs: Some(uvs),
+    }
+}
+
 /// Warns when a per-face texture's face count disagrees with the mesh's.
 ///
 /// A Ptex face id *is* a mesh face index, so the two counts must match
 /// exactly. When they do not, the texture belongs to different geometry and
 /// every lookup is quietly wrong — the render still completes, and still looks
 /// like a plausible rock, which is precisely what makes it worth a warning.
-fn check_face_count(prim: &Prim, counts: &[i32], material: &dyn Material) {
+/// `n_base_faces` is the *authored cage's* face count
+/// ([`MeshSource::base_face_count`]) — never the refined count: subdivision
+/// changes the mesh's face count but Ptex ids keep indexing the cage.
+fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
     let Some(tex) = material.face_texture() else {
         return;
     };
-    if tex.num_faces() != counts.len() {
+    if tex.num_faces() != n_base_faces {
         warn!(
             "Mesh at {} has {} faces but its per-face texture has {} — \
              the texture does not match this geometry, so shading will be wrong",
             prim.path(),
-            counts.len(),
+            n_base_faces,
             tex.num_faces()
         );
     }
@@ -1209,7 +1450,11 @@ fn triangulate(
     }
     // `then_some` rather than `then`: the value is two already-built vectors
     // being moved, so there is no work for a closure to defer.
-    let map = want_faces.then_some(FaceMap { faces, slices });
+    let map = want_faces.then_some(FaceMap {
+        faces,
+        slices,
+        uvs: None,
+    });
     Some((tris, map))
 }
 
@@ -1448,11 +1693,8 @@ fn collect_proto_parts(
             // always needs a real kernel scene — committing here is also what
             // marks the slot as ineligible for baking, so a mesh used both
             // directly and as a prototype is not stored twice.
-            if let Some((points, counts, indices)) = mesh_arrays(&mesh)
-                && let Some(slot) =
-                    caches
-                        .meshes
-                        .intern(&prim, &points, &counts, &indices, &material)
+            if let Some(src) = mesh_source(&prim, &mesh, material.face_texture().is_some())
+                && let Some(slot) = caches.meshes.intern(&prim, &src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 parts.push(ProtoPart {
@@ -3208,6 +3450,7 @@ mod bake_tests {
                 Vec3A::new(-1.0, 1.0, 0.0),
             ],
             tris: vec![[0, 1, 2], [0, 2, 3]],
+            normals: None,
         }
     }
 
@@ -3288,6 +3531,71 @@ mod bake_tests {
         assert!(baked.2 > 0.0, "the ray-facing normal points back up +z");
     }
 
+    /// Shading normals through the same two placements: `bake_normals` must
+    /// be the exact matrix the kernel's instance path applies (the inverse
+    /// transpose), or a mesh shades differently depending on whether the
+    /// importer happened to bake or instance it — including under a mirror,
+    /// where a plain rotation of the normal would come out backwards.
+    #[test]
+    fn baked_shading_normals_match_the_instanced_path() {
+        // Tilted shading normals, deliberately not the geometric one.
+        let tilt = Vec3A::new(0.3, -0.2, 1.0).normalize();
+        let normals = vec![tilt; 4];
+        let geom = quad();
+        let mat = || -> Arc<dyn Material> { Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))) };
+        let ray = crate::ray::Ray::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::new(0.0, 0.0, -1.0));
+        let probe = |w: &crate::rt_world::World| {
+            let h = w.intersect(&ray, 1e-4, f32::MAX).expect("the quad is hit");
+            (h.rec.front_face, h.rec.normal)
+        };
+
+        for l2w in [
+            Affine3A::from_scale_rotation_translation(
+                glam::Vec3::new(2.0, 1.5, 1.0),
+                glam::Quat::from_rotation_z(0.7),
+                glam::Vec3::new(0.3, -0.2, 0.0),
+            ),
+            // The mirror is the case that breaks naive normal transforms.
+            Affine3A::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0)),
+        ] {
+            let mut baked = WorldBuilder::new();
+            baked.attach(
+                Geometry::TriangleMesh {
+                    vertices: bake_verts(&geom.verts, &l2w),
+                    indices: bake_indices(geom.tris.clone(), &l2w),
+                    normals: Some(bake_normals(&normals, &l2w)),
+                },
+                mat(),
+            );
+            let baked = baked.commit();
+
+            let mut inner = RtSceneBuilder::new();
+            inner.attach(Geometry::TriangleMesh {
+                vertices: geom.verts.clone(),
+                indices: geom.tris.clone(),
+                normals: Some(normals.clone()),
+            });
+            let mut inst = WorldBuilder::new();
+            inst.attach(
+                Geometry::Instance {
+                    scene: Arc::new(inner.commit()),
+                    transform: l2w,
+                    transform_end: None,
+                },
+                mat(),
+            );
+            let inst = inst.commit();
+
+            let (b_front, b_n) = probe(&baked);
+            let (i_front, i_n) = probe(&inst);
+            assert_eq!(b_front, i_front, "front_face split under {l2w:?}");
+            assert!(
+                b_n.abs_diff_eq(i_n, 1e-6),
+                "normals split under {l2w:?}: baked {b_n:?} vs instanced {i_n:?}"
+            );
+        }
+    }
+
     /// Without the swap the test above would pass for the wrong reason if
     /// `bake_indices` were a no-op and the kernel happened to agree, so pin
     /// the swap itself.
@@ -3350,6 +3658,86 @@ mod curve_basis_tests {
 #[cfg(test)]
 mod face_table_tests {
     use super::*;
+
+    /// The remap end to end: subdivide one textured quad, triangulate the
+    /// refinement, remap — every triangle must resolve into the *base* face,
+    /// and the refined corners must land on their sub-rectangle of it.
+    #[test]
+    fn subdivided_face_table_resolves_into_the_base_face() {
+        let points = vec![
+            Vec3f::from([0.0, 0.0, 0.0]),
+            Vec3f::from([1.0, 0.0, 0.0]),
+            Vec3f::from([1.0, 1.0, 0.0]),
+            Vec3f::from([0.0, 1.0, 0.0]),
+        ];
+        let counts = [4];
+        let indices = [0, 1, 2, 3];
+        let req = subdiv::SubdivRequest {
+            scheme: subdiv::SubdivScheme::CatmullClark,
+            level: 1,
+            boundary: opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeAndCorner,
+            crease_indices: &[],
+            crease_lengths: &[],
+            crease_sharpnesses: &[],
+            corner_indices: &[],
+            corner_sharpnesses: &[],
+            want_face_uvs: true,
+        };
+        let refined = subdiv::subdivide(&points, &counts, &indices, &req).unwrap();
+        let sub = refined.faces.as_ref().unwrap();
+        let (tris, map) =
+            triangulate(&refined.counts, &refined.indices, refined.points.len(), true).unwrap();
+        let map = remap_subdivided_faces(map.unwrap(), sub);
+
+        assert_eq!(tris.len(), 8, "4 child quads, 2 triangles each");
+        let uvs = map.uvs.as_ref().expect("subdivided tables carry UVs");
+        assert_eq!(map.faces.len(), tris.len());
+        assert_eq!(uvs.len(), tris.len());
+        assert!(map.faces.iter().all(|&f| f == 0), "one base face only");
+
+        // Each triangle's interior resolves inside its child's quadrant of
+        // the base face — quadrants are half-open squares of side 0.5.
+        for (i, tri_uvs) in uvs.iter().enumerate() {
+            let (got_face, u, v) = map
+                .resolve(i as u32, 1.0 / 3.0, 1.0 / 3.0, false)
+                .expect("every child of a quad resolves");
+            assert_eq!(got_face, 0);
+            let centroid_u = tri_uvs.iter().map(|c| c[0]).sum::<f32>() / 3.0;
+            let centroid_v = tri_uvs.iter().map(|c| c[1]).sum::<f32>() / 3.0;
+            assert!((u - centroid_u).abs() < 1e-6);
+            assert!((v - centroid_v).abs() < 1e-6);
+            assert!((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v));
+        }
+
+        // The whole refinement still covers the base face: some corner of
+        // some triangle touches each of the four Ptex corners.
+        for corner in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
+            assert!(
+                uvs.iter().flatten().any(|c| (c[0] - corner[0]).abs() < 1e-6
+                    && (c[1] - corner[1]).abs() < 1e-6),
+                "no triangle corner reaches base corner {corner:?}"
+            );
+        }
+    }
+
+    /// Children of a non-quad cage face must decline the lookup — same
+    /// contract as an unsubdivided n-gon.
+    #[test]
+    fn subdivided_ngon_descendants_are_unmappable() {
+        let map = FaceMap {
+            faces: vec![0, 1],
+            slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
+            uvs: None,
+        };
+        let sub = subdiv::SubdivFaces {
+            base_face: vec![u32::MAX, u32::MAX],
+            corner_uvs: vec![[[0.0; 2]; 4]; 2],
+        };
+        let map = remap_subdivided_faces(map, &sub);
+        assert!(map.slices.iter().all(|&s| s == FanSlice::Unmappable));
+        assert_eq!(map.resolve(0, 0.2, 0.2, false), None);
+        assert_eq!(map.resolve(1, 0.2, 0.2, false), None);
+    }
 
     /// The triangle list and the face table must stay index-parallel, because
     /// the kernel's `prim_id` indexes one to look up the other.

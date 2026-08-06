@@ -82,7 +82,9 @@ forces every mesh to be instanced instead of baking single-placement geometry fl
 is bit-identical with it set, which is what separates a deferral bug from a baking
 difference); `CRUST_PTEX=0` declines every Ptex texture so surfaces fall back to their
 constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution loaded
-(log2 edge length, default 5 = 32x32).
+(log2 edge length, default 5 = 32x32); `CRUST_SUBDIV=0` forces every
+`crust:subdivisionLevel` to 0 so subdivision-surface meshes render their base cage — the
+A/B that separates a subdivision artifact from a material or lighting one.
 
 ## Measuring a change
 
@@ -398,6 +400,47 @@ Schema mapping:
   Non-invertible transforms still bake immediately, and a mesh authoring
   `crust:motion:translate` always instances (a baked mesh has no transform left to lerp).
   `UsdGeomSphere` → analytic `Sphere` geometry.
+- **Subdivision surfaces** (`scene/subdiv.rs`, via the pure-Rust
+  [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
+  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned by git tag). A mesh
+  prim authoring `crust:subdivisionLevel` (int, default 0, clamped to 6) is uniformly
+  refined that many times and **snapped to the limit surface**, with smooth per-vertex
+  shading normals (the kernel's `TriangleMesh.normals`, interpolated by barycentrics).
+  Deliberately **opt-in per prim** rather than triggered by `subdivisionScheme`: USD's
+  fallback scheme is `catmullClark`, so honouring the scheme alone would subdivide
+  virtually every mesh ever authored (all of the Moana island included), and USD has no
+  standard per-prim refinement level — Hydra treats refinement as a render setting. The
+  scheme still picks the algorithm once a level asks: unauthored/`catmullClark` →
+  Catmark, `bilinear` → Bilinear, `loop` → Loop (all-triangle cages only), `none` →
+  warn and render the cage. `creaseIndices`/`creaseLengths`/`creaseSharpnesses`
+  (per-run or per-edge sharpness, 10 = infinite), `cornerIndices`/`cornerSharpnesses`
+  and `interpolateBoundary` are honoured; `holeIndices` and
+  `faceVaryingLinearInterpolation` are not. Refinement happens in `mesh_source`,
+  *before* interning, so every path (direct bake, deferred instance-vs-bake,
+  prototypes) sees it exactly once and `MeshKey` dedupes on the refined arrays. A
+  malformed cage or refiner error warns and degrades to the cage. **Ptex keeps
+  indexing the base cage**: refined triangles carry explicit corner UVs
+  (`FaceMap.uvs`) mapping them back into their cage face's unit square (a synthetic
+  face-varying channel refined with linear-everywhere interpolation), and
+  `check_face_count` compares the texture against the *authored* face count. Baked
+  placements push normals through the inverse transpose (`bake_normals`), matching the
+  kernel's instance path exactly — mirrors included. Sample scene:
+  `samples/subdivision.usda` (levels 0–3 plus a fully edge-creased cube that stays a
+  cube); `CRUST_SUBDIV=0` is the kill switch.
+  **Memory, measured** (the refiner retains every level 0..L, a ×4/3 geometric series
+  over the last level): `subdivide()` transiently allocates **~313 B per refined face**,
+  ~556–592 B when the material needs Ptex sub-face UVs (the synthetic fvar channel is a
+  full parallel hierarchy); the returned mesh holds 48 B/face (84 with UVs). Pinned by
+  the allocation-counting probe `cargo test -p crust-core --lib
+  subdivision_memory_probe -- --ignored --nocapture --test-threads=1` (deterministic
+  requested-byte ceilings ~25% above those numbers). End to end
+  (`scripts/gen_subdiv_stress.py`, 1.18 M refined quads at level 3, A/B'd with
+  `CRUST_SUBDIV=0`): traverse-phase peak +310 MiB — within 6% of the model — and
+  kernel-resident memory scaling exactly ×4 per level (34.67 MiB at level 1 → 2.17 GiB
+  at level 4). The whole-process peak is **not** opensubdiv: at level 4 traversal peaks
+  at 1.16 GiB while the SBVH build over the baked result peaks at 2.19 GiB — the
+  pre-existing build transient (see "Known incomplete work"), which subdivision merely
+  feeds 4^L× more triangles.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
   (USD diameters) resolve per-vertex / per-curve / constant by array length.
@@ -524,9 +567,11 @@ Schema mapping:
     `v0=(0,0)` than transposed, and 1.9–97x lower than between unrelated faces.
     Alongside those, 10 textures / 28 816 faces against 57 632 triangles (exactly 2 per
     quad). The importer warns when a texture's `numFaces` disagrees with its mesh. Not reproduced: no
-    displacement (`inputs:displacementMap` is unread), no subdivision (meshes are
-    `catmullClark`; the base cage is rendered, which Ptex is indifferent to since its
-    faces *are* cage faces), and the reference's `islandsunEnv.tex` environment is a
+    displacement (`inputs:displacementMap` is unread), no subdivision *on the island*
+    (subdivision is opt-in via `crust:subdivisionLevel`, which the island does not
+    author, so its `catmullClark` base cages render as before — Ptex is indifferent
+    either way, since face ids index cage faces and subdivided face tables map back to
+    them), and the reference's `islandsunEnv.tex` environment is a
     RenderMan-only format.
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
@@ -641,6 +686,14 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   transiently holds a few hundred MiB where 1 788 small builds held almost nothing. If that
   peak ever matters more than the ~20% render win, the lever is a triangle-count cap on
   baking; the real fix is a builder that does not materialise the whole binary tree.
+  Subdivision surfaces sharpen this: a level-L cage feeds 4^L× more triangles into the
+  same build, and on the `gen_subdiv_stress.py` scene at level 4 the SBVH commit peak
+  (2.19 GiB) is nearly twice the refiner's own traverse-phase peak (1.16 GiB) — so the
+  build transient, not opensubdiv, is the first lever if a subdivided scene runs out of
+  memory. Within `subdivide()` itself the tail holds ~5 copies of the last level's
+  positions (`verts`, `limit`, `points`, `verts_a`, `normals`) plus the whole retained
+  refiner; restructuring to drop the refiner before the copies would shave roughly a
+  third off its ~313 B/face transient if that ever matters.
 
 - **Instancing caveats.** The kernel nests instances to arbitrary depth (transforms
   compose, normals map back through every level, masks gate per level — pinned by

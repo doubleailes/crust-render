@@ -139,7 +139,7 @@ when this document was first written; see the addendum in §4.)*
 | Language / safety | C++ (+ ISPC, SYCL), unsafe by nature | 100 % safe Rust |
 | Triangles | ✅ watertight | ✅⁺ watertight (Woop 2013, f64 tie fallback) |
 | Spheres / points | ✅ spheres + 2 disc types | ✅ analytic sphere (also a `LightShape`) |
-| Quads / grids / subdivision | ✅ | ❌ (USD import triangulates) |
+| Quads / grids / subdivision | ✅ | ✅-ish (opt-in uniform Catmull-Clark/Bilinear/Loop at USD import via pure-Rust opensubdiv-rs — limit snap, creases, corners, boundary rules; kernel still traces triangles; no feature-adaptive, no holes) |
 | Curves / hair | ✅ 5 bases × 3 modes | ✅⁺ round linear segments; cubic bezier/bspline/catmullRom flattened |
 | User geometry | ✅ callbacks | ✅-ish (`Hittable` trait — same idea, idiomatic Rust) |
 | Instancing | ✅ multi-level + arrays | ✅ multi-level `Instance` (nests to any depth), shared local-space BLAS with content dedup; no instance *arrays* |

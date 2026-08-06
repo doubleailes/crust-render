@@ -1,0 +1,216 @@
+#usda 1.0
+(
+    doc = """Subdivision-surface showcase: five identical cube cages in a row.
+
+    The first four author crust:subdivisionLevel = 0/1/2/3 — the cage, then
+    progressively smoother Catmull-Clark limit surfaces (level 3 is nearly a
+    sphere). The fifth subdivides at level 3 too, but creases all twelve cage
+    edges at sharpness 10, so its limit surface *is* the cube: creases carry
+    through refinement. Subdivided meshes shade with smooth per-vertex
+    normals; the level-0 cage stays faceted.
+
+    A/B: render with CRUST_SUBDIV=0 to force every level to 0 — five
+    identical sharp cubes."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 18
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 3.5, 14)
+        float xformOp:rotateX = -10
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Scope "Materials"
+    {
+        def Material "blue"
+        {
+            token outputs:surface.connect = </World/Materials/blue/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.25, 0.45, 0.8)
+                token outputs:surface
+            }
+        }
+
+        def Material "teal"
+        {
+            token outputs:surface.connect = </World/Materials/teal/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.2, 0.65, 0.6)
+                token outputs:surface
+            }
+        }
+
+        def Material "green"
+        {
+            token outputs:surface.connect = </World/Materials/green/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.45, 0.7, 0.25)
+                token outputs:surface
+            }
+        }
+
+        def Material "amber"
+        {
+            token outputs:surface.connect = </World/Materials/amber/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.85, 0.6, 0.2)
+                token outputs:surface
+            }
+        }
+
+        def Material "red"
+        {
+            token outputs:surface.connect = </World/Materials/red/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.8, 0.25, 0.2)
+                token outputs:surface
+            }
+        }
+    }
+
+    # The five cages are identical ±1 cubes; only the subdivision request
+    # differs. Class-less duplication keeps the file trivially greppable.
+    def Mesh "CubeL0" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        # Level 0 is the default — authored anyway to document the knob.
+        int crust:subdivisionLevel = 0
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/blue>
+        double3 xformOp:translate = (-6, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "CubeL1" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int crust:subdivisionLevel = 1
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/teal>
+        double3 xformOp:translate = (-3, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "CubeL2" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int crust:subdivisionLevel = 2
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/green>
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "CubeL3" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int crust:subdivisionLevel = 3
+        uniform token subdivisionScheme = "catmullClark"
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/amber>
+        double3 xformOp:translate = (3, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Same refinement as CubeL3, but all 12 cage edges creased at USD's
+    # maximum sharpness (10 = infinitely sharp): the limit surface is the
+    # cage itself, so this renders as an exact cube beside its rounded twin.
+    def Mesh "CubeCreased" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int crust:subdivisionLevel = 3
+        uniform token subdivisionScheme = "catmullClark"
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        int[] creaseIndices = [0, 1, 1, 2, 2, 3, 3, 0,
+                               4, 5, 5, 6, 6, 7, 7, 4,
+                               0, 4, 1, 5, 2, 6, 3, 7]
+        int[] creaseLengths = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        float[] creaseSharpnesses = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
+        rel material:binding = </World/Materials/red>
+        double3 xformOp:translate = (6, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-14, 0, -10), (14, 0, -10), (14, 0, 10), (-14, 0, 10)]
+    }
+
+    # Wide rect light above and in front of the row, tilted down at it.
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 10
+        float inputs:height = 4
+        color3f inputs:color = (5, 5, 5)
+        float inputs:intensity = 1.0
+        double3 xformOp:translate = (0, 8, 7)
+        float xformOp:rotateX = -50
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+    }
+}
