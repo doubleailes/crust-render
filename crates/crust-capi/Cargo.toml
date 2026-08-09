@@ -21,3 +21,9 @@ crust-core = { path = "../crust-core" }
 # Same workspace glam as crust-core (one crate instance), for the types
 # crust-core does not re-export (Mat3A, Affine3A).
 glam.workspace = true
+# Dome-light texture decoding (crust_scene_add_dome_light_file): the capi
+# is the delegate's host, so it owns the AssetLoader role the CLI plays for
+# batch renders — same decoders, same feature set, same linearization
+# semantics as crust-render/src/main.rs's CliAssets.
+exr.workspace = true
+image = { version = "0.25.6", default-features = false, features = ["png", "hdr"] }

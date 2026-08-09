@@ -543,6 +543,102 @@ fn in_place_edits_match_fresh_builds() {
     crust_scene_destroy(ts_ref.scene);
 }
 
+/// The file-based dome light decodes real image files with the CLI's
+/// semantics (LDR -> linear), errors cleanly on bad paths, and the v2
+/// material defaults carry the coat fields.
+#[test]
+fn dome_light_file_and_material_v2() {
+    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    crust_material_default(&mut material);
+    assert_eq!(material.coat_weight, 0.0);
+    assert_eq!(material.coat_roughness, 0.0);
+
+    // A 2x2 white PNG in the temp dir — sRGB 255 decodes to linear 1.0.
+    let png_path = std::env::temp_dir().join("crust_capi_dome_test.png");
+    image::RgbImage::from_pixel(2, 2, image::Rgb([255u8, 255, 255]))
+        .save(&png_path)
+        .expect("write test png");
+    let png_cstr = std::ffi::CString::new(png_path.to_str().unwrap()).unwrap();
+
+    let scene = crust_scene_create();
+    let identity9: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let tint = [0.5f32, 0.5, 0.5];
+    assert_eq!(
+        crust_scene_add_dome_light_file(
+            scene,
+            tint.as_ptr(),
+            png_cstr.as_ptr(),
+            identity9.as_ptr()
+        ),
+        CrustStatus::Ok
+    );
+    // Error paths: missing file, NULL path.
+    let missing = std::ffi::CString::new("/nonexistent/nowhere.exr").unwrap();
+    assert_eq!(
+        crust_scene_add_dome_light_file(
+            scene,
+            tint.as_ptr(),
+            missing.as_ptr(),
+            identity9.as_ptr()
+        ),
+        CrustStatus::InvalidArgument
+    );
+    assert_eq!(
+        crust_scene_add_dome_light_file(
+            scene,
+            tint.as_ptr(),
+            ptr::null(),
+            identity9.as_ptr()
+        ),
+        CrustStatus::NullArgument
+    );
+
+    // Coated sphere under the textured dome: renders finite and nonzero
+    // (the dome replaces the sky, so escaping rays return tint * texel).
+    material.coat_weight = 0.5;
+    material.coat_roughness = 0.1;
+    let mut id = 0u32;
+    assert_eq!(
+        crust_scene_add_sphere(scene, [0.0f32, 0.0, 0.0].as_ptr(), 1.0, &material, &mut id),
+        CrustStatus::Ok
+    );
+    assert_eq!(
+        crust_scene_set_camera(scene, VIEW.as_ptr(), perspective().as_ptr(), 0.0, 3.0),
+        CrustStatus::Ok
+    );
+    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    crust_render_settings_default(&mut settings);
+    settings.width = 16;
+    settings.height = 16;
+    settings.samples_per_pixel = 4;
+    settings.max_depth = 4;
+    assert_eq!(
+        crust_scene_set_render_settings(scene, &settings),
+        CrustStatus::Ok
+    );
+    let renderer = commit(scene, ptr::null());
+    let mut status = CrustStepStatus::InProgress;
+    let mut done = 0u32;
+    while status != CrustStepStatus::Complete {
+        assert_eq!(
+            crust_renderer_step(renderer, 2, &mut status, &mut done),
+            CrustStatus::Ok
+        );
+    }
+    let mut rgba = vec![0.0f32; 16 * 16 * 4];
+    assert_eq!(
+        crust_renderer_read_color(renderer, rgba.as_mut_ptr(), 16 * 16),
+        CrustStatus::Ok
+    );
+    assert!(rgba.iter().all(|v| v.is_finite()));
+    // A corner pixel escapes to the dome: white texel * 0.5 tint = 0.5.
+    assert!((rgba[0] - 0.5).abs() < 1e-3, "corner = {}", rgba[0]);
+
+    crust_renderer_destroy(renderer);
+    crust_scene_destroy(scene);
+    let _ = std::fs::remove_file(&png_path);
+}
+
 #[test]
 fn error_paths_return_their_exact_status() {
     // Null handles.
@@ -626,7 +722,7 @@ fn error_paths_return_their_exact_status() {
     ] {
         assert!(!crust_status_string(status).is_null());
     }
-    assert_eq!(crust_api_version(), 1);
+    assert_eq!(crust_api_version(), 2);
     let (mut ma, mut mi, mut pa) = (0u32, 0u32, 0u32);
     crust_library_version(&mut ma, &mut mi, &mut pa);
     assert!(ma > 0 || mi > 0 || pa > 0);

@@ -340,6 +340,61 @@ pub extern "C" fn crust_scene_add_distant_light(
     result.err().unwrap_or(CrustStatus::Ok)
 }
 
+/// A dome is at infinity — only the rotation of its frame matters.
+/// Normalize the columns like the USD importer does, so a rotation with
+/// uniform scale folded in still orients correctly.
+fn read_dome_rotation(rotation: *const f32) -> CResult<Mat3A> {
+    let r = slice(rotation, 9)?;
+    if !r.iter().all(|v| v.is_finite()) {
+        return Err(CrustStatus::InvalidArgument);
+    }
+    let mut rotation =
+        Mat3A::from_cols_array(&[r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]]);
+    for col in [
+        &mut rotation.x_axis,
+        &mut rotation.y_axis,
+        &mut rotation.z_axis,
+    ] {
+        if col.length_squared() < 1e-20 {
+            return Err(CrustStatus::InvalidArgument);
+        }
+        *col = col.normalize();
+    }
+    Ok(rotation)
+}
+
+/// `CrustStatus crust_scene_add_dome_light_file(CrustScene*,
+///     const float tint[3], const char* path, const float rotation[9]);`
+#[unsafe(no_mangle)]
+pub extern "C" fn crust_scene_add_dome_light_file(
+    scene: *mut SceneHandle,
+    tint: *const f32,
+    path: *const std::ffi::c_char,
+    rotation: *const f32,
+) -> CrustStatus {
+    let result = (|| -> CResult<()> {
+        let handle = require_mut(scene)?;
+        handle.ensure_live()?;
+        let tint = validate::finite3(tint)?;
+        let rotation = read_dome_rotation(rotation)?;
+        if path.is_null() {
+            return Err(CrustStatus::NullArgument);
+        }
+        // SAFETY: non-null checked; a NUL-terminated string is the caller's
+        // contract per the header.
+        let path = unsafe { std::ffi::CStr::from_ptr(path) }
+            .to_str()
+            .map_err(|_| CrustStatus::InvalidArgument)?;
+        let map = crate::dome::load_environment(std::path::Path::new(path))
+            .ok_or(CrustStatus::InvalidArgument)?;
+        handle
+            .lights
+            .add(Arc::new(DomeLight::new(tint, Some(Arc::new(map)), rotation)));
+        Ok(())
+    })();
+    result.err().unwrap_or(CrustStatus::Ok)
+}
+
 /// `CrustStatus crust_scene_add_dome_light(CrustScene*, const float tint[3],
 ///     uint32_t tex_width, uint32_t tex_height, const float* pixels_or_null,
 ///     const float rotation[9]);`
@@ -356,22 +411,7 @@ pub extern "C" fn crust_scene_add_dome_light(
         let handle = require_mut(scene)?;
         handle.ensure_live()?;
         let tint = validate::finite3(tint)?;
-        let r = slice(rotation, 9)?;
-        if !r.iter().all(|v| v.is_finite()) {
-            return Err(CrustStatus::InvalidArgument);
-        }
-        // A dome is at infinity — only the rotation of its frame matters.
-        // Normalize the columns like the USD importer does, so a rotation
-        // with uniform scale folded in still orients correctly.
-        let mut rotation = Mat3A::from_cols_array(&[
-            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
-        ]);
-        for col in [&mut rotation.x_axis, &mut rotation.y_axis, &mut rotation.z_axis] {
-            if col.length_squared() < 1e-20 {
-                return Err(CrustStatus::InvalidArgument);
-            }
-            *col = col.normalize();
-        }
+        let rotation = read_dome_rotation(rotation)?;
         let map = if pixels_or_null.is_null() {
             None
         } else {

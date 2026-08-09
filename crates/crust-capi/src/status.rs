@@ -43,7 +43,10 @@ pub extern "C" fn crust_status_string(status: CrustStatus) -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn crust_api_version() -> u32 {
     // Bump together with CRUST_API_VERSION in crust.h.
-    1
+    // v2: CrustMaterial gained coat_weight/coat_roughness (sizeof 56 -> 64);
+    //     added the geometry cache, instanced placement, in-place edits and
+    //     file-based dome lights.
+    2
 }
 
 /// `void crust_library_version(uint32_t* major, uint32_t* minor, uint32_t* patch);`

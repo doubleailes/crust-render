@@ -40,8 +40,11 @@ extern "C" {
 
 /* ---- version ---------------------------------------------------------- */
 
-/* Bumped on any ABI-incompatible change to this header. */
-#define CRUST_API_VERSION 1u
+/* Bumped on any ABI-incompatible change to this header.
+ * v2: CrustMaterial gained coat_weight/coat_roughness (sizeof 56 -> 64);
+ *     added CrustGeoCache, crust_scene_add_instance, the in-place
+ *     renderer edits, and crust_scene_add_dome_light_file. */
+#define CRUST_API_VERSION 2u
 
 /* The API version the library was built against; check == CRUST_API_VERSION
  * at startup. */
@@ -113,14 +116,16 @@ typedef struct CrustMaterial {
   float opacity;            /* geometric presence, 0..1                    */
   float emission_color[3];
   float emission_luminance; /* nits; 0 = not emissive                      */
+  float coat_weight;        /* clearcoat layer weight, 0..1                */
+  float coat_roughness;     /* clearcoat roughness, 0..1                   */
   int32_t thin_walled;      /* nonzero: thin sheet, no interior            */
   int32_t reserved_;        /* keep zeroed                                 */
 } CrustMaterial;
 
 #if !defined(__cplusplus)
-_Static_assert(sizeof(CrustMaterial) == 56, "CrustMaterial ABI drift");
+_Static_assert(sizeof(CrustMaterial) == 64, "CrustMaterial ABI drift");
 #else
-static_assert(sizeof(CrustMaterial) == 56, "CrustMaterial ABI drift");
+static_assert(sizeof(CrustMaterial) == 64, "CrustMaterial ABI drift");
 #endif
 
 /* Fill with defaults (grey diffuse: the OpenPBR default surface). */
@@ -238,6 +243,16 @@ CrustStatus crust_scene_add_dome_light(CrustScene* scene,
                                        uint32_t tex_width, uint32_t tex_height,
                                        const float* pixels_or_null,
                                        const float rotation[9]);
+
+/* As crust_scene_add_dome_light, but decoding the equirect texture from a
+ * file (NUL-terminated UTF-8 path): .exr and .hdr load linearly, LDR
+ * formats (e.g. .png) are converted from sRGB to linear — the same
+ * semantics as crust's CLI. Unreadable/undecodable path ->
+ * CRUST_ERROR_INVALID_ARGUMENT (fall back to the uniform-color variant). */
+CrustStatus crust_scene_add_dome_light_file(CrustScene* scene,
+                                            const float tint[3],
+                                            const char* path,
+                                            const float rotation[9]);
 
 /* view: world-to-view. proj: any perspective projection (GL [-1,1] z,
  * DirectX [0,1] z, reverse-Z, off-axis all accepted; orthographic is
