@@ -264,6 +264,285 @@ fn stop_token_interrupts_and_resumes() {
     crust_stop_token_destroy(token2);
 }
 
+/// Builds the standard test scene with the quad placed through the
+/// geometry cache as an instance. `arrays` controls whether the vertex
+/// data is supplied (a cache hit does not need it).
+fn build_instanced_scene(
+    cache: *mut GeoCacheHandle,
+    version: u32,
+    arrays: bool,
+    xform: &[f64; 16],
+) -> *mut SceneHandle {
+    let scene = crust_scene_create();
+    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    crust_material_default(&mut material);
+    material.base_color = [0.8, 0.4, 0.2];
+
+    let positions: [f32; 12] = [
+        -0.6, -0.6, 0.0, //
+        0.6, -0.6, 0.0, //
+        0.6, 0.6, 0.0, //
+        -0.6, 0.6, 0.0,
+    ];
+    let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+    let mut id = u32::MAX;
+    let status = crust_scene_add_instance(
+        scene,
+        cache,
+        0xC0FFEE,
+        version,
+        if arrays { positions.as_ptr() } else { ptr::null() },
+        4,
+        if arrays { indices.as_ptr() } else { ptr::null() },
+        2,
+        ptr::null(),
+        xform.as_ptr(),
+        &material,
+        &mut id,
+    );
+    assert_eq!(status, CrustStatus::Ok);
+
+    assert_eq!(
+        crust_scene_add_sphere_light(
+            scene,
+            [0.0f32, 0.0, 2.0].as_ptr(),
+            0.5,
+            [12.0f32, 12.0, 12.0].as_ptr(),
+        ),
+        CrustStatus::Ok
+    );
+    assert_eq!(
+        crust_scene_set_camera(scene, VIEW.as_ptr(), perspective().as_ptr(), 0.0, 3.0),
+        CrustStatus::Ok
+    );
+    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    crust_render_settings_default(&mut settings);
+    settings.width = 32;
+    settings.height = 32;
+    settings.samples_per_pixel = 8;
+    settings.max_depth = 4;
+    assert_eq!(
+        crust_scene_set_render_settings(scene, &settings),
+        CrustStatus::Ok
+    );
+    scene
+}
+
+fn render_to_completion(renderer: *mut RendererHandle) -> Vec<f32> {
+    let mut status = CrustStepStatus::InProgress;
+    let mut done = 0u32;
+    while status != CrustStepStatus::Complete {
+        assert_eq!(
+            crust_renderer_step(renderer, 4, &mut status, &mut done),
+            CrustStatus::Ok
+        );
+    }
+    read_rgba(renderer)
+}
+
+const IDENTITY: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// The geometry cache must be invisible in the image: a cache-hit rebuild
+/// (NULL vertex arrays) renders bit-identically to the miss that populated
+/// it, and version bumps invalidate.
+#[test]
+fn geo_cache_hits_render_bit_identical() {
+    let cache = crust_geo_cache_create();
+    assert!(!crust_geo_cache_contains(cache, 0xC0FFEE, 1));
+
+    // Miss: arrays supplied, prototype committed and cached.
+    let scene_a = build_instanced_scene(cache, 1, true, &IDENTITY);
+    assert!(crust_geo_cache_contains(cache, 0xC0FFEE, 1));
+    assert!(!crust_geo_cache_contains(cache, 0xC0FFEE, 2));
+    let renderer_a = commit(scene_a, ptr::null());
+    let a = render_to_completion(renderer_a);
+
+    // Hit: NULL arrays, same key+version, same everything else.
+    let scene_b = build_instanced_scene(cache, 1, false, &IDENTITY);
+    let renderer_b = commit(scene_b, ptr::null());
+    let b = render_to_completion(renderer_b);
+
+    assert!(a.iter().any(|v| *v > 0.0));
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&a), bits(&b), "cache hit must not change the image");
+
+    // A miss with NULL arrays is an error (version bumped, no data).
+    let scene_c = crust_scene_create();
+    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    crust_material_default(&mut material);
+    let mut id = 0u32;
+    assert_eq!(
+        crust_scene_add_instance(
+            scene_c,
+            cache,
+            0xC0FFEE,
+            2,
+            ptr::null(),
+            4,
+            ptr::null(),
+            2,
+            ptr::null(),
+            IDENTITY.as_ptr(),
+            &material,
+            &mut id,
+        ),
+        CrustStatus::NullArgument
+    );
+    // A singular placement is rejected.
+    let zero_scale: [f64; 16] = [0.0; 16];
+    let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let indices: [u32; 3] = [0, 1, 2];
+    assert_eq!(
+        crust_scene_add_instance(
+            scene_c,
+            cache,
+            7,
+            1,
+            positions.as_ptr(),
+            3,
+            indices.as_ptr(),
+            1,
+            ptr::null(),
+            zero_scale.as_ptr(),
+            &material,
+            &mut id,
+        ),
+        CrustStatus::InvalidArgument
+    );
+    crust_scene_destroy(scene_c);
+
+    // Removal forgets the key; clear forgets everything.
+    crust_geo_cache_remove(cache, 0xC0FFEE);
+    assert!(!crust_geo_cache_contains(cache, 0xC0FFEE, 1));
+    crust_geo_cache_clear(cache);
+
+    // Renderers keep their prototypes alive through the Arc regardless.
+    let a2 = read_rgba(renderer_a);
+    assert_eq!(bits(&a), bits(&a2));
+
+    crust_renderer_destroy(renderer_a);
+    crust_renderer_destroy(renderer_b);
+    crust_scene_destroy(scene_a);
+    crust_scene_destroy(scene_b);
+    crust_geo_cache_destroy(cache);
+    crust_geo_cache_destroy(ptr::null_mut()); // NULL is a no-op
+}
+
+/// In-place camera and settings edits restart sampling without a rebuild
+/// and land on exactly the image a fresh build would produce.
+#[test]
+fn in_place_edits_match_fresh_builds() {
+    // Reference: fresh build with the SHIFTED camera.
+    let mut shifted_view = VIEW;
+    shifted_view[12] = -0.4; // translate x
+    let ts_ref = build_scene(8);
+    assert_eq!(
+        crust_scene_set_camera(
+            ts_ref.scene,
+            shifted_view.as_ptr(),
+            perspective().as_ptr(),
+            0.0,
+            3.0
+        ),
+        CrustStatus::Ok
+    );
+    let renderer_ref = commit(ts_ref.scene, ptr::null());
+    let reference = render_to_completion(renderer_ref);
+
+    // Edited: build with the ORIGINAL camera, render some, then update.
+    let ts = build_scene(8);
+    let renderer = commit(ts.scene, ptr::null());
+    let mut status = CrustStepStatus::InProgress;
+    let mut done = 0u32;
+    assert_eq!(
+        crust_renderer_step(renderer, 3, &mut status, &mut done),
+        CrustStatus::Ok
+    );
+    let token = crust_stop_token_create();
+    assert_eq!(
+        crust_renderer_update_camera(
+            renderer,
+            shifted_view.as_ptr(),
+            perspective().as_ptr(),
+            0.0,
+            3.0,
+            token,
+        ),
+        CrustStatus::Ok
+    );
+    // Progress restarted from zero.
+    assert_eq!(crust_renderer_spp_done(renderer), 0);
+    assert!(!crust_renderer_is_converged(renderer));
+    let edited = render_to_completion(renderer);
+
+    let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    assert!(reference.iter().any(|v| *v > 0.0));
+    assert_eq!(
+        bits(&reference),
+        bits(&edited),
+        "update_camera must land on the fresh-build image"
+    );
+
+    // Settings edit: resolution change resizes the outputs.
+    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    crust_render_settings_default(&mut settings);
+    settings.width = 16;
+    settings.height = 16;
+    settings.samples_per_pixel = 4;
+    settings.max_depth = 4;
+    assert_eq!(
+        crust_renderer_update_settings(renderer, &settings, ptr::null()),
+        CrustStatus::Ok
+    );
+    let mut w = 0u32;
+    let mut h = 0u32;
+    crust_renderer_get_dimensions(renderer, &mut w, &mut h);
+    assert_eq!((w, h), (16, 16));
+    let mut small = vec![0.0f32; 16 * 16 * 4];
+    let mut st = CrustStepStatus::InProgress;
+    while st != CrustStepStatus::Complete {
+        assert_eq!(
+            crust_renderer_step(renderer, 2, &mut st, &mut done),
+            CrustStatus::Ok
+        );
+    }
+    assert_eq!(
+        crust_renderer_read_color(renderer, small.as_mut_ptr(), 16 * 16),
+        CrustStatus::Ok
+    );
+    assert!(small.iter().all(|v| v.is_finite()));
+
+    // Error paths.
+    let ortho: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, -0.02, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    assert_eq!(
+        crust_renderer_update_camera(
+            renderer,
+            VIEW.as_ptr(),
+            ortho.as_ptr(),
+            0.0,
+            3.0,
+            ptr::null()
+        ),
+        CrustStatus::InvalidCamera
+    );
+
+    crust_stop_token_destroy(token);
+    crust_renderer_destroy(renderer);
+    crust_renderer_destroy(renderer_ref);
+    crust_scene_destroy(ts.scene);
+    crust_scene_destroy(ts_ref.scene);
+}
+
 #[test]
 fn error_paths_return_their_exact_status() {
     // Null handles.

@@ -43,6 +43,39 @@ fn read_vec3s(ptr: *const f32, count: usize) -> CResult<Vec<Vec3A>> {
         .collect())
 }
 
+/// Validates and reads a triangle mesh's arrays into kernel form — the
+/// shared front half of `crust_scene_add_mesh` and
+/// `crust_scene_add_instance`.
+fn read_mesh_geometry(
+    positions: *const f32,
+    vertex_count: usize,
+    tri_indices: *const u32,
+    triangle_count: usize,
+    normals_or_null: *const f32,
+) -> CResult<Geometry> {
+    if vertex_count > u32::MAX as usize {
+        return Err(CrustStatus::InvalidArgument);
+    }
+    let vertices = read_vec3s(positions, vertex_count)?;
+    let index_len = triangle_count
+        .checked_mul(3)
+        .ok_or(CrustStatus::InvalidArgument)?;
+    let indices: Vec<[u32; 3]> = slice(tri_indices, index_len)?
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let normals = if normals_or_null.is_null() {
+        None
+    } else {
+        Some(read_vec3s(normals_or_null, vertex_count)?)
+    };
+    Ok(Geometry::TriangleMesh {
+        vertices,
+        indices,
+        normals,
+    })
+}
+
 /// `CrustStatus crust_scene_add_mesh(CrustScene*, const float* positions,
 ///     size_t vertex_count, const uint32_t* tri_indices,
 ///     size_t triangle_count, const float* normals_or_null,
@@ -61,28 +94,94 @@ pub extern "C" fn crust_scene_add_mesh(
     let result = (|| -> CResult<u32> {
         let handle = require_mut(scene)?;
         let pbr = require(material)?.to_openpbr()?;
-        if vertex_count > u32::MAX as usize {
+        let geometry = read_mesh_geometry(
+            positions,
+            vertex_count,
+            tri_indices,
+            triangle_count,
+            normals_or_null,
+        )?;
+        let builder = handle.builder_mut()?;
+        Ok(builder.attach(geometry, Arc::new(pbr)))
+    })();
+    match result {
+        Ok(id) => {
+            write_out(out_geom_id, id);
+            CrustStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// `CrustStatus crust_scene_add_instance(CrustScene*, CrustGeoCache*,
+///     uint64_t key, uint32_t version,
+///     const float* positions_or_null, size_t vertex_count,
+///     const uint32_t* tri_indices_or_null, size_t triangle_count,
+///     const float* normals_or_null, const double xform[16],
+///     const CrustMaterial*, uint32_t* out_geom_id);`
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn crust_scene_add_instance(
+    scene: *mut SceneHandle,
+    cache: *mut crate::geo_cache::GeoCacheHandle,
+    key: u64,
+    version: u32,
+    positions_or_null: *const f32,
+    vertex_count: usize,
+    tri_indices_or_null: *const u32,
+    triangle_count: usize,
+    normals_or_null: *const f32,
+    xform: *const f64,
+    material: *const CrustMaterial,
+    out_geom_id: *mut u32,
+) -> CrustStatus {
+    let result = (|| -> CResult<u32> {
+        let handle = require_mut(scene)?;
+        let cache = require(cache.cast_const())?;
+        let pbr = require(material)?.to_openpbr()?;
+
+        // The placement, validated before any geometry work: the kernel's
+        // instance path requires an invertible transform (a zero scale is
+        // the common "hide this" idiom — the caller skips those).
+        let m = slice(xform, 16)?;
+        if !m.iter().all(|v| v.is_finite()) {
             return Err(CrustStatus::InvalidArgument);
         }
-        let vertices = read_vec3s(positions, vertex_count)?;
-        let index_len = triangle_count
-            .checked_mul(3)
-            .ok_or(CrustStatus::InvalidArgument)?;
-        let indices: Vec<[u32; 3]> = slice(tri_indices, index_len)?
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
-        let normals = if normals_or_null.is_null() {
-            None
-        } else {
-            Some(read_vec3s(normals_or_null, vertex_count)?)
+        let mut cols = [0.0f64; 16];
+        cols.copy_from_slice(m);
+        let placement64 = glam::DMat4::from_cols_array(&cols);
+        if placement64.determinant().abs() < 1e-12 {
+            return Err(CrustStatus::InvalidArgument);
+        }
+        let placement = glam::Affine3A::from_mat4(placement64.as_mat4());
+
+        // The prototype: cached committed scene, or built from the arrays
+        // on a miss. On a hit the arrays are never read (they may be NULL —
+        // that is the whole point of `crust_geo_cache_contains`).
+        let proto = match cache.lookup(key, version) {
+            Some(scene) => scene,
+            None => {
+                let geometry = read_mesh_geometry(
+                    positions_or_null,
+                    vertex_count,
+                    tri_indices_or_null,
+                    triangle_count,
+                    normals_or_null,
+                )?;
+                let mut inner = crust_core::rt::SceneBuilder::new();
+                inner.attach(geometry);
+                let scene = Arc::new(inner.commit());
+                cache.insert(key, version, scene.clone());
+                scene
+            }
         };
+
         let builder = handle.builder_mut()?;
         Ok(builder.attach(
-            Geometry::TriangleMesh {
-                vertices,
-                indices,
-                normals,
+            crust_core::rt::Geometry::Instance {
+                scene: proto,
+                transform: placement,
+                transform_end: None,
             },
             Arc::new(pbr),
         ))

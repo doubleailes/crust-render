@@ -25,6 +25,7 @@
 //!   owning both. `handles::RendererHandle` documents how that
 //!   self-reference is kept sound.
 
+mod geo_cache;
 mod handles;
 mod material;
 mod render;
@@ -33,6 +34,7 @@ mod status;
 mod token;
 mod validate;
 
+pub use geo_cache::*;
 pub use handles::{RendererHandle, SceneHandle, TokenHandle};
 pub use material::*;
 pub use render::*;
