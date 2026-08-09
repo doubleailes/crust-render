@@ -138,7 +138,21 @@ rather than plateauing.
 
 ## Workspace layout
 
-Five crates under `crates/`:
+Five crates under `crates/` (plus the C++ plugin under `hydra/`):
+
+- **`crust-capi`** — the C ABI over crust-core for the Hydra delegate; the one
+  sanctioned `unsafe` crate (see the safe-Rust rule above). The C contract is
+  the hand-written `include/crust.h`, guarded from drift by `tests/abi.rs`
+  (Rust side) and `tests/smoke.c` via `scripts/test_capi_c.sh` (C side).
+  Depends only on crust-core + glam; nothing depends on it.
+- **`hydra/hdCrust/`** (not a crate) — the C++ `HdRenderDelegate` plugin over
+  crust-capi: synchronous stepping per Hydra `Execute`, rebuild-on-any-edit,
+  displayColor shading, color/depth/primId AOVs. Builds against an OpenUSD
+  C++ install (imaging on, GL not needed); `tests/testHdCrust.cpp` is a
+  headless registry→render harness. See `hydra/hdCrust/README.md` and
+  `docs/hydra_delegate.md`.
+
+The engine crates:
 
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
@@ -175,7 +189,9 @@ Five crates under `crates/`:
   the tone-mapped PNG. `main.rs` is the only file.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
-- **`openqmc-rs`** (crate/lib name `openqmc`) — a self-contained, from-scratch Rust port
+- **`openqmc-rs`** (crate/lib name `openqmc`; no longer under `crates/` — pulled from
+  crates.io as an ordinary dependency, having graduated out of the workspace) — a
+  self-contained, from-scratch Rust port
   of [AcademySoftwareFoundation/openqmc](https://github.com/AcademySoftwareFoundation/openqmc)
   (Apache-2.0), the quasi-Monte Carlo sampling library. Modules map one-to-one to the
   upstream `oqmc/*.h` headers (`pcg`, `reverse`, `rotate`, `permute`, `encode`, `float`,

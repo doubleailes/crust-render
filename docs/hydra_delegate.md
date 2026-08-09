@@ -1,6 +1,14 @@
 # Hydra render delegate (hdCrust): decision record and roadmap
 
-Status: **Phase 0 in progress** (engine groundwork). Phases 1–2 are planned, not started.
+Status: **Phases 0 and 1 landed.** Phase 0 (engine groundwork) and Phase 1
+(`crust-capi` + the `hdCrust` plugin MVP) are implemented on this branch.
+`crust-capi` is tested from both sides of the ABI (`cargo test -p
+crust-capi`, `scripts/test_capi_c.sh`); `hdCrust` is compile- **and
+runtime-verified** against OpenUSD v25.11 — a headless harness
+(`hydra/hdCrust/tests/testHdCrust.cpp`) loads the plugin through
+`HdRendererPluginRegistry`, renders a cube via hd's unit-test scene
+delegate, and asserts the color buffer converges nonzero. Interactive
+usdview verification and Phase 2 remain.
 
 ## The decision
 
@@ -55,18 +63,26 @@ bit-identical):
   a pure function of the persisted accumulators). CLI: `--progressive`, `--preview`,
   `--time-limit`.
 
-### Phase 1 — `crust-capi` + `hdCrust` MVP
+### Phase 1 — `crust-capi` + `hdCrust` MVP (landed)
 
-- `crates/crust-capi`: `cdylib` exposing scene build (mesh/camera/light/material
-  subset), render start/stop, framebuffer + AOV reads over a C ABI (cbindgen).
-  This is where `unsafe` first appears — `extern "C"` exports and raw-pointer
-  buffer views, nothing else.
-- `hydra/hdCrust/`: C++ plugin — `HdRenderDelegate`, `HdRenderPass`,
-  `HdRenderBuffer`, `HdMesh`/`HdCamera`/light adapters, `plugInfo.json`, CMake
-  against a host OpenUSD build. MVP semantics: rebuild the whole crust scene on any
-  dirty bit; color + depth AOVs; verify in usdview.
-- Note: this repo's CI container has no OpenUSD C++ build; the C++ side is
-  compile-verified against a local USD install, documented in the plugin's README.
+- `crates/crust-capi`: `cdylib`+`staticlib` exposing scene build (meshes,
+  spheres, the four light types, matrix camera, settings), progressive
+  step/stop, framebuffer + AOV reads over a hand-written C header
+  (`include/crust.h`). This is where `unsafe` first appears — `extern "C"`
+  exports, raw-pointer buffer views, and the pinned self-reference tying the
+  `ProgressiveRender` session to its boxed `Renderer` (see
+  `src/handles.rs`). Because the workspace builds release with
+  `panic = "abort"`, the boundary validates every input rather than relying
+  on `catch_unwind`.
+- `hydra/hdCrust/`: the C++ plugin — `HdRenderDelegate`, `HdRenderPass`
+  (synchronous stepping: one `crust_renderer_step` per Hydra `Execute`;
+  usdview's convergence loop supplies progressiveness), `HdRenderBuffer`,
+  mesh/instancer/light adapters, a no-op material stub, `plugInfo.json`,
+  CMake. MVP semantics: rebuild the whole crust scene on any dirty bit;
+  displayColor shading; color + depth + primId AOVs (picking works).
+- Verified against a from-source OpenUSD v25.11 build (no Python, no GL):
+  compiles clean, and the headless `testHdCrust` harness proves registry
+  discovery → delegate → synced scene → converged nonzero image.
 
 ### Phase 2 — incrementality and materials
 
