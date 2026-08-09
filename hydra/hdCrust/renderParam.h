@@ -9,15 +9,20 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include <crust.h>
+
 #include <map>
 #include <mutex>
+#include <string>
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// One synced mesh, in object space. The render pass bakes `xform` (and
-/// each instance transform) into world-space vertices when it feeds the
-/// crust scene — the Phase 1 C API has no instance object yet, so
-/// instancing is flattened here (the documented Phase 2 seam).
+/// One synced mesh, in object space. The render pass hands the arrays to
+/// the crust geometry cache keyed by (path hash, `geoVersion`) and places
+/// them as kernel instances — `geoVersion` only moves when the geometry
+/// itself (points/topology/normals) changes, so transform, color, material
+/// and instancing edits reuse the committed triangles.
 struct HdCrustCachedMesh {
     VtVec3fArray points;
     VtVec3iArray triangles;      // from HdMeshUtil, indexing `points`
@@ -25,6 +30,8 @@ struct HdCrustCachedMesh {
     GfMatrix4d xform{1.0};
     VtMatrix4dArray instanceXforms; // empty = one placement at `xform`
     GfVec3f displayColor{0.5f, 0.5f, 0.5f};
+    SdfPath materialId;          // bound material sprim, or empty
+    uint32_t geoVersion = 0;     // bumped on geometry-changing dirty bits
     int primId = 0;              // Hydra's rprim id, for the primId AOV
     bool visible = true;
 };
@@ -41,6 +48,7 @@ struct HdCrustCachedLight {
     float width = 1.0f;          // rectLight
     float height = 1.0f;         // rectLight
     float angle = 0.53f;         // distantLight (angular diameter, degrees)
+    std::string texturePath;     // domeLight equirect file, or empty
 };
 
 /// The rebuild spine: prims write their cached state here during Sync and
@@ -72,6 +80,28 @@ public:
             ++_version;
         }
     }
+    void UpdateMaterial(SdfPath const& id, CrustMaterial material) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _materials[id] = material;
+        ++_version;
+    }
+    void RemoveMaterial(SdfPath const& id) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_materials.erase(id) > 0) {
+            ++_version;
+        }
+    }
+
+    /// Records a deleted mesh's cache key so the render pass can evict its
+    /// prototype from the crust geometry cache at the next rebuild.
+    void AddDeadGeoKey(uint64_t key) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _deadGeoKeys.push_back(key);
+    }
+    std::vector<uint64_t> TakeDeadGeoKeys() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return std::move(_deadGeoKeys);
+    }
 
     int GetVersion() const {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -81,10 +111,12 @@ public:
     /// A consistent copy for the render pass to build from, with the
     /// version it corresponds to.
     int Snapshot(std::map<SdfPath, HdCrustCachedMesh>* meshes,
-                 std::map<SdfPath, HdCrustCachedLight>* lights) const {
+                 std::map<SdfPath, HdCrustCachedLight>* lights,
+                 std::map<SdfPath, CrustMaterial>* materials) const {
         std::lock_guard<std::mutex> lock(_mutex);
         *meshes = _meshes;
         *lights = _lights;
+        *materials = _materials;
         return _version;
     }
 
@@ -92,6 +124,8 @@ private:
     mutable std::mutex _mutex;
     std::map<SdfPath, HdCrustCachedMesh> _meshes;
     std::map<SdfPath, HdCrustCachedLight> _lights;
+    std::map<SdfPath, CrustMaterial> _materials;
+    std::vector<uint64_t> _deadGeoKeys;
     int _version = 1;
 };
 

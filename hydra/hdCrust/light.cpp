@@ -4,6 +4,7 @@
 
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/usd/sdf/assetPath.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -44,16 +45,13 @@ void HdCrustLight::Sync(HdSceneDelegate* sceneDelegate,
     } else if (_lightType == HdPrimTypeTokens->distantLight) {
         light.angle = _Param(sceneDelegate, id, HdLightTokens->angle, 0.53f);
     } else if (_lightType == HdPrimTypeTokens->domeLight) {
-        // Dome textures are deferred (Phase 1 renders the uniform color;
-        // the crust C API already accepts equirect pixels for when EXR/HDR
-        // decoding lands in the plugin).
         VtValue texture =
             sceneDelegate->GetLightParamValue(id, HdLightTokens->textureFile);
-        if (!texture.IsEmpty()) {
-            TF_WARN(
-                "hdCrust: dome light %s has a texture; Phase 1 renders its "
-                "uniform color instead",
-                id.GetText());
+        if (texture.IsHolding<SdfAssetPath>()) {
+            SdfAssetPath const& asset = texture.UncheckedGet<SdfAssetPath>();
+            light.texturePath = asset.GetResolvedPath().empty()
+                                    ? asset.GetAssetPath()
+                                    : asset.GetResolvedPath();
         }
     }
 

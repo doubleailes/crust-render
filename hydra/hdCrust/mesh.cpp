@@ -4,6 +4,7 @@
 #include "renderParam.h"
 
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/tf/hash.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/meshUtil.h>
 #include <pxr/imaging/hd/renderIndex.h>
@@ -23,6 +24,7 @@ HdDirtyBits HdCrustMesh::GetInitialDirtyBitsMask() const {
         | HdChangeTracker::DirtyPrimvar
         | HdChangeTracker::DirtyNormals
         | HdChangeTracker::DirtyInstancer
+        | HdChangeTracker::DirtyMaterialId
         | HdChangeTracker::DirtyPrimID;
 }
 
@@ -62,13 +64,28 @@ void HdCrustMesh::Sync(HdSceneDelegate* sceneDelegate,
         _UpdateVisibility(sceneDelegate, dirtyBits);
     }
     _UpdateInstancer(sceneDelegate, dirtyBits);
+    if (*dirtyBits & HdChangeTracker::DirtyMaterialId) {
+        SetMaterialId(sceneDelegate->GetMaterialId(id));
+    }
 
-    // Phase 1 rebuilds the whole crust scene on any change, so the cache
-    // entry is simply recomputed from scratch on every Sync — cheap next
-    // to the render, and immune to partial-dirty bookkeeping bugs.
+    // The GEOMETRY version moves only when the geometry itself did — that
+    // is what lets the render pass keep hitting the crust prototype cache
+    // across transform/material/color/instancing edits.
+    if (_geoVersion == 0 ||
+        (*dirtyBits & (HdChangeTracker::DirtyPoints |
+                       HdChangeTracker::DirtyTopology |
+                       HdChangeTracker::DirtyNormals))) {
+        ++_geoVersion;
+    }
+
+    // The cache entry itself is recomputed from scratch on every Sync —
+    // cheap next to the render, and immune to partial-dirty bookkeeping
+    // bugs; only the version above is stateful.
     HdCrustCachedMesh mesh;
     mesh.visible = IsVisible();
     mesh.primId = GetPrimId();
+    mesh.geoVersion = _geoVersion;
+    mesh.materialId = GetMaterialId();
     mesh.xform = sceneDelegate->GetTransform(id);
     mesh.displayColor = _GetDisplayColor(sceneDelegate, id);
 
@@ -102,6 +119,12 @@ void HdCrustMesh::Sync(HdSceneDelegate* sceneDelegate,
 
     SdfPath instancerId = GetInstancerId();
     if (!instancerId.IsEmpty()) {
+        // The render index does NOT sync instancers on its own — the rprim
+        // must pull its instancer chain up to date before reading it
+        // (hdEmbree does the same; the helper is mutex-guarded for
+        // concurrent rprim syncs).
+        HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(),
+                                              instancerId);
         HdInstancer* instancer =
             sceneDelegate->GetRenderIndex().GetInstancer(instancerId);
         if (TF_VERIFY(instancer)) {
@@ -116,7 +139,11 @@ void HdCrustMesh::Sync(HdSceneDelegate* sceneDelegate,
 }
 
 void HdCrustMesh::Finalize(HdRenderParam* renderParam) {
-    static_cast<HdCrustRenderParam*>(renderParam)->RemoveMesh(GetId());
+    auto* param = static_cast<HdCrustRenderParam*>(renderParam);
+    param->RemoveMesh(GetId());
+    // Let the render pass evict this mesh's prototype from the crust
+    // geometry cache — same key derivation as the rebuild uses.
+    param->AddDeadGeoKey(TfHash()(GetId()));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

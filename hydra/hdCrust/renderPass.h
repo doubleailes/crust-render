@@ -43,6 +43,10 @@ private:
 
     CrustRenderer* _renderer = nullptr;
     CrustStopToken* _token = nullptr;
+    /// Prototype triangles survive scene rebuilds here — a rebuild whose
+    /// meshes all hit the cache pays only the top-level BVH over instance
+    /// bounds.
+    CrustGeoCache* _geoCache = nullptr;
 
     int _lastVersion = -1;
     GfMatrix4d _lastView{1.0};
