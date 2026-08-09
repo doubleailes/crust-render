@@ -7,6 +7,7 @@
 
 use crate::status::CrustStatus;
 use crust_core::Vec3A;
+use std::mem::size_of;
 
 pub(crate) type CResult<T> = Result<T, CrustStatus>;
 

@@ -3,6 +3,7 @@
 use crate::status::CrustStatus;
 use crate::validate::{CResult, MAX_DIM};
 use crust_core::{OpenPBR, RenderSettings, Vec3A};
+use std::mem::size_of;
 
 /// Mirrors `CrustMaterial` in `crust.h`: a portable subset of the OpenPBR
 /// übershader. Field-for-field POD; size pinned on both sides.
