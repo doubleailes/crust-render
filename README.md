@@ -9,6 +9,11 @@
 A toy, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
 Completely in a vibe coding mood.
 
+Every crate is `forbid(unsafe_code)` safe Rust, with one sanctioned exception on the
+roadmap: the USD **Hydra render delegate boundary** (a `crust-capi` C-ABI crate + the
+`hdCrust` C++ plugin) may use `unsafe`/FFI, since Hydra's plugin ABI is C++ — see
+[`docs/hydra_delegate.md`](docs/hydra_delegate.md).
+
 ## 📸 Preview
 
 ![preview](./images/rgb.png)
