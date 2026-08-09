@@ -26,6 +26,13 @@ public:
 protected:
     void _InitRepr(TfToken const& reprToken, HdDirtyBits* dirtyBits) override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override;
+
+private:
+    /// The (path-hash, geoVersion) pair keys the crust geometry cache:
+    /// bumped only when a Sync saw geometry-changing dirty bits, so
+    /// transform/material/instancing edits keep hitting the committed
+    /// prototype.
+    uint32_t _geoVersion = 0;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

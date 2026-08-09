@@ -25,9 +25,14 @@ TF_DEFINE_ENV_SETTING(HDCRUST_MAX_DEPTH, 8, "Path length bound");
 HdCrustRenderPass::HdCrustRenderPass(HdRenderIndex* index,
                                      HdRprimCollection const& collection,
                                      HdCrustRenderParam* renderParam)
-    : HdRenderPass(index, collection), _renderParam(renderParam) {}
+    : HdRenderPass(index, collection),
+      _renderParam(renderParam),
+      _geoCache(crust_geo_cache_create()) {}
 
-HdCrustRenderPass::~HdCrustRenderPass() { _DestroyRenderer(); }
+HdCrustRenderPass::~HdCrustRenderPass() {
+    _DestroyRenderer();
+    crust_geo_cache_destroy(_geoCache);
+}
 
 void HdCrustRenderPass::_DestroyRenderer() {
     if (_token) {
@@ -98,8 +103,31 @@ static void _AddLight(CrustScene* scene, HdCrustCachedLight const& light) {
                 rotation[row * 3 + col] = float(light.xform[row][col]);
             }
         }
+        if (!light.texturePath.empty()) {
+            CrustStatus status = crust_scene_add_dome_light_file(
+                scene, energyPtr, light.texturePath.c_str(), rotation);
+            if (status == CRUST_OK) {
+                return;
+            }
+            TF_WARN(
+                "hdCrust: dome texture %s failed to load (%s); using the "
+                "uniform color",
+                light.texturePath.c_str(), crust_status_string(status));
+        }
         crust_scene_add_dome_light(scene, energyPtr, 0, 0, nullptr, rotation);
     }
+}
+
+static CrustRenderSettings _MakeSettings(uint32_t width, uint32_t height) {
+    CrustRenderSettings settings;
+    crust_render_settings_default(&settings);
+    settings.width = width;
+    settings.height = height;
+    settings.samples_per_pixel =
+        uint32_t(std::max(1, TfGetEnvSetting(HDCRUST_SAMPLES_PER_PIXEL)));
+    settings.max_depth =
+        uint32_t(std::max(1, TfGetEnvSetting(HDCRUST_MAX_DEPTH)));
+    return settings;
 }
 
 void HdCrustRenderPass::_RebuildScene(GfMatrix4d const& view,
@@ -111,11 +139,17 @@ void HdCrustRenderPass::_RebuildScene(GfMatrix4d const& view,
 
     std::map<SdfPath, HdCrustCachedMesh> meshes;
     std::map<SdfPath, HdCrustCachedLight> lights;
-    _lastVersion = _renderParam->Snapshot(&meshes, &lights);
+    std::map<SdfPath, CrustMaterial> materials;
+    _lastVersion = _renderParam->Snapshot(&meshes, &lights, &materials);
     _lastView = view;
     _lastProj = proj;
     _width = width;
     _height = height;
+
+    // Deleted meshes release their prototypes.
+    for (uint64_t key : _renderParam->TakeDeadGeoKeys()) {
+        crust_geo_cache_remove(_geoCache, key);
+    }
 
     CrustScene* scene = crust_scene_create();
 
@@ -124,62 +158,82 @@ void HdCrustRenderPass::_RebuildScene(GfMatrix4d const& view,
         if (!mesh.visible || mesh.points.empty() || mesh.triangles.empty()) {
             continue;
         }
+        // Bound material if translated, else the displayColor fallback.
         CrustMaterial material;
-        crust_material_default(&material);
-        material.base_color[0] = mesh.displayColor[0];
-        material.base_color[1] = mesh.displayColor[1];
-        material.base_color[2] = mesh.displayColor[2];
-
-        // One capi mesh per placement, world-space baked — the Phase 1 C
-        // API has no instance object (the documented Phase 2 seam), so
-        // instancing is flattened here.
-        VtMatrix4dArray const singlePlacement(1, mesh.xform);
-        VtMatrix4dArray const& placements =
-            mesh.instanceXforms.empty() ? singlePlacement : mesh.instanceXforms;
-
-        std::vector<float> positions(mesh.points.size() * 3);
-        std::vector<float> normals;
-        std::vector<uint32_t> indices(mesh.triangles.size() * 3);
-        for (size_t t = 0; t < mesh.triangles.size(); ++t) {
-            indices[3 * t] = uint32_t(mesh.triangles[t][0]);
-            indices[3 * t + 1] = uint32_t(mesh.triangles[t][1]);
-            indices[3 * t + 2] = uint32_t(mesh.triangles[t][2]);
+        auto boundMaterial = materials.find(mesh.materialId);
+        if (!mesh.materialId.IsEmpty() && boundMaterial != materials.end()) {
+            material = boundMaterial->second;
+        } else {
+            crust_material_default(&material);
+            material.base_color[0] = mesh.displayColor[0];
+            material.base_color[1] = mesh.displayColor[1];
+            material.base_color[2] = mesh.displayColor[2];
         }
 
-        for (GfMatrix4d const& placement : placements) {
-            GfMatrix4d xform = mesh.instanceXforms.empty()
-                                   ? placement
-                                   : mesh.xform * placement;
+        // One kernel instance per placement over a cached prototype. The
+        // arrays are marshalled only when the (path-hash, geoVersion) key
+        // misses — i.e. only when the geometry itself changed.
+        uint64_t const key = TfHash()(entry.first);
+        std::vector<float> positions;
+        std::vector<float> normals;
+        std::vector<uint32_t> indices;
+        const float* positionsPtr = nullptr;
+        const uint32_t* indicesPtr = nullptr;
+        const float* normalsPtr = nullptr;
+        if (!crust_geo_cache_contains(_geoCache, key, mesh.geoVersion)) {
+            positions.resize(mesh.points.size() * 3);
             for (size_t i = 0; i < mesh.points.size(); ++i) {
-                GfVec3d p = xform.Transform(GfVec3d(mesh.points[i]));
-                positions[3 * i] = float(p[0]);
-                positions[3 * i + 1] = float(p[1]);
-                positions[3 * i + 2] = float(p[2]);
+                positions[3 * i] = mesh.points[i][0];
+                positions[3 * i + 1] = mesh.points[i][1];
+                positions[3 * i + 2] = mesh.points[i][2];
             }
-            const float* normalsPtr = nullptr;
+            indices.resize(mesh.triangles.size() * 3);
+            for (size_t t = 0; t < mesh.triangles.size(); ++t) {
+                indices[3 * t] = uint32_t(mesh.triangles[t][0]);
+                indices[3 * t + 1] = uint32_t(mesh.triangles[t][1]);
+                indices[3 * t + 2] = uint32_t(mesh.triangles[t][2]);
+            }
             if (!mesh.normals.empty()) {
-                // Normals map through the inverse transpose (mirrors and
-                // non-uniform scales included).
-                GfMatrix4d normalXf = xform.GetInverse().GetTranspose();
+                // Object space: the kernel's instance path maps normals
+                // through the placement's inverse transpose itself.
                 normals.resize(mesh.normals.size() * 3);
                 for (size_t i = 0; i < mesh.normals.size(); ++i) {
-                    GfVec3d n = normalXf.TransformDir(GfVec3d(mesh.normals[i]));
-                    n.Normalize();
-                    normals[3 * i] = float(n[0]);
-                    normals[3 * i + 1] = float(n[1]);
-                    normals[3 * i + 2] = float(n[2]);
+                    normals[3 * i] = mesh.normals[i][0];
+                    normals[3 * i + 1] = mesh.normals[i][1];
+                    normals[3 * i + 2] = mesh.normals[i][2];
                 }
                 normalsPtr = normals.data();
             }
+            positionsPtr = positions.data();
+            indicesPtr = indices.data();
+        }
+
+        VtMatrix4dArray const singlePlacement(1, mesh.xform);
+        VtMatrix4dArray const& placements =
+            mesh.instanceXforms.empty() ? singlePlacement : mesh.instanceXforms;
+        for (GfMatrix4d const& placement : placements) {
+            GfMatrix4d const xform = mesh.instanceXforms.empty()
+                                         ? placement
+                                         : mesh.xform * placement;
             uint32_t geomId = 0;
-            CrustStatus status = crust_scene_add_mesh(
-                scene, positions.data(), mesh.points.size(), indices.data(),
-                mesh.triangles.size(), normalsPtr, &material, &geomId);
+            CrustStatus status = crust_scene_add_instance(
+                scene, _geoCache, key, mesh.geoVersion, positionsPtr,
+                mesh.points.size(), indicesPtr, mesh.triangles.size(),
+                normalsPtr, xform.GetArray(), &material, &geomId);
             if (status != CRUST_OK) {
-                TF_WARN("hdCrust: add_mesh(%s) failed: %s",
-                        entry.first.GetText(), crust_status_string(status));
+                // Singular placements (zero scale = "hide me") are expected;
+                // anything else is worth a warning.
+                if (status != CRUST_ERROR_INVALID_ARGUMENT) {
+                    TF_WARN("hdCrust: add_instance(%s) failed: %s",
+                            entry.first.GetText(), crust_status_string(status));
+                }
                 continue;
             }
+            // The first placement populated the cache; later ones (and
+            // later rebuilds) hit it.
+            positionsPtr = nullptr;
+            indicesPtr = nullptr;
+            normalsPtr = nullptr;
             if (_geomToPrimId.size() <= geomId) {
                 _geomToPrimId.resize(geomId + 1, -1);
             }
@@ -197,13 +251,7 @@ void HdCrustRenderPass::_RebuildScene(GfMatrix4d const& view,
         TF_WARN("hdCrust: set_camera failed: %s", crust_status_string(status));
     }
 
-    CrustRenderSettings settings;
-    crust_render_settings_default(&settings);
-    settings.width = width;
-    settings.height = height;
-    settings.samples_per_pixel =
-        uint32_t(std::max(1, TfGetEnvSetting(HDCRUST_SAMPLES_PER_PIXEL)));
-    settings.max_depth = uint32_t(std::max(1, TfGetEnvSetting(HDCRUST_MAX_DEPTH)));
+    CrustRenderSettings settings = _MakeSettings(width, height);
     crust_scene_set_render_settings(scene, &settings);
 
     _token = crust_stop_token_create();
@@ -263,10 +311,42 @@ void HdCrustRenderPass::_Execute(
     GfMatrix4d view = renderPassState->GetWorldToViewMatrix();
     GfMatrix4d proj = renderPassState->GetProjectionMatrix();
 
-    if (!_renderer || _renderParam->GetVersion() != _lastVersion ||
-        view != _lastView || proj != _lastProj || width != _width ||
-        height != _height) {
+    if (!_renderer || _renderParam->GetVersion() != _lastVersion) {
+        // Scene content changed: rebuild — cheap now, since unchanged
+        // geometry hits the prototype cache and only the top-level BVH
+        // over instance bounds is rebuilt.
         _RebuildScene(view, proj, width, height);
+    } else if (width != _width || height != _height) {
+        // Resolution change: restart sampling in place, no world work.
+        CrustStopToken* fresh = crust_stop_token_create();
+        CrustRenderSettings settings = _MakeSettings(width, height);
+        if (crust_renderer_update_settings(_renderer, &settings, fresh) ==
+            CRUST_OK) {
+            crust_stop_token_destroy(_token);
+            _token = fresh;
+            _width = width;
+            _height = height;
+            _converged = false;
+        } else {
+            crust_stop_token_destroy(fresh);
+            _RebuildScene(view, proj, width, height);
+        }
+    } else if (view != _lastView || proj != _lastProj) {
+        // Camera orbit — the common interactive edit: restart sampling in
+        // place, no world work.
+        CrustStopToken* fresh = crust_stop_token_create();
+        if (crust_renderer_update_camera(_renderer, view.GetArray(),
+                                         proj.GetArray(), 0.0f, 1.0f,
+                                         fresh) == CRUST_OK) {
+            crust_stop_token_destroy(_token);
+            _token = fresh;
+            _lastView = view;
+            _lastProj = proj;
+            _converged = false;
+        } else {
+            crust_stop_token_destroy(fresh);
+            _RebuildScene(view, proj, width, height);
+        }
     }
     if (!_renderer) {
         return;

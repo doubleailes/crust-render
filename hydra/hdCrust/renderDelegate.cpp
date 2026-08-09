@@ -2,13 +2,13 @@
 
 #include "instancer.h"
 #include "light.h"
+#include "material.h"
 #include "mesh.h"
 #include "renderBuffer.h"
 #include "renderPass.h"
 
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/imaging/hd/camera.h>
-#include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 
@@ -26,23 +26,6 @@ const TfTokenVector HdCrustRenderDelegate::SUPPORTED_SPRIM_TYPES = {
 
 const TfTokenVector HdCrustRenderDelegate::SUPPORTED_BPRIM_TYPES = {
     HdPrimTypeTokens->renderBuffer,
-};
-
-/// Accepted and ignored: Phase 1 shades from displayColor, and the stub
-/// keeps material-heavy stages (every production asset binds materials
-/// everywhere) from spraying unsupported-prim errors.
-class HdCrustMaterial final : public HdMaterial {
-public:
-    explicit HdCrustMaterial(SdfPath const& id) : HdMaterial(id) {}
-    HdDirtyBits GetInitialDirtyBitsMask() const override {
-        return HdMaterial::AllDirty;
-    }
-    void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
-              HdDirtyBits* dirtyBits) override {
-        (void)sceneDelegate;
-        (void)renderParam;
-        *dirtyBits = HdMaterial::Clean;
-    }
 };
 
 HdCrustRenderDelegate::HdCrustRenderDelegate() : HdRenderDelegate() {

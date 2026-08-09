@@ -31,6 +31,7 @@ set(CRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/crust-capi/inclu
 add_library(hdCrust SHARED
     instancer.cpp
     light.cpp
+    material.cpp
     mesh.cpp
     renderBuffer.cpp
     renderDelegate.cpp
