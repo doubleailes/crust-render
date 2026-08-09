@@ -1,0 +1,23 @@
+[package]
+name = "crust-capi"
+version = { workspace = true }
+edition = { workspace = true }
+license-file = { workspace = true }
+
+# The C ABI boundary for the hdCrust Hydra render delegate — the one
+# sanctioned exception to the workspace's safe-Rust rule (see
+# docs/hydra_delegate.md). No engine crate depends on this crate.
+#
+# `cdylib` + `staticlib` are what a C++ host links; `rlib` keeps
+# `tests/abi.rs` linking normally under the test profile (where Cargo forces
+# `panic = "unwind"` back on, so the workspace's release `panic = "abort"`
+# does not affect the tests).
+[lib]
+name = "crust_capi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+crust-core = { path = "../crust-core" }
+# Same workspace glam as crust-core (one crate instance), for the types
+# crust-core does not re-export (Mat3A, Affine3A).
+glam.workspace = true
