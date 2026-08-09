@@ -285,8 +285,25 @@ int main() {
     std::vector<float> instancesMoved = converge();
     REQUIRE(instancesMoved != instanced, "moving instances changed nothing");
 
+    // 10. A render buffer with hostile dimensions must refuse allocation
+    // (negative values would wrap to huge unsigned sizes) and end up with
+    // zero-sized storage the render pass then refuses to write into.
+    SdfPath badBufferId("/scene/badBuffer");
+    HdRenderBufferDescriptor badDesc;
+    badDesc.dimensions = GfVec3i(-4, H, 1);
+    badDesc.format = HdFormatFloat32Vec4;
+    badDesc.multiSampled = false;
+    scene.AddRenderBuffer(badBufferId, badDesc);
+    (void)converge(); // syncs the new bprim (Allocate runs and refuses)
+    auto* badBuffer = dynamic_cast<HdRenderBuffer*>(
+        index->GetBprim(HdPrimTypeTokens->renderBuffer, badBufferId));
+    REQUIRE(badBuffer != nullptr, "bad render buffer bprim missing");
+    REQUIRE(badBuffer->GetWidth() == 0 && badBuffer->GetHeight() == 0,
+            "negative-dimension Allocate was not refused");
+
     printf("testHdCrust PASS: beauty (%d nonzero), materials bind and edit, "
-           "transform/camera/instancer edits re-converge\n",
+           "transform/camera/instancer edits re-converge, hostile buffer "
+           "dims refused\n",
            nonzero);
     return 0;
 }
