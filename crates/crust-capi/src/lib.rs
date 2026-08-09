@@ -7,6 +7,14 @@
 //! [`handles::RendererHandle`]. No engine crate depends on this crate, so
 //! the exception cannot leak inward.
 //!
+//! Every export that takes a raw pointer is `pub unsafe extern "C" fn`,
+//! with its preconditions in a `# Safety` section: validation here checks
+//! what CAN be checked (null, counts, finiteness), but validity, alignment,
+//! liveness and exclusivity are promises only the caller can make — a safe
+//! signature would let safe Rust cause UB with a dangling pointer. The
+//! `unsafe` marker is Rust-side only: symbol names and the C ABI are
+//! unchanged.
+//!
 //! The C contract is `include/crust.h` — hand-written, and every
 //! `extern "C"` function below carries its C declaration in the doc comment
 //! directly above it. The C smoke test (`tests/smoke.c`, run by

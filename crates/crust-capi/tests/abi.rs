@@ -36,10 +36,14 @@ struct TestScene {
 }
 
 fn build_scene(spp: u32) -> TestScene {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let scene = crust_scene_create();
     assert!(!scene.is_null());
 
-    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    let mut material = std::mem::zeroed::<CrustMaterial>();
     crust_material_default(&mut material);
     material.base_color = [0.8, 0.4, 0.2];
 
@@ -81,7 +85,7 @@ fn build_scene(spp: u32) -> TestScene {
         CrustStatus::Ok
     );
 
-    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    let mut settings = std::mem::zeroed::<CrustRenderSettings>();
     crust_render_settings_default(&mut settings);
     settings.width = 32;
     settings.height = 32;
@@ -93,9 +97,14 @@ fn build_scene(spp: u32) -> TestScene {
     );
 
     TestScene { scene, quad_id }
+    }
 }
 
 fn commit(scene: *mut SceneHandle, token: *const TokenHandle) -> *mut RendererHandle {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let mut renderer: *mut RendererHandle = ptr::null_mut();
     assert_eq!(
         crust_scene_commit(scene, token, &mut renderer),
@@ -103,19 +112,29 @@ fn commit(scene: *mut SceneHandle, token: *const TokenHandle) -> *mut RendererHa
     );
     assert!(!renderer.is_null());
     renderer
+    }
 }
 
 fn read_rgba(renderer: *mut RendererHandle) -> Vec<f32> {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let mut out = vec![0.0f32; 32 * 32 * 4];
     assert_eq!(
         crust_renderer_read_color(renderer, out.as_mut_ptr(), 32 * 32),
         CrustStatus::Ok
     );
     out
+    }
 }
 
 #[test]
 fn renders_deterministically_through_the_abi() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let run = || -> Vec<f32> {
         let ts = build_scene(8);
         let renderer = commit(ts.scene, ptr::null());
@@ -151,10 +170,15 @@ fn renders_deterministically_through_the_abi() {
     assert!(a.iter().all(|v| v.is_finite()));
     let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
     assert_eq!(bits(&a), bits(&b), "two identical runs must be bit-identical");
+    }
 }
 
 #[test]
 fn aov_planes_report_hits_and_misses() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let ts = build_scene(2);
     let renderer = commit(ts.scene, ptr::null());
     let mut status = CrustStepStatus::InProgress;
@@ -216,10 +240,15 @@ fn aov_planes_report_hits_and_misses() {
 
     crust_renderer_destroy(renderer);
     crust_scene_destroy(ts.scene);
+    }
 }
 
 #[test]
 fn stop_token_interrupts_and_resumes() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let ts = build_scene(8);
     let token = crust_stop_token_create();
     assert!(!crust_stop_token_is_stopped(token));
@@ -262,6 +291,7 @@ fn stop_token_interrupts_and_resumes() {
     crust_scene_destroy(ts2.scene);
     crust_stop_token_destroy(token);
     crust_stop_token_destroy(token2);
+    }
 }
 
 /// Builds the standard test scene with the quad placed through the
@@ -273,8 +303,12 @@ fn build_instanced_scene(
     arrays: bool,
     xform: &[f64; 16],
 ) -> *mut SceneHandle {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let scene = crust_scene_create();
-    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    let mut material = std::mem::zeroed::<CrustMaterial>();
     crust_material_default(&mut material);
     material.base_color = [0.8, 0.4, 0.2];
 
@@ -315,7 +349,7 @@ fn build_instanced_scene(
         crust_scene_set_camera(scene, VIEW.as_ptr(), perspective().as_ptr(), 0.0, 3.0),
         CrustStatus::Ok
     );
-    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    let mut settings = std::mem::zeroed::<CrustRenderSettings>();
     crust_render_settings_default(&mut settings);
     settings.width = 32;
     settings.height = 32;
@@ -326,9 +360,14 @@ fn build_instanced_scene(
         CrustStatus::Ok
     );
     scene
+    }
 }
 
 fn render_to_completion(renderer: *mut RendererHandle) -> Vec<f32> {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let mut status = CrustStepStatus::InProgress;
     let mut done = 0u32;
     while status != CrustStepStatus::Complete {
@@ -338,6 +377,7 @@ fn render_to_completion(renderer: *mut RendererHandle) -> Vec<f32> {
         );
     }
     read_rgba(renderer)
+    }
 }
 
 const IDENTITY: [f64; 16] = [
@@ -352,6 +392,10 @@ const IDENTITY: [f64; 16] = [
 /// it, and version bumps invalidate.
 #[test]
 fn geo_cache_hits_render_bit_identical() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     let cache = crust_geo_cache_create();
     assert!(!crust_geo_cache_contains(cache, 0xC0FFEE, 1));
 
@@ -373,7 +417,7 @@ fn geo_cache_hits_render_bit_identical() {
 
     // A miss with NULL arrays is an error (version bumped, no data).
     let scene_c = crust_scene_create();
-    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    let mut material = std::mem::zeroed::<CrustMaterial>();
     crust_material_default(&mut material);
     let mut id = 0u32;
     assert_eq!(
@@ -431,12 +475,17 @@ fn geo_cache_hits_render_bit_identical() {
     crust_scene_destroy(scene_b);
     crust_geo_cache_destroy(cache);
     crust_geo_cache_destroy(ptr::null_mut()); // NULL is a no-op
+    }
 }
 
 /// In-place camera and settings edits restart sampling without a rebuild
 /// and land on exactly the image a fresh build would produce.
 #[test]
 fn in_place_edits_match_fresh_builds() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     // Reference: fresh build with the SHIFTED camera.
     let mut shifted_view = VIEW;
     shifted_view[12] = -0.4; // translate x
@@ -489,7 +538,7 @@ fn in_place_edits_match_fresh_builds() {
     );
 
     // Settings edit: resolution change resizes the outputs.
-    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    let mut settings = std::mem::zeroed::<CrustRenderSettings>();
     crust_render_settings_default(&mut settings);
     settings.width = 16;
     settings.height = 16;
@@ -541,6 +590,7 @@ fn in_place_edits_match_fresh_builds() {
     crust_renderer_destroy(renderer_ref);
     crust_scene_destroy(ts.scene);
     crust_scene_destroy(ts_ref.scene);
+    }
 }
 
 /// The file-based dome light decodes real image files with the CLI's
@@ -548,7 +598,11 @@ fn in_place_edits_match_fresh_builds() {
 /// material defaults carry the coat fields.
 #[test]
 fn dome_light_file_and_material_v2() {
-    let mut material = unsafe { std::mem::zeroed::<CrustMaterial>() };
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
+    let mut material = std::mem::zeroed::<CrustMaterial>();
     crust_material_default(&mut material);
     assert_eq!(material.coat_weight, 0.0);
     assert_eq!(material.coat_roughness, 0.0);
@@ -606,7 +660,7 @@ fn dome_light_file_and_material_v2() {
         crust_scene_set_camera(scene, VIEW.as_ptr(), perspective().as_ptr(), 0.0, 3.0),
         CrustStatus::Ok
     );
-    let mut settings = unsafe { std::mem::zeroed::<CrustRenderSettings>() };
+    let mut settings = std::mem::zeroed::<CrustRenderSettings>();
     crust_render_settings_default(&mut settings);
     settings.width = 16;
     settings.height = 16;
@@ -637,14 +691,19 @@ fn dome_light_file_and_material_v2() {
     crust_renderer_destroy(renderer);
     crust_scene_destroy(scene);
     let _ = std::fs::remove_file(&png_path);
+    }
 }
 
 #[test]
 fn error_paths_return_their_exact_status() {
+    // SAFETY: this test drives the C ABI with locally-owned, valid,
+    // exclusively-held pointers and correct array lengths - precisely
+    // the crust.h contract the exports' `# Safety` sections require.
+    unsafe {
     // Null handles.
     let mut out_id = 0u32;
     let material = {
-        let mut m = unsafe { std::mem::zeroed::<CrustMaterial>() };
+        let mut m = std::mem::zeroed::<CrustMaterial>();
         crust_material_default(&mut m);
         m
     };
@@ -726,4 +785,5 @@ fn error_paths_return_their_exact_status() {
     let (mut ma, mut mi, mut pa) = (0u32, 0u32, 0u32);
     crust_library_version(&mut ma, &mut mi, &mut pa);
     assert!(ma > 0 || mi > 0 || pa > 0);
+    }
 }
