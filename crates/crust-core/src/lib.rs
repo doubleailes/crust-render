@@ -1,4 +1,11 @@
+// Safe Rust everywhere; the only `unsafe` in the crate is the test-only
+// counting allocator in `scene/subdiv.rs`, hence the `not(test)` guard.
+// The one sanctioned FFI exception lives outside the engine crates entirely
+// (the Hydra delegate boundary — see docs/hydra_delegate.md).
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 mod aabb;
+mod aov;
 mod buffer;
 mod camera;
 mod error;
@@ -28,6 +35,7 @@ pub type PathSampler = openqmc::SobolSampler;
 pub use crust_rt as rt;
 
 pub use aabb::AABB;
+pub use aov::{AovBuffers, AovRequest};
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use error::Error;
@@ -51,6 +59,9 @@ pub use stats::{
     peak_memory_bytes,
 };
 pub use texture::{PtexRef, PtexTexture};
-pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};
+pub use tracer::{
+    ProgressCallback, ProgressiveRender, RenderSettings, Renderer, SamplingStrategy, StepStatus,
+    StopToken, ray_color,
+};
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

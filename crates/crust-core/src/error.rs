@@ -9,6 +9,10 @@ pub enum Error {
     NonUtf8Path(PathBuf),
     /// Opening or parsing the USD stage failed.
     UsdOpen { path: PathBuf, message: String },
+    /// A camera could not be built from the given matrices (non-invertible
+    /// view/projection, or a projection kind the camera model cannot
+    /// express, e.g. orthographic).
+    InvalidCamera(String),
 }
 
 impl fmt::Display for Error {
@@ -19,6 +23,9 @@ impl fmt::Display for Error {
             }
             Error::UsdOpen { path, message } => {
                 write!(f, "failed to open USD stage {}: {}", path.display(), message)
+            }
+            Error::InvalidCamera(message) => {
+                write!(f, "cannot build camera from matrices: {message}")
             }
         }
     }

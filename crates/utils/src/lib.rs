@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod common;
 pub use common::Lerp;
 pub use common::{

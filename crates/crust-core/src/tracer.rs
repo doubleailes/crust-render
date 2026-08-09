@@ -11,7 +11,8 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{info, warn};
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
@@ -120,6 +121,86 @@ struct PassConfig {
     adaptive: bool,
 }
 
+/// A cancellation handle shared between a render and its host. Clone it,
+/// hand one side to [`Renderer::render_with_control`] (or a
+/// [`ProgressiveRender`] step) and call [`StopToken::stop`] on the other —
+/// from a signal handler, a UI thread, a Hydra `Stop()` — and the render
+/// winds down at the next work-unit (row/tile) boundary, returning a
+/// coherent partially-sampled image. Checked once per work unit, never per
+/// sample, so it costs the hot loop nothing.
+#[derive(Clone, Debug, Default)]
+pub struct StopToken(Arc<AtomicBool>);
+
+impl StopToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request cancellation. Idempotent; there is no un-stop.
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Everything one pixel has accumulated so far. Persisting exactly these
+/// five estimator values (plus the adaptive-stop latch) between sampling
+/// chunks is what makes progressive rendering bit-identical to the batch
+/// path: the sampler is a pure function of the sample index, so resuming at
+/// `taken` replays the identical IEEE addition sequence the one-shot loop
+/// would have run.
+#[derive(Clone, Copy)]
+struct PixelAccum {
+    /// Filter-weighted radiance sum Σwᵢ·Lᵢ (see `filter.rs`).
+    sum: Vec3A,
+    /// Filter weight sum Σwᵢ.
+    weight_sum: f32,
+    /// Luminance moments for the adaptive stop and the variance estimate.
+    lum_sum: f64,
+    lum_sq: f64,
+    /// Samples taken so far — the next chunk resumes at this index.
+    taken: u32,
+    /// Latched by the adaptive early stop; later chunks skip the pixel.
+    done: bool,
+}
+
+impl Default for PixelAccum {
+    fn default() -> Self {
+        PixelAccum {
+            sum: Vec3A::ZERO,
+            weight_sum: 0.0,
+            lum_sum: 0.0,
+            lum_sq: 0.0,
+            taken: 0,
+            done: false,
+        }
+    }
+}
+
+/// The persistent accumulation plane of an in-flight render: one
+/// [`PixelAccum`] per pixel, row-major with row 0 at the bottom (the
+/// `Buffer` convention). A batch render builds one, advances it to the full
+/// budget and resolves it; a progressive render keeps it alive between
+/// steps.
+struct Film {
+    width: usize,
+    height: usize,
+    pixels: Vec<PixelAccum>,
+}
+
+impl Film {
+    fn new(width: usize, height: usize) -> Self {
+        Film {
+            width,
+            height,
+            pixels: vec![PixelAccum::default(); width * height],
+        }
+    }
+}
+
 /// Image-quality statistics of one render pass.
 struct PassStats {
     /// Mean per-pixel variance of the pixel estimate — the inverse-variance
@@ -205,10 +286,90 @@ impl Renderer {
         progress: Option<ProgressCallback>,
     ) -> (Buffer, RayStats) {
         if self.settings.guiding {
-            return self.render_guided(tiled, progress);
+            let (buf, rays, _) = self.render_guided(tiled, progress, None);
+            return (buf, rays);
         }
-        let (buf, _, pass) = self.render_pass(self.final_pass_config(tiled), None, progress);
+        let (buf, _, pass, _) =
+            self.render_pass(self.final_pass_config(tiled), None, progress, None);
         (buf, pass.rays)
+    }
+
+    /// As the plain entry points, plus a [`StopToken`]: when it fires the
+    /// render winds down at the next row/tile boundary and returns the
+    /// coherent partial image (every pixel a valid mean of the samples it
+    /// took; unreached pixels black). The `bool` reports whether the render
+    /// ran to completion. With guiding enabled, a stop during a training
+    /// pass discards that pass — its partial sample set never reaches the
+    /// field — and blends the passes that completed.
+    pub fn render_with_control(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+        stop: Option<&StopToken>,
+    ) -> (Buffer, RayStats, bool) {
+        if self.settings.guiding {
+            return self.render_guided(tiled, progress, stop);
+        }
+        let cfg = self.final_pass_config(tiled);
+        let mut film = Film::new(self.settings.width, self.settings.height);
+        let (_, rays, completed) = self.advance_film(&mut film, cfg.spp, &cfg, None, progress, stop);
+        let (buffer, _, _) = self.finish_pass(&film, cfg.tiled);
+        (buffer, rays, completed)
+    }
+
+    /// Begins a progressive render session: the same render the batch entry
+    /// points produce, advanced in caller-sized sample chunks with a
+    /// readable partial image between chunks. Run to completion, the result
+    /// is **bit-identical** to [`Renderer::render`]/`render_with_tiles` —
+    /// the sampler is a pure function of the sample index and the film
+    /// persists every accumulator, so chunking cannot move a single bit.
+    ///
+    /// With guiding enabled, training passes run whole (one per `step` call,
+    /// however small the requested chunk — their sample stream feeds the
+    /// order-sensitive field update and must not be split); only the final
+    /// pass is chunked. Run to completion that too is bit-identical to the
+    /// batch guided render.
+    pub fn begin_progressive(&self, tiled: bool) -> ProgressiveRender<'_> {
+        let state = if self.settings.guiding {
+            match self.world.bounds() {
+                Some(bounds) => {
+                    let gcfg = GuidingConfig {
+                        train_iterations: self.settings.guiding_train_iterations,
+                        guide_prob: self.settings.guiding_prob,
+                        ..GuidingConfig::default()
+                    };
+                    ProgState::Training {
+                        field: GuidingField::new(bounds, gcfg),
+                        gcfg,
+                        passes: Vec::new(),
+                        k: 0,
+                        eff_unguided: None,
+                        eff_guided: None,
+                        train_spp_done: 0,
+                    }
+                }
+                None => {
+                    warn!(
+                        "path guiding enabled but the scene has no bounding box; rendering unguided"
+                    );
+                    ProgState::Simple {
+                        film: Film::new(self.settings.width, self.settings.height),
+                        spp_done: 0,
+                    }
+                }
+            }
+        } else {
+            ProgState::Simple {
+                film: Film::new(self.settings.width, self.settings.height),
+                spp_done: 0,
+            }
+        };
+        ProgressiveRender {
+            renderer: self,
+            tiled,
+            rays: RayStats::default(),
+            state,
+        }
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
@@ -246,7 +407,8 @@ impl Renderer {
         &self,
         tiled: bool,
         progress: Option<ProgressCallback>,
-    ) -> (Buffer, RayStats) {
+        stop: Option<&StopToken>,
+    ) -> (Buffer, RayStats, bool) {
         // Every pass costs time, training included, so the counters cover
         // all of them rather than the final pass alone.
         let mut rays = RayStats::default();
@@ -254,9 +416,9 @@ impl Renderer {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                let (buf, _, pass) =
-                    self.render_pass(self.final_pass_config(tiled), None, progress);
-                return (buf, pass.rays);
+                let (buf, _, pass, completed) =
+                    self.render_pass(self.final_pass_config(tiled), None, progress, stop);
+                return (buf, pass.rays, completed);
             }
         };
         let cfg = GuidingConfig {
@@ -291,10 +453,23 @@ impl Renderer {
                 adaptive: false,
             };
             let start = std::time::Instant::now();
-            let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
+            let (buffer, samples, stats, completed) =
+                self.render_pass(train_cfg, Some(&gctx), None, stop);
             rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
             drop(gctx);
+            if !completed {
+                // The pass's sample set is partial (and dependent on where
+                // the stop landed), so the field never sees it and its image
+                // is not blended. Blend what completed; if nothing did, the
+                // interrupted pass's coherent partial image is still the
+                // best available.
+                info!("path guiding: stopped during training pass {} — discarding it", k + 1);
+                if passes.is_empty() {
+                    return (buffer, rays, false);
+                }
+                return (self.blend_passes(&passes), rays, false);
+            }
             info!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
@@ -313,13 +488,46 @@ impl Renderer {
             passes.push((buffer, stats.variance));
         }
 
-        let guide_final = match (&eff_unguided, &eff_guided) {
+        let guide_final = self.decide_guide_final(&passes, &eff_unguided, &eff_guided);
+
+        info!(
+            "path guiding: final pass at {} spp ({})",
+            self.settings.samples_per_pixel,
+            if guide_final { "guided" } else { "unguided" }
+        );
+        let gctx = GuidingContext {
+            field: &field,
+            training: false,
+        };
+        let final_gctx = if guide_final { Some(&gctx) } else { None };
+        let (final_buffer, _, final_stats, completed) =
+            self.render_pass(self.final_pass_config(tiled), final_gctx, progress, stop);
+        rays.merge(&final_stats.rays);
+        // An interrupted final pass carries infinite variance (some pixels
+        // hold <2 samples), so `blend_passes` gives it zero weight and the
+        // completed training passes carry the image — pushing it is still
+        // right, as the fallback when *nothing* completed.
+        passes.push((final_buffer, final_stats.variance));
+
+        (self.blend_passes(&passes), rays, completed)
+    }
+
+    /// The guiding efficiency verdict (see [`Renderer::render_guided`]):
+    /// should the final pass draw from the trained field at all? `true`
+    /// unless the measured efficiency ratio says training made things worse.
+    fn decide_guide_final(
+        &self,
+        passes: &[(Buffer, f64)],
+        eff_unguided: &Option<(Vec<f64>, f64)>,
+        eff_guided: &Option<(Vec<f64>, f64)>,
+    ) -> bool {
+        match (eff_unguided, eff_guided) {
             (Some((var_pt, cost_pt)), Some((var_pg, cost_pg))) if *cost_pg > 0.0 => {
                 // Reference image for relative error: the blend of all
                 // training passes — our stand-in for the paper's denoised
                 // accumulated image, and crucially the *same* image for both
                 // sides of the ratio.
-                let ref_lum = blend_luminance(&passes, self.settings.width, self.settings.height);
+                let ref_lum = blend_luminance(passes, self.settings.width, self.settings.height);
                 let mrse_pt = mean_relative_error(var_pt, &ref_lum);
                 let mrse_pg = mean_relative_error(var_pg, &ref_lum);
                 if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
@@ -342,30 +550,13 @@ impl Renderer {
             // degenerate statistics give no basis to overrule the scene's
             // explicit opt-in — keep guiding.
             _ => true,
-        };
-
-        info!(
-            "path guiding: final pass at {} spp ({})",
-            self.settings.samples_per_pixel,
-            if guide_final { "guided" } else { "unguided" }
-        );
-        let gctx = GuidingContext {
-            field: &field,
-            training: false,
-        };
-        let final_gctx = if guide_final { Some(&gctx) } else { None };
-        let (final_buffer, _, final_stats) =
-            self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
-        rays.merge(&final_stats.rays);
-        passes.push((final_buffer, final_stats.variance));
-
-        (self.blend_passes(passes), rays)
+        }
     }
 
     /// Inverse-variance blend of independent unbiased passes. Passes whose
     /// variance could not be estimated (spp < 2) get zero weight; if nothing
     /// is weightable, the last (final) pass is returned as-is.
-    fn blend_passes(&self, mut passes: Vec<(Buffer, f64)>) -> Buffer {
+    fn blend_passes(&self, passes: &[(Buffer, f64)]) -> Buffer {
         let weights: Vec<f64> = passes
             .iter()
             .map(|(_, var)| {
@@ -378,7 +569,11 @@ impl Renderer {
             .collect();
         let total: f64 = weights.iter().sum();
         if total <= 0.0 {
-            return passes.pop().expect("at least the final pass exists").0;
+            return passes
+                .last()
+                .expect("at least the final pass exists")
+                .0
+                .clone();
         }
         info!(
             "path guiding: blending {} passes, weight shares {:?}",
@@ -402,32 +597,75 @@ impl Renderer {
         out
     }
 
-    /// One full-frame pass at `spp` samples per pixel. Returns the image,
-    /// whatever training samples the pass recorded (empty unless a training
-    /// `GuidingContext` is supplied), and the pass's [`PassStats`].
+    /// One full-frame pass at `cfg.spp` samples per pixel. Returns the
+    /// image, whatever training samples the pass recorded (empty unless a
+    /// training `GuidingContext` is supplied), the pass's [`PassStats`], and
+    /// whether the pass ran to completion (`false` only when `stop` fired).
     fn render_pass(
         &self,
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
-    ) -> (Buffer, Vec<SampleData>, PassStats) {
-        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        stop: Option<&StopToken>,
+    ) -> (Buffer, Vec<SampleData>, PassStats, bool) {
+        let mut film = Film::new(self.settings.width, self.settings.height);
+        let (all_samples, rays, completed) =
+            self.advance_film(&mut film, cfg.spp, &cfg, gctx, progress, stop);
+        let (buffer, variance, var_map) = self.finish_pass(&film, cfg.tiled);
+        (
+            buffer,
+            all_samples,
+            PassStats {
+                variance,
+                var_map,
+                rays,
+            },
+        completed,
+        )
+    }
+
+    /// Advances every pixel of `film` to `target_spp` samples (skipping
+    /// pixels the adaptive stop already finished). This is the one scheduling
+    /// loop in the renderer — batch passes advance a fresh film to the full
+    /// budget in a single call, progressive rendering calls it repeatedly
+    /// with a rising target. Sample indices are consumed in ascending order
+    /// with no gaps, so how the budget is chunked cannot change the result.
+    ///
+    /// Returns the training samples recorded, the ray counters, and whether
+    /// the advance completed (`false` when `stop` cut it short at a row/tile
+    /// boundary — the film stays coherent either way).
+    fn advance_film(
+        &self,
+        film: &mut Film,
+        target_spp: u32,
+        cfg: &PassConfig,
+        gctx: Option<&GuidingContext>,
+        progress: Option<ProgressCallback>,
+        stop: Option<&StopToken>,
+    ) -> (Vec<SampleData>, RayStats, bool) {
         let mut all_samples = Vec::new();
-        let mut variance_sum = 0.0f64;
         let mut rays = RayStats::default();
-        let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
-        let pixel_count = (self.settings.width * self.settings.height) as f64;
-        // One tabulation per pass, shared read-only by every worker.
+        // One tabulation per advance, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
 
         if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
             let total = tiles.len() as u64;
             let done = AtomicU64::new(0);
-            type TileOut = (Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>, RayStats);
-            let results: Vec<TileOut> = tiles
+            type TileOut = (Vec<(usize, usize, PixelAccum)>, Vec<SampleData>, RayStats);
+            // Shared read view for the workers; each tile copies its accums
+            // out, advances them privately, and the sequential merge below
+            // writes them back — keeping the merge order identical to the
+            // scheduling order however rayon interleaves the tiles.
+            let film_ref: &Film = film;
+            let results: Vec<Option<TileOut>> = tiles
                 .into_par_iter()
                 .map(|tile| {
+                    // A fired stop skips tiles that have not started; whole
+                    // tiles either run or don't, so the film stays coherent.
+                    if stop.is_some_and(|s| s.is_stopped()) {
+                        return None;
+                    }
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     let mut samples = Vec::new();
                     // Private to this tile, so no two threads share a
@@ -438,104 +676,158 @@ impl Renderer {
                     let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) = self.render_pixel(
+                            let mut acc = film_ref.pixels[j * film_ref.width + i];
+                            let mut s = self.sample_pixel(
                                 i,
                                 j,
-                                &cfg,
+                                &mut acc,
+                                target_spp,
+                                cfg,
                                 &filter,
                                 gctx,
                                 &mut scratch,
                                 &mut tile_rays,
                             );
-                            pixels.push((i, j, color, v));
+                            pixels.push((i, j, acc));
                             samples.append(&mut s);
                         }
                     }
                     if let Some(cb) = progress {
                         cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     }
-                    (pixels, samples, tile_rays)
+                    Some((pixels, samples, tile_rays))
                 })
                 .collect();
-            for (pixels, samples, tile_rays) in results {
+            let mut completed = true;
+            for result in results {
+                let Some((pixels, samples, tile_rays)) = result else {
+                    completed = false;
+                    continue;
+                };
                 rays.merge(&tile_rays);
-                for (i, j, color, var) in pixels {
-                    buffer.set_pixel(i, j, color);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
+                for (i, j, acc) in pixels {
+                    film.pixels[j * film.width + i] = acc;
                 }
                 all_samples.extend(samples);
             }
+            (all_samples, rays, completed)
         } else {
             let total = self.settings.height as u64;
             let mut done = 0u64;
+            let mut completed = true;
+            let width = film.width;
             for j in (0..self.settings.height).rev() {
+                // A fired stop ends the advance at the next row boundary.
+                if stop.is_some_and(|s| s.is_stopped()) {
+                    completed = false;
+                    break;
+                }
                 // `map_init` rather than `map`: the path scratch is reused
                 // across every pixel rayon hands one worker, instead of being
                 // rebuilt per pixel. (This path parallelises over pixels, so
                 // unlike the tiled path there is no per-work-unit closure to
                 // hang the buffer on.)
-                let row: Vec<(Vec3A, Vec<SampleData>, f64, RayStats)> = (0..self.settings.width)
-                    .into_par_iter()
+                let row_accums = &mut film.pixels[j * width..(j + 1) * width];
+                let row: Vec<(Vec<SampleData>, RayStats)> = row_accums
+                    .par_iter_mut()
+                    .enumerate()
                     .map_init(
                         || PathScratch::new(self.settings.max_depth as usize),
-                        |scratch, i| {
+                        |scratch, (i, acc)| {
                             let mut px = RayStats::default();
-                            let (c, s, v) =
-                                self.render_pixel(i, j, &cfg, &filter, gctx, scratch, &mut px);
-                            (c, s, v, px)
+                            let s = self.sample_pixel(
+                                i, j, acc, target_spp, cfg, &filter, gctx, scratch, &mut px,
+                            );
+                            (s, px)
                         },
                     )
                     .collect();
-                for (i, (color, samples, var, px_rays)) in row.into_iter().enumerate() {
+                for (samples, px_rays) in row {
                     rays.merge(&px_rays);
-                    buffer.set_pixel(i, j, color);
                     all_samples.extend(samples);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
                 }
                 done += 1;
                 if let Some(cb) = progress {
                     cb(done, total);
                 }
             }
+            (all_samples, rays, completed)
         }
-
-        (
-            buffer,
-            all_samples,
-            PassStats {
-                variance: variance_sum / pixel_count,
-                var_map,
-                rays,
-            },
-        )
     }
 
-    fn render_pixel(
+    /// Resolves a film into the pass image and its variance statistics.
+    ///
+    /// Pixels are visited in the *scheduling order* of the pass mode
+    /// (scanline: rows top-down, i ascending; tiled: tile order) purely so
+    /// the f64 `variance_sum` accumulates in the same order the pre-film
+    /// code produced — that mean feeds the guided blend weights, and a
+    /// reordered float sum would move the final image by ulps.
+    fn finish_pass(&self, film: &Film, tiled: bool) -> (Buffer, f64, Vec<f64>) {
+        let mut buffer = Buffer::new(film.width, film.height);
+        let mut var_map = vec![0.0f64; film.width * film.height];
+        let mut variance_sum = 0.0f64;
+        let pixel_count = (film.width * film.height) as f64;
+        let mut resolve = |i: usize, j: usize| {
+            let (color, var) = resolve_pixel(&film.pixels[j * film.width + i]);
+            buffer.set_pixel(i, j, color);
+            var_map[j * film.width + i] = var;
+            variance_sum += var;
+        };
+        if tiled {
+            for tile in generate_tiles(film.width, film.height, 16) {
+                for j in tile.y..tile.y + tile.height {
+                    for i in tile.x..tile.x + tile.width {
+                        resolve(i, j);
+                    }
+                }
+            }
+        } else {
+            for j in (0..film.height).rev() {
+                for i in 0..film.width {
+                    resolve(i, j);
+                }
+            }
+        }
+        drop(resolve);
+        (buffer, variance_sum / pixel_count, var_map)
+    }
+
+    /// Advances one pixel's accumulator from `acc.taken` to `target_spp`
+    /// samples (or to its adaptive stop), returning the training samples the
+    /// new samples recorded. The loop body is the renderer's hot path; the
+    /// accumulator state lives in locals for the duration of the loop and is
+    /// stored back once per call.
+    #[allow(clippy::too_many_arguments)]
+    fn sample_pixel(
         &self,
         i: usize,
         j: usize,
+        acc: &mut PixelAccum,
+        target_spp: u32,
         cfg: &PassConfig,
         filter: &FilterSampler,
         gctx: Option<&GuidingContext>,
         scratch: &mut PathScratch,
         stats: &mut RayStats,
-    ) -> (Vec3A, Vec<SampleData>, f64) {
-        let mut sum = Vec3A::ZERO;
+    ) -> Vec<SampleData> {
+        let mut samples = Vec::new();
+        if acc.done || acc.taken >= target_spp {
+            return samples;
+        }
         // FIS weight sum (see `filter.rs`): the pixel estimate is the
         // weighted average Σwᵢ·Lᵢ / Σwᵢ. For box and triangle every wᵢ is
         // exactly 1.0, so the sum is exactly `taken as f32` and the estimate
         // is the plain mean — box at radius 0.5 stays bit-identical to the
         // historical unweighted, unfiltered estimator.
-        let mut weight_sum = 0.0f32;
-        let mut samples = Vec::new();
-        let mut lum_sum = 0.0f64;
-        let mut lum_sq = 0.0f64;
+        let mut sum = acc.sum;
+        let mut weight_sum = acc.weight_sum;
+        let mut lum_sum = acc.lum_sum;
+        let mut lum_sq = acc.lum_sq;
 
         let threshold = self.settings.variance_threshold as f64;
         let min_spp = self.settings.min_samples_per_pixel.max(2);
-        let mut taken = 0u32;
+        let mut taken = acc.taken;
+        let mut done = false;
 
         // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
         // with an extra domain so images wider/taller than 256 stay fully
@@ -555,7 +847,7 @@ impl Renderer {
         // domain that is never derived leaves `root` untouched.
         let motion = self.world.has_motion();
 
-        for sample in 0..cfg.spp {
+        for sample in acc.taken..target_spp {
             let root =
                 PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
@@ -612,28 +904,474 @@ impl Renderer {
                     ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
                 let mean = (lum_sum / n).max(1e-4);
                 if var_of_mean.sqrt() / mean < threshold {
+                    done = true;
                     break;
                 }
             }
         }
 
-        // Unbiased variance of the pixel-mean luminance.
-        let n = taken as f64;
-        let variance = if taken >= 2 {
-            ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0)
-        } else {
-            f64::INFINITY
-        };
-        // Weighted-average film estimator. A Mitchell pixel whose few
-        // samples all landed on negative lobes could zero the denominator;
-        // the plain mean is the sane fallback there.
-        let mean = if weight_sum > 0.0 {
-            sum / weight_sum
-        } else {
-            sum / taken as f32
-        };
-        (mean, samples, variance)
+        acc.sum = sum;
+        acc.weight_sum = weight_sum;
+        acc.lum_sum = lum_sum;
+        acc.lum_sq = lum_sq;
+        acc.taken = taken;
+        acc.done = done;
+        samples
     }
+}
+
+/// Resolves an accumulator into its pixel estimate and the unbiased
+/// variance of the pixel-mean luminance. A pure function of the persisted
+/// state, so *when* a pixel is resolved (per pass, per progressive
+/// snapshot) cannot change what it resolves to.
+fn resolve_pixel(acc: &PixelAccum) -> (Vec3A, f64) {
+    // A pixel a cancelled render never reached: black, with variance
+    // "unknown" — unreachable in a completed pass.
+    if acc.taken == 0 {
+        return (Vec3A::ZERO, f64::INFINITY);
+    }
+    let n = acc.taken as f64;
+    let variance = if acc.taken >= 2 {
+        ((acc.lum_sq - acc.lum_sum * acc.lum_sum / n) / (n - 1.0) / n).max(0.0)
+    } else {
+        f64::INFINITY
+    };
+    // Weighted-average film estimator. A Mitchell pixel whose few
+    // samples all landed on negative lobes could zero the denominator;
+    // the plain mean is the sane fallback there.
+    let mean = if acc.weight_sum > 0.0 {
+        acc.sum / acc.weight_sum
+    } else {
+        acc.sum / acc.taken as f32
+    };
+    (mean, variance)
+}
+
+/// Outcome of one [`ProgressiveRender::step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    /// The step reached its target; more of the budget remains.
+    InProgress { spp_done: u32 },
+    /// The stop token fired mid-step. The image stays coherent, and a later
+    /// `step` resumes exactly where this one was cut off.
+    Stopped { spp_done: u32 },
+    /// The full sample budget is rendered; further `step`s are no-ops.
+    Complete { spp_done: u32 },
+}
+
+impl StepStatus {
+    /// Samples per pixel fully banked so far (budgeted samples of completed
+    /// chunks — pixels the adaptive stop finished early hold fewer by
+    /// design).
+    pub fn spp_done(self) -> u32 {
+        match self {
+            StepStatus::InProgress { spp_done }
+            | StepStatus::Stopped { spp_done }
+            | StepStatus::Complete { spp_done } => spp_done,
+        }
+    }
+}
+
+/// State of an in-flight progressive render — see
+/// [`Renderer::begin_progressive`].
+enum ProgState {
+    /// Unguided: one film advanced toward the full budget.
+    Simple { film: Film, spp_done: u32 },
+    /// Guided, in the training phase: passes run whole, one per step.
+    Training {
+        field: GuidingField,
+        gcfg: GuidingConfig,
+        passes: Vec<(Buffer, f64)>,
+        k: u32,
+        eff_unguided: Option<(Vec<f64>, f64)>,
+        eff_guided: Option<(Vec<f64>, f64)>,
+        train_spp_done: u32,
+    },
+    /// Guided, in the (chunkable) final pass. `field` is `None` when the
+    /// efficiency estimate turned guiding off for the final pass.
+    Final {
+        field: Option<GuidingField>,
+        passes: Vec<(Buffer, f64)>,
+        film: Film,
+        train_spp_done: u32,
+        spp_done: u32,
+    },
+    Done { buffer: Buffer, spp_done: u32 },
+    /// Placeholder while `step` owns the state; never observable.
+    Transitioning,
+}
+
+/// A progressive render session (see [`Renderer::begin_progressive`]): the
+/// host thread owns it, calls [`ProgressiveRender::step`] to advance the
+/// image by a sample budget, and may read a coherent intermediate image
+/// with [`ProgressiveRender::snapshot`] between steps — the reason there is
+/// no locking anywhere in this type.
+pub struct ProgressiveRender<'a> {
+    renderer: &'a Renderer,
+    tiled: bool,
+    rays: RayStats,
+    state: ProgState,
+}
+
+impl ProgressiveRender<'_> {
+    /// Advances the render by (up to) `spp` more samples per pixel. In the
+    /// guided training phase the chunk size is ignored and the next whole
+    /// training pass runs instead (see [`Renderer::begin_progressive`]).
+    pub fn step(
+        &mut self,
+        spp: u32,
+        progress: Option<ProgressCallback>,
+        stop: Option<&StopToken>,
+    ) -> StepStatus {
+        let renderer = self.renderer;
+        let total_spp = renderer.settings.samples_per_pixel;
+        let state = std::mem::replace(&mut self.state, ProgState::Transitioning);
+        let (state, status) = match state {
+            ProgState::Done { buffer, spp_done } => (
+                ProgState::Done { buffer, spp_done },
+                StepStatus::Complete { spp_done },
+            ),
+
+            ProgState::Simple { mut film, spp_done } => {
+                let target = spp_done.saturating_add(spp.max(1)).min(total_spp);
+                let cfg = renderer.final_pass_config(self.tiled);
+                let (_, rays, chunk_done) =
+                    renderer.advance_film(&mut film, target, &cfg, None, progress, stop);
+                self.rays.merge(&rays);
+                if !chunk_done {
+                    (
+                        ProgState::Simple { film, spp_done },
+                        StepStatus::Stopped { spp_done },
+                    )
+                } else if target >= total_spp {
+                    let (buffer, _, _) = renderer.finish_pass(&film, self.tiled);
+                    (
+                        ProgState::Done {
+                            buffer,
+                            spp_done: target,
+                        },
+                        StepStatus::Complete { spp_done: target },
+                    )
+                } else {
+                    (
+                        ProgState::Simple {
+                            film,
+                            spp_done: target,
+                        },
+                        StepStatus::InProgress { spp_done: target },
+                    )
+                }
+            }
+
+            ProgState::Training {
+                mut field,
+                gcfg,
+                mut passes,
+                k,
+                mut eff_unguided,
+                mut eff_guided,
+                train_spp_done,
+            } => {
+                // Mirror of the batch schedule in `render_guided` — same
+                // budgets, same seeds, same field updates, so a progressive
+                // guided render trains the identical field.
+                let spp_k = (1u32 << k.min(16)).max(2);
+                let seed = (renderer.settings.frame as u32)
+                    .wrapping_add((k + 1).wrapping_mul(0x9E37_79B9));
+                let train_cfg = PassConfig {
+                    spp: spp_k,
+                    seed,
+                    tiled: self.tiled,
+                    adaptive: false,
+                };
+                let gctx = GuidingContext {
+                    field: &field,
+                    training: true,
+                };
+                let start = std::time::Instant::now();
+                let (buffer, samples, stats, completed) =
+                    renderer.render_pass(train_cfg, Some(&gctx), progress, stop);
+                let secs = start.elapsed().as_secs_f64();
+                drop(gctx);
+                self.rays.merge(&stats.rays);
+                if !completed {
+                    // Discard the interrupted pass wholesale (partial sample
+                    // sets must not train the field); the next step re-runs
+                    // it from scratch.
+                    info!(
+                        "path guiding: stopped during training pass {} — discarding it",
+                        k + 1
+                    );
+                    (
+                        ProgState::Training {
+                            field,
+                            gcfg,
+                            passes,
+                            k,
+                            eff_unguided,
+                            eff_guided,
+                            train_spp_done,
+                        },
+                        StepStatus::Stopped {
+                            spp_done: train_spp_done,
+                        },
+                    )
+                } else {
+                    info!(
+                        "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
+                        k + 1,
+                        gcfg.train_iterations,
+                        spp_k,
+                        samples.len(),
+                        stats.variance,
+                        secs
+                    );
+                    if k == 0 {
+                        eff_unguided = Some((stats.var_map, secs));
+                    } else if k == gcfg.train_iterations - 1 {
+                        eff_guided = Some((stats.var_map, secs));
+                    }
+                    field.update(&samples, k + 1);
+                    passes.push((buffer, stats.variance));
+                    let train_spp_done = train_spp_done + spp_k;
+                    let k = k + 1;
+                    if k < gcfg.train_iterations {
+                        (
+                            ProgState::Training {
+                                field,
+                                gcfg,
+                                passes,
+                                k,
+                                eff_unguided,
+                                eff_guided,
+                                train_spp_done,
+                            },
+                            StepStatus::InProgress {
+                                spp_done: train_spp_done,
+                            },
+                        )
+                    } else {
+                        let guide_final =
+                            renderer.decide_guide_final(&passes, &eff_unguided, &eff_guided);
+                        info!(
+                            "path guiding: final pass at {} spp ({})",
+                            total_spp,
+                            if guide_final { "guided" } else { "unguided" }
+                        );
+                        (
+                            ProgState::Final {
+                                field: guide_final.then_some(field),
+                                passes,
+                                film: Film::new(
+                                    renderer.settings.width,
+                                    renderer.settings.height,
+                                ),
+                                train_spp_done,
+                                spp_done: 0,
+                            },
+                            StepStatus::InProgress {
+                                spp_done: train_spp_done,
+                            },
+                        )
+                    }
+                }
+            }
+
+            ProgState::Final {
+                field,
+                mut passes,
+                mut film,
+                train_spp_done,
+                spp_done,
+            } => {
+                let target = spp_done.saturating_add(spp.max(1)).min(total_spp);
+                let cfg = renderer.final_pass_config(self.tiled);
+                let gctx_store;
+                let gctx = match &field {
+                    Some(f) => {
+                        gctx_store = GuidingContext {
+                            field: f,
+                            training: false,
+                        };
+                        Some(&gctx_store)
+                    }
+                    None => None,
+                };
+                let (_, rays, chunk_done) =
+                    renderer.advance_film(&mut film, target, &cfg, gctx, progress, stop);
+                self.rays.merge(&rays);
+                if !chunk_done {
+                    (
+                        ProgState::Final {
+                            field,
+                            passes,
+                            film,
+                            train_spp_done,
+                            spp_done,
+                        },
+                        StepStatus::Stopped {
+                            spp_done: train_spp_done + spp_done,
+                        },
+                    )
+                } else if target >= total_spp {
+                    let (buffer, variance, _) = renderer.finish_pass(&film, self.tiled);
+                    passes.push((buffer, variance));
+                    let blended = renderer.blend_passes(&passes);
+                    (
+                        ProgState::Done {
+                            buffer: blended,
+                            spp_done: train_spp_done + target,
+                        },
+                        StepStatus::Complete {
+                            spp_done: train_spp_done + target,
+                        },
+                    )
+                } else {
+                    (
+                        ProgState::Final {
+                            field,
+                            passes,
+                            film,
+                            train_spp_done,
+                            spp_done: target,
+                        },
+                        StepStatus::InProgress {
+                            spp_done: train_spp_done + target,
+                        },
+                    )
+                }
+            }
+
+            ProgState::Transitioning => unreachable!("ProgState::Transitioning escaped step()"),
+        };
+        self.state = state;
+        status
+    }
+
+    /// A coherent copy of the image as rendered so far. Call between steps
+    /// (the session is single-owner, so there is nothing to race). In the
+    /// guided final phase the partial final pass joins the blend weighted by
+    /// its variance so far — an approximation that only ever affects
+    /// intermediate snapshots, never the completed render.
+    pub fn snapshot(&self) -> Buffer {
+        let renderer = self.renderer;
+        match &self.state {
+            ProgState::Done { buffer, .. } => buffer.clone(),
+            ProgState::Simple { film, .. } => renderer.finish_pass(film, self.tiled).0,
+            ProgState::Training { passes, .. } => {
+                if passes.is_empty() {
+                    Buffer::new(renderer.settings.width, renderer.settings.height)
+                } else {
+                    blend_pass_refs(
+                        &passes.iter().map(|(b, v)| (b, *v)).collect::<Vec<_>>(),
+                        renderer.settings.width,
+                        renderer.settings.height,
+                    )
+                }
+            }
+            ProgState::Final { passes, film, .. } => {
+                let (partial, variance, _) = renderer.finish_pass(film, self.tiled);
+                let mut entries: Vec<(&Buffer, f64)> =
+                    passes.iter().map(|(b, v)| (b, *v)).collect();
+                entries.push((&partial, variance));
+                blend_pass_refs(
+                    &entries,
+                    renderer.settings.width,
+                    renderer.settings.height,
+                )
+            }
+            ProgState::Transitioning => unreachable!("ProgState::Transitioning escaped step()"),
+        }
+    }
+
+    /// As [`ProgressiveRender::snapshot`], writing into a caller-owned
+    /// buffer (resized to the image if it does not match).
+    pub fn snapshot_into(&self, buf: &mut Buffer) {
+        match &self.state {
+            ProgState::Simple { film, .. } => {
+                if buf.width() != film.width || buf.height() != film.height {
+                    *buf = Buffer::new(film.width, film.height);
+                }
+                for j in 0..film.height {
+                    for i in 0..film.width {
+                        buf.set_pixel(i, j, resolve_pixel(&film.pixels[j * film.width + i]).0);
+                    }
+                }
+            }
+            _ => *buf = self.snapshot(),
+        }
+    }
+
+    /// Budgeted samples per pixel banked so far (training + final for
+    /// guided sessions).
+    pub fn spp_done(&self) -> u32 {
+        match &self.state {
+            ProgState::Simple { spp_done, .. } => *spp_done,
+            ProgState::Training { train_spp_done, .. } => *train_spp_done,
+            ProgState::Final {
+                train_spp_done,
+                spp_done,
+                ..
+            } => train_spp_done + spp_done,
+            ProgState::Done { spp_done, .. } => *spp_done,
+            ProgState::Transitioning => unreachable!("ProgState::Transitioning escaped step()"),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self.state, ProgState::Done { .. })
+    }
+
+    /// Consumes the session, returning the image as rendered so far (the
+    /// final image when complete) and the ray counters across every step.
+    pub fn finish(self) -> (Buffer, RayStats) {
+        if matches!(self.state, ProgState::Done { .. }) {
+            let rays = self.rays;
+            match self.state {
+                ProgState::Done { buffer, .. } => (buffer, rays),
+                _ => unreachable!(),
+            }
+        } else {
+            let buffer = self.snapshot();
+            (buffer, self.rays)
+        }
+    }
+}
+
+/// Inverse-variance blend over borrowed passes — `blend_passes` for the
+/// snapshot path, minus the ownership and the logging (snapshots may run
+/// every frame). Non-finite/zero variances get zero weight; if nothing is
+/// weightable the last pass is returned as-is.
+fn blend_pass_refs(passes: &[(&Buffer, f64)], width: usize, height: usize) -> Buffer {
+    let weights: Vec<f64> = passes
+        .iter()
+        .map(|(_, var)| {
+            if var.is_finite() && *var > 0.0 {
+                1.0 / var
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return passes
+            .last()
+            .expect("at least one pass exists")
+            .0
+            .clone();
+    }
+    let mut out = Buffer::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let mut c = Vec3A::ZERO;
+            for ((pass, _), w) in passes.iter().zip(&weights) {
+                c += pass.get_pixel(x, y) * (*w / total) as f32;
+            }
+            out.set_pixel(x, y, c);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -660,6 +1398,16 @@ pub struct RenderSettings {
     pixel_filter: PixelFilter,
 }
 impl RenderSettings {
+    /// Image width in pixels.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Image height in pixels.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
     pub fn new(
         samples_per_pixel: u32,
         max_depth: u32,
@@ -1665,6 +2413,159 @@ mod tests {
         let balance = SamplingStrategy::BalanceMis.light_weight(a, b);
         let power = SamplingStrategy::PowerMis.light_weight(a, b);
         assert!(power > balance, "power {power} <= balance {balance}");
+    }
+
+    use super::{Renderer, StepStatus, StopToken};
+    use crate::tracer::RenderSettings;
+    use crate::world::simple_scene;
+    use crate::{Buffer, Camera};
+    use glam::Vec3A;
+
+    /// A tiny renderer over the procedural scene — small enough that the
+    /// bitwise progressive-vs-batch comparisons below run in milliseconds.
+    fn tiny_renderer(spp: u32, adaptive: bool) -> Renderer {
+        let (world, lights) = simple_scene();
+        let camera = Camera::new(
+            Vec3A::new(15.0, 3.0, 3.0),
+            Vec3A::new(0.0, 1.0, 0.0),
+            Vec3A::new(0.0, 1.0, 0.0),
+            20.0,
+            64.0 / 36.0,
+            0.1,
+            10.0,
+        );
+        // variance_threshold > 0 with a low min_spp arms the adaptive early
+        // stop; 0 disables it.
+        let (min_spp, threshold) = if adaptive { (4, 0.5) } else { (0, 0.0) };
+        let settings = RenderSettings::new(spp, 8, 64, 36, min_spp, threshold, 0);
+        Renderer::new(camera, world, lights, settings)
+    }
+
+    fn assert_buffers_bit_identical(a: &Buffer, b: &Buffer, what: &str) {
+        assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+        for (idx, (pa, pb)) in a.as_slice().iter().zip(b.as_slice()).enumerate() {
+            assert_eq!(
+                [pa.x.to_bits(), pa.y.to_bits(), pa.z.to_bits()],
+                [pb.x.to_bits(), pb.y.to_bits(), pb.z.to_bits()],
+                "{what}: pixel {idx} differs ({pa:?} vs {pb:?})"
+            );
+        }
+    }
+
+    /// The load-bearing Phase 0 guarantee: a progressive render run to
+    /// completion is bit-identical to the batch render — for any chunk
+    /// size, with adaptive sampling off and on, scanline and tiled.
+    #[test]
+    fn progressive_equals_batch_bitwise() {
+        for adaptive in [false, true] {
+            for tiled in [false, true] {
+                let renderer = tiny_renderer(16, adaptive);
+                let batch = if tiled {
+                    renderer.render_with_tiles()
+                } else {
+                    renderer.render()
+                };
+                for chunk in [1u32, 3, 5, 16] {
+                    let mut session = renderer.begin_progressive(tiled);
+                    while !session.is_complete() {
+                        session.step(chunk, None, None);
+                    }
+                    let (progressive, _) = session.finish();
+                    assert_buffers_bit_identical(
+                        &batch,
+                        &progressive,
+                        &format!("adaptive={adaptive} tiled={tiled} chunk={chunk}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Guided progressive (whole training passes, chunked final pass) must
+    /// reproduce the guided batch render bit for bit.
+    ///
+    /// One training iteration on purpose: with two or more, the guiding
+    /// efficiency estimate (`decide_guide_final`) compares *wall-clock*
+    /// pass costs, so even two batch renders of the same scene can
+    /// legitimately pick different final passes when ΔEff sits near 1 —
+    /// a pre-existing property of the guided pipeline, not of the
+    /// progressive refactor. A single iteration never produces the
+    /// estimate, making the guided/unguided decision (and therefore the
+    /// image) deterministic.
+    #[test]
+    fn guided_progressive_equals_guided_batch() {
+        let mut renderer = tiny_renderer(8, false);
+        renderer.settings = renderer.settings.with_guiding(true, 1, 0.5);
+        let batch = renderer.render();
+        let mut session = renderer.begin_progressive(false);
+        while !session.is_complete() {
+            session.step(3, None, None);
+        }
+        let (progressive, _) = session.finish();
+        assert_buffers_bit_identical(&batch, &progressive, "guided");
+    }
+
+    /// A fired stop leaves a coherent partial image (no NaNs, unreached
+    /// pixels black), and resuming afterwards still converges to the exact
+    /// batch result.
+    #[test]
+    fn stopped_render_is_coherent_and_resumes() {
+        let renderer = tiny_renderer(16, false);
+        let batch = renderer.render();
+
+        let stop = StopToken::new();
+        stop.stop(); // fire before the first row: the whole step is skipped
+        let mut session = renderer.begin_progressive(false);
+        let status = session.step(16, None, Some(&stop));
+        assert_eq!(status, StepStatus::Stopped { spp_done: 0 });
+        let snapshot = session.snapshot();
+        for p in snapshot.as_slice() {
+            assert!(p.is_finite(), "stopped snapshot contains non-finite pixels");
+        }
+
+        // Resume without the token: the interrupted work is picked back up
+        // and the completed render matches batch bitwise.
+        while !session.is_complete() {
+            session.step(4, None, None);
+        }
+        let (resumed, _) = session.finish();
+        assert_buffers_bit_identical(&batch, &resumed, "stop/resume");
+
+        // The controlled one-shot entry point reports the interruption too.
+        let stop2 = StopToken::new();
+        stop2.stop();
+        let (partial, _, completed) = renderer.render_with_control(false, None, Some(&stop2));
+        assert!(!completed);
+        for p in partial.as_slice() {
+            assert!(p.is_finite());
+        }
+    }
+
+    /// `render_with_control` without a token is exactly the plain render.
+    #[test]
+    fn controlled_render_without_token_matches_batch() {
+        let renderer = tiny_renderer(8, true);
+        let batch = renderer.render();
+        let (controlled, _, completed) = renderer.render_with_control(false, None, None);
+        assert!(completed);
+        assert_buffers_bit_identical(&batch, &controlled, "render_with_control");
+    }
+
+    /// Mid-flight snapshots are coherent and `snapshot_into` agrees with
+    /// `snapshot`.
+    #[test]
+    fn snapshots_are_coherent_mid_render() {
+        let renderer = tiny_renderer(16, false);
+        let mut session = renderer.begin_progressive(true);
+        session.step(4, None, None);
+        assert_eq!(session.spp_done(), 4);
+        let snap = session.snapshot();
+        let mut into = Buffer::new(1, 1); // wrong size on purpose: must resize
+        session.snapshot_into(&mut into);
+        assert_buffers_bit_identical(&snap, &into, "snapshot_into");
+        for p in snap.as_slice() {
+            assert!(p.is_finite());
+        }
     }
 }
 
