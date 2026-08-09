@@ -50,8 +50,15 @@ pub extern "C" fn crust_api_version() -> u32 {
 }
 
 /// `void crust_library_version(uint32_t* major, uint32_t* minor, uint32_t* patch);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_library_version(major: *mut u32, minor: *mut u32, patch: *mut u32) {
+pub unsafe extern "C" fn crust_library_version(major: *mut u32, minor: *mut u32, patch: *mut u32) {
     let parts = [
         env!("CARGO_PKG_VERSION_MAJOR"),
         env!("CARGO_PKG_VERSION_MINOR"),

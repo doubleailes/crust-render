@@ -53,8 +53,15 @@ pub extern "C" fn crust_geo_cache_create() -> *mut GeoCacheHandle {
 
 /// `bool crust_geo_cache_contains(const CrustGeoCache*, uint64_t key,
 ///     uint32_t version);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_geo_cache_contains(
+pub unsafe extern "C" fn crust_geo_cache_contains(
     cache: *const GeoCacheHandle,
     key: u64,
     version: u32,
@@ -65,8 +72,15 @@ pub extern "C" fn crust_geo_cache_contains(
 }
 
 /// `void crust_geo_cache_remove(CrustGeoCache*, uint64_t key);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_geo_cache_remove(cache: *mut GeoCacheHandle, key: u64) {
+pub unsafe extern "C" fn crust_geo_cache_remove(cache: *mut GeoCacheHandle, key: u64) {
     // SAFETY: as `crust_geo_cache_contains`.
     if let Some(cache) = unsafe { cache.as_ref() } {
         cache
@@ -78,8 +92,15 @@ pub extern "C" fn crust_geo_cache_remove(cache: *mut GeoCacheHandle, key: u64) {
 }
 
 /// `void crust_geo_cache_clear(CrustGeoCache*);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_geo_cache_clear(cache: *mut GeoCacheHandle) {
+pub unsafe extern "C" fn crust_geo_cache_clear(cache: *mut GeoCacheHandle) {
     // SAFETY: as `crust_geo_cache_contains`.
     if let Some(cache) = unsafe { cache.as_ref() } {
         cache
@@ -91,8 +112,15 @@ pub extern "C" fn crust_geo_cache_clear(cache: *mut GeoCacheHandle) {
 }
 
 /// `void crust_geo_cache_destroy(CrustGeoCache*);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_geo_cache_destroy(cache: *mut GeoCacheHandle) {
+pub unsafe extern "C" fn crust_geo_cache_destroy(cache: *mut GeoCacheHandle) {
     if !cache.is_null() {
         // SAFETY: created by `crust_geo_cache_create`; use after destroy is
         // forbidden by the header contract. Prototypes still referenced by

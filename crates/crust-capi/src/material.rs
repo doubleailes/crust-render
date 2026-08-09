@@ -83,9 +83,17 @@ impl CrustMaterial {
 }
 
 /// `void crust_material_default(CrustMaterial* out);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_material_default(out: *mut CrustMaterial) {
-    crate::validate::write_out(out, CrustMaterial::defaults());
+pub unsafe extern "C" fn crust_material_default(out: *mut CrustMaterial) {
+    // SAFETY: out-param per this export's `# Safety` contract.
+    unsafe { crate::validate::write_out(out, CrustMaterial::defaults()) };
 }
 
 /// Mirrors `CrustRenderSettings` in `crust.h`.
@@ -132,9 +140,18 @@ impl CrustRenderSettings {
 }
 
 /// `void crust_render_settings_default(CrustRenderSettings* out);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_render_settings_default(out: *mut CrustRenderSettings) {
-    crate::validate::write_out(
+pub unsafe extern "C" fn crust_render_settings_default(out: *mut CrustRenderSettings) {
+    // SAFETY: out-param per this export's `# Safety` contract.
+    unsafe {
+        crate::validate::write_out(
         out,
         CrustRenderSettings {
             width: 640,
@@ -145,5 +162,6 @@ pub extern "C" fn crust_render_settings_default(out: *mut CrustRenderSettings) {
             variance_threshold: 0.0,
             frame: 0,
         },
-    );
+    )
+    };
 }

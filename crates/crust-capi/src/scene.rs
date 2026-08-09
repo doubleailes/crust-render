@@ -19,8 +19,15 @@ pub extern "C" fn crust_scene_create() -> *mut SceneHandle {
 }
 
 /// `void crust_scene_destroy(CrustScene* scene);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_destroy(scene: *mut SceneHandle) {
+pub unsafe extern "C" fn crust_scene_destroy(scene: *mut SceneHandle) {
     if !scene.is_null() {
         // SAFETY: created by `crust_scene_create`; use after destroy is
         // forbidden by the header contract.
@@ -29,11 +36,15 @@ pub extern "C" fn crust_scene_destroy(scene: *mut SceneHandle) {
 }
 
 /// Reads a required point/vector array (`3 * count` floats, all finite).
-fn read_vec3s(ptr: *const f32, count: usize) -> CResult<Vec<Vec3A>> {
+///
+/// # Safety
+/// Carries [`crate::validate::slice`]'s contract for `ptr` with
+/// `3 * count` elements.
+unsafe fn read_vec3s(ptr: *const f32, count: usize) -> CResult<Vec<Vec3A>> {
     let len = count
         .checked_mul(3)
         .ok_or(CrustStatus::InvalidArgument)?;
-    let flat = slice(ptr, len)?;
+    let flat = unsafe { slice(ptr, len) }?;
     if !flat.iter().all(|v| v.is_finite()) {
         return Err(CrustStatus::InvalidArgument);
     }
@@ -46,7 +57,12 @@ fn read_vec3s(ptr: *const f32, count: usize) -> CResult<Vec<Vec3A>> {
 /// Validates and reads a triangle mesh's arrays into kernel form — the
 /// shared front half of `crust_scene_add_mesh` and
 /// `crust_scene_add_instance`.
-fn read_mesh_geometry(
+///
+/// # Safety
+/// Carries [`crate::validate::slice`]'s contract for each array:
+/// `3 * vertex_count` floats, `3 * triangle_count` indices, and (when
+/// non-NULL) `3 * vertex_count` normal floats.
+unsafe fn read_mesh_geometry(
     positions: *const f32,
     vertex_count: usize,
     tri_indices: *const u32,
@@ -56,18 +72,18 @@ fn read_mesh_geometry(
     if vertex_count > u32::MAX as usize {
         return Err(CrustStatus::InvalidArgument);
     }
-    let vertices = read_vec3s(positions, vertex_count)?;
+    let vertices = unsafe { read_vec3s(positions, vertex_count) }?;
     let index_len = triangle_count
         .checked_mul(3)
         .ok_or(CrustStatus::InvalidArgument)?;
-    let indices: Vec<[u32; 3]> = slice(tri_indices, index_len)?
+    let indices: Vec<[u32; 3]> = unsafe { slice(tri_indices, index_len) }?
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
     let normals = if normals_or_null.is_null() {
         None
     } else {
-        Some(read_vec3s(normals_or_null, vertex_count)?)
+        Some(unsafe { read_vec3s(normals_or_null, vertex_count) }?)
     };
     Ok(Geometry::TriangleMesh {
         vertices,
@@ -80,8 +96,15 @@ fn read_mesh_geometry(
 ///     size_t vertex_count, const uint32_t* tri_indices,
 ///     size_t triangle_count, const float* normals_or_null,
 ///     const CrustMaterial*, uint32_t* out_geom_id);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_mesh(
+pub unsafe extern "C" fn crust_scene_add_mesh(
     scene: *mut SceneHandle,
     positions: *const f32,
     vertex_count: usize,
@@ -92,21 +115,24 @@ pub extern "C" fn crust_scene_add_mesh(
     out_geom_id: *mut u32,
 ) -> CrustStatus {
     let result = (|| -> CResult<u32> {
-        let handle = require_mut(scene)?;
-        let pbr = require(material)?.to_openpbr()?;
-        let geometry = read_mesh_geometry(
-            positions,
-            vertex_count,
-            tri_indices,
-            triangle_count,
-            normals_or_null,
-        )?;
+        let handle = unsafe { require_mut(scene) }?;
+        let pbr = unsafe { require(material) }?.to_openpbr()?;
+        // SAFETY: forwarded from this export's `# Safety` contract.
+        let geometry = unsafe {
+            read_mesh_geometry(
+                positions,
+                vertex_count,
+                tri_indices,
+                triangle_count,
+                normals_or_null,
+            )
+        }?;
         let builder = handle.builder_mut()?;
         Ok(builder.attach(geometry, Arc::new(pbr)))
     })();
     match result {
         Ok(id) => {
-            write_out(out_geom_id, id);
+            unsafe { write_out(out_geom_id, id) };
             CrustStatus::Ok
         }
         Err(status) => status,
@@ -119,9 +145,16 @@ pub extern "C" fn crust_scene_add_mesh(
 ///     const uint32_t* tri_indices_or_null, size_t triangle_count,
 ///     const float* normals_or_null, const double xform[16],
 ///     const CrustMaterial*, uint32_t* out_geom_id);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn crust_scene_add_instance(
+pub unsafe extern "C" fn crust_scene_add_instance(
     scene: *mut SceneHandle,
     cache: *mut crate::geo_cache::GeoCacheHandle,
     key: u64,
@@ -136,14 +169,14 @@ pub extern "C" fn crust_scene_add_instance(
     out_geom_id: *mut u32,
 ) -> CrustStatus {
     let result = (|| -> CResult<u32> {
-        let handle = require_mut(scene)?;
-        let cache = require(cache.cast_const())?;
-        let pbr = require(material)?.to_openpbr()?;
+        let handle = unsafe { require_mut(scene) }?;
+        let cache = unsafe { require(cache.cast_const()) }?;
+        let pbr = unsafe { require(material) }?.to_openpbr()?;
 
         // The placement, validated before any geometry work: the kernel's
         // instance path requires an invertible transform (a zero scale is
         // the common "hide this" idiom — the caller skips those).
-        let m = slice(xform, 16)?;
+        let m = unsafe { slice(xform, 16) }?;
         if !m.iter().all(|v| v.is_finite()) {
             return Err(CrustStatus::InvalidArgument);
         }
@@ -161,13 +194,17 @@ pub extern "C" fn crust_scene_add_instance(
         let proto = match cache.lookup(key, version) {
             Some(scene) => scene,
             None => {
-                let geometry = read_mesh_geometry(
-                    positions_or_null,
-                    vertex_count,
-                    tri_indices_or_null,
-                    triangle_count,
-                    normals_or_null,
-                )?;
+                // SAFETY: forwarded from this export's `# Safety` contract
+                // (on a cache miss the arrays are required and valid).
+                let geometry = unsafe {
+                    read_mesh_geometry(
+                        positions_or_null,
+                        vertex_count,
+                        tri_indices_or_null,
+                        triangle_count,
+                        normals_or_null,
+                    )
+                }?;
                 let mut inner = crust_core::rt::SceneBuilder::new();
                 inner.attach(geometry);
                 let scene = Arc::new(inner.commit());
@@ -188,7 +225,7 @@ pub extern "C" fn crust_scene_add_instance(
     })();
     match result {
         Ok(id) => {
-            write_out(out_geom_id, id);
+            unsafe { write_out(out_geom_id, id) };
             CrustStatus::Ok
         }
         Err(status) => status,
@@ -197,8 +234,15 @@ pub extern "C" fn crust_scene_add_instance(
 
 /// `CrustStatus crust_scene_add_sphere(CrustScene*, const float center[3],
 ///     float radius, const CrustMaterial*, uint32_t* out_geom_id);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_sphere(
+pub unsafe extern "C" fn crust_scene_add_sphere(
     scene: *mut SceneHandle,
     center: *const f32,
     radius: f32,
@@ -206,9 +250,9 @@ pub extern "C" fn crust_scene_add_sphere(
     out_geom_id: *mut u32,
 ) -> CrustStatus {
     let result = (|| -> CResult<u32> {
-        let handle = require_mut(scene)?;
-        let pbr = require(material)?.to_openpbr()?;
-        let center = validate::finite3(center)?;
+        let handle = unsafe { require_mut(scene) }?;
+        let pbr = unsafe { require(material) }?.to_openpbr()?;
+        let center = unsafe { validate::finite3(center) }?;
         if !(radius.is_finite() && radius > 0.0) {
             return Err(CrustStatus::InvalidArgument);
         }
@@ -217,7 +261,7 @@ pub extern "C" fn crust_scene_add_sphere(
     })();
     match result {
         Ok(id) => {
-            write_out(out_geom_id, id);
+            unsafe { write_out(out_geom_id, id) };
             CrustStatus::Ok
         }
         Err(status) => status,
@@ -231,17 +275,24 @@ const LIGHT_MASK: u32 = MASK_SHADOW | MASK_INDIRECT;
 
 /// `CrustStatus crust_scene_add_sphere_light(CrustScene*,
 ///     const float center[3], float radius, const float radiance[3]);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_sphere_light(
+pub unsafe extern "C" fn crust_scene_add_sphere_light(
     scene: *mut SceneHandle,
     center: *const f32,
     radius: f32,
     radiance: *const f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
-        let center = validate::finite3(center)?;
-        let radiance = validate::finite3(radiance)?;
+        let handle = unsafe { require_mut(scene) }?;
+        let center = unsafe { validate::finite3(center) }?;
+        let radiance = unsafe { validate::finite3(radiance) }?;
         if !(radius.is_finite() && radius > 0.0) {
             return Err(CrustStatus::InvalidArgument);
         }
@@ -264,8 +315,15 @@ pub extern "C" fn crust_scene_add_sphere_light(
 
 /// `CrustStatus crust_scene_add_rect_light(CrustScene*, const float origin[3],
 ///     const float edge_u[3], const float edge_v[3], const float radiance[3]);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_rect_light(
+pub unsafe extern "C" fn crust_scene_add_rect_light(
     scene: *mut SceneHandle,
     origin: *const f32,
     edge_u: *const f32,
@@ -273,11 +331,11 @@ pub extern "C" fn crust_scene_add_rect_light(
     radiance: *const f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
-        let origin = validate::finite3(origin)?;
-        let edge_u = validate::finite3(edge_u)?;
-        let edge_v = validate::finite3(edge_v)?;
-        let radiance = validate::finite3(radiance)?;
+        let handle = unsafe { require_mut(scene) }?;
+        let origin = unsafe { validate::finite3(origin) }?;
+        let edge_u = unsafe { validate::finite3(edge_u) }?;
+        let edge_v = unsafe { validate::finite3(edge_v) }?;
+        let radiance = unsafe { validate::finite3(radiance) }?;
         let normal = edge_u.cross(edge_v);
         if normal.length_squared() < 1e-20 {
             return Err(CrustStatus::InvalidArgument); // degenerate rectangle
@@ -314,18 +372,25 @@ pub extern "C" fn crust_scene_add_rect_light(
 
 /// `CrustStatus crust_scene_add_distant_light(CrustScene*,
 ///     const float direction[3], const float irradiance[3], float angle_deg);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_distant_light(
+pub unsafe extern "C" fn crust_scene_add_distant_light(
     scene: *mut SceneHandle,
     direction: *const f32,
     irradiance: *const f32,
     angle_deg: f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         handle.ensure_live()?;
-        let direction = validate::finite3(direction)?;
-        let irradiance = validate::finite3(irradiance)?;
+        let direction = unsafe { validate::finite3(direction) }?;
+        let irradiance = unsafe { validate::finite3(irradiance) }?;
         if direction.length_squared() < 1e-20 || !(angle_deg.is_finite() && angle_deg >= 0.0) {
             return Err(CrustStatus::InvalidArgument);
         }
@@ -343,8 +408,11 @@ pub extern "C" fn crust_scene_add_distant_light(
 /// A dome is at infinity — only the rotation of its frame matters.
 /// Normalize the columns like the USD importer does, so a rotation with
 /// uniform scale folded in still orients correctly.
-fn read_dome_rotation(rotation: *const f32) -> CResult<Mat3A> {
-    let r = slice(rotation, 9)?;
+///
+/// # Safety
+/// Carries [`crate::validate::slice`]'s contract for 9 floats.
+unsafe fn read_dome_rotation(rotation: *const f32) -> CResult<Mat3A> {
+    let r = unsafe { slice(rotation, 9) }?;
     if !r.iter().all(|v| v.is_finite()) {
         return Err(CrustStatus::InvalidArgument);
     }
@@ -365,18 +433,25 @@ fn read_dome_rotation(rotation: *const f32) -> CResult<Mat3A> {
 
 /// `CrustStatus crust_scene_add_dome_light_file(CrustScene*,
 ///     const float tint[3], const char* path, const float rotation[9]);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_dome_light_file(
+pub unsafe extern "C" fn crust_scene_add_dome_light_file(
     scene: *mut SceneHandle,
     tint: *const f32,
     path: *const std::ffi::c_char,
     rotation: *const f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         handle.ensure_live()?;
-        let tint = validate::finite3(tint)?;
-        let rotation = read_dome_rotation(rotation)?;
+        let tint = unsafe { validate::finite3(tint) }?;
+        let rotation = unsafe { read_dome_rotation(rotation) }?;
         if path.is_null() {
             return Err(CrustStatus::NullArgument);
         }
@@ -398,8 +473,15 @@ pub extern "C" fn crust_scene_add_dome_light_file(
 /// `CrustStatus crust_scene_add_dome_light(CrustScene*, const float tint[3],
 ///     uint32_t tex_width, uint32_t tex_height, const float* pixels_or_null,
 ///     const float rotation[9]);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_add_dome_light(
+pub unsafe extern "C" fn crust_scene_add_dome_light(
     scene: *mut SceneHandle,
     tint: *const f32,
     tex_width: u32,
@@ -408,10 +490,10 @@ pub extern "C" fn crust_scene_add_dome_light(
     rotation: *const f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         handle.ensure_live()?;
-        let tint = validate::finite3(tint)?;
-        let rotation = read_dome_rotation(rotation)?;
+        let tint = unsafe { validate::finite3(tint) }?;
+        let rotation = unsafe { read_dome_rotation(rotation) }?;
         let map = if pixels_or_null.is_null() {
             None
         } else {
@@ -420,7 +502,7 @@ pub extern "C" fn crust_scene_add_dome_light(
                 .checked_mul(h)
                 .and_then(|px| px.checked_mul(3))
                 .ok_or(CrustStatus::InvalidArgument)?;
-            let flat = slice(pixels_or_null, count)?;
+            let flat = unsafe { slice(pixels_or_null, count) }?;
             let pixels: Vec<Vec3A> = flat
                 .chunks_exact(3)
                 .map(|c| Vec3A::new(c[0], c[1], c[2]))
@@ -442,8 +524,15 @@ pub extern "C" fn crust_scene_add_dome_light(
 
 /// `CrustStatus crust_scene_set_camera(CrustScene*, const double view[16],
 ///     const double proj[16], float aperture, float focus_distance);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_set_camera(
+pub unsafe extern "C" fn crust_scene_set_camera(
     scene: *mut SceneHandle,
     view: *const f64,
     proj: *const f64,
@@ -451,10 +540,10 @@ pub extern "C" fn crust_scene_set_camera(
     focus_distance: f32,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         handle.ensure_live()?;
         let to_mat4 = |ptr: *const f64| -> CResult<Mat4> {
-            let m = slice(ptr, 16)?;
+            let m = unsafe { slice(ptr, 16) }?;
             let mut cols = [0.0f32; 16];
             for (dst, src) in cols.iter_mut().zip(m) {
                 if !src.is_finite() {
@@ -482,15 +571,22 @@ pub extern "C" fn crust_scene_set_camera(
 
 /// `CrustStatus crust_scene_set_render_settings(CrustScene*,
 ///     const CrustRenderSettings*);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_set_render_settings(
+pub unsafe extern "C" fn crust_scene_set_render_settings(
     scene: *mut SceneHandle,
     settings: *const CrustRenderSettings,
 ) -> CrustStatus {
     let result = (|| -> CResult<()> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         handle.ensure_live()?;
-        handle.settings = Some(require(settings)?.to_settings()?);
+        handle.settings = Some(unsafe { require(settings) }?.to_settings()?);
         Ok(())
     })();
     result.err().unwrap_or(CrustStatus::Ok)
@@ -498,14 +594,21 @@ pub extern "C" fn crust_scene_set_render_settings(
 
 /// `CrustStatus crust_scene_commit(CrustScene*,
 ///     const CrustStopToken* token_or_null, CrustRenderer** out_renderer);`
+///
+/// # Safety
+/// Every pointer argument must satisfy the crust.h contract: NULL where the
+/// header allows it, otherwise valid, aligned and initialized for the whole
+/// call, with arrays holding at least the stated element counts, out-params
+/// exclusively accessible, and handle pointers live (not destroyed) and
+/// externally synchronized.
 #[unsafe(no_mangle)]
-pub extern "C" fn crust_scene_commit(
+pub unsafe extern "C" fn crust_scene_commit(
     scene: *mut SceneHandle,
     token_or_null: *const TokenHandle,
     out_renderer: *mut *mut RendererHandle,
 ) -> CrustStatus {
     let result = (|| -> CResult<*mut RendererHandle> {
-        let handle = require_mut(scene)?;
+        let handle = unsafe { require_mut(scene) }?;
         if out_renderer.is_null() {
             return Err(CrustStatus::NullArgument);
         }
@@ -526,7 +629,7 @@ pub extern "C" fn crust_scene_commit(
     })();
     match result {
         Ok(ptr) => {
-            write_out(out_renderer, ptr);
+            unsafe { write_out(out_renderer, ptr) };
             CrustStatus::Ok
         }
         Err(status) => status,
