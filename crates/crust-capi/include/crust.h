@@ -72,6 +72,7 @@ const char* crust_status_string(CrustStatus status);
 typedef struct CrustScene CrustScene;         /* scene builder              */
 typedef struct CrustRenderer CrustRenderer;   /* committed, steppable render */
 typedef struct CrustStopToken CrustStopToken; /* cross-thread cancellation  */
+typedef struct CrustGeoCache CrustGeoCache;   /* cross-rebuild prototype cache */
 
 /* ---- stop token --------------------------------------------------------- */
 
@@ -81,6 +82,23 @@ CrustStopToken* crust_stop_token_create(void);
 void crust_stop_token_stop(CrustStopToken* token);
 bool crust_stop_token_is_stopped(const CrustStopToken* token);
 void crust_stop_token_destroy(CrustStopToken* token);
+
+/* ---- geometry cache -------------------------------------------------------
+ * What makes edits cheap: a mesh's triangles (and their acceleration
+ * structure) are committed once and cached across scene rebuilds, keyed by
+ * an opaque caller-chosen key (e.g. a prim path hash) plus a content
+ * version the caller bumps when the geometry itself changes. A rebuild
+ * whose meshes all hit the cache pays only the top-level build over
+ * instance bounds. Thread-safe (internally synchronized), like the stop
+ * token; prototypes still referenced by live renderers survive removal. */
+
+CrustGeoCache* crust_geo_cache_create(void);
+bool crust_geo_cache_contains(const CrustGeoCache* cache, uint64_t key,
+                              uint32_t version);
+/* Call when a prim is deleted so its prototype can be reclaimed. */
+void crust_geo_cache_remove(CrustGeoCache* cache, uint64_t key);
+void crust_geo_cache_clear(CrustGeoCache* cache);
+void crust_geo_cache_destroy(CrustGeoCache* cache);
 
 /* ---- material ----------------------------------------------------------- */
 
@@ -158,6 +176,29 @@ CrustStatus crust_scene_add_sphere(CrustScene* scene,
                                    const float center[3], float radius,
                                    const CrustMaterial* material,
                                    uint32_t* out_geom_id);
+
+/* An OBJECT-SPACE mesh placed by xform (column-major doubles, same
+ * convention as the camera matrices — a GfMatrix4d passes untransposed),
+ * with its triangles cached in `cache` under (key, version):
+ *  - on a cache HIT the vertex arrays are never read and may be NULL —
+ *    check crust_geo_cache_contains first to skip marshalling entirely;
+ *  - on a MISS the arrays are required (as in crust_scene_add_mesh, but
+ *    object space; normals transform correctly through the placement) and
+ *    the committed prototype is stored for every later rebuild.
+ * The placement must be invertible: a singular xform (e.g. zero scale, the
+ * common "hide this" idiom) returns CRUST_ERROR_INVALID_ARGUMENT and the
+ * caller skips the placement. Each call adds one placement and returns its
+ * geom_id; N placements of one prototype share the cached triangles. */
+CrustStatus crust_scene_add_instance(CrustScene* scene, CrustGeoCache* cache,
+                                     uint64_t key, uint32_t version,
+                                     const float* positions_or_null,
+                                     size_t vertex_count,
+                                     const uint32_t* tri_indices_or_null,
+                                     size_t triangle_count,
+                                     const float* normals_or_null,
+                                     const double xform[16],
+                                     const CrustMaterial* material,
+                                     uint32_t* out_geom_id);
 
 /* Lights. Geometry-backed lights (sphere, rect) follow crust's engine
  * convention internally: their emissive geometry is hidden from camera
@@ -272,6 +313,24 @@ CrustStatus crust_renderer_read_aov_id(CrustRenderer* renderer,
 /* 1 float per pixel: 1.0 hit / 0.0 miss. */
 CrustStatus crust_renderer_read_aov_alpha(CrustRenderer* renderer,
                                           float* alpha, size_t capacity_px);
+
+/* ---- in-place edits --------------------------------------------------------
+ * Both restart sampling from zero (a film cannot survive a camera or
+ * resolution change) WITHOUT touching the world or its acceleration
+ * structure — this is the cheap path for viewport orbits. Reads made after
+ * an edit see the restarted render. A stopped token is permanent, so pass
+ * a fresh token to keep the restarted render cancellable; NULL keeps the
+ * current one (stopped or not). */
+
+CrustStatus crust_renderer_update_camera(CrustRenderer* renderer,
+                                         const double view[16],
+                                         const double proj[16],
+                                         float aperture, float focus_distance,
+                                         const CrustStopToken* token_or_null);
+
+CrustStatus crust_renderer_update_settings(CrustRenderer* renderer,
+                                           const CrustRenderSettings* settings,
+                                           const CrustStopToken* token_or_null);
 
 void crust_renderer_destroy(CrustRenderer* renderer);
 

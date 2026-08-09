@@ -8,7 +8,6 @@ use crust_core::{
     AovBuffers, AovRequest, Buffer, Camera, LightList, ProgressiveRender, RenderSettings,
     Renderer, StepStatus, StopToken, WorldBuilder,
 };
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
 /// The C `CrustStopToken`: a boxed clone-able engine token. The one type
@@ -61,29 +60,33 @@ impl SceneHandle {
 /// - The `Renderer` lives at a stable heap address: it is boxed once in
 ///   [`RendererHandle::new`] and freed only in `Drop`. The session's
 ///   `&'static Renderer` is a lie about *lifetime*, never about *address*.
-/// - No `&mut Renderer` is ever created while the session exists: this
-///   crate's C surface exposes no post-commit mutation (rebuild-everything
-///   semantics — an edit means a new scene handle and a new commit), and
-///   internally only shared `renderer()` references are taken.
-///   `ProgressiveRender::step` mutates the *session*, not the renderer.
+/// - No `&mut Renderer` is ever created **while a session exists**. The
+///   session and the renderer alternate: rendering holds a live session and
+///   takes only shared `renderer()` references (`ProgressiveRender::step`
+///   mutates the *session*, not the renderer); an in-place edit
+///   ([`RendererHandle::edit`]) first drops the session — ending its
+///   borrow — then forms the one `&mut Renderer`, then begins a fresh
+///   session before returning. Nothing can observe the handle mid-edit
+///   (handles are externally synchronized per the header contract).
 /// - `renderer` is a raw `NonNull`, not a `Box` field: materializing
 ///   `&mut RendererHandle` from the C pointer at every call would retag a
 ///   `Box`'s unique pointer and invalidate the session's outstanding
 ///   borrow under Stacked Borrows; raw pointers are never retagged.
-/// - Drop order is explicit: `Drop::drop` first drops the session (which
-///   merely releases its film — dropping a `&Renderer` field dereferences
-///   nothing), then frees the `Renderer`. `ManuallyDrop` makes that
-///   ordering independent of field order, and nothing can observe the
-///   handle between the two.
+/// - `session` is an `Option` dropped via `take()` in both `edit` and
+///   `Drop`, so the session is destroyed strictly before any `&mut
+///   Renderer` (edit) or the `Renderer`'s deallocation (drop), and a panic
+///   unwinding out of an edit (test builds only) can at worst leave the
+///   session `None` — never double-drop it.
 pub struct RendererHandle {
-    session: ManuallyDrop<ProgressiveRender<'static>>,
+    session: Option<ProgressiveRender<'static>>,
     renderer: NonNull<Renderer>,
     stop: StopToken,
     /// Reused `snapshot_into` target so per-step color reads do not
     /// allocate a frame each time.
     color_scratch: Buffer,
-    /// The four AOV planes, probed lazily on the first read (the committed
-    /// scene is immutable, so once is enough) and cached.
+    /// The four AOV planes, probed lazily on the first read and cached
+    /// until an edit invalidates them (they depend on the camera, the
+    /// resolution and the world alike).
     aovs: Option<AovBuffers>,
 }
 
@@ -97,7 +100,7 @@ impl RendererHandle {
         let session: ProgressiveRender<'static> =
             unsafe { renderer.as_ref() }.begin_progressive(true);
         Box::new(RendererHandle {
-            session: ManuallyDrop::new(session),
+            session: Some(session),
             renderer,
             stop,
             color_scratch: Buffer::new(width, height),
@@ -107,8 +110,38 @@ impl RendererHandle {
 
     fn renderer(&self) -> &Renderer {
         // SAFETY: the pointee is alive for the whole life of the handle
-        // (freed only in Drop) and only ever shared-borrowed.
+        // (freed only in Drop) and only ever shared-borrowed while a
+        // session exists (see the struct-level argument).
         unsafe { self.renderer.as_ref() }
+    }
+
+    fn session(&self) -> &ProgressiveRender<'static> {
+        self.session.as_ref().expect("session alive outside edit()")
+    }
+
+    /// The one place a `&mut Renderer` is ever formed. Tears the session
+    /// down (ending its borrow), applies the mutation, restarts sampling
+    /// from zero with a fresh session, and invalidates everything the old
+    /// scene/camera state had derived (AOV cache, scratch size). A stopped
+    /// token stays stopped, so callers may hand in a fresh one.
+    pub(crate) fn edit(&mut self, new_token: Option<StopToken>, apply: impl FnOnce(&mut Renderer)) {
+        drop(self.session.take());
+        // SAFETY: the session — the only borrower of the renderer — was
+        // just dropped, so this exclusive reference is unique. It ends
+        // before `begin_progressive` takes a new shared borrow below.
+        apply(unsafe { self.renderer.as_mut() });
+        if let Some(token) = new_token {
+            self.stop = token;
+        }
+        let (width, height) = self.renderer().settings.get_dimensions();
+        if (self.color_scratch.width(), self.color_scratch.height()) != (width, height) {
+            self.color_scratch = Buffer::new(width, height);
+        }
+        self.aovs = None;
+        // SAFETY: same as in `new` — the unbounded lifetime from
+        // `NonNull::as_ref` is what lets the session be stored as
+        // `'static`; the struct-level argument covers why that is sound.
+        self.session = Some(unsafe { self.renderer.as_ref() }.begin_progressive(true));
     }
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
@@ -122,7 +155,10 @@ impl RendererHandle {
     }
 
     pub(crate) fn step(&mut self, spp: u32) -> (CrustStepStatus, u32) {
-        match self.session.step(spp, None, Some(&self.stop)) {
+        // Field-precise borrows: the session advances while the (atomic)
+        // stop token is observed from the sibling field.
+        let session = self.session.as_mut().expect("session alive outside edit()");
+        match session.step(spp, None, Some(&self.stop)) {
             StepStatus::InProgress { spp_done } => (CrustStepStatus::InProgress, spp_done),
             StepStatus::Stopped { spp_done } => (CrustStepStatus::Stopped, spp_done),
             StepStatus::Complete { spp_done } => (CrustStepStatus::Complete, spp_done),
@@ -130,11 +166,11 @@ impl RendererHandle {
     }
 
     pub(crate) fn is_converged(&self) -> bool {
-        self.session.is_complete()
+        self.session().is_complete()
     }
 
     pub(crate) fn spp_done(&self) -> u32 {
-        self.session.spp_done()
+        self.session().spp_done()
     }
 
     fn ensure_aovs(&mut self) -> &AovBuffers {
@@ -155,7 +191,7 @@ impl RendererHandle {
     /// accumulators must never be memcpy'd as float data.
     pub(crate) fn read_color(&mut self, out: &mut [f32]) {
         self.ensure_aovs();
-        self.session.snapshot_into(&mut self.color_scratch);
+        self.session.as_ref().expect("session alive outside edit()").snapshot_into(&mut self.color_scratch);
         let alpha = self
             .aovs
             .as_ref()
@@ -205,11 +241,13 @@ impl RendererHandle {
 
 impl Drop for RendererHandle {
     fn drop(&mut self) {
-        // SAFETY: the session (which borrows the renderer) is dropped
-        // strictly before the renderer's box is reclaimed, and neither is
-        // touched again — `self` is being destroyed.
+        // The session (which borrows the renderer) is dropped strictly
+        // before the renderer's box is reclaimed, and neither is touched
+        // again — `self` is being destroyed.
+        drop(self.session.take());
+        // SAFETY: allocated by `Box::new` in `RendererHandle::new`, freed
+        // exactly once here, with no outstanding borrows (see above).
         unsafe {
-            ManuallyDrop::drop(&mut self.session);
             drop(Box::from_raw(self.renderer.as_ptr()));
         }
     }

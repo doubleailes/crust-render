@@ -1,8 +1,11 @@
-//! The renderer entry points: stepping and framebuffer/AOV reads.
+//! The renderer entry points: stepping, framebuffer/AOV reads, and the
+//! in-place edits that restart sampling without touching the world.
 
-use crate::handles::RendererHandle;
+use crate::handles::{RendererHandle, TokenHandle};
+use crate::material::CrustRenderSettings;
 use crate::status::{CrustStatus, CrustStepStatus};
-use crate::validate::{CResult, require, require_mut, slice_mut, write_out};
+use crate::validate::{CResult, require, require_mut, slice, slice_mut, write_out};
+use crust_core::{Camera, Mat4};
 
 /// `CrustStatus crust_renderer_step(CrustRenderer*, uint32_t spp,
 ///     CrustStepStatus* out_status, uint32_t* out_spp_done);`
@@ -149,6 +152,74 @@ pub extern "C" fn crust_renderer_read_aov_alpha(
     capacity_px: usize,
 ) -> CrustStatus {
     read_into(renderer, alpha, capacity_px, 1, RendererHandle::read_alpha)
+}
+
+fn read_mat4(ptr: *const f64) -> CResult<Mat4> {
+    let m = slice(ptr, 16)?;
+    let mut cols = [0.0f32; 16];
+    for (dst, src) in cols.iter_mut().zip(m) {
+        if !src.is_finite() {
+            return Err(CrustStatus::InvalidArgument);
+        }
+        *dst = *src as f32;
+    }
+    Ok(Mat4::from_cols_array(&cols))
+}
+
+/// `CrustStatus crust_renderer_update_camera(CrustRenderer*,
+///     const double view[16], const double proj[16], float aperture,
+///     float focus_distance, const CrustStopToken* token_or_null);`
+///
+/// Restarts sampling from zero with the new camera — no world/BVH work at
+/// all, which is what makes a viewport orbit cheap. The film cannot survive
+/// a camera change, so progress resets; a stopped token stays stopped, so
+/// pass a fresh one to make the restarted render cancellable.
+#[unsafe(no_mangle)]
+pub extern "C" fn crust_renderer_update_camera(
+    renderer: *mut RendererHandle,
+    view: *const f64,
+    proj: *const f64,
+    aperture: f32,
+    focus_distance: f32,
+    token_or_null: *const TokenHandle,
+) -> CrustStatus {
+    let result = (|| -> CResult<()> {
+        let handle = require_mut(renderer)?;
+        let view = read_mat4(view)?;
+        let proj = read_mat4(proj)?;
+        if !(aperture.is_finite() && aperture >= 0.0) {
+            return Err(CrustStatus::InvalidArgument);
+        }
+        let camera = Camera::from_view_projection(view, proj, aperture, focus_distance)
+            .map_err(|_| CrustStatus::InvalidCamera)?;
+        // SAFETY: read-only access to a caller-owned token, per the header.
+        let token = unsafe { token_or_null.as_ref() }.map(|t| t.0.clone());
+        handle.edit(token, |r| r.camera = camera);
+        Ok(())
+    })();
+    result.err().unwrap_or(CrustStatus::Ok)
+}
+
+/// `CrustStatus crust_renderer_update_settings(CrustRenderer*,
+///     const CrustRenderSettings*, const CrustStopToken* token_or_null);`
+///
+/// As `crust_renderer_update_camera`, for the render settings (resolution,
+/// budget, depth, adaptive stop). Sampling restarts from zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn crust_renderer_update_settings(
+    renderer: *mut RendererHandle,
+    settings: *const CrustRenderSettings,
+    token_or_null: *const TokenHandle,
+) -> CrustStatus {
+    let result = (|| -> CResult<()> {
+        let handle = require_mut(renderer)?;
+        let settings = require(settings)?.to_settings()?;
+        // SAFETY: read-only access to a caller-owned token, per the header.
+        let token = unsafe { token_or_null.as_ref() }.map(|t| t.0.clone());
+        handle.edit(token, |r| r.settings = settings);
+        Ok(())
+    })();
+    result.err().unwrap_or(CrustStatus::Ok)
 }
 
 /// `void crust_renderer_destroy(CrustRenderer*);`
