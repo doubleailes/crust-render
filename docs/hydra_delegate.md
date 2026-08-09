@@ -1,14 +1,15 @@
 # Hydra render delegate (hdCrust): decision record and roadmap
 
-Status: **Phases 0 and 1 landed.** Phase 0 (engine groundwork) and Phase 1
-(`crust-capi` + the `hdCrust` plugin MVP) are implemented on this branch.
-`crust-capi` is tested from both sides of the ABI (`cargo test -p
-crust-capi`, `scripts/test_capi_c.sh`); `hdCrust` is compile- **and
-runtime-verified** against OpenUSD v25.11 — a headless harness
-(`hydra/hdCrust/tests/testHdCrust.cpp`) loads the plugin through
-`HdRendererPluginRegistry`, renders a cube via hd's unit-test scene
-delegate, and asserts the color buffer converges nonzero. Interactive
-usdview verification and Phase 2 remain.
+Status: **Phases 0, 1 and 2 landed.** Phase 0 (engine groundwork), Phase 1
+(`crust-capi` + the `hdCrust` plugin MVP) and Phase 2 (incrementality +
+materials) are implemented on this branch. `crust-capi` is tested from both
+sides of the ABI (`cargo test -p crust-capi`, `scripts/test_capi_c.sh`);
+`hdCrust` is compile- **and runtime-verified** against OpenUSD v25.11 — the
+headless harness (`hydra/hdCrust/tests/testHdCrust.cpp`) loads the plugin
+through `HdRendererPluginRegistry` and exercises a converging beauty
+render, UsdPreviewSurface bind + edit, and transform / camera / instancer
+edits re-converging. Interactive usdview verification remains, as do the
+later ideas below (surface textures, volume/curve rprims).
 
 ## The decision
 
@@ -84,13 +85,28 @@ bit-identical):
   compiles clean, and the headless `testHdCrust` harness proves registry
   discovery → delegate → synced scene → converged nonzero image.
 
-### Phase 2 — incrementality and materials
+### Phase 2 — incrementality and materials (landed)
 
-- Retained scene: per-geometry replace, transform-only refit, `Arc<dyn Material>`
-  slot swap — so camera orbits and material tweaks stop paying a full SBVH rebuild.
-- `HdMaterialNetwork2` → OpenPBR translation (transplant the existing
-  UsdPreviewSurface mapping out of `usd_import.rs`'s USD-prim reads).
-- Instancer sync, light edits, render-settings sync.
+- **Prototype geometry cache** (`CrustGeoCache` + `crust_scene_add_instance`):
+  each mesh's triangles commit to an inner `rt::Scene` once and survive scene
+  rebuilds keyed by (prim-path hash, geometry version); placements are kernel
+  `Instance`s, so any edit rebuilds only the top-level BVH over instance
+  bounds. Zero engine changes — the kernel's existing `Arc<rt::Scene>`
+  sharing (the USD importer's own prototype pattern) carries it.
+- **In-place edits** (`crust_renderer_update_camera`/`update_settings`): a
+  camera orbit restarts sampling with no world work at all. Inside the capi,
+  `RendererHandle::edit` is the one place a `&mut Renderer` is formed — the
+  film session (the renderer's only borrower) is dropped first.
+- **UsdPreviewSurface → OpenPBR** in the plugin, replicating the engine
+  importer's mapping exactly (values verbatim, no color-space decode,
+  emission on iff emissiveColor nonzero, clearcoat → coat); texture-connected
+  inputs warn and fall back; meshes track `DirtyMaterialId`.
+- **Dome textures**: `crust_scene_add_dome_light_file` decodes .exr/.hdr/LDR
+  with the CLI `AssetLoader`'s exact semantics (capi-side `exr`/`image` deps).
+- Fixed en route: Phase 1 never synced instancers (the render index does not
+  sync them — the rprim must call `HdInstancer::_SyncInstancerAndParents`,
+  as hdEmbree does), so instance transforms were silently identity. Caught
+  by the extended headless harness.
 
 ## Non-goals
 

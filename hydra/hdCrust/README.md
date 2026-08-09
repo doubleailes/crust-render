@@ -4,19 +4,26 @@ A C++ `HdRenderDelegate` plugin that lets Hydra hosts (usdview, Solaris,
 Maya, …) render their viewport through Crust Render's CPU path tracer, via
 the `crust-capi` C ABI (`crates/crust-capi/include/crust.h`).
 
-This is the **Phase 1 MVP** of `docs/hydra_delegate.md`:
+This is **Phase 2** of `docs/hydra_delegate.md`:
 
 - Rprims: meshes (triangulated via `HdMeshUtil`; vertex normals honored).
-- Instancing: point instancers flatten to one crust mesh per placement
-  (real kernel instancing through the C API is the Phase 2 seam).
+- Instancing: point instancers place a **shared kernel prototype** per
+  instance (one committed BVH per mesh, N placements).
 - Lights: sphere, rect, distant, dome — UsdLux `intensity`/`exposure`/
-  `color` respected; **dome textures render as the uniform color** for now.
-- Shading: **displayColor only** — materials are accepted and ignored
-  (`HdMaterialNetwork` → OpenPBR translation is Phase 2).
+  `color` respected; **dome textures load** (.exr/.hdr linear, LDR
+  sRGB→linear) with uniform-color fallback on decode failure.
+- Shading: **UsdPreviewSurface constants** via `HdMaterialNetwork`
+  (diffuseColor, metallic, roughness, ior, opacity, clearcoat,
+  clearcoatRoughness, emissiveColor — same mapping as crust's USD
+  importer); texture-connected inputs warn and use defaults; unbound
+  meshes shade from displayColor.
 - AOVs: color (float32/float16/unorm8 RGBA), depth, primId (picking works).
-- Edits: **any** change (camera orbit included) rebuilds the whole crust
-  scene — correct, not yet fast. Progressive refinement between edits:
-  every Hydra `Execute` adds a few samples until the budget converges.
+- Edits are cheap: a **camera orbit restarts sampling with zero scene
+  work** (`crust_renderer_update_camera`); geometry/material/light edits
+  rebuild only the top-level BVH over instance bounds — mesh triangles and
+  their inner BVHs live in a cross-rebuild prototype cache keyed by prim
+  path + geometry version. Progressive refinement between edits: every
+  Hydra `Execute` adds a few samples until the budget converges.
 
 ## Building
 
@@ -43,6 +50,11 @@ export PXR_PLUGINPATH_NAME=$PWD/install/plugin/usd/hdCrust/resources:$PXR_PLUGIN
 export LD_LIBRARY_PATH=$PWD/target/release:$USD_ROOT/lib:$LD_LIBRARY_PATH
 usdview samples/cornellbox.usda   # then View > Renderer > Crust
 ```
+
+The headless harness (`-DHDCRUST_BUILD_TESTS=ON` → `testHdCrust`, run with
+the same two environment variables) covers what usdview would exercise:
+registry discovery, a converging beauty render, material bind + edit,
+transform / camera / instancer edits re-converging.
 
 Environment knobs (all `TF_ENV_SETTING`s):
 
