@@ -77,6 +77,11 @@ cargo run --release -p crust-render --example xform_probe -- stage.usda /prim   
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
 
+# The C-side ABI guard for crust-capi (the Hydra delegate boundary): compiles
+# include/crust.h from real C with -Werror, links the release cdylib, runs
+# tests/smoke.c. The Rust-side twin is `cargo test -p crust-capi`.
+scripts/test_capi_c.sh
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
