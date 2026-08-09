@@ -216,7 +216,10 @@ Rust bindings exist (`embree4-sys`, `embree4-rs`). Cycles-class traversal speed,
 instancing, curves, and motion blur essentially for free — at the cost of the
 project's two founding constraints: **safe Rust** (an FFI kernel is unsafe C++ at the
 bottom of every ray) and self-containedness (a large native dependency, ISA/build
-matrix, no wasm story). Given that crust is explicitly a toy/learning renderer in
+matrix, no wasm story). (The safe-Rust constraint has since gained one sanctioned
+exception — the Hydra render delegate boundary, `crust-capi` + `hdCrust`; see
+`docs/hydra_delegate.md`. That exception is scoped to those boundary crates and does
+not extend to the kernel, so this trade-off analysis is unchanged.) Given that crust is explicitly a toy/learning renderer in
 safe Rust, this route is coherent only as an optional, feature-gated backend behind
 the existing `Hittable` seam — `trait` object in, `Hit` out — which the codebase's
 narrow query interface (`hit(ray, t_min, t_max)`) would make straightforward to slot

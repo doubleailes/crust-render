@@ -6,27 +6,34 @@ context: |
   Rust (edition 2024). The guiding goal is to bring industry-standard graphics
   formats and models — OpenUSD (scene interchange) and OpenPBR (surface shading)
   — into a Rust environment, drawing on PBRT, "Ray Tracing in One Weekend", and
-  Autodesk Standard Surface.
+  Autodesk Standard Surface. The safe-Rust rule has exactly one sanctioned
+  exception: the Hydra render delegate boundary (a future crust-capi C-ABI crate
+  + hdCrust C++ plugin) may use unsafe/FFI; engine crates never depend on it
+  (see docs/hydra_delegate.md).
 
   Guiding principles (apply when writing proposals and specs):
   - Performance is a core concern: prefer designs and data layouts that keep the
     CPU path tracer fast (Rayon parallelism, cache-friendly structures, BVH).
     Flag proposals that would regress render throughput.
   - CPU only — there is no GPU backend; do not spec one.
-  - The CLI is the only UI for now; assume no interactive/GUI surface.
+  - The CLI is the primary UI; a USD Hydra render delegate (hdCrust) is planned,
+    so engine APIs may be shaped for progressive, cancellable rendering with a
+    readable partial framebuffer — but crust-core itself stays UI-free.
   - "Production-inspired toy": favor correct, industry-aligned semantics
     (OpenUSD scene model, OpenPBR shading) over breadth of one-off features.
 
   Tech stack:
-  - Rust 2024, Cargo workspace with three crates under crates/:
-    - crust-core: the whole engine as a library (renderer, integrator, materials,
-      primitives, lights, BVH, USD import).
+  - Rust 2024, Cargo workspace with four crates under crates/:
+    - crust-rt: the intersection kernel (Embree-shaped scene/geometry API,
+      SBVH build collapsed to BVH4, instancing, motion blur).
+    - crust-core: the engine as a library (renderer, integrator, materials,
+      lights, volumes, path guiding, USD import) on top of crust-rt.
     - crust-render: the thin CLI binary (main.rs only) — clap args, builds a Scene,
-      runs the Renderer, writes EXR.
+      runs the Renderer, writes EXR + tone-mapped PNG.
     - utils: math/RNG helpers (random*, balance_heuristic, align_to_normal, clamp, Lerp).
   - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output),
-    openusd 0.5 (scene import — always compiled in, no feature flag), tracing (logging),
-    indicatif (progress bar), criterion (benches).
+    openusd 0.6 (scene import — always compiled in, no feature flag), openqmc-rs
+    (QMC sampling), tracing (logging), indicatif (progress bar), criterion (benches).
 
   Domain conventions:
   - Scenes load exclusively from USD (.usda/.usdc/.usdz). RON, Alembic (.abc),
@@ -38,9 +45,10 @@ context: |
     explicitly rather than speccing unimplemented features as done.
 
   Known incomplete work (do not spec as working):
-  - Adaptive sampling params (min_samples_per_pixel, variance_threshold, frame) are
-    parsed into RenderSettings but NOT consumed by the tracer yet.
-  - Non-sphere USD lux lights (Rect/Disk/Distant/Dome/Cylinder) warn once and are skipped.
+  - USD lux DiskLight and CylinderLight warn once and are skipped
+    (Sphere/Rect/Distant/Dome are supported).
+  - The Hydra delegate itself (crust-capi, hdCrust) does not exist yet — only the
+    engine-side groundwork (progressive/cancellable rendering, AOVs, matrix camera).
 
 # Per-artifact rules (optional).
 rules:
