@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Crust Render's ray tracing kernel — the intersection layer only,
 //! factored out of the renderer the way `openqmc-rs` factored out
 //! sampling. The API is deliberately **Embree-shaped** (geometry objects
