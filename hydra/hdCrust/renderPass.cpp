@@ -373,6 +373,19 @@ void HdCrustRenderPass::_Execute(
         HdFormat format = buffer->GetFormat();
         uint8_t* out = buffer->GetStorage();
 
+        // Belt and braces against an under-allocated buffer (Allocate
+        // rejects overflow/invalid inputs, leaving zero-sized storage):
+        // never write more bytes than the buffer actually holds.
+        const size_t required =
+            size_t(_width) * size_t(_height) * HdDataSizeOfFormat(format);
+        if (required == 0 || buffer->GetStorageSize() < required) {
+            TF_WARN(
+                "hdCrust: render buffer %s holds %zu bytes, %zu needed; "
+                "skipping",
+                binding.aovName.GetText(), buffer->GetStorageSize(), required);
+            continue;
+        }
+
         if (binding.aovName == HdAovTokens->color) {
             if (format == HdFormatFloat32Vec4) {
                 std::memcpy(out, _rgba.data(), pixels * 4 * sizeof(float));
