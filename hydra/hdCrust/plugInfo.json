@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdCrustRendererPlugin": {
+                        "bases": [
+                            "HdRendererPlugin"
+                        ],
+                        "displayName": "Crust",
+                        "priority": 99
+                    }
+                }
+            },
+            "LibraryPath": "libhdCrust.so",
+            "Name": "hdCrust",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}
