@@ -25,6 +25,7 @@
 //!   owning both. `handles::RendererHandle` documents how that
 //!   self-reference is kept sound.
 
+mod dome;
 mod geo_cache;
 mod handles;
 mod material;

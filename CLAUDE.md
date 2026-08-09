@@ -142,9 +142,16 @@ Five crates under `crates/` (plus the C++ plugin under `hydra/`):
 
 - **`crust-capi`** — the C ABI over crust-core for the Hydra delegate; the one
   sanctioned `unsafe` crate (see the safe-Rust rule above). The C contract is
-  the hand-written `include/crust.h`, guarded from drift by `tests/abi.rs`
-  (Rust side) and `tests/smoke.c` via `scripts/test_capi_c.sh` (C side).
-  Depends only on crust-core + glam; nothing depends on it.
+  the hand-written `include/crust.h` (API v2), guarded from drift by
+  `tests/abi.rs` (Rust side) and `tests/smoke.c` via `scripts/test_capi_c.sh`
+  (C side). What makes Hydra edits cheap lives here: `CrustGeoCache` keeps each
+  mesh's committed inner `rt::Scene` alive across scene rebuilds (placements are
+  kernel `Instance`s, so a rebuild pays only the top-level BVH over instance
+  boxes), and `crust_renderer_update_camera`/`update_settings` restart sampling
+  in place with no world work at all. Depends on crust-core + glam, plus
+  `exr`/`image` for `crust_scene_add_dome_light_file` (the capi plays the
+  `AssetLoader` role for the delegate that the CLI plays for batch renders);
+  nothing depends on it.
 - **`hydra/hdCrust/`** (not a crate) — the C++ `HdRenderDelegate` plugin over
   crust-capi: synchronous stepping per Hydra `Execute`, rebuild-on-any-edit,
   displayColor shading, color/depth/primId AOVs. Builds against an OpenUSD

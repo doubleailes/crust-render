@@ -135,6 +135,96 @@ static void render_to_completion(CrustRenderer* renderer, float* rgba) {
   CHECK(crust_renderer_read_color(renderer, rgba, PX));
 }
 
+/* Phase 2 surface: geometry cache, instanced placement, in-place edits,
+ * file-based dome lights. */
+static void exercise_phase2(void) {
+  CrustGeoCache* cache = crust_geo_cache_create();
+  assert(cache != NULL);
+  assert(!crust_geo_cache_contains(cache, 42, 1));
+
+  CrustScene* scene = crust_scene_create();
+  CrustMaterial material;
+  crust_material_default(&material);
+  assert(material.coat_weight == 0.0f && material.coat_roughness == 0.0f);
+  material.base_color[0] = 0.9f;
+  material.coat_weight = 0.3f;
+
+  const float positions[9] = {-0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f,
+                              0.0f,  0.5f,  0.0f};
+  const uint32_t indices[3] = {0, 1, 2};
+  const double identity[16] = {1, 0, 0, 0, 0, 1, 0, 0,
+                               0, 0, 1, 0, 0, 0, 0, 1};
+  uint32_t id_a = 0, id_b = 0;
+  /* Miss populates the cache; hit places the shared prototype with NULL
+   * arrays. */
+  CHECK(crust_scene_add_instance(scene, cache, 42, 1, positions, 3, indices,
+                                 1, NULL, identity, &material, &id_a));
+  assert(crust_geo_cache_contains(cache, 42, 1));
+  const double shifted[16] = {1, 0, 0, 0, 0, 1, 0, 0,
+                              0, 0, 1, 0, 1.5, 0, 0, 1};
+  CHECK(crust_scene_add_instance(scene, cache, 42, 1, NULL, 0, NULL, 0, NULL,
+                                 shifted, &material, &id_b));
+  assert(id_b == id_a + 1);
+
+  /* Dome-light file: a missing path is a clean error, not a crash. */
+  const float tint[3] = {0.2f, 0.2f, 0.2f};
+  const float identity9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  assert(crust_scene_add_dome_light_file(scene, tint, "/no/such/file.exr",
+                                         identity9) ==
+         CRUST_ERROR_INVALID_ARGUMENT);
+  CHECK(crust_scene_add_dome_light(scene, tint, 0, 0, NULL, identity9));
+
+  double proj[16];
+  gl_perspective(proj);
+  CHECK(crust_scene_set_camera(scene, kView, proj, 0.0f, 3.0f));
+  CrustRenderSettings settings;
+  crust_render_settings_default(&settings);
+  settings.width = 16;
+  settings.height = 16;
+  settings.samples_per_pixel = 4;
+  settings.max_depth = 4;
+  CHECK(crust_scene_set_render_settings(scene, &settings));
+
+  CrustRenderer* renderer = NULL;
+  CHECK(crust_scene_commit(scene, NULL, &renderer));
+  crust_scene_destroy(scene);
+
+  CrustStepStatus status = CRUST_STEP_IN_PROGRESS;
+  uint32_t done = 0;
+  CHECK(crust_renderer_step(renderer, 2, &status, &done));
+
+  /* In-place edits: camera shift and a resolution change both restart
+   * sampling without a rebuild. */
+  double view2[16];
+  memcpy(view2, kView, sizeof(view2));
+  view2[12] = 0.25; /* translate x */
+  CrustStopToken* fresh = crust_stop_token_create();
+  CHECK(crust_renderer_update_camera(renderer, view2, proj, 0.0f, 3.0f, fresh));
+  assert(crust_renderer_spp_done(renderer) == 0);
+  settings.width = 8;
+  settings.height = 8;
+  CHECK(crust_renderer_update_settings(renderer, &settings, NULL));
+  uint32_t w = 0, h = 0;
+  crust_renderer_get_dimensions(renderer, &w, &h);
+  assert(w == 8 && h == 8);
+  status = CRUST_STEP_IN_PROGRESS;
+  while (status != CRUST_STEP_COMPLETE) {
+    CHECK(crust_renderer_step(renderer, 2, &status, &done));
+  }
+  static float small[8 * 8 * 4];
+  CHECK(crust_renderer_read_color(renderer, small, 8 * 8));
+  for (size_t i = 0; i < 8 * 8 * 4; i++) assert(!isnan(small[i]));
+
+  crust_stop_token_destroy(fresh);
+  crust_renderer_destroy(renderer);
+  crust_geo_cache_remove(cache, 42);
+  assert(!crust_geo_cache_contains(cache, 42, 1));
+  crust_geo_cache_clear(cache);
+  crust_geo_cache_destroy(cache);
+  crust_geo_cache_destroy(NULL); /* NULL is a no-op */
+  printf("smoke.c: phase 2 surface OK\n");
+}
+
 int main(void) {
   assert(crust_api_version() == CRUST_API_VERSION);
   uint32_t major = 0, minor = 0, patch = 0;
@@ -212,6 +302,8 @@ int main(void) {
   crust_stop_token_destroy(NULL); /* NULL is a no-op */
   crust_renderer_destroy(NULL);
   crust_scene_destroy(NULL);
+
+  exercise_phase2();
 
   printf("smoke.c: all checks passed (%d nonzero channel values)\n", nonzero);
   return 0;

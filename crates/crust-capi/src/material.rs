@@ -17,11 +17,13 @@ pub struct CrustMaterial {
     pub opacity: f32,
     pub emission_color: [f32; 3],
     pub emission_luminance: f32,
+    pub coat_weight: f32,
+    pub coat_roughness: f32,
     pub thin_walled: i32,
     pub reserved: i32,
 }
 
-const _: () = assert!(size_of::<CrustMaterial>() == 56, "CrustMaterial ABI drift");
+const _: () = assert!(size_of::<CrustMaterial>() == 64, "CrustMaterial ABI drift");
 
 impl CrustMaterial {
     /// The header's default: the OpenPBR default surface (grey diffuse).
@@ -36,6 +38,8 @@ impl CrustMaterial {
             opacity: pbr.geometry_opacity,
             emission_color: pbr.emission_color.to_array(),
             emission_luminance: pbr.emission_luminance,
+            coat_weight: pbr.coat_weight,
+            coat_roughness: pbr.coat_roughness,
             thin_walled: pbr.geometry_thin_walled as i32,
             reserved: 0,
         }
@@ -55,6 +59,8 @@ impl CrustMaterial {
             self.emission_color[1],
             self.emission_color[2],
             self.emission_luminance,
+            self.coat_weight,
+            self.coat_roughness,
         ];
         if !all.iter().all(|v| v.is_finite()) {
             return Err(CrustStatus::InvalidArgument);
@@ -68,6 +74,8 @@ impl CrustMaterial {
         pbr.geometry_opacity = self.opacity.clamp(0.0, 1.0);
         pbr.emission_color = Vec3A::from_array(self.emission_color);
         pbr.emission_luminance = self.emission_luminance.max(0.0);
+        pbr.coat_weight = self.coat_weight.clamp(0.0, 1.0);
+        pbr.coat_roughness = self.coat_roughness.clamp(0.0, 1.0);
         pbr.geometry_thin_walled = self.thin_walled != 0;
         Ok(pbr)
     }
