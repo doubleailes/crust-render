@@ -11,7 +11,9 @@
 #include <pxr/base/gf/frustum.h>
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/rect2i.h>
+#include <pxr/base/gf/vec3f.h>
 #include <pxr/imaging/cameraUtil/framing.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
@@ -69,6 +71,22 @@ private:
     HdRenderPassStateSharedPtr _renderPassState;
     TfTokenVector _renderTags;
 };
+
+// One-node UsdPreviewSurface network with a constant diffuseColor — the
+// shape UsdImaging delivers for a bound preview-surface material.
+static VtValue _MakePreviewSurface(GfVec3f const& color) {
+    HdMaterialNode node;
+    node.path = SdfPath("/materials/mat/preview");
+    node.identifier = TfToken("UsdPreviewSurface");
+    node.parameters[TfToken("diffuseColor")] = VtValue(color);
+    node.parameters[TfToken("roughness")] = VtValue(0.9f);
+    HdMaterialNetwork network;
+    network.nodes.push_back(node);
+    HdMaterialNetworkMap map;
+    map.map[HdMaterialTerminalTokens->surface] = network;
+    map.terminals.push_back(node.path);
+    return VtValue(map);
+}
 
 } // namespace
 
@@ -157,31 +175,118 @@ int main() {
     aovBindings[0].clearValue = VtValue(GfVec4f(0.0f));
     renderPassState->SetAovBindings(aovBindings);
 
-    int iterations = 0;
-    for (; iterations < 256 && !renderPass->IsConverged(); ++iterations) {
-        HdTaskSharedPtrVector tasks = {
-            std::make_shared<DrawTask>(renderPass, renderPassState)};
-        engine.Execute(index.get(), &tasks);
-    }
-    REQUIRE(renderPass->IsConverged(), "render never converged");
-    REQUIRE(renderBuffer->IsConverged(), "buffer not marked converged");
+    // Drives Execute until convergence and returns the frame; also checks
+    // finiteness on every read.
+    auto converge = [&]() -> std::vector<float> {
+        // Always execute at least once: after an edit, IsConverged() still
+        // reports the previous frame's state until an Execute syncs the
+        // dirty prims and notices the change — usdview likewise re-executes
+        // on scene invalidation rather than polling convergence first.
+        int iterations = 0;
+        do {
+            HdTaskSharedPtrVector tasks = {
+                std::make_shared<DrawTask>(renderPass, renderPassState)};
+            engine.Execute(index.get(), &tasks);
+            ++iterations;
+        } while (iterations < 1024 && !renderPass->IsConverged());
+        if (!renderPass->IsConverged()) {
+            fprintf(stderr, "FAIL: render never converged\n");
+            exit(1);
+        }
+        renderBuffer->Resolve();
+        auto const* rgba = static_cast<float const*>(renderBuffer->Map());
+        std::vector<float> frame(rgba, rgba + size_t(W) * H * 4);
+        renderBuffer->Unmap();
+        for (float v : frame) {
+            if (!std::isfinite(v)) {
+                fprintf(stderr, "FAIL: non-finite pixel\n");
+                exit(1);
+            }
+        }
+        return frame;
+    };
 
     // 4. The image made it into the Hydra buffer.
-    renderBuffer->Resolve();
-    auto const* rgba = static_cast<float const*>(renderBuffer->Map());
-    REQUIRE(rgba != nullptr, "Map() returned NULL");
+    std::vector<float> frame = converge();
+    REQUIRE(renderBuffer->IsConverged(), "buffer not marked converged");
     int nonzero = 0;
-    bool finite = true;
-    for (int i = 0; i < W * H * 4; ++i) {
-        if (rgba[i] > 0.0f) nonzero++;
-        if (!std::isfinite(rgba[i])) finite = false;
+    for (float v : frame) {
+        if (v > 0.0f) nonzero++;
     }
-    renderBuffer->Unmap();
-    REQUIRE(finite, "non-finite pixels");
     REQUIRE(nonzero > W * H, "image is (almost) all black");
 
-    printf("testHdCrust PASS: converged after %d executes, %d nonzero "
-           "channel values\n",
-           iterations, nonzero);
+    // ---- Phase 2: materials and dirty-driven edits ----------------------
+
+    const size_t center = (size_t(H / 2) * W + W / 2) * 4;
+
+    // 5. Bind a red UsdPreviewSurface. AddMaterialResource inserts the
+    // sprim; RebindMaterial marks the cube's DirtyMaterialId (BindMaterial
+    // alone marks nothing after the first sync).
+    SdfPath matId("/scene/material");
+    scene.AddMaterialResource(matId, _MakePreviewSurface(GfVec3f(1.0f, 0.0f, 0.0f)));
+    scene.RebindMaterial(SdfPath("/scene/cube"), matId);
+    std::vector<float> red = converge();
+    REQUIRE(red[center] > 2.0f * red[center + 1] &&
+                red[center] > 2.0f * red[center + 2],
+            "cube did not shade red from its bound UsdPreviewSurface");
+
+    // 6. A material edit propagates through DirtyResource.
+    scene.UpdateMaterialResource(matId, _MakePreviewSurface(GfVec3f(0.0f, 1.0f, 0.0f)));
+    std::vector<float> green = converge();
+    REQUIRE(green[center + 1] > 2.0f * green[center] &&
+                green[center + 1] > 2.0f * green[center + 2],
+            "material edit did not turn the cube green");
+
+    // 7. A transform edit re-places the cached prototype (same geometry
+    // version — the crust prototype cache hits) and changes the image.
+    GfMatrix4f moved(1.0f);
+    moved.SetTranslate(GfVec3f(2.0f, 0.0f, 0.0f));
+    scene.UpdateTransform(SdfPath("/scene/cube"), moved);
+    std::vector<float> shifted = converge();
+    REQUIRE(shifted != green, "moving the cube changed nothing");
+    REQUIRE(!(shifted[center + 1] > 2.0f * shifted[center]),
+            "cube still green at center after moving away");
+
+    // 8. A camera move takes the no-rebuild fast path
+    // (crust_renderer_update_camera) and re-converges on a different frame.
+    GfFrustum orbit;
+    orbit.SetPosition(GfVec3d(1.5, 0.5, 5.0));
+    GfCamera orbitCam;
+    orbitCam.SetFromViewAndProjectionMatrix(orbit.ComputeViewMatrix(),
+                                            orbit.ComputeProjectionMatrix());
+    scene.UpdateTransform(camId, GfMatrix4f(orbitCam.GetTransform()));
+    // HdUnitTestDelegate::UpdateTransform marks camera sprims with the
+    // RPRIM DirtyTransform bit (1<<9), which HdCamera::Sync (expecting
+    // HdCamera::DirtyTransform, 1<<0) ignores — mark it properly here.
+    index->GetChangeTracker().MarkSprimDirty(camId, HdCamera::AllDirty);
+    std::vector<float> orbited = converge();
+    REQUIRE(orbited != shifted, "camera move changed nothing");
+
+    // 9. Instancing: three placements of a new cube through an instancer,
+    // then move them — both re-converge and alter the image.
+    SdfPath instancerId("/scene/instancer");
+    scene.AddInstancer(instancerId);
+    scene.AddCube(SdfPath("/scene/proto"), GfMatrix4f(1.0f), false, instancerId);
+    VtIntArray protoIndices{0, 0, 0};
+    VtVec3fArray scales{GfVec3f(0.5f), GfVec3f(0.5f), GfVec3f(0.5f)};
+    VtVec4fArray rotates{GfVec4f(1, 0, 0, 0), GfVec4f(1, 0, 0, 0),
+                         GfVec4f(1, 0, 0, 0)};
+    VtVec3fArray translates{GfVec3f(-2, 0, 0), GfVec3f(-2, 2, 0),
+                            GfVec3f(-2, -2, 0)};
+    scene.SetInstancerProperties(instancerId, protoIndices, scales, rotates,
+                                 translates);
+    std::vector<float> instanced = converge();
+    REQUIRE(instanced != orbited, "instanced cubes changed nothing");
+
+    VtVec3fArray movedTranslates{GfVec3f(-1, 0, 0), GfVec3f(-1, 2, 0),
+                                 GfVec3f(-1, -2, 0)};
+    scene.SetInstancerProperties(instancerId, protoIndices, scales, rotates,
+                                 movedTranslates);
+    std::vector<float> instancesMoved = converge();
+    REQUIRE(instancesMoved != instanced, "moving instances changed nothing");
+
+    printf("testHdCrust PASS: beauty (%d nonzero), materials bind and edit, "
+           "transform/camera/instancer edits re-converge\n",
+           nonzero);
     return 0;
 }
