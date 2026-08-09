@@ -18,9 +18,16 @@ project(hdCrust LANGUAGES CXX)
 find_package(pxr REQUIRED)
 
 set(CRUST_CAPI_DIR "" CACHE PATH
-    "Directory containing libcrust_capi.so (cargo's target/release)")
+    "Directory containing the crust_capi library (cargo's target/release)")
+# On Windows, cargo's cdylib produces crust_capi.dll + crust_capi.dll.lib
+# (the import library, found by the "crust_capi.dll" name) alongside the
+# staticlib crust_capi.lib — prefer the import library so the plugin links
+# against the DLL instead of pulling the whole engine in statically (which
+# would also need Rust's system libraries spelled out by hand). On
+# Linux/macOS the first name matches nothing and libcrust_capi.so/.dylib
+# resolves via the second.
 find_library(CRUST_CAPI_LIB
-    NAMES crust_capi
+    NAMES crust_capi.dll crust_capi
     HINTS "${CRUST_CAPI_DIR}"
     REQUIRED)
 # include/crust.h lives in the crate, two levels up from target/release by
@@ -49,11 +56,19 @@ target_include_directories(hdCrust PRIVATE "${CRUST_INCLUDE_DIR}")
 # `hd` transitively pulls the pxr base/usd libraries it needs.
 target_link_libraries(hdCrust PRIVATE hd "${CRUST_CAPI_LIB}")
 
+# plugInfo.json carries the platform's actual library file name
+# (libhdCrust.so / libhdCrust.dylib / libhdCrust.dll).
+set(HDCRUST_LIBRARY_FILE "libhdCrust${CMAKE_SHARED_LIBRARY_SUFFIX}")
+configure_file(plugInfo.json.in "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json" @ONLY)
+
 # Install layout: point PXR_PLUGINPATH_NAME at
 # <prefix>/plugin/usd/hdCrust/resources (see README.md).
+# RUNTIME covers Windows, where a SHARED library's .dll installs as a
+# runtime artifact; LIBRARY covers .so/.dylib.
 install(TARGETS hdCrust
-    LIBRARY DESTINATION plugin/usd/hdCrust)
-install(FILES plugInfo.json
+    LIBRARY DESTINATION plugin/usd/hdCrust
+    RUNTIME DESTINATION plugin/usd/hdCrust)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json"
     DESTINATION plugin/usd/hdCrust/resources)
 
 # Headless smoke test (no GL, no usdview): loads the plugin through the

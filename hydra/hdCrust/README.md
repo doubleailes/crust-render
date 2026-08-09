@@ -27,12 +27,26 @@ This is **Phase 2** of `docs/hydra_delegate.md`:
 
 ## Building
 
-Requirements: an OpenUSD C++ build with imaging enabled (GL not required —
-a `build_usd.py --no-python --imaging` build is enough), CMake ≥ 3.20, a
-C++17 compiler, and the crust-capi cdylib.
+Requirements on every platform:
+
+- An **OpenUSD C++ build with imaging enabled** (GL not required — a
+  `build_usd.py --no-python --imaging` build is enough). The plugin must be
+  compiled with the **same compiler family and C++ runtime as that USD
+  build** — USD's C++ ABI is not stable across toolchains.
+- **CMake ≥ 3.20** and a **C++17 compiler**.
+- A **Rust toolchain** (rustc ≥ 1.85, the edition-2024 floor) for the
+  crust-capi library the plugin links against.
+
+`$USD_ROOT` / `%USD_ROOT%` below is the USD install prefix (the directory
+containing `pxrConfig.cmake`).
+
+### Linux (and macOS)
+
+Any recent gcc or clang works (match the one that built USD).
 
 ```bash
-# 1. The Rust side (from the repository root)
+# 1. The Rust side (from the repository root) — produces
+#    target/release/libcrust_capi.so
 cargo build --release -p crust-capi
 
 # 2. The plugin
@@ -43,13 +57,58 @@ cmake -S hydra/hdCrust -B build/hdCrust \
 cmake --build build/hdCrust --target install
 ```
 
+### Windows
+
+Use **MSVC** (the toolchain USD requires on Windows) from an *x64 Native
+Tools Command Prompt for VS*, and the MSVC Rust toolchain
+(`x86_64-pc-windows-msvc`, rustup's default on Windows). Cargo's cdylib
+produces `crust_capi.dll` plus its import library `crust_capi.dll.lib`;
+CMake links the import library (preferred automatically over the
+also-produced static `crust_capi.lib`) and the DLL is loaded at run time.
+
+```bat
+:: 1. The Rust side (from the repository root) — produces
+::    target\release\crust_capi.dll (+ .dll.lib)
+cargo build --release -p crust-capi
+
+:: 2. The plugin (multi-config generator: pick Release at build time)
+cmake -S hydra\hdCrust -B build\hdCrust ^
+      -DCMAKE_PREFIX_PATH=%USD_ROOT% ^
+      -DCRUST_CAPI_DIR=%CD%\target\release ^
+      -DCMAKE_INSTALL_PREFIX=%CD%\install
+cmake --build build\hdCrust --config Release --target install
+```
+
+Notes:
+- `plugInfo.json` is configured by CMake with the platform's library file
+  name (`libhdCrust.so` / `.dylib` / `.dll`), so the same source tree
+  builds everywhere.
+- The C smoke test (`scripts/test_capi_c.sh`) is a bash script; on Windows
+  run the Rust-side twin instead: `cargo test -p crust-capi`.
+
 ## Running
+
+Linux/macOS:
 
 ```bash
 export PXR_PLUGINPATH_NAME=$PWD/install/plugin/usd/hdCrust/resources:$PXR_PLUGINPATH_NAME
 export LD_LIBRARY_PATH=$PWD/target/release:$USD_ROOT/lib:$LD_LIBRARY_PATH
 usdview samples/cornellbox.usda   # then View > Renderer > Crust
 ```
+
+Windows (DLL resolution goes through `PATH` — it must reach both
+`crust_capi.dll` and USD's own DLLs):
+
+```bat
+set PXR_PLUGINPATH_NAME=%CD%\install\plugin\usd\hdCrust\resources;%PXR_PLUGINPATH_NAME%
+set PATH=%CD%\target\release;%USD_ROOT%\lib;%USD_ROOT%\bin;%PATH%
+usdview samples\cornellbox.usda   :: then View > Renderer > Crust
+```
+
+Only the Linux path is exercised by this repository's checks (the headless
+harness below runs against a from-source Linux USD build); the Windows
+instructions follow USD's standard plugin conventions but are not covered
+by CI — please report anything that doesn't hold.
 
 The headless harness (`-DHDCRUST_BUILD_TESTS=ON` → `testHdCrust`, run with
 the same two environment variables) covers what usdview would exercise:

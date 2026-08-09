@@ -12,7 +12,7 @@
                     }
                 }
             },
-            "LibraryPath": "libhdCrust.so",
+            "LibraryPath": "@HDCRUST_LIBRARY_FILE@",
             "Name": "hdCrust",
             "ResourcePath": "resources",
             "Root": "..",
