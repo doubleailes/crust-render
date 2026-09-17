@@ -1,0 +1,21 @@
+[package]
+name = "crust-mtlx"
+version = { workspace = true }
+edition = { workspace = true }
+license-file = { workspace = true }
+description = "MaterialX .mtlx reader: XML to a name-addressed graph, compiled to a slot-indexed shading program, with the BSDF tree flattened to weighted lobes. Safe Rust, no renderer dependency."
+
+[lib]
+name = "crust_mtlx"
+path = "src/lib.rs"
+
+[dependencies]
+glam.workspace = true
+# MaterialX `.mtlx` documents are XML, and openusd ships no MaterialX file
+# format plugin, so crust parses them itself. A read-only DOM is exactly the
+# shape of the job — a `.mtlx` is a flat list of nodes connected by name, so
+# the graph is resolved by name lookup after the whole document is in memory,
+# not streamed. `roxmltree` is pure safe Rust (`forbid(unsafe_code)`) with no
+# transitive dependencies, which keeps this crate's "safe Rust only" claim —
+# and crust's — intact.
+roxmltree = "0.20"

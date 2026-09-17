@@ -1,0 +1,438 @@
+//! MaterialX surfaces: the adapter between `crust-mtlx` and crust's material model.
+//!
+//! USD's own answer to MaterialX is a file-format plugin that composes a
+//! `.mtlx` into the stage as `UsdShade` prims. `openusd` ships no such plugin,
+//! so a `Material` whose only opinion is
+//! `references = @foo.mtlx@</MaterialX/Materials/name>` composes **empty** —
+//! and the importer's material resolution, finding no surface source, falls
+//! back to grey. That is what the two DPEL assets (MaterialX Teapot, MaterialX
+//! Lion) look like on import without this module.
+//!
+//! So crust reads the `.mtlx` itself. Parsing the document and compiling its
+//! graph is the standalone [`crust_mtlx`] crate (re-exported as
+//! [`crate::mtlx`]), which knows nothing about crust. This file is everything
+//! that *does*: [`MtlxMaterial`] implements [`Material`] by running the
+//! compiled program per hit and delegating the BSDF to the [`OpenPBR`] it
+//! reduces to; [`reduce`] is that pooling of flattened lobes onto OpenPBR's
+//! fixed lobe stack; [`load`] is what the importer calls.
+//!
+//! The pooling is the lossy part, and deliberately so. crust-mtlx flattens a
+//! `layer`/`mix` tree into weighted lobes at compile time (see its `bsdf`
+//! module); **at shading time** those lobes are pooled by kind and the pools
+//! normalised into OpenPBR parameters. What this cannot represent, and does
+//! not pretend to: two dielectric lobes of *different* roughness layered over
+//! one another collapse to a single weighted roughness, because OpenPBR has
+//! one specular lobe. On the teapot's ceramic that merges the smooth glaze
+//! (roughness 0.002) with the rough stained glaze under its own mask — the
+//! mask still drives the blend, but the result is one intermediate lobe rather
+//! than two. Representing it properly needs a layered-BSDF material, not a
+//! different reduction.
+//!
+//! The division of labour with the host is the same as everywhere else in
+//! crust: nothing here decodes pixels. An `image` node's file crosses the
+//! [`crate::AssetLoader`] seam and comes back as a [`crate::Texture2D`]
+//! sampler.
+
+use crate::PathSampler;
+use crate::hittable::HitRecord;
+use crate::material::{Material, OpenPBR, ScatterSample};
+use crate::ray::Ray;
+use crust_mtlx::{Lobe, LobeKind, Program, ShadeCtx, TextureLoader, Val, reflectivity_from_ior};
+use glam::Vec3A;
+
+pub use crust_mtlx::MtlxError;
+
+/// A surface whose parameters come from a MaterialX graph, re-evaluated at
+/// every shading point.
+///
+/// Holds the compiled pattern [`Program`] and the flattened [`Lobe`] list, and
+/// implements [`Material`] by running both and delegating the actual BSDF to
+/// the [`OpenPBR`] they reduce to. Delegating rather than reimplementing is
+/// the whole point: sampling, evaluation, MIS densities, the coat and fuzz
+/// layering and the energy compensation all stay in one place, and a MaterialX
+/// surface is unbiased by exactly the same argument as an authored one.
+pub struct MtlxMaterial {
+    program: Program,
+    lobes: Vec<Lobe>,
+    /// Defaults for everything no lobe speaks to, and the fallback when the
+    /// graph yields nothing at all.
+    base: OpenPBR,
+    /// Name of the material node, for diagnostics.
+    pub name: String,
+}
+
+impl std::fmt::Debug for MtlxMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MtlxMaterial({}, {} ops, {} lobes)",
+            self.name,
+            self.program.ops.len(),
+            self.lobes.len()
+        )
+    }
+}
+
+thread_local! {
+    /// Scratch value stack for [`Program::eval`].
+    ///
+    /// One buffer per render thread, reused for every shading call. The
+    /// alternative — a `Vec` per call — allocates several times per path
+    /// vertex (sample, then once per NEE and guide evaluation), which is a
+    /// cost spread too thinly across the profile to ever look like a
+    /// bottleneck while still being pure waste.
+    static SLOTS: std::cell::RefCell<Vec<Val>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl MtlxMaterial {
+    /// Evaluates the graph at a hit and hands the resulting OpenPBR to `f`.
+    ///
+    /// The parameter set is a temporary rather than something cached on the
+    /// hit, because [`Material`]'s methods take `&self` and a `&HitRecord`
+    /// with nowhere to stash it. That means a vertex evaluated for NEE *and*
+    /// for a BSDF sample runs the graph twice — correct, and the obvious thing
+    /// to memoise if MaterialX surfaces ever dominate a render.
+    fn shade<R>(&self, r_in: &Ray, rec: &HitRecord, f: impl FnOnce(&OpenPBR, &HitRecord) -> R) -> R {
+        let ctx = ShadeCtx {
+            uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
+            normal: rec.normal,
+            tangent: rec.tangent,
+            view: r_in.direction(),
+            position: rec.p,
+        };
+        SLOTS.with(|cell| {
+            let mut slots = cell.borrow_mut();
+            self.program.eval(&ctx, &mut slots);
+            let (params, normal) = reduce(&self.lobes, &slots, &self.base);
+            // A shading normal from the graph replaces the geometric one for
+            // the BSDF, but must not flip the surface: a normal map can push
+            // the frame past the horizon on a silhouette, and shading with a
+            // normal facing away from the viewer makes a black rim.
+            let mut rec = *rec;
+            if let Some(n) = normal
+                && n.length_squared() > 1e-12
+            {
+                let n = n.normalize();
+                if n.dot(rec.normal) > 1e-3 {
+                    rec.normal = n;
+                }
+            }
+            f(&params, &rec)
+        })
+    }
+}
+
+impl Material for MtlxMaterial {
+    fn scatter_importance(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+    ) -> Option<ScatterSample> {
+        self.shade(r_in, rec, |m, rec| m.scatter_importance(r_in, rec, sampler))
+    }
+
+    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        self.shade(r_in, rec, |m, rec| m.eval(r_in, rec, wi))
+    }
+
+    fn uses_uv(&self) -> bool {
+        // Unconditionally true rather than "does the program hold a texture":
+        // a graph with no `image` node can still carry a `normalmap` over a
+        // constant, or a `texcoord`-driven procedural, and both need the
+        // chart. The cost of an unnecessary table is bounded; shading a
+        // textured surface at (0, 0) everywhere is not obviously wrong on
+        // screen, which is the failure worth avoiding.
+        true
+    }
+
+    fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+        // No graph evaluation: `make_ray` only decides whether the ray carries
+        // an interior medium, and this reduction never produces a
+        // transmissive OpenPBR (MaterialX transmission maps to no lobe here).
+        Ray::new(rec.p, wi)
+    }
+}
+
+/// Everything the importer needs to know about one loaded `.mtlx` material.
+pub struct Loaded {
+    /// Typed rather than `Arc<dyn Material>` so a caller can still reach
+    /// [`MtlxMaterial::probe`]; it coerces to the trait object wherever the
+    /// importer needs one.
+    pub material: std::sync::Arc<MtlxMaterial>,
+    /// How the reduction described itself — operator count and lobe count —
+    /// for a debug line the importer can print without `dyn Material` having
+    /// to implement `Debug`.
+    pub summary: String,
+    /// Node categories the compiler had no operator for, for one warning per
+    /// material instead of one per node.
+    pub unsupported: Vec<String>,
+    /// Whether any `image` node resolved to a real texture. A material whose
+    /// every texture was declined still renders — on its constant inputs — but
+    /// the difference between "no textures authored" and "no textures found"
+    /// is worth surfacing.
+    pub textures: usize,
+}
+
+/// Builds a material from a `.mtlx` file.
+///
+/// `material_node` is the name of the `surfacematerial` (or `surface`) node to
+/// start from; USD spells it as the last component of the reference's prim
+/// path, `</MaterialX/Materials/surfacematerial_teapot_ceramic>`. When it is
+/// `None` the first `surfacematerial` in the document is used, which is what a
+/// single-material document means.
+///
+/// `load_texture` resolves an `image` node's `file` — relative to the `.mtlx`
+/// itself, which is how MaterialX anchors asset paths — into a sampler.
+pub fn load(
+    path: &std::path::Path,
+    material_node: Option<&str>,
+    load_texture: TextureLoader<'_>,
+) -> Result<Loaded, MtlxError> {
+    let c = crust_mtlx::compile(path, material_node, load_texture)?;
+    let material = MtlxMaterial {
+        program: c.program,
+        lobes: c.lobes,
+        base: OpenPBR::default(),
+        name: c.root_name,
+    };
+    let summary = format!("{material:?}");
+    Ok(Loaded {
+        material: std::sync::Arc::new(material),
+        summary,
+        unsupported: c.unsupported,
+        textures: c.textures,
+    })
+}
+
+/// Evaluates a material's graph at a hit and returns the OpenPBR parameters it
+/// reduces to.
+///
+/// Exists for `examples/mtlx_shade`. A MaterialX surface can only be wrong in
+/// ways that still look like a surface, so the way to check one is to read the
+/// numbers it produces at a named point on the chart — not to compare renders.
+impl MtlxMaterial {
+    pub fn probe(&self, r_in: &Ray, rec: &HitRecord) -> OpenPBR {
+        self.shade(r_in, rec, |params, _| params.clone())
+    }
+}
+
+/// Splits a USD reference target such as `/MaterialX/Materials/surfacematerial_x`
+/// into the material node name MaterialX knows it by.
+///
+/// USD's MaterialX plugin namespaces a document's materials under
+/// `/MaterialX/Materials/`, so the leaf is the `surfacematerial` node's own
+/// `name` attribute — which is what [`load`] looks up.
+pub fn material_node_of(prim_path: &str) -> Option<&str> {
+    let leaf = prim_path.rsplit('/').next()?;
+    (!leaf.is_empty()).then_some(leaf)
+}
+
+/// One pool's running totals.
+#[derive(Default, Clone, Copy)]
+struct Pool {
+    w: f32,
+    color: Vec3A,
+    roughness: f32,
+    ior: f32,
+}
+
+impl Pool {
+    fn add(&mut self, w: f32, color: Vec3A, roughness: f32, ior: f32) {
+        self.w += w;
+        self.color += color * w;
+        self.roughness += roughness * w;
+        self.ior += ior * w;
+    }
+
+    /// Weighted means, or the supplied neutral when the pool is empty.
+    fn mean_color(&self, neutral: Vec3A) -> Vec3A {
+        if self.w > 1e-6 { self.color / self.w } else { neutral }
+    }
+
+    fn mean(&self, total: f32, neutral: f32) -> f32 {
+        if self.w > 1e-6 { total / self.w } else { neutral }
+    }
+}
+
+/// Folds the evaluated lobes into an OpenPBR parameter set.
+///
+/// `base` is the material's authored defaults, so anything no lobe speaks to
+/// (emission, transmission, thin-film) keeps a sensible value instead of zero.
+pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option<Vec3A>) {
+    let get = |i: u32| slots.get(i as usize).copied().unwrap_or(Val::ZERO);
+    let (mut diffuse, mut spec, mut metal, mut sheen, mut sss) = (
+        Pool::default(),
+        Pool::default(),
+        Pool::default(),
+        Pool::default(),
+        Pool::default(),
+    );
+    let mut normal_sum = Vec3A::ZERO;
+    let mut normal_w = 0.0f32;
+
+    for l in lobes {
+        // A weight can leave the graph slightly outside [0,1] (a mask run
+        // through `contrast` is not clamped by MaterialX either); clamping
+        // here keeps the pools' normalisation meaningful.
+        let w = get(l.weight).x().clamp(0.0, 1.0);
+        // NaN-safe by construction: a weight that leaves the graph as NaN
+        // fails this comparison and the lobe is dropped, rather than poisoning
+        // every pool total it would otherwise be added to.
+        if w.is_nan() || w <= 1e-5 {
+            continue;
+        }
+        let color = get(l.color).rgb();
+        let rough = get(l.roughness).x().clamp(0.0, 1.0);
+        let ior = get(l.ior).x();
+        match l.kind {
+            LobeKind::Diffuse => diffuse.add(w, color, rough, 0.0),
+            LobeKind::Dielectric => spec.add(w, color, rough, ior),
+            LobeKind::Conductor => {
+                // Recover the reflectivity colour OpenPBR's metal lobe takes.
+                // `ior`/`extinction` are the general authoring; when the graph
+                // fed them from `artistic_ior` this inverts it exactly.
+                let n = get(l.ior).rgb();
+                let k = get(l.extinction).rgb();
+                let refl = if k.length_squared() > 1e-12 || (n - Vec3A::ONE).length_squared() > 1e-12
+                {
+                    reflectivity_from_ior(n, k) * color
+                } else {
+                    color
+                };
+                metal.add(w, refl, rough, 0.0);
+            }
+            LobeKind::Sheen => sheen.add(w, color, rough, 0.0),
+            LobeKind::Subsurface => sss.add(w, color, rough, 0.0),
+        }
+        if let Some(slot) = l.normal {
+            let n = get(slot).rgb();
+            if n.length_squared() > 1e-12 {
+                normal_sum += n.normalize() * w;
+                normal_w += w;
+            }
+        }
+    }
+
+    // Base colour is a diffuse/metal blend, and metalness is their ratio:
+    // OpenPBR mixes its metal and dielectric-base lobes by `base_metalness`
+    // off one `base_color`, which is exactly the shape of these two pools.
+    let base_total = diffuse.w + metal.w + sss.w;
+    let mut m = base.clone();
+    if base_total > 1e-5 {
+        m.base_metalness = (metal.w / base_total).clamp(0.0, 1.0);
+        m.base_color = (diffuse.color + metal.color + sss.color) / base_total;
+        m.base_weight = base_total.clamp(0.0, 1.0);
+    } else if spec.w > 1e-5 {
+        // A purely specular stack (a bare glass shell): keep the coat, but do
+        // not leave an unlit grey base under it.
+        m.base_weight = 0.0;
+    }
+    m.base_diffuse_roughness = diffuse.mean(diffuse.roughness, 0.0).clamp(0.0, 1.0);
+
+    // The specular lobe serves both the dielectric coat and the metal's own
+    // microfacet distribution, so its roughness is their joint weighted mean.
+    let rough_w = spec.w + metal.w;
+    m.specular_roughness = if rough_w > 1e-5 {
+        ((spec.roughness + metal.roughness) / rough_w).clamp(0.0, 1.0)
+    } else {
+        base.specular_roughness
+    };
+    m.specular_weight = if spec.w > 1e-5 || metal.w > 1e-5 {
+        spec.w.max(metal.w).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    m.specular_color = spec.mean_color(Vec3A::ONE);
+    m.specular_ior = spec.mean(spec.ior, base.specular_ior).clamp(1.0, 3.0);
+
+    m.fuzz_weight = sheen.w.clamp(0.0, 1.0);
+    m.fuzz_color = sheen.mean_color(Vec3A::ONE);
+    m.fuzz_roughness = sheen.mean(sheen.roughness, 0.3).clamp(0.0, 1.0);
+
+    if sss.w > 1e-5 {
+        m.subsurface_weight = (sss.w / base_total.max(1e-5)).clamp(0.0, 1.0);
+        m.subsurface_color = sss.mean_color(Vec3A::ONE);
+    }
+
+    let normal = (normal_w > 1e-5).then(|| normal_sum / normal_w);
+    (m, normal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crust_mtlx::{Compiler, Doc, flatten};
+
+    #[test]
+    fn a_usd_reference_target_names_the_materialx_node() {
+        assert_eq!(
+            material_node_of("/MaterialX/Materials/surfacematerial_teapot_ceramic"),
+            Some("surfacematerial_teapot_ceramic")
+        );
+        assert_eq!(material_node_of(""), None);
+    }
+
+    /// Compiles a document and evaluates it at one flat, upward-facing point.
+    fn evaluate(text: &str, root: &str) -> (Vec<Lobe>, Vec<Val>) {
+        let doc = Doc::parse(text).unwrap();
+        let loader = |_: &str, _: Option<&str>| None;
+        let mut c = Compiler::new(&doc, &loader);
+        let one = c.constant(Val::ONE);
+        let node = doc.find("", root).unwrap().clone();
+        let mut lobes = Vec::new();
+        flatten(&mut c, &node, one, 0, &mut lobes);
+        let mut slots = Vec::new();
+        c.program.eval(
+            &ShadeCtx {
+                uv: (0.0, 0.0),
+                normal: Vec3A::Z,
+                tangent: Vec3A::X,
+                view: -Vec3A::Z,
+                position: Vec3A::ZERO,
+            },
+            &mut slots,
+        );
+        (lobes, slots)
+    }
+
+    #[test]
+    fn a_zero_weight_leaf_contributes_nothing() {
+        // Both assets use a `weight = 0` dielectric as a mix's null branch;
+        // if its own weight input were ignored it would coat every surface.
+        let text = r#"<materialx>
+          <dielectric_bsdf name="null" type="BSDF">
+            <input name="weight" type="float" value="0" />
+          </dielectric_bsdf>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+          <mix name="m" type="BSDF">
+            <input name="bg" type="BSDF" nodename="null" />
+            <input name="fg" type="BSDF" nodename="d" />
+            <input name="mix" type="float" value="0.5" />
+          </mix>
+        </materialx>"#;
+        let (lobes, slots) = evaluate(text, "m");
+        let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
+        assert_eq!(m.specular_weight, 0.0, "a weight=0 dielectric coated the surface");
+    }
+
+    #[test]
+    fn a_conductor_becomes_metal_and_a_diffuse_does_not() {
+        let text = r#"<materialx>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+            <input name="color" type="color3" value="0.8, 0.2, 0.2" />
+          </oren_nayar_diffuse_bsdf>
+          <conductor_bsdf name="c" type="BSDF">
+            <input name="roughness" type="float" value="0.1" />
+          </conductor_bsdf>
+          <mix name="m" type="BSDF">
+            <input name="bg" type="BSDF" nodename="c" />
+            <input name="fg" type="BSDF" nodename="d" />
+            <input name="mix" type="float" value="0.25" />
+          </mix>
+        </materialx>"#;
+        let (lobes, slots) = evaluate(text, "m");
+        let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
+        assert!((m.base_metalness - 0.75).abs() < 1e-4, "{}", m.base_metalness);
+    }
+}

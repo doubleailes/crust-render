@@ -32,6 +32,7 @@
 //! ```
 
 use std::collections::HashMap;
+use crust_assets::read_channel;
 
 /// Samples per edge. The seam is a 1-D signal; a handful of points along it is
 /// plenty to separate "matches" from "uncorrelated".
@@ -240,14 +241,5 @@ impl Stat {
     }
     fn mean(&self) -> f64 {
         if self.n == 0 { 0.0 } else { self.sum / self.n as f64 }
-    }
-}
-
-fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
-    match dt {
-        ptex::DataType::UInt8 => src[0] as f32,
-        ptex::DataType::UInt16 => u16::from_le_bytes([src[0], src[1]]) as f32,
-        ptex::DataType::Half => ptex::half_to_float(u16::from_le_bytes([src[0], src[1]])),
-        ptex::DataType::Float => f32::from_le_bytes([src[0], src[1], src[2], src[3]]),
     }
 }

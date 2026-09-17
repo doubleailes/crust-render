@@ -793,6 +793,19 @@ def Xform "W" {
 /// was asked for and hands back a synthetic two-texel map.
 struct FakeAssets {
     requested: std::sync::Mutex<Vec<PathBuf>>,
+    /// UV textures asked for, with the colour space the importer decided. The
+    /// space is recorded because getting it wrong is silent: a normal map read
+    /// through the sRGB curve is still a plausible-looking normal map.
+    textures: std::sync::Mutex<Vec<(PathBuf, crust_core::ColorSpace)>>,
+}
+
+impl Default for FakeAssets {
+    fn default() -> Self {
+        FakeAssets {
+            requested: std::sync::Mutex::new(Vec::new()),
+            textures: std::sync::Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl crust_core::AssetLoader for FakeAssets {
@@ -806,6 +819,20 @@ impl crust_core::AssetLoader for FakeAssets {
                 crust_core::Vec3A::new(0.0, 9.0, 0.0),
             ],
         )
+    }
+
+    fn load_texture(
+        &self,
+        path: &std::path::Path,
+        space: crust_core::ColorSpace,
+    ) -> Option<std::sync::Arc<dyn crust_core::Texture2D>> {
+        self.textures
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), space));
+        // Declined on purpose: this host records requests, it does not decode.
+        // The material still builds, on its constant inputs.
+        None
     }
 }
 
@@ -836,9 +863,7 @@ fn loads_domelight_usda() {
 /// handed to the host — `crust-core` never opens the file itself.
 #[test]
 fn dome_texture_is_resolved_and_requested_from_the_host() {
-    let assets = FakeAssets {
-        requested: std::sync::Mutex::new(Vec::new()),
-    };
+    let assets = FakeAssets::default();
     let scene = Scene::from_usd_with_assets(&sample("domelight.usda"), &assets)
         .expect("failed to open domelight.usda");
     assert_eq!(scene.lights.count(), 2);
@@ -1173,4 +1198,161 @@ def Xform "W" {
         hit.rec.t
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// MaterialX
+// ---------------------------------------------------------------------------
+//
+// The assets this was written for (the DPEL MaterialX Teapot and Lion) are two
+// gigabytes and gitignored, so these run against `samples/materialx_basic.*`,
+// which is authored the same way at 20 KiB of textures.
+
+/// A `Material` prim whose only opinion is a reference into a `.mtlx` composes
+/// to an *empty* prim — openusd ships no MaterialX file-format plugin — so
+/// every schema query fails and the old importer fell back to grey. Getting a
+/// material that is not the grey default is the whole feature.
+#[test]
+fn a_materialx_reference_resolves_to_a_real_material() {
+    let scene =
+        Scene::from_usd(&sample("materialx_basic.usda")).expect("failed to open materialx_basic");
+
+    assert!(scene.world.count() >= 3, "expected the three quads");
+
+    // The grey fallback is `OpenPBR::diffuse(0.5)`: no continuous specular and
+    // a flat mid-grey. A resolved MaterialX material reports that it reads
+    // texture coordinates, which the fallback never does — that is the cheapest
+    // unambiguous signal, since colour alone could coincide.
+    let textured = (0..scene.world.count() as u32)
+        .filter(|&g| scene.world.material(g).uses_uv())
+        .count();
+    assert_eq!(
+        textured, 3,
+        "expected all three quads to carry MaterialX materials, got {textured}"
+    );
+}
+
+/// The texture files a `.mtlx` names must reach the host, resolved against the
+/// **document's own** directory — MaterialX anchors asset paths on itself, not
+/// on the USD layer that referenced it — and with the `<UDIM>` token intact,
+/// since expanding it is the host's job.
+#[test]
+fn materialx_textures_reach_the_host_with_their_udim_token() {
+    let assets = FakeAssets::default();
+    let scene = Scene::from_usd_with_assets(&sample("materialx_basic.usda"), &assets)
+        .expect("failed to open materialx_basic");
+    let _ = scene;
+
+    let requested = assets.textures.lock().unwrap();
+    let names: Vec<String> = requested
+        .iter()
+        .map(|(p, _)| p.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names.len(),
+        3,
+        "expected three distinct textures (memoized), got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("mtlx_base.<UDIM>.png")),
+        "the UDIM token was expanded or lost before the host saw it: {names:?}"
+    );
+    for (path, _) in requested.iter() {
+        // A `<UDIM>` path names a *set*, so it never exists as a file — its
+        // directory does, which is what anchoring had to get right. A plain
+        // path is checked outright.
+        let anchored = if path.to_string_lossy().contains("<UDIM>") {
+            path.parent().is_some_and(|d| d.is_dir())
+        } else {
+            path.exists()
+        };
+        assert!(
+            anchored,
+            "asset path not anchored against the .mtlx's directory: {}",
+            path.display()
+        );
+    }
+
+    // Colour space is MaterialX's own per-input declaration, and getting it
+    // wrong is silent: only `mtlx_base` is marked `srgb_texture`, and reading
+    // the normal or mask maps through the sRGB curve would bend every value
+    // toward zero.
+    let srgb: Vec<&str> = requested
+        .iter()
+        .filter(|(_, s)| *s == crust_core::ColorSpace::Srgb)
+        .map(|(p, _)| p.file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(srgb, vec!["mtlx_base.<UDIM>.png"], "wrong inputs decoded as sRGB");
+}
+
+/// `primvars:st` has to survive triangulation, and faceVarying is the case
+/// that matters: a vertex on a UV seam has one position and two coordinates,
+/// so nothing per-point can carry it.
+#[test]
+fn face_varying_st_reaches_the_shading_point() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let scene =
+        Scene::from_usd(&sample("materialx_basic.usda")).expect("failed to open materialx_basic");
+
+    // The two ceramic quads sit at z = 0 spanning x in [-2.1, -0.1] and
+    // [0.1, 2.1], charted 0..1 and 1..2 respectively. Fire at the middle of
+    // each and read back the interpolated coordinate.
+    let probe = |x: f32, y: f32| -> Option<(f32, f32)> {
+        let r = Ray::new(Vec3A::new(x, y, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene.world.intersect(&r, 0.001, f32::INFINITY)?;
+        hit.rec.has_uv.then_some(hit.rec.uv)
+    };
+
+    let a = probe(-1.1, 1.0).expect("left quad carries no UV");
+    let b = probe(1.1, 1.0).expect("right quad carries no UV");
+    assert!((a.0 - 0.5).abs() < 0.01, "left u = {}, expected ~0.5", a.0);
+    assert!((a.1 - 0.5).abs() < 0.01, "left v = {}, expected ~0.5", a.1);
+    // The second tile must report u ~ 1.5 — *not* wrapped into [0, 1], or the
+    // UDIM addressing collapses every tile onto the first.
+    assert!((b.0 - 1.5).abs() < 0.01, "right u = {}, expected ~1.5", b.0);
+}
+
+/// A baked (single-placement) mesh must carry a tangent frame, or every normal
+/// map silently degrades to the geometric normal.
+#[test]
+fn baked_geometry_carries_a_tangent_frame() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let scene =
+        Scene::from_usd(&sample("materialx_basic.usda")).expect("failed to open materialx_basic");
+    let r = Ray::new(Vec3A::new(-1.1, 1.0, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+    let hit = scene
+        .world
+        .intersect(&r, 0.001, f32::INFINITY)
+        .expect("no hit on the left quad");
+
+    let t = hit.rec.tangent;
+    assert!(t.length() > 0.5, "no tangent recorded: {t:?}");
+    // The quad's chart runs with +u along +x, so the tangent must too, and it
+    // must be perpendicular to the normal or the frame is not a frame.
+    assert!(t.x > 0.9, "tangent does not follow +u: {t:?}");
+    assert!(
+        t.dot(hit.rec.normal).abs() < 1e-3,
+        "tangent is not orthogonal to the normal: {t:?} . {:?}",
+        hit.rec.normal
+    );
+}
+
+/// Geometry bound to a material that reads no texture coordinates must not pay
+/// for the table — the reason [`Material::uses_uv`] exists.
+#[test]
+fn untextured_geometry_carries_no_uv_table() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let scene = Scene::from_usd(&sample("cornellbox.usda")).expect("failed to open cornellbox");
+    let r = Ray::new(Vec3A::new(0.0, 1.0, 3.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+    let hit = scene
+        .world
+        .intersect(&r, 0.001, f32::INFINITY)
+        .expect("no hit in the cornell box");
+    assert!(
+        !hit.rec.has_uv,
+        "an untextured mesh built a UV table it will never read"
+    );
 }

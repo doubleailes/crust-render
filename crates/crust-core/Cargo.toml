@@ -25,6 +25,9 @@ openusd = { version = "0.6", default-features = false, features = ["geom", "lux"
 # git dependency; pinned to a tag because `Cargo.lock` is not checked in —
 # same reasoning as ptex-rs in crust-render.
 opensubdiv-rs = "0.1"
+# The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
+# graphs onto `Material` / `OpenPBR`.
+crust-mtlx = { path = "../crust-mtlx" }
 
 [dev-dependencies]
 criterion = "0.8"

@@ -10,24 +10,23 @@ license-file.workspace = true
 traversal-stats = ["crust-core/traversal-stats"]
 
 [dependencies]
-crust-core = {path = "../crust-core"}
+crust-core = { path = "../crust-core" }
+# Everything that decodes a file lives in crust-assets; this binary only
+# writes: `exr` for the linear EXR, `image` for the tone-mapped PNG.
+crust-assets = { path = "../crust-assets" }
 clap = { version = "4.5.48", features = ["derive"] }
-# Pure-Rust Ptex reader (crate/lib name `ptex`). Host-side only: crust-core
-# decodes nothing, so the per-face texture decoder sits in `main.rs` alongside
-# the image decoders, which is where everything that knows a file format lives.
-# Pinned by `rev` because the crate is not published and `Cargo.lock` is not
-# checked in — without it a fresh clone silently takes whatever `main` points at.
-ptex-rs = { git = "https://github.com/doubleailes/ptex-rs", rev = "36212f65dbd4caf7fb8786b34da5c041cc59d7f1" }
-image = { version = "0.25.6", default-features = false, features = ["png", "hdr"] }
+image.workspace = true
 indicatif = "0.18.0"
 tracing.workspace = true
 exr.workspace = true
 
-# The probe examples read a stage directly: `ptex_verify` to check a .ptx file's
-# embedded base cage against the geometry it is bound to, `proto_probe` /
-# `rel_probe` to diagnose composition bugs against the prims the importer sees.
+# The probe examples read a stage directly (`ptex_verify`, `proto_probe`,
+# `rel_probe`, ...) and read `.ptx` headers and faces through the raw reader
+# (`tex_probe`, `ptex_seams`) — the decoded `PtexColor` deliberately does not
+# replace those, since they sample without the colour decode.
 [dev-dependencies]
 openusd = { version = "0.6", default-features = false, features = ["geom"] }
+ptex-rs.workspace = true
 
 [dependencies.tracing-subscriber]
 version = "0.3.20"

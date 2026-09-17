@@ -18,7 +18,7 @@ use crate::light::{
 use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
-use crate::rt_world::{FaceMap, FanSlice, WorldBuilder};
+use crate::rt_world::{FaceMap, FanSlice, UvMap, WorldBuilder};
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
 use crust_rt::{
@@ -853,6 +853,15 @@ struct MeshSlot {
     /// every placement still needs to resolve face ids at render time. Shared
     /// by `Arc` across the placements of one distinct mesh.
     faces: Option<Arc<FaceMap>>,
+    /// Per-triangle texture coordinates, for a mesh whose material reads
+    /// them. Lives beside `faces` and for the same reason: it has to outlive
+    /// `local`, which both baking and committing drop.
+    ///
+    /// Held *without* tangents. A tangent is world-space, so it can only be
+    /// built once a placement is known — which is per placement, not per
+    /// distinct mesh. Baking builds one into a private clone of this table;
+    /// instancing shares this one and leaves the tangents empty.
+    uvs: Option<Arc<UvMap>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
     committed: Option<Arc<RtScene>>,
@@ -901,11 +910,17 @@ impl MeshArena {
             .map(|p| Vec3A::new(p.x, p.y, p.z))
             .collect();
         let want_faces = material.face_texture().is_some();
-        let (tris, faces) = triangulate(&src.counts, &src.indices, verts.len(), want_faces)
-            .or_else(|| {
-                debug!("Mesh at {} produced no triangles", prim.path());
-                None
-            })?;
+        let (tris, faces, uvs) = triangulate(
+            &src.counts,
+            &src.indices,
+            verts.len(),
+            want_faces,
+            src.uvs.as_ref(),
+        )
+        .or_else(|| {
+            debug!("Mesh at {} produced no triangles", prim.path());
+            None
+        })?;
         // A subdivided face table numbers *refined* faces; rewrite it to the
         // base-cage ids Ptex actually indexes before anything caches it.
         let faces = match (&src.subdiv_faces, faces) {
@@ -921,6 +936,7 @@ impl MeshArena {
                 normals: src.normals.clone(),
             }),
             faces: faces.map(Arc::new),
+            uvs: uvs.map(Arc::new),
             committed: None,
             n_place: 0,
         });
@@ -962,7 +978,8 @@ fn emit_mesh(
     pending: &mut Vec<MeshPlacement>,
 ) {
     let want_faces = material.face_texture().is_some();
-    let Some(src) = mesh_source(prim, mesh, want_faces) else {
+    let want_uvs = material.uses_uv();
+    let Some(src) = mesh_source(prim, mesh, want_faces, want_uvs) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
@@ -995,8 +1012,14 @@ fn emit_mesh(
             })
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
-        match triangulate(&src.counts, &src.indices, verts.len(), want_faces) {
-            Some((tris, faces)) => {
+        match triangulate(
+            &src.counts,
+            &src.indices,
+            verts.len(),
+            want_faces,
+            src.uvs.as_ref(),
+        ) {
+            Some((tris, faces, uvs)) => {
                 // A singular transform has no inverse-transpose to push the
                 // prototype's normals through, but the smooth normals of the
                 // *transformed* mesh are still well-defined — recompute them.
@@ -1008,6 +1031,14 @@ fn emit_mesh(
                     (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
                     (_, faces) => faces,
                 };
+                // Built before the attach, because `verts` and `tris` are
+                // moved into the geometry — and buildable at all only because
+                // this path has already transformed the vertices into world
+                // space, which is the frame a tangent has to be in.
+                let uvs = uvs.map(|mut m| {
+                    m.build_tangents(&verts, &tris);
+                    Arc::new(m)
+                });
                 let geom_id = world.attach_masked(
                     Geometry::TriangleMesh {
                         vertices: verts,
@@ -1022,6 +1053,9 @@ fn emit_mesh(
                 // barycentric order — is whatever the transform produced.
                 if let Some(map) = faces {
                     world.set_face_map(geom_id, Arc::new(map), false);
+                }
+                if let Some(map) = uvs {
+                    world.set_uv_map(geom_id, map, false);
                 }
             }
             None => debug!("Mesh at {} produced no triangles", prim.path()),
@@ -1093,16 +1127,32 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             && p.motion.is_none();
 
         let faces = slot.faces.clone();
+        let uvs = slot.uvs.clone();
+        let mirrored = p.l2w.matrix3.determinant() < 0.0;
         if bake {
             let geom = meshes.slots[p.slot as usize]
                 .local
                 .take()
                 .expect("an unbaked, uncommitted slot still holds its triangles");
+            let verts = bake_verts(&geom.verts, &p.l2w);
+            let tris = bake_indices(geom.tris, &p.l2w);
+            // A baked mesh has world-space vertices, so this is the one place
+            // a tangent frame can be built. The table is cloned out of the
+            // slot first: the corner UVs are shared with any other placement,
+            // but the tangents belong to *this* transform.
+            let uvs = uvs.map(|shared| {
+                let mut m = UvMap {
+                    uvs: shared.uvs.clone(),
+                    tangents: Vec::new(),
+                };
+                m.build_tangents(&verts, &tris);
+                Arc::new(m)
+            });
             world.set_geometry(
                 p.geom_id,
                 Geometry::TriangleMesh {
-                    vertices: bake_verts(&geom.verts, &p.l2w),
-                    indices: bake_indices(geom.tris, &p.l2w),
+                    vertices: verts,
+                    indices: tris,
                     normals: geom.normals.map(|ns| bake_normals(&ns, &p.l2w)),
                 },
             );
@@ -1110,7 +1160,10 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             // mirroring placement, which exchanges the barycentrics the kernel
             // reports — so the face lookup has to exchange them back.
             if let Some(map) = faces {
-                world.set_face_map(p.geom_id, map, p.l2w.matrix3.determinant() < 0.0);
+                world.set_face_map(p.geom_id, map, mirrored);
+            }
+            if let Some(map) = uvs {
+                world.set_uv_map(p.geom_id, map, mirrored);
             }
             baked += 1;
         } else {
@@ -1130,6 +1183,14 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             // applied to the ray, not to the triangles, so no swap.
             if let Some(map) = faces {
                 world.set_face_map(p.geom_id, map, false);
+            }
+            // Shared as-is, tangents empty: the table belongs to the
+            // prototype and every placement transforms it differently, so
+            // there is no one world-space tangent to record. Texture
+            // coordinates still work; normal maps fall back to the geometric
+            // normal. See `UvMap::tangents`.
+            if let Some(map) = uvs {
+                world.set_uv_map(p.geom_id, map, false);
             }
             instanced += 1;
         }
@@ -1195,6 +1256,84 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
     Some((points, counts, indices))
 }
 
+/// The `st` primvar as authored, before triangulation resolves it.
+///
+/// USD stores texture coordinates as a value array plus an optional index
+/// array, interpolated either per **point** (`vertex`/`varying`) or per
+/// **face-vertex** (`faceVarying`). The distinction is not cosmetic: a vertex
+/// on a UV seam has one position but two texture coordinates, which only the
+/// faceVarying form can express — and it is the form both DPEL assets use.
+struct UvSource {
+    values: Vec<[f32; 2]>,
+    /// `primvars:st:indices`, when authored. Indexes `values`.
+    indices: Option<Vec<i32>>,
+    /// True for `faceVarying`: the lookup index is the running face-vertex
+    /// offset rather than the point index.
+    face_varying: bool,
+}
+
+impl UvSource {
+    /// The coordinate at face-vertex `fv`, whose point index is `point`.
+    fn at(&self, fv: usize, point: usize) -> [f32; 2] {
+        let i = if self.face_varying { fv } else { point };
+        let i = match &self.indices {
+            Some(idx) => match idx.get(i) {
+                Some(&v) if v >= 0 => v as usize,
+                _ => return [0.0, 0.0],
+            },
+            None => i,
+        };
+        self.values.get(i).copied().unwrap_or([0.0, 0.0])
+    }
+}
+
+/// Reads a mesh's texture-coordinate primvar.
+///
+/// `st` is USD's conventional name and what `UsdPreviewSurface` and MaterialX
+/// both assume; `uv` and `st0` are read as fallbacks because exporters differ
+/// and an asset with the chart under another name is otherwise silently
+/// untextured. The first one that yields values wins.
+fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
+    for name in ["primvars:st", "primvars:uv", "primvars:st0", "primvars:UVMap"] {
+        let value = prim.attribute(name).get::<sdf::Value>().ok().flatten();
+        let values = match value {
+            // `texCoord2f[]` and `float2[]` are the same bits; which one an
+            // exporter writes is a matter of taste.
+            Some(sdf::Value::Vec2fVec(v)) => v.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+            _ => continue,
+        };
+        if values.is_empty() {
+            continue;
+        }
+        let indices = match prim
+            .attribute(&format!("{name}:indices"))
+            .get::<sdf::Value>()
+            .ok()
+            .flatten()
+        {
+            Some(sdf::Value::IntVec(v)) => Some(v),
+            _ => None,
+        };
+        // USD's fallback interpolation for a primvar is `constant`, but for
+        // `st` in practice it is always authored; treating an unauthored
+        // metadatum as faceVarying would mis-index a vertex-interpolated
+        // chart, so the authored value decides and `vertex` is the fallback.
+        let face_varying = matches!(
+            prim.attribute(name)
+                .get_metadata::<sdf::Value>("interpolation")
+                .ok()
+                .flatten(),
+            Some(sdf::Value::Token(t)) if t.as_str() == "faceVarying"
+        );
+        return Some(UvSource {
+            values,
+            indices,
+            face_varying,
+        });
+    }
+    None
+}
+
 /// One mesh's geometry as the rest of the importer consumes it — either the
 /// authored cage verbatim, or its subdivision-surface refinement when the
 /// prim opts in (see [`subdiv_level`]). Refinement happens *here*, before
@@ -1215,26 +1354,49 @@ struct MeshSource {
     /// The *authored* cage's face count — what Ptex face ids index, whether
     /// or not the mesh was refined.
     base_face_count: usize,
+    /// `primvars:st`, `Some` iff the bound material reads texture
+    /// coordinates. Absent for a subdivided mesh: refining a face-varying
+    /// chart is a second synthetic channel through the refiner (the Ptex
+    /// sub-face UVs already are one), and carrying the *cage's* UVs onto
+    /// refined triangles would stretch every texture across the patch it came
+    /// from. A subdivided MaterialX mesh therefore renders on its constant
+    /// inputs rather than on a wrong chart.
+    uvs: Option<UvSource>,
 }
 
 /// Reads a mesh prim's arrays and applies subdivision when requested.
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
-fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSource> {
+fn mesh_source(
+    prim: &Prim,
+    mesh: &UsdMesh,
+    want_faces: bool,
+    want_uvs: bool,
+) -> Option<MeshSource> {
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
-    let cage = |points, counts, indices| MeshSource {
+    let uvs = want_uvs.then(|| mesh_uvs(prim)).flatten();
+    let cage = |points, counts, indices, uvs| MeshSource {
         points,
         counts,
         indices,
         normals: None,
         subdiv_faces: None,
         base_face_count,
+        uvs,
     };
 
     let level = subdiv_level(prim);
     if level == 0 {
-        return Some(cage(points, counts, indices));
+        return Some(cage(points, counts, indices, uvs));
+    }
+    if uvs.is_some() {
+        warn!(
+            "Mesh at {}: crust:subdivisionLevel with a UV-textured material — \
+             texture coordinates are not refined, so the surface renders on its \
+             constant inputs",
+            prim.path()
+        );
     }
 
     let usd_scheme = mesh
@@ -1253,7 +1415,7 @@ fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSour
                      mesh — rendering the base cage",
                     prim.path()
                 );
-                return Some(cage(points, counts, indices));
+                return Some(cage(points, counts, indices, uvs));
             }
             subdiv::SubdivScheme::Loop
         }
@@ -1263,7 +1425,7 @@ fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSour
                  (subdivisionScheme = none)",
                 prim.path()
             );
-            return Some(cage(points, counts, indices));
+            return Some(cage(points, counts, indices, uvs));
         }
     };
 
@@ -1322,6 +1484,7 @@ fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSour
                 normals: Some(refined.normals),
                 subdiv_faces: refined.faces,
                 base_face_count,
+                uvs: None,
             })
         }
         Err(e) => {
@@ -1329,7 +1492,9 @@ fn mesh_source(prim: &Prim, mesh: &UsdMesh, want_faces: bool) -> Option<MeshSour
                 "Mesh at {}: subdivision failed ({e}) — rendering the base cage",
                 prim.path()
             );
-            Some(cage(points, counts, indices))
+            // The cage fallback recovers the chart: unrefined triangles
+            // index it exactly as authored.
+            Some(cage(points, counts, indices, uvs))
         }
     }
 }
@@ -1407,10 +1572,12 @@ fn triangulate(
     indices: &[i32],
     n_verts: usize,
     want_faces: bool,
-) -> Option<(Vec<[u32; 3]>, Option<FaceMap>)> {
+    uv_src: Option<&UvSource>,
+) -> Option<(Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>)> {
     let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut faces: Vec<u32> = Vec::new();
     let mut slices: Vec<FanSlice> = Vec::new();
+    let mut uvs: Vec<[[f32; 2]; 3]> = Vec::new();
     let mut offset = 0usize;
     for (face, &fc) in counts.iter().enumerate() {
         let fc = fc as usize;
@@ -1430,6 +1597,20 @@ fn triangulate(
                 continue;
             }
             tris.push([i0, i1, i2]);
+            // Pushed in the same statement sequence as the triangle, so the
+            // skip paths above cannot desynchronise the tables from it —
+            // the same discipline `faces`/`slices` rely on.
+            if let Some(src) = uv_src {
+                // A faceVarying chart is indexed by the *face-vertex* slot,
+                // which is why the fan's offsets are carried through rather
+                // than just the point indices: two faces meeting at a seam
+                // share `i0` but not its texture coordinate.
+                uvs.push([
+                    src.at(offset, i0 as usize),
+                    src.at(offset + k, i1 as usize),
+                    src.at(offset + k + 1, i2 as usize),
+                ]);
+            }
             if want_faces {
                 faces.push(face as u32);
                 // Ptex defines quad and triangle faces only, so a larger
@@ -1455,7 +1636,13 @@ fn triangulate(
         slices,
         uvs: None,
     });
-    Some((tris, map))
+    // Tangents are left empty here: they need *world-space* vertices, which
+    // only exist once a placement is decided. See `UvMap::tangents`.
+    let uv_map = uv_src.map(|_| UvMap {
+        uvs,
+        tangents: Vec::new(),
+    });
+    Some((tris, map, uv_map))
 }
 
 // -----------------------------------------------------------------------
@@ -1612,6 +1799,11 @@ struct ProtoPart {
     /// instancing it passed through (the kernel forwards the innermost
     /// `prim_id` unchanged).
     faces: Option<Arc<FaceMap>>,
+    /// Per-triangle texture coordinates, when this part's material reads
+    /// them. Carried on the same terms as `faces`, and — like every instanced
+    /// placement — without tangents: the table is the prototype's and each
+    /// placement transforms it differently. See [`UvMap::tangents`].
+    uvs: Option<Arc<UvMap>>,
 }
 
 /// Walks a prototype subtree and builds its [`ProtoPart`]s, in the
@@ -1693,16 +1885,22 @@ fn collect_proto_parts(
             // always needs a real kernel scene — committing here is also what
             // marks the slot as ineligible for baking, so a mesh used both
             // directly and as a prototype is not stored twice.
-            if let Some(src) = mesh_source(&prim, &mesh, material.face_texture().is_some())
-                && let Some(slot) = caches.meshes.intern(&prim, &src, &material)
+            if let Some(src) = mesh_source(
+                &prim,
+                &mesh,
+                material.face_texture().is_some(),
+                material.uses_uv(),
+            ) && let Some(slot) = caches.meshes.intern(&prim, &src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
+                let uvs = caches.meshes.slots[slot as usize].uvs.clone();
                 parts.push(ProtoPart {
                     scene: caches.meshes.committed_scene(slot),
                     local: this_local,
                     material,
                     mask,
                     faces,
+                    uvs,
                 });
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
@@ -1723,6 +1921,7 @@ fn collect_proto_parts(
                 material,
                 mask,
                 faces: None,
+                uvs: None,
             });
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
@@ -1742,6 +1941,7 @@ fn collect_proto_parts(
                     material,
                     mask,
                     faces: None,
+                    uvs: None,
                 });
             }
         } else if custom_token(&prim, "crust:volume:type").is_some() {
@@ -1834,6 +2034,7 @@ fn nested_instancer_parts(
                 material: part.material.clone(),
                 mask,
                 faces: part.faces.clone(),
+                uvs: part.uvs.clone(),
             });
         }
     }
@@ -1902,6 +2103,9 @@ fn attach_proto_parts(
         // and with it the barycentric order — is the prototype's own: no swap.
         if let Some(map) = &part.faces {
             world.set_face_map(geom_id, map.clone(), false);
+        }
+        if let Some(map) = &part.uvs {
+            world.set_uv_map(geom_id, map.clone(), false);
         }
         attached += 1;
     }
@@ -2751,6 +2955,12 @@ struct MaterialCache {
     /// Resolved `.ptx` path -> the opened texture, or `None` if it could not
     /// be opened. Keyed by filesystem path, so it needs no epoch scoping.
     ptex: HashMap<String, Option<Arc<dyn crate::PtexTexture>>>,
+    /// `(resolved path, colour space)` -> the opened UV texture. Keyed by
+    /// filesystem path for the same reason as `ptex`, and by colour space
+    /// because the same file can legitimately be read both ways (a packed ORM
+    /// map is raw; the albedo beside it is display-encoded) and the decode
+    /// happens once, at load.
+    textures: HashMap<(String, crate::ColorSpace), Option<Arc<dyn crate::Texture2D>>>,
     /// Which stage the prototype-scoped entries belong to; see
     /// [`MaterialCache::key`]. Kept in step with [`ImportCaches::epoch`].
     epoch: u32,
@@ -2811,9 +3021,29 @@ fn resolve_material_uncached(
     caches: &mut ImportCaches<'_>,
 ) -> Arc<dyn Material> {
 
+    // A material whose whole definition is a reference into a `.mtlx` composes
+    // to a prim with a `Material` type name and *nothing inside it*, because
+    // openusd ships no MaterialX file-format plugin. So every schema query
+    // below fails and the surface falls back to grey — which is exactly what
+    // the MaterialX Teapot and Lion did before this existed.
+    //
+    // Consulted lazily, at each point where the USD path gives up, rather than
+    // first: finding it means walking the prim's composition graph, and a
+    // stage of ordinary USD materials should not pay for that.
+    macro_rules! try_mtlx {
+        () => {
+            if let Some((file, node)) = mtlx_reference(stage, mat_path)
+                && let Some(m) = load_mtlx_material(&file, &node, caches)
+            {
+                return m;
+            }
+        };
+    }
+
     let mat = match UsdMaterial::get(stage, mat_path.clone()) {
         Ok(Some(m)) => m,
         _ => {
+            try_mtlx!();
             warn!(
                 "Material at {} not resolvable — using default grey OpenPBR",
                 mat_path
@@ -2838,6 +3068,10 @@ fn resolve_material_uncached(
     let shader = match mat.compute_surface_source() {
         Ok(Some(s)) => s,
         _ => {
+            // The MaterialX case reaches here when the material prim itself
+            // composed (a wrapper layer `over`s it, so the prim exists) but
+            // its shader network lives in the unreadable `.mtlx`.
+            try_mtlx!();
             warn!(
                 "Material {} has no surface shader — using default grey OpenPBR",
                 mat_path
@@ -3045,6 +3279,149 @@ fn disney_to_openpbr(
         o.base_color_ptex.is_some()
     );
     o
+}
+
+/// The `.mtlx` file and material node a `Material` prim references, if any.
+///
+/// Read off the *layer specs* rather than the composed prim, because there is
+/// nothing composed to read: without a MaterialX file-format plugin the
+/// reference resolves to no layer at all, so the arc survives only as authored
+/// metadata. The first `.mtlx` found wins.
+fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::PathBuf, String)> {
+    // The composed stage path is not where the reference is *authored*: a shot
+    // layer referencing `teapot.usda` sees the material at
+    // `/World/Teapot/Looks/TeapotCeramic`, while the arc is authored at
+    // `/Teapot/Looks/TeapotCeramic` inside the asset layer. Only the prim's
+    // composition graph knows both, so the candidate spec paths come from its
+    // nodes rather than from the stage path.
+    let mut paths = vec![mat_path.clone()];
+    if let Ok(graph) = stage.prim(mat_path.clone()).prim_index().graph() {
+        for node in graph.all_nodes() {
+            let p = node.path().clone();
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+
+    for id in stage.layer_identifiers() {
+        let Some(layer) = stage.layer(&id) else {
+            continue;
+        };
+        // Every candidate path against every layer. The cross product is a
+        // handful of lookups — a material's graph has a few nodes and a stage
+        // a few layers — and it sidesteps having to map a node's `LayerId`
+        // back to an identifier, which openusd does not expose.
+        for path in &paths {
+            let Some(spec) = layer.prim(path.clone()) else {
+                continue;
+            };
+            let Ok(Some(sdf::Value::ReferenceListOp(list))) = spec.field("references") else {
+                continue;
+            };
+            // Every list-op bucket, because which one a reference lands in
+            // depends on whether it was authored as `prepend`, `append` or a
+            // bare assignment — and all three mean "this material is that
+            // document".
+            let items = list
+                .explicit_items
+                .iter()
+                .chain(list.prepended_items.iter())
+                .chain(list.appended_items.iter())
+                .chain(list.added_items.iter());
+            for r in items {
+                if !r.asset_path.to_ascii_lowercase().ends_with(".mtlx") {
+                    continue;
+                }
+                // Anchored against the *authoring layer's* directory, the same
+                // rule `asset_value_path` follows for textures and for the
+                // same reason: `Looks/teapot_ceramic_ldX.mtlx` is relative to
+                // `teapot.usda`, which need not be the stage root.
+                let base = std::path::Path::new(&id).parent()?.to_path_buf();
+                let file = base.join(&r.asset_path);
+                let node = crate::materialx::material_node_of(r.prim_path.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                return Some((file, node));
+            }
+        }
+    }
+    None
+}
+
+/// Parses a `.mtlx` and turns the named material node into a [`Material`].
+///
+/// Asset paths inside the document are relative to the document itself (the
+/// MaterialX rule), not to the USD layer that referenced it, so texture
+/// resolution anchors on `file`'s own directory.
+fn load_mtlx_material(
+    file: &std::path::Path,
+    node: &str,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Arc<dyn Material>> {
+    let dir = file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    // `RefCell` because the loader closure is called from inside the compiler
+    // while `caches` would otherwise be mutably borrowed by the outer call.
+    let cell = std::cell::RefCell::new(&mut *caches);
+    let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
+        let mut c = cell.borrow_mut();
+        load_uv_texture(&dir.join(asset), space, &mut c).map(crate::TextureRef)
+    };
+    // Billed as (total) minus (what the texture loads already billed): the
+    // loader closure runs *inside* this call and adds its own decode time to
+    // the same accumulator, so timing the whole thing on top of that would
+    // count every texture twice — which showed up as a "Load assets" phase
+    // reported at 178% of the parse phase that contains it.
+    let started = Instant::now();
+    let before = cell.borrow().asset_time;
+    let loaded = crate::materialx::load(file, (!node.is_empty()).then_some(node), &loader);
+    let nested = cell.borrow().asset_time - before;
+    drop(cell);
+    caches.asset_time += started.elapsed().saturating_sub(nested);
+
+    match loaded {
+        Ok(l) => {
+            if !l.unsupported.is_empty() {
+                warn!(
+                    "MaterialX {}: no operator for node type(s) {} — those inputs \
+                     fall back to their defaults",
+                    file.display(),
+                    l.unsupported.join(", ")
+                );
+            }
+            debug!(
+                "MaterialX {} -> {} ({} textures resolved)",
+                file.display(),
+                l.summary,
+                l.textures
+            );
+            Some(l.material)
+        }
+        Err(e) => {
+            warn!("MaterialX {} not usable ({e}) — falling back", file.display());
+            None
+        }
+    }
+}
+
+/// Opens a UV texture through the host, memoized by resolved path and colour
+/// space. The colour space comes from MaterialX's own `colorspace` attribute
+/// via [`crate::ColorSpace::from_mtlx`].
+fn load_uv_texture(
+    path: &std::path::Path,
+    space: Option<&str>,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Arc<dyn crate::Texture2D>> {
+    let space = crate::ColorSpace::from_mtlx(space);
+    let key = (path.to_string_lossy().into_owned(), space);
+    if let Some(hit) = caches.materials.textures.get(&key) {
+        return hit.clone();
+    }
+    let started = Instant::now();
+    let loaded = caches.assets.load_texture(path, space);
+    caches.asset_time += started.elapsed();
+    caches.materials.textures.insert(key, loaded.clone());
+    loaded
 }
 
 /// The per-face colour texture a material binds, if any.
@@ -3685,8 +4062,8 @@ mod face_table_tests {
         };
         let refined = subdiv::subdivide(&points, &counts, &indices, &req).unwrap();
         let sub = refined.faces.as_ref().unwrap();
-        let (tris, map) =
-            triangulate(&refined.counts, &refined.indices, refined.points.len(), true).unwrap();
+        let (tris, map, _) =
+            triangulate(&refined.counts, &refined.indices, refined.points.len(), true, None).unwrap();
         let map = remap_subdivided_faces(map.unwrap(), sub);
 
         assert_eq!(tris.len(), 8, "4 child quads, 2 triangles each");
@@ -3746,7 +4123,7 @@ mod face_table_tests {
         // Three quads, 4 verts each, sharing a vertex pool of 12.
         let counts = [4, 4, 4];
         let indices: Vec<i32> = (0..12).collect();
-        let (tris, map) = triangulate(&counts, &indices, 12, true).unwrap();
+        let (tris, map, _) = triangulate(&counts, &indices, 12, true, None).unwrap();
         let map = map.unwrap();
 
         assert_eq!(tris.len(), 6, "a quad fans into two triangles");
@@ -3777,7 +4154,7 @@ mod face_table_tests {
         // A degenerate 2-gon between two quads: skipped, but still numbered.
         let counts = [4, 2, 4];
         let indices: Vec<i32> = (0..10).collect();
-        let (tris, map) = triangulate(&counts, &indices, 10, true).unwrap();
+        let (tris, map, _) = triangulate(&counts, &indices, 10, true, None).unwrap();
         let map = map.unwrap();
         assert_eq!(tris.len(), 4);
         // Face 1 contributed nothing; face 2 keeps its own index.
@@ -3790,7 +4167,7 @@ mod face_table_tests {
     fn ngons_and_triangles_get_their_own_slices() {
         let counts = [3, 5];
         let indices: Vec<i32> = (0..8).collect();
-        let (_, map) = triangulate(&counts, &indices, 8, true).unwrap();
+        let (_, map, _) = triangulate(&counts, &indices, 8, true, None).unwrap();
         let map = map.unwrap();
         assert_eq!(map.slices[0], FanSlice::Triangle);
         // A pentagon fans into three triangles, none of them addressable.
@@ -3806,7 +4183,7 @@ mod face_table_tests {
     fn face_table_is_not_built_unless_requested() {
         let counts = [4];
         let indices = [0, 1, 2, 3];
-        let (tris, map) = triangulate(&counts, &indices, 4, false).unwrap();
+        let (tris, map, _) = triangulate(&counts, &indices, 4, false, None).unwrap();
         assert_eq!(tris.len(), 2);
         assert!(map.is_none());
     }

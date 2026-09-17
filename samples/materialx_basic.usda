@@ -1,0 +1,119 @@
+#usda 1.0
+(
+    doc = """MaterialX import fixture: two quads bound to materials that exist
+    only inside a `.mtlx` document.
+
+    Small and self-contained on purpose. The assets this feature was written
+    for — the DPEL MaterialX Teapot and Lion — are two gigabytes and
+    gitignored, so this stands in for them in `tests/usd_scene.rs`: same
+    authoring idiom (a `Material` prim whose only opinion is
+    `references = @file.mtlx@</MaterialX/Materials/name>`), same standalone-BSDF
+    graph shape, same `<UDIM>` texture addressing, at 20 KiB of textures.
+
+    The left quad spans UDIM tile 1001 and the right one tile 1002, so a render
+    that shows both checkers is evidence the tile is selected from the integer
+    part of `u` rather than wrapped into one image.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Ceramic" (
+            prepend references = @materialx_basic.mtlx@</MaterialX/Materials/mtlx_ceramic>
+        )
+        {
+        }
+
+        def Material "Metal" (
+            prepend references = @materialx_basic.mtlx@</MaterialX/Materials/mtlx_metal>
+        )
+        {
+        }
+    }
+
+    # u runs 0..1 -> UDIM tile 1001.
+    def Mesh "TileA" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2.1, 0, 0), (-0.1, 0, 0), (-0.1, 2, 0), (-2.1, 2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/Ceramic>
+    }
+
+    # u runs 1..2 -> UDIM tile 1002. Same material, same chart, different tile.
+    def Mesh "TileB" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.1, 0, 0), (2.1, 0, 0), (2.1, 2, 0), (0.1, 2, 0)]
+        texCoord2f[] primvars:st = [(1, 0), (2, 0), (2, 1), (1, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/Ceramic>
+    }
+
+    # The metal, on a quad below the two tiles.
+    def Mesh "MetalBar" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2.1, -1.2, 0), (2.1, -1.2, 0), (2.1, -0.2, 0), (-2.1, -0.2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/Metal>
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.6, 0.65, 0.75)
+        float inputs:intensity = 0.4
+    }
+
+    def RectLight "Key"
+    {
+        color3f inputs:color = (1, 0.97, 0.92)
+        float inputs:intensity = 12
+        float inputs:width = 4
+        float inputs:height = 4
+        matrix4d xformOp:transform = ( (0.8, 0, -0.6, 0), (-0.3, 0.87, -0.4, 0), (0.52, 0.5, 0.69, 0), (3, 3, 4, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 50
+        float horizontalAperture = 36
+        float focusDistance = 8.5
+        float fStop = 0
+        double3 xformOp:translate = (0, 0.4, 8.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# crust resolves render settings through the stage's `renderSettingsPrimPath`
+# metadatum, falling back to the conventional `/Render/settings` — so the prim
+# has to live there, not at the stage root.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 360)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+    }
+}

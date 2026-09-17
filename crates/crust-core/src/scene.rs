@@ -98,6 +98,34 @@ pub trait AssetLoader: Send + Sync {
     /// not an error: the caller falls back.
     fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap>;
 
+    /// Opens a UV-addressed texture and returns something that can sample it.
+    ///
+    /// `path` has already been resolved against the authoring layer's
+    /// directory and may still contain a **`<UDIM>`** token: expanding it into
+    /// the tile set on disk is the host's job, since which tiles exist is a
+    /// filesystem question and the cheapest place to decide how many of them
+    /// to hold in memory. `space` says how to decode the stored values — the
+    /// file does not say, and getting it wrong is silent (see
+    /// [`crate::ColorSpace`]).
+    ///
+    /// Like [`Self::load_ptex`], the host keeps the pixels and hands back a
+    /// sampler. `None` means the material falls back to the constant value
+    /// authored beside the texture in the MaterialX graph. Defaulted, like
+    /// `load_ptex`, so hosts that decode neither need no extra ceremony.
+    fn load_texture(
+        &self,
+        path: &std::path::Path,
+        space: crate::ColorSpace,
+    ) -> Option<std::sync::Arc<dyn crate::Texture2D>> {
+        let _ = space;
+        tracing::warn!(
+            "Asset loader does not decode UV textures: {} ignored — the input \
+             falls back to its constant value.",
+            path.display()
+        );
+        None
+    }
+
     /// Opens a Ptex file and returns something that can sample it.
     ///
     /// Unlike [`Self::load_environment`], the host keeps ownership of the

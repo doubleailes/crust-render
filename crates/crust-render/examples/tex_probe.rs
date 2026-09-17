@@ -11,6 +11,8 @@
 //! cargo run --release -p crust-render --example tex_probe -- image.png [x0 y0 x1 y1]
 //! ```
 
+use crust_assets::read_channel;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(path) = args.first() else {
@@ -204,15 +206,6 @@ fn probe_ptex(path: &str) {
         print!(" {}", h * 100 / count.max(1));
     }
     println!();
-}
-
-fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
-    match dt {
-        ptex::DataType::UInt8 => src[0] as f32,
-        ptex::DataType::UInt16 => u16::from_le_bytes([src[0], src[1]]) as f32,
-        ptex::DataType::Half => ptex::half_to_float(u16::from_le_bytes([src[0], src[1]])),
-        ptex::DataType::Float => f32::from_le_bytes([src[0], src[1], src[2], src[3]]),
-    }
 }
 
 /// Mean of an image, over a box if given, else over non-black pixels (the

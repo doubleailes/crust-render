@@ -18,15 +18,21 @@ context: |
     (OpenUSD scene model, OpenPBR shading) over breadth of one-off features.
 
   Tech stack:
-  - Rust 2024, Cargo workspace with three crates under crates/:
-    - crust-core: the whole engine as a library (renderer, integrator, materials,
-      primitives, lights, BVH, USD import).
-    - crust-render: the thin CLI binary (main.rs only) — clap args, builds a Scene,
-      runs the Renderer, writes EXR.
+  - Rust 2024, Cargo workspace with six crates under crates/:
+    - crust-rt: the intersection kernel (Embree-shaped API, SBVH → BVH4), no crust deps.
+    - crust-mtlx: the MaterialX .mtlx reader (parse → compiled program → flattened
+      BSDF lobes), no crust deps; crust-core re-exports its `Texture` trait as `Texture2D`.
+    - crust-core: the whole engine as a library (renderer, integrator, materials incl.
+      the MaterialX→OpenPBR adapter, lights, volumes, path guiding, USD import).
+    - crust-assets: host-side decoders implementing crust_core::AssetLoader
+      (EXR/LDR environment maps, Ptex, UV/UDIM textures) over exr, image, ptex-rs.
+    - crust-render: the thin CLI binary (main.rs only; writes EXR + PNG, decodes
+      nothing) — clap args, builds a Scene with crust_assets::FileAssets, runs the Renderer.
     - utils: math/RNG helpers (random*, balance_heuristic, align_to_normal, clamp, Lerp).
-  - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output),
-    openusd 0.5 (scene import — always compiled in, no feature flag), tracing (logging),
-    indicatif (progress bar), criterion (benches).
+  - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output and decoding),
+    openusd 0.6 (scene import — always compiled in, no feature flag), openqmc-rs (QMC
+    sampling), opensubdiv-rs (subdivision), ptex-rs (Ptex), roxmltree (MaterialX XML),
+    tracing (logging), indicatif (progress bar), criterion (benches).
 
   Domain conventions:
   - Scenes load exclusively from USD (.usda/.usdc/.usdz). RON, Alembic (.abc),

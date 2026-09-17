@@ -29,7 +29,7 @@ in a per-ray profile.
 The work is split across the two crates along the same seam as everything else:
 `crust-core` converts values it reads from USD *attributes* itself
 (`usd_import.rs`), but decodes no **asset** — every image and Ptex decoder lives
-in the host (`crust-render/src/main.rs`), reached through `AssetLoader`. The
+in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `PtexTexture` trait pins the contract at that boundary
 (`crust-core/src/texture.rs:32`): values returned from `eval` are linear, not
 display-encoded, so the host must have decoded them already.
@@ -41,8 +41,8 @@ interchangeable:
 
 | Curve | Formula | Where |
 | --- | --- | --- |
-| **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`main.rs:121-129`) |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`main.rs:251`) |
+| **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`) |
+| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open`) |
 
 The flat curve is *not* a sloppy approximation of the standard one — it is
 matched to what the source content actually applies. The Moana island's shading
@@ -50,7 +50,7 @@ networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
 that reasoning in a comment at the call site (`usd_import.rs:2856-2861`,
-`main.rs:245-250`).
+`crust-assets/src/ptex_texture.rs`, `PtexColor::open`).
 
 How much does the distinction matter? Across most of the range, very little —
 maximum absolute difference over `[0,1]` is 0.0085, and at 0.5 the two give
@@ -134,16 +134,16 @@ swatch, so there is no display encoding to undo. Same reasoning as
 
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| Ptex `.ptx` colour texels | `main.rs:251` | flat 2.2 | ✅ intentional (island convention) |
-| LDR env image (PNG/JPG/…) | `main.rs:121-129` | piecewise sRGB | ✅ correct per format |
-| `.hdr` env image | `main.rs:122` | none (pass-through) | ✅ correct — HDR is scene-linear |
-| `.exr` env map | `main.rs:78` | none (pass-through) | ✅ correct — EXR is linear |
+| Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` | flat 2.2 | ✅ intentional (island convention) |
+| LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
+| `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
+| `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
 
-The `is_hdr` branch at `main.rs:117-120` exists because `image`'s `to_rgb32f`
+The `is_hdr` branch in `load_image_environment` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
 while leaving true HDR values as authored — so the decode must be conditional
 on the format, not applied blanket. Pinned by
-`ldr_images_are_converted_to_linear` (`main.rs:692`).
+`ldr_images_are_converted_to_linear` (`crust-assets/src/environment.rs`).
 
 Ptex texels are decoded once at load into the preloaded immutable buffer, not
 per lookup — which is also why `CRUST_PTEX_MAX_LOG2`'s mip cap and the decode
@@ -164,11 +164,11 @@ unenforced, and is exactly how the `UsdPreviewSurface` gap below arose.
 ## The output side
 
 The engine produces a linear `Buffer`. The CLI writes it two ways
-(`crust-render/src/main.rs`):
+(`crust-render/src/main.rs`, the one place that still touches pixels):
 
 - **`.exr`** — the linear values, unmodified. This is the render output.
 - **`.png`** — tone-mapped: clamp to `[0,1]`, then encode with the piecewise
-  sRGB OETF (`tone_map`, `main.rs:460-468`). A preview, not a deliverable.
+  sRGB OETF (`tone_map` in `main.rs`). A preview, not a deliverable.
 
 `tone_map` is the *inverse* of the LDR-image decode above, using the standard
 piecewise curve in the forward direction. Comparing renders numerically should
@@ -189,7 +189,7 @@ of any convention.
 
 **2. No shared abstraction, so nothing is enforced.** There is no `ColorSpace`
 type. The two curves exist as independent inline implementations
-(`usd_import.rs:2862`, `main.rs:251`) that happen to agree. Nothing forces a
+(`usd_import.rs` `disney_to_openpbr`, `crust-assets` `PtexColor::open`) that happen to agree. Nothing forces a
 newly added colour input to state its source space; the default behaviour of
 adding one is to get gap #1 again, silently.
 

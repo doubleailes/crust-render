@@ -1,0 +1,121 @@
+<?xml version="1.0"?>
+<!--
+  A small MaterialX document exercising the parts of the format crust reads,
+  so the importer has something to be tested against without the 2 GB DPEL
+  assets (which are gitignored).
+
+  Deliberately mirrors how the MaterialX Teapot and Lion are authored, rather
+  than using `standard_surface`: standalone BSDF nodes glued with `layer` and
+  `mix`, parameters driven by `image` nodes, and a `<UDIM>` token written as a
+  bare `<` inside an attribute value — which is malformed XML that MaterialX's
+  own PugiXML reader accepts. Every one of those is a thing that broke before
+  it was handled; see `scene/materialx/`.
+-->
+<materialx version="1.38">
+
+  <!-- Glazed ceramic: a smooth dielectric over a textured diffuse base,
+       with a normal map on both. -->
+
+  <image name="base_color_tex" type="color3">
+    <input name="file" type="filename" value="textures/mtlx_base.<UDIM>.png" colorspace="srgb_texture" />
+  </image>
+
+  <image name="base_normal_tex" type="vector3">
+    <input name="file" type="filename" value="textures/mtlx_normal.<UDIM>.png" />
+  </image>
+
+  <normalmap name="base_normal" type="vector3">
+    <input name="in" type="vector3" nodename="base_normal_tex" />
+    <input name="scale" type="float" value="0.8" />
+  </normalmap>
+
+  <oren_nayar_diffuse_bsdf name="ceramic_diffuse" type="BSDF">
+    <input name="color" type="color3" nodename="base_color_tex" />
+    <input name="roughness" type="float" value="0.25" />
+    <input name="normal" type="vector3" nodename="base_normal" />
+  </oren_nayar_diffuse_bsdf>
+
+  <constant name="glaze_ior" type="float">
+    <input name="value" type="float" value="1.48" />
+  </constant>
+
+  <dielectric_bsdf name="glaze" type="BSDF">
+    <input name="roughness" type="vector2" value="0.06, 0.06" />
+    <input name="ior" type="float" nodename="glaze_ior" />
+    <input name="normal" type="vector3" nodename="base_normal" />
+  </dielectric_bsdf>
+
+  <layer name="glazed_ceramic" type="BSDF">
+    <input name="base" type="BSDF" nodename="ceramic_diffuse" />
+    <input name="top" type="BSDF" nodename="glaze" />
+  </layer>
+
+  <surface name="ceramic_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="glazed_ceramic" />
+  </surface>
+
+  <surfacematerial name="mtlx_ceramic" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="ceramic_surface" />
+  </surfacematerial>
+
+  <!-- Dirtied metal: a conductor parameterised through `artistic_ior`,
+       mixed toward a diffuse under a mask. -->
+
+  <constant name="metal_reflectivity" type="color3">
+    <input name="value" type="color3" value="0.94, 0.72, 0.36" />
+  </constant>
+
+  <artistic_ior name="metal_ior" type="multioutput">
+    <input name="reflectivity" type="color3" nodename="metal_reflectivity" />
+  </artistic_ior>
+
+  <image name="dirt_mask_tex" type="float">
+    <input name="file" type="filename" value="textures/mtlx_mask.png" />
+  </image>
+
+  <!-- A contrast/clamp pair, the pattern both DPEL assets use to shape a
+       painted mask before it drives a blend. -->
+  <contrast name="dirt_contrast" type="float">
+    <input name="in" type="float" nodename="dirt_mask_tex" />
+    <input name="amount" type="float" value="1.6" />
+    <input name="pivot" type="float" value="0.5" />
+  </contrast>
+
+  <clamp name="dirt_mask" type="float">
+    <input name="in" type="float" nodename="dirt_contrast" />
+  </clamp>
+
+  <power name="metal_roughness" type="float">
+    <input name="in1" type="float" nodename="dirt_mask" />
+    <input name="in2" type="float" value="1.5" />
+  </power>
+
+  <convert name="metal_roughness_v2" type="vector2">
+    <input name="in" type="float" nodename="metal_roughness" />
+  </convert>
+
+  <conductor_bsdf name="metal" type="BSDF">
+    <input name="ior" type="color3" nodename="metal_ior" output="ior" />
+    <input name="extinction" type="color3" nodename="metal_ior" output="extinction" />
+    <input name="roughness" type="vector2" nodename="metal_roughness_v2" />
+  </conductor_bsdf>
+
+  <oren_nayar_diffuse_bsdf name="dirt" type="BSDF">
+    <input name="color" type="color3" value="0.14, 0.12, 0.1" />
+    <input name="roughness" type="float" value="0.7" />
+  </oren_nayar_diffuse_bsdf>
+
+  <mix name="dirty_metal" type="BSDF">
+    <input name="bg" type="BSDF" nodename="metal" />
+    <input name="fg" type="BSDF" nodename="dirt" />
+    <input name="mix" type="float" nodename="dirt_mask" />
+  </mix>
+
+  <surface name="metal_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="dirty_metal" />
+  </surface>
+
+  <surfacematerial name="mtlx_metal" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="metal_surface" />
+  </surfacematerial>
+</materialx>
