@@ -23,6 +23,8 @@ rayon = "1.10.0"
 
 [dev-dependencies]
 criterion = "0.8"
+# Seeded randomness for the tests; the library itself stays on glam + rayon.
+openqmc-rs = "0.2"
 
 [[bench]]
 name = "traversal"

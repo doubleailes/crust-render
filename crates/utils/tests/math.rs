@@ -1,28 +1,13 @@
 //! Behavioural tests for the `utils` helpers: sampling warps, MIS heuristics
 //! and the small math conveniences the renderer leans on everywhere.
 //!
-//! The distribution checks use a deterministic LCG rather than `rand` so a
-//! failure reproduces bit for bit.
+//! The distribution checks draw from a seeded `openqmc::pcg::Rng` rather
+//! than `rand`, so a failure reproduces bit for bit.
 
 use glam::Vec3A;
+use openqmc::pcg::Rng;
 use std::f32::consts::{FRAC_PI_2, PI};
 use utils::*;
-
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
-    }
-}
 
 fn approx(a: f32, b: f32, tol: f32) -> bool {
     (a - b).abs() <= tol
@@ -159,11 +144,11 @@ fn cosine_hemisphere_origin_maps_to_the_pole() {
 #[test]
 fn cosine_hemisphere_has_the_cosine_weighted_mean() {
     // E[cos θ] under a cosine-weighted hemisphere is 2/3.
-    let mut rng = Lcg::new(1);
+    let mut rng = Rng::new(1);
     let n = 200_000;
     let mut sum = 0.0f64;
     for _ in 0..n {
-        sum += cosine_hemisphere([rng.next(), rng.next()]).z as f64;
+        sum += cosine_hemisphere([rng.next_f32(), rng.next_f32()]).z as f64;
     }
     let mean = sum / n as f64;
     assert!((mean - 2.0 / 3.0).abs() < 0.005, "mean cos = {mean}");
@@ -171,11 +156,11 @@ fn cosine_hemisphere_has_the_cosine_weighted_mean() {
 
 #[test]
 fn cosine_hemisphere_is_rotationally_symmetric_in_azimuth() {
-    let mut rng = Lcg::new(2);
+    let mut rng = Rng::new(2);
     let n = 200_000;
     let (mut sx, mut sy) = (0.0f64, 0.0f64);
     for _ in 0..n {
-        let d = cosine_hemisphere([rng.next(), rng.next()]);
+        let d = cosine_hemisphere([rng.next_f32(), rng.next_f32()]);
         sx += d.x as f64;
         sy += d.y as f64;
     }
@@ -205,12 +190,12 @@ fn uniform_sphere_poles_come_from_the_ends_of_u() {
 
 #[test]
 fn uniform_sphere_has_zero_mean_and_isotropic_second_moment() {
-    let mut rng = Lcg::new(3);
+    let mut rng = Rng::new(3);
     let n = 200_000;
     let mut mean = [0.0f64; 3];
     let mut sq = [0.0f64; 3];
     for _ in 0..n {
-        let d = uniform_sphere([rng.next(), rng.next()]);
+        let d = uniform_sphere([rng.next_f32(), rng.next_f32()]);
         for (k, c) in [d.x, d.y, d.z].iter().enumerate() {
             mean[k] += *c as f64;
             sq[k] += (*c as f64) * (*c as f64);
@@ -228,9 +213,9 @@ fn uniform_sphere_has_zero_mean_and_isotropic_second_moment() {
 
 #[test]
 fn uniform_ball_stays_inside_the_unit_ball() {
-    let mut rng = Lcg::new(4);
+    let mut rng = Rng::new(4);
     for _ in 0..10_000 {
-        let p = uniform_ball([rng.next(), rng.next(), rng.next()]);
+        let p = uniform_ball([rng.next_f32(), rng.next_f32(), rng.next_f32()]);
         assert!(p.length() <= 1.0 + 1e-5, "{p}");
     }
 }
@@ -239,11 +224,11 @@ fn uniform_ball_stays_inside_the_unit_ball() {
 fn uniform_ball_radius_warp_is_volumetric() {
     // With r = w^(1/3), r³ is uniform on [0, 1] so E[r³] = 1/2, and
     // E[r] = 3/4.
-    let mut rng = Lcg::new(5);
+    let mut rng = Rng::new(5);
     let n = 200_000;
     let (mut r3, mut r1) = (0.0f64, 0.0f64);
     for _ in 0..n {
-        let r = uniform_ball([rng.next(), rng.next(), rng.next()]).length() as f64;
+        let r = uniform_ball([rng.next_f32(), rng.next_f32(), rng.next_f32()]).length() as f64;
         r3 += r * r * r;
         r1 += r;
     }
@@ -286,11 +271,11 @@ fn concentric_disk_maps_the_center_and_edges() {
 fn concentric_disk_is_area_preserving() {
     // A uniform square maps to a uniform disk: the fraction inside radius
     // 1/2 is 1/4 and inside radius 1/√2 is 1/2.
-    let mut rng = Lcg::new(6);
+    let mut rng = Rng::new(6);
     let n = 200_000;
     let (mut quarter, mut half) = (0u32, 0u32);
     for _ in 0..n {
-        let r = concentric_disk([rng.next(), rng.next()]).length();
+        let r = concentric_disk([rng.next_f32(), rng.next_f32()]).length();
         if r < 0.5 {
             quarter += 1;
         }
@@ -372,10 +357,10 @@ fn align_to_normal_preserves_length_and_linearity() {
 
 #[test]
 fn hemisphere_samples_aligned_to_a_normal_stay_on_its_side() {
-    let mut rng = Lcg::new(7);
+    let mut rng = Rng::new(7);
     let n = Vec3A::new(-0.4, 0.2, -0.7).normalize();
     for _ in 0..5000 {
-        let local = cosine_hemisphere([rng.next(), rng.next()]);
+        let local = cosine_hemisphere([rng.next_f32(), rng.next_f32()]);
         let world = align_to_normal(local, n);
         assert!(world.dot(n) >= -1e-5, "{world} fell below the normal {n}");
     }

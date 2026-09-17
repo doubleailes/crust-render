@@ -2,23 +2,14 @@
 //! sin θ importance sampling behind `DomeLight`.
 
 use crust_core::{EnvironmentMap, Vec3A};
+use openqmc::pcg::Rng;
 
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
-    }
-    fn dir(&mut self) -> Vec3A {
-        // Uniform on the sphere.
-        let z = 1.0 - 2.0 * self.next();
-        let r = (1.0 - z * z).max(0.0).sqrt();
-        let phi = std::f32::consts::TAU * self.next();
-        Vec3A::new(r * phi.cos(), z, r * phi.sin())
-    }
+/// Uniform on the sphere.
+fn dir(rng: &mut Rng) -> Vec3A {
+    let z = 1.0 - 2.0 * rng.next_f32();
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = std::f32::consts::TAU * rng.next_f32();
+    Vec3A::new(r * phi.cos(), z, r * phi.sin())
 }
 
 fn approx(a: f32, b: f32, tol: f32) -> bool {
@@ -70,9 +61,9 @@ fn row_zero_is_the_upper_pole() {
         "{down}"
     );
     // Anything above the horizon reads the top row.
-    let mut rng = Lcg(1);
+    let mut rng = Rng::new(1);
     for _ in 0..200 {
-        let mut d = rng.dir();
+        let mut d = dir(&mut rng);
         d.y = d.y.abs().max(0.01);
         let c = m.radiance(d.normalize());
         assert_eq!(c.z, 0.0, "{d} read the bottom row: {c}");
@@ -110,9 +101,9 @@ fn radiance_lookup_tolerates_unnormalized_directions() {
 #[test]
 fn a_uniform_map_samples_every_direction_with_a_finite_pdf() {
     let m = EnvironmentMap::new(8, 4, vec![Vec3A::splat(2.0); 32]).unwrap();
-    let mut rng = Lcg(2);
+    let mut rng = Rng::new(2);
     for _ in 0..500 {
-        let (d, r, pdf) = m.sample(rng.next(), rng.next()).unwrap();
+        let (d, r, pdf) = m.sample(rng.next_f32(), rng.next_f32()).unwrap();
         assert!(approx(d.length(), 1.0, 1e-4), "{d}");
         assert_eq!(r, Vec3A::splat(2.0));
         assert!(pdf > 0.0 && pdf.is_finite());
@@ -129,13 +120,13 @@ fn a_uniform_map_samples_every_direction_with_a_finite_pdf() {
 
 #[test]
 fn sampled_radiance_is_the_lookup_at_the_sampled_direction() {
-    let mut rng = Lcg(3);
+    let mut rng = Rng::new(3);
     let px: Vec<Vec3A> = (0..64)
-        .map(|_| Vec3A::new(rng.next(), rng.next(), rng.next()) + 0.05)
+        .map(|_| Vec3A::new(rng.next_f32(), rng.next_f32(), rng.next_f32()) + 0.05)
         .collect();
     let m = EnvironmentMap::new(8, 8, px).unwrap();
     for _ in 0..500 {
-        let (d, r, _) = m.sample(rng.next(), rng.next()).unwrap();
+        let (d, r, _) = m.sample(rng.next_f32(), rng.next_f32()).unwrap();
         assert_eq!(r, m.radiance(d));
     }
 }
@@ -172,10 +163,10 @@ fn importance_sampling_finds_a_single_bright_texel() {
     let mut px = vec![Vec3A::splat(0.02); w * h];
     px[7 * w + 20] = Vec3A::splat(2000.0);
     let m = EnvironmentMap::new(w, h, px).unwrap();
-    let mut rng = Lcg(4);
+    let mut rng = Rng::new(4);
     let mut bright = 0;
     for _ in 0..4000 {
-        let (_, r, _) = m.sample(rng.next(), rng.next()).unwrap();
+        let (_, r, _) = m.sample(rng.next_f32(), rng.next_f32()).unwrap();
         if r.x > 1.0 {
             bright += 1;
         }
@@ -210,15 +201,15 @@ fn bright_texels_carry_proportionally_higher_pdf() {
 
 #[test]
 fn the_solid_angle_pdf_integrates_to_one() {
-    let mut rng = Lcg(5);
+    let mut rng = Rng::new(5);
     let px: Vec<Vec3A> = (0..16 * 8)
-        .map(|_| Vec3A::splat(rng.next() + 0.1))
+        .map(|_| Vec3A::splat(rng.next_f32() + 0.1))
         .collect();
     let m = EnvironmentMap::new(16, 8, px).unwrap();
     let n = 400_000;
     let mut sum = 0.0f64;
     for _ in 0..n {
-        sum += m.pdf(rng.dir()) as f64;
+        sum += m.pdf(dir(&mut rng)) as f64;
     }
     let integral = sum / n as f64 * 4.0 * std::f64::consts::PI;
     assert!((integral - 1.0).abs() < 0.03, "∫pdf dω = {integral}");
@@ -237,9 +228,9 @@ fn sampling_is_deterministic_in_its_inputs() {
 #[test]
 fn a_one_texel_map_is_a_uniform_sky() {
     let m = EnvironmentMap::new(1, 1, vec![Vec3A::new(0.2, 0.4, 0.6)]).unwrap();
-    let mut rng = Lcg(6);
+    let mut rng = Rng::new(6);
     for _ in 0..100 {
-        let d = rng.dir();
+        let d = dir(&mut rng);
         assert_eq!(m.radiance(d), Vec3A::new(0.2, 0.4, 0.6));
     }
     // The density over the sphere is still uniform in (u, v), so it

@@ -142,8 +142,10 @@ fn an_emissive_ball_renders_its_radiance_in_the_centre() {
 
 #[test]
 fn rows_and_tiles_render_the_same_image() {
+    // Whole-buffer comparisons render at 16 spp, the count the repository
+    // fixes for image regressions (see scripts/check_images.sh).
     let (w, h) = (20, 12);
-    let r = emissive_ball_scene(1.0, w, h, 2);
+    let r = emissive_ball_scene(1.0, w, h, 16);
     let rows = r.render();
     let tiles = r.render_with_tiles();
     assert!(
@@ -155,7 +157,7 @@ fn rows_and_tiles_render_the_same_image() {
 #[test]
 fn rendering_is_deterministic() {
     let (w, h) = (12, 8);
-    let r = emissive_ball_scene(1.0, w, h, 3);
+    let r = emissive_ball_scene(1.0, w, h, 16);
     let a = r.render();
     let b = r.render();
     assert!(buffers_equal(&a, &b, w, h));
@@ -187,7 +189,7 @@ fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
             camera,
             b.commit(),
             LightList::new(),
-            RenderSettings::new(4, 3, w, h, 4, 0.0, frame),
+            RenderSettings::new(16, 3, w, h, 16, 0.0, frame),
         )
     };
     let a = mk(0).render();
