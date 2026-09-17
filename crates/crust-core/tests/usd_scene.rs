@@ -1313,6 +1313,132 @@ fn face_varying_st_reaches_the_shading_point() {
     assert!((b.0 - 1.5).abs() < 0.01, "right u = {}, expected ~1.5", b.0);
 }
 
+/// Two prims with the same points, topology and material but *different*
+/// `primvars:st` are not the same mesh.
+///
+/// The `MeshSlot` a distinct mesh interns to owns the `UvMap` every placement
+/// of it shades through, built from whichever prim got there first. Leaving
+/// the chart out of `MeshKey` therefore made the second prim read the first
+/// one's coordinates — a wrong UDIM tile, or a wrong region of one atlas,
+/// rendering as a plausible texture rather than as an error. Charting one
+/// panel into two tiles is the ordinary idiom (`samples/materialx_basic.usda`
+/// is built on it); it only collides once the two prims agree on geometry,
+/// which is exactly what an instanced kit of parts does.
+#[test]
+fn identical_geometry_with_different_uvs_keeps_its_own_chart() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_uv_dedup_probe");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // A material from a `.mtlx`, because `uses_uv()` is what makes the
+    // importer read a chart at all — a `UsdPreviewSurface` would build no
+    // table and the collision would be unobservable.
+    std::fs::write(
+        dir.join("flat.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="flat_diffuse" type="BSDF">
+    <input name="color" type="color3" value="0.8, 0.8, 0.8" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="flat_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="flat_diffuse" />
+  </surface>
+  <surfacematerial name="mtlx_flat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="flat_surface" />
+  </surfacematerial>
+</materialx>
+"#,
+    )
+    .expect("write probe mtlx");
+
+    // `A` and `B` are byte-identical geometry bound to one material, set
+    // apart only by their transform and their chart: A spans UDIM tile 1001,
+    // B tile 1002.
+    let stage = |st_b: &str| {
+        format!(
+            r#"#usda 1.0
+(defaultPrim = "W")
+def Xform "W" {{
+    def Scope "Looks" {{
+        def Material "Mtl" (
+            prepend references = @flat.mtlx@</MaterialX/Materials/mtlx_flat>
+        ) {{
+        }}
+    }}
+    def Mesh "A" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </W/Looks/Mtl>
+        double3 xformOp:translate = (-3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Mesh "B" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
+        texCoord2f[] primvars:st = [{st_b}] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </W/Looks/Mtl>
+        double3 xformOp:translate = (3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+"#
+        )
+    };
+
+    let probe = |scene: &crust_core::Scene, x: f32| -> (f32, f32) {
+        let r = Ray::new(Vec3A::new(x, 1.0, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .unwrap_or_else(|| panic!("no hit at x = {x}"));
+        assert!(hit.rec.has_uv, "no chart reached the shading point at x = {x}");
+        hit.rec.uv
+    };
+
+    // 1. Different charts: each prim must report the coordinates it authored.
+    let path = dir.join("uv_dedup.usda");
+    std::fs::write(&path, stage("(1, 0), (2, 0), (2, 1), (1, 1)")).expect("write probe stage");
+    let scene = Scene::from_usd(&path).expect("stage must load");
+    let (au, av) = probe(&scene, -3.0);
+    let (bu, bv) = probe(&scene, 3.0);
+    assert!((au - 0.5).abs() < 0.01 && (av - 0.5).abs() < 0.01, "A: ({au}, {av})");
+    // The load-bearing one: B shading at u ~ 0.5 means it was handed A's
+    // chart, so its texture reads tile 1001 instead of 1002.
+    assert!(
+        (bu - 1.5).abs() < 0.01 && (bv - 0.5).abs() < 0.01,
+        "B shaded through A's chart: ({bu}, {bv}), expected ~(1.5, 0.5)"
+    );
+
+    // 2. Identical charts still dedupe — the fix must not disable sharing,
+    // only make it correct. Two prims sharing a slot are placed as instances
+    // of one prototype, so the root BVH holds instances and the *unique*
+    // triangle count stays that of a single quad.
+    let same = dir.join("uv_dedup_same.usda");
+    std::fs::write(&same, stage("(0, 0), (1, 0), (1, 1), (0, 1)")).expect("write probe stage");
+    let shared = Scene::from_usd(&same).expect("stage must load");
+    assert_eq!(
+        shared.stats.scene.unique.triangles, 2,
+        "prims agreeing on geometry, material and chart must still share one mesh: {:?}",
+        shared.stats.scene
+    );
+    assert_eq!(shared.stats.scene.top_level.instances, 2);
+    // And the differing-chart stage is the opposite: two distinct meshes.
+    assert_eq!(
+        scene.stats.scene.unique.triangles, 4,
+        "differing charts must intern as two meshes: {:?}",
+        scene.stats.scene
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A baked (single-placement) mesh must carry a tangent frame, or every normal
 /// map silently degrades to the geometric normal.
 #[test]
