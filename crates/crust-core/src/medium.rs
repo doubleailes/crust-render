@@ -232,11 +232,11 @@ mod tests {
             // Exact bin mass from the HG CDF:
             // ∫ 2π p dµ = (1-g²)/(2g) · [(1+g²-2gµ)^{-1/2}]_a^b.
             let cdf_term = |mu: f32| (1.0 + g * g - 2.0 * g * mu).max(1e-9).powf(-0.5);
-            for b in 0..bins {
+            for (b, &count) in hist.iter().enumerate() {
                 let lo = -1.0 + b as f32 * 2.0 / bins as f32;
                 let hi = lo + 2.0 / bins as f32;
                 let expected = (1.0 - g * g) / (2.0 * g) * (cdf_term(hi) - cdf_term(lo));
-                let observed = hist[b] as f32 / n as f32;
+                let observed = count as f32 / n as f32;
                 // 5% relative, floored at 4σ of binomial counting noise.
                 let tol = (0.05 * expected).max(4.0 * (expected / n as f32).sqrt());
                 assert!(

@@ -415,7 +415,7 @@ fn phase_sample_agrees_with_its_pdf_histogram() {
         let b = (((mu + 1.0) * 0.5) * bins as f32).min(bins as f32 - 1.0) as usize;
         hist[b] += 1;
     }
-    for b in 0..bins {
+    for (b, &count) in hist.iter().enumerate() {
         // Expected mass from a fine quadrature of the pdf over the bin.
         let lo = -1.0 + 2.0 * b as f32 / bins as f32;
         let mut mass = 0.0f64;
@@ -425,7 +425,7 @@ fn phase_sample_agrees_with_its_pdf_histogram() {
             mass += p.pdf(mu) as f64;
         }
         let expected = mass * 2.0 * std::f64::consts::PI * (2.0 / bins as f64) / steps as f64;
-        let observed = hist[b] as f64 / n as f64;
+        let observed = count as f64 / n as f64;
         let tol = (0.05 * expected).max(4.0 * (expected / n as f64).sqrt());
         assert!(
             (observed - expected).abs() < tol,

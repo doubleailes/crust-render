@@ -1361,15 +1361,15 @@ fn collapse_node(
         n_kids += 1;
     }
 
-    for lane in 0..n_kids {
-        let k = kids[lane] as usize;
+    for (lane, &kid) in kids.iter().enumerate().take(n_kids) {
+        let k = kid as usize;
         let bounds = binary[k].bbox;
         out[slot].set_lane_bounds(lane, &bounds);
         if binary[k].count > 0 {
             out[slot].child[lane] = data.push_leaf(leaf_range(&binary[k], indices), prims);
             out[slot].mark_leaf(lane);
         } else {
-            let ci = collapse_node(binary, indices, prims, kids[lane], out, data);
+            let ci = collapse_node(binary, indices, prims, kid, out, data);
             out[slot].child[lane] = ci;
         }
     }

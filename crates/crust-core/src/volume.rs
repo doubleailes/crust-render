@@ -195,6 +195,7 @@ pub struct VolumeRegion {
 }
 
 impl VolumeRegion {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         local_to_world: Mat4,
         half_extent: Vec3A,

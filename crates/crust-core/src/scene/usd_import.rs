@@ -677,35 +677,35 @@ fn value_as_f32(value: &sdf::Value) -> Option<f32> {
 /// `compose_xform_ops` cannot decode. Known to compose multi-op stacks in
 /// the wrong order (see `local_matrix_at`).
 fn local_matrix_via_openusd(stage: &Stage, prim: &Prim) -> GMat4 {
-    if let Ok(Some(x)) = Xform::get(stage, prim.path().clone()) {
-        if let Ok(m) = x.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(m);
-        }
+    if let Ok(Some(x)) = Xform::get(stage, prim.path().clone())
+        && let Ok(m) = x.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(m);
     }
-    if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone()) {
-        if let Ok(mat) = m.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(mat);
-        }
+    if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone())
+        && let Ok(mat) = m.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(mat);
     }
-    if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone()) {
-        if let Ok(mat) = s.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(mat);
-        }
+    if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone())
+        && let Ok(mat) = s.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(mat);
     }
-    if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone()) {
-        if let Ok(mat) = c.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(mat);
-        }
+    if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone())
+        && let Ok(mat) = c.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(mat);
     }
-    if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone()) {
-        if let Ok(mat) = l.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(mat);
-        }
+    if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone())
+        && let Ok(mat) = l.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(mat);
     }
-    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone()) {
-        if let Ok(mat) = l.local_to_parent_transform(0.0) {
-            return usd_mat_to_glam(mat);
-        }
+    if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone())
+        && let Ok(mat) = l.local_to_parent_transform(0.0)
+    {
+        return usd_mat_to_glam(mat);
     }
     GMat4::IDENTITY
 }
@@ -1362,7 +1362,7 @@ fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
             continue;
         }
         let indices = match prim
-            .attribute(&format!("{name}:indices"))
+            .attribute(format!("{name}:indices"))
             .get::<sdf::Value>()
             .ok()
             .flatten()
@@ -1623,13 +1623,18 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
 /// outputs are index-parallel by construction: every `push` to one pushes to
 /// the other in the same statement, so the skip paths cannot desynchronise
 /// them.
+///
+/// The triangle list, plus the per-face and per-triangle-UV side tables
+/// when the material asked for them.
+type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
+
 fn triangulate(
     counts: &[i32],
     indices: &[i32],
     n_verts: usize,
     want_faces: bool,
     uv_src: Option<&UvSource>,
-) -> Option<(Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>)> {
+) -> Option<Triangulated> {
     let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut faces: Vec<u32> = Vec::new();
     let mut slices: Vec<FanSlice> = Vec::new();
@@ -3440,7 +3445,7 @@ fn load_mtlx_material(
     let before = cell.borrow().asset_time;
     let loaded = crate::materialx::load(file, (!node.is_empty()).then_some(node), &loader);
     let nested = cell.borrow().asset_time - before;
-    drop(cell);
+    // `cell` is not used past this point, which ends its borrow of `caches`.
     caches.asset_time += started.elapsed().saturating_sub(nested);
 
     match loaded {
@@ -3722,11 +3727,11 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     };
 
     let (mut w, mut h) = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    if let Ok(Some(v)) = s.resolution_attr().get::<sdf::Value>() {
-        if let Some(v2) = v.try_as_vec_2i() {
-            w = v2.x as usize;
-            h = v2.y as usize;
-        }
+    if let Ok(Some(v)) = s.resolution_attr().get::<sdf::Value>()
+        && let Some(v2) = v.try_as_vec_2i()
+    {
+        w = v2.x as usize;
+        h = v2.y as usize;
     }
 
     // Custom `crust:*` attrs. We look them up on the RenderSettings prim.

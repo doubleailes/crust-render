@@ -167,10 +167,10 @@ pub fn eon_albedo_exact(mu: f32, roughness: f32) -> f32 {
 /// form used by the Adobe reference; agrees with the exact form to ~1e-2).
 pub fn eon_albedo_approx(mu: f32, roughness: f32) -> f32 {
     let mucomp = 1.0 - mu.clamp(0.0, 1.0);
-    const G1: f32 = 0.057_108_529;
+    const G1: f32 = 0.057_108_53;
     const G2: f32 = 0.491_881_87;
     const G3: f32 = -0.332_181_44;
-    const G4: f32 = 0.071_442_995;
+    const G4: f32 = 0.071_442_99;
     let g_over_pi = mucomp * (G1 + mucomp * (G2 + mucomp * (G3 + mucomp * G4)));
     (1.0 + roughness * g_over_pi) / (1.0 + EON_A * roughness)
 }
