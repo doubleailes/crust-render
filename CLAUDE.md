@@ -629,7 +629,10 @@ Schema mapping:
   reason: a production UDIM set is fourteen 4K images per map, so the host
   decodes and hands back a **sampler**, and `Texture2D::eval` takes
   **unwrapped** coordinates — `u = 3.4` is the fourth UDIM tile, not `0.4` of
-  the first, and tile selection is the host's addressing job. `AssetLoader::load_texture`
+  the first, and tile selection is the host's addressing job. Both of
+  MaterialX's tile tokens are expanded (`TileToken`): `<UDIM>` → `1001 + u +
+  10·v`, `<UVTILE>` → `u<u+1>_v<v+1>`. They name the same 10x10 grid, so tiles
+  are keyed by UDIM number whichever token named the file. `AssetLoader::load_texture`
   carries the colour space with the path, because the file does not say: an
   8-bit PNG holding albedo is display-encoded while the same encoding holding a
   normal, a roughness or a mask is raw data. MaterialX states it per input

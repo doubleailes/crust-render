@@ -12,6 +12,16 @@
 //! many tiles to hold is the host's job, which is why `Texture2D::eval` takes
 //! *unwrapped* coordinates: `u = 3.4` has to still know it is the fourth tile.
 //!
+//! **And `<UVTILE>`.** MaterialX defines a second spelling of the same grid:
+//! `Albedo.<UVTILE>.png`, expanding to `u1_v1` for the tile `<UDIM>` calls
+//! 1001 (both indices 1-based, the Mari/Mudbox convention). It addresses the
+//! same tiles by the same coordinates, so only the name on disk differs and
+//! [`TileToken`] is the whole of the difference — tiles are keyed by UDIM
+//! number internally whichever token named them. The document parser already
+//! carries both tokens through intact (`crust-mtlx`'s `escape_udim_tokens`),
+//! so failing to expand one here meant a set that loaded *no* tiles at all
+//! rather than one that loaded them wrongly.
+//!
 //! **Why a resolution cap is not an optimisation.** Fourteen 4096² tiles is
 //! 235 M texels; at 3 bytes each that is 674 MiB for one map, and the ceramic
 //! alone binds four maps across two materials — before the metal's 8K handle
@@ -40,7 +50,61 @@ struct Tile {
     height: usize,
 }
 
-/// A UV-addressed texture: one image, or a UDIM set.
+/// The filename token that addresses a tile set, and how it spells a tile.
+///
+/// Two spellings, one grid: a document may use either, and both index the
+/// same `(u, v)` chart coordinates. Keeping the distinction in one place is
+/// what lets everything downstream — the tile key, the sampler, the 10x10
+/// bound — stay written in UDIM numbers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TileToken {
+    /// `<UDIM>` → `1001 + u + 10·v`, e.g. `Albedo.1012.png`.
+    Udim,
+    /// `<UVTILE>` → `u<u+1>_v<v+1>`, e.g. `Albedo.u2_v2.png`. Both indices
+    /// are 1-based, so `u1_v1` is the same tile as UDIM 1001.
+    UvTile,
+}
+
+impl TileToken {
+    /// The token this file name carries, or `None` for a single image.
+    ///
+    /// `<UDIM>` is tested first only to be deterministic about a name that
+    /// carries both, which no conformant document writes.
+    fn detect(name: &str) -> Option<TileToken> {
+        if name.contains("<UDIM>") {
+            Some(TileToken::Udim)
+        } else if name.contains("<UVTILE>") {
+            Some(TileToken::UvTile)
+        } else {
+            None
+        }
+    }
+
+    /// The file name of the tile at zero-based chart coordinates `(u, v)`.
+    fn expand(self, name: &str, u: u32, v: u32) -> String {
+        match self {
+            TileToken::Udim => name.replace("<UDIM>", &udim_number(u, v).to_string()),
+            TileToken::UvTile => name.replace("<UVTILE>", &format!("u{}_v{}", u + 1, v + 1)),
+        }
+    }
+
+    /// The token as authored, for the "nothing found" message.
+    fn as_str(self) -> &'static str {
+        match self {
+            TileToken::Udim => "<UDIM>",
+            TileToken::UvTile => "<UVTILE>",
+        }
+    }
+}
+
+/// The UDIM number of the tile at zero-based chart coordinates.
+///
+/// The internal tile key, whichever token named the file.
+fn udim_number(u: u32, v: u32) -> u32 {
+    1001 + u + 10 * v
+}
+
+/// A UV-addressed texture: one image, or a tile set.
 pub struct UvTexture {
     tiles: Vec<Tile>,
     /// Per-channel decode table, `u8` → linear `f32`. Holds the inverse sRGB
@@ -51,10 +115,11 @@ pub struct UvTexture {
     /// Representative tile size, for the load message.
     width: usize,
     height: usize,
-    /// True when the file name carried a `<UDIM>` token. A UDIM set addresses
-    /// tiles by the integer part of `(u, v)`; a single image wraps instead,
-    /// which is MaterialX's default `periodic` address mode.
-    udim: bool,
+    /// True when the file name carried a tile token (`<UDIM>` or `<UVTILE>`).
+    /// A tile set addresses tiles by the integer part of `(u, v)`; a single
+    /// image wraps instead, which is MaterialX's default `periodic` address
+    /// mode.
+    tiled: bool,
 }
 
 /// Largest tile edge kept, unless `CRUST_TEX_MAX` says otherwise.
@@ -64,9 +129,10 @@ pub struct UvTexture {
 pub const DEFAULT_MAX_EDGE: usize = 1024;
 
 impl UvTexture {
-    /// Opens `path` — a single image, or a UDIM set when the name carries a
-    /// `<UDIM>` token — decoding every tile present on disk at or below the
-    /// `CRUST_TEX_MAX` edge cap. `None` when nothing could be decoded.
+    /// Opens `path` — a single image, or a tile set when the name carries a
+    /// `<UDIM>` or `<UVTILE>` token — decoding every tile present on disk at
+    /// or below the `CRUST_TEX_MAX` edge cap. `None` when nothing could be
+    /// decoded.
     pub fn open(path: &Path, space: ColorSpace) -> Option<UvTexture> {
         let max_edge = std::env::var("CRUST_TEX_MAX")
             .ok()
@@ -75,31 +141,35 @@ impl UvTexture {
             .unwrap_or(DEFAULT_MAX_EDGE);
 
         let name = path.to_string_lossy().into_owned();
-        let udim = name.contains("<UDIM>");
+        let token = TileToken::detect(&name);
         let mut tiles = Vec::new();
-        if udim {
+        if let Some(token) = token {
             // Only tiles that exist on disk are opened, so a chart with holes
             // costs nothing for the tiles it does not use. 10x10 covers the
-            // 1001..1100 range every DCC writes.
+            // 1001..1100 range every DCC writes — and is what bounds the
+            // `<UVTILE>` sweep too, since the two tokens name the same grid.
             for v in 0..10u32 {
                 for u in 0..10u32 {
-                    let number = 1001 + u + 10 * v;
-                    let candidate = name.replace("<UDIM>", &number.to_string());
+                    let candidate = token.expand(&name, u, v);
                     let p = Path::new(&candidate);
                     if !p.exists() {
                         continue;
                     }
-                    if let Some(t) = decode_tile(p, number, max_edge) {
+                    if let Some(t) = decode_tile(p, udim_number(u, v), max_edge) {
                         tiles.push(t);
                     }
                 }
             }
             if tiles.is_empty() {
-                error!("No UDIM tiles found for {}", path.display());
+                error!(
+                    "No tiles found for {} ({} expanded over the 10x10 grid)",
+                    path.display(),
+                    token.as_str()
+                );
                 return None;
             }
         } else {
-            tiles.push(decode_tile(path, 1001, max_edge)?);
+            tiles.push(decode_tile(path, udim_number(0, 0), max_edge)?);
         }
 
         let to_linear = to_linear_table(space);
@@ -109,7 +179,7 @@ impl UvTexture {
             to_linear,
             width,
             height,
-            udim,
+            tiled: token.is_some(),
         })
     }
 
@@ -177,15 +247,15 @@ impl Texture2D for UvTexture {
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }
-        if self.udim {
+        if self.tiled {
             let (tu, tv) = (u.floor(), v.floor());
-            // Outside the 10x10 UDIM grid there is no tile by definition;
+            // Outside the 10x10 tile grid there is no tile by definition;
             // black rather than a wrapped guess, so a mis-scaled chart looks
             // wrong instead of plausibly tiled.
             if !(0.0..10.0).contains(&tu) || !(0.0..10.0).contains(&tv) {
                 return [0.0, 0.0, 0.0, 1.0];
             }
-            let number = 1001 + tu as u32 + 10 * tv as u32;
+            let number = udim_number(tu as u32, tv as u32);
             match self.tiles.iter().find(|t| t.number == number) {
                 Some(t) => self.sample_tile(t, u - tu, v - tv),
                 None => [0.0, 0.0, 0.0, 1.0],
@@ -305,6 +375,124 @@ fn to_linear_table(space: ColorSpace) -> [f32; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes a 1x1 PNG of a flat colour, creating parent directories.
+    ///
+    /// One texel is enough: these tests are about *which file* a coordinate
+    /// reaches, so the colour is the tile's identity and bilinear filtering
+    /// across a uniform tile returns it exactly.
+    fn write_tile(path: &Path, rgb: [u8; 3]) {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("temp dir");
+        image::RgbImage::from_pixel(1, 1, image::Rgb(rgb))
+            .save(path)
+            .expect("write png");
+    }
+
+    /// A scratch directory of its own per test, so the parallel test runner
+    /// cannot have one test's tiles satisfy another's glob.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("crust_uv_texture_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// The channel values a tile is written with, recovered from a lookup.
+    /// Raw decode, so the round trip is exact.
+    fn sampled(tex: &UvTexture, u: f32, v: f32) -> [u8; 3] {
+        let px = tex.eval(u, v);
+        [
+            (px[0] * 255.0).round() as u8,
+            (px[1] * 255.0).round() as u8,
+            (px[2] * 255.0).round() as u8,
+        ]
+    }
+
+    #[test]
+    fn a_udim_set_loads_and_addresses_by_tile() {
+        let dir = scratch("udim");
+        // 1001 is (0,0), 1002 is (1,0), 1011 is (0,1) — and 1012 is left off
+        // disk, so the set has a hole.
+        write_tile(&dir.join("a.1001.png"), [10, 0, 0]);
+        write_tile(&dir.join("a.1002.png"), [20, 0, 0]);
+        write_tile(&dir.join("a.1011.png"), [30, 0, 0]);
+
+        let tex = UvTexture::open(&dir.join("a.<UDIM>.png"), ColorSpace::Raw)
+            .expect("a <UDIM> set must load the tiles that exist");
+        assert_eq!(tex.tile_count(), 3, "only the tiles on disk are decoded");
+        assert_eq!(sampled(&tex, 0.5, 0.5), [10, 0, 0]);
+        assert_eq!(sampled(&tex, 1.5, 0.5), [20, 0, 0]);
+        assert_eq!(sampled(&tex, 0.5, 1.5), [30, 0, 0]);
+    }
+
+    #[test]
+    fn a_uvtile_set_loads_and_addresses_by_the_same_tile() {
+        // The regression this pins: `<UVTILE>` reached `open` intact (the
+        // document parser escapes and restores it) and was then never
+        // expanded, so the literal name was opened as a single image, failed,
+        // and the whole set loaded *nothing*.
+        let dir = scratch("uvtile");
+        // Both indices are 1-based: u1_v1 is the tile <UDIM> numbers 1001.
+        write_tile(&dir.join("a.u1_v1.png"), [10, 0, 0]);
+        write_tile(&dir.join("a.u2_v1.png"), [20, 0, 0]);
+        write_tile(&dir.join("a.u1_v2.png"), [30, 0, 0]);
+
+        let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::Raw)
+            .expect("a <UVTILE> set must load like a <UDIM> one");
+        assert_eq!(tex.tile_count(), 3);
+        // Identical coordinates to the <UDIM> test above: the two tokens
+        // spell the same grid, so addressing must not depend on which named
+        // the files.
+        assert_eq!(sampled(&tex, 0.5, 0.5), [10, 0, 0]);
+        assert_eq!(sampled(&tex, 1.5, 0.5), [20, 0, 0]);
+        assert_eq!(sampled(&tex, 0.5, 1.5), [30, 0, 0]);
+    }
+
+    #[test]
+    fn a_missing_tile_reads_black_rather_than_a_neighbour() {
+        let dir = scratch("holes");
+        write_tile(&dir.join("a.u1_v1.png"), [10, 20, 30]);
+        let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::Raw).expect("loads");
+
+        // A hole inside the grid, and coordinates off the grid entirely.
+        // Both are black, so a mis-scaled chart looks wrong instead of
+        // plausibly tiled — the set must not wrap onto the tile it does have.
+        assert_eq!(sampled(&tex, 3.5, 2.5), [0, 0, 0], "hole");
+        assert_eq!(sampled(&tex, 10.5, 0.5), [0, 0, 0], "past the grid");
+        assert_eq!(sampled(&tex, -0.5, 0.5), [0, 0, 0], "before the grid");
+        assert_eq!(sampled(&tex, 0.5, 0.5), [10, 20, 30], "the tile that exists");
+    }
+
+    #[test]
+    fn an_empty_tile_set_declines_instead_of_loading_the_literal_name() {
+        let dir = scratch("empty");
+        assert!(UvTexture::open(&dir.join("gone.<UDIM>.png"), ColorSpace::Raw).is_none());
+        assert!(UvTexture::open(&dir.join("gone.<UVTILE>.png"), ColorSpace::Raw).is_none());
+    }
+
+    #[test]
+    fn a_single_image_wraps_instead_of_tiling() {
+        let dir = scratch("single");
+        write_tile(&dir.join("flat.png"), [7, 8, 9]);
+        let tex = UvTexture::open(&dir.join("flat.png"), ColorSpace::Raw).expect("loads");
+        // MaterialX's default address mode is `periodic`, so a coordinate
+        // outside the unit square wraps back rather than reading black.
+        assert_eq!(sampled(&tex, 0.5, 0.5), [7, 8, 9]);
+        assert_eq!(sampled(&tex, 3.5, 2.5), [7, 8, 9]);
+    }
+
+    #[test]
+    fn the_two_tokens_spell_the_same_grid() {
+        for (u, v) in [(0, 0), (1, 0), (0, 1), (9, 9)] {
+            let udim = TileToken::Udim.expand("a.<UDIM>.png", u, v);
+            let uvtile = TileToken::UvTile.expand("a.<UVTILE>.png", u, v);
+            assert_eq!(udim, format!("a.{}.png", udim_number(u, v)));
+            assert_eq!(uvtile, format!("a.u{}_v{}.png", u + 1, v + 1));
+        }
+        assert_eq!(TileToken::detect("a.<UDIM>.png"), Some(TileToken::Udim));
+        assert_eq!(TileToken::detect("a.<UVTILE>.png"), Some(TileToken::UvTile));
+        assert_eq!(TileToken::detect("a.png"), None);
+    }
 
     fn at(space: ColorSpace, encoded: u8) -> f32 {
         to_linear_table(space)[encoded as usize]
