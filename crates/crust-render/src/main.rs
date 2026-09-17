@@ -312,3 +312,137 @@ fn main() {
         println!("{stats}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tone_map_anchors_black_and_white() {
+        assert_eq!(tone_map(0.0), 0);
+        assert_eq!(tone_map(1.0), 255);
+        // Out-of-range input clamps rather than wrapping.
+        assert_eq!(tone_map(-3.0), 0);
+        assert_eq!(tone_map(50.0), 255);
+        assert_eq!(tone_map(f32::INFINITY), 255);
+    }
+
+    #[test]
+    fn tone_map_applies_the_srgb_curve() {
+        // Linear 0.5 is display 188; linear 0.214 is display ~128.
+        assert_eq!(tone_map(0.5), 188);
+        assert!((tone_map(0.214) as i32 - 128).abs() <= 1);
+        // The linear toe: 0.001 linear → 12.92 · 0.001 · 255 ≈ 3.3 → 3.
+        assert_eq!(tone_map(0.001), 3);
+    }
+
+    #[test]
+    fn tone_map_is_monotone() {
+        let mut prev = 0u8;
+        for i in 0..=1000 {
+            let v = tone_map(i as f32 / 1000.0);
+            assert!(v >= prev, "not monotone at {i}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn cli_strategy_names_map_onto_the_engine_enum() {
+        assert_eq!(SamplingStrategy::from(Strategy::Power), SamplingStrategy::PowerMis);
+        assert_eq!(SamplingStrategy::from(Strategy::Balance), SamplingStrategy::BalanceMis);
+        assert_eq!(SamplingStrategy::from(Strategy::Light), SamplingStrategy::LightOnly);
+        assert_eq!(SamplingStrategy::from(Strategy::Bsdf), SamplingStrategy::BsdfOnly);
+    }
+
+    #[test]
+    fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
+        assert_eq!(PixelFilter::from(Filter::Box), PixelFilter::BoxFilter { radius: 0.5 });
+        assert_eq!(PixelFilter::from(Filter::Triangle), PixelFilter::Triangle { radius: 1.0 });
+        assert_eq!(PixelFilter::from(Filter::Gaussian), PixelFilter::Gaussian { radius: 1.5 });
+        assert_eq!(PixelFilter::from(Filter::Blackman), PixelFilter::Blackman { radius: 1.5 });
+        assert_eq!(PixelFilter::from(Filter::Mitchell), PixelFilter::Mitchell { radius: 2.0 });
+    }
+
+    #[test]
+    fn log_levels_map_one_to_one() {
+        assert_eq!(get_logger_level(LoggerLevel::Trace), Level::TRACE);
+        assert_eq!(get_logger_level(LoggerLevel::Debug), Level::DEBUG);
+        assert_eq!(get_logger_level(LoggerLevel::Info), Level::INFO);
+        assert_eq!(get_logger_level(LoggerLevel::Warn), Level::WARN);
+        assert_eq!(get_logger_level(LoggerLevel::Error), Level::ERROR);
+    }
+
+    #[test]
+    fn write_png_flips_rows_and_tone_maps() {
+        let (w, h) = (3usize, 2usize);
+        let mut buffer = Buffer::new(w, h);
+        buffer.set_pixel(0, 0, crust_core::Vec3A::new(1.0, 0.0, 0.0)); // scene bottom-left
+        buffer.set_pixel(2, 1, crust_core::Vec3A::new(0.0, 0.5, 0.0)); // scene top-right
+        let dir = std::env::temp_dir().join("crust_render_png_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.png");
+        write_png(&buffer, w, h, &path).expect("png written");
+        let img = image::open(&path).expect("readable").to_rgba8();
+        assert_eq!((img.width(), img.height()), (3, 2));
+        // Image row 0 is the top: the scene's y = 1 row.
+        assert_eq!(img.get_pixel(2, 0).0, [0, 188, 0, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cli_parses_its_flags() {
+        let cli = Cli::try_parse_from([
+            "crust-render",
+            "-i",
+            "scene.usda",
+            "-o",
+            "out.exr",
+            "--bucket",
+            "-s",
+            "12",
+            "--strategy",
+            "balance",
+            "--filter",
+            "mitchell",
+            "--filter-radius",
+            "1.75",
+            "--stats",
+            "-l",
+            "debug",
+        ])
+        .expect("valid flags");
+        assert_eq!(cli.input.as_deref(), Some("scene.usda"));
+        assert_eq!(cli.output, "out.exr");
+        assert!(cli.bucket);
+        assert_eq!(cli.samples, Some(12));
+        assert!(matches!(cli.strategy, Some(Strategy::Balance)));
+        assert!(matches!(cli.filter, Some(Filter::Mitchell)));
+        assert_eq!(cli.filter_radius, Some(1.75));
+        assert!(cli.stats);
+        assert!(matches!(cli.level, LoggerLevel::Debug));
+    }
+
+    #[test]
+    fn cli_defaults_when_nothing_is_given() {
+        let cli = Cli::try_parse_from(["crust-render"]).expect("no flags is valid");
+        assert!(cli.input.is_none());
+        assert_eq!(cli.output, "output.exr");
+        assert!(!cli.bucket);
+        assert!(cli.samples.is_none());
+        assert!(cli.strategy.is_none());
+        assert!(cli.filter.is_none());
+        assert!(cli.filter_radius.is_none());
+        assert!(!cli.stats);
+        assert!(matches!(cli.level, LoggerLevel::Info));
+    }
+
+    #[test]
+    fn cli_rejects_unknown_enum_values() {
+        assert!(Cli::try_parse_from(["crust-render", "--strategy", "random"]).is_err());
+        assert!(Cli::try_parse_from(["crust-render", "--filter", "lanczos"]).is_err());
+        assert!(Cli::try_parse_from(["crust-render", "-l", "loud"]).is_err());
+        assert!(Cli::try_parse_from(["crust-render", "-s", "many"]).is_err());
+    }
+}
