@@ -296,10 +296,11 @@ impl Program {
                 } => {
                     let (a, il, ih, ol, oh) =
                         (g(*a), g(*in_low), g(*in_high), g(*out_low), g(*out_high));
-                    let t = a.zip(il, |x, l| x - l).zip(
-                        ih.zip(il, |h, l| h - l),
-                        |x, d| if d.abs() > 1e-20 { x / d } else { 0.0 },
-                    );
+                    let t = a
+                        .zip(il, |x, l| x - l)
+                        .zip(ih.zip(il, |h, l| h - l), |x, d| {
+                            if d.abs() > 1e-20 { x / d } else { 0.0 }
+                        });
                     ol.zip(oh.zip(ol, |h, l| h - l).zip(t, |d, t| d * t), |l, x| l + x)
                 }
                 Op::Invert { a, amount } => g(*amount).zip(g(*a), |m, x| m - x),
@@ -312,9 +313,7 @@ impl Program {
                     let c = g(*a).rgb();
                     Val::float(c.dot(Vec3A::new(0.2722287, 0.6740818, 0.0536895)))
                 }
-                Op::NormalMap { a, scale } => {
-                    normal_map(g(*a), g(*scale).x(), ctx).into()
-                }
+                Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale).x(), ctx).into(),
                 Op::ArtisticIor {
                     reflectivity,
                     edge,
@@ -390,8 +389,8 @@ fn artistic_ior(reflectivity: Vec3A, edge: Vec3A) -> (Vec3A, Vec3A) {
     let n = n_max + (n_min - n_max) * edge.clamp(Vec3A::ZERO, Vec3A::ONE);
     let np1 = n + Vec3A::ONE;
     let nm1 = n - Vec3A::ONE;
-    let k2 = ((np1 * np1 * r - nm1 * nm1) / (Vec3A::ONE - r).max(Vec3A::splat(1e-6)))
-        .max(Vec3A::ZERO);
+    let k2 =
+        ((np1 * np1 * r - nm1 * nm1) / (Vec3A::ONE - r).max(Vec3A::splat(1e-6))).max(Vec3A::ZERO);
     (n, Vec3A::new(k2.x.sqrt(), k2.y.sqrt(), k2.z.sqrt()))
 }
 
@@ -481,9 +480,16 @@ impl<'a> Compiler<'a> {
             }
             Source::Node { name, output } => self.compile_named(&scope, name, output.as_deref()),
             Source::Graph { graph, output } => match self.doc.graph_output(graph, output) {
-                Some(n) => {
-                    let (g, nm) = (n.graph.clone().unwrap_or_default(), n.name.clone());
-                    self.compile_named(&g, &nm, None)
+                Some(conn) => {
+                    // The graph's `<output>` may itself select one output of a
+                    // multioutput node; carry it through, or `extinction`
+                    // silently compiles as `ior`.
+                    let (g, nm) = (
+                        conn.node.graph.clone().unwrap_or_default(),
+                        conn.node.name.clone(),
+                    );
+                    let sel = conn.output.map(str::to_string);
+                    self.compile_named(&g, &nm, sel.as_deref())
                 }
                 None => self.constant(Val::ZERO),
             },
@@ -658,9 +664,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_image(&mut self, node: &Node, arity: u8) -> u32 {
         let file = node.input("file").and_then(|i| i.text.clone());
-        let space = node
-            .input("file")
-            .and_then(|i| i.colorspace.clone());
+        let space = node.input("file").and_then(|i| i.colorspace.clone());
         let tex = file
             .as_deref()
             .and_then(|f| (self.loader)(f, space.as_deref()));
@@ -761,6 +765,68 @@ mod tests {
             let back = reflectivity_from_ior(n, k);
             assert!((back.x - r).abs() < 1e-4, "r={r} -> {}", back.x);
         }
+    }
+
+    #[test]
+    fn a_graph_output_keeps_the_output_it_selected() {
+        // A `<nodegraph>`'s `<output>` may select one output of a multioutput
+        // node. Dropping that selection is silent: the reference falls back to
+        // the node's first output, so a graph publishing `artistic_ior`'s
+        // extinction hands its consumer the ior instead.
+        let doc = r#"<materialx>
+                 <nodegraph name="g">
+                   <artistic_ior name="ai" type="multioutput">
+                     <input name="reflectivity" type="color3" value="0.5, 0.5, 0.5" />
+                     <input name="edge_color" type="color3" value="1, 1, 1" />
+                   </artistic_ior>
+                   <output name="n" type="color3" nodename="ai" output="ior" />
+                   <output name="k" type="color3" nodename="ai" output="extinction" />
+                 </nodegraph>
+                 <multiply name="take_n" type="color3">
+                   <input name="in1" type="color3" nodegraph="g" output="n" />
+                   <input name="in2" type="color3" value="1, 1, 1" />
+                 </multiply>
+                 <multiply name="take_k" type="color3">
+                   <input name="in1" type="color3" nodegraph="g" output="k" />
+                   <input name="in2" type="color3" value="1, 1, 1" />
+                 </multiply>
+               </materialx>"#;
+        let (n, k) = artistic_ior(Vec3A::splat(0.5), Vec3A::ONE);
+        let got_n = run(doc, "take_n");
+        let got_k = run(doc, "take_k");
+        assert!((got_n.x() - n.x).abs() < 1e-5, "ior: got {}", got_n.x());
+        assert!(
+            (got_k.x() - k.x).abs() < 1e-5,
+            "extinction: got {}",
+            got_k.x()
+        );
+        // The two outputs are what the test is about; equal values would make
+        // the assertions above pass for the wrong reason.
+        assert!((n.x - k.x).abs() > 1e-3);
+    }
+
+    #[test]
+    fn a_graph_output_without_a_selection_takes_the_first_output() {
+        // The single-output majority authors no `output` attribute, and must
+        // keep resolving as it did.
+        let v = run(
+            r#"<materialx>
+                 <nodegraph name="g">
+                   <artistic_ior name="ai" type="multioutput">
+                     <input name="reflectivity" type="color3" value="0.5, 0.5, 0.5" />
+                     <input name="edge_color" type="color3" value="1, 1, 1" />
+                   </artistic_ior>
+                   <output name="out" type="color3" nodename="ai" />
+                 </nodegraph>
+                 <multiply name="take" type="color3">
+                   <input name="in1" type="color3" nodegraph="g" output="out" />
+                   <input name="in2" type="color3" value="1, 1, 1" />
+                 </multiply>
+               </materialx>"#,
+            "take",
+        );
+        let (n, _) = artistic_ior(Vec3A::splat(0.5), Vec3A::ONE);
+        assert!((v.x() - n.x).abs() < 1e-5, "got {}", v.x());
     }
 
     #[test]

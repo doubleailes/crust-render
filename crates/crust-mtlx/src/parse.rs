@@ -74,9 +74,28 @@ pub struct Doc {
     pub nodes: Vec<Node>,
     /// `(graph, name) → index`, where `graph` is empty at document scope.
     index: HashMap<(String, String), usize>,
-    /// `(graph, output name) → the node name it forwards to`, from a
+    /// `(graph, output name) → the connection it forwards to`, from a
     /// `<nodegraph>`'s `<output nodename=…>` children.
-    graph_outputs: HashMap<(String, String), String>,
+    graph_outputs: HashMap<(String, String), GraphTarget>,
+}
+
+/// What one `<output>` declaration forwards to: a node by name, plus which of
+/// that node's outputs was selected. The selection is not decoration — a
+/// graph exposing `artistic_ior`'s `extinction` says so *on the `<output>`*,
+/// and dropping it silently yields the node's first output (`ior`) instead.
+#[derive(Clone, Debug)]
+struct GraphTarget {
+    node: String,
+    output: Option<String>,
+}
+
+/// A nodegraph output resolved to the node it forwards to, carrying the
+/// output name that node's declaration selected (`None` for the
+/// single-output majority).
+#[derive(Clone, Copy, Debug)]
+pub struct GraphConn<'a> {
+    pub node: &'a Node,
+    pub output: Option<&'a str>,
 }
 
 /// Why a `.mtlx` could not be turned into a material.
@@ -127,8 +146,13 @@ impl Doc {
                             if let (Some(name), Some(target)) =
                                 (inner.attribute("name"), inner.attribute("nodename"))
                             {
-                                doc.graph_outputs
-                                    .insert((g.clone(), name.to_string()), target.to_string());
+                                doc.graph_outputs.insert(
+                                    (g.clone(), name.to_string()),
+                                    GraphTarget {
+                                        node: target.to_string(),
+                                        output: inner.attribute("output").map(str::to_string),
+                                    },
+                                );
                             }
                         } else {
                             doc.push(parse_node(inner, Some(g.clone())));
@@ -141,8 +165,13 @@ impl Doc {
                     if let (Some(name), Some(target)) =
                         (child.attribute("name"), child.attribute("nodename"))
                     {
-                        doc.graph_outputs
-                            .insert((String::new(), name.to_string()), target.to_string());
+                        doc.graph_outputs.insert(
+                            (String::new(), name.to_string()),
+                            GraphTarget {
+                                node: target.to_string(),
+                                output: child.attribute("output").map(str::to_string),
+                            },
+                        );
                     }
                 }
                 _ => doc.push(parse_node(child, None)),
@@ -177,12 +206,15 @@ impl Doc {
     }
 
     /// Resolves `nodegraph="G" output="o"` to the node the graph's output
-    /// forwards to.
-    pub fn graph_output(&self, graph: &str, output: &str) -> Option<&Node> {
+    /// forwards to, together with the output that declaration selected on it.
+    pub fn graph_output(&self, graph: &str, output: &str) -> Option<GraphConn<'_>> {
         let target = self
             .graph_outputs
             .get(&(graph.to_string(), output.to_string()))?;
-        self.find(graph, target)
+        Some(GraphConn {
+            node: self.find(graph, &target.node)?,
+            output: target.output.as_deref(),
+        })
     }
 
     /// Every node of a given category, in document order.

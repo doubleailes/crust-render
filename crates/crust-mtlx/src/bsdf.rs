@@ -228,7 +228,9 @@ fn bsdf_input(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
     let scope = node.graph.clone().unwrap_or_default();
     match &input.source {
         Source::Node { name, .. } => c.doc.find(&scope, name).cloned(),
-        Source::Graph { graph, output } => c.doc.graph_output(graph, output).cloned(),
+        Source::Graph { graph, output } => {
+            c.doc.graph_output(graph, output).map(|g| g.node.clone())
+        }
         Source::Value(_) => None,
     }
 }
