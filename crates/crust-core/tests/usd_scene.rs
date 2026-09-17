@@ -8,13 +8,18 @@ use openusd::usd::{PrimPredicate, Stage};
 fn sample(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // crust-core is at <workspace>/crates/crust-core → samples/ two dirs up.
-    root.parent().unwrap().parent().unwrap().join("samples").join(name)
+    root.parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("samples")
+        .join(name)
 }
 
 #[test]
 fn loads_cornellbox_usda() {
-    let scene = Scene::from_usd(&sample("cornellbox.usda"))
-        .expect("failed to open cornellbox.usda");
+    let scene =
+        Scene::from_usd(&sample("cornellbox.usda")).expect("failed to open cornellbox.usda");
 
     // The Cornell box fixture ships with meshes; whatever material dispatch
     // ends up doing, we should have at least one hittable in the world.
@@ -77,8 +82,8 @@ fn loads_openpbr_showcase_usda() {
 /// `xformOp:*` attributes itself.
 #[test]
 fn cornellbox_transforms_compose_correctly() {
-    let scene = Scene::from_usd(&sample("cornellbox.usda"))
-        .expect("failed to open cornellbox.usda");
+    let scene =
+        Scene::from_usd(&sample("cornellbox.usda")).expect("failed to open cornellbox.usda");
     let bbox = scene
         .world
         .bounds()
@@ -104,8 +109,7 @@ fn cornellbox_transforms_compose_correctly() {
 
 #[test]
 fn loads_rectlight_usda() {
-    let scene =
-        Scene::from_usd(&sample("rectlight.usda")).expect("failed to open rectlight.usda");
+    let scene = Scene::from_usd(&sample("rectlight.usda")).expect("failed to open rectlight.usda");
 
     // Ball sphere + floor mesh BVH + two triangles of rect-light geometry.
     assert_eq!(
@@ -126,8 +130,7 @@ fn loads_rectlight_usda() {
 
 #[test]
 fn loads_veach_mis_usda() {
-    let scene =
-        Scene::from_usd(&sample("veach_mis.usda")).expect("failed to open veach_mis.usda");
+    let scene = Scene::from_usd(&sample("veach_mis.usda")).expect("failed to open veach_mis.usda");
 
     // 4 plate meshes + floor + back wall + 4 light spheres.
     assert_eq!(
@@ -207,12 +210,20 @@ fn loads_fog_usda() {
     let fog = &scene.volumes[0];
     assert!(fog.is_homogeneous());
     assert!((fog.g - 0.3).abs() < 1e-6);
-    assert!((fog.sigma_s - crust_core::Vec3A::splat(0.15)).abs().max_element() < 1e-6);
+    assert!(
+        (fog.sigma_s - crust_core::Vec3A::splat(0.15))
+            .abs()
+            .max_element()
+            < 1e-6
+    );
     // The homogeneous fast path must yield exact Beer-Lambert through the
     // 4-unit room: e^{-(0.15+0.01)·4} in the red channel.
     let mut s = openqmc::pcg::Rng::new(1);
     let volumes = crust_core::Volumes::new(scene.volumes);
-    let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.0, 2.0, 10.0), -crust_core::Vec3A::Z);
+    let ray = crust_core::Ray::new(
+        crust_core::Vec3A::new(0.0, 2.0, 10.0),
+        -crust_core::Vec3A::Z,
+    );
     let tr = volumes.transmittance(&ray, 1e-3, 100.0, &mut s);
     let expect = (-(0.15f32 + 0.01) * 4.0).exp();
     assert!(
@@ -338,10 +349,8 @@ fn loads_curves_usda() {
     // The linear Tripod strand's first segment rises from (1.6, 0, -0.5)
     // to (1.6, 0.8, -0.3) (after the prim's translate); a -Z ray at its
     // mid-height must hit it, and slightly to the side must miss it.
-    let on_axis = crust_core::Ray::new(
-        crust_core::Vec3A::new(1.6, 0.4, 5.0),
-        -crust_core::Vec3A::Z,
-    );
+    let on_axis =
+        crust_core::Ray::new(crust_core::Vec3A::new(1.6, 0.4, 5.0), -crust_core::Vec3A::Z);
     let hit = scene
         .world
         .intersect(&on_axis, 0.001, f32::INFINITY)
@@ -351,18 +360,21 @@ fn loads_curves_usda() {
         "strand hit at t={} (expected ~5.4)",
         hit.rec.t
     );
-    let wide = crust_core::Ray::new(
-        crust_core::Vec3A::new(2.6, 0.4, 5.0),
-        -crust_core::Vec3A::Z,
-    );
+    let wide = crust_core::Ray::new(crust_core::Vec3A::new(2.6, 0.4, 5.0), -crust_core::Vec3A::Z);
     // The wide ray flies past every strand and over the floor edge... but the
     // floor extends to z=-8, so aim slightly upward to clear it entirely.
     let wide_up = crust_core::Ray::new(
         crust_core::Vec3A::new(2.6, 0.4, 5.0),
-        (crust_core::Vec3A::new(2.6, 3.0, -8.0) - crust_core::Vec3A::new(2.6, 0.4, 5.0)).normalize(),
+        (crust_core::Vec3A::new(2.6, 3.0, -8.0) - crust_core::Vec3A::new(2.6, 0.4, 5.0))
+            .normalize(),
     );
     assert!(scene.world.intersect(&wide, 0.001, 4.0).is_none());
-    assert!(scene.world.intersect(&wide_up, 0.001, f32::INFINITY).is_none());
+    assert!(
+        scene
+            .world
+            .intersect(&wide_up, 0.001, f32::INFINITY)
+            .is_none()
+    );
 }
 
 /// Light source geometry is camera-invisible by default (the industry
@@ -376,14 +388,23 @@ fn light_geometry_camera_visibility() {
         .expect("failed to open light_visibility.usda");
 
     // Floor + three light spheres, all three in the light list.
-    assert_eq!(scene.world.count(), 4, "expected 4 geometries, got {}", scene.world.count());
-    assert_eq!(scene.lights.count(), 3, "expected 3 lights, got {}", scene.lights.count());
+    assert_eq!(
+        scene.world.count(),
+        4,
+        "expected 4 geometries, got {}",
+        scene.world.count()
+    );
+    assert_eq!(
+        scene.lights.count(),
+        3,
+        "expected 3 lights, got {}",
+        scene.lights.count()
+    );
 
     // Each light: radius 0.5 sphere at (x, 2, 0); a ray straight down from
     // (x, 5, 0) meets its top at t = 2.5 and the floor at t = 5.
-    let down = |x: f32| {
-        crust_core::Ray::new(crust_core::Vec3A::new(x, 5.0, 0.0), -crust_core::Vec3A::Y)
-    };
+    let down =
+        |x: f32| crust_core::Ray::new(crust_core::Vec3A::new(x, 5.0, 0.0), -crust_core::Vec3A::Y);
     let hit_t = |x: f32, mask: u32| {
         scene
             .world
@@ -423,11 +444,8 @@ fn loads_motionblur_usda() {
     // shutter: a time-0 ray down its start position hits, a time-1 ray at
     // the same spot misses, and a time-1 ray at the end position hits.
     let at = |x: f32, time: f32| {
-        crust_core::Ray::new(
-            crust_core::Vec3A::new(x, 0.6, 6.0),
-            -crust_core::Vec3A::Z,
-        )
-        .with_time(time)
+        crust_core::Ray::new(crust_core::Vec3A::new(x, 0.6, 6.0), -crust_core::Vec3A::Z)
+            .with_time(time)
     };
     assert!(scene.world.intersect(&at(-1.5, 0.0), 0.001, 5.9).is_some());
     assert!(scene.world.intersect(&at(-1.5, 1.0), 0.001, 5.9).is_none());
@@ -435,13 +453,14 @@ fn loads_motionblur_usda() {
 
     // The shadow card (crust:rayMask = 6) is invisible to camera rays but
     // opaque to shadow rays.
-    let down = crust_core::Ray::new(
-        crust_core::Vec3A::new(0.0, 5.0, 0.0),
-        -crust_core::Vec3A::Y,
-    );
+    let down = crust_core::Ray::new(crust_core::Vec3A::new(0.0, 5.0, 0.0), -crust_core::Vec3A::Y);
     let cam_hit = scene
         .world
-        .intersect(&down.clone().with_mask(crust_core::MASK_CAMERA), 0.001, f32::INFINITY)
+        .intersect(
+            &down.clone().with_mask(crust_core::MASK_CAMERA),
+            0.001,
+            f32::INFINITY,
+        )
         .expect("camera ray passes the card and hits the floor");
     assert!(
         (cam_hit.rec.t - 5.0).abs() < 1e-3,
@@ -450,7 +469,11 @@ fn loads_motionblur_usda() {
     );
     let shadow_hit = scene
         .world
-        .intersect(&down.clone().with_mask(crust_core::MASK_SHADOW), 0.001, f32::INFINITY)
+        .intersect(
+            &down.clone().with_mask(crust_core::MASK_SHADOW),
+            0.001,
+            f32::INFINITY,
+        )
         .expect("shadow ray must be blocked by the card");
     assert!(
         (shadow_hit.rec.t - 3.0).abs() < 1e-3,
@@ -464,8 +487,8 @@ fn loads_motionblur_usda() {
 /// `PointInstancer` scattering six gems, one of which `invisibleIds` hides.
 #[test]
 fn loads_instancing_usda() {
-    let scene = Scene::from_usd(&sample("instancing.usda"))
-        .expect("failed to open instancing.usda");
+    let scene =
+        Scene::from_usd(&sample("instancing.usda")).expect("failed to open instancing.usda");
 
     // 5 visible scatter instances + 3 towers x 2 prototype parts + floor
     // + the rect light's geometry.
@@ -492,16 +515,13 @@ fn loads_instancing_usda() {
 /// contents rendered at the origin as an extra, phantom object.
 #[test]
 fn instancing_does_not_draw_the_class_prototype() {
-    let scene = Scene::from_usd(&sample("instancing.usda"))
-        .expect("failed to open instancing.usda");
+    let scene =
+        Scene::from_usd(&sample("instancing.usda")).expect("failed to open instancing.usda");
 
     // `/World/_Tower` is authored at the origin. The towers are placed at
     // x = -4.2, -2.2 and -0.4, so nothing should occupy x = 0, and a ray
     // down the tower's height there must reach only the floor.
-    let ray = crust_core::Ray::new(
-        crust_core::Vec3A::new(0.0, 1.0, 6.0),
-        -crust_core::Vec3A::Z,
-    );
+    let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.0, 1.0, 6.0), -crust_core::Vec3A::Z);
     assert!(
         scene.world.intersect(&ray, 0.001, 20.0).is_none(),
         "the class prototype was drawn at the origin"
@@ -512,17 +532,14 @@ fn instancing_does_not_draw_the_class_prototype() {
 /// material bound inside the prototype.
 #[test]
 fn instances_are_placed_and_shaded_per_prototype_part() {
-    let scene = Scene::from_usd(&sample("instancing.usda"))
-        .expect("failed to open instancing.usda");
+    let scene =
+        Scene::from_usd(&sample("instancing.usda")).expect("failed to open instancing.usda");
 
     // TowerA sits at x = -4.2 with its block spanning y in [0, 2] and its
     // emerald cap [2, 2.5] (prototype y in [-0.5, 1.5] / [1.5, 2.0], the
     // instance raised by 0.5).
     let shoot = |x: f32, y: f32| {
-        crust_core::Ray::new(
-            crust_core::Vec3A::new(x, y, 6.0),
-            -crust_core::Vec3A::Z,
-        )
+        crust_core::Ray::new(crust_core::Vec3A::new(x, y, 6.0), -crust_core::Vec3A::Z)
     };
     let block = scene
         .world
@@ -539,18 +556,27 @@ fn instances_are_placed_and_shaded_per_prototype_part() {
 
     // Nothing between the towers.
     assert!(
-        scene.world.intersect(&shoot(-3.4, 1.0), 0.001, 20.0).is_none(),
+        scene
+            .world
+            .intersect(&shoot(-3.4, 1.0), 0.001, 20.0)
+            .is_none(),
         "unexpected geometry between TowerA and TowerB"
     );
 
     // TowerC is scaled to 1.4 in y, so its cap reaches higher than
     // TowerA's: prototype y = 2.0 maps to 0.5 + 1.4 * 2.0 = 3.3.
     assert!(
-        scene.world.intersect(&shoot(-0.4, 3.0), 0.001, 20.0).is_some(),
+        scene
+            .world
+            .intersect(&shoot(-0.4, 3.0), 0.001, 20.0)
+            .is_some(),
         "TowerC's non-uniform scale was not applied"
     );
     assert!(
-        scene.world.intersect(&shoot(-4.2, 3.0), 0.001, 20.0).is_none(),
+        scene
+            .world
+            .intersect(&shoot(-4.2, 3.0), 0.001, 20.0)
+            .is_none(),
         "unscaled TowerA should not reach y = 3"
     );
 }
@@ -558,8 +584,8 @@ fn instances_are_placed_and_shaded_per_prototype_part() {
 /// `invisibleIds` prunes instances, and every visible one is placed.
 #[test]
 fn point_instancer_honours_invisible_ids() {
-    let scene = Scene::from_usd(&sample("instancing.usda"))
-        .expect("failed to open instancing.usda");
+    let scene =
+        Scene::from_usd(&sample("instancing.usda")).expect("failed to open instancing.usda");
 
     // Six positions are authored; id 13 — the fourth, at x = 5.4 — is
     // hidden. Shoot straight down each gem's column from y = 4: a gem
@@ -568,10 +594,7 @@ fn point_instancer_honours_invisible_ids() {
     // floor rather than near the gems' tops: per-instance rotations tilt
     // them, so the height at which a column meets a gem varies.)
     let hit_above = |x: f32, z: f32| {
-        let ray = crust_core::Ray::new(
-            crust_core::Vec3A::new(x, 4.0, z),
-            -crust_core::Vec3A::Y,
-        );
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 4.0, z), -crust_core::Vec3A::Y);
         scene
             .world
             .intersect(&ray, 0.001, 10.0)
@@ -580,7 +603,10 @@ fn point_instancer_honours_invisible_ids() {
     assert!(hit_above(1.6, 0.0), "gem id 10 missing");
     assert!(hit_above(2.9, -1.1), "gem id 11 missing");
     assert!(hit_above(4.2, 0.4), "gem id 12 missing");
-    assert!(!hit_above(5.4, -0.6), "gem id 13 is in invisibleIds but was drawn");
+    assert!(
+        !hit_above(5.4, -0.6),
+        "gem id 13 is in invisibleIds but was drawn"
+    );
     assert!(hit_above(2.2, 1.6), "gem id 14 missing");
     assert!(hit_above(3.8, 2.1), "gem id 15 missing");
 }
@@ -634,10 +660,7 @@ fn nested_instances_compose_transforms_and_keep_materials() {
 
     // Shoot along -Z through a point, from well in front of the grove.
     let at = |x: f32, y: f32| {
-        let ray = crust_core::Ray::new(
-            crust_core::Vec3A::new(x, y, 10.0),
-            -crust_core::Vec3A::Z,
-        );
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, y, 10.0), -crust_core::Vec3A::Z);
         scene.world.intersect(&ray, 0.001, 40.0)
     };
 
@@ -689,10 +712,7 @@ fn multi_part_prototype_keeps_every_part() {
         .expect("failed to open nested_instancing.usda");
 
     let at = |x: f32, y: f32| {
-        let ray = crust_core::Ray::new(
-            crust_core::Vec3A::new(x, y, 10.0),
-            -crust_core::Vec3A::Z,
-        );
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, y, 10.0), -crust_core::Vec3A::Z);
         scene.world.intersect(&ray, 0.001, 40.0)
     };
 
@@ -772,10 +792,7 @@ def Xform "W" {
     );
 
     let hit = |x: f32| {
-        let ray = crust_core::Ray::new(
-            crust_core::Vec3A::new(x, 0.0, 10.0),
-            -crust_core::Vec3A::Z,
-        );
+        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 0.0, 10.0), -crust_core::Vec3A::Z);
         scene.world.intersect(&ray, 0.001, 40.0).is_some()
     };
     assert!(hit(0.0), "the outer prototype's own sphere should render");
@@ -840,8 +857,7 @@ impl crust_core::AssetLoader for FakeAssets {
 /// list without adding hittables.
 #[test]
 fn loads_domelight_usda() {
-    let scene = Scene::from_usd(&sample("domelight.usda"))
-        .expect("failed to open domelight.usda");
+    let scene = Scene::from_usd(&sample("domelight.usda")).expect("failed to open domelight.usda");
 
     assert_eq!(
         scene.lights.count(),
@@ -896,8 +912,7 @@ fn dome_texture_is_resolved_and_requested_from_the_host() {
 /// way a bounce ray can find them — and neither may claim scene geometry.
 #[test]
 fn infinite_lights_are_found_by_escaping_rays() {
-    let scene = Scene::from_usd(&sample("domelight.usda"))
-        .expect("failed to open domelight.usda");
+    let scene = Scene::from_usd(&sample("domelight.usda")).expect("failed to open domelight.usda");
 
     let mut dome_like = 0;
     let mut cone_like = 0;
@@ -928,7 +943,10 @@ fn infinite_lights_are_found_by_escaping_rays() {
         let s = light
             .sample_li(crust_core::Vec3A::ZERO, 0.37, 0.62)
             .expect("an infinite light is reachable from anywhere");
-        assert!(s.distance.is_infinite(), "a light at infinity cannot be occluded");
+        assert!(
+            s.distance.is_infinite(),
+            "a light at infinity cannot be occluded"
+        );
         let (_, pdf) = light
             .escaped(crust_core::Vec3A::ZERO, s.direction)
             .expect("sample_li produced a direction escaped() does not cover");
@@ -940,7 +958,10 @@ fn infinite_lights_are_found_by_escaping_rays() {
         );
     }
     assert_eq!(dome_like, 1, "expected exactly one all-direction dome");
-    assert_eq!(cone_like, 1, "expected exactly one cone-shaped distant light");
+    assert_eq!(
+        cone_like, 1,
+        "expected exactly one cone-shaped distant light"
+    );
 }
 
 /// A host whose Ptex decode takes a measurable, known-minimum amount of time.
@@ -1187,7 +1208,10 @@ def Xform "W" {
     let scene = Scene::from_usd(&path).expect("stage must load");
     // The cage's corner must still be there: a down ray just inside (1,1)
     // hits the flat top at y = 1 exactly.
-    let ray = crust_core::Ray::new(crust_core::Vec3A::new(0.95, 8.0, 0.95), -crust_core::Vec3A::Y);
+    let ray = crust_core::Ray::new(
+        crust_core::Vec3A::new(0.95, 8.0, 0.95),
+        -crust_core::Vec3A::Y,
+    );
     let hit = scene
         .world
         .intersect(&ray, 0.001, f32::INFINITY)
@@ -1282,7 +1306,11 @@ fn materialx_textures_reach_the_host_with_their_udim_token() {
         .filter(|(_, s)| *s == crust_core::ColorSpace::Srgb)
         .map(|(p, _)| p.file_name().unwrap().to_str().unwrap())
         .collect();
-    assert_eq!(srgb, vec!["mtlx_base.<UDIM>.png"], "wrong inputs decoded as sRGB");
+    assert_eq!(
+        srgb,
+        vec!["mtlx_base.<UDIM>.png"],
+        "wrong inputs decoded as sRGB"
+    );
 }
 
 /// `primvars:st` has to survive triangulation, and faceVarying is the case
@@ -1393,12 +1421,16 @@ def Xform "W" {{
     };
 
     let probe = |scene: &crust_core::Scene, x: f32| -> (f32, f32) {
-        let r = Ray::new(Vec3A::new(x, 1.0, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let r =
+            Ray::new(Vec3A::new(x, 1.0, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
         let hit = scene
             .world
             .intersect(&r, 0.001, f32::INFINITY)
             .unwrap_or_else(|| panic!("no hit at x = {x}"));
-        assert!(hit.rec.has_uv, "no chart reached the shading point at x = {x}");
+        assert!(
+            hit.rec.has_uv,
+            "no chart reached the shading point at x = {x}"
+        );
         hit.rec.uv
     };
 
@@ -1408,7 +1440,10 @@ def Xform "W" {{
     let scene = Scene::from_usd(&path).expect("stage must load");
     let (au, av) = probe(&scene, -3.0);
     let (bu, bv) = probe(&scene, 3.0);
-    assert!((au - 0.5).abs() < 0.01 && (av - 0.5).abs() < 0.01, "A: ({au}, {av})");
+    assert!(
+        (au - 0.5).abs() < 0.01 && (av - 0.5).abs() < 0.01,
+        "A: ({au}, {av})"
+    );
     // The load-bearing one: B shading at u ~ 0.5 means it was handed A's
     // chart, so its texture reads tile 1001 instead of 1002.
     assert!(

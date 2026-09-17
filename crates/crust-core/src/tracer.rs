@@ -148,12 +148,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(
-        camera: Camera,
-        world: World,
-        lights: LightList,
-        settings: RenderSettings,
-    ) -> Self {
+    pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
         info!("world holds {} geometries", world.count());
         Renderer {
             camera,
@@ -191,19 +186,11 @@ impl Renderer {
     ///
     /// With guiding enabled the counters cover **every** pass, training
     /// included, since all of them spend time.
-    pub fn render_with_stats(
-        &self,
-        tiled: bool,
-        progress: ProgressCallback,
-    ) -> (Buffer, RayStats) {
+    pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
         self.render_impl(tiled, Some(progress))
     }
 
-    fn render_impl(
-        &self,
-        tiled: bool,
-        progress: Option<ProgressCallback>,
-    ) -> (Buffer, RayStats) {
+    fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {
         if self.settings.guiding {
             return self.render_guided(tiled, progress);
         }
@@ -242,11 +229,7 @@ impl Renderer {
     /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
-    fn render_guided(
-        &self,
-        tiled: bool,
-        progress: Option<ProgressCallback>,
-    ) -> (Buffer, RayStats) {
+    fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {
         // Every pass costs time, training included, so the counters cover
         // all of them rather than the final pass alone.
         let mut rays = RayStats::default();
@@ -556,8 +539,8 @@ impl Renderer {
         let motion = self.world.has_motion();
 
         for sample in 0..cfg.spp {
-            let root =
-                PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32).new_domain(tile);
+            let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
+                .new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
             // Warp the in-pixel jitter through the reconstruction filter's
             // distribution (filter importance sampling): the offset places
@@ -608,8 +591,7 @@ impl Renderer {
             // threshold. Checked every 4th sample to amortize the cost.
             if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
                 let n = taken as f64;
-                let var_of_mean =
-                    ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
+                let var_of_mean = ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
                 let mean = (lum_sum / n).max(1e-4);
                 if var_of_mean.sqrt() / mean < threshold {
                     break;
@@ -944,8 +926,7 @@ fn bounce_emission_weight(
     };
     match lights.find_by_geom(hit.geom_id) {
         Some(light) => {
-            let light_pdf =
-                (light.pdf_at_point(from, hit.rec.p) / lights.count() as f32).max(1e-6);
+            let light_pdf = (light.pdf_at_point(from, hit.rec.p) / lights.count() as f32).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
         None => 1.0,
@@ -1194,8 +1175,18 @@ fn trace_path(
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee =
-                    volume_nee(p, wi, &phase, world, volumes, lights, strategy, v, ray.time(), stats);
+                let nee = volume_nee(
+                    p,
+                    wi,
+                    &phase,
+                    world,
+                    volumes,
+                    lights,
+                    strategy,
+                    v,
+                    ray.time(),
+                    stats,
+                );
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -1233,7 +1224,10 @@ fn trace_path(
                     records.push(vrec);
                     break;
                 }
-                prev = Some(PrevVertex::Phase { pos: p, pdf: phase_pdf });
+                prev = Some(PrevVertex::Phase {
+                    pos: p,
+                    pdf: phase_pdf,
+                });
                 stats.vertices += 1;
                 records.push(vrec);
                 // Preserve the carried medium: scattering in fog inside a
@@ -1332,8 +1326,7 @@ fn trace_path(
                 // built-in sky gradient so scenes without an environment
                 // light look as they always have.
                 let t = 0.5 * (unit_direction.y + 1.0);
-                background +=
-                    (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
+                background += (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
             }
             // Segment emission is already weighted; the background pays the
             // volume transmittance of the final segment.
@@ -1432,14 +1425,12 @@ fn trace_path(
                     let bounce_pdf = match guiding_here {
                         Some(g) if g.field.trained_at(rec.p) => {
                             let alpha = g.field.config().guide_prob;
-                            alpha * g.field.pdf(rec.p, light_dir_unit)
-                                + (1.0 - alpha) * brdf_pdf
+                            alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
                         }
                         _ => brdf_pdf,
                     };
                     let weight = strategy.light_weight(light_pdf, bounce_pdf);
-                    nee += ls.radiance * brdf_value * cosine * shadow_tr * weight
-                        / light_pdf;
+                    nee += ls.radiance * brdf_value * cosine * shadow_tr * weight / light_pdf;
                 }
             }
         }
@@ -1636,8 +1627,8 @@ mod tests {
         ];
         for s in strategies {
             for (light_pdf, bounce_pdf) in pdf_pairs {
-                let sum = s.light_weight(light_pdf, bounce_pdf)
-                    + s.bounce_weight(bounce_pdf, light_pdf);
+                let sum =
+                    s.light_weight(light_pdf, bounce_pdf) + s.bounce_weight(bounce_pdf, light_pdf);
                 assert!(
                     (sum - 1.0).abs() < 1e-3,
                     "{s:?}: weights sum to {sum} at pdfs ({light_pdf}, {bounce_pdf})"

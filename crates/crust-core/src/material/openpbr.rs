@@ -35,12 +35,12 @@
 //! - `geometry_opacity` (host-renderer cutout) and authored geometry
 //!   normals/tangents.
 
+use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::{Material, ScatterSample};
 use crate::material::brdf::*;
+use crate::material::{Material, ScatterSample};
 use crate::medium::Medium;
 use crate::ray::Ray;
-use crate::PathSampler;
 use glam::Vec3A;
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -467,11 +467,7 @@ fn eval_specular(
 
     // OpenPBR spec places thin-film between coat and base; when there is
     // no coat the outer medium is air.
-    let outer_ior = if m.coat_weight > 0.0 {
-        m.coat_ior
-    } else {
-        1.0
-    };
+    let outer_ior = if m.coat_weight > 0.0 { m.coat_ior } else { 1.0 };
     // OpenPBR thickness is in μm; the thin-film helpers want nm.
     let tf_thickness_nm = m.thin_film_thickness * 1000.0;
 
@@ -902,8 +898,8 @@ fn eval_transmission_channel(
     }
 
     // BTDF (eq. 21).
-    let btdf = (v_dot_h * -l_dot_h) / (n_dot_v * n_dot_l)
-        * (eta_t * eta_t * (1.0 - f) * d * g / denom2);
+    let btdf =
+        (v_dot_h * -l_dot_h) / (n_dot_v * n_dot_l) * (eta_t * eta_t * (1.0 - f) * d * g / denom2);
 
     // pdf: raw VNDF half-vector density times the refraction Jacobian
     // (eq. 17): dω_h/dω_l = η_t² |l·h| / (η_i(v·h) + η_t(l·h))².
@@ -1102,10 +1098,8 @@ impl OpenPBR {
                 l
             }
             Lobe::Coat => {
-                let (ax, ay) = roughness_to_alpha_aniso(
-                    self.coat_roughness,
-                    self.coat_roughness_anisotropy,
-                );
+                let (ax, ay) =
+                    roughness_to_alpha_aniso(self.coat_roughness, self.coat_roughness_anisotropy);
                 let h_local = sample_vndf_ggx_aniso_local(v_local, ax, ay, dir_uv);
                 let l = 2.0 * v_local.dot(h_local) * h_local - v_local;
                 if l.z <= 0.0 {
@@ -1156,7 +1150,6 @@ impl OpenPBR {
             pdf,
         ))
     }
-
 }
 
 impl Material for OpenPBR {
@@ -1263,16 +1256,25 @@ mod tests {
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let r_in = Ray::new(
+            Vec3A::new(0.3, -0.2, 1.0),
+            Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+        );
 
         let mut checked = 0;
         for _ in 0..128 {
             if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 assert!(!sample.delta, "opaque OpenPBR has no delta lobe");
                 let wi = sample.ray.direction().normalize();
-                let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("opaque OpenPBR is evaluable");
+                let (ev, epdf) = m
+                    .eval(&r_in, &rec, wi)
+                    .expect("opaque OpenPBR is evaluable");
                 let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
-                assert!((ev - sample.value).abs().max_element() < tol, "{ev} vs {:?}", sample.value);
+                assert!(
+                    (ev - sample.value).abs().max_element() < tol,
+                    "{ev} vs {:?}",
+                    sample.value
+                );
                 assert!(
                     (epdf - sample.pdf).abs() < 1e-3 * (1.0 + sample.pdf),
                     "{epdf} vs {}",
@@ -1301,12 +1303,18 @@ mod tests {
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let r_in = Ray::new(
+            Vec3A::new(0.3, -0.2, 1.0),
+            Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+        );
 
         let (mut transmitted, mut reflected) = (0, 0);
         for _ in 0..256 {
             if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
-                assert!(!sample.delta, "thick non-dispersive glass has no delta lobe");
+                assert!(
+                    !sample.delta,
+                    "thick non-dispersive glass has no delta lobe"
+                );
                 let wi = sample.ray.direction().normalize();
                 if wi.z < 0.0 {
                     transmitted += 1;
@@ -1332,7 +1340,10 @@ mod tests {
                 assert!(w.is_finite() && w >= 0.0 && w < 10.0, "weight {w}");
             }
         }
-        assert!(transmitted > 64, "glass should mostly refract: {transmitted}");
+        assert!(
+            transmitted > 64,
+            "glass should mostly refract: {transmitted}"
+        );
         assert!(reflected >= 0);
 
         // Near-smooth glass: pointwise agreement degrades to float noise but
@@ -1365,7 +1376,9 @@ mod tests {
         rec.front_face = true;
         let dir_in = Vec3A::new(0.4, 0.0, -1.0).normalize();
         let r_in = Ray::new(-dir_in, dir_in);
-        let expected = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+        let expected = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5)
+            .unwrap()
+            .normalize();
 
         let mut checked = 0;
         for _ in 0..128 {
@@ -1393,7 +1406,10 @@ mod tests {
         let mut rec = HitRecord::new();
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let r_in = Ray::new(
+            Vec3A::new(0.3, -0.2, 1.0),
+            Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+        );
         let mut deltas = 0;
         for _ in 0..128 {
             if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
@@ -1583,7 +1599,10 @@ mod tests {
         let mut rec = HitRecord::new();
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
-        let ray = Ray::new(Vec3A::new(0.5, 0.0, 1.0), Vec3A::new(-0.5, 0.0, -1.0).normalize());
+        let ray = Ray::new(
+            Vec3A::new(0.5, 0.0, 1.0),
+            Vec3A::new(-0.5, 0.0, -1.0).normalize(),
+        );
         let mut got_positive = false;
         let mut smp = s();
         for _ in 0..128 {
@@ -1674,7 +1693,10 @@ mod tests {
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let r_in = Ray::new(
+            Vec3A::new(0.3, -0.2, 1.0),
+            Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+        );
 
         let mut transmitted = 0;
         for _ in 0..256 {
@@ -1684,7 +1706,9 @@ mod tests {
                 if wi.z < 0.0 {
                     transmitted += 1;
                 }
-                let (ev, epdf) = m.eval(&r_in, &rec, wi).expect("dispersive glass is evaluable");
+                let (ev, epdf) = m
+                    .eval(&r_in, &rec, wi)
+                    .expect("dispersive glass is evaluable");
                 let tol = 1e-3 * (1.0 + sample.value.max_element().abs());
                 assert!(
                     (ev - sample.value).abs().max_element() < tol,
@@ -1704,7 +1728,10 @@ mod tests {
                 assert!(w.is_finite() && w >= 0.0 && w < 30.0, "weight {w}");
             }
         }
-        assert!(transmitted > 64, "dispersive glass should mostly refract: {transmitted}");
+        assert!(
+            transmitted > 64,
+            "dispersive glass should mostly refract: {transmitted}"
+        );
     }
 
     #[test]
@@ -1725,13 +1752,28 @@ mod tests {
         // The green channel's own IOR under the Cauchy fit (545 nm sits
         // slightly blue of the d line where n_d is defined).
         let eta_g = transmission_iors(&m).y;
-        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / eta_g).unwrap().normalize();
+        let l_green = refract_dir(-dir_in, Vec3A::Z, 1.0 / eta_g)
+            .unwrap()
+            .normalize();
 
         let (v, pdf) = m.eval(&r_in, &rec, l_green).expect("evaluable");
         assert!(pdf > 0.0, "pdf = {pdf}");
-        assert!(v.y > 0.0, "green channel dark at its own Snell direction: {v}");
-        assert!(v.y > v.x, "green {} not > red {} at green Snell direction", v.y, v.x);
-        assert!(v.y > v.z, "green {} not > blue {} at green Snell direction", v.y, v.z);
+        assert!(
+            v.y > 0.0,
+            "green channel dark at its own Snell direction: {v}"
+        );
+        assert!(
+            v.y > v.x,
+            "green {} not > red {} at green Snell direction",
+            v.y,
+            v.x
+        );
+        assert!(
+            v.y > v.z,
+            "green {} not > blue {} at green Snell direction",
+            v.y,
+            v.z
+        );
     }
 
     #[test]
@@ -1825,7 +1867,9 @@ mod tests {
         rec.front_face = true;
         let dir_in = Vec3A::new(0.4, 0.0, -1.0).normalize();
         let r_in = Ray::new(-dir_in, dir_in);
-        let wi = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5).unwrap().normalize();
+        let wi = refract_dir(-dir_in, Vec3A::Z, 1.0 / 1.5)
+            .unwrap()
+            .normalize();
 
         let (v_deep, _) = deep.eval(&r_in, &rec, wi).expect("evaluable");
         assert!(v_deep.y > 0.0, "no transmission at the Snell direction");
@@ -1852,13 +1896,22 @@ mod tests {
         assert!((f_n - f0).abs().max_element() < 1e-5, "F(0°) = {f_n}");
         // Grazing incidence goes to white.
         let f_g = fresnel_f82_tint(0.0, f0, tint);
-        assert!((f_g - Vec3A::ONE).abs().max_element() < 1e-5, "F(90°) = {f_g}");
+        assert!(
+            (f_g - Vec3A::ONE).abs().max_element() < 1e-5,
+            "F(90°) = {f_g}"
+        );
         // At μ̄ = 1/7 the reflectance is exactly Schlick scaled by the tint.
         let mu_bar = 1.0 / 7.0;
         let with = fresnel_f82_tint(mu_bar, f0, tint);
         let without = fresnel_f82_tint(mu_bar, f0, Vec3A::ONE);
-        assert!((with.y / without.y - tint.y).abs() < 1e-3, "{with} vs {without}");
-        assert!((with.z / without.z - tint.z).abs() < 1e-3, "{with} vs {without}");
+        assert!(
+            (with.y / without.y - tint.y).abs() < 1e-3,
+            "{with} vs {without}"
+        );
+        assert!(
+            (with.z / without.z - tint.z).abs() < 1e-3,
+            "{with} vs {without}"
+        );
         assert!((with.x - without.x).abs() < 1e-5, "untinted channel moved");
     }
 
@@ -1918,7 +1971,10 @@ mod tests {
         };
         let p_n = coat_passage(&m, 1.0);
         let p_g = coat_passage(&m, 0.2);
-        assert!(p_g.x < p_n.x && p_g.y < p_n.y, "{p_g} not dimmer than {p_n}");
+        assert!(
+            p_g.x < p_n.x && p_g.y < p_n.y,
+            "{p_g} not dimmer than {p_n}"
+        );
         assert!(
             p_g.y / p_g.x < p_n.y / p_n.x,
             "tinted channel not saturating with angle: {p_g} vs {p_n}"
@@ -1965,7 +2021,11 @@ mod tests {
         let inv = 1.0 - a;
         let expect_ax = r * r * (2.0 / (1.0 + inv * inv)).sqrt();
         assert!((ax - expect_ax).abs() < 1e-6, "ax {ax} != {expect_ax}");
-        assert!((ay - inv * expect_ax).abs() < 1e-6, "ay {ay} != {}", inv * expect_ax);
+        assert!(
+            (ay - inv * expect_ax).abs() < 1e-6,
+            "ay {ay} != {}",
+            inv * expect_ax
+        );
     }
 
     #[test]
@@ -1988,7 +2048,10 @@ mod tests {
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Z;
         rec.front_face = true;
-        let r_in = Ray::new(Vec3A::new(0.3, -0.2, 1.0), Vec3A::new(-0.3, 0.2, -1.0).normalize());
+        let r_in = Ray::new(
+            Vec3A::new(0.3, -0.2, 1.0),
+            Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+        );
         for _ in 0..256 {
             if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
                 if sample.ray.direction().z < 0.0 {
@@ -2089,10 +2152,12 @@ mod tests {
         assert!(medium.is_scattering());
         assert!((medium.g - 0.3).abs() < 1e-5, "g {}", medium.g);
         // Half the sss volume's scattering (sss fraction (1-0.5)·1 = 0.5).
-        let full_sss =
-            Medium::from_subsurface(Vec3A::splat(0.5), 0.1, Vec3A::ONE, 0.3);
+        let full_sss = Medium::from_subsurface(Vec3A::splat(0.5), 0.1, Vec3A::ONE, 0.3);
         assert!(
-            (medium.sigma_s - full_sss.sigma_s * 0.5).abs().max_element() < 1e-3,
+            (medium.sigma_s - full_sss.sigma_s * 0.5)
+                .abs()
+                .max_element()
+                < 1e-3,
             "sigma_s {:?}",
             medium.sigma_s
         );
@@ -2166,8 +2231,18 @@ mod tests {
                 sum_no += sample.value;
             }
         }
-        assert!(sum_sss.y < sum_no.y, "SSS green {} not < baseline {}", sum_sss.y, sum_no.y);
-        assert!(sum_sss.z < sum_no.z, "SSS blue {} not < baseline {}", sum_sss.z, sum_no.z);
+        assert!(
+            sum_sss.y < sum_no.y,
+            "SSS green {} not < baseline {}",
+            sum_sss.y,
+            sum_no.y
+        );
+        assert!(
+            sum_sss.z < sum_no.z,
+            "SSS blue {} not < baseline {}",
+            sum_sss.z,
+            sum_no.z
+        );
     }
 
     #[test]
@@ -2228,12 +2303,19 @@ mod tests {
         let mut rec = HitRecord::new();
         rec.p = Vec3A::ZERO;
         rec.normal = Vec3A::Y;
-        let ray = Ray::new(Vec3A::new(0.0, 1.0, 1.0), Vec3A::new(0.0, -1.0, -1.0).normalize());
+        let ray = Ray::new(
+            Vec3A::new(0.0, 1.0, 1.0),
+            Vec3A::new(0.0, -1.0, -1.0).normalize(),
+        );
         // Run many samples: none should be NaN or negative.
         let mut smp = s();
         for _ in 0..64 {
             if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
-                assert!(sample.pdf.is_finite() && sample.pdf > 0.0, "pdf = {}", sample.pdf);
+                assert!(
+                    sample.pdf.is_finite() && sample.pdf > 0.0,
+                    "pdf = {}",
+                    sample.pdf
+                );
                 assert!(sample.value.is_finite(), "value = {:?}", sample.value);
                 assert!(
                     sample.value.x >= 0.0 && sample.value.y >= 0.0 && sample.value.z >= 0.0,

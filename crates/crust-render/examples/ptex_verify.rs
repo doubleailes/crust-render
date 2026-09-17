@@ -55,7 +55,11 @@ fn main() {
 
     let mut failures = 0usize;
     let mut check = |label: &str, ok: bool, detail: String| {
-        println!("{:<44} {}  {detail}", label, if ok { "PASS" } else { "FAIL" });
+        println!(
+            "{:<44} {}  {detail}",
+            label,
+            if ok { "PASS" } else { "FAIL" }
+        );
         if !ok {
             failures += 1;
         }
@@ -162,8 +166,10 @@ fn main() {
         check(
             "vertex positions agree",
             n == mesh.points.len() && rel < 1e-5,
-            format!("{n} vs {} verts, worst |d| {worst:.6} at {worst_at} (rel {rel:.2e})",
-                mesh.points.len()),
+            format!(
+                "{n} vs {} verts, worst |d| {worst:.6} at {worst_at} (rel {rel:.2e})",
+                mesh.points.len()
+            ),
         );
     }
 
@@ -186,8 +192,8 @@ struct Mesh {
 }
 
 fn read_mesh(stage_path: &str, prim_path: &str) -> Result<Mesh, String> {
-    let stage = usd::Stage::open(stage_path)
-        .map_err(|e| format!("cannot open {stage_path}: {e}"))?;
+    let stage =
+        usd::Stage::open(stage_path).map_err(|e| format!("cannot open {stage_path}: {e}"))?;
     let path = sdf::Path::new(prim_path).map_err(|e| format!("bad prim path: {e}"))?;
     let prim = stage.prim(path);
 
@@ -201,7 +207,11 @@ fn read_mesh(stage_path: &str, prim_path: &str) -> Result<Mesh, String> {
     let indices = int_vec("faceVertexIndices")?;
     let points = match prim.attribute("points").get::<sdf::Value>() {
         Ok(Some(sdf::Value::Vec3fVec(v))) => v.iter().map(|p| [p.x, p.y, p.z]).collect(),
-        other => return Err(format!("{prim_path}.points: expected point3f[], got {other:?}")),
+        other => {
+            return Err(format!(
+                "{prim_path}.points: expected point3f[], got {other:?}"
+            ));
+        }
     };
     Ok(Mesh {
         counts,

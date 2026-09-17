@@ -136,7 +136,13 @@ impl UvMap {
     /// `swapped` undoes a mirrored placement's index swap exactly as
     /// [`FaceMap::resolve`] does: corner UVs are stored in original vertex
     /// order, so restoring the barycentrics to that order is all it takes.
-    pub fn resolve(&self, prim_id: u32, u: f32, v: f32, swapped: bool) -> Option<((f32, f32), Vec3A)> {
+    pub fn resolve(
+        &self,
+        prim_id: u32,
+        u: f32,
+        v: f32,
+        swapped: bool,
+    ) -> Option<((f32, f32), Vec3A)> {
         let i = prim_id as usize;
         let [a, b, c] = *self.uvs.get(i)?;
         let (u, v) = if swapped { (v, u) } else { (u, v) };

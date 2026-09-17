@@ -31,8 +31,8 @@
 //! cargo run --release -p crust-render --example ptex_seams -- texture.ptx
 //! ```
 
-use std::collections::HashMap;
 use crust_assets::read_channel;
+use std::collections::HashMap;
 
 /// Samples per edge. The seam is a 1-D signal; a handful of points along it is
 /// plenty to separate "matches" from "uncorrelated".
@@ -60,7 +60,10 @@ fn main() {
     let dt = tx.data_type();
     let scale = dt.one_value_inv();
     let n_faces = tx.num_faces();
-    println!("{path}\n{n_faces} faces, {n_chan} channels of {}\n", dt.name());
+    println!(
+        "{path}\n{n_faces} faces, {n_chan} channels of {}\n",
+        dt.name()
+    );
 
     // Sample faces spread across the mesh rather than the first N, which on a
     // baked cage tend to be one contiguous patch.
@@ -126,9 +129,18 @@ fn main() {
 
     println!("seams tested: {seams}  ({} samples each side)\n", seams * K);
     println!("mean |difference| across a shared edge, 0..1 per channel:");
-    println!("  v0=(0,0) convention (what crust uses)   {:.4}", agree.mean());
-    println!("  same seam, u/v transposed               {:.4}", transposed.mean());
-    println!("  unrelated faces (chance)                {:.4}", unrelated.mean());
+    println!(
+        "  v0=(0,0) convention (what crust uses)   {:.4}",
+        agree.mean()
+    );
+    println!(
+        "  same seam, u/v transposed               {:.4}",
+        transposed.mean()
+    );
+    println!(
+        "  unrelated faces (chance)                {:.4}",
+        unrelated.mean()
+    );
 
     let vs_chance = unrelated.mean() / agree.mean().max(1e-9);
     let vs_transpose = transposed.mean() / agree.mean().max(1e-9);
@@ -240,6 +252,10 @@ impl Stat {
         self.n += 1;
     }
     fn mean(&self) -> f64 {
-        if self.n == 0 { 0.0 } else { self.sum / self.n as f64 }
+        if self.n == 0 {
+            0.0
+        } else {
+            self.sum / self.n as f64
+        }
     }
 }

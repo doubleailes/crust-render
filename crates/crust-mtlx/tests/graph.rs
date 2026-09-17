@@ -4,8 +4,8 @@
 //! sample document.
 
 use crust_mtlx::{
-    BinOp, Compiler, Doc, LobeKind, MtlxError, Op, Program, ShadeCtx, Source, Texture,
-    TextureRef, Val, compile, flatten, reflectivity_from_ior,
+    BinOp, Compiler, Doc, LobeKind, MtlxError, Op, Program, ShadeCtx, Source, Texture, TextureRef,
+    Val, compile, flatten, reflectivity_from_ior,
 };
 use glam::Vec3A;
 use std::path::PathBuf;
@@ -344,14 +344,32 @@ fn filename_inputs_keep_text_and_colorspace() {
 
 #[test]
 fn arithmetic_binaries() {
-    assert!(approx(run(&binary("add", "float", "1.5", "2"), "n").x(), 3.5));
-    assert!(approx(run(&binary("subtract", "float", "1.5", "2"), "n").x(), -0.5));
-    assert!(approx(run(&binary("multiply", "float", "1.5", "2"), "n").x(), 3.0));
-    assert!(approx(run(&binary("divide", "float", "1.5", "2"), "n").x(), 0.75));
-    assert!(approx(run(&binary("power", "float", "2", "3"), "n").x(), 8.0));
+    assert!(approx(
+        run(&binary("add", "float", "1.5", "2"), "n").x(),
+        3.5
+    ));
+    assert!(approx(
+        run(&binary("subtract", "float", "1.5", "2"), "n").x(),
+        -0.5
+    ));
+    assert!(approx(
+        run(&binary("multiply", "float", "1.5", "2"), "n").x(),
+        3.0
+    ));
+    assert!(approx(
+        run(&binary("divide", "float", "1.5", "2"), "n").x(),
+        0.75
+    ));
+    assert!(approx(
+        run(&binary("power", "float", "2", "3"), "n").x(),
+        8.0
+    ));
     assert!(approx(run(&binary("min", "float", "2", "3"), "n").x(), 2.0));
     assert!(approx(run(&binary("max", "float", "2", "3"), "n").x(), 3.0));
-    assert!(approx(run(&binary("modulo", "float", "7", "3"), "n").x(), 1.0));
+    assert!(approx(
+        run(&binary("modulo", "float", "7", "3"), "n").x(),
+        1.0
+    ));
 }
 
 #[test]
@@ -382,9 +400,15 @@ fn a_float_operand_broadcasts_into_a_colour() {
 #[test]
 fn unauthored_binary_inputs_take_their_defaults() {
     // multiply defaults both inputs to 1, add to 0.
-    let v = run(r#"<materialx><multiply name="n" type="float" /></materialx>"#, "n");
+    let v = run(
+        r#"<materialx><multiply name="n" type="float" /></materialx>"#,
+        "n",
+    );
     assert!(approx(v.x(), 1.0));
-    let v = run(r#"<materialx><add name="n" type="float" /></materialx>"#, "n");
+    let v = run(
+        r#"<materialx><add name="n" type="float" /></materialx>"#,
+        "n",
+    );
     assert!(approx(v.x(), 0.0));
     let v = run(
         r#"<materialx><multiply name="n" type="float"><input name="in1" type="float" value="5" /></multiply></materialx>"#,
@@ -405,7 +429,9 @@ fn unary_math_nodes() {
     assert!((run(&unary("ln", "float", "2.718281828"), "n").x() - 1.0).abs() < 1e-4);
     assert!(approx(run(&unary("sin", "float", "0"), "n").x(), 0.0));
     assert!(approx(run(&unary("cos", "float", "0"), "n").x(), 1.0));
-    assert!((run(&unary("asin", "float", "1"), "n").x() - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    assert!(
+        (run(&unary("asin", "float", "1"), "n").x() - std::f32::consts::FRAC_PI_2).abs() < 1e-5
+    );
     assert!(approx(run(&unary("acos", "float", "1"), "n").x(), 0.0));
 }
 
@@ -612,22 +638,50 @@ fn dotproduct_and_luminance() {
     let v = run(&binary("dotproduct", "vector3", "1, 2, 3", "4, 5, 6"), "n");
     assert!(approx(v.x(), 32.0));
     let v = run(&unary("luminance", "color3", "1, 1, 1"), "n");
-    assert!((v.x() - 1.0).abs() < 1e-4, "white has unit luminance: {}", v.x());
+    assert!(
+        (v.x() - 1.0).abs() < 1e-4,
+        "white has unit luminance: {}",
+        v.x()
+    );
     let v = run(&unary("luminance", "color3", "0, 1, 0"), "n");
-    assert!(v.x() > 0.6 && v.x() < 0.8, "green carries most of the luminance: {}", v.x());
+    assert!(
+        v.x() > 0.6 && v.x() < 0.8,
+        "green carries most of the luminance: {}",
+        v.x()
+    );
 }
 
 #[test]
 fn geometric_inputs_read_the_shading_context() {
     let c = ctx();
-    let uv = run_with(r#"<materialx><texcoord name="n" type="vector2" /></materialx>"#, "n", &c, &decline);
+    let uv = run_with(
+        r#"<materialx><texcoord name="n" type="vector2" /></materialx>"#,
+        "n",
+        &c,
+        &decline,
+    );
     assert_eq!(uv.arity, 2);
     assert!(approx(uv.v[0], 0.25) && approx(uv.v[1], 0.75));
-    let n = run_with(r#"<materialx><normal name="n" type="vector3" /></materialx>"#, "n", &c, &decline);
+    let n = run_with(
+        r#"<materialx><normal name="n" type="vector3" /></materialx>"#,
+        "n",
+        &c,
+        &decline,
+    );
     assert_eq!(n.rgb(), Vec3A::Z);
-    let p = run_with(r#"<materialx><position name="n" type="vector3" /></materialx>"#, "n", &c, &decline);
+    let p = run_with(
+        r#"<materialx><position name="n" type="vector3" /></materialx>"#,
+        "n",
+        &c,
+        &decline,
+    );
     assert_eq!(p.rgb(), Vec3A::new(1.0, 2.0, 3.0));
-    let v = run_with(r#"<materialx><viewdirection name="n" type="vector3" /></materialx>"#, "n", &c, &decline);
+    let v = run_with(
+        r#"<materialx><viewdirection name="n" type="vector3" /></materialx>"#,
+        "n",
+        &c,
+        &decline,
+    );
     assert_eq!(v.rgb(), -Vec3A::Z);
 }
 
@@ -639,7 +693,10 @@ fn constant_node_returns_its_value() {
     );
     assert_eq!(v.arity, 3);
     assert!(approx(v.v[1], 0.6));
-    let v = run(r#"<materialx><constant name="n" type="float" /></materialx>"#, "n");
+    let v = run(
+        r#"<materialx><constant name="n" type="float" /></materialx>"#,
+        "n",
+    );
     assert!(approx(v.x(), 0.0));
 }
 
@@ -720,7 +777,11 @@ fn program_eval_reuses_the_caller_buffer() {
     let mut p = Program::default();
     p.ops.push(Op::Const(Val::float(1.0)));
     p.ops.push(Op::Const(Val::float(2.0)));
-    p.ops.push(Op::Binary { op: BinOp::Add, a: 0, b: 1 });
+    p.ops.push(Op::Binary {
+        op: BinOp::Add,
+        a: 0,
+        b: 1,
+    });
     let mut slots = vec![Val::float(99.0); 10];
     p.eval(&ctx(), &mut slots);
     assert_eq!(slots.len(), 3);
@@ -738,8 +799,15 @@ fn hand_built_ops_evaluate() {
     p.ops.push(Op::Const(Val::vec3(0.5, 0.25, 0.125)));
     let s = p.ops.len() as u32;
     p.ops.push(Op::Const(Val::float(2.0)));
-    p.ops.push(Op::Binary { op: BinOp::Mul, a, b: s });
-    p.ops.push(Op::Unary { op: crust_mtlx::UnOp::Sqrt, a });
+    p.ops.push(Op::Binary {
+        op: BinOp::Mul,
+        a,
+        b: s,
+    });
+    p.ops.push(Op::Unary {
+        op: crust_mtlx::UnOp::Sqrt,
+        a,
+    });
     p.ops.push(Op::Extract { a, index: 1 });
     p.ops.push(Op::Convert { a: s, arity: 3 });
     let mut slots = Vec::new();
@@ -789,7 +857,10 @@ fn a_declined_image_falls_back_to_its_default() {
            </image></materialx>"#,
         "n",
     );
-    assert!(v.rgb().min_element() > 0.0 && v.rgb().max_element() < 1.0, "{v:?}");
+    assert!(
+        v.rgb().min_element() > 0.0 && v.rgb().max_element() < 1.0,
+        "{v:?}"
+    );
 }
 
 #[test]
@@ -837,7 +908,8 @@ fn a_float_image_reads_one_lane() {
 
 #[test]
 fn image_lookups_use_the_context_uv() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader =
+        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
     let v = run_with(
         r#"<materialx><image name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -851,7 +923,8 @@ fn image_lookups_use_the_context_uv() {
 
 #[test]
 fn tiledimage_scales_and_offsets_the_uv() {
-    let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let loader =
+        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
     let v = run_with(
         r#"<materialx><tiledimage name="n" type="vector2">
              <input name="file" type="filename" value="e.png" />
@@ -864,7 +937,10 @@ fn tiledimage_scales_and_offsets_the_uv() {
     );
     // The lookup is at uv·tiling + offset (or an equivalent affine map):
     // it must differ from the raw uv, and scaling must be visible.
-    assert!(!(approx(v.v[0], 0.25) && approx(v.v[1], 0.75)), "tiling ignored: {v:?}");
+    assert!(
+        !(approx(v.v[0], 0.25) && approx(v.v[1], 0.75)),
+        "tiling ignored: {v:?}"
+    );
     assert!(v.v[0].is_finite() && v.v[1].is_finite());
 }
 
@@ -884,7 +960,10 @@ fn a_flat_normal_map_returns_the_geometric_normal() {
         &loader,
     );
     let n = v.rgb().normalize();
-    assert!(n.abs_diff_eq(c.normal, 1e-3), "flat map bent the normal: {n}");
+    assert!(
+        n.abs_diff_eq(c.normal, 1e-3),
+        "flat map bent the normal: {n}"
+    );
 }
 
 #[test]
@@ -904,8 +983,14 @@ fn a_tilted_normal_map_leans_along_the_tangent() {
         &loader,
     );
     let n = v.rgb().normalize();
-    assert!(n.dot(c.tangent) > 0.2, "normal did not lean toward the tangent: {n}");
-    assert!(n.dot(c.normal) > 0.0, "normal must stay on the surface's side: {n}");
+    assert!(
+        n.dot(c.tangent) > 0.2,
+        "normal did not lean toward the tangent: {n}"
+    );
+    assert!(
+        n.dot(c.normal) > 0.0,
+        "normal must stay on the surface's side: {n}"
+    );
 }
 
 #[test]
@@ -996,7 +1081,10 @@ fn every_bsdf_leaf_category_maps_to_a_pool() {
         ("subsurface_bsdf", LobeKind::Subsurface),
         ("translucent_bsdf", LobeKind::Subsurface),
     ] {
-        let l = lobes_of(&format!(r#"<materialx><{cat} name="x" type="BSDF" /></materialx>"#), "x");
+        let l = lobes_of(
+            &format!(r#"<materialx><{cat} name="x" type="BSDF" /></materialx>"#),
+            "x",
+        );
         assert_eq!(l.len(), 1, "{cat}");
         assert_eq!(l[0].0, kind, "{cat}");
     }
@@ -1089,7 +1177,10 @@ fn a_leaf_weight_input_scales_its_lobe() {
         "t",
     );
     assert_eq!(l.len(), 1);
-    assert!(approx(l[0].1, 0.0), "a weight-0 dummy must reach the pool with no weight");
+    assert!(
+        approx(l[0].1, 0.0),
+        "a weight-0 dummy must reach the pool with no weight"
+    );
 }
 
 #[test]
@@ -1203,10 +1294,17 @@ fn sample_metal_compiles_with_mask_driven_weights() {
             .sum::<f32>()
     };
     let total = w(LobeKind::Conductor) + w(LobeKind::Diffuse);
-    assert!((total - 1.0).abs() < 1e-4, "a mix partitions its weight: {total}");
+    assert!(
+        (total - 1.0).abs() < 1e-4,
+        "a mix partitions its weight: {total}"
+    );
     // The conductor's colour reduces from artistic_ior back to the authored
     // reflectivity.
-    let metal = c.lobes.iter().find(|l| l.kind == LobeKind::Conductor).unwrap();
+    let metal = c
+        .lobes
+        .iter()
+        .find(|l| l.kind == LobeKind::Conductor)
+        .unwrap();
     let n = slots[metal.ior as usize].rgb();
     let k = slots[metal.extinction as usize].rgb();
     let r = reflectivity_from_ior(n, k);
@@ -1216,19 +1314,34 @@ fn sample_metal_compiles_with_mask_driven_weights() {
 #[test]
 fn sample_first_material_is_used_when_none_is_named() {
     let c = compile(&sample_mtlx(), None, &decline).expect("compiles");
-    assert_eq!(c.root_name, "mtlx_ceramic", "document order picks the first surfacematerial");
+    assert_eq!(
+        c.root_name, "mtlx_ceramic",
+        "document order picks the first surfacematerial"
+    );
 }
 
 #[test]
 fn sample_textures_are_requested_with_their_colorspace() {
     let asked = std::sync::Mutex::new(Vec::new());
     let loader = |file: &str, cs: Option<&str>| -> Option<TextureRef> {
-        asked.lock().unwrap().push((file.to_string(), cs.map(str::to_string)));
+        asked
+            .lock()
+            .unwrap()
+            .push((file.to_string(), cs.map(str::to_string)));
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
     let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &loader).expect("compiles");
     assert_eq!(c.textures, 2, "albedo and normal map");
     let asked = asked.lock().unwrap();
-    assert!(asked.iter().any(|(f, cs)| f.contains("mtlx_base.<UDIM>.png") && cs.as_deref() == Some("srgb_texture")));
-    assert!(asked.iter().any(|(f, cs)| f.contains("mtlx_normal.<UDIM>.png") && cs.is_none()));
+    assert!(
+        asked
+            .iter()
+            .any(|(f, cs)| f.contains("mtlx_base.<UDIM>.png")
+                && cs.as_deref() == Some("srgb_texture"))
+    );
+    assert!(
+        asked
+            .iter()
+            .any(|(f, cs)| f.contains("mtlx_normal.<UDIM>.png") && cs.is_none())
+    );
 }

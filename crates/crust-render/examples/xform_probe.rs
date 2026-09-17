@@ -38,7 +38,10 @@ fn main() {
                     .collect();
                 println!("  [{}]", row.join(" "));
             }
-            println!("translation row = [{:.4}, {:.4}, {:.4}]", m.0[12], m.0[13], m.0[14]);
+            println!(
+                "translation row = [{:.4}, {:.4}, {:.4}]",
+                m.0[12], m.0[13], m.0[14]
+            );
         }
         Err(e) => println!("local_transformation failed: {e}"),
     }

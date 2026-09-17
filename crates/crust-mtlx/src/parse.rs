@@ -25,7 +25,10 @@ pub enum Source {
     /// Another node's output. `output` names which one for a `multioutput`
     /// node (`artistic_ior` yields both `ior` and `extinction`), and is
     /// `None` for the single-output majority.
-    Node { name: String, output: Option<String> },
+    Node {
+        name: String,
+        output: Option<String>,
+    },
     /// A nodegraph's output, reached as `nodegraph="G" output="out"`.
     Graph { graph: String, output: String },
 }
@@ -181,10 +184,7 @@ impl Doc {
     }
 
     fn push(&mut self, node: Node) {
-        let key = (
-            node.graph.clone().unwrap_or_default(),
-            node.name.clone(),
-        );
+        let key = (node.graph.clone().unwrap_or_default(), node.name.clone());
         // First declaration wins. MaterialX requires names unique within a
         // scope, so a duplicate is a malformed document; keeping the first
         // keeps the graph acyclic-by-construction rather than half-rewired.

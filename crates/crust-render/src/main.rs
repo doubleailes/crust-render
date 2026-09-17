@@ -348,19 +348,46 @@ mod tests {
 
     #[test]
     fn cli_strategy_names_map_onto_the_engine_enum() {
-        assert_eq!(SamplingStrategy::from(Strategy::Power), SamplingStrategy::PowerMis);
-        assert_eq!(SamplingStrategy::from(Strategy::Balance), SamplingStrategy::BalanceMis);
-        assert_eq!(SamplingStrategy::from(Strategy::Light), SamplingStrategy::LightOnly);
-        assert_eq!(SamplingStrategy::from(Strategy::Bsdf), SamplingStrategy::BsdfOnly);
+        assert_eq!(
+            SamplingStrategy::from(Strategy::Power),
+            SamplingStrategy::PowerMis
+        );
+        assert_eq!(
+            SamplingStrategy::from(Strategy::Balance),
+            SamplingStrategy::BalanceMis
+        );
+        assert_eq!(
+            SamplingStrategy::from(Strategy::Light),
+            SamplingStrategy::LightOnly
+        );
+        assert_eq!(
+            SamplingStrategy::from(Strategy::Bsdf),
+            SamplingStrategy::BsdfOnly
+        );
     }
 
     #[test]
     fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
-        assert_eq!(PixelFilter::from(Filter::Box), PixelFilter::BoxFilter { radius: 0.5 });
-        assert_eq!(PixelFilter::from(Filter::Triangle), PixelFilter::Triangle { radius: 1.0 });
-        assert_eq!(PixelFilter::from(Filter::Gaussian), PixelFilter::Gaussian { radius: 1.5 });
-        assert_eq!(PixelFilter::from(Filter::Blackman), PixelFilter::Blackman { radius: 1.5 });
-        assert_eq!(PixelFilter::from(Filter::Mitchell), PixelFilter::Mitchell { radius: 2.0 });
+        assert_eq!(
+            PixelFilter::from(Filter::Box),
+            PixelFilter::BoxFilter { radius: 0.5 }
+        );
+        assert_eq!(
+            PixelFilter::from(Filter::Triangle),
+            PixelFilter::Triangle { radius: 1.0 }
+        );
+        assert_eq!(
+            PixelFilter::from(Filter::Gaussian),
+            PixelFilter::Gaussian { radius: 1.5 }
+        );
+        assert_eq!(
+            PixelFilter::from(Filter::Blackman),
+            PixelFilter::Blackman { radius: 1.5 }
+        );
+        assert_eq!(
+            PixelFilter::from(Filter::Mitchell),
+            PixelFilter::Mitchell { radius: 2.0 }
+        );
     }
 
     #[test]

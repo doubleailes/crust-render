@@ -74,10 +74,7 @@ impl PtexColor {
             // Clamp each axis independently: Ptex faces are frequently
             // non-square (64x16 is common) and clamping the pair together
             // would distort the aspect the file chose.
-            let res = ptex::Res::new(
-                info.res.ulog2.min(max_log2),
-                info.res.vlog2.min(max_log2),
-            );
+            let res = ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2));
             let (w, h) = (res.u(), res.v());
             let offset = texels.len() as u32;
             faces.push(Face {
@@ -150,8 +147,16 @@ impl PtexTexture for PtexColor {
         // is not attempted: at these face resolutions the seam is far below a
         // pixel, and getting adjacency edge-rotations wrong is worse than not
         // filtering across at all.
-        let fu = if u.is_finite() { u.clamp(0.0, 1.0) } else { 0.0 };
-        let fv = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let fu = if u.is_finite() {
+            u.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let fv = if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         // Texel centres sit at (i + 0.5)/n.
         let x = fu * w as f32 - 0.5;
@@ -165,12 +170,8 @@ impl PtexTexture for PtexColor {
         let (x0i, x1i) = (cx(x0), cx(x0 + 1.0));
         let (y0i, y1i) = (cy(y0), cy(y0 + 1.0));
 
-        let top = self
-            .texel(f, x0i, y0i)
-            .lerp(self.texel(f, x1i, y0i), tx);
-        let bot = self
-            .texel(f, x0i, y1i)
-            .lerp(self.texel(f, x1i, y1i), tx);
+        let top = self.texel(f, x0i, y0i).lerp(self.texel(f, x1i, y0i), tx);
+        let bot = self.texel(f, x0i, y1i).lerp(self.texel(f, x1i, y1i), tx);
         top.lerp(bot, ty)
     }
 

@@ -1,7 +1,7 @@
+use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample};
 use crate::ray::Ray;
-use crate::PathSampler;
 use glam::Vec3A;
 
 /// A purely emissive surface material. Emission is all it knows — the shape

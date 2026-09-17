@@ -45,7 +45,10 @@ pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
     // formats to 0..1 *without* removing their sRGB transfer curve. Undo it
     // for those, so an LDR sky lights the scene in linear light.
     let is_hdr = matches!(
-        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("hdr")
     );
     let to_linear = |c: f32| if is_hdr { c } else { crate::srgb_to_linear(c) };

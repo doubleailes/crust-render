@@ -43,13 +43,21 @@ fn main() {
     println!("\n--- summary ---");
     let (mut ok, mut empty) = (0, 0);
     for (path, n, in_proto) in &seen {
-        if *n > 0 { ok += 1 } else { empty += 1 }
+        if *n > 0 {
+            ok += 1
+        } else {
+            empty += 1
+        }
         println!(
             "{:<5} {:>3} target(s)  {}{}",
             if *n > 0 { "OK" } else { "EMPTY" },
             n,
             path,
-            if *in_proto { "   (inside a prototype)" } else { "" }
+            if *in_proto {
+                "   (inside a prototype)"
+            } else {
+                ""
+            }
         );
     }
     println!("\n{ok} instancer(s) with targets, {empty} without");

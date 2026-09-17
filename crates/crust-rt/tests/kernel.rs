@@ -182,7 +182,9 @@ fn ray_defaults_are_time_zero_and_visible_to_all() {
 
 #[test]
 fn ray_builders_replace_only_their_field() {
-    let r = Ray::new(Vec3A::ZERO, Vec3A::Z).with_time(0.25).with_mask(MASK_SHADOW);
+    let r = Ray::new(Vec3A::ZERO, Vec3A::Z)
+        .with_time(0.25)
+        .with_mask(MASK_SHADOW);
     assert_eq!(r.time, 0.25);
     assert_eq!(r.mask, MASK_SHADOW);
     assert_eq!(r.origin, Vec3A::ZERO);
@@ -217,7 +219,11 @@ fn aabb_slab_test_hits_and_misses() {
     // Range too short to reach the box.
     assert!(!b.hit(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 0.0, 3.0));
     // From inside.
-    assert!(b.hit(&Ray::new(Vec3A::ZERO, Vec3A::new(0.3, 0.4, 0.5)), 0.0, 100.0));
+    assert!(b.hit(
+        &Ray::new(Vec3A::ZERO, Vec3A::new(0.3, 0.4, 0.5)),
+        0.0,
+        100.0
+    ));
 }
 
 #[test]
@@ -283,8 +289,16 @@ fn set_geometry_keeps_the_original_mask() {
     b.set_geometry(slot, sphere(Vec3A::ZERO, 1.0));
     let scene = b.commit();
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
-    assert!(scene.intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0).is_none());
-    assert!(scene.intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0).is_some());
+    assert!(
+        scene
+            .intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0)
+            .is_none()
+    );
+    assert!(
+        scene
+            .intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0)
+            .is_some()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,12 +309,20 @@ fn set_geometry_keeps_the_original_mask() {
 fn sphere_distances_from_outside_and_inside() {
     let scene = unit_sphere_scene();
     let out = scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 0.001, 100.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z),
+            0.001,
+            100.0,
+        )
         .unwrap();
     assert!((out.t - 4.0).abs() < 1e-5);
     assert!((out.normal - (-Vec3A::Z)).length() < 1e-5);
     let inside = scene
-        .intersect(&Ray::new(Vec3A::ZERO, Vec3A::new(0.0, 3.0, 0.0)), 0.001, 100.0)
+        .intersect(
+            &Ray::new(Vec3A::ZERO, Vec3A::new(0.0, 3.0, 0.0)),
+            0.001,
+            100.0,
+        )
         .unwrap();
     // Unnormalized direction: t carries the direction's scale.
     assert!((inside.t - 1.0 / 3.0).abs() < 1e-5);
@@ -310,12 +332,24 @@ fn sphere_distances_from_outside_and_inside() {
 #[test]
 fn sphere_misses_when_pointing_away_or_offset() {
     let scene = unit_sphere_scene();
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), -Vec3A::Z), 0.001, 100.0)
-        .is_none());
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 1.5, -5.0), Vec3A::Z), 0.001, 100.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.0, -5.0), -Vec3A::Z),
+                0.001,
+                100.0
+            )
+            .is_none()
+    );
+    assert!(
+        scene
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 1.5, -5.0), Vec3A::Z),
+                0.001,
+                100.0
+            )
+            .is_none()
+    );
 }
 
 #[test]
@@ -338,7 +372,11 @@ fn t_min_avoids_self_intersection_at_the_origin() {
     let hit = scene
         .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -1.0), Vec3A::Z), 1e-3, 100.0)
         .unwrap();
-    assert!((hit.t - 2.0).abs() < 1e-4, "hit the far side, not the origin: {}", hit.t);
+    assert!(
+        (hit.t - 2.0).abs() < 1e-4,
+        "hit the far side, not the origin: {}",
+        hit.t
+    );
 }
 
 #[test]
@@ -359,10 +397,16 @@ fn closest_of_two_overlapping_spheres_wins() {
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
     assert_eq!(scene.intersect(&ray, 0.001, 100.0).unwrap().geom_id, near);
     let from_behind = Ray::new(Vec3A::new(0.0, 0.0, 8.0), -Vec3A::Z);
-    assert_eq!(scene.intersect(&from_behind, 0.001, 100.0).unwrap().geom_id, far);
+    assert_eq!(
+        scene.intersect(&from_behind, 0.001, 100.0).unwrap().geom_id,
+        far
+    );
     // Occlusion with a range stopping between the two sees only the near.
     assert!(scene.occluded(&ray, 0.001, 5.0));
-    assert!(!scene.occluded(&ray, 4.5, 5.5), "the gap between the spheres is clear");
+    assert!(
+        !scene.occluded(&ray, 4.5, 5.5),
+        "the gap between the spheres is clear"
+    );
 }
 
 #[test]
@@ -413,7 +457,10 @@ fn random_spheres_agree_with_the_analytic_closest_hit() {
                 assert!((h.t - t).abs() < 1e-3 * t.max(1.0), "t {} vs {}", h.t, t);
                 assert_eq!(h.geom_id, id);
             }
-            (b, g) => panic!("brute force {b:?} vs kernel {:?}", g.map(|h| (h.t, h.geom_id))),
+            (b, g) => panic!(
+                "brute force {b:?} vs kernel {:?}",
+                g.map(|h| (h.t, h.geom_id))
+            ),
         }
         assert_eq!(scene.occluded(&ray, t_min, t_max), best.is_some());
     }
@@ -427,20 +474,25 @@ fn random_spheres_agree_with_the_analytic_closest_hit() {
 #[test]
 fn triangle_barycentrics_weight_the_second_and_third_vertices() {
     let mut b = SceneBuilder::new();
-    b.attach(mesh(
-        vec![Vec3A::ZERO, Vec3A::X, Vec3A::Y],
-        vec![[0, 1, 2]],
-    ));
+    b.attach(mesh(vec![Vec3A::ZERO, Vec3A::X, Vec3A::Y], vec![[0, 1, 2]]));
     let scene = b.commit();
     let hit = scene
-        .intersect(&Ray::new(Vec3A::new(0.25, 0.5, -1.0), Vec3A::Z), 0.001, 10.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.25, 0.5, -1.0), Vec3A::Z),
+            0.001,
+            10.0,
+        )
         .unwrap();
     assert!((hit.t - 1.0).abs() < 1e-5);
     assert!((hit.u - 0.25).abs() < 1e-4, "u = {}", hit.u);
     assert!((hit.v - 0.5).abs() < 1e-4, "v = {}", hit.v);
     // Corners.
     let at_v1 = scene
-        .intersect(&Ray::new(Vec3A::new(0.999, 0.0005, -1.0), Vec3A::Z), 0.001, 10.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.999, 0.0005, -1.0), Vec3A::Z),
+            0.001,
+            10.0,
+        )
         .unwrap();
     assert!(at_v1.u > 0.99 && at_v1.v < 0.01);
 }
@@ -474,9 +526,11 @@ fn triangle_misses_outside_its_edges() {
         assert!(!scene.occluded(&ray, 0.001, 10.0), "({x}, {y})");
     }
     // Parallel to the plane.
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(-1.0, 0.2, 0.0), Vec3A::X), 0.001, 10.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(&Ray::new(Vec3A::new(-1.0, 0.2, 0.0), Vec3A::X), 0.001, 10.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -506,7 +560,11 @@ fn out_of_range_indices_are_skipped_not_panicked() {
         vec![[0, 1, 2], [0, 1, 7], [9, 9, 9]],
     ));
     let scene = b.commit();
-    assert_eq!(scene.primitive_count(), 1, "only the valid triangle survives");
+    assert_eq!(
+        scene.primitive_count(),
+        1,
+        "only the valid triangle survives"
+    );
     let hit = scene
         .intersect(&Ray::new(Vec3A::new(0.2, 0.2, -1.0), Vec3A::Z), 0.001, 10.0)
         .unwrap();
@@ -543,11 +601,18 @@ fn interpolated_shading_normals_are_unit_length() {
     for _ in 0..300 {
         let d = rng.dir();
         let ray = Ray::new(d * 5.0, -d);
-        let hit = scene.intersect(&ray, 0.001, 100.0).expect("aimed at the centre");
+        let hit = scene
+            .intersect(&ray, 0.001, 100.0)
+            .expect("aimed at the centre");
         assert!((hit.normal.length() - 1.0).abs() < 1e-4);
         // Shading normal of a sphere points back along the ray direction
         // (toward the origin of the probe), within tessellation error.
-        assert!(hit.normal.dot(d) > 0.95, "normal {} vs dir {}", hit.normal, d);
+        assert!(
+            hit.normal.dot(d) > 0.95,
+            "normal {} vs dir {}",
+            hit.normal,
+            d
+        );
         assert!(hit.front_face);
     }
 }
@@ -561,7 +626,9 @@ fn tessellated_sphere_matches_the_analytic_radius() {
     let mut rng = Lcg::new(6);
     for _ in 0..300 {
         let d = rng.dir();
-        let hit = scene.intersect(&Ray::new(d * 4.0, -d), 0.001, 100.0).unwrap();
+        let hit = scene
+            .intersect(&Ray::new(d * 4.0, -d), 0.001, 100.0)
+            .unwrap();
         // Chordal error for a 64x128 tessellation is well under 1%.
         assert!((hit.t - 3.0).abs() < 0.01, "t = {}", hit.t);
     }
@@ -685,11 +752,19 @@ fn quad_hits_report_the_right_fan_triangle() {
     b.attach(unit_quad());
     let scene = b.commit();
     let lower = scene
-        .intersect(&Ray::new(Vec3A::new(0.75, 0.25, -1.0), Vec3A::Z), 1e-4, 10.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.75, 0.25, -1.0), Vec3A::Z),
+            1e-4,
+            10.0,
+        )
         .unwrap();
     assert_eq!(lower.prim_id, 0);
     let upper = scene
-        .intersect(&Ray::new(Vec3A::new(0.25, 0.75, -1.0), Vec3A::Z), 1e-4, 10.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.25, 0.75, -1.0), Vec3A::Z),
+            1e-4,
+            10.0,
+        )
         .unwrap();
     assert_eq!(upper.prim_id, 1);
 }
@@ -746,7 +821,11 @@ fn scene_queries_are_safe_from_many_threads() {
         .collect();
     let reference: Vec<Option<(u32, u32)>> = rays
         .iter()
-        .map(|r| scene.intersect(r, 1e-3, 50.0).map(|h| (h.t.to_bits(), h.geom_id)))
+        .map(|r| {
+            scene
+                .intersect(r, 1e-3, 50.0)
+                .map(|h| (h.t.to_bits(), h.geom_id))
+        })
         .collect();
     std::thread::scope(|s| {
         for chunk in 0..8 {
@@ -755,7 +834,9 @@ fn scene_queries_are_safe_from_many_threads() {
             let reference = &reference;
             s.spawn(move || {
                 for (i, r) in rays.iter().enumerate().skip(chunk).step_by(8) {
-                    let got = scene.intersect(r, 1e-3, 50.0).map(|h| (h.t.to_bits(), h.geom_id));
+                    let got = scene
+                        .intersect(r, 1e-3, 50.0)
+                        .map(|h| (h.t.to_bits(), h.geom_id));
                     assert_eq!(got, reference[i]);
                 }
             });
@@ -773,9 +854,21 @@ fn indirect_only_geometry_hides_from_camera_and_shadow_rays() {
     b.attach_masked(sphere(Vec3A::ZERO, 1.0), MASK_INDIRECT);
     let scene = b.commit();
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
-    assert!(scene.intersect(&ray.with_mask(MASK_CAMERA), 1e-3, 10.0).is_none());
-    assert!(scene.intersect(&ray.with_mask(MASK_SHADOW), 1e-3, 10.0).is_none());
-    assert!(scene.intersect(&ray.with_mask(MASK_INDIRECT), 1e-3, 10.0).is_some());
+    assert!(
+        scene
+            .intersect(&ray.with_mask(MASK_CAMERA), 1e-3, 10.0)
+            .is_none()
+    );
+    assert!(
+        scene
+            .intersect(&ray.with_mask(MASK_SHADOW), 1e-3, 10.0)
+            .is_none()
+    );
+    assert!(
+        scene
+            .intersect(&ray.with_mask(MASK_INDIRECT), 1e-3, 10.0)
+            .is_some()
+    );
     // A ray carrying every bit sees it too.
     assert!(scene.intersect(&ray, 1e-3, 10.0).is_some());
 }
@@ -793,7 +886,9 @@ fn masked_geometry_does_not_shadow_the_closest_hit_behind_it() {
     assert_eq!(hit.geom_id, visible);
     assert!((hit.t - 5.5).abs() < 1e-4);
     // The shadow ray stops at the first.
-    let hit = scene.intersect(&ray.with_mask(MASK_SHADOW), 1e-3, 100.0).unwrap();
+    let hit = scene
+        .intersect(&ray.with_mask(MASK_SHADOW), 1e-3, 100.0)
+        .unwrap();
     assert!((hit.t - 3.5).abs() < 1e-4);
 }
 
@@ -810,7 +905,12 @@ fn segment(p0: Vec3A, p1: Vec3A, r0: f32, r1: f32) -> Geometry {
 #[test]
 fn round_curve_body_is_hit_like_a_cylinder() {
     let mut b = SceneBuilder::new();
-    b.attach(segment(Vec3A::new(-1.0, 0.0, 0.0), Vec3A::new(1.0, 0.0, 0.0), 0.5, 0.5));
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.5,
+        0.5,
+    ));
     let scene = b.commit();
     let hit = scene
         .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
@@ -824,40 +924,62 @@ fn round_curve_body_is_hit_like_a_cylinder() {
         .unwrap();
     assert!((graze.t - (5.0 - 0.3)).abs() < 1e-3);
     // Beyond the radius: miss.
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.6, -5.0), Vec3A::Z), 1e-3, 100.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(&Ray::new(Vec3A::new(0.0, 0.6, -5.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
 fn round_curve_end_caps_are_spherical() {
     let mut b = SceneBuilder::new();
-    b.attach(segment(Vec3A::new(-1.0, 0.0, 0.0), Vec3A::new(1.0, 0.0, 0.0), 0.5, 0.5));
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.5,
+        0.5,
+    ));
     let scene = b.commit();
     // Past the end point along the axis, but within the cap sphere.
     let cap = scene
         .intersect(&Ray::new(Vec3A::new(1.3, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
         .expect("the cap sphere at (1,0,0) covers x = 1.3");
     let expected = 5.0 - (0.25f32 - 0.09).sqrt();
-    assert!((cap.t - expected).abs() < 1e-3, "t = {} want {expected}", cap.t);
+    assert!(
+        (cap.t - expected).abs() < 1e-3,
+        "t = {} want {expected}",
+        cap.t
+    );
     // Head-on down the axis hits the cap at x = 1.5.
     let axial = scene
         .intersect(&Ray::new(Vec3A::new(5.0, 0.0, 0.0), -Vec3A::X), 1e-3, 100.0)
         .unwrap();
     assert!((axial.t - 3.5).abs() < 1e-4);
     assert!(axial.normal.abs_diff_eq(Vec3A::X, 1e-4));
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(1.6, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(&Ray::new(Vec3A::new(1.6, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
 fn tapered_curve_radius_shrinks_along_the_segment() {
     let mut b = SceneBuilder::new();
-    b.attach(segment(Vec3A::new(-1.0, 0.0, 0.0), Vec3A::new(1.0, 0.0, 0.0), 0.5, 0.1));
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.5,
+        0.1,
+    ));
     let scene = b.commit();
     let thick = scene
-        .intersect(&Ray::new(Vec3A::new(-0.8, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .intersect(
+            &Ray::new(Vec3A::new(-0.8, 0.0, -5.0), Vec3A::Z),
+            1e-3,
+            100.0,
+        )
         .unwrap();
     let thin = scene
         .intersect(&Ray::new(Vec3A::new(0.8, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
@@ -921,9 +1043,10 @@ fn a_straight_cubic_span_matches_the_linear_segment() {
             assert!((a.t - b.t).abs() < 1e-2, "at ({x},{y}): {} vs {}", a.t, b.t);
         }
     }
-    assert!(cub
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.6, -5.0), Vec3A::Z), 1e-3, 100.0)
-        .is_none());
+    assert!(
+        cub.intersect(&Ray::new(Vec3A::new(0.0, 0.6, -5.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -944,13 +1067,21 @@ fn a_bent_cubic_span_is_hit_where_it_bends() {
     });
     let scene = b.commit();
     // At x = 0 the Bézier passes through y = 0.75: a ray there hits...
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.75, -5.0), Vec3A::Z), 1e-3, 100.0)
-        .is_some());
+    assert!(
+        scene
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.75, -5.0), Vec3A::Z),
+                1e-3,
+                100.0
+            )
+            .is_some()
+    );
     // ...while the straight chord (y = 0) is empty.
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
     let bb = scene.bounds().unwrap();
     assert!(bb.maximum.y >= 0.75 + 0.15 - 1e-3);
 }
@@ -970,7 +1101,10 @@ fn instance(scene: Arc<Scene>, transform: Affine3A) -> Geometry {
 #[test]
 fn uniformly_scaled_instance_scales_the_radius() {
     let mut b = SceneBuilder::new();
-    b.attach(instance(unit_sphere_scene(), Affine3A::from_scale(Vec3::splat(2.0))));
+    b.attach(instance(
+        unit_sphere_scene(),
+        Affine3A::from_scale(Vec3::splat(2.0)),
+    ));
     let scene = b.commit();
     let hit = scene
         .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
@@ -1051,9 +1185,11 @@ fn many_instances_of_one_prototype_hit_independently() {
         assert!((hit.t - 8.0).abs() < 1e-4);
     }
     // Between two spheres: nothing.
-    assert!(scene
-        .intersect(&Ray::new(Vec3A::new(1.5, 0.0, -9.0), Vec3A::Z), 1e-3, 100.0)
-        .is_none());
+    assert!(
+        scene
+            .intersect(&Ray::new(Vec3A::new(1.5, 0.0, -9.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -1062,11 +1198,19 @@ fn motion_blur_lerps_at_intermediate_shutter_times() {
     b.attach(Geometry::Instance {
         scene: unit_sphere_scene(),
         transform: Affine3A::IDENTITY,
-        transform_end: Some(Box::new(Affine3A::from_translation(Vec3::new(8.0, 0.0, 0.0)))),
+        transform_end: Some(Box::new(Affine3A::from_translation(Vec3::new(
+            8.0, 0.0, 0.0,
+        )))),
     });
     let scene = b.commit();
     assert!(scene.has_motion());
-    for (time, x) in [(0.0f32, 0.0f32), (0.25, 2.0), (0.5, 4.0), (0.75, 6.0), (1.0, 8.0)] {
+    for (time, x) in [
+        (0.0f32, 0.0f32),
+        (0.25, 2.0),
+        (0.5, 4.0),
+        (0.75, 6.0),
+        (1.0, 8.0),
+    ] {
         let ray = Ray::new(Vec3A::new(x, 0.0, -5.0), Vec3A::Z).with_time(time);
         let hit = scene.intersect(&ray, 1e-3, 100.0);
         assert!(hit.is_some(), "time {time}: sphere should be at x = {x}");
@@ -1096,14 +1240,21 @@ fn instance_normal_maps_through_a_rotation() {
     let inner = Arc::new(inner.commit());
     let mut b = SceneBuilder::new();
     // Rotate the quad (normal +Z) by 90° about X: its normal becomes -Y.
-    b.attach(instance(inner, Affine3A::from_rotation_x(std::f32::consts::FRAC_PI_2)));
+    b.attach(instance(
+        inner,
+        Affine3A::from_rotation_x(std::f32::consts::FRAC_PI_2),
+    ));
     let scene = b.commit();
     // Local (0.5, 0.5, 0) maps to (0.5, 0, 0.5). Probe from -Y.
     let hit = scene
         .intersect(&Ray::new(Vec3A::new(0.5, -3.0, 0.5), Vec3A::Y), 1e-3, 100.0)
         .expect("rotated quad");
     assert!((hit.t - 3.0).abs() < 1e-4);
-    assert!(hit.normal.abs_diff_eq(-Vec3A::Y, 1e-4), "normal {}", hit.normal);
+    assert!(
+        hit.normal.abs_diff_eq(-Vec3A::Y, 1e-4),
+        "normal {}",
+        hit.normal
+    );
     assert!(hit.front_face);
 }
 
@@ -1120,9 +1271,24 @@ fn breakdown_counts_every_kind_of_top_level_primitive() {
     b.attach(sphere(Vec3A::X, 1.0));
     b.attach(Geometry::RoundCurves {
         segments: vec![
-            CurveSegment { p0: Vec3A::ZERO, p1: Vec3A::Y, r0: 0.1, r1: 0.1 },
-            CurveSegment { p0: Vec3A::Y, p1: Vec3A::Y * 2.0, r0: 0.1, r1: 0.1 },
-            CurveSegment { p0: Vec3A::X, p1: Vec3A::X * 2.0, r0: 0.1, r1: 0.1 },
+            CurveSegment {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::Y,
+                r0: 0.1,
+                r1: 0.1,
+            },
+            CurveSegment {
+                p0: Vec3A::Y,
+                p1: Vec3A::Y * 2.0,
+                r0: 0.1,
+                r1: 0.1,
+            },
+            CurveSegment {
+                p0: Vec3A::X,
+                p1: Vec3A::X * 2.0,
+                r0: 0.1,
+                r1: 0.1,
+            },
         ],
     });
     b.attach(Geometry::CubicCurves {
@@ -1132,7 +1298,10 @@ fn breakdown_counts_every_kind_of_top_level_primitive() {
             r1: 0.1,
         }],
     });
-    b.attach(instance(unit_sphere_scene(), Affine3A::from_translation(Vec3::Z * 9.0)));
+    b.attach(instance(
+        unit_sphere_scene(),
+        Affine3A::from_translation(Vec3::Z * 9.0),
+    ));
     let scene = b.commit();
     let br = scene.primitive_breakdown();
     assert_eq!(br.triangles, 8);
@@ -1156,7 +1325,10 @@ fn unique_breakdown_equals_top_level_without_instancing() {
     b.attach(mesh(v, t));
     b.attach(sphere(Vec3A::ZERO, 1.0));
     let scene = b.commit();
-    assert_eq!(scene.primitive_breakdown(), scene.unique_primitive_breakdown());
+    assert_eq!(
+        scene.primitive_breakdown(),
+        scene.unique_primitive_breakdown()
+    );
 }
 
 #[test]
@@ -1166,7 +1338,12 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     let small = small.commit().memory_footprint();
     assert_eq!(
         small.total(),
-        small.prim_nodes + small.boxed_prims + small.bvh_nodes + small.leaves + small.packets + small.indices
+        small.prim_nodes
+            + small.boxed_prims
+            + small.bvh_nodes
+            + small.leaves
+            + small.packets
+            + small.indices
     );
     assert!(small.total() > 0);
 
@@ -1201,7 +1378,10 @@ fn shared_instanced_scenes_are_counted_once_in_the_footprint() {
     let hundred = build(100);
     assert!(one >= proto_bytes, "the instanced scene is included");
     // 99 more placements cost 99 instance nodes, not 99 copies of the mesh.
-    assert!(hundred - one < proto_bytes, "prototype counted more than once: {one} -> {hundred}");
+    assert!(
+        hundred - one < proto_bytes,
+        "prototype counted more than once: {one} -> {hundred}"
+    );
 }
 
 #[test]
@@ -1232,7 +1412,12 @@ fn bounds_cover_every_attached_geometry() {
     let mut b = SceneBuilder::new();
     b.attach(sphere(Vec3A::new(-5.0, 0.0, 0.0), 1.0));
     b.attach(unit_quad());
-    b.attach(segment(Vec3A::new(0.0, 0.0, 7.0), Vec3A::new(0.0, 0.0, 9.0), 0.5, 0.5));
+    b.attach(segment(
+        Vec3A::new(0.0, 0.0, 7.0),
+        Vec3A::new(0.0, 0.0, 9.0),
+        0.5,
+        0.5,
+    ));
     let bb = b.commit().bounds().unwrap();
     assert!(bb.minimum.x <= -6.0 && bb.maximum.x >= 1.0);
     assert!(bb.minimum.y <= -1.0 && bb.maximum.y >= 1.0);

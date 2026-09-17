@@ -20,7 +20,9 @@ fn load(path: &str) -> (usize, usize, Vec<f32>) {
             let (w, h) = (resolution.width(), resolution.height());
             (w, h, vec![0.0f32; w * h * 4])
         },
-        |(w, _h, pixels): &mut (usize, usize, Vec<f32>), pos, (r, g, b, a): (f32, f32, f32, f32)| {
+        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
+         pos,
+         (r, g, b, a): (f32, f32, f32, f32)| {
             let i = (pos.y() * *w + pos.x()) * 4;
             pixels[i] = r;
             pixels[i + 1] = g;

@@ -148,9 +148,18 @@ mod color_space_tests {
     fn materialx_gamma_tags_are_not_srgb() {
         // The bug this pins: both tags used to land on `Srgb` and decode
         // through the piecewise curve.
-        assert_eq!(ColorSpace::from_mtlx(Some("g22_rec709")), ColorSpace::Gamma22);
-        assert_eq!(ColorSpace::from_mtlx(Some("g18_rec709")), ColorSpace::Gamma18);
-        assert_eq!(ColorSpace::from_mtlx(Some("G22_Rec709")), ColorSpace::Gamma22);
+        assert_eq!(
+            ColorSpace::from_mtlx(Some("g22_rec709")),
+            ColorSpace::Gamma22
+        );
+        assert_eq!(
+            ColorSpace::from_mtlx(Some("g18_rec709")),
+            ColorSpace::Gamma18
+        );
+        assert_eq!(
+            ColorSpace::from_mtlx(Some("G22_Rec709")),
+            ColorSpace::Gamma22
+        );
     }
 
     #[test]

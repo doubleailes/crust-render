@@ -15,10 +15,16 @@ fn a_new_report_is_empty_but_well_formed() {
     assert_eq!(s.total(), Duration::ZERO);
     let out = s.report();
     assert!(out.contains("Render Statistics"));
-    assert!(!out.contains("Profile by execution tree"), "no phases, no profile");
+    assert!(
+        !out.contains("Profile by execution tree"),
+        "no phases, no profile"
+    );
     // `Display` and `report` are the same formatter (memory is sampled
     // live, so only the fixed part is compared).
-    assert!(s.to_string().starts_with(&out[..out.find("peak memory").unwrap_or(out.len())]));
+    assert!(
+        s.to_string()
+            .starts_with(&out[..out.find("peak memory").unwrap_or(out.len())])
+    );
 }
 
 #[test]
@@ -37,7 +43,10 @@ fn record_appends_phases_in_order_with_their_depth() {
 #[test]
 fn record_at_keeps_the_memory_sample_it_was_given() {
     let mut s = RenderStats::new();
-    let mem = MemorySample { rss: Some(1024 * 1024), peak: Some(3 * 1024 * 1024) };
+    let mem = MemorySample {
+        rss: Some(1024 * 1024),
+        peak: Some(3 * 1024 * 1024),
+    };
     s.record_at("Build", 0, Duration::from_secs(1), mem);
     let p: &Phase = &s.phases[0];
     assert_eq!(p.rss_end, Some(1024 * 1024));
@@ -54,7 +63,10 @@ fn memory_sample_now_reads_the_process_on_linux() {
         assert!(m.rss.is_some_and(|b| b > 0));
         assert!(m.peak.is_some_and(|b| b > 0));
         assert!(peak_memory_bytes().is_some());
-        assert!(m.peak.unwrap() >= m.rss.unwrap(), "peak is a high-water mark");
+        assert!(
+            m.peak.unwrap() >= m.rss.unwrap(),
+            "peak is a high-water mark"
+        );
     }
     let d = MemorySample::default();
     assert!(d.rss.is_none() && d.peak.is_none());
@@ -80,7 +92,10 @@ fn report_sorts_the_time_view_largest_first() {
     let out = s.report();
     let by_time = out.split("Profile by time").nth(1).expect("time view");
     let pos = |n: &str| by_time.find(n).unwrap();
-    assert!(pos("Beta") < pos("Gamma") && pos("Gamma") < pos("Alpha"), "{by_time}");
+    assert!(
+        pos("Beta") < pos("Gamma") && pos("Gamma") < pos("Alpha"),
+        "{by_time}"
+    );
     // Nested phases are marked.
     let mut s = RenderStats::new();
     s.record("Top", 0, Duration::from_secs(2));
@@ -98,7 +113,10 @@ fn image_counters_come_from_render_settings() {
     assert_eq!((img.width, img.height), (300, 200));
     assert_eq!(img.samples_per_pixel, 24);
     assert_eq!(img.max_depth, 9);
-    let s = RenderStats { image: img, ..RenderStats::default() };
+    let s = RenderStats {
+        image: img,
+        ..RenderStats::default()
+    };
     let out = s.report();
     assert!(out.contains("300x200"));
     assert!(out.contains("samples per pixel"));
@@ -106,7 +124,13 @@ fn image_counters_come_from_render_settings() {
 
 #[test]
 fn primitive_counts_convert_from_the_kernel_breakdown() {
-    let br = PrimitiveBreakdown { triangles: 10, spheres: 2, curve_segments: 3, cubic_curve_spans: 4, instances: 5 };
+    let br = PrimitiveBreakdown {
+        triangles: 10,
+        spheres: 2,
+        curve_segments: 3,
+        cubic_curve_spans: 4,
+        instances: 5,
+    };
     let pc: PrimitiveCounts = br.into();
     assert_eq!(pc.triangles, 10);
     assert_eq!(pc.spheres, 2);
@@ -122,7 +146,10 @@ fn scene_counters_appear_in_the_report_with_thousands_grouping() {
     let s = RenderStats {
         scene: SceneCounters {
             geometries: 1_234_567,
-            top_level: PrimitiveCounts { triangles: 2_000_000, ..Default::default() },
+            top_level: PrimitiveCounts {
+                triangles: 2_000_000,
+                ..Default::default()
+            },
             lights: 3,
             volumes: 2,
             ..Default::default()
@@ -185,8 +212,26 @@ fn ray_stats_derived_quantities() {
 
 #[test]
 fn ray_stats_merge_adds_every_counter() {
-    let mut a = RayStats { camera_rays: 1, closest_hit: 2, shadow_rays: 3, vertices: 4, rr_tested: 5, rr_killed: 6, ended_escaped: 7, ended_depth: 8 };
-    let b = RayStats { camera_rays: 10, closest_hit: 20, shadow_rays: 30, vertices: 40, rr_tested: 50, rr_killed: 60, ended_escaped: 70, ended_depth: 80 };
+    let mut a = RayStats {
+        camera_rays: 1,
+        closest_hit: 2,
+        shadow_rays: 3,
+        vertices: 4,
+        rr_tested: 5,
+        rr_killed: 6,
+        ended_escaped: 7,
+        ended_depth: 8,
+    };
+    let b = RayStats {
+        camera_rays: 10,
+        closest_hit: 20,
+        shadow_rays: 30,
+        vertices: 40,
+        rr_tested: 50,
+        rr_killed: 60,
+        ended_escaped: 70,
+        ended_depth: 80,
+    };
     a.merge(&b);
     assert_eq!(a.camera_rays, 11);
     assert_eq!(a.closest_hit, 22);

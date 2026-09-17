@@ -11,22 +11,22 @@ use glam::Mat4 as GMat4;
 use tracing::{debug, info, warn};
 
 use crate::camera::Camera;
+use crate::filter::PixelFilter;
 use crate::light::{
     AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight, LightList, RectShape,
     SphereShape,
 };
-use crate::scene::AssetLoader;
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
 use crate::rt_world::{FaceMap, FanSlice, UvMap, WorldBuilder};
+use crate::scene::AssetLoader;
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
+use crate::tracer::{RenderSettings, SamplingStrategy};
+use crate::volume::{DensityField, VolumeRegion};
 use crust_rt::{
     CubicCurveSegment, CurveSegment, Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
-use crate::filter::PixelFilter;
-use crate::tracer::{RenderSettings, SamplingStrategy};
-use crate::volume::{DensityField, VolumeRegion};
 use glam::{Affine3A, Mat3A, Vec3, Vec3A};
 
 use super::subdiv;
@@ -271,11 +271,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
 }
 
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
-fn open_stage(
-    path: &Path,
-    path_str: &str,
-    mask: Option<sdf::Path>,
-) -> Result<Stage, crate::Error> {
+fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
     let mut builder = Stage::builder().load(InitialLoadSet::LoadAll);
     if let Some(p) = mask {
         builder = builder.mask(StagePopulationMask::new([p]));
@@ -419,8 +415,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         max_depth: settings.max_depth(),
     };
 
-    let mut scene =
-        Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
+    let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
     Ok(scene)
 }
@@ -441,7 +436,9 @@ fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
         "homogeneous" => DensityField::Homogeneous,
         "smoke" => DensityField::Noise {
             scale: custom_f32(prim, "crust:volume:noiseScale").unwrap_or(4.0),
-            octaves: custom_i32(prim, "crust:volume:noiseOctaves").unwrap_or(4).max(1) as u32,
+            octaves: custom_i32(prim, "crust:volume:noiseOctaves")
+                .unwrap_or(4)
+                .max(1) as u32,
             gain: custom_f32(prim, "crust:volume:noiseGain").unwrap_or(0.5),
             lacunarity: custom_f32(prim, "crust:volume:noiseLacunarity").unwrap_or(2.0),
             threshold: custom_f32(prim, "crust:volume:noiseThreshold").unwrap_or(0.3),
@@ -452,11 +449,19 @@ fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
             let data = custom_f32_array(prim, "crust:volume:gridData");
             match (dims, data) {
                 (Some(d), Some(data)) if d.len() == 3 => {
-                    let (nx, ny, nz) = (d[0].max(1) as usize, d[1].max(1) as usize, d[2].max(1) as usize);
+                    let (nx, ny, nz) = (
+                        d[0].max(1) as usize,
+                        d[1].max(1) as usize,
+                        d[2].max(1) as usize,
+                    );
                     if nx * ny * nz != data.len() {
                         warn!(
                             "Volume at {}: gridDims {}x{}x{} does not match gridData length {} — skipped",
-                            prim.path(), nx, ny, nz, data.len()
+                            prim.path(),
+                            nx,
+                            ny,
+                            nz,
+                            data.len()
                         );
                         return;
                     }
@@ -928,10 +933,18 @@ impl MeshArena {
     /// Interns a mesh by content, returning its slot index. Triangulates on
     /// first sight; `None` if nothing survives triangulation (matching the
     /// old behaviour, which also did not cache a failed mesh).
-    fn intern(&mut self, prim: &Prim, src: &MeshSource, material: &Arc<dyn Material>) -> Option<u32> {
+    fn intern(
+        &mut self,
+        prim: &Prim,
+        src: &MeshSource,
+        material: &Arc<dyn Material>,
+    ) -> Option<u32> {
         let key = MeshKey::new(src, material);
         if let Some(&slot) = self.by_key.get(&key) {
-            debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
+            debug!(
+                "Mesh at {} shares geometry with an earlier prim",
+                prim.path()
+            );
             return Some(slot);
         }
         let verts: Vec<Vec3A> = src
@@ -1151,10 +1164,8 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
         // Bake only when this is the mesh's sole placement, nothing has
         // already made it resident as a kernel scene, and it does not move —
         // a baked mesh has no transform left to interpolate over the shutter.
-        let bake = bake_enabled
-            && slot.n_place == 1
-            && slot.committed.is_none()
-            && p.motion.is_none();
+        let bake =
+            bake_enabled && slot.n_place == 1 && slot.committed.is_none() && p.motion.is_none();
 
         let faces = slot.faces.clone();
         let uvs = slot.uvs.clone();
@@ -1281,8 +1292,18 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
         sdf::Value::Vec3fVec(v) => v,
         _ => return None,
     };
-    let counts = int_vec(mesh.face_vertex_counts_attr().get::<sdf::Value>().ok().flatten()?)?;
-    let indices = int_vec(mesh.face_vertex_indices_attr().get::<sdf::Value>().ok().flatten()?)?;
+    let counts = int_vec(
+        mesh.face_vertex_counts_attr()
+            .get::<sdf::Value>()
+            .ok()
+            .flatten()?,
+    )?;
+    let indices = int_vec(
+        mesh.face_vertex_indices_attr()
+            .get::<sdf::Value>()
+            .ok()
+            .flatten()?,
+    )?;
     Some((points, counts, indices))
 }
 
@@ -1324,7 +1345,12 @@ impl UvSource {
 /// and an asset with the chart under another name is otherwise silently
 /// untextured. The first one that yields values wins.
 fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
-    for name in ["primvars:st", "primvars:uv", "primvars:st0", "primvars:UVMap"] {
+    for name in [
+        "primvars:st",
+        "primvars:uv",
+        "primvars:st0",
+        "primvars:UVMap",
+    ] {
         let value = prim.attribute(name).get::<sdf::Value>().ok().flatten();
         let values = match value {
             // `texCoord2f[]` and `float2[]` are the same bits; which one an
@@ -1477,11 +1503,11 @@ fn mesh_source(
         Some(sdf::Value::IntVec(v)) => v,
         _ => Vec::new(),
     };
-    let float_array =
-        |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten() {
-            Some(sdf::Value::FloatVec(v)) => v,
-            _ => Vec::new(),
-        };
+    let float_array = |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten()
+    {
+        Some(sdf::Value::FloatVec(v)) => v,
+        _ => Vec::new(),
+    };
     let crease_indices = int_array(mesh.crease_indices_attr());
     let crease_lengths = int_array(mesh.crease_lengths_attr());
     let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());
@@ -1863,7 +1889,11 @@ fn collect_proto_parts(
         // Same pruning as the top-level traversal: an inactive prim (and
         // its subtree) is absent from the composed scene, prototype or not.
         if !prim.is_active().unwrap_or(true) {
-            debug!("Skipping inactive prim {} (prototype {})", prim.path(), root.path());
+            debug!(
+                "Skipping inactive prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
             continue;
         }
 
@@ -2232,7 +2262,10 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
             continue;
         }
 
-        let Some(k) = usize::try_from(proto_index).ok().filter(|k| *k < targets.len()) else {
+        let Some(k) = usize::try_from(proto_index)
+            .ok()
+            .filter(|k| *k < targets.len())
+        else {
             warn!(
                 "PointInstancer at {}: protoIndices[{i}] = {proto_index} is out of range — instance skipped",
                 prim.path()
@@ -2250,11 +2283,7 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
             .unwrap_or(glam::Quat::IDENTITY);
         placements.push((
             k,
-            GMat4::from_scale_rotation_translation(
-                scale,
-                rotation,
-                Vec3::new(pos.x, pos.y, pos.z),
-            ),
+            GMat4::from_scale_rotation_translation(scale, rotation, Vec3::new(pos.x, pos.y, pos.z)),
         ));
     }
 
@@ -2368,14 +2397,7 @@ fn instance_orientations(instancer: &PointInstancer) -> Option<Vec<glam::Quat>> 
     match instancer.orientations_attr().get::<sdf::Value>() {
         Ok(Some(sdf::Value::QuathVec(v))) => Some(
             v.iter()
-                .map(|q| {
-                    quat(
-                        q.w.to_f32(),
-                        q.x.to_f32(),
-                        q.y.to_f32(),
-                        q.z.to_f32(),
-                    )
-                })
+                .map(|q| quat(q.w.to_f32(), q.x.to_f32(), q.y.to_f32(), q.z.to_f32()))
                 .collect(),
         ),
         _ => None,
@@ -2555,8 +2577,7 @@ fn curve_segments(
             break;
         }
         let cp = &pts[offset..offset + cnt];
-        let radius =
-            |k: usize| 0.5 * width_of(offset + k, curve_idx).max(1e-6);
+        let radius = |k: usize| 0.5 * width_of(offset + k, curve_idx).max(1e-6);
 
         if ty == "linear" {
             for k in 0..cnt.saturating_sub(1) {
@@ -2944,7 +2965,11 @@ fn emit_dome_light(
 /// a root layer sitting anywhere else would otherwise resolve it against the
 /// wrong directory and silently fall back to the dome's uniform colour.
 fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
-    let value = light.texture_file_attr().get::<sdf::Value>().ok().flatten()?;
+    let value = light
+        .texture_file_attr()
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()?;
     asset_value_path(&value, stage_path)
 }
 
@@ -3026,7 +3051,11 @@ impl MaterialCache {
     }
 }
 
-fn resolve_material(stage: &Stage, prim: &Prim, caches: &mut ImportCaches<'_>) -> Arc<dyn Material> {
+fn resolve_material(
+    stage: &Stage,
+    prim: &Prim,
+    caches: &mut ImportCaches<'_>,
+) -> Arc<dyn Material> {
     let mat_path = MaterialBindingAPI::get(stage, prim.path().clone())
         .ok()
         .flatten()
@@ -3050,7 +3079,6 @@ fn resolve_material_uncached(
     mat_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
 ) -> Arc<dyn Material> {
-
     // A material whose whole definition is a reference into a `.mtlx` composes
     // to a prim with a `Material` type name and *nothing inside it*, because
     // openusd ships no MaterialX file-format plugin. So every schema query
@@ -3177,7 +3205,10 @@ fn preview_surface_openpbr(stage: &Stage, mat_path: &sdf::Path) -> OpenPBR {
     if let Some(rgb) = ps.diffuse_color.value() {
         o.base_color = Vec3A::new(rgb[0], rgb[1], rgb[2]);
     } else if ps.diffuse_color.texture().is_some() {
-        warn!("UsdPreviewSurface at {}: diffuseColor is a texture — textures are not supported yet", mat_path);
+        warn!(
+            "UsdPreviewSurface at {}: diffuseColor is a texture — textures are not supported yet",
+            mat_path
+        );
     }
     if let Some(m) = ps.metallic.value() {
         o.base_metalness = *m;
@@ -3218,13 +3249,13 @@ fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
     let Ok(children) = stage.prim(mat_path.clone()).children() else {
         return false;
     };
-    children.iter().any(|c| {
-        match c.attribute("info:id").get::<sdf::Value>() {
+    children
+        .iter()
+        .any(|c| match c.attribute("info:id").get::<sdf::Value>() {
             Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
             Ok(Some(sdf::Value::String(t))) => t == id,
             _ => false,
-        }
-    })
+        })
 }
 
 /// Maps RenderMan's `PxrDisneyBsdf` onto [`OpenPBR`].
@@ -3389,7 +3420,10 @@ fn load_mtlx_material(
     node: &str,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn Material>> {
-    let dir = file.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let dir = file
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
     // `RefCell` because the loader closure is called from inside the compiler
     // while `caches` would otherwise be mutably borrowed by the outer call.
     let cell = std::cell::RefCell::new(&mut *caches);
@@ -3428,7 +3462,10 @@ fn load_mtlx_material(
             Some(l.material)
         }
         Err(e) => {
-            warn!("MaterialX {} not usable ({e}) — falling back", file.display());
+            warn!(
+                "MaterialX {} not usable ({e}) — falling back",
+                file.display()
+            );
             None
         }
     }
@@ -3696,10 +3733,9 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     let prim = stage.prim(path);
     let spp = custom_i32(&prim, "crust:samplesPerPixel").unwrap_or(DEFAULT_SPP as i32) as u32;
     let max_depth = custom_i32(&prim, "crust:maxDepth").unwrap_or(DEFAULT_MAX_DEPTH as i32) as u32;
-    let min_spp = custom_i32(&prim, "crust:minSamplesPerPixel").unwrap_or(DEFAULT_MIN_SPP as i32)
-        as u32;
-    let variance =
-        custom_f32(&prim, "crust:varianceThreshold").unwrap_or(DEFAULT_VARIANCE);
+    let min_spp =
+        custom_i32(&prim, "crust:minSamplesPerPixel").unwrap_or(DEFAULT_MIN_SPP as i32) as u32;
+    let variance = custom_f32(&prim, "crust:varianceThreshold").unwrap_or(DEFAULT_VARIANCE);
     let frame = custom_i32(&prim, "crust:frame").unwrap_or(DEFAULT_FRAME as i32) as isize;
 
     // Path guiding (opt-in).
@@ -3707,8 +3743,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     let guiding_iters = custom_i32(&prim, "crust:guidingTrainIterations")
         .unwrap_or(DEFAULT_GUIDING_TRAIN_ITERATIONS as i32)
         .max(1) as u32;
-    let guiding_prob =
-        custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
+    let guiding_prob = custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
 
     // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
     let strategy = match custom_token(&prim, "crust:samplingStrategy").as_deref() {
@@ -4092,8 +4127,14 @@ mod face_table_tests {
         };
         let refined = subdiv::subdivide(&points, &counts, &indices, &req).unwrap();
         let sub = refined.faces.as_ref().unwrap();
-        let (tris, map, _) =
-            triangulate(&refined.counts, &refined.indices, refined.points.len(), true, None).unwrap();
+        let (tris, map, _) = triangulate(
+            &refined.counts,
+            &refined.indices,
+            refined.points.len(),
+            true,
+            None,
+        )
+        .unwrap();
         let map = remap_subdivided_faces(map.unwrap(), sub);
 
         assert_eq!(tris.len(), 8, "4 child quads, 2 triangles each");
@@ -4120,8 +4161,9 @@ mod face_table_tests {
         // some triangle touches each of the four Ptex corners.
         for corner in [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] {
             assert!(
-                uvs.iter().flatten().any(|c| (c[0] - corner[0]).abs() < 1e-6
-                    && (c[1] - corner[1]).abs() < 1e-6),
+                uvs.iter()
+                    .flatten()
+                    .any(|c| (c[0] - corner[0]).abs() < 1e-6 && (c[1] - corner[1]).abs() < 1e-6),
                 "no triangle corner reaches base corner {corner:?}"
             );
         }
@@ -4203,7 +4245,11 @@ mod face_table_tests {
         // A pentagon fans into three triangles, none of them addressable.
         assert_eq!(
             &map.slices[1..],
-            &[FanSlice::Unmappable, FanSlice::Unmappable, FanSlice::Unmappable]
+            &[
+                FanSlice::Unmappable,
+                FanSlice::Unmappable,
+                FanSlice::Unmappable
+            ]
         );
     }
 

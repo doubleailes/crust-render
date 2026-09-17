@@ -24,10 +24,7 @@ fn main() {
         // texture and holds them for the whole render, so the peak is the sum
         // over the set. Worth knowing before starting a production stage,
         // rather than after it has been swapping for ten minutes.
-        let cap = args
-            .get(1)
-            .and_then(|s| s.parse::<i8>().ok())
-            .unwrap_or(5);
+        let cap = args.get(1).and_then(|s| s.parse::<i8>().ok()).unwrap_or(5);
         budget_dir(path, cap);
     } else if path.ends_with(".ptx") {
         probe_ptex(path);
@@ -56,7 +53,12 @@ fn budget_dir(dir: &str, cap: i8) {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_ptx(std::path::Path::new(dir), &mut files);
     files.sort();
-    println!("{} .ptx under {dir}, cap {cap} ({}x{} per face)\n", files.len(), 1 << cap, 1 << cap);
+    println!(
+        "{} .ptx under {dir}, cap {cap} ({}x{} per face)\n",
+        files.len(),
+        1 << cap,
+        1 << cap
+    );
 
     // Per top-level directory under `dir`, so a production stage's elements
     // are individually attributable.
@@ -87,7 +89,11 @@ fn budget_dir(dir: &str, cap: i8) {
         let group = f
             .strip_prefix(dir)
             .ok()
-            .and_then(|p| p.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()))
+            .and_then(|p| {
+                p.components()
+                    .next()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            })
             .unwrap_or_else(|| "?".into());
         let e = per_group.entry(group).or_default();
         e.0 += faces;
@@ -98,13 +104,25 @@ fn budget_dir(dir: &str, cap: i8) {
         total_full += full;
     }
 
-    println!("{:<22} {:>10} {:>7} {:>12}", "group", "faces", "files", "resident");
+    println!(
+        "{:<22} {:>10} {:>7} {:>12}",
+        "group", "faces", "files", "resident"
+    );
     for (g, (faces, bytes, n)) in &per_group {
         println!("{:<22} {:>10} {:>7} {:>12}", g, faces, n, mib(*bytes));
     }
     println!("{:<22} {:>10} {:>7} {:>12}", "", "", "", "");
-    println!("{:<22} {:>10} {:>7} {:>12}", "TOTAL", total_faces, files.len(), mib(total_bytes));
-    println!("\nat full resolution this set would be {} — the cap is what makes it fit", mib(total_full));
+    println!(
+        "{:<22} {:>10} {:>7} {:>12}",
+        "TOTAL",
+        total_faces,
+        files.len(),
+        mib(total_bytes)
+    );
+    println!(
+        "\nat full resolution this set would be {} — the cap is what makes it fit",
+        mib(total_full)
+    );
     if failed > 0 {
         println!("{failed} file(s) could not be opened");
     }
@@ -122,12 +140,19 @@ fn budget_dir(dir: &str, cap: i8) {
                 }
             }
         }
-        println!("  CRUST_PTEX_MAX_LOG2={c} ({:>4}x{:<4}) {:>12}", 1 << c, 1 << c, mib(b));
+        println!(
+            "  CRUST_PTEX_MAX_LOG2={c} ({:>4}x{:<4}) {:>12}",
+            1 << c,
+            1 << c,
+            mib(b)
+        );
     }
 }
 
 fn collect_ptx(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
@@ -164,7 +189,12 @@ fn probe_ptex(path: &str) {
     let n_chan = tx.num_channels();
     let dt = tx.data_type();
     let scale = dt.one_value_inv();
-    println!("faces {}  channels {}  type {}", tx.num_faces(), n_chan, dt.name());
+    println!(
+        "faces {}  channels {}  type {}",
+        tx.num_faces(),
+        n_chan,
+        dt.name()
+    );
 
     let mut sum = 0.0f64;
     let mut count = 0u64;
@@ -199,8 +229,14 @@ fn probe_ptex(path: &str) {
     let mean = sum / count as f64;
     println!("texels sampled {count}");
     println!("mean raw (as stored, 0..1)          = {mean:.4}");
-    println!("  -> if file is sRGB, linear mean   = {:.4}", mean.powf(2.2));
-    println!("  -> if file is linear, sRGB mean   = {:.4}", mean.powf(1.0 / 2.2));
+    println!(
+        "  -> if file is sRGB, linear mean   = {:.4}",
+        mean.powf(2.2)
+    );
+    println!(
+        "  -> if file is linear, sRGB mean   = {:.4}",
+        mean.powf(1.0 / 2.2)
+    );
     print!("decile histogram:");
     for h in hist {
         print!(" {}", h * 100 / count.max(1));
@@ -244,7 +280,10 @@ fn probe_image(path: &str, box_: Option<(u32, u32, u32, u32)>) {
         return;
     }
     let n = count as f64;
-    println!("pixels {count}  ({:.1}% of box)", 100.0 * n / ((x1 - x0) as f64 * (y1 - y0) as f64));
+    println!(
+        "pixels {count}  ({:.1}% of box)",
+        100.0 * n / ((x1 - x0) as f64 * (y1 - y0) as f64)
+    );
     println!(
         "mean sRGB   = ({:.4}, {:.4}, {:.4})  grey {:.4}",
         sum[0] / n,

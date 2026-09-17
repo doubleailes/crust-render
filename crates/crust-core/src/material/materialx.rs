@@ -92,7 +92,12 @@ impl MtlxMaterial {
     /// with nowhere to stash it. That means a vertex evaluated for NEE *and*
     /// for a BSDF sample runs the graph twice — correct, and the obvious thing
     /// to memoise if MaterialX surfaces ever dominate a render.
-    fn shade<R>(&self, r_in: &Ray, rec: &HitRecord, f: impl FnOnce(&OpenPBR, &HitRecord) -> R) -> R {
+    fn shade<R>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        f: impl FnOnce(&OpenPBR, &HitRecord) -> R,
+    ) -> R {
         let ctx = ShadeCtx {
             uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
             normal: rec.normal,
@@ -247,11 +252,19 @@ impl Pool {
 
     /// Weighted means, or the supplied neutral when the pool is empty.
     fn mean_color(&self, neutral: Vec3A) -> Vec3A {
-        if self.w > 1e-6 { self.color / self.w } else { neutral }
+        if self.w > 1e-6 {
+            self.color / self.w
+        } else {
+            neutral
+        }
     }
 
     fn mean(&self, total: f32, neutral: f32) -> f32 {
-        if self.w > 1e-6 { total / self.w } else { neutral }
+        if self.w > 1e-6 {
+            total / self.w
+        } else {
+            neutral
+        }
     }
 }
 
@@ -294,12 +307,12 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
                 // fed them from `artistic_ior` this inverts it exactly.
                 let n = get(l.ior).rgb();
                 let k = get(l.extinction).rgb();
-                let refl = if k.length_squared() > 1e-12 || (n - Vec3A::ONE).length_squared() > 1e-12
-                {
-                    reflectivity_from_ior(n, k) * color
-                } else {
-                    color
-                };
+                let refl =
+                    if k.length_squared() > 1e-12 || (n - Vec3A::ONE).length_squared() > 1e-12 {
+                        reflectivity_from_ior(n, k) * color
+                    } else {
+                        color
+                    };
                 metal.add(w, refl, rough, 0.0);
             }
             LobeKind::Sheen => sheen.add(w, color, rough, 0.0),
@@ -413,7 +426,10 @@ mod tests {
         </materialx>"#;
         let (lobes, slots) = evaluate(text, "m");
         let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
-        assert_eq!(m.specular_weight, 0.0, "a weight=0 dielectric coated the surface");
+        assert_eq!(
+            m.specular_weight, 0.0,
+            "a weight=0 dielectric coated the surface"
+        );
     }
 
     #[test]
@@ -433,6 +449,10 @@ mod tests {
         </materialx>"#;
         let (lobes, slots) = evaluate(text, "m");
         let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
-        assert!((m.base_metalness - 0.75).abs() < 1e-4, "{}", m.base_metalness);
+        assert!(
+            (m.base_metalness - 0.75).abs() < 1e-4,
+            "{}",
+            m.base_metalness
+        );
     }
 }

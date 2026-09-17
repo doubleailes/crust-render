@@ -23,7 +23,13 @@ fn region(l2w: Mat4, half: f32, sigma_s: f32, sigma_a: f32, field: DensityField)
 }
 
 fn unit_box(sigma_s: f32, sigma_a: f32) -> VolumeRegion {
-    region(Mat4::IDENTITY, 1.0, sigma_s, sigma_a, DensityField::Homogeneous)
+    region(
+        Mat4::IDENTITY,
+        1.0,
+        sigma_s,
+        sigma_a,
+        DensityField::Homogeneous,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -33,7 +39,12 @@ fn unit_box(sigma_s: f32, sigma_a: f32) -> VolumeRegion {
 #[test]
 fn homogeneous_field_is_one_everywhere() {
     let f = DensityField::Homogeneous;
-    for p in [Vec3A::ZERO, Vec3A::ONE, Vec3A::splat(0.5), Vec3A::new(0.1, 0.9, 0.3)] {
+    for p in [
+        Vec3A::ZERO,
+        Vec3A::ONE,
+        Vec3A::splat(0.5),
+        Vec3A::new(0.1, 0.9, 0.3),
+    ] {
         assert_eq!(f.density(p), 1.0);
     }
     assert_eq!(f.max_value(), 1.0);
@@ -41,7 +52,12 @@ fn homogeneous_field_is_one_everywhere() {
 
 #[test]
 fn grid_field_interpolates_between_voxel_centres() {
-    let f = DensityField::Grid { nx: 2, ny: 1, nz: 1, data: vec![0.0, 1.0] };
+    let f = DensityField::Grid {
+        nx: 2,
+        ny: 1,
+        nz: 1,
+        data: vec![0.0, 1.0],
+    };
     let at = |x: f32| f.density(Vec3A::new(x, 0.5, 0.5));
     assert!(approx(at(0.25), 0.0, 1e-6), "voxel 0 centre");
     assert!(approx(at(0.75), 1.0, 1e-6), "voxel 1 centre");
@@ -57,7 +73,12 @@ fn grid_field_interpolates_between_voxel_centres() {
 #[test]
 fn grid_field_uses_x_fastest_layout() {
     // 2×2×1: index = x + 2·y.
-    let f = DensityField::Grid { nx: 2, ny: 2, nz: 1, data: vec![1.0, 2.0, 3.0, 4.0] };
+    let f = DensityField::Grid {
+        nx: 2,
+        ny: 2,
+        nz: 1,
+        data: vec![1.0, 2.0, 3.0, 4.0],
+    };
     assert!(approx(f.density(Vec3A::new(0.25, 0.25, 0.5)), 1.0, 1e-6));
     assert!(approx(f.density(Vec3A::new(0.75, 0.25, 0.5)), 2.0, 1e-6));
     assert!(approx(f.density(Vec3A::new(0.25, 0.75, 0.5)), 3.0, 1e-6));
@@ -69,17 +90,44 @@ fn grid_field_uses_x_fastest_layout() {
 
 #[test]
 fn grid_field_along_z_and_max_value() {
-    let f = DensityField::Grid { nx: 1, ny: 1, nz: 3, data: vec![0.2, 0.8, 0.5] };
-    assert!(approx(f.density(Vec3A::new(0.5, 0.5, 1.0 / 6.0)), 0.2, 1e-5));
+    let f = DensityField::Grid {
+        nx: 1,
+        ny: 1,
+        nz: 3,
+        data: vec![0.2, 0.8, 0.5],
+    };
+    assert!(approx(
+        f.density(Vec3A::new(0.5, 0.5, 1.0 / 6.0)),
+        0.2,
+        1e-5
+    ));
     assert!(approx(f.density(Vec3A::new(0.5, 0.5, 0.5)), 0.8, 1e-5));
-    assert!(approx(f.density(Vec3A::new(0.5, 0.5, 5.0 / 6.0)), 0.5, 1e-5));
+    assert!(approx(
+        f.density(Vec3A::new(0.5, 0.5, 5.0 / 6.0)),
+        0.5,
+        1e-5
+    ));
     assert_eq!(f.max_value(), 0.8);
 }
 
 #[test]
 fn noise_field_stays_in_range_and_is_deterministic() {
-    let f = DensityField::Noise { scale: 4.0, octaves: 4, gain: 0.5, lacunarity: 2.0, threshold: 0.0, seed: 7 };
-    let g = DensityField::Noise { scale: 4.0, octaves: 4, gain: 0.5, lacunarity: 2.0, threshold: 0.0, seed: 7 };
+    let f = DensityField::Noise {
+        scale: 4.0,
+        octaves: 4,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.0,
+        seed: 7,
+    };
+    let g = DensityField::Noise {
+        scale: 4.0,
+        octaves: 4,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.0,
+        seed: 7,
+    };
     let mut rng = Rng::new(3);
     let mut sum = 0.0;
     for _ in 0..2000 {
@@ -90,15 +138,39 @@ fn noise_field_stays_in_range_and_is_deterministic() {
         sum += d;
     }
     let mean = sum / 2000.0;
-    assert!(mean > 0.2 && mean < 0.8, "value noise averages toward the middle: {mean}");
+    assert!(
+        mean > 0.2 && mean < 0.8,
+        "value noise averages toward the middle: {mean}"
+    );
     assert_eq!(f.max_value(), 1.0);
 }
 
 #[test]
 fn noise_seed_and_threshold_change_the_field() {
-    let a = DensityField::Noise { scale: 3.0, octaves: 3, gain: 0.5, lacunarity: 2.0, threshold: 0.0, seed: 1 };
-    let b = DensityField::Noise { scale: 3.0, octaves: 3, gain: 0.5, lacunarity: 2.0, threshold: 0.0, seed: 2 };
-    let t = DensityField::Noise { scale: 3.0, octaves: 3, gain: 0.5, lacunarity: 2.0, threshold: 0.6, seed: 1 };
+    let a = DensityField::Noise {
+        scale: 3.0,
+        octaves: 3,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.0,
+        seed: 1,
+    };
+    let b = DensityField::Noise {
+        scale: 3.0,
+        octaves: 3,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.0,
+        seed: 2,
+    };
+    let t = DensityField::Noise {
+        scale: 3.0,
+        octaves: 3,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.6,
+        seed: 1,
+    };
     let mut rng = Rng::new(5);
     let (mut differ, mut thresholded_lower) = (0, 0);
     for _ in 0..500 {
@@ -112,10 +184,20 @@ fn noise_seed_and_threshold_change_the_field() {
             thresholded_lower += 1;
         }
     }
-    assert!(differ > 400, "different seeds should differ almost everywhere: {differ}");
+    assert!(
+        differ > 400,
+        "different seeds should differ almost everywhere: {differ}"
+    );
     assert_eq!(thresholded_lower, 500);
     // A threshold near one leaves almost nothing.
-    let sparse = DensityField::Noise { scale: 3.0, octaves: 3, gain: 0.5, lacunarity: 2.0, threshold: 0.999, seed: 1 };
+    let sparse = DensityField::Noise {
+        scale: 3.0,
+        octaves: 3,
+        gain: 0.5,
+        lacunarity: 2.0,
+        threshold: 0.999,
+        seed: 1,
+    };
     assert!(sparse.density(Vec3A::splat(0.3)) < 0.5);
 }
 
@@ -136,20 +218,33 @@ fn region_density_is_zero_outside_its_box() {
 #[test]
 fn region_intersect_gives_entry_and_exit_distances() {
     let r = unit_box(0.5, 0.1);
-    let (t0, t1) = r.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z)).unwrap();
+    let (t0, t1) = r
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z))
+        .unwrap();
     assert!(approx(t0, 4.0, 1e-5) && approx(t1, 6.0, 1e-5));
     // Unnormalized direction: the interval is in ray-parameter units.
-    let (t0, t1) = r.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z * 2.0)).unwrap();
+    let (t0, t1) = r
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z * 2.0))
+        .unwrap();
     assert!(approx(t0, 2.0, 1e-5) && approx(t1, 3.0, 1e-5));
     // Starting inside: the interval begins at zero.
     let (t0, t1) = r.intersect(&Ray::new(Vec3A::ZERO, Vec3A::X)).unwrap();
     assert_eq!(t0, 0.0);
     assert!(approx(t1, 1.0, 1e-5));
     // Missing, and pointing away.
-    assert!(r.intersect(&Ray::new(Vec3A::new(0.0, 2.0, -5.0), Vec3A::Z)).is_none());
-    assert!(r.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), -Vec3A::Z)).is_none());
+    assert!(
+        r.intersect(&Ray::new(Vec3A::new(0.0, 2.0, -5.0), Vec3A::Z))
+            .is_none()
+    );
+    assert!(
+        r.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), -Vec3A::Z))
+            .is_none()
+    );
     // Axis-parallel ray outside the slab.
-    assert!(r.intersect(&Ray::new(Vec3A::new(3.0, 0.0, -5.0), Vec3A::Z)).is_none());
+    assert!(
+        r.intersect(&Ray::new(Vec3A::new(3.0, 0.0, -5.0), Vec3A::Z))
+            .is_none()
+    );
 }
 
 #[test]
@@ -166,19 +261,40 @@ fn region_transform_places_and_scales_the_box() {
     assert_eq!(r.density(Vec3A::new(10.9, 0.0, 0.0)), 1.0);
     assert_eq!(r.density(Vec3A::new(11.1, 0.0, 0.0)), 0.0);
     assert_eq!(r.density(Vec3A::ZERO), 0.0);
-    let (t0, t1) = r.intersect(&Ray::new(Vec3A::new(10.0, 0.0, -5.0), Vec3A::Z)).unwrap();
+    let (t0, t1) = r
+        .intersect(&Ray::new(Vec3A::new(10.0, 0.0, -5.0), Vec3A::Z))
+        .unwrap();
     assert!(approx(t0, 4.0, 1e-4) && approx(t1, 6.0, 1e-4));
 }
 
 #[test]
 fn a_rotated_region_is_hit_on_its_diagonal() {
     // Rotate the unit box 45° about Y: along X its extent is now √2.
-    let r = region(Mat4::from_rotation_y(std::f32::consts::FRAC_PI_4), 1.0, 1.0, 0.0, DensityField::Homogeneous);
-    let (t0, t1) = r.intersect(&Ray::new(Vec3A::new(-5.0, 0.0, 0.0), Vec3A::X)).unwrap();
+    let r = region(
+        Mat4::from_rotation_y(std::f32::consts::FRAC_PI_4),
+        1.0,
+        1.0,
+        0.0,
+        DensityField::Homogeneous,
+    );
+    let (t0, t1) = r
+        .intersect(&Ray::new(Vec3A::new(-5.0, 0.0, 0.0), Vec3A::X))
+        .unwrap();
     let s2 = 2f32.sqrt();
-    assert!(approx(t0, 5.0 - s2, 1e-4) && approx(t1, 5.0 + s2, 1e-4), "{t0} {t1}");
-    assert_eq!(r.density(Vec3A::new(1.3, 0.0, 0.0)), 1.0, "inside the rotated corner");
-    assert_eq!(r.density(Vec3A::new(1.3, 0.0, 1.3)), 0.0, "outside the rotated side");
+    assert!(
+        approx(t0, 5.0 - s2, 1e-4) && approx(t1, 5.0 + s2, 1e-4),
+        "{t0} {t1}"
+    );
+    assert_eq!(
+        r.density(Vec3A::new(1.3, 0.0, 0.0)),
+        1.0,
+        "inside the rotated corner"
+    );
+    assert_eq!(
+        r.density(Vec3A::new(1.3, 0.0, 1.3)),
+        0.0,
+        "outside the rotated side"
+    );
 }
 
 #[test]
@@ -203,10 +319,34 @@ fn density_scale_folds_into_the_coefficients_and_g_is_clamped() {
 
 #[test]
 fn grid_region_reports_non_homogeneous() {
-    let r = region(Mat4::IDENTITY, 1.0, 1.0, 0.0, DensityField::Grid { nx: 1, ny: 1, nz: 1, data: vec![0.5] });
+    let r = region(
+        Mat4::IDENTITY,
+        1.0,
+        1.0,
+        0.0,
+        DensityField::Grid {
+            nx: 1,
+            ny: 1,
+            nz: 1,
+            data: vec![0.5],
+        },
+    );
     assert!(!r.is_homogeneous());
     assert_eq!(r.density(Vec3A::ZERO), 0.5);
-    let n = region(Mat4::IDENTITY, 1.0, 1.0, 0.0, DensityField::Noise { scale: 2.0, octaves: 2, gain: 0.5, lacunarity: 2.0, threshold: 0.0, seed: 0 });
+    let n = region(
+        Mat4::IDENTITY,
+        1.0,
+        1.0,
+        0.0,
+        DensityField::Noise {
+            scale: 2.0,
+            octaves: 2,
+            gain: 0.5,
+            lacunarity: 2.0,
+            threshold: 0.0,
+            seed: 0,
+        },
+    );
     assert!(!n.is_homogeneous());
 }
 
@@ -253,7 +393,10 @@ fn phase_samples_are_unit_and_follow_the_anisotropy() {
         }
         // E[cos θ] under Henyey-Greenstein is exactly g.
         let mean_cos = mean_cos / n as f64;
-        assert!((mean_cos - g as f64).abs() < 0.02, "g={g}: mean cos {mean_cos}");
+        assert!(
+            (mean_cos - g as f64).abs() < 0.02,
+            "g={g}: mean cos {mean_cos}"
+        );
     }
 }
 
@@ -284,7 +427,10 @@ fn phase_sample_agrees_with_its_pdf_histogram() {
         let expected = mass * 2.0 * std::f64::consts::PI * (2.0 / bins as f64) / steps as f64;
         let observed = hist[b] as f64 / n as f64;
         let tol = (0.05 * expected).max(4.0 * (expected / n as f64).sqrt());
-        assert!((observed - expected).abs() < tol, "bin {b}: {observed} vs {expected}");
+        assert!(
+            (observed - expected).abs() < tol,
+            "bin {b}: {observed} vs {expected}"
+        );
     }
 }
 
@@ -301,7 +447,10 @@ fn empty_volumes_are_transparent() {
     let ray = Ray::new(Vec3A::ZERO, Vec3A::Z);
     assert_eq!(v.transmittance(&ray, 0.0, 10.0, &mut rng), Vec3A::ONE);
     match v.sample_interaction(&ray, 0.0, 10.0, &mut rng) {
-        VolumeEvent::Passthrough { transmittance, emitted } => {
+        VolumeEvent::Passthrough {
+            transmittance,
+            emitted,
+        } => {
             assert_eq!(transmittance, Vec3A::ONE);
             assert_eq!(emitted, Vec3A::ZERO);
         }
@@ -345,7 +494,12 @@ fn transmittance_is_per_channel() {
     );
     let v = Volumes::new(vec![r]);
     let mut rng = Rng::new(1);
-    let tr = v.transmittance(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-4, 100.0, &mut rng);
+    let tr = v.transmittance(
+        &Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z),
+        1e-4,
+        100.0,
+        &mut rng,
+    );
     assert!(approx(tr.x, (-0.2f32).exp(), 1e-5));
     assert!(approx(tr.y, (-1.0f32).exp(), 1e-5));
     assert!(approx(tr.z, (-2.0f32).exp(), 1e-5));
@@ -354,7 +508,13 @@ fn transmittance_is_per_channel() {
 #[test]
 fn overlapping_homogeneous_regions_multiply_their_transmittance() {
     let a = unit_box(0.25, 0.0);
-    let b = region(Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)), 1.0, 0.0, 0.5, DensityField::Homogeneous);
+    let b = region(
+        Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+        1.0,
+        0.0,
+        0.5,
+        DensityField::Homogeneous,
+    );
     let v = Volumes::new(vec![a, b]);
     let mut rng = Rng::new(1);
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
@@ -374,7 +534,10 @@ fn a_pure_absorber_never_scatters_and_dims_in_expectation() {
     for _ in 0..n {
         match v.sample_interaction(&ray, 1e-4, 100.0, &mut rng) {
             VolumeEvent::Scatter { .. } => panic!("an absorber has no scattering events"),
-            VolumeEvent::Passthrough { transmittance, emitted } => {
+            VolumeEvent::Passthrough {
+                transmittance,
+                emitted,
+            } => {
                 assert_eq!(emitted, Vec3A::ZERO);
                 sum += transmittance.x as f64;
             }
@@ -395,25 +558,44 @@ fn a_pure_scatterer_collides_with_the_right_probability() {
     let mut scatters = 0;
     for _ in 0..n {
         match v.sample_interaction(&ray, 1e-4, 100.0, &mut rng) {
-            VolumeEvent::Scatter { t, p, weight, phase, emitted } => {
+            VolumeEvent::Scatter {
+                t,
+                p,
+                weight,
+                phase,
+                emitted,
+            } => {
                 scatters += 1;
                 // The walk starts exactly at the entry distance; an
                 // exponential step can round to zero.
                 assert!((4.0..6.0).contains(&t), "scatter outside the box at t={t}");
                 assert!(p.abs_diff_eq(ray.at(t), 1e-4));
                 assert!(weight.is_finite() && weight.min_element() > 0.0);
-                assert!(approx(weight.x, 1.0, 1e-4), "a pure scatterer's collision carries unit weight: {weight}");
+                assert!(
+                    approx(weight.x, 1.0, 1e-4),
+                    "a pure scatterer's collision carries unit weight: {weight}"
+                );
                 assert_eq!(emitted, Vec3A::ZERO);
-                assert!(approx(phase.pdf(0.3), 1.0 / (4.0 * std::f32::consts::PI), 1e-6));
+                assert!(approx(
+                    phase.pdf(0.3),
+                    1.0 / (4.0 * std::f32::consts::PI),
+                    1e-6
+                ));
             }
             VolumeEvent::Passthrough { transmittance, .. } => {
-                assert!(approx(transmittance.x, 1.0, 1e-5), "no absorption, no null collisions: {transmittance}");
+                assert!(
+                    approx(transmittance.x, 1.0, 1e-5),
+                    "no absorption, no null collisions: {transmittance}"
+                );
             }
         }
     }
     let frac = scatters as f64 / n as f64;
     let expected = 1.0 - (-2.0 * sigma_s as f64).exp();
-    assert!((frac - expected).abs() < 0.01, "scatter fraction {frac} vs {expected}");
+    assert!(
+        (frac - expected).abs() < 0.01,
+        "scatter fraction {frac} vs {expected}"
+    );
 }
 
 #[test]
@@ -423,7 +605,10 @@ fn a_segment_ending_before_the_box_passes_through_untouched() {
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
     for _ in 0..100 {
         match v.sample_interaction(&ray, 1e-4, 3.5, &mut rng) {
-            VolumeEvent::Passthrough { transmittance, emitted } => {
+            VolumeEvent::Passthrough {
+                transmittance,
+                emitted,
+            } => {
                 assert_eq!(transmittance, Vec3A::ONE);
                 assert_eq!(emitted, Vec3A::ZERO);
             }
@@ -451,7 +636,9 @@ fn an_emissive_absorber_adds_emission_along_the_walk() {
     let mut emitted_sum = Vec3A::ZERO;
     let mut any = false;
     for _ in 0..n {
-        if let VolumeEvent::Passthrough { emitted, .. } = v.sample_interaction(&ray, 1e-4, 100.0, &mut rng) {
+        if let VolumeEvent::Passthrough { emitted, .. } =
+            v.sample_interaction(&ray, 1e-4, 100.0, &mut rng)
+        {
             any |= emitted.x > 0.0;
             emitted_sum += emitted;
         }
@@ -463,7 +650,11 @@ fn an_emissive_absorber_adds_emission_along_the_walk() {
     assert!(approx(mean.z / mean.x, 3.0, 0.05), "{mean}");
     // Analytic: ∫₀² σₐ Lₑ e^{-σₐ s} ds = Lₑ (1 − e^{-1}).
     let expected = 1.0 - (-1.0f32).exp();
-    assert!(approx(mean.x, expected, 0.03), "mean emission {} vs {expected}", mean.x);
+    assert!(
+        approx(mean.x, expected, 0.03),
+        "mean emission {} vs {expected}",
+        mean.x
+    );
 }
 
 #[test]
@@ -475,7 +666,12 @@ fn heterogeneous_transmittance_is_unbiased_against_the_analytic_answer() {
         1.0,
         0.0,
         1.0,
-        DensityField::Grid { nx: 1, ny: 1, nz: 2, data: vec![0.0, 1.0] },
+        DensityField::Grid {
+            nx: 1,
+            ny: 1,
+            nz: 2,
+            data: vec![0.0, 1.0],
+        },
     );
     let v = Volumes::new(vec![r]);
     let mut rng = Rng::new(9);
@@ -496,14 +692,34 @@ fn heterogeneous_transmittance_is_unbiased_against_the_analytic_answer() {
 
 #[test]
 fn scatter_events_in_overlapping_regions_mix_their_phase_lobes() {
-    let a = VolumeRegion::new(Mat4::IDENTITY, Vec3A::ONE, Vec3A::splat(1.0), Vec3A::ZERO, 0.8, Vec3A::ZERO, 1.0, DensityField::Homogeneous);
-    let b = VolumeRegion::new(Mat4::IDENTITY, Vec3A::ONE, Vec3A::splat(1.0), Vec3A::ZERO, -0.8, Vec3A::ZERO, 1.0, DensityField::Homogeneous);
+    let a = VolumeRegion::new(
+        Mat4::IDENTITY,
+        Vec3A::ONE,
+        Vec3A::splat(1.0),
+        Vec3A::ZERO,
+        0.8,
+        Vec3A::ZERO,
+        1.0,
+        DensityField::Homogeneous,
+    );
+    let b = VolumeRegion::new(
+        Mat4::IDENTITY,
+        Vec3A::ONE,
+        Vec3A::splat(1.0),
+        Vec3A::ZERO,
+        -0.8,
+        Vec3A::ZERO,
+        1.0,
+        DensityField::Homogeneous,
+    );
     let v = Volumes::new(vec![a, b]);
     let mut rng = Rng::new(6);
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
     let mut seen = false;
     for _ in 0..200 {
-        if let VolumeEvent::Scatter { phase, .. } = v.sample_interaction(&ray, 1e-4, 100.0, &mut rng) {
+        if let VolumeEvent::Scatter { phase, .. } =
+            v.sample_interaction(&ray, 1e-4, 100.0, &mut rng)
+        {
             seen = true;
             // Equal σₛ: the mixture is symmetric, so forward and backward
             // agree and both exceed the sideways value.

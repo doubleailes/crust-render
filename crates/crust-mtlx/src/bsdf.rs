@@ -76,13 +76,7 @@ const MAX_BSDF_DEPTH: usize = 16;
 /// `weight` is the slot holding the accumulated weight reaching this subtree;
 /// `normal` the enclosing shading normal, which a leaf inherits unless it
 /// authors its own.
-pub fn flatten(
-    c: &mut Compiler<'_>,
-    node: &Node,
-    weight: u32,
-    depth: usize,
-    out: &mut Vec<Lobe>,
-) {
+pub fn flatten(c: &mut Compiler<'_>, node: &Node, weight: u32, depth: usize, out: &mut Vec<Lobe>) {
     if depth > MAX_BSDF_DEPTH {
         return;
     }
@@ -416,8 +410,16 @@ mod tests {
     #[test]
     fn a_mix_partitions_weight_between_its_branches() {
         let w = weights(MIXED, "m");
-        let diffuse: f32 = w.iter().filter(|(k, _)| *k == LobeKind::Diffuse).map(|(_, v)| v).sum();
-        let metal: f32 = w.iter().filter(|(k, _)| *k == LobeKind::Conductor).map(|(_, v)| v).sum();
+        let diffuse: f32 = w
+            .iter()
+            .filter(|(k, _)| *k == LobeKind::Diffuse)
+            .map(|(_, v)| v)
+            .sum();
+        let metal: f32 = w
+            .iter()
+            .filter(|(k, _)| *k == LobeKind::Conductor)
+            .map(|(_, v)| v)
+            .sum();
         assert!((diffuse - 0.25).abs() < 1e-5, "diffuse {diffuse}");
         assert!((metal - 0.75).abs() < 1e-5, "metal {metal}");
         // Partition of unity: nothing created, nothing lost.
