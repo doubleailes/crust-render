@@ -16,6 +16,8 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
 cargo run --release -- -i samples/cornellbox.usda
 cargo run --release -- -i samples/materialx_teapot.usda    # MaterialX + UDIM (needs the DPEL download)
+cargo run --release -- -i samples/materialx_lion.usda      # the other DPEL asset: 140-op graph, sheen, 1.06 M tris
+cargo run --release -- -i samples/materialx_showcase.usda  # both, framed after the assets' overview.png (1080p)
 cargo run --release -- -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
@@ -604,9 +606,19 @@ Schema mapping:
     plausible pastel and a mask read at the wrong colour space is a plausible
     blend; comparing renders settles nothing.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
-    KiB of textures, what `tests/usd_scene.rs` runs against) and
-    `samples/materialx_teapot.usda` (the shot layer for the DPEL teapot, which
-    is gitignored and must be downloaded).
+    KiB of textures, what `tests/usd_scene.rs` runs against), and the two shot
+    layers for the DPEL assets, which are gitignored and must be downloaded:
+    `samples/materialx_teapot.usda` and `samples/materialx_lion.usda`, plus
+    `samples/materialx_showcase.usda` composing both after the `overview.png`
+    the assets ship with (the lion is scaled to 0.52 there: both are ~0.26 m
+    tall as authored, yet the overview shows the lion at ~60% of the teapot's
+    height while standing nearer the camera, so it is scaled, not pushed back;
+    the seamless sweep is a near-white floor under a uniform dome, the two
+    meeting at the horizon because a Lambertian floor of albedo a under
+    radiance L reflects a·L). The lion
+    is the larger graph (140 ops, 8 lobes, 7 textures over 6 UDIM tiles, 1.06 M
+    baked triangles) and the one that layers a `sheen_bsdf`, so it is what
+    exercises the fuzz pool; both import with no unsupported nodes.
 - **UV textures** (`texture.rs`, host decoder in `crust-assets/src/uv_texture.rs`) —
   the chart a `primvars:st` primvar carries, as opposed to Ptex's per-face
   parameterisation. `Texture2D` is `crust_mtlx::Texture` re-exported — the
