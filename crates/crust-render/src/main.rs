@@ -1,8 +1,11 @@
+#![forbid(unsafe_code)]
+
 use clap::Parser;
 use crust_core::Buffer;
 use crust_core::PixelFilter;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
+use crust_core::{AovRequest, StepStatus, StopToken};
 use crust_core::{AssetLoader, EnvironmentMap, PtexTexture, Scene, Vec3A};
 use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
@@ -393,6 +396,25 @@ struct Cli {
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
     stats: bool,
+    /// Render progressively, advancing the image by this many samples per
+    /// pixel per chunk. Run to completion the result is bit-identical to
+    /// the one-shot render — this exists for previews (--preview) and
+    /// early termination (--time-limit).
+    #[arg(long, value_name = "SPP")]
+    progressive: Option<u32>,
+    /// With --progressive: every N chunks, write a tone-mapped snapshot
+    /// PNG next to the output (out.pass###.png).
+    #[arg(long, value_name = "N")]
+    preview: Option<u32>,
+    /// Stop rendering after this many seconds and write the coherent
+    /// partial image accumulated so far.
+    #[arg(long, value_name = "SECONDS")]
+    time_limit: Option<u64>,
+    /// Also render AOV sidecars next to the output: primary-hit depth,
+    /// world normal, alpha and [geom_id, prim_id] (out.depth.exr,
+    /// out.normal.exr, out.alpha.exr, out.id.exr).
+    #[arg(long, default_value_t = false)]
+    aovs: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -486,6 +508,69 @@ fn write_png(
         }
     }
     img.save(path)
+}
+
+/// Render the AOV planes and write them as EXR sidecars next to `output`:
+/// `.depth.exr`, `.normal.exr`, `.alpha.exr` (linear f32 RGB), and
+/// `.id.exr` carrying the primary hit's `[geom_id, prim_id]` as two u32
+/// channels (ids must survive exactly — a float channel would corrupt them
+/// past 2^24). A failed sidecar logs and continues: the beauty image is
+/// already on disk.
+fn write_aovs(renderer: &Renderer, output: &str) {
+    let aovs = renderer.render_aovs(AovRequest {
+        depth: true,
+        normal: true,
+        prim_id: true,
+        alpha: true,
+    });
+    let (w, h) = (aovs.width, aovs.height);
+    // AOV planes keep row 0 at the bottom (the engine convention); EXR
+    // scanlines run top-down.
+    let flip = |x: usize, y: usize| (h - 1 - y) * w + x;
+
+    let depth = aovs.depth.as_ref().expect("requested above");
+    let path = Path::new(output).with_extension("depth.exr");
+    match write_rgb_file(&path, w, h, |x, y| {
+        let d = depth[flip(x, y)];
+        (d, d, d)
+    }) {
+        Ok(_) => info!("AOV written to: {:?}", path),
+        Err(e) => error!("Error writing depth AOV: {}", e),
+    }
+
+    let normal = aovs.normal.as_ref().expect("requested above");
+    let path = Path::new(output).with_extension("normal.exr");
+    match write_rgb_file(&path, w, h, |x, y| {
+        let n = normal[flip(x, y)];
+        (n.x, n.y, n.z)
+    }) {
+        Ok(_) => info!("AOV written to: {:?}", path),
+        Err(e) => error!("Error writing normal AOV: {}", e),
+    }
+
+    let alpha = aovs.alpha.as_ref().expect("requested above");
+    let path = Path::new(output).with_extension("alpha.exr");
+    match write_rgb_file(&path, w, h, |x, y| {
+        let a = alpha[flip(x, y)];
+        (a, a, a)
+    }) {
+        Ok(_) => info!("AOV written to: {:?}", path),
+        Err(e) => error!("Error writing alpha AOV: {}", e),
+    }
+
+    let ids = aovs.prim_id.as_ref().expect("requested above");
+    let path = Path::new(output).with_extension("id.exr");
+    let channels = SpecificChannels::build()
+        .with_channel("geom_id")
+        .with_channel("prim_id")
+        .with_pixel_fn(|pos: Vec2<usize>| {
+            let [geom, prim] = ids[flip(pos.x(), pos.y())];
+            (geom, prim)
+        });
+    match Image::from_channels((w, h), channels).write().to_file(&path) {
+        Ok(_) => info!("AOV written to: {:?}", path),
+        Err(e) => error!("Error writing id AOV: {}", e),
+    }
 }
 
 fn main() {
@@ -585,7 +670,62 @@ fn main() {
         }
         progress_bar.set_position(done);
     };
-    let (buffer, ray_stats) = renderer.render_with_stats(cli.bucket, &progress);
+    // --time-limit arms a stop token from a watchdog thread; the render
+    // winds down at the next row/tile boundary and the partial image is
+    // written through the normal output path.
+    let stop = StopToken::new();
+    if let Some(secs) = cli.time_limit {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(secs));
+            stop.stop();
+        });
+    }
+
+    let (buffer, ray_stats) = if let Some(chunk) = cli.progressive {
+        let mut session = renderer.begin_progressive(cli.bucket);
+        let mut chunk_idx = 0u32;
+        loop {
+            let status = session.step(chunk.max(1), Some(&progress), Some(&stop));
+            chunk_idx += 1;
+            match status {
+                StepStatus::Complete { .. } => break,
+                StepStatus::Stopped { spp_done } => {
+                    info!("render stopped at {spp_done} spp; writing the partial image");
+                    break;
+                }
+                StepStatus::InProgress { spp_done } => {
+                    if let Some(every) = cli.preview
+                        && every > 0
+                        && chunk_idx % every == 0
+                    {
+                        let snapshot = session.snapshot();
+                        let preview_path =
+                            Path::new(&output).with_extension(format!("pass{chunk_idx:03}.png"));
+                        match write_png(
+                            &snapshot,
+                            snapshot.width(),
+                            snapshot.height(),
+                            &preview_path,
+                        ) {
+                            Ok(_) => info!("preview at {spp_done} spp: {preview_path:?}"),
+                            Err(e) => error!("Error writing preview PNG: {e}"),
+                        }
+                    }
+                }
+            }
+        }
+        session.finish()
+    } else if cli.time_limit.is_some() {
+        let (buffer, ray_stats, completed) =
+            renderer.render_with_control(cli.bucket, Some(&progress), Some(&stop));
+        if !completed {
+            info!("render stopped by --time-limit; writing the partial image");
+        }
+        (buffer, ray_stats)
+    } else {
+        renderer.render_with_stats(cli.bucket, &progress)
+    };
     bar.finish();
     // Close Timer
     let duration: Duration = start.elapsed();
@@ -609,6 +749,9 @@ fn main() {
             error!("Error writing PNG: {}", e);
             std::process::exit(1);
         }
+    }
+    if cli.aovs {
+        write_aovs(&renderer, &output);
     }
     stats.record("Write output", 0, output_start.elapsed());
 

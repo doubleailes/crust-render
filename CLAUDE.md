@@ -9,6 +9,14 @@ inspired by PBRT, *Ray Tracing in One Weekend*, and Autodesk Standard Surface / 
 Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the pure-Rust
 [`openusd`](https://github.com/mxpv/openusd) crate — RON support was removed.
 
+The safe-Rust rule is enforced (`forbid(unsafe_code)` in every crate root, test-only
+carve-outs excepted) and carries exactly **one sanctioned exception**: the planned
+**Hydra render delegate boundary** — a future `crust-capi` C-ABI crate plus the
+`hdCrust` C++ `HdRenderDelegate` plugin — may use `unsafe`/FFI, because Hydra's plugin
+ABI is C++ and cannot be reached otherwise. No engine crate may ever depend on those
+boundary crates, so the exception cannot leak inward. Rationale, scope and the phased
+roadmap live in `docs/hydra_delegate.md`.
+
 ## Commands
 
 ```bash
@@ -21,7 +29,11 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
-# --stats (per-phase profile + scene statistics)
+# --stats (per-phase profile + scene statistics),
+# --progressive <spp> (chunked render; run to completion it is bit-identical to
+# one-shot) + --preview <n> (snapshot PNG every n chunks), --time-limit <secs>
+# (stop and write the coherent partial image), --aovs (EXR sidecars: primary-hit
+# depth/normal/alpha + [geom_id, prim_id] as u32 channels in out.id.exr)
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- -i samples/curves.usda --stats
@@ -64,6 +76,11 @@ cargo run --release -p crust-render --example xform_probe -- stage.usda /prim   
 # Kernel correctness is stated in exact float bits, so it must hold under every
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
+
+# The C-side ABI guard for crust-capi (the Hydra delegate boundary): compiles
+# include/crust.h from real C with -Werror, links the release cdylib, runs
+# tests/smoke.c. The Rust-side twin is `cargo test -p crust-capi`.
+scripts/test_capi_c.sh
 
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
@@ -121,7 +138,28 @@ rather than plateauing.
 
 ## Workspace layout
 
-Five crates under `crates/`:
+Five crates under `crates/` (plus the C++ plugin under `hydra/`):
+
+- **`crust-capi`** — the C ABI over crust-core for the Hydra delegate; the one
+  sanctioned `unsafe` crate (see the safe-Rust rule above). The C contract is
+  the hand-written `include/crust.h` (API v2), guarded from drift by
+  `tests/abi.rs` (Rust side) and `tests/smoke.c` via `scripts/test_capi_c.sh`
+  (C side). What makes Hydra edits cheap lives here: `CrustGeoCache` keeps each
+  mesh's committed inner `rt::Scene` alive across scene rebuilds (placements are
+  kernel `Instance`s, so a rebuild pays only the top-level BVH over instance
+  boxes), and `crust_renderer_update_camera`/`update_settings` restart sampling
+  in place with no world work at all. Depends on crust-core + glam, plus
+  `exr`/`image` for `crust_scene_add_dome_light_file` (the capi plays the
+  `AssetLoader` role for the delegate that the CLI plays for batch renders);
+  nothing depends on it.
+- **`hydra/hdCrust/`** (not a crate) — the C++ `HdRenderDelegate` plugin over
+  crust-capi: synchronous stepping per Hydra `Execute`, rebuild-on-any-edit,
+  displayColor shading, color/depth/primId AOVs. Builds against an OpenUSD
+  C++ install (imaging on, GL not needed); `tests/testHdCrust.cpp` is a
+  headless registry→render harness. See `hydra/hdCrust/README.md` and
+  `docs/hydra_delegate.md`.
+
+The engine crates:
 
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
@@ -158,7 +196,9 @@ Five crates under `crates/`:
   the tone-mapped PNG. `main.rs` is the only file.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
-- **`openqmc-rs`** (crate/lib name `openqmc`) — a self-contained, from-scratch Rust port
+- **`openqmc-rs`** (crate/lib name `openqmc`; no longer under `crates/` — pulled from
+  crates.io as an ordinary dependency, having graduated out of the workspace) — a
+  self-contained, from-scratch Rust port
   of [AcademySoftwareFoundation/openqmc](https://github.com/AcademySoftwareFoundation/openqmc)
   (Apache-2.0), the quasi-Monte Carlo sampling library. Modules map one-to-one to the
   upstream `oqmc/*.h` headers (`pcg`, `reverse`, `rotate`, `permute`, `encode`, `float`,
@@ -186,6 +226,23 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
    - `render()` — parallel over pixels within each scanline row.
    - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
+   Both resolve a **`Film`** (one persisted `PixelAccum` — Σwᵢ·Lᵢ, Σwᵢ, luminance
+   moments, `taken`, adaptive-stop latch — per pixel) that `advance_film` drives to a
+   target spp; because the sampler is a pure function of the sample index and the
+   adaptive predicate a pure function of those accumulators, `begin_progressive()`
+   (chunked `step`/`snapshot`/`finish`, for hosts like a Hydra delegate) is
+   **bit-identical to batch when run to completion** — pinned by
+   `progressive_equals_batch_bitwise`. `render_with_control(tiled, progress, stop)`
+   adds cancellation via `StopToken` (checked per row/tile, never per sample; a stopped
+   render is a coherent partial image). Guided training passes never chunk (their
+   sample order feeds the order-sensitive SD-tree update); only the final pass does.
+   The ΔEff guided/unguided decision compares wall-clock costs, so guided renders are
+   deterministic only per-decision — the guided bitwise test pins one training
+   iteration for exactly that reason.
+   `render_aovs(AovRequest)` (`aov.rs`) fills depth/normal/`[geom_id, prim_id]`/alpha
+   planes from one primary-hit probe per pixel — point-sampled at pixel centers
+   through the lens center (never filtered: ids don't average), `MASK_CAMERA` so AOVs
+   agree with what the beauty sees.
    Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
    importance sampling**, not splatting: each pixel warps its jitter through the
    filter's distribution and weights radiance by `f/p`, keeping every per-pixel
