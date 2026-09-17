@@ -34,18 +34,33 @@ in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 (`crust-core/src/texture.rs:32`): values returned from `eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
-## Two transfer curves, deliberately
+## Three transfer curves, deliberately
 
-There are two decode curves in the codebase, and they are not
+There are three decode curves in the codebase, and they are not
 interchangeable:
 
 | Curve | Formula | Where |
 | --- | --- | --- |
-| **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`) |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open`) |
+| **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
+| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open`); UV textures tagged `g22_rec709` |
+| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture.rs`, `to_linear_table`) |
 
-The flat curve is *not* a sloppy approximation of the standard one — it is
-matched to what the source content actually applies. The Moana island's shading
+MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
+*separate* colour spaces, and [`ColorSpace::from_mtlx`][cs] maps them onto
+three separate decodes accordingly. Folding the two power laws into the sRGB
+branch — which this code did until it was caught — is wrong in the shadows for
+2.2 (the table below) and wrong across the whole range for 1.8, whose
+exponent is not 2.4-ish at all. The primaries in those two names are Rec.709,
+which is the space crust already works in, so only the curve differs; a tag
+naming *different* primaries (`acescg`, `g22_ap1`) is deliberately left as
+`Raw` rather than decoded with the wrong gamut. Pinned by the decode tests in
+`crust-assets/src/uv_texture.rs` and the tag-mapping tests in
+`crust-core/src/texture.rs`.
+
+[cs]: ../crates/crust-core/src/texture.rs
+
+The flat 2.2 curve is *not* a sloppy approximation of the standard one — it
+is matched to what the source content actually applies. The Moana island's shading
 networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
@@ -135,6 +150,10 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
 | Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` | flat 2.2 | ✅ intentional (island convention) |
+| UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture.rs` (`to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
+| UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture.rs` | flat 2.2 | ✅ correct per MaterialX |
+| UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture.rs` | flat 1.8 | ✅ correct per MaterialX |
+| UV texture, any other tag or none | `crust-assets/src/uv_texture.rs` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
@@ -187,11 +206,15 @@ maps), so treating them as sRGB is a defensible convention rather than a
 standards requirement — but "no conversion at all" is not a defensible reading
 of any convention.
 
-**2. No shared abstraction, so nothing is enforced.** There is no `ColorSpace`
-type. The two curves exist as independent inline implementations
-(`usd_import.rs` `disney_to_openpbr`, `crust-assets` `PtexColor::open`) that happen to agree. Nothing forces a
-newly added colour input to state its source space; the default behaviour of
-adding one is to get gap #1 again, silently.
+**2. The abstraction covers assets only, so USD attributes enforce nothing.**
+`ColorSpace` (`crust-core/src/texture.rs`) does exist, and every UV texture
+crossing the `AssetLoader` seam names its space — that is what makes
+`srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. USD
+*attribute* reads are not covered: their curves remain independent inline
+implementations (`usd_import.rs` `disney_to_openpbr`, `crust-assets`
+`PtexColor::open`) that happen to agree, and nothing forces a newly added
+colour attribute to state its source space; the default behaviour of adding
+one is to get gap #1 again, silently.
 
 **3. Per-attribute colour-space authoring is unsupported.** A USD attribute
 carrying an explicit `colorSpace` metadatum is ignored; the curve is chosen by
