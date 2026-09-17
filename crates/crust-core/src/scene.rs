@@ -26,12 +26,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn new(
-        camera: Camera,
-        world: World,
-        lights: LightList,
-        settings: RenderSettings,
-    ) -> Self {
+    pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
         Self {
             camera,
             world,

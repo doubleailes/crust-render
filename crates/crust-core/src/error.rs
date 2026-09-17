@@ -18,7 +18,12 @@ impl fmt::Display for Error {
                 write!(f, "USD path is not valid UTF-8: {}", path.display())
             }
             Error::UsdOpen { path, message } => {
-                write!(f, "failed to open USD stage {}: {}", path.display(), message)
+                write!(
+                    f,
+                    "failed to open USD stage {}: {}",
+                    path.display(),
+                    message
+                )
             }
         }
     }

@@ -219,7 +219,10 @@ fn uniform_sphere_has_zero_mean_and_isotropic_second_moment() {
     for k in 0..3 {
         assert!((mean[k] / n as f64).abs() < 0.006, "axis {k} mean");
         // E[x²] = 1/3 on the unit sphere.
-        assert!((sq[k] / n as f64 - 1.0 / 3.0).abs() < 0.006, "axis {k} second moment");
+        assert!(
+            (sq[k] / n as f64 - 1.0 / 3.0).abs() < 0.006,
+            "axis {k} second moment"
+        );
     }
 }
 

@@ -234,7 +234,11 @@ impl SceneBuilder {
         // (`MemoryFootprint` counts capacity, not length, which is why it
         // showed up). The bound can only over-shoot by the number of
         // degenerate primitives skipped below, normally zero.
-        let total: usize = self.geoms.iter().map(|(g, _)| Self::prim_upper_bound(g)).sum();
+        let total: usize = self
+            .geoms
+            .iter()
+            .map(|(g, _)| Self::prim_upper_bound(g))
+            .sum();
         let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
         let mut has_motion = false;
         for (geom_id, (geom, mask)) in self.geoms.into_iter().enumerate() {
@@ -356,7 +360,11 @@ impl Scene {
         let front_face = ray.dir.dot(hit.outward) < 0.0;
         Some(RayHit {
             t: hit.t,
-            normal: if front_face { hit.outward } else { -hit.outward },
+            normal: if front_face {
+                hit.outward
+            } else {
+                -hit.outward
+            },
             front_face,
             u: hit.u,
             v: hit.v,
@@ -531,7 +539,11 @@ mod tests {
         let scene = b.commit();
         assert_eq!(scene.primitive_count(), 2);
         let hit = scene
-            .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z), 1e-4, f32::MAX)
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z),
+                1e-4,
+                f32::MAX,
+            )
             .expect("the filled-in sphere is hit");
         assert_eq!(hit.geom_id, slot, "and reports the id it reserved");
     }
@@ -582,7 +594,11 @@ mod tests {
     fn front_face_semantics_match_ray_side() {
         let scene = unit_sphere_scene();
         let outside = scene
-            .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 0.001, 100.0)
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z),
+                0.001,
+                100.0,
+            )
             .expect("outside hit");
         assert!(outside.front_face);
         assert!(outside.normal.abs_diff_eq(-Vec3A::Z, 1e-4));
@@ -703,7 +719,11 @@ mod tests {
         // And nothing where the spheres are not.
         assert!(
             scene
-                .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z), 0.001, 100.0)
+                .intersect(
+                    &Ray::new(Vec3A::new(0.0, 0.0, -8.0), Vec3A::Z),
+                    0.001,
+                    100.0
+                )
                 .is_none(),
             "hit between the nested spheres"
         );
@@ -777,7 +797,11 @@ mod tests {
         // Long axis is now Y: a ray down the Y axis meets the surface at
         // |y| = 2, while one down X meets it at |x| = 1.
         let along_y = scene
-            .intersect(&Ray::new(Vec3A::new(0.0, -8.0, 0.0), Vec3A::Y), 0.001, 100.0)
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, -8.0, 0.0), Vec3A::Y),
+                0.001,
+                100.0,
+            )
             .expect("ray along Y must hit the rotated ellipsoid");
         assert!(
             (along_y.t - 6.0).abs() < 1e-3,
@@ -785,7 +809,11 @@ mod tests {
             along_y.t
         );
         let along_x = scene
-            .intersect(&Ray::new(Vec3A::new(-8.0, 0.0, 0.0), Vec3A::X), 0.001, 100.0)
+            .intersect(
+                &Ray::new(Vec3A::new(-8.0, 0.0, 0.0), Vec3A::X),
+                0.001,
+                100.0,
+            )
             .expect("ray along X must hit the rotated ellipsoid");
         assert!(
             (along_x.t - 7.0).abs() < 1e-3,
@@ -832,8 +860,16 @@ mod tests {
         let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
         // The inner level only admits shadow rays, so a camera ray is
         // rejected there even though the outer level would allow it.
-        assert!(scene.intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0).is_none());
-        assert!(scene.intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0).is_some());
+        assert!(
+            scene
+                .intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0)
+                .is_none()
+        );
+        assert!(
+            scene
+                .intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0)
+                .is_some()
+        );
     }
 
     #[test]
@@ -848,8 +884,16 @@ mod tests {
         );
         let scene = b.commit();
         let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
-        assert!(scene.intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0).is_none());
-        assert!(scene.intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0).is_some());
+        assert!(
+            scene
+                .intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0)
+                .is_none()
+        );
+        assert!(
+            scene
+                .intersect(&ray.with_mask(MASK_SHADOW), 0.001, 100.0)
+                .is_some()
+        );
         assert!(!scene.occluded(&ray.with_mask(MASK_CAMERA), 0.001, 100.0));
         assert!(scene.occluded(&ray.with_mask(MASK_SHADOW), 0.001, 100.0));
     }
@@ -875,9 +919,17 @@ mod tests {
         let scene = b.commit();
         // Straight at the v1 corner region: x > 0 → normal tilts +x.
         let hit = scene
-            .intersect(&Ray::new(Vec3A::new(0.6, -0.7, 0.0), Vec3A::Z), 0.001, 100.0)
+            .intersect(
+                &Ray::new(Vec3A::new(0.6, -0.7, 0.0), Vec3A::Z),
+                0.001,
+                100.0,
+            )
             .expect("hit");
-        assert!(hit.normal.x > 0.1, "normal not interpolated: {:?}", hit.normal);
+        assert!(
+            hit.normal.x > 0.1,
+            "normal not interpolated: {:?}",
+            hit.normal
+        );
         assert!(hit.normal.z < 0.0);
     }
 
@@ -911,7 +963,11 @@ mod tests {
         let scene = b.commit();
         // Hit the ellipsoid straight down above x=1 (local x=0.5).
         let hit = scene
-            .intersect(&Ray::new(Vec3A::new(1.0, 5.0, 0.0), -Vec3A::Y), 0.001, f32::INFINITY)
+            .intersect(
+                &Ray::new(Vec3A::new(1.0, 5.0, 0.0), -Vec3A::Y),
+                0.001,
+                f32::INFINITY,
+            )
             .expect("hit");
         // Implicit ellipsoid (x/2)^2 + y^2 + z^2 = 1: gradient at
         // (1, sqrt(3)/2, 0) is proportional to (0.5, sqrt(3), 0).
@@ -948,7 +1004,11 @@ mod tests {
         let scene = b.commit();
         // Local (0,0,2) maps to world (2,0,0); triangle now faces +X.
         let hit = scene
-            .intersect(&Ray::new(Vec3A::new(5.0, 0.0, 0.0), -Vec3A::X), 0.001, f32::INFINITY)
+            .intersect(
+                &Ray::new(Vec3A::new(5.0, 0.0, 0.0), -Vec3A::X),
+                0.001,
+                f32::INFINITY,
+            )
             .expect("hit");
         assert!((hit.t - 3.0).abs() < 1e-4);
         assert!(hit.normal.abs_diff_eq(Vec3A::X, 1e-4));
@@ -960,7 +1020,9 @@ mod tests {
         b.attach(Geometry::Instance {
             scene: unit_sphere_scene(),
             transform: Affine3A::IDENTITY,
-            transform_end: Some(Box::new(Affine3A::from_translation(glam::Vec3::new(4.0, 0.0, 0.0)))),
+            transform_end: Some(Box::new(Affine3A::from_translation(glam::Vec3::new(
+                4.0, 0.0, 0.0,
+            )))),
         });
         let scene = b.commit();
         // At time 0 the sphere is at the origin...
@@ -973,7 +1035,9 @@ mod tests {
         assert!(scene.intersect(&r1_origin, 0.001, f32::INFINITY).is_none());
         // ...and at time 0.5 it is halfway.
         let rh = Ray::new(Vec3A::new(2.0, 0.0, -5.0), Vec3A::Z).with_time(0.5);
-        let hit = scene.intersect(&rh, 0.001, f32::INFINITY).expect("halfway hit");
+        let hit = scene
+            .intersect(&rh, 0.001, f32::INFINITY)
+            .expect("halfway hit");
         assert!((hit.t - 4.0).abs() < 1e-4);
         // The shutter-union bounding box covers both endpoints.
         let bb = scene.bounds().unwrap();
@@ -1008,7 +1072,11 @@ mod tests {
         let scene = b.commit();
         // Upper-left region → second triangle of the instanced mesh.
         let hit = scene
-            .intersect(&Ray::new(Vec3A::new(-0.5, 0.5, 0.0), Vec3A::Z), 0.001, f32::INFINITY)
+            .intersect(
+                &Ray::new(Vec3A::new(-0.5, 0.5, 0.0), Vec3A::Z),
+                0.001,
+                f32::INFINITY,
+            )
             .expect("hit");
         assert_eq!(hit.geom_id, inst);
         assert_eq!(hit.prim_id, 1);

@@ -1,8 +1,8 @@
 mod aabb;
 mod buffer;
 mod camera;
-mod error;
 mod environment;
+mod error;
 mod filter;
 mod guiding;
 mod hittable;
@@ -27,22 +27,21 @@ mod world;
 /// edit can swap in another OpenQMC sampler (e.g. `SobolBnSampler`).
 pub type PathSampler = openqmc::SobolSampler;
 
+/// The standalone MaterialX reader crust-core builds `MtlxMaterial` on.
+pub use crust_mtlx as mtlx;
 /// The intersection kernel (Embree-shaped scene/geometry API), re-exported
 /// so applications can build [`rt::Geometry`] values for [`WorldBuilder`].
 pub use crust_rt as rt;
-/// The standalone MaterialX reader crust-core builds `MtlxMaterial` on.
-pub use crust_mtlx as mtlx;
 
 pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
+pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
 pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::HitRecord;
-pub use environment::EnvironmentMap;
-pub use scene::{AssetLoader, NoAssets};
 pub use light::{
     AreaLight, DistantLight, DomeLight, Light, LightList, LightSample, LightShape, RectShape,
     SphereShape,
@@ -52,6 +51,7 @@ pub use medium::Medium;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
 pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
+pub use scene::{AssetLoader, NoAssets};
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderStats, SceneCounters,
     peak_memory_bytes,

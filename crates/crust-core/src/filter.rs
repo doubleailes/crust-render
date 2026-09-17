@@ -118,8 +118,7 @@ impl PixelFilter {
                 // 4-term Blackman-Harris window over [0, 1].
                 let t = (x + radius) / (2.0 * radius);
                 let w = std::f32::consts::TAU * t;
-                0.35875 - 0.48829 * w.cos() + 0.14128 * (2.0 * w).cos()
-                    - 0.01168 * (3.0 * w).cos()
+                0.35875 - 0.48829 * w.cos() + 0.14128 * (2.0 * w).cos() - 0.01168 * (3.0 * w).cos()
             }
             PixelFilter::Mitchell { radius } => {
                 // Mitchell-Netravali with B = C = 1/3 on |x'| ∈ [0, 2].
@@ -133,7 +132,8 @@ impl PixelFilter {
                         + (-18.0 + 12.0 * B + 6.0 * C) * x2
                         + (6.0 - 2.0 * B)
                 } else {
-                    (-B - 6.0 * C) * x3 + (6.0 * B + 30.0 * C) * x2
+                    (-B - 6.0 * C) * x3
+                        + (6.0 * B + 30.0 * C) * x2
                         + (-12.0 * B - 48.0 * C) * x
                         + (8.0 * B + 24.0 * C)
                 }) / 6.0

@@ -12,7 +12,10 @@ use std::sync::Arc;
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
     }
 }
@@ -27,7 +30,10 @@ fn approx(a: f32, b: f32, tol: f32) -> bool {
 
 #[test]
 fn sphere_shape_area_and_surface_points() {
-    let s = SphereShape { center: Vec3A::new(1.0, -2.0, 3.0), radius: 2.0 };
+    let s = SphereShape {
+        center: Vec3A::new(1.0, -2.0, 3.0),
+        radius: 2.0,
+    };
     assert!(approx(s.area(), 4.0 * std::f32::consts::PI * 4.0, 1e-4));
     let mut rng = Lcg(3);
     for _ in 0..500 {
@@ -41,18 +47,28 @@ fn sphere_shape_area_and_surface_points() {
 
 #[test]
 fn sphere_shape_sampling_covers_both_hemispheres() {
-    let s = SphereShape { center: Vec3A::ZERO, radius: 1.0 };
+    let s = SphereShape {
+        center: Vec3A::ZERO,
+        radius: 1.0,
+    };
     let mut rng = Lcg(9);
     let (mut up, mut down) = (0, 0);
     let mut mean = Vec3A::ZERO;
     for _ in 0..20_000 {
         let p = s.sample_point(rng.next(), rng.next());
-        if p.z > 0.0 { up += 1 } else { down += 1 }
+        if p.z > 0.0 {
+            up += 1
+        } else {
+            down += 1
+        }
         mean += p;
     }
     assert!((up as f32 / 20_000.0 - 0.5).abs() < 0.02);
     assert!(down > 0);
-    assert!((mean / 20_000.0).length() < 0.03, "uniform by area has zero mean");
+    assert!(
+        (mean / 20_000.0).length() < 0.03,
+        "uniform by area has zero mean"
+    );
 }
 
 #[test]
@@ -68,12 +84,21 @@ fn rect_shape_area_normal_and_corners() {
     assert_eq!(r.sample_point(0.0, 0.0), r.origin);
     assert_eq!(r.sample_point(1.0, 1.0), r.origin + r.edge_u + r.edge_v);
     assert_eq!(r.sample_point(0.5, 0.5), Vec3A::new(0.0, 0.0, 0.0));
-    assert_eq!(r.normal_at(Vec3A::new(7.0, 7.0, 7.0)), Vec3A::Y, "flat: same normal everywhere");
+    assert_eq!(
+        r.normal_at(Vec3A::new(7.0, 7.0, 7.0)),
+        Vec3A::Y,
+        "flat: same normal everywhere"
+    );
 }
 
 #[test]
 fn rect_shape_samples_lie_in_the_parallelogram() {
-    let r = RectShape::new(Vec3A::ZERO, Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(0.5, 1.0, 0.0), Vec3A::Z);
+    let r = RectShape::new(
+        Vec3A::ZERO,
+        Vec3A::new(1.0, 0.0, 0.0),
+        Vec3A::new(0.5, 1.0, 0.0),
+        Vec3A::Z,
+    );
     let mut rng = Lcg(4);
     for _ in 0..500 {
         let (u, v) = (rng.next(), rng.next());
@@ -83,7 +108,10 @@ fn rect_shape_samples_lie_in_the_parallelogram() {
         assert!(approx(p.x - 0.5 * v, u, 1e-6));
         assert_eq!(p.z, 0.0);
     }
-    assert!(approx(r.area(), 1.0, 1e-6), "shear does not change the area");
+    assert!(
+        approx(r.area(), 1.0, 1e-6),
+        "shear does not change the area"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -105,16 +133,24 @@ fn area_light_sample_aims_at_a_point_on_its_surface() {
     let from = Vec3A::ZERO;
     let mut rng = Lcg(5);
     for _ in 0..200 {
-        let s = light.sample_li(from, rng.next(), rng.next()).expect("reachable");
+        let s = light
+            .sample_li(from, rng.next(), rng.next())
+            .expect("reachable");
         assert!(approx(s.direction.length(), 1.0, 1e-5));
         let p = from + s.direction * s.distance;
-        assert!(approx((p - center).length(), 0.5, 1e-3), "sampled point off the sphere: {p}");
+        assert!(
+            approx((p - center).length(), 0.5, 1e-3),
+            "sampled point off the sphere: {p}"
+        );
         assert_eq!(s.radiance, Vec3A::splat(10.0));
         assert!(s.pdf > 0.0 && s.pdf.is_finite());
         assert!(s.distance.is_finite());
     }
     assert_eq!(light.geom_id(), Some(7));
-    assert!(light.escaped(from, Vec3A::Y).is_none(), "finite lights are never 'escaped to'");
+    assert!(
+        light.escaped(from, Vec3A::Y).is_none(),
+        "finite lights are never 'escaped to'"
+    );
 }
 
 #[test]
@@ -126,7 +162,11 @@ fn area_light_pdf_at_point_matches_its_own_sample() {
         let s = light.sample_li(from, rng.next(), rng.next()).unwrap();
         let p = from + s.direction * s.distance;
         let pdf = light.pdf_at_point(from, p);
-        assert!(approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)), "{pdf} vs {}", s.pdf);
+        assert!(
+            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            "{pdf} vs {}",
+            s.pdf
+        );
     }
 }
 
@@ -156,11 +196,20 @@ fn rect_light_is_effectively_one_sided() {
         Vec3A::Z,
     );
     let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
-    let front = light.sample_li(Vec3A::new(0.0, 0.0, 1.0), 0.5, 0.5).unwrap();
-    let back = light.sample_li(Vec3A::new(0.0, 0.0, -1.0), 0.5, 0.5).unwrap();
+    let front = light
+        .sample_li(Vec3A::new(0.0, 0.0, 1.0), 0.5, 0.5)
+        .unwrap();
+    let back = light
+        .sample_li(Vec3A::new(0.0, 0.0, -1.0), 0.5, 0.5)
+        .unwrap();
     // Behind the emitting side the cosine clamps to zero and the pdf
     // explodes, which is how MIS drives the contribution to nothing.
-    assert!(back.pdf > 1000.0 * front.pdf, "front {} back {}", front.pdf, back.pdf);
+    assert!(
+        back.pdf > 1000.0 * front.pdf,
+        "front {} back {}",
+        front.pdf,
+        back.pdf
+    );
 }
 
 #[test]
@@ -168,7 +217,11 @@ fn area_light_declines_a_coincident_shading_point() {
     let light = sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 0);
     // u = 0, v = 0 samples the +Z pole; shading from exactly there is a
     // zero-length connection.
-    let pole = SphereShape { center: Vec3A::ZERO, radius: 1.0 }.sample_point(0.0, 0.0);
+    let pole = SphereShape {
+        center: Vec3A::ZERO,
+        radius: 1.0,
+    }
+    .sample_point(0.0, 0.0);
     assert!(light.sample_li(pole, 0.0, 0.0).is_none());
 }
 
@@ -192,9 +245,15 @@ fn distant_light_samples_lie_in_its_cone_at_infinity() {
     let cos_half = 5f32.to_radians().cos();
     let mut rng = Lcg(8);
     for _ in 0..500 {
-        let s = light.sample_li(Vec3A::ZERO, rng.next(), rng.next()).unwrap();
+        let s = light
+            .sample_li(Vec3A::ZERO, rng.next(), rng.next())
+            .unwrap();
         assert!(approx(s.direction.length(), 1.0, 1e-5));
-        assert!(s.direction.dot(-toward) >= cos_half - 1e-5, "outside the cone: {}", s.direction);
+        assert!(
+            s.direction.dot(-toward) >= cos_half - 1e-5,
+            "outside the cone: {}",
+            s.direction
+        );
         assert_eq!(s.distance, f32::INFINITY);
         assert!(s.pdf > 0.0);
     }
@@ -206,7 +265,12 @@ fn distant_light_pdf_is_the_inverse_cone_solid_angle() {
     let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 10.0);
     let omega = 2.0 * std::f32::consts::PI * (1.0 - 5f32.to_radians().cos());
     let s = light.sample_li(Vec3A::ZERO, 0.3, 0.3).unwrap();
-    assert!(approx(s.pdf, 1.0 / omega, 1e-3 / omega), "{} vs {}", s.pdf, 1.0 / omega);
+    assert!(
+        approx(s.pdf, 1.0 / omega, 1e-3 / omega),
+        "{} vs {}",
+        s.pdf,
+        1.0 / omega
+    );
 }
 
 #[test]
@@ -218,7 +282,10 @@ fn distant_light_intensity_is_irradiance_not_radiance() {
         let light = DistantLight::new(-Vec3A::Y, e, angle);
         let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
         let back = s.radiance / s.pdf;
-        assert!(back.abs_diff_eq(e, 1e-3 * e.max_element()), "angle {angle}: {back}");
+        assert!(
+            back.abs_diff_eq(e, 1e-3 * e.max_element()),
+            "angle {angle}: {back}"
+        );
     }
 }
 
@@ -230,7 +297,12 @@ fn distant_light_zero_angle_is_widened_not_singular() {
     assert!(s.radiance.is_finite());
     // The documented floor is an angular diameter of 0.05 degrees.
     let floor = 2.0 * std::f32::consts::PI * (1.0 - (0.5f32 * 0.05).to_radians().cos());
-    assert!(approx(s.pdf, 1.0 / floor, 1e-2 / floor), "{} vs {}", s.pdf, 1.0 / floor);
+    assert!(
+        approx(s.pdf, 1.0 / floor, 1e-2 / floor),
+        "{} vs {}",
+        s.pdf,
+        1.0 / floor
+    );
 }
 
 #[test]
@@ -238,7 +310,9 @@ fn distant_light_escaped_agrees_with_sampling_inside_the_cone_only() {
     let toward = Vec3A::new(1.0, -1.0, 0.0).normalize();
     let light = DistantLight::new(toward * 3.0, Vec3A::splat(4.0), 20.0);
     let s = light.sample_li(Vec3A::ZERO, 0.2, 0.7).unwrap();
-    let (radiance, pdf) = light.escaped(Vec3A::ZERO, s.direction).expect("a sampled direction is covered");
+    let (radiance, pdf) = light
+        .escaped(Vec3A::ZERO, s.direction)
+        .expect("a sampled direction is covered");
     assert_eq!(radiance, s.radiance);
     assert_eq!(pdf, s.pdf);
     // Straight back along the light is the cone axis.
@@ -275,7 +349,10 @@ fn uniform_dome_samples_the_whole_sphere_uniformly() {
             below += 1;
         }
     }
-    assert!((below as f32 / 2000.0 - 0.5).abs() < 0.05, "a dome is a full sphere, not a hemisphere");
+    assert!(
+        (below as f32 / 2000.0 - 0.5).abs() < 0.05,
+        "a dome is a full sphere, not a hemisphere"
+    );
     assert!(dome.geom_id().is_none());
     assert_eq!(dome.pdf_at_point(Vec3A::ZERO, Vec3A::Y), 0.0);
 }
@@ -285,7 +362,9 @@ fn uniform_dome_answers_every_escaping_ray() {
     let tint = Vec3A::splat(2.0);
     let dome = DomeLight::new(tint, None, Mat3A::IDENTITY);
     for d in [Vec3A::X, -Vec3A::Y, Vec3A::new(0.3, 0.4, -0.5).normalize()] {
-        let (r, pdf) = dome.escaped(Vec3A::ZERO, d).expect("a dome covers every direction");
+        let (r, pdf) = dome
+            .escaped(Vec3A::ZERO, d)
+            .expect("a dome covers every direction");
         assert_eq!(r, tint);
         assert!(approx(pdf, 1.0 / (4.0 * std::f32::consts::PI), 1e-7));
     }
@@ -293,7 +372,14 @@ fn uniform_dome_answers_every_escaping_ray() {
 
 /// A 2×1 map: the left texel red, the right texel green.
 fn two_texel_map() -> Arc<EnvironmentMap> {
-    Arc::new(EnvironmentMap::new(2, 1, vec![Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(0.0, 1.0, 0.0)]).unwrap())
+    Arc::new(
+        EnvironmentMap::new(
+            2,
+            1,
+            vec![Vec3A::new(1.0, 0.0, 0.0), Vec3A::new(0.0, 1.0, 0.0)],
+        )
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -320,9 +406,7 @@ fn rotating_the_dome_rotates_the_sky() {
 
 #[test]
 fn textured_dome_sample_and_escaped_share_one_density() {
-    let map = Arc::new(
-        EnvironmentMap::new(1, 1, vec![Vec3A::splat(3.0)]).unwrap(),
-    );
+    let map = Arc::new(EnvironmentMap::new(1, 1, vec![Vec3A::splat(3.0)]).unwrap());
     let dome = DomeLight::new(Vec3A::splat(0.5), Some(map), Mat3A::from_rotation_x(0.4));
     let mut rng = Lcg(11);
     for _ in 0..300 {
@@ -350,7 +434,11 @@ fn textured_dome_importance_samples_a_bright_sun() {
             sun += 1;
             // One texel of a 16x8 map near the equator covers ~0.15 sr,
             // so a sample landing on it carries a density around 6.5.
-            assert!(s.pdf > 5.0, "the sun texel must carry a high pdf: {}", s.pdf);
+            assert!(
+                s.pdf > 5.0,
+                "the sun texel must carry a high pdf: {}",
+                s.pdf
+            );
         }
     }
     assert!(sun > 900, "only {sun} of 1000 samples found the sun");
@@ -405,7 +493,10 @@ fn light_list_finds_lights_by_geometry_id() {
     l.add(Arc::new(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 40)));
     assert!(l.find_by_geom(12).is_some());
     assert!(l.find_by_geom(40).is_some());
-    assert!(l.find_by_geom(13).is_none(), "an unrelated geometry is not a light");
+    assert!(
+        l.find_by_geom(13).is_none(),
+        "an unrelated geometry is not a light"
+    );
     assert_eq!(l.find_by_geom(40).unwrap().geom_id(), Some(40));
 }
 

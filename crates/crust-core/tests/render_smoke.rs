@@ -4,9 +4,9 @@
 
 use crust_core::rt::Geometry;
 use crust_core::{
-    AreaLight, Buffer, Camera, Emissive, LightList, OpenPBR, PathSampler, PixelFilter, Ray,
-    RenderSettings, Renderer, SamplingStrategy, Scene, SphereShape, Vec3A, Volumes, WorldBuilder,
-    ray_color, MASK_INDIRECT, MASK_SHADOW,
+    AreaLight, Buffer, Camera, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR,
+    PathSampler, PixelFilter, Ray, RenderSettings, Renderer, SamplingStrategy, Scene, SphereShape,
+    Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,10 +35,21 @@ fn buffers_equal(a: &Buffer, b: &Buffer, w: usize, h: usize) -> bool {
 fn emissive_ball_scene(l: f32, w: usize, h: usize, spp: u32) -> Renderer {
     let mut world = WorldBuilder::new();
     world.attach(
-        Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 },
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
         Arc::new(Emissive::new(Vec3A::splat(l))),
     );
-    let camera = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 40.0, w as f32 / h as f32, 0.0, 5.0);
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        40.0,
+        w as f32 / h as f32,
+        0.0,
+        5.0,
+    );
     let settings = RenderSettings::new(spp, 4, w, h, spp, 0.0, 0);
     Renderer::new(camera, world.commit(), LightList::new(), settings)
 }
@@ -119,7 +130,10 @@ fn an_emissive_ball_renders_its_radiance_in_the_centre() {
     let r = emissive_ball_scene(3.0, w, h, 4);
     let buf = r.render();
     let centre = buf.get_pixel(4, 4);
-    assert!(centre.abs_diff_eq(Vec3A::splat(3.0), 1e-4), "centre pixel {centre}");
+    assert!(
+        centre.abs_diff_eq(Vec3A::splat(3.0), 1e-4),
+        "centre pixel {centre}"
+    );
     // The corners see past the ball to the background, which is dimmer.
     let corner = buf.get_pixel(0, 0);
     assert!(corner.max_element() < 3.0);
@@ -132,7 +146,10 @@ fn rows_and_tiles_render_the_same_image() {
     let r = emissive_ball_scene(1.0, w, h, 2);
     let rows = r.render();
     let tiles = r.render_with_tiles();
-    assert!(buffers_equal(&rows, &tiles, w, h), "tile and row paths diverged");
+    assert!(
+        buffers_equal(&rows, &tiles, w, h),
+        "tile and row paths diverged"
+    );
 }
 
 #[test]
@@ -148,15 +165,37 @@ fn rendering_is_deterministic() {
 #[test]
 fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
     let (w, h) = (8, 8);
-    let camera = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        40.0,
+        1.0,
+        0.0,
+        5.0,
+    );
     let mk = |frame: isize| {
         let mut b = WorldBuilder::new();
-        b.attach(Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 }, Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))));
-        Renderer::new(camera, b.commit(), LightList::new(), RenderSettings::new(4, 3, w, h, 4, 0.0, frame))
+        b.attach(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        Renderer::new(
+            camera,
+            b.commit(),
+            LightList::new(),
+            RenderSettings::new(4, 3, w, h, 4, 0.0, frame),
+        )
     };
     let a = mk(0).render();
     let b = mk(1).render();
-    assert!(!buffers_equal(&a, &b, w, h), "different frames must decorrelate");
+    assert!(
+        !buffers_equal(&a, &b, w, h),
+        "different frames must decorrelate"
+    );
     let (sa, sb) = (buffer_sum(&a, w, h), buffer_sum(&b, w, h));
     assert!((sa - sb).abs() / sa.max(1e-6) < 0.5, "{sa} vs {sb}");
 }
@@ -178,12 +217,23 @@ fn progress_callback_reaches_the_total() {
         assert!(buffer_sum(&buf, w, h) > 0.0);
         let t = total.load(Ordering::SeqCst);
         assert!(t > 0, "tiled={tiled}");
-        assert_eq!(last.load(Ordering::SeqCst), t, "tiled={tiled}: progress must finish at total");
-        assert!(calls.load(Ordering::SeqCst) >= t, "one report per work unit at least");
+        assert_eq!(
+            last.load(Ordering::SeqCst),
+            t,
+            "tiled={tiled}: progress must finish at total"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= t,
+            "one report per work unit at least"
+        );
         if !tiled {
             assert_eq!(t, h as u64, "row rendering reports one unit per scanline");
         } else {
-            assert_eq!(t, (w as u64).div_ceil(16) * (h as u64).div_ceil(16), "one unit per 16x16 tile");
+            assert_eq!(
+                t,
+                (w as u64).div_ceil(16) * (h as u64).div_ceil(16),
+                "one unit per 16x16 tile"
+            );
         }
     }
 }
@@ -208,14 +258,24 @@ fn ray_stats_count_every_camera_ray() {
 fn adaptive_sampling_takes_fewer_camera_rays_on_a_flat_image() {
     let (w, h) = (6, 6);
     let mut world = WorldBuilder::new();
-    world.attach(Geometry::Sphere { center: Vec3A::ZERO, radius: 100.0 }, Arc::new(Emissive::new(Vec3A::ONE)));
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 100.0,
+        },
+        Arc::new(Emissive::new(Vec3A::ONE)),
+    );
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
     // 64 spp allowed, minimum 4, and a zero-variance image: every pixel
     // stops at the first check past the minimum.
     let settings = RenderSettings::new(64, 2, w, h, 4, 0.01, 0);
     let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
     let (buf, stats) = r.render_with_stats(false, &|_, _| {});
-    assert!(stats.camera_rays < (w * h * 64) as u64, "early stop never fired: {}", stats.camera_rays);
+    assert!(
+        stats.camera_rays < (w * h * 64) as u64,
+        "early stop never fired: {}",
+        stats.camera_rays
+    );
     assert!(stats.camera_rays >= (w * h * 4) as u64);
     assert!(buf.get_pixel(3, 3).abs_diff_eq(Vec3A::ONE, 1e-5));
 }
@@ -223,13 +283,36 @@ fn adaptive_sampling_takes_fewer_camera_rays_on_a_flat_image() {
 #[test]
 fn scene_new_and_with_volumes_assemble_a_renderer() {
     let mut world = WorldBuilder::new();
-    world.attach(Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 }, Arc::new(Emissive::new(Vec3A::ONE)));
-    let camera = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
-    let scene = Scene::new(camera, world.commit(), LightList::new(), RenderSettings::new(1, 2, 4, 4, 1, 0.0, 0))
-        .with_volumes(Vec::new());
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        Arc::new(Emissive::new(Vec3A::ONE)),
+    );
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        40.0,
+        1.0,
+        0.0,
+        5.0,
+    );
+    let scene = Scene::new(
+        camera,
+        world.commit(),
+        LightList::new(),
+        RenderSettings::new(1, 2, 4, 4, 1, 0.0, 0),
+    )
+    .with_volumes(Vec::new());
     assert!(scene.volumes.is_empty());
-    assert!(scene.stats.phases.is_empty(), "a hand-built scene has no import phases");
-    let renderer = Renderer::new(scene.camera, scene.world, scene.lights, scene.settings).with_volumes(scene.volumes);
+    assert!(
+        scene.stats.phases.is_empty(),
+        "a hand-built scene has no import phases"
+    );
+    let renderer = Renderer::new(scene.camera, scene.world, scene.lights, scene.settings)
+        .with_volumes(scene.volumes);
     assert!(renderer.volumes.is_empty());
     let buf = renderer.render();
     assert!(buf.get_pixel(2, 2).x > 0.0);
@@ -243,7 +326,10 @@ fn scene_new_and_with_volumes_assemble_a_renderer() {
 fn ray_color_returns_emission_for_a_direct_hit() {
     let mut world = WorldBuilder::new();
     world.attach(
-        Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 },
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
         Arc::new(Emissive::new(Vec3A::new(0.25, 0.5, 4.0))),
     );
     let world = world.commit();
@@ -251,7 +337,15 @@ fn ray_color_returns_emission_for_a_direct_hit() {
     let volumes = Volumes::default();
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
     for i in 0..8 {
-        let c = ray_color(&ray, &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(0, 0, 0, i));
+        let c = ray_color(
+            &ray,
+            &world,
+            &lights,
+            &volumes,
+            4,
+            SamplingStrategy::PowerMis,
+            PathSampler::new(0, 0, 0, i),
+        );
         assert!(c.abs_diff_eq(Vec3A::new(0.25, 0.5, 4.0), 1e-5), "{c}");
     }
 }
@@ -262,11 +356,35 @@ fn ray_color_of_an_escaping_ray_is_the_sky_and_deterministic() {
     let lights = LightList::new();
     let volumes = Volumes::default();
     let up = Ray::new(Vec3A::ZERO, Vec3A::Y);
-    let a = ray_color(&up, &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(0, 0, 0, 0));
-    let b = ray_color(&up, &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(0, 0, 0, 0));
+    let a = ray_color(
+        &up,
+        &world,
+        &lights,
+        &volumes,
+        4,
+        SamplingStrategy::PowerMis,
+        PathSampler::new(0, 0, 0, 0),
+    );
+    let b = ray_color(
+        &up,
+        &world,
+        &lights,
+        &volumes,
+        4,
+        SamplingStrategy::PowerMis,
+        PathSampler::new(0, 0, 0, 0),
+    );
     assert_eq!(a, b);
     assert!(a.min_element() >= 0.0 && a.is_finite());
-    let down = ray_color(&Ray::new(Vec3A::ZERO, -Vec3A::Y), &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(0, 0, 0, 0));
+    let down = ray_color(
+        &Ray::new(Vec3A::ZERO, -Vec3A::Y),
+        &world,
+        &lights,
+        &volumes,
+        4,
+        SamplingStrategy::PowerMis,
+        PathSampler::new(0, 0, 0, 0),
+    );
     assert!(down.min_element() >= 0.0);
     assert_ne!(a, down, "a gradient sky differs between up and down");
 }
@@ -290,10 +408,22 @@ fn a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance() {
     let l = 2.0f32;
     let mut world = WorldBuilder::new();
     world.attach(
-        Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 },
-        Arc::new(OpenPBR { specular_ior: 1.0, ..OpenPBR::diffuse(Vec3A::splat(albedo)) }),
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        Arc::new(OpenPBR {
+            specular_ior: 1.0,
+            ..OpenPBR::diffuse(Vec3A::splat(albedo))
+        }),
     );
-    world.attach(Geometry::Sphere { center: Vec3A::ZERO, radius: 50.0 }, Arc::new(Emissive::new(Vec3A::splat(l))));
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 50.0,
+        },
+        Arc::new(Emissive::new(Vec3A::splat(l))),
+    );
     let world = world.commit();
     let lights = LightList::new();
     let volumes = Volumes::default();
@@ -301,12 +431,23 @@ fn a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance() {
     let n = 4096;
     let mut sum = 0.0f64;
     for i in 0..n {
-        let c = ray_color(&ray, &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(3, 7, 0, i));
+        let c = ray_color(
+            &ray,
+            &world,
+            &lights,
+            &volumes,
+            4,
+            SamplingStrategy::PowerMis,
+            PathSampler::new(3, 7, 0, i),
+        );
         sum += c.x as f64;
     }
     let mean = sum / n as f64;
     let expected = (albedo * l) as f64;
-    assert!((mean - expected).abs() < 0.03 * expected, "furnace mean {mean} vs {expected}");
+    assert!(
+        (mean - expected).abs() < 0.03 * expected,
+        "furnace mean {mean} vs {expected}"
+    );
 }
 
 #[test]
@@ -318,10 +459,22 @@ fn the_furnace_measures_the_documented_two_thirds() {
     let l = 2.0f32;
     let mut world = WorldBuilder::new();
     world.attach(
-        Geometry::Sphere { center: Vec3A::ZERO, radius: 1.0 },
-        Arc::new(OpenPBR { specular_ior: 1.0, ..OpenPBR::diffuse(Vec3A::splat(albedo)) }),
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        Arc::new(OpenPBR {
+            specular_ior: 1.0,
+            ..OpenPBR::diffuse(Vec3A::splat(albedo))
+        }),
     );
-    world.attach(Geometry::Sphere { center: Vec3A::ZERO, radius: 50.0 }, Arc::new(Emissive::new(Vec3A::splat(l))));
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 50.0,
+        },
+        Arc::new(Emissive::new(Vec3A::splat(l))),
+    );
     let world = world.commit();
     let lights = LightList::new();
     let volumes = Volumes::default();
@@ -329,13 +482,24 @@ fn the_furnace_measures_the_documented_two_thirds() {
     let n = 4096;
     let mut sum = 0.0f64;
     for i in 0..n {
-        let c = ray_color(&ray, &world, &lights, &volumes, 4, SamplingStrategy::PowerMis, PathSampler::new(3, 7, 0, i));
+        let c = ray_color(
+            &ray,
+            &world,
+            &lights,
+            &volumes,
+            4,
+            SamplingStrategy::PowerMis,
+            PathSampler::new(3, 7, 0, i),
+        );
         sum += c.x as f64;
     }
     let mean = sum / n as f64;
     // ∫ (ρ/π) cos² dω over the hemisphere = 2ρ/3.
     let documented = (albedo * l) as f64 * 2.0 / 3.0;
-    assert!((mean - documented).abs() < 0.03 * documented, "furnace mean {mean} vs documented {documented}");
+    assert!(
+        (mean - documented).abs() < 0.03 * documented,
+        "furnace mean {mean} vs documented {documented}"
+    );
 }
 
 #[test]
@@ -364,7 +528,11 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
         emitter.clone(),
         MASK_SHADOW | MASK_INDIRECT,
     );
-    lights.add(Arc::new(AreaLight::new(Box::new(SphereShape { center, radius }), emitter, id)));
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(SphereShape { center, radius }),
+        emitter,
+        id,
+    )));
     let world = world.commit();
     let volumes = Volumes::default();
     let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
@@ -372,7 +540,16 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
     let mean_for = |s: SamplingStrategy, n: i32| {
         let mut sum = 0.0f64;
         for i in 0..n {
-            sum += ray_color(&ray, &world, &lights, &volumes, 3, s, PathSampler::new(1, 2, 0, i)).x as f64;
+            sum += ray_color(
+                &ray,
+                &world,
+                &lights,
+                &volumes,
+                3,
+                s,
+                PathSampler::new(1, 2, 0, i),
+            )
+            .x as f64;
         }
         sum / n as f64
     };
@@ -385,7 +562,10 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
         (SamplingStrategy::BsdfOnly, 65_536, 0.12),
     ] {
         let m = mean_for(s, n);
-        assert!((m - reference).abs() < tol * reference, "{s:?}: {m} vs {reference}");
+        assert!(
+            (m - reference).abs() < tol * reference,
+            "{s:?}: {m} vs {reference}"
+        );
     }
 }
 
@@ -394,17 +574,47 @@ fn light_geometry_hidden_from_camera_rays_still_lights_the_scene() {
     let (w, h) = (7, 7);
     let mut world = WorldBuilder::new();
     let mut lights = LightList::new();
-    world.attach(Geometry::Sphere { center: Vec3A::new(0.0, -101.0, 0.0), radius: 100.0 }, Arc::new(OpenPBR::diffuse(Vec3A::splat(0.8))));
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::new(0.0, -101.0, 0.0),
+            radius: 100.0,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.8))),
+    );
     let emitter = Arc::new(Emissive::new(Vec3A::splat(30.0)));
     let (center, radius) = (Vec3A::new(0.0, 0.0, 2.0), 0.4);
-    let id = world.attach_masked(Geometry::Sphere { center, radius }, emitter.clone(), MASK_SHADOW | MASK_INDIRECT);
-    lights.add(Arc::new(AreaLight::new(Box::new(SphereShape { center, radius }), emitter, id)));
+    let id = world.attach_masked(
+        Geometry::Sphere { center, radius },
+        emitter.clone(),
+        MASK_SHADOW | MASK_INDIRECT,
+    );
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(SphereShape { center, radius }),
+        emitter,
+        id,
+    )));
     // The camera looks straight at the light: its geometry must not show.
-    let camera = Camera::new(Vec3A::new(0.0, 0.0, 6.0), Vec3A::new(0.0, 0.0, 2.0), Vec3A::Y, 30.0, 1.0, 0.0, 4.0);
-    let r = Renderer::new(camera, world.commit(), lights, RenderSettings::new(8, 3, w, h, 8, 0.0, 0));
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 6.0),
+        Vec3A::new(0.0, 0.0, 2.0),
+        Vec3A::Y,
+        30.0,
+        1.0,
+        0.0,
+        4.0,
+    );
+    let r = Renderer::new(
+        camera,
+        world.commit(),
+        lights,
+        RenderSettings::new(8, 3, w, h, 8, 0.0, 0),
+    );
     let buf = r.render();
     let centre = buf.get_pixel(3, 3);
-    assert!(centre.max_element() < 5.0, "the light source is visible to the camera: {centre}");
+    assert!(
+        centre.max_element() < 5.0,
+        "the light source is visible to the camera: {centre}"
+    );
     // The floor below is lit.
     let floor = buf.get_pixel(3, 0);
     assert!(floor.max_element() > 0.0);

@@ -94,10 +94,16 @@ fn missing_files_decline_rather_than_panic() {
     assert!(load_exr_environment(&ghost).is_none());
     assert!(load_image_environment(&samples().join("does_not_exist.png")).is_none());
     assert!(FileAssets.load_environment(&ghost).is_none());
-    assert!(FileAssets.load_ptex(&samples().join("does_not_exist.ptx")).is_none());
-    assert!(FileAssets
-        .load_texture(&samples().join("does_not_exist.png"), ColorSpace::Raw)
-        .is_none());
+    assert!(
+        FileAssets
+            .load_ptex(&samples().join("does_not_exist.ptx"))
+            .is_none()
+    );
+    assert!(
+        FileAssets
+            .load_texture(&samples().join("does_not_exist.png"), ColorSpace::Raw)
+            .is_none()
+    );
     assert!(PtexColor::open(&samples().join("does_not_exist.ptx")).is_err());
 }
 
@@ -117,7 +123,11 @@ fn ldr_environment_rows_map_to_the_poles() {
     let path = dir.join("poles.png");
     let mut img = image::RgbImage::new(4, 2);
     for (x, y, p) in img.enumerate_pixels_mut() {
-        *p = if y == 0 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) };
+        *p = if y == 0 {
+            image::Rgb([255, 0, 0])
+        } else {
+            image::Rgb([0, 0, 255])
+        };
         let _ = x;
     }
     img.save(&path).unwrap();
@@ -201,13 +211,20 @@ fn colour_space_changes_the_decoded_value() {
     // neighbours (a blend of encoded values is not the encoding of a
     // blend).
     let (w, h) = raw.tile_size();
-    let (u, v) = ((w as f32 * 0.3).floor() + 0.5, (h as f32 * 0.3).floor() + 0.5);
+    let (u, v) = (
+        (w as f32 * 0.3).floor() + 0.5,
+        (h as f32 * 0.3).floor() + 0.5,
+    );
     let (u, v) = (u / w as f32, v / h as f32);
     let (r, s, g) = (raw.eval(u, v), srgb.eval(u, v), g22.eval(u, v));
     for ch in 0..3 {
         let encoded = r[ch];
         if encoded > 0.02 && encoded < 0.98 {
-            assert!(s[ch] < encoded, "sRGB decode darkens midtones: {encoded} -> {}", s[ch]);
+            assert!(
+                s[ch] < encoded,
+                "sRGB decode darkens midtones: {encoded} -> {}",
+                s[ch]
+            );
             assert!((s[ch] - srgb_to_linear(encoded)).abs() < 2e-3);
             assert!((g[ch] - encoded.powf(2.2)).abs() < 2e-3);
         }
@@ -241,7 +258,10 @@ fn a_written_gradient_is_sampled_at_the_right_place() {
     assert!(right[0] > 0.9 && right[2] < 0.1, "right is red: {right:?}");
     // Wrapping: u = 1.02 reads like u = 0.02.
     let wrapped = tex.eval(1.02, 0.5);
-    assert!((wrapped[0] - left[0]).abs() < 0.05, "{wrapped:?} vs {left:?}");
+    assert!(
+        (wrapped[0] - left[0]).abs() < 0.05,
+        "{wrapped:?} vs {left:?}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -258,7 +278,11 @@ fn non_finite_coordinates_do_not_panic() {
         let px = tex.eval(u, v);
         assert_eq!(px.len(), 4);
     }
-    let set = UvTexture::open(&samples().join("textures/mtlx_base.<UDIM>.png"), ColorSpace::Raw).unwrap();
+    let set = UvTexture::open(
+        &samples().join("textures/mtlx_base.<UDIM>.png"),
+        ColorSpace::Raw,
+    )
+    .unwrap();
     let _ = set.eval(f32::NAN, f32::NAN);
 }
 
@@ -279,10 +303,22 @@ fn default_ptex_cap_is_used_without_the_env_override() {
 #[test]
 fn read_channel_decodes_every_ptex_data_type() {
     assert_eq!(read_channel(&[200], ptex::DataType::UInt8), 200.0);
-    assert_eq!(read_channel(&300u16.to_le_bytes(), ptex::DataType::UInt16), 300.0);
-    assert_eq!(read_channel(&1.5f32.to_le_bytes(), ptex::DataType::Float), 1.5);
+    assert_eq!(
+        read_channel(&300u16.to_le_bytes(), ptex::DataType::UInt16),
+        300.0
+    );
+    assert_eq!(
+        read_channel(&1.5f32.to_le_bytes(), ptex::DataType::Float),
+        1.5
+    );
     // 0x3C00 is half-precision 1.0.
-    assert_eq!(read_channel(&0x3C00u16.to_le_bytes(), ptex::DataType::Half), 1.0);
+    assert_eq!(
+        read_channel(&0x3C00u16.to_le_bytes(), ptex::DataType::Half),
+        1.0
+    );
     // 0xC000 is half-precision -2.0.
-    assert_eq!(read_channel(&0xC000u16.to_le_bytes(), ptex::DataType::Half), -2.0);
+    assert_eq!(
+        read_channel(&0xC000u16.to_le_bytes(), ptex::DataType::Half),
+        -2.0
+    );
 }

@@ -202,8 +202,9 @@ pub fn eon_diffuse(rho: Vec3A, roughness: f32, v_local: Vec3A, l_local: Vec3A) -
     let avg_e = af * (1.0 + EON_B * roughness);
     let rho_ms = (rho * rho) * avg_e / (Vec3A::ONE - rho * (1.0 - avg_e));
     const EPS: f32 = 1.0e-7;
-    let f_ms =
-        rho_ms * (1.0 / PI) * ((1.0 - e_o).max(EPS) * (1.0 - e_i).max(EPS) / (1.0 - avg_e).max(EPS));
+    let f_ms = rho_ms
+        * (1.0 / PI)
+        * ((1.0 - e_o).max(EPS) * (1.0 - e_i).max(EPS) / (1.0 - avg_e).max(EPS));
 
     f_ss + f_ms
 }
@@ -287,7 +288,8 @@ pub fn sheen_charlie(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, roughness: f32) -
 /// for artistic mixes) and "full physical darkening" (`1`).
 pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -> Vec3A {
     let f_avg = f0_from_ior(coat_ior) + (1.0 - f0_from_ior(coat_ior)) * 0.05;
-    let dark = base_color / (Vec3A::ONE - f_avg * (Vec3A::ONE - base_color)).max(Vec3A::splat(1e-4));
+    let dark =
+        base_color / (Vec3A::ONE - f_avg * (Vec3A::ONE - base_color)).max(Vec3A::splat(1e-4));
     let one = Vec3A::ONE;
     one * (1.0 - darkening) + dark * darkening
 }

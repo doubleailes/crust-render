@@ -68,7 +68,9 @@ fn intersect_resolves_the_hit_material_and_geometry() {
     let right = b.attach(sphere(Vec3A::new(3.0, 0.0, 0.0), 1.0), emissive(2.0));
     let world = b.commit();
     let ray = Ray::new(Vec3A::new(3.0, 0.0, -5.0), Vec3A::Z);
-    let hit = world.intersect(&ray, 1e-3, 100.0).expect("hit the right sphere");
+    let hit = world
+        .intersect(&ray, 1e-3, 100.0)
+        .expect("hit the right sphere");
     assert_eq!(hit.geom_id, right);
     assert_eq!(hit.prim_id, 0);
     assert_eq!(hit.mat.emitted().x, 2.0);
@@ -76,10 +78,18 @@ fn intersect_resolves_the_hit_material_and_geometry() {
     assert!(hit.rec.p.abs_diff_eq(ray.at(hit.rec.t), 1e-6));
     assert!(hit.rec.normal.abs_diff_eq(-Vec3A::Z, 1e-5));
     assert!(hit.rec.front_face);
-    assert_eq!(hit.rec.face_id, HitRecord::NO_FACE, "no face table was installed");
+    assert_eq!(
+        hit.rec.face_id,
+        HitRecord::NO_FACE,
+        "no face table was installed"
+    );
     assert!(!hit.rec.has_uv);
     assert_eq!(hit.rec.tangent, Vec3A::ZERO);
-    assert!(world.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0).is_none());
+    assert!(
+        world
+            .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -96,11 +106,23 @@ fn occluded_is_the_boolean_view_of_intersect() {
 #[test]
 fn masks_gate_world_queries() {
     let mut b = WorldBuilder::new();
-    b.attach_masked(sphere(Vec3A::ZERO, 1.0), emissive(1.0), MASK_SHADOW | MASK_INDIRECT);
+    b.attach_masked(
+        sphere(Vec3A::ZERO, 1.0),
+        emissive(1.0),
+        MASK_SHADOW | MASK_INDIRECT,
+    );
     let world = b.commit();
     let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
-    assert!(world.intersect(&ray.clone().with_mask(MASK_CAMERA), 1e-3, 100.0).is_none());
-    assert!(world.intersect(&ray.clone().with_mask(MASK_INDIRECT), 1e-3, 100.0).is_some());
+    assert!(
+        world
+            .intersect(&ray.clone().with_mask(MASK_CAMERA), 1e-3, 100.0)
+            .is_none()
+    );
+    assert!(
+        world
+            .intersect(&ray.clone().with_mask(MASK_INDIRECT), 1e-3, 100.0)
+            .is_some()
+    );
     assert!(world.occluded(&ray.clone().with_mask(MASK_SHADOW), 1e-3, 100.0));
     assert!(!world.occluded(&ray.with_mask(MASK_CAMERA), 1e-3, 100.0));
 }
@@ -116,7 +138,9 @@ fn reserved_slots_bind_their_material_before_their_geometry() {
     let world = b.commit();
     assert_eq!(world.count(), 3);
     assert_eq!(world.primitive_count(), 3);
-    let hit = world.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0).unwrap();
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
     assert_eq!(hit.geom_id, slot);
     assert_eq!(hit.mat.emitted().x, 5.0);
 }
@@ -130,7 +154,9 @@ fn an_unfilled_slot_is_invisible_but_keeps_its_material() {
     assert_eq!(world.count(), 2);
     assert_eq!(world.primitive_count(), 1);
     assert_eq!(world.material(slot).emitted().x, 9.0);
-    let hit = world.intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0).unwrap();
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
     assert_eq!(hit.geom_id, 1);
 }
 
@@ -169,7 +195,11 @@ fn an_empty_world_has_no_bounds() {
     let world = WorldBuilder::new().commit();
     assert_eq!(world.count(), 0);
     assert!(world.bounds().is_none());
-    assert!(world.intersect(&Ray::new(Vec3A::ZERO, Vec3A::Z), 1e-3, 100.0).is_none());
+    assert!(
+        world
+            .intersect(&Ray::new(Vec3A::ZERO, Vec3A::Z), 1e-3, 100.0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -271,13 +301,27 @@ fn world_hits_carry_ptex_face_coordinates() {
     b.set_face_map(id, Arc::new(quad_face_map()), false);
     let world = b.commit();
     // For this quad the Ptex parameterisation equals the hit's (x, y).
-    for (x, y) in [(0.75, 0.25), (0.25, 0.75), (0.5, 0.5), (0.1, 0.05), (0.9, 0.95)] {
+    for (x, y) in [
+        (0.75, 0.25),
+        (0.25, 0.75),
+        (0.5, 0.5),
+        (0.1, 0.05),
+        (0.9, 0.95),
+    ] {
         let hit = world
             .intersect(&Ray::new(Vec3A::new(x, y, -1.0), Vec3A::Z), 1e-3, 10.0)
             .unwrap();
         assert_eq!(hit.rec.face_id, 0);
-        assert!(approx(hit.rec.face_uv.0, x, 1e-4), "({x},{y}) -> {:?}", hit.rec.face_uv);
-        assert!(approx(hit.rec.face_uv.1, y, 1e-4), "({x},{y}) -> {:?}", hit.rec.face_uv);
+        assert!(
+            approx(hit.rec.face_uv.0, x, 1e-4),
+            "({x},{y}) -> {:?}",
+            hit.rec.face_uv
+        );
+        assert!(
+            approx(hit.rec.face_uv.1, y, 1e-4),
+            "({x},{y}) -> {:?}",
+            hit.rec.face_uv
+        );
     }
 }
 
@@ -285,22 +329,41 @@ fn world_hits_carry_ptex_face_coordinates() {
 fn a_mirrored_placement_swaps_the_face_parameterisation() {
     // Bake the quad mirrored in X (x → 1 − x) with its winding fixed by an
     // index swap, exactly as the importer does, and mark the table swapped.
-    let verts: Vec<Vec3A> = quad_verts().into_iter().map(|p| Vec3A::new(1.0 - p.x, p.y, p.z)).collect();
+    let verts: Vec<Vec3A> = quad_verts()
+        .into_iter()
+        .map(|p| Vec3A::new(1.0 - p.x, p.y, p.z))
+        .collect();
     let tris: Vec<[u32; 3]> = quad_tris().into_iter().map(|[a, b, c]| [a, c, b]).collect();
     let mut b = WorldBuilder::new();
     let id = b.attach(
-        Geometry::TriangleMesh { vertices: verts, indices: tris, normals: None },
+        Geometry::TriangleMesh {
+            vertices: verts,
+            indices: tris,
+            normals: None,
+        },
         emissive(1.0),
     );
     b.set_face_map(id, Arc::new(quad_face_map()), true);
     let world = b.commit();
     // The point at world x = 0.25 is the original quad's x = 0.75.
     let hit = world
-        .intersect(&Ray::new(Vec3A::new(0.25, 0.25, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .intersect(
+            &Ray::new(Vec3A::new(0.25, 0.25, -1.0), Vec3A::Z),
+            1e-3,
+            10.0,
+        )
         .unwrap();
     assert_eq!(hit.rec.face_id, 0);
-    assert!(approx(hit.rec.face_uv.0, 0.75, 1e-4), "{:?}", hit.rec.face_uv);
-    assert!(approx(hit.rec.face_uv.1, 0.25, 1e-4), "{:?}", hit.rec.face_uv);
+    assert!(
+        approx(hit.rec.face_uv.0, 0.75, 1e-4),
+        "{:?}",
+        hit.rec.face_uv
+    );
+    assert!(
+        approx(hit.rec.face_uv.1, 0.25, 1e-4),
+        "{:?}",
+        hit.rec.face_uv
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -368,13 +431,19 @@ fn build_tangents_follows_increasing_u() {
 #[test]
 fn build_tangents_gives_zero_for_degenerate_charts() {
     let mut m = UvMap {
-        uvs: vec![[[0.3, 0.3], [0.3, 0.3], [0.3, 0.3]], [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]],
+        uvs: vec![
+            [[0.3, 0.3], [0.3, 0.3], [0.3, 0.3]],
+            [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+        ],
         tangents: Vec::new(),
     };
     m.build_tangents(&quad_verts(), &quad_tris());
     assert_eq!(m.tangents, vec![Vec3A::ZERO, Vec3A::ZERO]);
     // A triangle with no UV entry at all also gets zero, never a panic.
-    let mut short = UvMap { uvs: vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]], tangents: Vec::new() };
+    let mut short = UvMap {
+        uvs: vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]],
+        tangents: Vec::new(),
+    };
     short.build_tangents(&quad_verts(), &quad_tris());
     assert_eq!(short.tangents.len(), 2);
     assert!(short.tangents[0].abs_diff_eq(Vec3A::X, 1e-5));
@@ -403,9 +472,15 @@ fn world_hits_carry_uv_and_tangent_from_the_uv_map() {
     b.set_uv_map(id, Arc::new(m), false);
     let world = b.commit();
     for (x, y) in [(0.75, 0.25), (0.25, 0.75), (0.5, 0.5)] {
-        let hit = world.intersect(&Ray::new(Vec3A::new(x, y, -1.0), Vec3A::Z), 1e-3, 10.0).unwrap();
+        let hit = world
+            .intersect(&Ray::new(Vec3A::new(x, y, -1.0), Vec3A::Z), 1e-3, 10.0)
+            .unwrap();
         assert!(hit.rec.has_uv);
-        assert!(approx(hit.rec.uv.0, x, 1e-4) && approx(hit.rec.uv.1, y, 1e-4), "{:?}", hit.rec.uv);
+        assert!(
+            approx(hit.rec.uv.0, x, 1e-4) && approx(hit.rec.uv.1, y, 1e-4),
+            "{:?}",
+            hit.rec.uv
+        );
         assert!(hit.rec.tangent.abs_diff_eq(Vec3A::X, 1e-5));
         // The face table was not installed, so Ptex fields stay unset.
         assert_eq!(hit.rec.face_id, HitRecord::NO_FACE);
@@ -419,7 +494,9 @@ fn a_geometry_may_carry_both_side_tables() {
     b.set_face_map(id, Arc::new(quad_face_map()), false);
     b.set_uv_map(id, Arc::new(quad_uv_map()), false);
     let world = b.commit();
-    let hit = world.intersect(&Ray::new(Vec3A::new(0.6, 0.2, -1.0), Vec3A::Z), 1e-3, 10.0).unwrap();
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(0.6, 0.2, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .unwrap();
     assert_eq!(hit.rec.face_id, 0);
     assert!(hit.rec.has_uv);
     assert!(approx(hit.rec.face_uv.0, hit.rec.uv.0, 1e-5));
@@ -432,7 +509,10 @@ fn side_tables_are_per_geometry() {
     let textured = b.attach(quad(), emissive(1.0));
     let plain = b.attach(
         Geometry::TriangleMesh {
-            vertices: quad_verts().into_iter().map(|p| p + Vec3A::new(2.0, 0.0, 0.0)).collect(),
+            vertices: quad_verts()
+                .into_iter()
+                .map(|p| p + Vec3A::new(2.0, 0.0, 0.0))
+                .collect(),
             indices: quad_tris(),
             normals: None,
         },
@@ -440,9 +520,13 @@ fn side_tables_are_per_geometry() {
     );
     b.set_face_map(textured, Arc::new(quad_face_map()), false);
     let world = b.commit();
-    let a = world.intersect(&Ray::new(Vec3A::new(0.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0).unwrap();
+    let a = world
+        .intersect(&Ray::new(Vec3A::new(0.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .unwrap();
     assert_eq!(a.rec.face_id, 0);
-    let p = world.intersect(&Ray::new(Vec3A::new(2.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0).unwrap();
+    let p = world
+        .intersect(&Ray::new(Vec3A::new(2.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .unwrap();
     assert_eq!(p.geom_id, plain);
     assert_eq!(p.rec.face_id, HitRecord::NO_FACE);
 }
@@ -462,7 +546,11 @@ fn openpbr_presets_set_the_expected_lobes() {
     let m = OpenPBR::metal(Vec3A::ONE, 0.3);
     assert_eq!(m.base_metalness, 1.0);
     assert_eq!(m.specular_roughness, 0.3);
-    assert_eq!(OpenPBR::metal(Vec3A::ONE, 4.0).specular_roughness, 1.0, "roughness clamps");
+    assert_eq!(
+        OpenPBR::metal(Vec3A::ONE, 4.0).specular_roughness,
+        1.0,
+        "roughness clamps"
+    );
     assert_eq!(OpenPBR::metal(Vec3A::ONE, -1.0).specular_roughness, 0.0);
 
     let g = OpenPBR::glass(1.7);
@@ -517,7 +605,10 @@ fn a_coat_attenuates_emission_more_at_grazing_angles() {
     let grazing = o.emitted_directional(0.1);
     assert!(head_on.x <= 1.0 + 1e-6, "a coat never amplifies: {head_on}");
     assert!(head_on.x > 0.0);
-    assert!(grazing.x < head_on.x, "grazing {grazing} vs head-on {head_on}");
+    assert!(
+        grazing.x < head_on.x,
+        "grazing {grazing} vs head-on {head_on}"
+    );
 }
 
 #[test]
@@ -526,9 +617,18 @@ fn emissive_material_emits_and_never_scatters() {
     assert_eq!(e.color(), Vec3A::new(3.0, 2.0, 1.0));
     assert_eq!(e.emitted(), Vec3A::new(3.0, 2.0, 1.0));
     assert_eq!(e.emitted_directional(0.3), e.emitted());
-    let rec = HitRecord { p: Vec3A::ZERO, normal: Vec3A::Z, t: 1.0, front_face: true, ..HitRecord::default() };
+    let rec = HitRecord {
+        p: Vec3A::ZERO,
+        normal: Vec3A::Z,
+        t: 1.0,
+        front_face: true,
+        ..HitRecord::default()
+    };
     let r_in = Ray::new(Vec3A::Z, -Vec3A::Z);
-    assert!(e.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 0)).is_none());
+    assert!(
+        e.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 0))
+            .is_none()
+    );
     assert!(e.eval(&r_in, &rec, Vec3A::Z).is_none());
     assert!(e.face_texture().is_none());
     assert!(!e.uses_uv());
@@ -547,7 +647,13 @@ fn upward_hit() -> (Ray, HitRecord) {
         front_face: true,
         ..HitRecord::default()
     };
-    (Ray::new(Vec3A::new(0.3, 0.2, 1.0), Vec3A::new(-0.3, -0.2, -1.0).normalize()), rec)
+    (
+        Ray::new(
+            Vec3A::new(0.3, 0.2, 1.0),
+            Vec3A::new(-0.3, -0.2, -1.0).normalize(),
+        ),
+        rec,
+    )
 }
 
 #[test]
@@ -558,7 +664,10 @@ fn diffuse_scatter_samples_stay_in_the_upper_hemisphere() {
         let s = m
             .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
             .expect("a diffuse surface always scatters");
-        assert!(s.ray.direction().dot(rec.normal) > 0.0, "sample {i} went below the surface");
+        assert!(
+            s.ray.direction().dot(rec.normal) > 0.0,
+            "sample {i} went below the surface"
+        );
         assert!(s.ray.origin().abs_diff_eq(rec.p, 1e-3));
         assert!(s.pdf > 0.0 && s.pdf.is_finite());
         assert!(s.value.min_element() >= 0.0 && s.value.is_finite());
@@ -572,10 +681,22 @@ fn diffuse_eval_is_consistent_with_its_samples() {
     let m = OpenPBR::diffuse(Vec3A::splat(0.7));
     let (r_in, rec) = upward_hit();
     for i in 0..64 {
-        let s = m.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i)).unwrap();
-        let (value, pdf) = m.eval(&r_in, &rec, s.ray.direction().normalize()).expect("continuous");
-        assert!(approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)), "pdf {pdf} vs sampled {}", s.pdf);
-        assert!(value.abs_diff_eq(s.value, 1e-3 * s.value.max_element().max(1.0)), "{value} vs {}", s.value);
+        let s = m
+            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .unwrap();
+        let (value, pdf) = m
+            .eval(&r_in, &rec, s.ray.direction().normalize())
+            .expect("continuous");
+        assert!(
+            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            "pdf {pdf} vs sampled {}",
+            s.pdf
+        );
+        assert!(
+            value.abs_diff_eq(s.value, 1e-3 * s.value.max_element().max(1.0)),
+            "{value} vs {}",
+            s.value
+        );
     }
 }
 
@@ -583,7 +704,9 @@ fn diffuse_eval_is_consistent_with_its_samples() {
 fn eval_below_the_horizon_is_zero_but_still_some() {
     let m = OpenPBR::diffuse(Vec3A::splat(0.7));
     let (r_in, rec) = upward_hit();
-    let (value, pdf) = m.eval(&r_in, &rec, -Vec3A::Z).expect("eval availability never depends on wi");
+    let (value, pdf) = m
+        .eval(&r_in, &rec, -Vec3A::Z)
+        .expect("eval availability never depends on wi");
     assert_eq!(value, Vec3A::ZERO);
     assert!(pdf >= 0.0 && pdf.is_finite());
 }
@@ -594,7 +717,9 @@ fn directional_albedo(m: &OpenPBR) -> Vec3A {
     let n = 4096;
     let mut sum = Vec3A::ZERO;
     for i in 0..n {
-        let s = m.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i)).unwrap();
+        let s = m
+            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .unwrap();
         sum += s.value / s.pdf;
     }
     sum / n as f32
@@ -605,7 +730,10 @@ fn diffuse_furnace_returns_the_albedo() {
     // With the dielectric interface switched off (IOR 1 → F0 = 0) the
     // diffuse slab's directional albedo is exactly its base colour.
     let albedo = Vec3A::new(0.2, 0.5, 0.8);
-    let m = OpenPBR { specular_ior: 1.0, ..OpenPBR::diffuse(albedo) };
+    let m = OpenPBR {
+        specular_ior: 1.0,
+        ..OpenPBR::diffuse(albedo)
+    };
     let mean = directional_albedo(&m);
     assert!(mean.abs_diff_eq(albedo, 0.01), "{mean} vs {albedo}");
 }
@@ -619,7 +747,11 @@ fn diffuse_under_a_dielectric_interface_loses_the_average_fresnel() {
     let albedo = Vec3A::new(0.2, 0.5, 0.8);
     let m = OpenPBR::diffuse(albedo);
     let mean = directional_albedo(&m);
-    assert!(mean.abs_diff_eq(albedo * 0.96, 0.01), "{mean} vs {}", albedo * 0.96);
+    assert!(
+        mean.abs_diff_eq(albedo * 0.96, 0.01),
+        "{mean} vs {}",
+        albedo * 0.96
+    );
 }
 
 #[test]
@@ -630,12 +762,17 @@ fn metal_reflects_around_the_mirror_direction() {
     let mirror = (d - 2.0 * d.dot(rec.normal) * rec.normal).normalize();
     let mut close = 0;
     for i in 0..128 {
-        let s = m.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i)).unwrap();
+        let s = m
+            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .unwrap();
         if s.ray.direction().normalize().dot(mirror) > 0.95 {
             close += 1;
         }
     }
-    assert!(close > 100, "only {close} of 128 samples near the mirror direction");
+    assert!(
+        close > 100,
+        "only {close} of 128 samples near the mirror direction"
+    );
 }
 
 #[test]
@@ -648,15 +785,23 @@ fn glass_transmission_enters_the_interior() {
     let (r_in, rec) = upward_hit();
     let mut refracted = 0;
     for i in 0..128 {
-        let s = m.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i)).unwrap();
+        let s = m
+            .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, i))
+            .unwrap();
         if s.ray.direction().dot(rec.normal) < 0.0 {
             refracted += 1;
-            assert!(s.ray.medium().is_some(), "a refracted ray carries the interior medium");
+            assert!(
+                s.ray.medium().is_some(),
+                "a refracted ray carries the interior medium"
+            );
         } else {
             assert!(s.ray.medium().is_none(), "a reflected ray stays in vacuum");
         }
     }
-    assert!(refracted > 64, "most rays refract through clear glass: {refracted}/128");
+    assert!(
+        refracted > 64,
+        "most rays refract through clear glass: {refracted}/128"
+    );
     // `make_ray` mirrors that decision for an external direction.
     let inward = m.make_ray(&rec, Vec3A::new(0.1, 0.0, -1.0).normalize());
     assert!(inward.medium().is_some());
@@ -669,7 +814,10 @@ fn zero_depth_glass_carries_no_medium() {
     let m = OpenPBR::glass(1.5);
     let (_, rec) = upward_hit();
     let inward = m.make_ray(&rec, Vec3A::new(0.1, 0.0, -1.0).normalize());
-    assert!(inward.medium().is_none(), "an inert interior is not tracked");
+    assert!(
+        inward.medium().is_none(),
+        "an inert interior is not tracked"
+    );
 }
 
 #[test]
@@ -681,7 +829,10 @@ fn materials_are_object_safe_and_shareable() {
     ];
     let mut b = WorldBuilder::new();
     for (i, m) in mats.iter().enumerate() {
-        b.attach(sphere(Vec3A::new(i as f32 * 3.0, 0.0, 0.0), 1.0), Arc::clone(m));
+        b.attach(
+            sphere(Vec3A::new(i as f32 * 3.0, 0.0, 0.0), 1.0),
+            Arc::clone(m),
+        );
     }
     let world = b.commit();
     assert_eq!(world.material(1).emitted(), Vec3A::ONE);
@@ -704,7 +855,10 @@ fn sample_mtlx() -> std::path::PathBuf {
 
 #[test]
 fn material_node_of_takes_the_path_leaf() {
-    assert_eq!(materialx::material_node_of("/MaterialX/Materials/surfacematerial_x"), Some("surfacematerial_x"));
+    assert_eq!(
+        materialx::material_node_of("/MaterialX/Materials/surfacematerial_x"),
+        Some("surfacematerial_x")
+    );
     assert_eq!(materialx::material_node_of("plain"), Some("plain"));
     assert_eq!(materialx::material_node_of("/a/b/"), None);
     assert_eq!(materialx::material_node_of(""), None);
@@ -712,22 +866,36 @@ fn material_node_of_takes_the_path_leaf() {
 
 #[test]
 fn loading_the_sample_builds_a_material_that_shades() {
-    let loaded = materialx::load(&sample_mtlx(), Some("mtlx_ceramic"), &|_, _| None).expect("loads");
+    let loaded =
+        materialx::load(&sample_mtlx(), Some("mtlx_ceramic"), &|_, _| None).expect("loads");
     assert_eq!(loaded.material.name, "mtlx_ceramic");
     assert_eq!(loaded.textures, 0);
     assert!(loaded.unsupported.is_empty());
     assert!(loaded.summary.contains("mtlx_ceramic"));
     assert!(loaded.summary.contains("lobes"));
-    assert!(loaded.material.uses_uv(), "the graph reads texture coordinates");
+    assert!(
+        loaded.material.uses_uv(),
+        "the graph reads texture coordinates"
+    );
 
     let (r_in, rec) = upward_hit();
     let params = loaded.material.probe(&r_in, &rec);
     assert!(params.base_color.is_finite());
     assert!(params.base_color.min_element() >= 0.0 && params.base_color.max_element() <= 1.0);
-    assert!((params.specular_ior - 1.48).abs() < 1e-3, "the glaze IOR reaches OpenPBR: {}", params.specular_ior);
-    assert_eq!(params.base_metalness, 0.0, "no conductor lobe in the ceramic");
+    assert!(
+        (params.specular_ior - 1.48).abs() < 1e-3,
+        "the glaze IOR reaches OpenPBR: {}",
+        params.specular_ior
+    );
+    assert_eq!(
+        params.base_metalness, 0.0,
+        "no conductor lobe in the ceramic"
+    );
 
-    let s = loaded.material.scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 1)).expect("scatters");
+    let s = loaded
+        .material
+        .scatter_importance(&r_in, &rec, PathSampler::new(0, 0, 0, 1))
+        .expect("scatters");
     assert!(s.pdf > 0.0);
     assert!(loaded.material.eval(&r_in, &rec, Vec3A::Z).is_some());
     assert_eq!(loaded.material.emitted(), Vec3A::ZERO);
@@ -738,13 +906,19 @@ fn the_sample_metal_reduces_to_a_metal_lobe() {
     let loaded = materialx::load(&sample_mtlx(), Some("mtlx_metal"), &|_, _| None).expect("loads");
     let (r_in, rec) = upward_hit();
     let params = loaded.material.probe(&r_in, &rec);
-    assert!(params.base_metalness > 0.0 && params.base_metalness <= 1.0, "{}", params.base_metalness);
+    assert!(
+        params.base_metalness > 0.0 && params.base_metalness <= 1.0,
+        "{}",
+        params.base_metalness
+    );
     assert!(params.base_color.max_element() > 0.0);
 }
 
 #[test]
 fn a_missing_mtlx_material_is_an_error() {
-    let err = materialx::load(&sample_mtlx(), Some("nothing_here"), &|_, _| None).err().expect("error");
+    let err = materialx::load(&sample_mtlx(), Some("nothing_here"), &|_, _| None)
+        .err()
+        .expect("error");
     assert!(err.to_string().contains("nothing_here"));
     assert!(materialx::load(std::path::Path::new("/no/such.mtlx"), None, &|_, _| None).is_err());
 }

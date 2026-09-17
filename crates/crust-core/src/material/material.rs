@@ -1,6 +1,6 @@
+use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::ray::Ray;
-use crate::PathSampler;
 use glam::Vec3A;
 
 /// One direction sampled from a material's importance distribution.

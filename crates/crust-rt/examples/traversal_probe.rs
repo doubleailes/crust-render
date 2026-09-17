@@ -68,11 +68,7 @@ fn probe(label: &str, geom: Geometry) {
             // +/-0.25 from z=-4, so this keeps most rays on geometry.
             // A wide fan would average in misses that exit after one
             // node test and hide the real traversal depth.
-            let dir = Vec3A::new(
-                0.28 * x as f32 / N as f32,
-                0.28 * y as f32 / N as f32,
-                1.0,
-            );
+            let dir = Vec3A::new(0.28 * x as f32 / N as f32, 0.28 * y as f32 / N as f32, 1.0);
             let ray = Ray::new(Vec3A::new(0.0, 0.0, -4.0), dir);
             if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
                 hits += 1;
@@ -265,7 +261,11 @@ fn probe_nested(label: &str, groups: usize, per_group: usize, segs: usize, rings
     let t0 = std::time::Instant::now();
     for y in -N..N {
         for x in -N..N {
-            let dir = Vec3A::new(spread * x as f32 / N as f32, spread * y as f32 / N as f32, 1.0);
+            let dir = Vec3A::new(
+                spread * x as f32 / N as f32,
+                spread * y as f32 / N as f32,
+                1.0,
+            );
             let ray = Ray::new(Vec3A::new(0.0, 0.0, -dist), dir);
             if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
                 hits += 1;

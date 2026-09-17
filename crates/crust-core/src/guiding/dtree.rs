@@ -164,8 +164,8 @@ impl DTree {
         if self.total_flux() <= 0.0 {
             return None;
         }
-        let mut rng_state: u64 = ((seed[0].to_bits() as u64) << 32 | seed[1].to_bits() as u64)
-            ^ 0x9E37_79B9_7F4A_7C15;
+        let mut rng_state: u64 =
+            ((seed[0].to_bits() as u64) << 32 | seed[1].to_bits() as u64) ^ 0x9E37_79B9_7F4A_7C15;
         let mut node = 0usize;
         let mut base = [0.0f32; 2];
         let mut scale = 1.0f32;
@@ -229,7 +229,16 @@ impl DTree {
         if total <= 0.0 {
             return out;
         }
-        self.refine_rec(&mut out.nodes, 0, Some(0), self.nodes[0].sums, total, rho, 1, max_depth);
+        self.refine_rec(
+            &mut out.nodes,
+            0,
+            Some(0),
+            self.nodes[0].sums,
+            total,
+            rho,
+            1,
+            max_depth,
+        );
         out
     }
 
@@ -421,16 +430,16 @@ mod tests {
         for _ in 0..n {
             let (p, _) = tree.sample(s.next_2d()).unwrap();
             let d = canonical_to_dir(p);
-            let oct = (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize)
-                + 4 * ((d.z >= 0.0) as usize);
+            let oct =
+                (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize) + 4 * ((d.z >= 0.0) as usize);
             counts[oct] += 1;
         }
         let m = 400_000;
         let mut integrals = [0.0f64; 8];
         for _ in 0..m {
             let d = uniform_sphere(s.next_2d());
-            let oct = (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize)
-                + 4 * ((d.z >= 0.0) as usize);
+            let oct =
+                (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize) + 4 * ((d.z >= 0.0) as usize);
             integrals[oct] += tree.pdf(dir_to_canonical(d)) as f64;
         }
         for oct in 0..8 {
@@ -446,7 +455,11 @@ mod tests {
     #[test]
     fn refinement_grows_hot_regions() {
         let tree = trained_tree();
-        assert!(tree.depth() > 2, "hot octant should subdivide, depth = {}", tree.depth());
+        assert!(
+            tree.depth() > 2,
+            "hot octant should subdivide, depth = {}",
+            tree.depth()
+        );
     }
 
     #[test]

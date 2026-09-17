@@ -74,7 +74,11 @@ fn excess_scatter_shifts_absorption_to_stay_non_negative() {
     // so it is shifted by grey until every channel is ≥ 0.
     let m = Medium::from_transmission(Vec3A::new(0.5, 0.5, 0.9), 1.0, Vec3A::splat(1.0), 0.0);
     assert!(m.sigma_a.min_element() >= -1e-6, "{}", m.sigma_a);
-    assert!(approx(m.sigma_a.min_element(), 0.0, 1e-5), "shifted exactly to zero: {}", m.sigma_a);
+    assert!(
+        approx(m.sigma_a.min_element(), 0.0, 1e-5),
+        "shifted exactly to zero: {}",
+        m.sigma_a
+    );
     // The shift is grey: channel differences are preserved.
     let expected_diff = (-0.5f32.ln()) - (-0.9f32.ln());
     assert!(approx(m.sigma_a.x - m.sigma_a.z, expected_diff, 1e-5));
@@ -90,7 +94,11 @@ fn negative_scatter_is_clamped_to_zero() {
 fn anisotropy_is_clamped_below_one() {
     assert!(Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 5.0).g < 1.0);
     assert!(Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, -5.0).g > -1.0);
-    assert!(approx(Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 0.3).g, 0.3, 1e-6));
+    assert!(approx(
+        Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 0.3).g,
+        0.3,
+        1e-6
+    ));
     assert!(Medium::from_subsurface(Vec3A::splat(0.5), 1.0, Vec3A::ONE, 2.0).g < 1.0);
 }
 
@@ -116,16 +124,28 @@ fn albedo_is_scattering_over_extinction() {
     assert!(approx(a.y, 0.25, 1e-6));
     assert!(approx(a.z, 1.0, 1e-6));
     // A vacuum has a defined (zero) albedo rather than NaN.
-    let v = Medium { sigma_a: Vec3A::ZERO, sigma_s: Vec3A::ZERO, g: 0.0 };
+    let v = Medium {
+        sigma_a: Vec3A::ZERO,
+        sigma_s: Vec3A::ZERO,
+        g: 0.0,
+    };
     assert!(v.albedo().is_finite());
     assert_eq!(v.albedo(), Vec3A::ZERO);
 }
 
 #[test]
 fn is_scattering_ignores_negligible_scatter() {
-    let m = Medium { sigma_a: Vec3A::ONE, sigma_s: Vec3A::splat(1e-9), g: 0.0 };
+    let m = Medium {
+        sigma_a: Vec3A::ONE,
+        sigma_s: Vec3A::splat(1e-9),
+        g: 0.0,
+    };
     assert!(!m.is_scattering());
-    let m = Medium { sigma_a: Vec3A::ONE, sigma_s: Vec3A::new(0.0, 0.0, 1e-3), g: 0.0 };
+    let m = Medium {
+        sigma_a: Vec3A::ONE,
+        sigma_s: Vec3A::new(0.0, 0.0, 1e-3),
+        g: 0.0,
+    };
     assert!(m.is_scattering(), "any channel scattering counts");
 }
 
@@ -169,13 +189,24 @@ fn subsurface_albedo_inversion_is_monotone() {
 fn subsurface_radius_is_floored_against_zero() {
     let m = Medium::from_subsurface(Vec3A::splat(0.5), 0.0, Vec3A::ONE, 0.0);
     assert!(m.sigma_t_max().is_finite());
-    assert!(m.sigma_t_max() > 100.0, "a tiny mean free path is a dense medium");
+    assert!(
+        m.sigma_t_max() > 100.0,
+        "a tiny mean free path is a dense medium"
+    );
 }
 
 #[test]
 fn blend_combines_coefficients_linearly() {
-    let a = Medium { sigma_a: Vec3A::splat(1.0), sigma_s: Vec3A::splat(2.0), g: 0.0 };
-    let b = Medium { sigma_a: Vec3A::splat(3.0), sigma_s: Vec3A::splat(4.0), g: 0.0 };
+    let a = Medium {
+        sigma_a: Vec3A::splat(1.0),
+        sigma_s: Vec3A::splat(2.0),
+        g: 0.0,
+    };
+    let b = Medium {
+        sigma_a: Vec3A::splat(3.0),
+        sigma_s: Vec3A::splat(4.0),
+        g: 0.0,
+    };
     let m = Medium::blend(&a, 0.25, &b, 0.75);
     assert!(m.sigma_a.abs_diff_eq(Vec3A::splat(2.5), 1e-6));
     assert!(m.sigma_s.abs_diff_eq(Vec3A::splat(3.5), 1e-6));
@@ -183,13 +214,25 @@ fn blend_combines_coefficients_linearly() {
 
 #[test]
 fn blend_weights_anisotropy_by_scattering() {
-    let scattering = Medium { sigma_a: Vec3A::ZERO, sigma_s: Vec3A::splat(1.0), g: 0.8 };
-    let absorbing = Medium { sigma_a: Vec3A::splat(5.0), sigma_s: Vec3A::ZERO, g: 0.0 };
+    let scattering = Medium {
+        sigma_a: Vec3A::ZERO,
+        sigma_s: Vec3A::splat(1.0),
+        g: 0.8,
+    };
+    let absorbing = Medium {
+        sigma_a: Vec3A::splat(5.0),
+        sigma_s: Vec3A::ZERO,
+        g: 0.0,
+    };
     // The non-scattering component must not drag g toward zero.
     let m = Medium::blend(&scattering, 0.5, &absorbing, 0.5);
     assert!(approx(m.g, 0.8, 1e-6), "{}", m.g);
     // Two scatterers: g is their scattering-weighted mean.
-    let other = Medium { sigma_a: Vec3A::ZERO, sigma_s: Vec3A::splat(3.0), g: 0.0 };
+    let other = Medium {
+        sigma_a: Vec3A::ZERO,
+        sigma_s: Vec3A::splat(3.0),
+        g: 0.0,
+    };
     let m = Medium::blend(&scattering, 1.0, &other, 1.0);
     assert!(approx(m.g, 0.2, 1e-5), "{}", m.g);
     // No scattering anywhere: g is zero, not NaN.
@@ -199,8 +242,16 @@ fn blend_weights_anisotropy_by_scattering() {
 
 #[test]
 fn blend_with_zero_weight_is_the_other_medium() {
-    let a = Medium { sigma_a: Vec3A::splat(1.0), sigma_s: Vec3A::splat(2.0), g: 0.3 };
-    let b = Medium { sigma_a: Vec3A::splat(9.0), sigma_s: Vec3A::splat(9.0), g: -0.5 };
+    let a = Medium {
+        sigma_a: Vec3A::splat(1.0),
+        sigma_s: Vec3A::splat(2.0),
+        g: 0.3,
+    };
+    let b = Medium {
+        sigma_a: Vec3A::splat(9.0),
+        sigma_s: Vec3A::splat(9.0),
+        g: -0.5,
+    };
     let m = Medium::blend(&a, 1.0, &b, 0.0);
     assert_eq!(m.sigma_a, a.sigma_a);
     assert_eq!(m.sigma_s, a.sigma_s);

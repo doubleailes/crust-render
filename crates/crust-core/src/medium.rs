@@ -85,12 +85,15 @@ impl Medium {
         let sqrt_inner = Vec3A::new(inner.x.sqrt(), inner.y.sqrt(), inner.z.sqrt());
         let s = Vec3A::splat(4.09712) + 4.20863 * a - sqrt_inner;
         let s2 = s * s;
-        let alpha_ss =
-            ((Vec3A::ONE - s2) / (Vec3A::ONE - g * s2)).clamp(Vec3A::ZERO, Vec3A::ONE);
+        let alpha_ss = ((Vec3A::ONE - s2) / (Vec3A::ONE - g * s2)).clamp(Vec3A::ZERO, Vec3A::ONE);
 
         let sigma_s = sigma_t * alpha_ss;
         let sigma_a = sigma_t - sigma_s;
-        Self { sigma_a, sigma_s, g }
+        Self {
+            sigma_a,
+            sigma_s,
+            g,
+        }
     }
 
     /// Weighted blend of two media (Adobe reference `openpbr_add_volumes`):
@@ -107,7 +110,11 @@ impl Medium {
         } else {
             0.0
         };
-        Medium { sigma_a, sigma_s, g }
+        Medium {
+            sigma_a,
+            sigma_s,
+            g,
+        }
     }
 
     /// Beer–Lambert transmittance across a segment of length `t`.
@@ -194,10 +201,7 @@ mod tests {
                 sum += hg_phase(mu, g) as f64;
             }
             let integral = 2.0 * std::f64::consts::PI * sum * (2.0 / n as f64);
-            assert!(
-                (integral - 1.0).abs() < 1e-3,
-                "g={g}: integral={integral}"
-            );
+            assert!((integral - 1.0).abs() < 1e-3, "g={g}: integral={integral}");
         }
     }
 

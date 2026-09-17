@@ -1,7 +1,9 @@
 //! The small value types the renderer is built from: `Buffer`, `Camera`,
 //! the renderer-side `Ray`, and `HitRecord`.
 
-use crust_core::{Buffer, Camera, HitRecord, MASK_ALL, MASK_CAMERA, MASK_SHADOW, Medium, Ray, Vec3A};
+use crust_core::{
+    Buffer, Camera, HitRecord, MASK_ALL, MASK_CAMERA, MASK_SHADOW, Medium, Ray, Vec3A,
+};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +83,12 @@ fn ray_defaults_to_vacuum_time_zero_and_all_masks() {
 
 #[test]
 fn ray_in_medium_carries_it() {
-    let m = Arc::new(Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 0.0));
+    let m = Arc::new(Medium::from_transmission(
+        Vec3A::splat(0.5),
+        1.0,
+        Vec3A::ZERO,
+        0.0,
+    ));
     let r = Ray::new_in_medium(Vec3A::ZERO, Vec3A::X, Arc::clone(&m));
     let carried = r.medium().expect("medium kept");
     assert!(Arc::ptr_eq(carried, &m));
@@ -175,8 +182,14 @@ fn camera_rays_carry_the_camera_mask_and_shutter_time() {
 fn viewport_corners_follow_right_and_up() {
     let cam = looking_down_minus_z(0.0);
     // vfov 90° at aspect 1 gives a viewport spanning ±1 at focus distance 1.
-    let corner = cam.get_ray(1.0, 1.0, [0.5, 0.5], 0.0).direction().normalize();
-    assert!(corner.abs_diff_eq(Vec3A::new(1.0, 1.0, -1.0).normalize(), 1e-4), "{corner}");
+    let corner = cam
+        .get_ray(1.0, 1.0, [0.5, 0.5], 0.0)
+        .direction()
+        .normalize();
+    assert!(
+        corner.abs_diff_eq(Vec3A::new(1.0, 1.0, -1.0).normalize(), 1e-4),
+        "{corner}"
+    );
     let right = cam.get_ray(1.0, 0.5, [0.5, 0.5], 0.0).direction();
     assert!(right.x > 0.0 && right.y.abs() < 1e-5);
     let up = cam.get_ray(0.5, 1.0, [0.5, 0.5], 0.0).direction();
@@ -187,10 +200,24 @@ fn viewport_corners_follow_right_and_up() {
 
 #[test]
 fn field_of_view_scales_the_viewport() {
-    let narrow = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 30.0, 1.0, 0.0, 1.0);
+    let narrow = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        30.0,
+        1.0,
+        0.0,
+        1.0,
+    );
     let wide = looking_down_minus_z(0.0);
-    let n = narrow.get_ray(1.0, 0.5, [0.5, 0.5], 0.0).direction().normalize();
-    let w = wide.get_ray(1.0, 0.5, [0.5, 0.5], 0.0).direction().normalize();
+    let n = narrow
+        .get_ray(1.0, 0.5, [0.5, 0.5], 0.0)
+        .direction()
+        .normalize();
+    let w = wide
+        .get_ray(1.0, 0.5, [0.5, 0.5], 0.0)
+        .direction()
+        .normalize();
     // Angle from the axis is half the fov (aspect 1): 15° vs 45°.
     let ang = |d: Vec3A| d.dot(-Vec3A::Z).clamp(-1.0, 1.0).acos().to_degrees();
     assert!((ang(n) - 15.0).abs() < 0.1, "{}", ang(n));
@@ -199,7 +226,15 @@ fn field_of_view_scales_the_viewport() {
 
 #[test]
 fn aspect_ratio_widens_the_horizontal_extent() {
-    let cam = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 90.0, 2.0, 0.0, 1.0);
+    let cam = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        90.0,
+        2.0,
+        0.0,
+        1.0,
+    );
     let right = cam.get_ray(1.0, 0.5, [0.5, 0.5], 0.0).direction();
     let up = cam.get_ray(0.5, 1.0, [0.5, 0.5], 0.0).direction();
     // At focus distance 1 the half-height is 1 and the half-width is 2.
@@ -221,7 +256,10 @@ fn a_finite_aperture_offsets_the_origin_within_the_lens() {
     let aperture = 0.4;
     let cam = looking_down_minus_z(aperture);
     let centre = cam.get_ray(0.5, 0.5, [0.5, 0.5], 0.0);
-    assert!(centre.origin().abs_diff_eq(Vec3A::new(0.0, 0.0, 5.0), 1e-6), "disk centre is no offset");
+    assert!(
+        centre.origin().abs_diff_eq(Vec3A::new(0.0, 0.0, 5.0), 1e-6),
+        "disk centre is no offset"
+    );
     let edge = cam.get_ray(0.5, 0.5, [1.0, 0.5], 0.0);
     let offset = edge.origin() - Vec3A::new(0.0, 0.0, 5.0);
     assert!((offset.length() - aperture / 2.0).abs() < 1e-5, "{offset}");
@@ -230,12 +268,24 @@ fn a_finite_aperture_offsets_the_origin_within_the_lens() {
 
 #[test]
 fn every_lens_sample_converges_on_the_focal_point() {
-    let cam = Camera::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::ZERO, Vec3A::Y, 60.0, 1.5, 0.5, 3.0);
+    let cam = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        60.0,
+        1.5,
+        0.5,
+        3.0,
+    );
     let focus = Vec3A::new(0.0, 0.0, 2.0); // 3 units along -Z
     for lens in [[0.0, 0.0], [1.0, 1.0], [0.2, 0.8], [0.5, 0.5], [0.9, 0.1]] {
         let r = cam.get_ray(0.5, 0.5, lens, 0.0);
         // The direction is scaled so t = 1 lands on the focus plane.
-        assert!(r.at(1.0).abs_diff_eq(focus, 1e-4), "lens {lens:?}: {}", r.at(1.0));
+        assert!(
+            r.at(1.0).abs_diff_eq(focus, 1e-4),
+            "lens {lens:?}: {}",
+            r.at(1.0)
+        );
     }
 }
 
@@ -246,8 +296,15 @@ fn camera_respects_an_arbitrary_look_direction() {
     let cam = Camera::new(from, at, Vec3A::Y, 45.0, 1.0, 0.0, 1.0);
     let r = cam.get_ray(0.5, 0.5, [0.5, 0.5], 0.0);
     assert_eq!(r.origin(), from);
-    assert!(r.direction().normalize().abs_diff_eq((at - from).normalize(), 1e-4));
+    assert!(
+        r.direction()
+            .normalize()
+            .abs_diff_eq((at - from).normalize(), 1e-4)
+    );
     // "Up" on the image is not below the horizon.
-    let up = cam.get_ray(0.5, 1.0, [0.5, 0.5], 0.0).direction().normalize();
+    let up = cam
+        .get_ray(0.5, 1.0, [0.5, 0.5], 0.0)
+        .direction()
+        .normalize();
     assert!(up.y > r.direction().normalize().y);
 }

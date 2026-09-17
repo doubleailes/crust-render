@@ -16,7 +16,10 @@ fn all_kinds() -> [PixelFilter; 5] {
 
 #[test]
 fn default_is_the_unit_triangle() {
-    assert_eq!(PixelFilter::default(), PixelFilter::Triangle { radius: 1.0 });
+    assert_eq!(
+        PixelFilter::default(),
+        PixelFilter::Triangle { radius: 1.0 }
+    );
 }
 
 #[test]
@@ -27,7 +30,10 @@ fn names_round_trip_through_from_name() {
     }
     assert!(PixelFilter::from_name("lanczos").is_none());
     assert!(PixelFilter::from_name("").is_none());
-    assert!(PixelFilter::from_name("Box").is_none(), "names are case-sensitive tokens");
+    assert!(
+        PixelFilter::from_name("Box").is_none(),
+        "names are case-sensitive tokens"
+    );
 }
 
 #[test]
@@ -46,7 +52,10 @@ fn with_radius_keeps_the_kind_and_clamps_nonsense() {
         assert_eq!(r.name(), f.name());
         assert_eq!(r.radius(), 2.75);
         assert!(f.with_radius(0.0).radius() > 0.0, "zero radius is clamped");
-        assert!(f.with_radius(-3.0).radius() > 0.0, "negative radius is clamped");
+        assert!(
+            f.with_radius(-3.0).radius() > 0.0,
+            "negative radius is clamped"
+        );
     }
 }
 
@@ -110,7 +119,10 @@ fn gaussian_reaches_exactly_zero_at_its_radius() {
 fn blackman_window_is_small_at_its_edges() {
     let b = PixelFilter::Blackman { radius: 1.0 };
     assert!(b.eval(0.999).abs() < 1e-3);
-    assert!((b.eval(0.0) - 1.0).abs() < 1e-3, "the 4-term window peaks at ~1");
+    assert!(
+        (b.eval(0.0) - 1.0).abs() < 1e-3,
+        "the 4-term window peaks at ~1"
+    );
 }
 
 #[test]
@@ -208,7 +220,10 @@ fn nonnegative_filters_have_nonnegative_weights() {
             // Box and triangle are sampled analytically: the weight is
             // exactly one. Tabulated kinds vary within a bin (see the mean
             // test), but never wildly.
-            if matches!(f, PixelFilter::BoxFilter { .. } | PixelFilter::Triangle { .. }) {
+            if matches!(
+                f,
+                PixelFilter::BoxFilter { .. } | PixelFilter::Triangle { .. }
+            ) {
                 assert_eq!(w, 1.0, "{} u={u}", f.name());
             } else {
                 assert!(w < 3.0, "{} u={u}: w={w}", f.name());
@@ -231,7 +246,11 @@ fn weights_average_to_one_for_every_kind() {
             sum += s.sample(u).1 as f64;
         }
         let mean = sum / n as f64;
-        assert!((mean - 1.0).abs() < 2e-3, "{}: mean weight {mean}", f.name());
+        assert!(
+            (mean - 1.0).abs() < 2e-3,
+            "{}: mean weight {mean}",
+            f.name()
+        );
     }
 }
 
@@ -245,7 +264,10 @@ fn mitchell_produces_negative_weights_on_its_lobes() {
         let (x, w) = s.sample(u);
         if w < 0.0 {
             negatives += 1;
-            assert!(f.eval(x - 0.5) < 0.0, "negative weight off the negative lobe at {x}");
+            assert!(
+                f.eval(x - 0.5) < 0.0,
+                "negative weight off the negative lobe at {x}"
+            );
         }
     }
     assert!(negatives > 0, "the negative lobes were never sampled");
@@ -264,7 +286,8 @@ fn sampled_positions_follow_the_kernel_shape() {
         for i in 0..n {
             let u = (i as f32 + 0.5) / n as f32;
             let (x, _) = s.sample(u);
-            let b = (((x - 0.5 + r) / (2.0 * r)) * bins as f32).clamp(0.0, bins as f32 - 1.0) as usize;
+            let b =
+                (((x - 0.5 + r) / (2.0 * r)) * bins as f32).clamp(0.0, bins as f32 - 1.0) as usize;
             hist[b] += 1;
         }
         // Reference masses from a fine quadrature of |f|.

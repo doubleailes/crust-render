@@ -43,15 +43,14 @@ fn main() {
         }
     }
     let points: Vec<(f32, f32)> = if coords.len() >= 2 {
-        coords.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect()
+        coords
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (c[0], c[1]))
+            .collect()
     } else {
-        vec![
-            (0.1, 0.1),
-            (0.3, 0.5),
-            (0.5, 0.5),
-            (0.7, 0.5),
-            (0.9, 0.9),
-        ]
+        vec![(0.1, 0.1), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.9, 0.9)]
     };
 
     // The renderer's own decoder, so the numbers printed are the ones a

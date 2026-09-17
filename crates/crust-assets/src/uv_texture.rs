@@ -460,7 +460,11 @@ mod tests {
         assert_eq!(sampled(&tex, 3.5, 2.5), [0, 0, 0], "hole");
         assert_eq!(sampled(&tex, 10.5, 0.5), [0, 0, 0], "past the grid");
         assert_eq!(sampled(&tex, -0.5, 0.5), [0, 0, 0], "before the grid");
-        assert_eq!(sampled(&tex, 0.5, 0.5), [10, 20, 30], "the tile that exists");
+        assert_eq!(
+            sampled(&tex, 0.5, 0.5),
+            [10, 20, 30],
+            "the tile that exists"
+        );
     }
 
     #[test]
@@ -531,9 +535,15 @@ mod tests {
         // 1.8 is the shallower exponent, so it decodes above 2.2 everywhere
         // strictly inside [0,1] — the error is not confined to the toe.
         for encoded in [13u8, 64, 128, 200] {
-            let (g18, g22) = (at(ColorSpace::Gamma18, encoded), at(ColorSpace::Gamma22, encoded));
+            let (g18, g22) = (
+                at(ColorSpace::Gamma18, encoded),
+                at(ColorSpace::Gamma22, encoded),
+            );
             assert!(g18 > g22, "at {encoded}: g18 {g18} !> g22 {g22}");
-            assert!(g18 > at(ColorSpace::Srgb, encoded), "at {encoded}: g18 {g18}");
+            assert!(
+                g18 > at(ColorSpace::Srgb, encoded),
+                "at {encoded}: g18 {g18}"
+            );
         }
     }
 

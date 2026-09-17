@@ -45,7 +45,12 @@ pub fn random_scene() -> (World, LightList) {
     let mut lights = LightList::new();
 
     let ground_material = Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)));
-    add_sphere(&mut world, Vec3A::new(0.0, -1000.0, 0.0), 1000.0, ground_material);
+    add_sphere(
+        &mut world,
+        Vec3A::new(0.0, -1000.0, 0.0),
+        1000.0,
+        ground_material,
+    );
 
     for a in -11..11 {
         for b in -11..11 {
@@ -114,7 +119,12 @@ pub fn simple_scene() -> (World, LightList) {
     let mut lights = LightList::new();
 
     let ground_material = Arc::new(OpenPBR::diffuse(Vec3A::new(0.8, 0.5, 0.5)));
-    add_sphere(&mut world, Vec3A::new(0.0, -1000.0, 0.0), 1000.0, ground_material);
+    add_sphere(
+        &mut world,
+        Vec3A::new(0.0, -1000.0, 0.0),
+        1000.0,
+        ground_material,
+    );
 
     // Deterministic grid of spheres with preset materials
     for a in -2..3 {

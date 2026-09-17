@@ -31,10 +31,16 @@ fn main() {
             println!("min    = ({:.3}, {:.3}, {:.3})", min.x, min.y, min.z);
             println!("max    = ({:.3}, {:.3}, {:.3})", max.x, max.y, max.z);
             println!("size   = ({:.3}, {:.3}, {:.3})", size.x, size.y, size.z);
-            println!("center = ({:.3}, {:.3}, {:.3})", center.x, center.y, center.z);
+            println!(
+                "center = ({:.3}, {:.3}, {:.3})",
+                center.x, center.y, center.z
+            );
             println!("radius = {radius:.3}");
             // Distance at which a sphere of `radius` fills a 35mm/36mm frame.
-            println!("suggested camera distance (35mm on 36mm aperture) = {:.3}", radius / 0.5);
+            println!(
+                "suggested camera distance (35mm on 36mm aperture) = {:.3}",
+                radius / 0.5
+            );
         }
         None => println!("scene has no bounded geometry"),
     }

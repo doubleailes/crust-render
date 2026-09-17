@@ -27,11 +27,7 @@ impl LightShape for SphereShape {
     fn sample_point(&self, u: f32, v: f32) -> Vec3A {
         let theta = 2.0 * std::f32::consts::PI * u;
         let phi = (1.0 - 2.0 * v).acos();
-        let n = Vec3A::new(
-            phi.sin() * theta.cos(),
-            phi.sin() * theta.sin(),
-            phi.cos(),
-        );
+        let n = Vec3A::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos());
         self.center + self.radius * n
     }
 
@@ -434,9 +430,7 @@ impl LightList {
     /// light for MIS; emissive geometry with no light-list entry returns
     /// `None`.
     pub fn find_by_geom(&self, geom_id: u32) -> Option<&Arc<dyn Light>> {
-        self.lights
-            .iter()
-            .find(|l| l.geom_id() == Some(geom_id))
+        self.lights.iter().find(|l| l.geom_id() == Some(geom_id))
     }
 
     /// Returns the number of lights in the `LightList`.

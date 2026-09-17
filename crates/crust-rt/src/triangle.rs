@@ -556,7 +556,11 @@ mod tests {
                 let pick = ((next() + 0.5) * 4.0) as usize % 4;
                 let (v0, v1, v2, _, _) = tris[pick];
                 let (a, b) = (next() + 0.5, next() + 0.5);
-                let (a, b) = if a + b > 1.0 { (1.0 - a, 1.0 - b) } else { (a, b) };
+                let (a, b) = if a + b > 1.0 {
+                    (1.0 - a, 1.0 - b)
+                } else {
+                    (a, b)
+                };
                 (v0 + (v1 - v0) * a + (v2 - v0) * b) - origin
             } else {
                 Vec3A::new(next(), next(), next())
@@ -590,7 +594,10 @@ mod tests {
             }
         }
         assert!(compared > 7000, "only {compared} lanes compared");
-        assert!(hits > 50, "only {hits} hits — the test is not exercising hits");
+        assert!(
+            hits > 50,
+            "only {hits} hits — the test is not exercising hits"
+        );
     }
 
     /// Range tests must agree too: the packet folds the scalar path's
@@ -608,7 +615,12 @@ mod tests {
             (tri.0, tri.2, tri.1, 1u32, crate::ray::MASK_ALL),
         ];
         let packet = Tri4::new(&cases);
-        for (t_min, t_max) in [(0.001, 4.9), (5.1, 100.0), (0.001, f32::INFINITY), (4.9, 5.1)] {
+        for (t_min, t_max) in [
+            (0.001, 4.9),
+            (5.1, 100.0),
+            (0.001, f32::INFINITY),
+            (4.9, 5.1),
+        ] {
             for dir in [Vec3A::Z, -Vec3A::Z] {
                 let o = Vec3A::new(0.0, 0.0, if dir.z > 0.0 { 0.0 } else { 10.0 });
                 let r = ray(o, dir);
@@ -638,9 +650,18 @@ mod tests {
         let packet = Tri4::new(&one);
         assert_eq!(packet.active, 0b0001);
         let r = ray(Vec3A::ZERO, Vec3A::Z);
-        let out = packet.intersect(&RayShear::new(&r), crate::ray::MASK_ALL, 0.001, f32::INFINITY);
+        let out = packet.intersect(
+            &RayShear::new(&r),
+            crate::ray::MASK_ALL,
+            0.001,
+            f32::INFINITY,
+        );
         assert_eq!(out.hits, 0b0001, "only the real lane may hit");
-        assert_eq!(out.fallback & !0b0001, 0, "padding lanes must not fall back");
+        assert_eq!(
+            out.fallback & !0b0001,
+            0,
+            "padding lanes must not fall back"
+        );
     }
 
     /// Per-lane visibility masks must gate lanes independently.
@@ -676,8 +697,14 @@ mod tests {
                 .hits,
             0b110
         );
-        assert_eq!(packet.intersect(&sh, MASK_ALL, 0.001, f32::INFINITY).hits, 0b111);
-        assert_eq!(packet.intersect(&sh, 1 << 20, 0.001, f32::INFINITY).hits, 0b100);
+        assert_eq!(
+            packet.intersect(&sh, MASK_ALL, 0.001, f32::INFINITY).hits,
+            0b111
+        );
+        assert_eq!(
+            packet.intersect(&sh, 1 << 20, 0.001, f32::INFINITY).hits,
+            0b100
+        );
     }
 
     /// Axis-aligned rays (a zero direction component on the dominant-axis

@@ -200,8 +200,14 @@ impl Prim for CurvePrim {
     }
 
     fn bbox(&self) -> AABB {
-        let a = AABB::new(self.p0 - Vec3A::splat(self.r0), self.p0 + Vec3A::splat(self.r0));
-        let b = AABB::new(self.p1 - Vec3A::splat(self.r1), self.p1 + Vec3A::splat(self.r1));
+        let a = AABB::new(
+            self.p0 - Vec3A::splat(self.r0),
+            self.p0 + Vec3A::splat(self.r0),
+        );
+        let b = AABB::new(
+            self.p1 - Vec3A::splat(self.r1),
+            self.p1 + Vec3A::splat(self.r1),
+        );
         AABB::surrounding_box(a, b)
     }
 }
@@ -245,10 +251,8 @@ impl Prim for CubicCurvePrim {
 
     fn bbox(&self) -> AABB {
         let radius = self.r0.max(self.r1);
-        let min = self.cp[0].min(self.cp[1]).min(self.cp[2]).min(self.cp[3])
-            - Vec3A::splat(radius);
-        let max = self.cp[0].max(self.cp[1]).max(self.cp[2]).max(self.cp[3])
-            + Vec3A::splat(radius);
+        let min = self.cp[0].min(self.cp[1]).min(self.cp[2]).min(self.cp[3]) - Vec3A::splat(radius);
+        let max = self.cp[0].max(self.cp[1]).max(self.cp[2]).max(self.cp[3]) + Vec3A::splat(radius);
         AABB::new(min, max)
     }
 }
@@ -300,9 +304,21 @@ pub(crate) fn transformed_aabb(local: &AABB, m: &Affine3A) -> AABB {
     let mut max = Vec3A::splat(f32::NEG_INFINITY);
     for i in 0..8 {
         let corner = Vec3A::new(
-            if i & 1 == 0 { local.minimum.x } else { local.maximum.x },
-            if i & 2 == 0 { local.minimum.y } else { local.maximum.y },
-            if i & 4 == 0 { local.minimum.z } else { local.maximum.z },
+            if i & 1 == 0 {
+                local.minimum.x
+            } else {
+                local.maximum.x
+            },
+            if i & 2 == 0 {
+                local.minimum.y
+            } else {
+                local.maximum.y
+            },
+            if i & 4 == 0 {
+                local.minimum.z
+            } else {
+                local.maximum.z
+            },
         );
         let p = m.transform_point3a(corner);
         min = min.min(p);

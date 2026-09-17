@@ -253,12 +253,18 @@ mod tests {
     fn conventions_are_as_documented() {
         let (u, v) = EnvironmentMap::direction_to_uv(-Vec3A::Z);
         assert!((u - 0.5).abs() < 1e-5, "-Z should be at u = 0.5, got {u}");
-        assert!((v - 0.5).abs() < 1e-5, "the horizon should be at v = 0.5, got {v}");
+        assert!(
+            (v - 0.5).abs() < 1e-5,
+            "the horizon should be at v = 0.5, got {v}"
+        );
 
         let (_, v_top) = EnvironmentMap::direction_to_uv(Vec3A::Y);
         assert!(v_top < 1e-5, "+Y should be the top row, got v = {v_top}");
         let (_, v_bot) = EnvironmentMap::direction_to_uv(-Vec3A::Y);
-        assert!(v_bot > 1.0 - 1e-5, "-Y should be the bottom row, got v = {v_bot}");
+        assert!(
+            v_bot > 1.0 - 1e-5,
+            "-Y should be the bottom row, got v = {v_bot}"
+        );
     }
 
     /// `sample` and `pdf` are the two MIS sides of one strategy: for any

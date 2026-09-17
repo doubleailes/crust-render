@@ -104,14 +104,7 @@ impl SDTree {
         }
     }
 
-    fn split_rec(
-        &mut self,
-        node: usize,
-        bounds: AABB,
-        depth: u32,
-        threshold: u64,
-        max_depth: u32,
-    ) {
+    fn split_rec(&mut self, node: usize, bounds: AABB, depth: u32, threshold: u64, max_depth: u32) {
         match self.nodes[node].clone() {
             SNode::Inner {
                 axis,

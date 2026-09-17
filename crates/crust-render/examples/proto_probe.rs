@@ -57,12 +57,21 @@ fn main() {
 
     println!("\n--- totals ---");
     println!("prims visited (via children())      {}", counts.prims);
-    println!("Mesh by type_name                   {}", counts.mesh_by_type);
-    println!("Mesh by UsdMesh::get(path)          {}", counts.mesh_by_schema);
+    println!(
+        "Mesh by type_name                   {}",
+        counts.mesh_by_type
+    );
+    println!(
+        "Mesh by UsdMesh::get(path)          {}",
+        counts.mesh_by_schema
+    );
     println!("prims whose prim_at(path) is valid  {}", counts.path_valid);
     println!("prims with readable 'points'        {}", counts.has_points);
     println!("PointInstancers                     {}", counts.instancers);
-    println!("nested instanceable prims           {}", counts.nested_instances);
+    println!(
+        "nested instanceable prims           {}",
+        counts.nested_instances
+    );
     if counts.mesh_by_type > 0 && counts.mesh_by_schema == 0 {
         println!(
             "\n=> The prototype HAS meshes, but a schema get() on their paths finds none.\n   \

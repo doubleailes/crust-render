@@ -8,8 +8,10 @@ use std::path::PathBuf;
 
 /// Writes `body` (the prims under `/World`) into a fresh `.usda` and loads it.
 fn load(name: &str, body: &str) -> Scene {
-    load_raw(name, &format!(
-        r#"#usda 1.0
+    load_raw(
+        name,
+        &format!(
+            r#"#usda 1.0
 (
     defaultPrim = "World"
     upAxis = "Y"
@@ -20,15 +22,18 @@ def Xform "World"
 {body}
 }}
 "#
-    ))
+        ),
+    )
 }
 
 /// Like `load`, with a root-level `/Render/settings` prim: the importer
 /// reads `UsdRenderSettings` from the stage metadata or that conventional
 /// path, never from an arbitrary location under `/World`.
 fn load_with_settings(name: &str, body: &str, settings: &str) -> Scene {
-    load_raw(name, &format!(
-        r#"#usda 1.0
+    load_raw(
+        name,
+        &format!(
+            r#"#usda 1.0
 (
     defaultPrim = "World"
     upAxis = "Y"
@@ -40,7 +45,8 @@ def Xform "World"
 }}
 {settings}
 "#
-    ))
+        ),
+    )
 }
 
 fn load_raw(name: &str, text: &str) -> Scene {
@@ -57,11 +63,17 @@ fn write_stage(name: &str, text: &str) -> PathBuf {
 }
 
 fn hits(scene: &Scene, origin: Vec3A, dir: Vec3A) -> bool {
-    scene.world.intersect(&Ray::new(origin, dir), 1e-3, 1e4).is_some()
+    scene
+        .world
+        .intersect(&Ray::new(origin, dir), 1e-3, 1e4)
+        .is_some()
 }
 
 fn hit_t(scene: &Scene, origin: Vec3A, dir: Vec3A) -> Option<f32> {
-    scene.world.intersect(&Ray::new(origin, dir), 1e-3, 1e4).map(|h| h.rec.t)
+    scene
+        .world
+        .intersect(&Ray::new(origin, dir), 1e-3, 1e4)
+        .map(|h| h.rec.t)
 }
 
 const SETTINGS: &str = r#"
@@ -95,7 +107,10 @@ fn an_empty_stage_loads_with_defaults() {
     assert_eq!(scene.settings.get_dimensions(), (640, 360));
     assert_eq!(scene.settings.samples_per_pixel(), 128);
     assert_eq!(scene.settings.max_depth(), 32);
-    assert_eq!(scene.settings.sampling_strategy(), SamplingStrategy::PowerMis);
+    assert_eq!(
+        scene.settings.sampling_strategy(),
+        SamplingStrategy::PowerMis
+    );
     assert!(scene.world.bounds().is_none());
 }
 
@@ -177,10 +192,22 @@ fn ngons_and_mixed_face_counts_triangulate_to_n_minus_two() {
     );
     // 3 + 1 + 2
     assert_eq!(scene.world.primitive_breakdown().triangles, 6);
-    assert!(hits(&scene, Vec3A::new(0.5, 0.7, 5.0), -Vec3A::Z), "inside the pentagon");
-    assert!(hits(&scene, Vec3A::new(3.5, 0.3, 5.0), -Vec3A::Z), "inside the triangle");
-    assert!(hits(&scene, Vec3A::new(6.5, 0.5, 5.0), -Vec3A::Z), "inside the quad");
-    assert!(!hits(&scene, Vec3A::new(2.2, 0.5, 5.0), -Vec3A::Z), "the gap between them");
+    assert!(
+        hits(&scene, Vec3A::new(0.5, 0.7, 5.0), -Vec3A::Z),
+        "inside the pentagon"
+    );
+    assert!(
+        hits(&scene, Vec3A::new(3.5, 0.3, 5.0), -Vec3A::Z),
+        "inside the triangle"
+    );
+    assert!(
+        hits(&scene, Vec3A::new(6.5, 0.5, 5.0), -Vec3A::Z),
+        "inside the quad"
+    );
+    assert!(
+        !hits(&scene, Vec3A::new(2.2, 0.5, 5.0), -Vec3A::Z),
+        "the gap between them"
+    );
 }
 
 #[test]
@@ -215,15 +242,29 @@ fn identical_meshes_placed_twice_are_instanced_once_baked() {
         )
     };
     let once = load("place_once", &mesh("A", 0.0));
-    assert_eq!(once.world.primitive_breakdown().triangles, 2, "a single placement is baked flat");
+    assert_eq!(
+        once.world.primitive_breakdown().triangles,
+        2,
+        "a single placement is baked flat"
+    );
     assert_eq!(once.world.primitive_breakdown().instances, 0);
 
-    let twice = load("place_twice", &format!("{}{}", mesh("A", -3.0), mesh("B", 3.0)));
+    let twice = load(
+        "place_twice",
+        &format!("{}{}", mesh("A", -3.0), mesh("B", 3.0)),
+    );
     assert_eq!(twice.world.count(), 2);
     let br = twice.world.primitive_breakdown();
-    assert_eq!(br.instances, 2, "two placements of one mesh share a prototype");
+    assert_eq!(
+        br.instances, 2,
+        "two placements of one mesh share a prototype"
+    );
     assert_eq!(br.triangles, 0);
-    assert_eq!(twice.world.unique_primitive_breakdown().triangles, 2, "one resident copy");
+    assert_eq!(
+        twice.world.unique_primitive_breakdown().triangles,
+        2,
+        "one resident copy"
+    );
     assert!(hits(&twice, Vec3A::new(-3.0, 0.0, 5.0), -Vec3A::Z));
     assert!(hits(&twice, Vec3A::new(3.0, 0.0, 5.0), -Vec3A::Z));
     assert!(!hits(&twice, Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z));
@@ -273,7 +314,10 @@ fn a_parent_rotation_moves_a_translated_child() {
     }"#,
     );
     // rotateY(90) maps (0, 0, -2) to (-2, 0, 0).
-    assert!(hits(&scene, Vec3A::new(-2.0, 0.0, 10.0), -Vec3A::Z), "child should land at x = -2");
+    assert!(
+        hits(&scene, Vec3A::new(-2.0, 0.0, 10.0), -Vec3A::Z),
+        "child should land at x = -2"
+    );
     assert!(!hits(&scene, Vec3A::new(0.0, 0.0, 10.0), -Vec3A::Z));
     assert!(!hits(&scene, Vec3A::new(2.0, 0.0, 10.0), -Vec3A::Z));
 }
@@ -298,8 +342,14 @@ fn translate_then_scale_stack_keeps_the_authored_translation() {
     );
     let bb = scene.world.bounds().unwrap();
     // Translation stays (0, 4, 0); the quad is scaled to ±2 around it.
-    assert!((bb.minimum.y - 2.0).abs() < 1e-3 && (bb.maximum.y - 6.0).abs() < 1e-3, "{bb:?}");
-    assert!((bb.minimum.x + 2.0).abs() < 1e-3 && (bb.maximum.x - 2.0).abs() < 1e-3, "{bb:?}");
+    assert!(
+        (bb.minimum.y - 2.0).abs() < 1e-3 && (bb.maximum.y - 6.0).abs() < 1e-3,
+        "{bb:?}"
+    );
+    assert!(
+        (bb.minimum.x + 2.0).abs() < 1e-3 && (bb.maximum.x - 2.0).abs() < 1e-3,
+        "{bb:?}"
+    );
 }
 
 #[test]
@@ -355,7 +405,10 @@ fn render_settings_are_read_from_the_stage() {
     assert_eq!(scene.settings.get_dimensions(), (32, 16));
     assert_eq!(scene.settings.samples_per_pixel(), 7);
     assert_eq!(scene.settings.max_depth(), 3);
-    assert_eq!(scene.settings.sampling_strategy(), SamplingStrategy::BalanceMis);
+    assert_eq!(
+        scene.settings.sampling_strategy(),
+        SamplingStrategy::BalanceMis
+    );
     assert_eq!(scene.settings.pixel_filter().name(), "gaussian");
     assert_eq!(scene.settings.pixel_filter().radius(), 2.5);
 }
@@ -397,13 +450,19 @@ def Scope "Render"
     }
 }"#,
     );
-    assert_eq!(scene.settings.sampling_strategy(), SamplingStrategy::PowerMis);
+    assert_eq!(
+        scene.settings.sampling_strategy(),
+        SamplingStrategy::PowerMis
+    );
 }
 
 #[test]
 fn image_counters_mirror_the_settings() {
     let scene = load_with_settings("counters", "", SETTINGS);
-    assert_eq!((scene.stats.image.width, scene.stats.image.height), (32, 16));
+    assert_eq!(
+        (scene.stats.image.width, scene.stats.image.height),
+        (32, 16)
+    );
     assert_eq!(scene.stats.image.samples_per_pixel, 7);
     assert_eq!(scene.stats.image.max_depth, 3);
 }
@@ -425,7 +484,10 @@ fn the_camera_looks_down_its_local_minus_z() {
     let ray = scene.camera.get_ray(0.5, 0.5, [0.5, 0.5], 0.0);
     assert!(ray.origin().abs_diff_eq(Vec3A::new(0.0, 0.0, 5.0), 1e-4));
     assert!(ray.direction().normalize().abs_diff_eq(-Vec3A::Z, 1e-4));
-    let hit = scene.world.intersect(&ray, 1e-3, 100.0).expect("the centre ray hits the ball");
+    let hit = scene
+        .world
+        .intersect(&ray, 1e-3, 100.0)
+        .expect("the centre ray hits the ball");
     assert!((hit.rec.p.z - 0.5).abs() < 1e-3);
     assert_eq!(ray.mask(), MASK_CAMERA);
 }
@@ -441,7 +503,11 @@ fn a_rotated_camera_turns_its_view() {
         uniform token[] xformOpOrder = ["xformOp:rotateY"]
     }"#,
     );
-    let d = scene.camera.get_ray(0.5, 0.5, [0.5, 0.5], 0.0).direction().normalize();
+    let d = scene
+        .camera
+        .get_ray(0.5, 0.5, [0.5, 0.5], 0.0)
+        .direction()
+        .normalize();
     // rotateY(-90) takes -Z to +X.
     assert!(d.abs_diff_eq(Vec3A::X, 1e-4), "{d}");
 }
@@ -461,10 +527,19 @@ fn a_wider_aperture_widens_the_field_of_view() {
     let narrow = load("cam_narrow", &stage(10.0));
     let wide = load("cam_wide", &stage(40.0));
     let edge = |s: &Scene| {
-        let d = s.camera.get_ray(1.0, 0.5, [0.5, 0.5], 0.0).direction().normalize();
+        let d = s
+            .camera
+            .get_ray(1.0, 0.5, [0.5, 0.5], 0.0)
+            .direction()
+            .normalize();
         d.dot(-Vec3A::Z).acos()
     };
-    assert!(edge(&wide) > 2.0 * edge(&narrow), "{} vs {}", edge(&wide), edge(&narrow));
+    assert!(
+        edge(&wide) > 2.0 * edge(&narrow),
+        "{} vs {}",
+        edge(&wide),
+        edge(&narrow)
+    );
 }
 
 #[test]
@@ -483,7 +558,10 @@ fn f_stop_gives_the_camera_a_lens() {
     );
     let a = scene.camera.get_ray(0.5, 0.5, [0.0, 0.5], 0.0);
     let b = scene.camera.get_ray(0.5, 0.5, [1.0, 0.5], 0.0);
-    assert!(!a.origin().abs_diff_eq(b.origin(), 1e-6), "lens samples must move the origin");
+    assert!(
+        !a.origin().abs_diff_eq(b.origin(), 1e-6),
+        "lens samples must move the origin"
+    );
     // Both converge on the focus plane 5 units down the axis.
     assert!(a.at(1.0).abs_diff_eq(Vec3A::ZERO, 1e-3), "{}", a.at(1.0));
     assert!(b.at(1.0).abs_diff_eq(Vec3A::ZERO, 1e-3), "{}", b.at(1.0));
@@ -515,7 +593,13 @@ fn crust_openpbr_shader_inputs_decode_to_the_material() {
     }"#,
     );
     assert_eq!(scene.world.count(), 1);
-    assert!(scene.world.material(0).emitted().abs_diff_eq(Vec3A::new(3.0, 1.5, 0.75), 1e-5));
+    assert!(
+        scene
+            .world
+            .material(0)
+            .emitted()
+            .abs_diff_eq(Vec3A::new(3.0, 1.5, 0.75), 1e-5)
+    );
 }
 
 #[test]
@@ -606,11 +690,26 @@ fn a_sphere_light_is_geometry_plus_a_light_hidden_from_the_camera() {
     );
     assert_eq!(scene.world.count(), 1);
     assert_eq!(scene.lights.count(), 1);
-    assert!(scene.world.material(0).emitted().abs_diff_eq(Vec3A::new(2.0, 1.0, 0.5), 1e-5));
+    assert!(
+        scene
+            .world
+            .material(0)
+            .emitted()
+            .abs_diff_eq(Vec3A::new(2.0, 1.0, 0.5), 1e-5)
+    );
     assert_eq!(scene.lights.lights[0].geom_id(), Some(0));
     let ray = Ray::new(Vec3A::new(0.0, 5.0, 10.0), -Vec3A::Z);
-    assert!(scene.world.intersect(&ray.clone().with_mask(MASK_CAMERA), 1e-3, 100.0).is_none(), "camera-invisible by default");
-    assert!(scene.world.intersect(&ray, 1e-3, 100.0).is_some(), "other rays see it");
+    assert!(
+        scene
+            .world
+            .intersect(&ray.clone().with_mask(MASK_CAMERA), 1e-3, 100.0)
+            .is_none(),
+        "camera-invisible by default"
+    );
+    assert!(
+        scene.world.intersect(&ray, 1e-3, 100.0).is_some(),
+        "other rays see it"
+    );
 }
 
 #[test]
@@ -624,7 +723,13 @@ fn exposure_scales_light_by_powers_of_two() {
         float inputs:exposure = 3
     }"#,
     );
-    assert!(scene.world.material(0).emitted().abs_diff_eq(Vec3A::splat(8.0), 1e-5));
+    assert!(
+        scene
+            .world
+            .material(0)
+            .emitted()
+            .abs_diff_eq(Vec3A::splat(8.0), 1e-5)
+    );
 }
 
 #[test]
@@ -659,12 +764,32 @@ fn an_authored_ray_mask_wins_on_lights_and_hides_geometry() {
     );
     // The light with mask 1 is camera-only now.
     let at_light = Ray::new(Vec3A::new(0.0, 0.0, 10.0), -Vec3A::Z);
-    assert!(scene.world.intersect(&at_light.clone().with_mask(MASK_CAMERA), 1e-3, 100.0).is_some());
-    assert!(scene.world.intersect(&at_light.with_mask(crust_core::MASK_SHADOW), 1e-3, 100.0).is_none());
+    assert!(
+        scene
+            .world
+            .intersect(&at_light.clone().with_mask(MASK_CAMERA), 1e-3, 100.0)
+            .is_some()
+    );
+    assert!(
+        scene
+            .world
+            .intersect(&at_light.with_mask(crust_core::MASK_SHADOW), 1e-3, 100.0)
+            .is_none()
+    );
     // The sphere with mask 6 hides from the camera only.
     let at_sphere = Ray::new(Vec3A::new(5.0, 0.0, 10.0), -Vec3A::Z);
-    assert!(scene.world.intersect(&at_sphere.clone().with_mask(MASK_CAMERA), 1e-3, 100.0).is_none());
-    assert!(scene.world.intersect(&at_sphere.with_mask(crust_core::MASK_SHADOW), 1e-3, 100.0).is_some());
+    assert!(
+        scene
+            .world
+            .intersect(&at_sphere.clone().with_mask(MASK_CAMERA), 1e-3, 100.0)
+            .is_none()
+    );
+    assert!(
+        scene
+            .world
+            .intersect(&at_sphere.with_mask(crust_core::MASK_SHADOW), 1e-3, 100.0)
+            .is_some()
+    );
 }
 
 #[test]
@@ -685,11 +810,19 @@ fn a_rect_light_is_two_triangles_and_one_light() {
     assert_eq!(scene.world.primitive_breakdown().triangles, 2);
     assert_eq!(scene.lights.count(), 1);
     let bb = scene.world.bounds().unwrap();
-    assert!((bb.maximum.x - 1.0).abs() < 1e-3 && (bb.maximum.y - 0.5).abs() < 1e-3, "{bb:?}");
+    assert!(
+        (bb.maximum.x - 1.0).abs() < 1e-3 && (bb.maximum.y - 0.5).abs() < 1e-3,
+        "{bb:?}"
+    );
     // It emits along local -Z: a point below it on -Z is lit.
-    let s = scene.lights.lights[0].sample_li(Vec3A::new(0.0, 0.0, 0.0), 0.5, 0.5).expect("reachable");
+    let s = scene.lights.lights[0]
+        .sample_li(Vec3A::new(0.0, 0.0, 0.0), 0.5, 0.5)
+        .expect("reachable");
     assert!(s.direction.z > 0.99);
-    assert!(s.pdf.is_finite() && s.pdf < 1e3, "the emitting side faces the point");
+    assert!(
+        s.pdf.is_finite() && s.pdf < 1e3,
+        "the emitting side faces the point"
+    );
 }
 
 #[test]
@@ -715,12 +848,27 @@ fn infinite_lights_add_no_geometry() {
         assert!(l.geom_id().is_none());
     }
     // The dome answers every escaping ray with its colour.
-    let dome = scene.lights.lights.iter().find(|l| l.escaped(Vec3A::ZERO, Vec3A::X).is_some()).expect("dome");
-    let (r, _) = dome.escaped(Vec3A::ZERO, Vec3A::new(0.3, -0.2, 0.9).normalize()).unwrap();
+    let dome = scene
+        .lights
+        .lights
+        .iter()
+        .find(|l| l.escaped(Vec3A::ZERO, Vec3A::X).is_some())
+        .expect("dome");
+    let (r, _) = dome
+        .escaped(Vec3A::ZERO, Vec3A::new(0.3, -0.2, 0.9).normalize())
+        .unwrap();
     assert!(r.abs_diff_eq(Vec3A::new(0.2, 0.3, 0.4), 1e-5));
     // rotateX(-90) turns local -Z into -Y: the sun shines straight down, so
     // a ray escaping straight up finds it.
-    let sun = scene.lights.lights.iter().find(|l| l.escaped(Vec3A::ZERO, Vec3A::Y).is_some_and(|(r, _)| r.x > 1.0)).expect("sun overhead");
+    let sun = scene
+        .lights
+        .lights
+        .iter()
+        .find(|l| {
+            l.escaped(Vec3A::ZERO, Vec3A::Y)
+                .is_some_and(|(r, _)| r.x > 1.0)
+        })
+        .expect("sun overhead");
     assert!(sun.escaped(Vec3A::ZERO, -Vec3A::Y).is_none());
 }
 
@@ -779,7 +927,11 @@ fn a_volume_prim_is_a_region_not_geometry() {
     assert_eq!(scene.volumes.len(), 1);
     let v = &scene.volumes[0];
     assert!(v.is_homogeneous());
-    assert!(v.sigma_s.abs_diff_eq(Vec3A::splat(1.0), 1e-6), "densityScale folds in: {}", v.sigma_s);
+    assert!(
+        v.sigma_s.abs_diff_eq(Vec3A::splat(1.0), 1e-6),
+        "densityScale folds in: {}",
+        v.sigma_s
+    );
     assert!(v.sigma_a.abs_diff_eq(Vec3A::new(0.2, 0.4, 0.6), 1e-6));
     assert!((v.g - 0.3).abs() < 1e-6);
     // size 4 → half 2, centred at y = 2: spans y ∈ [0, 4].
@@ -880,8 +1032,13 @@ fn subdivision_level_multiplies_faces_by_four() {
 
 #[test]
 fn a_subdivided_cube_shrinks_toward_a_sphere() {
-    let cage = load("subdiv_cage", &format!(r#"
-    def Mesh "Cube" {{ {CUBE} }}"#));
+    let cage = load(
+        "subdiv_cage",
+        &format!(
+            r#"
+    def Mesh "Cube" {{ {CUBE} }}"#
+        ),
+    );
     let smooth = load(
         "subdiv_smooth",
         &format!(
@@ -894,11 +1051,17 @@ fn a_subdivided_cube_shrinks_toward_a_sphere() {
         ),
     );
     let corner = Vec3A::splat(0.95);
-    assert!(hits(&cage, corner + Vec3A::Z * 5.0, -Vec3A::Z), "the cage fills its corner");
+    assert!(
+        hits(&cage, corner + Vec3A::Z * 5.0, -Vec3A::Z),
+        "the cage fills its corner"
+    );
     // Catmull-Clark pulls the corners well inside the cube.
     let cage_t = hit_t(&cage, Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z).unwrap();
     let smooth_t = hit_t(&smooth, Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z).unwrap();
-    assert!(smooth_t > cage_t, "the limit surface sits inside the cage: {smooth_t} vs {cage_t}");
+    assert!(
+        smooth_t > cage_t,
+        "the limit surface sits inside the cage: {smooth_t} vs {cage_t}"
+    );
     let bb = smooth.world.bounds().unwrap();
     assert!(bb.maximum.x < 1.0 && bb.maximum.x > 0.5, "{bb:?}");
     // Smooth shading normals are unit length and not axis-aligned at an
@@ -908,7 +1071,11 @@ fn a_subdivided_cube_shrinks_toward_a_sphere() {
         .intersect(&Ray::new(Vec3A::new(0.4, 0.4, 5.0), -Vec3A::Z), 1e-3, 100.0)
         .unwrap();
     assert!((hit.rec.normal.length() - 1.0).abs() < 1e-3);
-    assert!(hit.rec.normal.x > 0.05 && hit.rec.normal.y > 0.05, "{}", hit.rec.normal);
+    assert!(
+        hit.rec.normal.x > 0.05 && hit.rec.normal.y > 0.05,
+        "{}",
+        hit.rec.normal
+    );
 }
 
 #[test]
@@ -925,7 +1092,11 @@ fn subdivision_scheme_none_and_clamping() {
     }}"#
         ),
     );
-    assert_eq!(none.world.primitive_breakdown().triangles, 12, "scheme none renders the cage");
+    assert_eq!(
+        none.world.primitive_breakdown().triangles,
+        12,
+        "scheme none renders the cage"
+    );
     let huge = load(
         "subdiv_clamped",
         &format!(
@@ -963,7 +1134,10 @@ fn import_fills_the_scene_counters_and_phases() {
     assert_eq!(s.lights, 1);
     assert_eq!(s.volumes, 0);
     assert!(s.footprint.total() > 0);
-    assert!(!scene.stats.phases.is_empty(), "the importer records its phases");
+    assert!(
+        !scene.stats.phases.is_empty(),
+        "the importer records its phases"
+    );
     assert!(scene.stats.total() > std::time::Duration::ZERO);
     let report = scene.stats.report();
     assert!(report.contains("geometries"));
@@ -972,7 +1146,9 @@ fn import_fills_the_scene_counters_and_phases() {
 
 #[test]
 fn a_missing_file_is_a_usd_open_error() {
-    let err = Scene::from_usd(std::path::Path::new("/definitely/not/here.usda")).err().expect("error");
+    let err = Scene::from_usd(std::path::Path::new("/definitely/not/here.usda"))
+        .err()
+        .expect("error");
     let msg = err.to_string();
     assert!(msg.contains("failed to open USD stage"), "{msg}");
     assert!(msg.contains("here.usda"), "{msg}");
@@ -991,7 +1167,10 @@ fn error_display_names_the_path() {
     let e = crust_core::Error::NonUtf8Path(PathBuf::from("/tmp/x.usda"));
     assert!(e.to_string().contains("/tmp/x.usda"));
     assert!(e.to_string().contains("UTF-8"));
-    let e = crust_core::Error::UsdOpen { path: PathBuf::from("/tmp/y.usda"), message: "boom".into() };
+    let e = crust_core::Error::UsdOpen {
+        path: PathBuf::from("/tmp/y.usda"),
+        message: "boom".into(),
+    };
     assert!(e.to_string().contains("boom") && e.to_string().contains("y.usda"));
     let _: &dyn std::error::Error = &e;
 }

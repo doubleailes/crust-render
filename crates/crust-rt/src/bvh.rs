@@ -1115,13 +1115,19 @@ fn build_subtree(
                     .clipped_aabb(s.axis, f32::NEG_INFINITY, s.pos)
                     .and_then(|c| intersect_aabb(&c, &r.bbox))
                 {
-                    left.push(PrimRef { bbox: c, idx: r.idx });
+                    left.push(PrimRef {
+                        bbox: c,
+                        idx: r.idx,
+                    });
                 }
                 if let Some(c) = prim
                     .clipped_aabb(s.axis, s.pos, f32::INFINITY)
                     .and_then(|c| intersect_aabb(&c, &r.bbox))
                 {
-                    right.push(PrimRef { bbox: c, idx: r.idx });
+                    right.push(PrimRef {
+                        bbox: c,
+                        idx: r.idx,
+                    });
                 }
             }
         }
@@ -1296,11 +1302,7 @@ impl LeafData {
 /// filled (or only leaves remain). Leaf lanes are converted to [`Leaf`]
 /// entries with their triangles packed into SIMD packets as they are
 /// reached. Purely input-driven, so determinism is preserved.
-fn collapse(
-    binary: &[Node],
-    indices: &[u32],
-    prims: &[PrimNode],
-) -> (Vec<WideNode>, LeafData) {
+fn collapse(binary: &[Node], indices: &[u32], prims: &[PrimNode]) -> (Vec<WideNode>, LeafData) {
     let mut out = Vec::with_capacity(binary.len() / 2 + 1);
     let mut data = LeafData::default();
     if binary.is_empty() {
@@ -1545,7 +1547,10 @@ mod tests {
     #[test]
     fn triangles_are_packed_into_simd_lanes() {
         let bvh = Bvh::new(diagonal_shards(64));
-        assert!(!bvh.packets.is_empty(), "no packets built for a triangle scene");
+        assert!(
+            !bvh.packets.is_empty(),
+            "no packets built for a triangle scene"
+        );
         assert!(
             bvh.indices.is_empty(),
             "{} triangles fell back to the scalar list",

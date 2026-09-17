@@ -122,10 +122,7 @@ fn subdivide_bezier(cp: &[Vec3A; 4]) -> [Vec3A; 7] {
 fn flatness_depth(cp: &[Vec3A; 4], max_width: f32) -> u32 {
     let d0 = cp[0] - cp[1] * 2.0 + cp[2];
     let d1 = cp[1] - cp[2] * 2.0 + cp[3];
-    let l0 = d0
-        .abs()
-        .max(d1.abs())
-        .max_element();
+    let l0 = d0.abs().max(d1.abs()).max_element();
     if l0 <= 0.0 || max_width <= 0.0 {
         return 0;
     }
@@ -189,7 +186,15 @@ fn subdivide_and_intersect(
     let radius_at = |u: f32| r0_full + (r1_full - r0_full) * u;
 
     if depth == 0 {
-        return rounded_cone_intersect(ray, cp[0], cp[3], radius_at(u0), radius_at(u1), t_min, t_max);
+        return rounded_cone_intersect(
+            ray,
+            cp[0],
+            cp[3],
+            radius_at(u0),
+            radius_at(u1),
+            t_min,
+            t_max,
+        );
     }
 
     let split = subdivide_bezier(cp);
@@ -208,7 +213,15 @@ fn subdivide_and_intersect(
             continue;
         }
         if let Some(hit) = subdivide_and_intersect(
-            ray, &sub_cp, su0, su1, r0_full, r1_full, depth - 1, t_min, cur_t_max,
+            ray,
+            &sub_cp,
+            su0,
+            su1,
+            r0_full,
+            r1_full,
+            depth - 1,
+            t_min,
+            cur_t_max,
         ) {
             best = Some(hit);
         }
@@ -310,13 +323,7 @@ mod tests {
 mod cubic_curve_tests {
     use super::*;
 
-    fn cubic_hit(
-        o: Vec3A,
-        d: Vec3A,
-        cp: &[Vec3A; 4],
-        r0: f32,
-        r1: f32,
-    ) -> Option<(f32, Vec3A)> {
+    fn cubic_hit(o: Vec3A, d: Vec3A, cp: &[Vec3A; 4], r0: f32, r1: f32) -> Option<(f32, Vec3A)> {
         cubic_curve_intersect(&Ray::new(o, d), cp, r0, r1, 0.001, f32::INFINITY)
     }
 
@@ -381,7 +388,11 @@ mod cubic_curve_tests {
         let r = 0.05;
 
         // A Z-parallel ray through the true arc point: must hit.
-        let true_arc = Vec3A::new(std::f32::consts::SQRT_2 / 2.0, std::f32::consts::SQRT_2 / 2.0, 0.0);
+        let true_arc = Vec3A::new(
+            std::f32::consts::SQRT_2 / 2.0,
+            std::f32::consts::SQRT_2 / 2.0,
+            0.0,
+        );
         let ray_o = true_arc + Vec3A::new(0.0, 0.0, 10.0);
         cubic_hit(ray_o, -Vec3A::Z, &cp, r, r).expect("ray through the true arc point must hit");
 

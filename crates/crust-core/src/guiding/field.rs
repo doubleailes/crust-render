@@ -64,7 +64,10 @@ impl GuidingField {
         // Pad the bounds slightly so hit points that land exactly on the
         // scene hull stay strictly inside.
         let pad = ((bounds.maximum - bounds.minimum).max_element() * 1e-3).max(1e-3);
-        let bounds = AABB::new(bounds.minimum - Vec3A::splat(pad), bounds.maximum + Vec3A::splat(pad));
+        let bounds = AABB::new(
+            bounds.minimum - Vec3A::splat(pad),
+            bounds.maximum + Vec3A::splat(pad),
+        );
         GuidingField {
             tree: SDTree::new(bounds),
             cfg,

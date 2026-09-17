@@ -6,7 +6,10 @@ use crust_core::{EnvironmentMap, Vec3A};
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
     }
     fn dir(&mut self) -> Vec3A {
@@ -57,9 +60,15 @@ fn dimensions_are_reported() {
 fn row_zero_is_the_upper_pole() {
     let m = quad_map();
     let up = m.radiance(Vec3A::Y);
-    assert!(up == Vec3A::new(1.0, 0.0, 0.0) || up == Vec3A::new(0.0, 1.0, 0.0), "{up}");
+    assert!(
+        up == Vec3A::new(1.0, 0.0, 0.0) || up == Vec3A::new(0.0, 1.0, 0.0),
+        "{up}"
+    );
     let down = m.radiance(-Vec3A::Y);
-    assert!(down == Vec3A::new(0.0, 0.0, 1.0) || down == Vec3A::new(1.0, 1.0, 0.0), "{down}");
+    assert!(
+        down == Vec3A::new(0.0, 0.0, 1.0) || down == Vec3A::new(1.0, 1.0, 0.0),
+        "{down}"
+    );
     // Anything above the horizon reads the top row.
     let mut rng = Lcg(1);
     for _ in 0..200 {
@@ -80,8 +89,14 @@ fn minus_z_is_the_image_centre_and_plus_z_the_seam() {
     let c = m.radiance(Vec3A::Z + Vec3A::Y * 0.1);
     assert_eq!(c, Vec3A::new(1.0, 0.0, 0.0));
     // +X is at u = 0.75 (column 1), -X at u = 0.25 (column 0).
-    assert_eq!(m.radiance(Vec3A::new(1.0, 0.1, 0.0)), Vec3A::new(0.0, 1.0, 0.0));
-    assert_eq!(m.radiance(Vec3A::new(-1.0, 0.1, 0.0)), Vec3A::new(1.0, 0.0, 0.0));
+    assert_eq!(
+        m.radiance(Vec3A::new(1.0, 0.1, 0.0)),
+        Vec3A::new(0.0, 1.0, 0.0)
+    );
+    assert_eq!(
+        m.radiance(Vec3A::new(-1.0, 0.1, 0.0)),
+        Vec3A::new(1.0, 0.0, 0.0)
+    );
 }
 
 #[test]
@@ -115,7 +130,9 @@ fn a_uniform_map_samples_every_direction_with_a_finite_pdf() {
 #[test]
 fn sampled_radiance_is_the_lookup_at_the_sampled_direction() {
     let mut rng = Lcg(3);
-    let px: Vec<Vec3A> = (0..64).map(|_| Vec3A::new(rng.next(), rng.next(), rng.next()) + 0.05).collect();
+    let px: Vec<Vec3A> = (0..64)
+        .map(|_| Vec3A::new(rng.next(), rng.next(), rng.next()) + 0.05)
+        .collect();
     let m = EnvironmentMap::new(8, 8, px).unwrap();
     for _ in 0..500 {
         let (d, r, _) = m.sample(rng.next(), rng.next()).unwrap();
@@ -180,7 +197,11 @@ fn bright_texels_carry_proportionally_higher_pdf() {
         let v = (y as f32 + 0.5) / h as f32;
         let theta = v * std::f32::consts::PI;
         let phi = (u - 0.5) * std::f32::consts::TAU;
-        Vec3A::new(theta.sin() * phi.sin(), theta.cos(), -theta.sin() * phi.cos())
+        Vec3A::new(
+            theta.sin() * phi.sin(),
+            theta.cos(),
+            -theta.sin() * phi.cos(),
+        )
     };
     let bright = m.pdf(dir_at(1, 2));
     let dim = m.pdf(dir_at(5, 2));
@@ -190,7 +211,9 @@ fn bright_texels_carry_proportionally_higher_pdf() {
 #[test]
 fn the_solid_angle_pdf_integrates_to_one() {
     let mut rng = Lcg(5);
-    let px: Vec<Vec3A> = (0..16 * 8).map(|_| Vec3A::splat(rng.next() + 0.1)).collect();
+    let px: Vec<Vec3A> = (0..16 * 8)
+        .map(|_| Vec3A::splat(rng.next() + 0.1))
+        .collect();
     let m = EnvironmentMap::new(16, 8, px).unwrap();
     let n = 400_000;
     let mut sum = 0.0f64;

@@ -64,9 +64,7 @@ impl DensityField {
                 let t = threshold.clamp(0.0, 0.999);
                 ((fbm - t) / (1.0 - t)).max(0.0)
             }
-            DensityField::Grid { nx, ny, nz, data } => {
-                grid_trilinear(u, *nx, *ny, *nz, data)
-            }
+            DensityField::Grid { nx, ny, nz, data } => grid_trilinear(u, *nx, *ny, *nz, data),
         }
     }
 
@@ -76,9 +74,7 @@ impl DensityField {
             DensityField::Homogeneous => 1.0,
             // fbm is normalized to [0,1]; the threshold remap keeps it ≤ 1.
             DensityField::Noise { .. } => 1.0,
-            DensityField::Grid { data, .. } => {
-                data.iter().copied().fold(0.0f32, f32::max)
-            }
+            DensityField::Grid { data, .. } => data.iter().copied().fold(0.0f32, f32::max),
         }
     }
 }
@@ -125,7 +121,14 @@ fn value_noise(p: Vec3A, freq: f32, seed: u32) -> f32 {
 }
 
 /// fBm over `octaves` octaves, normalized to [0, 1].
-fn fbm_value_noise(p: Vec3A, scale: f32, octaves: u32, gain: f32, lacunarity: f32, seed: u32) -> f32 {
+fn fbm_value_noise(
+    p: Vec3A,
+    scale: f32,
+    octaves: u32,
+    gain: f32,
+    lacunarity: f32,
+    seed: u32,
+) -> f32 {
     let octaves = octaves.max(1);
     let mut sum = 0.0;
     let mut norm = 0.0;
@@ -208,9 +211,21 @@ impl VolumeRegion {
         let mut max = Vec3A::splat(f32::NEG_INFINITY);
         for n in 0..8 {
             let corner = Vec3A::new(
-                if n & 1 == 0 { -half_extent.x } else { half_extent.x },
-                if n & 2 == 0 { -half_extent.y } else { half_extent.y },
-                if n & 4 == 0 { -half_extent.z } else { half_extent.z },
+                if n & 1 == 0 {
+                    -half_extent.x
+                } else {
+                    half_extent.x
+                },
+                if n & 2 == 0 {
+                    -half_extent.y
+                } else {
+                    half_extent.y
+                },
+                if n & 4 == 0 {
+                    -half_extent.z
+                } else {
+                    half_extent.z
+                },
             );
             let w = local_to_world.transform_point3(Vec3::from(corner));
             min = min.min(Vec3A::from(w));
@@ -246,8 +261,14 @@ impl VolumeRegion {
     /// renormalized so the returned interval stays parameterized on the
     /// world ray.
     pub fn intersect(&self, ray: &Ray) -> Option<(f32, f32)> {
-        let o = Vec3A::from(self.world_to_local.transform_point3(Vec3::from(ray.origin())));
-        let d = Vec3A::from(self.world_to_local.transform_vector3(Vec3::from(ray.direction())));
+        let o = Vec3A::from(
+            self.world_to_local
+                .transform_point3(Vec3::from(ray.origin())),
+        );
+        let d = Vec3A::from(
+            self.world_to_local
+                .transform_vector3(Vec3::from(ray.direction())),
+        );
         let mut t0 = 0.0f32;
         let mut t1 = f32::INFINITY;
         for a in 0..3 {
@@ -295,7 +316,9 @@ pub struct PhaseMix {
 
 impl PhaseMix {
     pub fn single(g: f32) -> Self {
-        Self { lobes: vec![(1.0, g)] }
+        Self {
+            lobes: vec![(1.0, g)],
+        }
     }
 
     /// Sample an outgoing direction given the incoming propagation
@@ -376,12 +399,7 @@ impl Volumes {
     /// majorant of the intersected regions. Summing majorants over the
     /// union span majorizes the summed extinction everywhere on it
     /// (superposed extinction of overlapping media is exact).
-    fn active_intervals(
-        &self,
-        ray: &Ray,
-        t_eps: f32,
-        t_max: f32,
-    ) -> (Vec<(usize, f32, f32)>, f32) {
+    fn active_intervals(&self, ray: &Ray, t_eps: f32, t_max: f32) -> (Vec<(usize, f32, f32)>, f32) {
         let mut spans = Vec::new();
         let mut majorant = 0.0f32;
         for (i, region) in self.regions.iter().enumerate() {
@@ -489,19 +507,16 @@ impl Volumes {
     /// with an exact analytic product when every region crossed is
     /// homogeneous (noise-free fog shadows; exponents of overlapping
     /// regions add, so the per-region product is exact).
-    pub fn transmittance(
-        &self,
-        ray: &Ray,
-        t_eps: f32,
-        t_max: f32,
-        rng: &mut Rng,
-    ) -> Vec3A {
+    pub fn transmittance(&self, ray: &Ray, t_eps: f32, t_max: f32, rng: &mut Rng) -> Vec3A {
         let (spans, majorant) = self.active_intervals(ray, t_eps, t_max);
         if spans.is_empty() || majorant <= 0.0 {
             return Vec3A::ONE;
         }
 
-        if spans.iter().all(|&(i, _, _)| self.regions[i].is_homogeneous()) {
+        if spans
+            .iter()
+            .all(|&(i, _, _)| self.regions[i].is_homogeneous())
+        {
             let mut tr = Vec3A::ONE;
             for &(i, a, b) in &spans {
                 let e = self.regions[i].sigma_t_at_density(1.0) * (b - a);
@@ -569,11 +584,7 @@ mod tests {
         let mut s = Rng::new(0xC0FFEE);
         let tr = volumes.transmittance(&x_ray(), 1e-3, 10.0, &mut s);
         let sigma_t = Vec3A::splat(0.7) + Vec3A::new(0.2, 0.4, 0.9);
-        let expect = Vec3A::new(
-            (-sigma_t.x).exp(),
-            (-sigma_t.y).exp(),
-            (-sigma_t.z).exp(),
-        );
+        let expect = Vec3A::new((-sigma_t.x).exp(), (-sigma_t.y).exp(), (-sigma_t.z).exp());
         assert!((tr - expect).abs().max_element() < 1e-5, "{tr} vs {expect}");
         // And again — the fast path is deterministic, zero variance.
         let tr2 = volumes.transmittance(&x_ray(), 1e-3, 10.0, &mut s);
@@ -715,11 +726,7 @@ mod tests {
         for pass in 0..2 {
             let mut vals = Vec::new();
             for i in 0..1000 {
-                let u = Vec3A::new(
-                    hash3(i, 1, 2, 7),
-                    hash3(i, 3, 4, 7),
-                    hash3(i, 5, 6, 7),
-                );
+                let u = Vec3A::new(hash3(i, 1, 2, 7), hash3(i, 3, 4, 7), hash3(i, 5, 6, 7));
                 let d = field.density(u);
                 assert!(d >= 0.0 && d <= m, "density {d} outside [0, {m}]");
                 vals.push(d);
@@ -750,7 +757,10 @@ mod tests {
             DensityField::Homogeneous,
         );
         let (t0, t1) = region.intersect(&x_ray()).expect("must hit");
-        assert!((t0 - 5.0).abs() < 1e-4 && (t1 - 9.0).abs() < 1e-4, "{t0} {t1}");
+        assert!(
+            (t0 - 5.0).abs() < 1e-4 && (t1 - 9.0).abs() < 1e-4,
+            "{t0} {t1}"
+        );
         // Rotation: 45° about z, ray along x through origin-centered box.
         let rot = Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4);
         let region = VolumeRegion::new(
@@ -772,7 +782,12 @@ mod tests {
     #[test]
     fn overlapping_regions_compose_exactly() {
         // Two overlapping homogeneous boxes: transmittance is the product.
-        let a = unit_region(Vec3A::ZERO, Vec3A::splat(0.5), 0.0, DensityField::Homogeneous);
+        let a = unit_region(
+            Vec3A::ZERO,
+            Vec3A::splat(0.5),
+            0.0,
+            DensityField::Homogeneous,
+        );
         let b = VolumeRegion::new(
             Mat4::from_translation(Vec3::new(0.25, 0.0, 0.0)),
             Vec3A::splat(0.5),

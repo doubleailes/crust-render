@@ -375,16 +375,8 @@ impl fmt::Display for RenderStats {
 
         let img = &self.image;
         if img.width > 0 && img.height > 0 {
-            writeln!(
-                f,
-                "  {:<28} {}x{}",
-                "resolution", img.width, img.height
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "samples per pixel", img.samples_per_pixel
-            )?;
+            writeln!(f, "  {:<28} {}x{}", "resolution", img.width, img.height)?;
+            writeln!(f, "  {:<28} {}", "samples per pixel", img.samples_per_pixel)?;
             writeln!(f, "  {:<28} {}", "max path depth", img.max_depth)?;
         }
 
@@ -454,12 +446,42 @@ impl fmt::Display for RenderStats {
             writeln!(f, "{rule}")?;
             writeln!(f, "Ray Statistics")?;
             writeln!(f, "{rule}")?;
-            writeln!(f, "  {:<28} {}", "camera rays", thousands(r.camera_rays as usize))?;
-            writeln!(f, "  {:<28} {}", "closest-hit queries", thousands(r.closest_hit as usize))?;
-            writeln!(f, "  {:<28} {}", "shadow rays", thousands(r.shadow_rays as usize))?;
-            writeln!(f, "  {:<28} {}", "total ray queries", thousands(r.total_rays() as usize))?;
-            writeln!(f, "  {:<28} {}", "vertices shaded", thousands(r.vertices as usize))?;
-            writeln!(f, "  {:<28} {:.2}", "mean path length", r.mean_path_length())?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "camera rays",
+                thousands(r.camera_rays as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "closest-hit queries",
+                thousands(r.closest_hit as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "shadow rays",
+                thousands(r.shadow_rays as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "total ray queries",
+                thousands(r.total_rays() as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "vertices shaded",
+                thousands(r.vertices as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {:.2}",
+                "mean path length",
+                r.mean_path_length()
+            )?;
             // Throughput needs the render phase alone, not the whole run:
             // dividing by total would credit rays to time spent parsing.
             if let Some(render) = self
@@ -497,8 +519,18 @@ impl fmt::Display for RenderStats {
                 thousands(r.rr_tested as usize),
                 100.0 * r.rr_kill_rate()
             )?;
-            writeln!(f, "  {:<28} {}", "paths ended: escaped", thousands(r.ended_escaped as usize))?;
-            writeln!(f, "  {:<28} {}", "paths ended: depth cap", thousands(r.ended_depth as usize))?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "paths ended: escaped",
+                thousands(r.ended_escaped as usize)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "paths ended: depth cap",
+                thousands(r.ended_depth as usize)
+            )?;
         }
 
         if self.phases.is_empty() {
@@ -510,7 +542,11 @@ impl fmt::Display for RenderStats {
         writeln!(f, "Profile by execution tree")?;
         // `rss` is what the phase left resident; `peak` the high-water
         // reached by its end. peak >> rss means transient churn.
-        writeln!(f, "{:<NAME$} {:>9}  {:>5}  {:>9} {:>9}", "", "time", "%", "rss", "peak")?;
+        writeln!(
+            f,
+            "{:<NAME$} {:>9}  {:>5}  {:>9} {:>9}",
+            "", "time", "%", "rss", "peak"
+        )?;
         writeln!(f, "{rule}")?;
         for p in &self.phases {
             let indent = "  ".repeat(1 + p.depth as usize);

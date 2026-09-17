@@ -135,4 +135,3 @@ impl AssetLoader for FileAssets {
         }
     }
 }
-
