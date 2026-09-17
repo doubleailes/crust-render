@@ -102,14 +102,7 @@ impl UvTexture {
             tiles.push(decode_tile(path, 1001, max_edge)?);
         }
 
-        let mut to_linear = [0.0f32; 256];
-        for (i, v) in to_linear.iter_mut().enumerate() {
-            let c = i as f32 / 255.0;
-            *v = match space {
-                ColorSpace::Srgb => crate::srgb_to_linear(c),
-                ColorSpace::Raw => c,
-            };
-        }
+        let to_linear = to_linear_table(space);
         let (width, height) = (tiles[0].width, tiles[0].height);
         Some(UvTexture {
             tiles,
@@ -281,4 +274,85 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
         width: w,
         height: h,
     })
+}
+
+/// The 256-entry decode table for one colour space.
+///
+/// The files are 8-bit, so every possible stored value is one of 256 — the
+/// transfer function is evaluated once per level at load rather than per
+/// texel fetch, and nothing recovers precision that was never in the file.
+///
+/// The three curves are deliberately distinct. MaterialX's `g22_rec709` and
+/// `g18_rec709` are pure power laws; sRGB's EOTF is piecewise, with a linear
+/// toe that keeps near-black values well above the power law (up to 19x at
+/// 0.01 — `docs/color_management.md` tabulates it). Collapsing them into one
+/// curve is wrong in the shadows for 2.2 and wrong everywhere for 1.8.
+fn to_linear_table(space: ColorSpace) -> [f32; 256] {
+    let mut table = [0.0f32; 256];
+    for (i, v) in table.iter_mut().enumerate() {
+        let c = i as f32 / 255.0;
+        *v = match space.gamma() {
+            Some(g) => c.powf(g),
+            None => match space {
+                ColorSpace::Srgb => crate::srgb_to_linear(c),
+                _ => c,
+            },
+        };
+    }
+    table
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(space: ColorSpace, encoded: u8) -> f32 {
+        to_linear_table(space)[encoded as usize]
+    }
+
+    #[test]
+    fn gamma_tables_are_pure_power_laws() {
+        for encoded in [0u8, 3, 13, 26, 128, 255] {
+            let c = encoded as f32 / 255.0;
+            assert!((at(ColorSpace::Gamma22, encoded) - c.powf(2.2)).abs() < 1e-7);
+            assert!((at(ColorSpace::Gamma18, encoded) - c.powf(1.8)).abs() < 1e-7);
+        }
+        // Both curves are anchored: black stays black, white stays white, so
+        // a fully-lit albedo keeps its exposure whichever tag it carries.
+        for space in [ColorSpace::Gamma22, ColorSpace::Gamma18, ColorSpace::Srgb] {
+            assert_eq!(at(space, 0), 0.0);
+            assert!((at(space, 255) - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gamma_22_is_not_the_srgb_curve_in_the_shadows() {
+        // The regression this pins. `g22_rec709` used to decode through the
+        // piecewise sRGB curve, whose linear toe lifts near-black by an order
+        // of magnitude — an albedo of 0.01 encoded reads 19x too bright.
+        let (srgb, g22) = (at(ColorSpace::Srgb, 3), at(ColorSpace::Gamma22, 3));
+        assert!(srgb > g22 * 10.0, "srgb {srgb} vs gamma22 {g22}");
+        // And converges in the midtones, which is why the bug is invisible
+        // on a look-dev turntable and only shows up in dark albedo.
+        let (srgb, g22) = (at(ColorSpace::Srgb, 128), at(ColorSpace::Gamma22, 128));
+        assert!((srgb - g22).abs() < 0.005, "srgb {srgb} vs gamma22 {g22}");
+    }
+
+    #[test]
+    fn gamma_18_is_brighter_than_both_across_the_range() {
+        // 1.8 is the shallower exponent, so it decodes above 2.2 everywhere
+        // strictly inside [0,1] — the error is not confined to the toe.
+        for encoded in [13u8, 64, 128, 200] {
+            let (g18, g22) = (at(ColorSpace::Gamma18, encoded), at(ColorSpace::Gamma22, encoded));
+            assert!(g18 > g22, "at {encoded}: g18 {g18} !> g22 {g22}");
+            assert!(g18 > at(ColorSpace::Srgb, encoded), "at {encoded}: g18 {g18}");
+        }
+    }
+
+    #[test]
+    fn raw_is_the_identity() {
+        for encoded in [0u8, 1, 77, 255] {
+            assert_eq!(at(ColorSpace::Raw, encoded), encoded as f32 / 255.0);
+        }
+    }
 }

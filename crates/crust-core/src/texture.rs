@@ -76,8 +76,15 @@ impl std::fmt::Debug for PtexRef {
 /// which is where crust reads it from — see `docs/color_management.md`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ColorSpace {
-    /// sRGB display-encoded; the host applies the inverse EOTF at load.
+    /// sRGB display-encoded; the host applies the piecewise inverse EOTF at
+    /// load.
     Srgb,
+    /// A pure power law of 2.2 — MaterialX's `g22_rec709`, which is *not* the
+    /// sRGB curve (see [`ColorSpace::from_mtlx`]).
+    Gamma22,
+    /// A pure power law of 1.8 — MaterialX's `g18_rec709`, the legacy Apple
+    /// display gamma.
+    Gamma18,
     /// Already linear, or not a colour at all (normals, roughness, masks).
     Raw,
 }
@@ -91,12 +98,33 @@ impl ColorSpace {
     /// convenient — normal, roughness, ORM and mask maps carry no colour, and
     /// the DPEL assets mark only their albedos. One function so the importer
     /// and the probe examples cannot drift on which spellings they accept.
+    ///
+    /// `g22_rec709` and `g18_rec709` are *not* spellings of sRGB. MaterialX
+    /// names them separately because they are separate transfer functions:
+    /// both are pure power laws with no linear toe, where sRGB's EOTF is
+    /// piecewise. Decoding either through the sRGB curve is invisible in
+    /// midtones and up to an order of magnitude too bright in near-black —
+    /// exactly the error `docs/color_management.md` tabulates — and for
+    /// gamma 1.8 the whole curve is wrong, not just the toe. The primaries in
+    /// those names are Rec.709, which is what crust works in already, so only
+    /// the curve differs.
     pub fn from_mtlx(name: Option<&str>) -> ColorSpace {
         match name.map(str::to_ascii_lowercase).as_deref() {
-            Some("srgb_texture" | "srgb" | "srgb_tx" | "g22_rec709" | "g18_rec709") => {
-                ColorSpace::Srgb
-            }
+            Some("srgb_texture" | "srgb" | "srgb_tx") => ColorSpace::Srgb,
+            Some("g22_rec709") => ColorSpace::Gamma22,
+            Some("g18_rec709") => ColorSpace::Gamma18,
             _ => ColorSpace::Raw,
+        }
+    }
+
+    /// The exponent of this space's power law, for the two spaces that are
+    /// one. `None` for the piecewise sRGB curve and for raw data, neither of
+    /// which is a plain `powf`.
+    pub fn gamma(self) -> Option<f32> {
+        match self {
+            ColorSpace::Gamma22 => Some(2.2),
+            ColorSpace::Gamma18 => Some(1.8),
+            ColorSpace::Srgb | ColorSpace::Raw => None,
         }
     }
 }
@@ -111,3 +139,37 @@ impl ColorSpace {
 /// blanket `impl` bridging the two is forbidden by the orphan rule anyway.
 /// `Texture2D` is the crust-side name; it is the same trait.
 pub use crust_mtlx::{Texture as Texture2D, TextureRef};
+
+#[cfg(test)]
+mod color_space_tests {
+    use super::ColorSpace;
+
+    #[test]
+    fn materialx_gamma_tags_are_not_srgb() {
+        // The bug this pins: both tags used to land on `Srgb` and decode
+        // through the piecewise curve.
+        assert_eq!(ColorSpace::from_mtlx(Some("g22_rec709")), ColorSpace::Gamma22);
+        assert_eq!(ColorSpace::from_mtlx(Some("g18_rec709")), ColorSpace::Gamma18);
+        assert_eq!(ColorSpace::from_mtlx(Some("G22_Rec709")), ColorSpace::Gamma22);
+    }
+
+    #[test]
+    fn srgb_spellings_still_mean_srgb_and_everything_else_is_raw() {
+        for s in ["srgb_texture", "sRGB", "srgb_tx"] {
+            assert_eq!(ColorSpace::from_mtlx(Some(s)), ColorSpace::Srgb, "{s}");
+        }
+        // Absent, linear, and a space whose *primaries* crust does not
+        // convert (ACEScg / AP1) all stay raw rather than guessing.
+        for s in [None, Some("lin_rec709"), Some("acescg"), Some("g22_ap1")] {
+            assert_eq!(ColorSpace::from_mtlx(s), ColorSpace::Raw, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_power_law_spaces_report_a_gamma() {
+        assert_eq!(ColorSpace::Gamma22.gamma(), Some(2.2));
+        assert_eq!(ColorSpace::Gamma18.gamma(), Some(1.8));
+        assert_eq!(ColorSpace::Srgb.gamma(), None);
+        assert_eq!(ColorSpace::Raw.gamma(), None);
+    }
+}
