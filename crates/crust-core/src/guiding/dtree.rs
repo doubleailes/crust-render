@@ -259,8 +259,7 @@ impl DTree {
             None => seeded_sums,
         };
         out[out_idx].sums = sums;
-        for q in 0..4 {
-            let flux = sums[q];
+        for (q, &flux) in sums.iter().enumerate() {
             if flux > rho * total && depth < max_depth {
                 let child_idx = out.len();
                 out.push(DNode::leaf());

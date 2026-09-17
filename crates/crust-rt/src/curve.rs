@@ -49,7 +49,7 @@ pub(crate) fn rounded_cone_intersect(
 
     let mut best: Option<(f32, Vec3A)> = None;
     let mut consider = |t: f32, n: Vec3A| {
-        if t >= n_min && t <= n_max && best.map_or(true, |(bt, _)| t < bt) {
+        if t >= n_min && t <= n_max && best.is_none_or(|(bt, _)| t < bt) {
             best = Some((t, n));
         }
     };
@@ -172,6 +172,7 @@ pub(crate) fn cubic_curve_intersect(
     subdivide_and_intersect(ray, cp, 0.0, 1.0, r0, r1, depth, t_min, t_max)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn subdivide_and_intersect(
     ray: &Ray,
     cp: &[Vec3A; 4],
@@ -341,7 +342,7 @@ mod cubic_curve_tests {
     fn curved_span_requires_subdivision() {
         // The classic 4-point cubic Bézier approximation of a unit-radius
         // quarter circle: clearly not flat, must recurse.
-        const K: f32 = 0.552_284_75;
+        const K: f32 = 0.552_284_8;
         let cp = [
             Vec3A::new(1.0, 0.0, 0.0),
             Vec3A::new(1.0, K, 0.0),
@@ -378,7 +379,7 @@ mod cubic_curve_tests {
         // from the origin than the chord does at that point. An
         // implementation that only tested the chord (or stopped
         // subdividing too early) would get this backwards.
-        const K: f32 = 0.552_284_75;
+        const K: f32 = 0.552_284_8;
         let cp = [
             Vec3A::new(1.0, 0.0, 0.0),
             Vec3A::new(1.0, K, 0.0),

@@ -242,7 +242,7 @@ fn ray_stats_merge_adds_every_counter() {
     assert_eq!(a.ended_escaped, 77);
     assert_eq!(a.ended_depth, 88);
     // Merging the empty stats is the identity.
-    let before = a.clone();
+    let before = a;
     a.merge(&RayStats::default());
     assert_eq!(a.total_rays(), before.total_rays());
 }

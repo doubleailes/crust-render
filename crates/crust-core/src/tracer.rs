@@ -277,7 +277,6 @@ impl Renderer {
             let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
             rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
-            drop(gctx);
             info!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
@@ -495,6 +494,7 @@ impl Renderer {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_pixel(
         &self,
         i: usize,
@@ -589,7 +589,7 @@ impl Renderer {
             // Adaptive early stop: once past the minimum budget, quit as soon
             // as the relative standard error of the pixel mean is below the
             // threshold. Checked every 4th sample to amortize the cost.
-            if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken % 4 == 0 {
+            if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken.is_multiple_of(4) {
                 let n = taken as f64;
                 let var_of_mean = ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
                 let mean = (lum_sum / n).max(1e-4);
@@ -776,16 +776,16 @@ fn sample_bounce_direction(
     if gs[0] < alpha {
         // Guide branch: draw from the field; the material's continuous
         // component supplies the value and the BSDF side of the mixture pdf.
-        if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]]) {
-            if let Some((value, p_bsdf)) = mat.eval(r, rec, wi) {
-                let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
-                return Some(ScatterSample {
-                    ray: mat.make_ray(rec, wi),
-                    value,
-                    pdf,
-                    delta: false,
-                });
-            }
+        if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]])
+            && let Some((value, p_bsdf)) = mat.eval(r, rec, wi)
+        {
+            let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
+            return Some(ScatterSample {
+                ray: mat.make_ray(rec, wi),
+                value,
+                pdf,
+                delta: false,
+            });
         }
         // Material with no continuous component: pure BSDF sampling.
         mat.scatter_importance(r, rec, bsdf_dom)
@@ -1020,6 +1020,7 @@ fn shadow_transmittance(
 /// phase function (value == pdf for the HG mixture) in place of
 /// `brdf·cos`, and the same phase pdf as the competing bounce density that
 /// `bounce_emission_weight`'s `Phase` arm uses.
+#[allow(clippy::too_many_arguments)]
 fn volume_nee(
     p: Vec3A,
     wi: Vec3A,
@@ -1064,6 +1065,7 @@ fn volume_nee(
 /// then folds the records into the radiance estimate and emits guiding
 /// training samples, which need the radiance arriving from the rest of the
 /// path and therefore cannot be computed forward.
+#[allow(clippy::too_many_arguments)]
 fn trace_path(
     r: &Ray,
     world: &World,
@@ -1601,6 +1603,23 @@ struct Tile {
     pub height: usize,
 }
 
+fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
+    let mut tiles = Vec::new();
+    for y in (0..image_height).step_by(tile_size) {
+        for x in (0..image_width).step_by(tile_size) {
+            let w = (x + tile_size).min(image_width) - x;
+            let h = (y + tile_size).min(image_height) - y;
+            tiles.push(Tile {
+                x,
+                y,
+                width: w,
+                height: h,
+            });
+        }
+    }
+    tiles
+}
+
 #[cfg(test)]
 mod tests {
     use super::SamplingStrategy;
@@ -1657,21 +1676,4 @@ mod tests {
         let power = SamplingStrategy::PowerMis.light_weight(a, b);
         assert!(power > balance, "power {power} <= balance {balance}");
     }
-}
-
-fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
-    let mut tiles = Vec::new();
-    for y in (0..image_height).step_by(tile_size) {
-        for x in (0..image_width).step_by(tile_size) {
-            let w = (x + tile_size).min(image_width) - x;
-            let h = (y + tile_size).min(image_height) - y;
-            tiles.push(Tile {
-                x,
-                y,
-                width: w,
-                height: h,
-            });
-        }
-    }
-    tiles
 }

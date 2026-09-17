@@ -156,12 +156,9 @@ fn analytic_sphere_t(ray: &Ray, center: Vec3A, radius: f32, t_min: f32, t_max: f
         return None;
     }
     let sq = disc.sqrt();
-    for root in [(-half_b - sq) / a, (-half_b + sq) / a] {
-        if root > t_min && root < t_max {
-            return Some(root);
-        }
-    }
-    None
+    [(-half_b - sq) / a, (-half_b + sq) / a]
+        .into_iter()
+        .find(|&root| root > t_min && root < t_max)
 }
 
 // ---------------------------------------------------------------------------

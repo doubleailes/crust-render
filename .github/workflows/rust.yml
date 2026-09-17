@@ -12,32 +12,44 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Turn `cargo` warnings into errors as well, so a new deprecation or an
+  # unused import fails the build instead of scrolling past in the log.
+  RUSTFLAGS: -D warnings
 
 jobs:
-  build:
-    name: build
+  # Formatting is a pure text check: no dependencies, no build. It runs in
+  # parallel with everything else and fails fast.
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci
-      - name: Build
-        run: cargo build --workspace --verbose
+      - run: rustup component add rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
+  # Clippy compiles the workspace (check mode, no codegen) and lints every
+  # target, tests and examples included, with warnings promoted to errors.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # `cargo test` builds everything it needs, so there is no separate
+  # `cargo build` step: it would compile the non-test artifacts only to have
+  # the test profile rebuild them. `--no-fail-fast` keeps going past the
+  # first failing test binary so one run reports every broken target.
   test:
     name: test
     runs-on: ubuntu-latest
-    needs: [build]
     steps:
       - uses: actions/checkout@v4
-      - name: Restore cargo registry and target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci
-      # `--no-fail-fast` keeps going past the first failing test binary so a
-      # run reports every broken target at once, not just the first.
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace --no-fail-fast --verbose
 
@@ -45,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
     if: github.event_name == 'release' && github.event.action == 'created'
-    needs: [build, test]
+    needs: [fmt, clippy, test]
     strategy:
       fail-fast: false
       matrix:

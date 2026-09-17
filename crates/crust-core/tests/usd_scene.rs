@@ -321,10 +321,10 @@ fn openpbr_showcase_materials_all_decode() {
     // Every sphere prim under /World/Scene except the ground must bind one.
     let mut bound = 0;
     for p in &prims {
-        if let Ok(Some(bind)) = MaterialBindingAPI::get(&stage, p.clone()) {
-            if let Ok(Some(_mat_path)) = bind.direct_binding("") {
-                bound += 1;
-            }
+        if let Ok(Some(bind)) = MaterialBindingAPI::get(&stage, p.clone())
+            && let Ok(Some(_mat_path)) = bind.direct_binding("")
+        {
+            bound += 1;
         }
     }
     assert_eq!(

@@ -752,7 +752,7 @@ fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
 /// used by tests to cross-check the sampled BTDF directions.)
 #[cfg_attr(not(test), allow(dead_code))]
 fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
-    let cos_i = v.dot(n).min(1.0).max(-1.0);
+    let cos_i = v.dot(n).clamp(-1.0, 1.0);
     let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
     if sin2_t >= 1.0 {
         return None;
@@ -1182,10 +1182,10 @@ impl Material for OpenPBR {
         // guided transmission direction crosses the interface with the same
         // origin offset and interior-medium tagging as a BSDF-sampled one.
         if transmission_is_continuous(self) && rec.normal.dot(wi) < 0.0 {
-            if rec.front_face {
-                if let Some(medium) = self.interior_medium() {
-                    return Ray::new_in_medium(rec.p + wi * 1e-4, wi, medium);
-                }
+            if rec.front_face
+                && let Some(medium) = self.interior_medium()
+            {
+                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, medium);
             }
             return Ray::new(rec.p + wi * 1e-4, wi);
         }
@@ -1337,7 +1337,7 @@ mod tests {
                 );
                 // VNDF-sampled Walter weights are bounded: value/pdf stays sane.
                 let w = (sample.value / sample.pdf).max_element();
-                assert!(w.is_finite() && w >= 0.0 && w < 10.0, "weight {w}");
+                assert!(w.is_finite() && (0.0..10.0).contains(&w), "weight {w}");
             }
         }
         assert!(
@@ -1360,7 +1360,7 @@ mod tests {
                     sample.pdf
                 );
                 let w = (sample.value / sample.pdf).max_element();
-                assert!(w.is_finite() && w >= 0.0 && w < 10.0, "weight {w}");
+                assert!(w.is_finite() && (0.0..10.0).contains(&w), "weight {w}");
             }
         }
     }
@@ -1412,11 +1412,11 @@ mod tests {
         );
         let mut deltas = 0;
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
-                if sample.ray.direction().z < 0.0 {
-                    assert!(sample.delta, "thin-walled transmission must stay delta");
-                    deltas += 1;
-                }
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next())
+                && sample.ray.direction().z < 0.0
+            {
+                assert!(sample.delta, "thin-walled transmission must stay delta");
+                deltas += 1;
             }
         }
         assert!(deltas > 16, "thin-walled never transmitted: {deltas}");
@@ -1606,11 +1606,11 @@ mod tests {
         let mut got_positive = false;
         let mut smp = s();
         for _ in 0..128 {
-            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
-                if sample.value.length_squared() > 0.0 {
-                    got_positive = true;
-                    break;
-                }
+            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next())
+                && sample.value.length_squared() > 0.0
+            {
+                got_positive = true;
+                break;
             }
         }
         assert!(got_positive, "coat-only material never scattered energy");
@@ -1725,7 +1725,7 @@ mod tests {
                 // One-sample channel-mixture weights are bounded by roughly
                 // 3× the non-dispersive Walter weight.
                 let w = (sample.value / sample.pdf).max_element();
-                assert!(w.is_finite() && w >= 0.0 && w < 30.0, "weight {w}");
+                assert!(w.is_finite() && (0.0..30.0).contains(&w), "weight {w}");
             }
         }
         assert!(
@@ -2053,10 +2053,10 @@ mod tests {
             Vec3A::new(-0.3, 0.2, -1.0).normalize(),
         );
         for _ in 0..256 {
-            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next()) {
-                if sample.ray.direction().z < 0.0 {
-                    return sample.ray.medium().cloned();
-                }
+            if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next())
+                && sample.ray.direction().z < 0.0
+            {
+                return sample.ray.medium().cloned();
             }
         }
         panic!("material never transmitted");
@@ -2279,12 +2279,12 @@ mod tests {
         let mut got_downward = false;
         let mut smp = s();
         for _ in 0..64 {
-            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next()) {
-                if sample.ray.direction().y < 0.0 {
-                    assert!(sample.delta, "transmission must be flagged delta");
-                    got_downward = true;
-                    break;
-                }
+            if let Some(sample) = m.scatter_importance(&ray, &rec, smp.next())
+                && sample.ray.direction().y < 0.0
+            {
+                assert!(sample.delta, "transmission must be flagged delta");
+                got_downward = true;
+                break;
             }
         }
         assert!(got_downward, "thin-walled transmission never went through");
