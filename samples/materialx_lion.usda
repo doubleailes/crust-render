@@ -1,0 +1,111 @@
+#usda 1.0
+(
+    doc = """Render wrapper for the DPEL MaterialX Lion.
+
+    `MaterialXTeapotLion-1.0/Lion/lion.usda` is an *asset* layer — geometry plus
+    material bindings, deliberately no camera, lights or render settings — so
+    this layer supplies the shot, exactly as `materialx_teapot.usda` does for
+    the teapot. Same studio rig, reframed: the statue is Z-up and roughly
+    0.20 x 0.17 x 0.26, centred near (0, -0.003, 0.129).
+
+    Its single MaterialX graph is the larger of the two assets' — 140 compiled
+    ops, 8 lobes, 7 textures over 6 UDIM tiles — and layers a `sheen_bsdf`, so
+    it is also the sample that exercises OpenPBR's fuzz through the reduction.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def "Statue" (
+        prepend references = @MaterialXTeapotLion-1.0/Lion/lion.usda@
+    )
+    {
+    }
+
+    def Mesh "Ground" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)]
+        rel material:binding = </World/Looks/GroundMaterial>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "GroundMaterial"
+        {
+            token outputs:surface.connect = </World/Looks/GroundMaterial/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.6, 0.6, 0.62)
+                float inputs:roughness = 0.75
+                float inputs:metallic = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    # The teapot scene's rig, unchanged: a uniform dome (replacing the Y-up
+    # built-in gradient, wrong for a Z-up stage), a warm key and a cool rim.
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.55, 0.62, 0.75)
+        float inputs:intensity = 0.45
+    }
+
+    def RectLight "Key"
+    {
+        color3f inputs:color = (1, 0.96, 0.9)
+        float inputs:intensity = 14
+        float inputs:width = 0.5
+        float inputs:height = 0.5
+        matrix4d xformOp:transform = ( (0.9061, 0.4226, 0, 0), (-0.2500, 0.5360, 0.8061, 0), (0.3406, -0.7303, 0.5918, 0), (0.30, -0.55, 0.62, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RectLight "Rim"
+    {
+        color3f inputs:color = (0.75, 0.82, 1.0)
+        float inputs:intensity = 8
+        float inputs:width = 0.4
+        float inputs:height = 0.4
+        matrix4d xformOp:transform = ( (-0.8000, -0.6000, 0, 0), (0.2400, -0.3200, 0.9165, 0), (-0.5499, 0.7332, 0.4000, 0), (-0.35, 0.45, 0.35, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 42
+        float horizontalAperture = 36
+        float focusDistance = 0.6248
+        float fStop = 0
+        matrix4d xformOp:transform = (
+            (0.864929521, 0.501893339, -0.000000000, 0),
+            (-0.146191016, 0.251935851, 0.956638131, 0),
+            (0.480130306, -0.827424560, 0.291279052, 0),
+            (0.300000000, -0.520000000, 0.300000000, 1)
+        )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+
+# crust resolves render settings through the stage's `renderSettingsPrimPath`
+# metadatum, falling back to the conventional `/Render/settings`.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (960, 540)
+        int crust:samplesPerPixel = 128
+        int crust:maxDepth = 12
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+    }
+}

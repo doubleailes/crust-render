@@ -30,6 +30,9 @@ Completely in a vibe coding mood.
   - Trait-based (`Material`), with OpenPBR as the single surface shader
   - Microfacet GGX BRDF with Fresnel and geometry terms
   - Rust-side presets: `OpenPBR::diffuse / metal / glass / glossy`
+- 🧩 **MaterialX** (`.mtlx`) look-dev graphs, read directly — standalone BSDF
+  nodes composed with `layer`/`mix`, textured through UV/**UDIM** image sets
+  and tangent-space normal maps, reduced onto OpenPBR at every shading point
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
 - 🧭 **Path Guiding** (opt-in)
@@ -110,6 +113,62 @@ Every `UsdGeomMesh` / `UsdGeomSphere` binds a `UsdShadeMaterial` via
   `samples/openpbr_showcase.usda` for the seven-preset reference scene.
 
 Unbound geometry falls back to a grey diffuse OpenPBR.
+
+### 🧩 MaterialX
+
+![materialx](images/materialx_showcase.png)
+
+*The two [DPEL MaterialX assets](https://www.aswf.io/blog/materialxteapotlion/)
+from NVIDIA — Teapot and Lion — rendered from their shipped `.mtlx` graphs
+(`samples/materialx_showcase.usda`).*
+
+A `Material` prim can be nothing but a reference into a MaterialX document:
+
+```
+def Material "TeapotCeramic" (
+    prepend references = @Looks/teapot_ceramic_ldX.mtlx@</MaterialX/Materials/surfacematerial_teapot_ceramic>
+)
+{
+}
+```
+
+USD normally resolves that through a MaterialX file-format plugin, which the
+pure-Rust `openusd` does not have — so the prim composes empty and would fall
+back to grey. Crust reads the `.mtlx` itself, in the standalone **`crust-mtlx`**
+crate (no renderer dependency, just an XML parser and `glam`):
+
+- the document parses to a name-addressed node graph and is **compiled once**
+  into a slot-indexed program — ~30 pattern node types (`image`,
+  `tiledimage`, `normalmap`, `mix`, `remap`, `contrast`, `artistic_ior`, …) —
+  that runs per shading point with no name lookups and no allocation;
+- the BSDF half — standalone `oren_nayar_diffuse_bsdf` / `dielectric_bsdf` /
+  `conductor_bsdf` / `sheen_bsdf` nodes glued with `layer` and `mix`, which is
+  how production look-dev is authored — is **flattened into weighted lobes**
+  at compile time and pooled onto OpenPBR's lobe stack at shading time, so
+  sampling, MIS and energy compensation stay in the one übershader. Layering
+  OpenPBR cannot express (two dielectrics of different roughness stacked)
+  averages rather than nests;
+- `image` nodes resolve through the `AssetLoader` seam to **UV/UDIM**
+  textures (`primvars:st`, `<UDIM>` tile sets, per-input colour space from
+  the graph's own `colorspace` attribute) with a tangent frame for normal
+  maps; the host decoder in `crust-assets` caps tile resolution
+  (`CRUST_TEX_MAX`, default 1024 — the teapot's ceramic alone is 2.7 GB at
+  full resolution).
+
+The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
+`<` inside an attribute value, which is not well-formed XML. MaterialX's own
+reader tolerates it; crust escapes the token before parsing, since rejecting
+the document would mean no material at all rather than a wrong path.
+
+Samples: `samples/materialx_basic.usda` is a self-contained fixture (20 KiB
+of textures, what the tests run against); `materialx_teapot.usda`,
+`materialx_lion.usda` and `materialx_showcase.usda` are shot layers for the
+DPEL assets, which are not checked in — download
+[MaterialXTeapotLion](https://dpel.aswf.io/) into `samples/` first.
+`cargo run --release -p crust-render --example mtlx_shade -- file.mtlx` prints
+the OpenPBR parameters a graph reduces to at a given `(u, v)` — the way to
+check a MaterialX surface, since a wrong colour-space decode still renders as
+a plausible surface.
 
 ### 💡 Lights
 

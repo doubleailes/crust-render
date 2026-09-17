@@ -1,0 +1,128 @@
+#usda 1.0
+(
+    doc = """The DPEL MaterialX showcase: Teapot and Lion together, framed after
+    the `overview.png` that ships with the assets (teapot left, the lion
+    smaller and nearer on the right in a three-quarter pose, both on a
+    seamless bright sweep under soft studio light).
+
+    Both assets are about 0.26 m tall as authored, yet in the overview the lion
+    reads at roughly 60% of the teapot's height while standing *lower* in frame
+    — closer to the camera — so it is scaled down here (0.52x) rather than
+    pushed back. Each asset is referenced from its own gitignored DPEL folder;
+    `materialx_teapot.usda` and `materialx_lion.usda` are the single-asset
+    shots with the same rig.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "Teapot" (
+        prepend references = @MaterialXTeapotLion-1.0/Teapot/teapot.usda@
+    )
+    {
+        double3 xformOp:translate = (-0.12, 0.06, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Lion" (
+        prepend references = @MaterialXTeapotLion-1.0/Lion/lion.usda@
+    )
+    {
+        double3 xformOp:translate = (0.15, -0.10, 0)
+        float xformOp:rotateZ = -40
+        float3 xformOp:scale = (0.52, 0.52, 0.52)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ", "xformOp:scale"]
+    }
+
+    # The floor is the only geometry of the set. The overview's seamless
+    # cyclorama is played by the dome plus a near-white floor: a Lambertian
+    # floor of albedo a under a uniform dome of radiance L reflects a*L, so at
+    # a ~ 0.98 the floor meets the sky at the horizon and there is no line to
+    # see — real cyclorama paper is this white for the same reason.
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, -4, 0), (4, -4, 0), (4, 4, 0), (-4, 4, 0)]
+        rel material:binding = </World/Looks/Sweep>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "Sweep"
+        {
+            token outputs:surface.connect = </World/Looks/Sweep/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.98, 0.98, 0.99)
+                float inputs:roughness = 0.8
+                float inputs:metallic = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.9, 0.92, 0.97)
+        float inputs:intensity = 0.8
+    }
+
+    # A large softbox high in front and to the right — the overview's shadows
+    # fall gently back and to the left of each object and have soft edges, so
+    # the key is big and not far off the camera axis.
+    def RectLight "Key"
+    {
+        color3f inputs:color = (1, 0.97, 0.93)
+        float inputs:intensity = 5
+        float inputs:width = 1.2
+        float inputs:height = 1.2
+        matrix4d xformOp:transform = ( (0.8944, 0.4472, 0, 0), (-0.2981, 0.5963, 0.7454, 0), (0.3333, -0.6667, 0.6667, 0), (0.55, -1.0, 1.05, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    # Cool fill from the left, weaker, to keep the glaze's left flank alive.
+    def RectLight "Fill"
+    {
+        color3f inputs:color = (0.85, 0.9, 1.0)
+        float inputs:intensity = 2.5
+        float inputs:width = 1.0
+        float inputs:height = 1.0
+        matrix4d xformOp:transform = ( (0.7071, -0.7071, 0, 0), (0.3536, 0.3536, 0.8660, 0), (-0.6124, -0.6124, 0.5, 0), (-0.9, -0.9, 0.75, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 65
+        float horizontalAperture = 36
+        float focusDistance = 1.0904
+        float fStop = 0
+        matrix4d xformOp:transform = (
+            (1.000000000, -0.000000000, 0.000000000, 0),
+            (0.000000000, 0.137568371, 0.990492273, 0),
+            (-0.000000000, -0.990492273, 0.137568371, 0),
+            (0.020000000, -1.080000000, 0.280000000, 1)
+        )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (1920, 1080)
+        int crust:samplesPerPixel = 128
+        int crust:maxDepth = 12
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+    }
+}
