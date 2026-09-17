@@ -101,10 +101,11 @@ pub trait AssetLoader: Send + Sync {
     /// Opens a UV-addressed texture and returns something that can sample it.
     ///
     /// `path` has already been resolved against the authoring layer's
-    /// directory and may still contain a **`<UDIM>`** token: expanding it into
-    /// the tile set on disk is the host's job, since which tiles exist is a
-    /// filesystem question and the cheapest place to decide how many of them
-    /// to hold in memory. `space` says how to decode the stored values — the
+    /// directory and may still contain a tile token — **`<UDIM>`** or
+    /// **`<UVTILE>`**, MaterialX's two spellings of the same grid. Expanding
+    /// either into the tile set on disk is the host's job, since which tiles
+    /// exist is a filesystem question and the cheapest place to decide how
+    /// many of them to hold in memory. `space` says how to decode the stored values — the
     /// file does not say, and getting it wrong is silent (see
     /// [`crate::ColorSpace`]).
     ///
