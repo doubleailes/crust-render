@@ -7,18 +7,8 @@ use crust_core::{
     RectShape, SphereShape, Vec3A,
 };
 use glam::Mat3A;
+use openqmc::pcg::Rng;
 use std::sync::Arc;
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
-    }
-}
 
 fn approx(a: f32, b: f32, tol: f32) -> bool {
     (a - b).abs() <= tol
@@ -35,9 +25,9 @@ fn sphere_shape_area_and_surface_points() {
         radius: 2.0,
     };
     assert!(approx(s.area(), 4.0 * std::f32::consts::PI * 4.0, 1e-4));
-    let mut rng = Lcg(3);
+    let mut rng = Rng::new(3);
     for _ in 0..500 {
-        let p = s.sample_point(rng.next(), rng.next());
+        let p = s.sample_point(rng.next_f32(), rng.next_f32());
         assert!(approx((p - s.center).length(), 2.0, 1e-4), "{p}");
         let n = s.normal_at(p);
         assert!(approx(n.length(), 1.0, 1e-5));
@@ -51,11 +41,11 @@ fn sphere_shape_sampling_covers_both_hemispheres() {
         center: Vec3A::ZERO,
         radius: 1.0,
     };
-    let mut rng = Lcg(9);
+    let mut rng = Rng::new(9);
     let (mut up, mut down) = (0, 0);
     let mut mean = Vec3A::ZERO;
     for _ in 0..20_000 {
-        let p = s.sample_point(rng.next(), rng.next());
+        let p = s.sample_point(rng.next_f32(), rng.next_f32());
         if p.z > 0.0 {
             up += 1
         } else {
@@ -99,9 +89,9 @@ fn rect_shape_samples_lie_in_the_parallelogram() {
         Vec3A::new(0.5, 1.0, 0.0),
         Vec3A::Z,
     );
-    let mut rng = Lcg(4);
+    let mut rng = Rng::new(4);
     for _ in 0..500 {
-        let (u, v) = (rng.next(), rng.next());
+        let (u, v) = (rng.next_f32(), rng.next_f32());
         let p = r.sample_point(u, v);
         // Invert the parallelogram parameterisation.
         assert!(approx(p.y, v, 1e-6));
@@ -131,10 +121,10 @@ fn area_light_sample_aims_at_a_point_on_its_surface() {
     let center = Vec3A::new(0.0, 5.0, 0.0);
     let light = sphere_light(center, 0.5, Vec3A::splat(10.0), 7);
     let from = Vec3A::ZERO;
-    let mut rng = Lcg(5);
+    let mut rng = Rng::new(5);
     for _ in 0..200 {
         let s = light
-            .sample_li(from, rng.next(), rng.next())
+            .sample_li(from, rng.next_f32(), rng.next_f32())
             .expect("reachable");
         assert!(approx(s.direction.length(), 1.0, 1e-5));
         let p = from + s.direction * s.distance;
@@ -157,9 +147,11 @@ fn area_light_sample_aims_at_a_point_on_its_surface() {
 fn area_light_pdf_at_point_matches_its_own_sample() {
     let light = sphere_light(Vec3A::new(2.0, 3.0, -1.0), 0.7, Vec3A::ONE, 0);
     let from = Vec3A::new(0.5, -1.0, 2.0);
-    let mut rng = Lcg(6);
+    let mut rng = Rng::new(6);
     for _ in 0..200 {
-        let s = light.sample_li(from, rng.next(), rng.next()).unwrap();
+        let s = light
+            .sample_li(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
         let p = from + s.direction * s.distance;
         let pdf = light.pdf_at_point(from, p);
         assert!(
@@ -243,10 +235,10 @@ fn distant_light_samples_lie_in_its_cone_at_infinity() {
     let toward = Vec3A::new(0.0, -1.0, 0.0); // light travels straight down
     let light = DistantLight::new(toward, Vec3A::splat(3.0), 10.0);
     let cos_half = 5f32.to_radians().cos();
-    let mut rng = Lcg(8);
+    let mut rng = Rng::new(8);
     for _ in 0..500 {
         let s = light
-            .sample_li(Vec3A::ZERO, rng.next(), rng.next())
+            .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
             .unwrap();
         assert!(approx(s.direction.length(), 1.0, 1e-5));
         assert!(
@@ -337,10 +329,12 @@ fn uniform_dome_samples_the_whole_sphere_uniformly() {
     let tint = Vec3A::new(0.5, 0.6, 0.7);
     let dome = DomeLight::new(tint, None, Mat3A::IDENTITY);
     let quarter_pi_inv = 1.0 / (4.0 * std::f32::consts::PI);
-    let mut rng = Lcg(10);
+    let mut rng = Rng::new(10);
     let mut below = 0;
     for _ in 0..2000 {
-        let s = dome.sample_li(Vec3A::ZERO, rng.next(), rng.next()).unwrap();
+        let s = dome
+            .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
+            .unwrap();
         assert!(approx(s.direction.length(), 1.0, 1e-5));
         assert!(approx(s.pdf, quarter_pi_inv, 1e-7));
         assert_eq!(s.radiance, tint);
@@ -408,9 +402,11 @@ fn rotating_the_dome_rotates_the_sky() {
 fn textured_dome_sample_and_escaped_share_one_density() {
     let map = Arc::new(EnvironmentMap::new(1, 1, vec![Vec3A::splat(3.0)]).unwrap());
     let dome = DomeLight::new(Vec3A::splat(0.5), Some(map), Mat3A::from_rotation_x(0.4));
-    let mut rng = Lcg(11);
+    let mut rng = Rng::new(11);
     for _ in 0..300 {
-        let s = dome.sample_li(Vec3A::ZERO, rng.next(), rng.next()).unwrap();
+        let s = dome
+            .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
+            .unwrap();
         assert!(approx(s.direction.length(), 1.0, 1e-4));
         assert_eq!(s.radiance, Vec3A::splat(1.5));
         let (r, pdf) = dome.escaped(Vec3A::ZERO, s.direction).unwrap();
@@ -426,10 +422,12 @@ fn textured_dome_importance_samples_a_bright_sun() {
     px[3 * w + 5] = Vec3A::splat(1000.0);
     let map = Arc::new(EnvironmentMap::new(w, h, px).unwrap());
     let dome = DomeLight::new(Vec3A::ONE, Some(map), Mat3A::IDENTITY);
-    let mut rng = Lcg(12);
+    let mut rng = Rng::new(12);
     let mut sun = 0;
     for _ in 0..1000 {
-        let s = dome.sample_li(Vec3A::ZERO, rng.next(), rng.next()).unwrap();
+        let s = dome
+            .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
+            .unwrap();
         if s.radiance.x > 1.0 {
             sun += 1;
             // One texel of a 16x8 map near the equator covers ~0.15 sr,

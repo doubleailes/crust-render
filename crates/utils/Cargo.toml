@@ -8,3 +8,8 @@ license-file.workspace = true
 rand.workspace = true
 serde.workspace = true
 glam.workspace = true
+
+[dev-dependencies]
+# Seeded randomness for the tests: the repository rule is that tests which
+# only need random draws use `openqmc::pcg::Rng`.
+openqmc-rs = "0.2"

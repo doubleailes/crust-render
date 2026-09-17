@@ -9,38 +9,29 @@ use crust_rt::{
     MASK_INDIRECT, MASK_SHADOW, Ray, Scene, SceneBuilder,
 };
 use glam::{Affine3A, Vec3, Vec3A};
+use openqmc::pcg::Rng;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-struct Lcg(u64);
+/// Uniform in `[lo, hi)`.
+fn range(rng: &mut Rng, lo: f32, hi: f32) -> f32 {
+    lo + (hi - lo) * rng.next_f32()
+}
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-    fn next(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as u32 & 0x00FF_FFFF) as f32 / 16_777_216.0
-    }
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next()
-    }
-    fn vec(&mut self, lo: f32, hi: f32) -> Vec3A {
-        Vec3A::new(self.range(lo, hi), self.range(lo, hi), self.range(lo, hi))
-    }
-    fn dir(&mut self) -> Vec3A {
-        loop {
-            let v = self.vec(-1.0, 1.0);
-            let l = v.length_squared();
-            if l > 1e-3 && l < 1.0 {
-                return v / l.sqrt();
-            }
+fn vec3(rng: &mut Rng, lo: f32, hi: f32) -> Vec3A {
+    Vec3A::new(range(rng, lo, hi), range(rng, lo, hi), range(rng, lo, hi))
+}
+
+/// A unit direction, by rejection from the cube.
+fn dir(rng: &mut Rng) -> Vec3A {
+    loop {
+        let v = vec3(rng, -1.0, 1.0);
+        let l = v.length_squared();
+        if l > 1e-3 && l < 1.0 {
+            return v / l.sqrt();
         }
     }
 }
@@ -425,9 +416,9 @@ fn a_thousand_spheres_map_back_to_their_ids() {
 
 #[test]
 fn random_spheres_agree_with_the_analytic_closest_hit() {
-    let mut rng = Lcg::new(11);
+    let mut rng = Rng::new(11);
     let spheres: Vec<(Vec3A, f32)> = (0..200)
-        .map(|_| (rng.vec(-10.0, 10.0), rng.range(0.2, 1.5)))
+        .map(|_| (vec3(&mut rng, -10.0, 10.0), range(&mut rng, 0.2, 1.5)))
         .collect();
     let mut b = SceneBuilder::new();
     for (c, r) in &spheres {
@@ -436,7 +427,7 @@ fn random_spheres_agree_with_the_analytic_closest_hit() {
     let scene = b.commit();
     let mut hits = 0;
     for _ in 0..1000 {
-        let ray = Ray::new(rng.vec(-15.0, 15.0), rng.dir());
+        let ray = Ray::new(vec3(&mut rng, -15.0, 15.0), dir(&mut rng));
         let (t_min, t_max) = (1e-3, 60.0);
         let mut best: Option<(f32, u32)> = None;
         for (i, (c, r)) in spheres.iter().enumerate() {
@@ -541,9 +532,9 @@ fn degenerate_triangles_never_hit_and_never_panic() {
     // Repeated vertex.
     b.attach(mesh(vec![Vec3A::Y, Vec3A::Y, Vec3A::Z], vec![[0, 1, 2]]));
     let scene = b.commit();
-    let mut rng = Lcg::new(3);
+    let mut rng = Rng::new(3);
     for _ in 0..200 {
-        let ray = Ray::new(rng.vec(-3.0, 3.0), rng.dir());
+        let ray = Ray::new(vec3(&mut rng, -3.0, 3.0), dir(&mut rng));
         assert!(scene.intersect(&ray, 1e-4, 100.0).is_none());
         assert!(!scene.occluded(&ray, 1e-4, 100.0));
     }
@@ -594,9 +585,9 @@ fn interpolated_shading_normals_are_unit_length() {
         normals: Some(n),
     });
     let scene = b.commit();
-    let mut rng = Lcg::new(5);
+    let mut rng = Rng::new(5);
     for _ in 0..300 {
-        let d = rng.dir();
+        let d = dir(&mut rng);
         let ray = Ray::new(d * 5.0, -d);
         let hit = scene
             .intersect(&ray, 0.001, 100.0)
@@ -620,9 +611,9 @@ fn tessellated_sphere_matches_the_analytic_radius() {
     let mut b = SceneBuilder::new();
     b.attach(mesh(v, t));
     let scene = b.commit();
-    let mut rng = Lcg::new(6);
+    let mut rng = Rng::new(6);
     for _ in 0..300 {
-        let d = rng.dir();
+        let d = dir(&mut rng);
         let hit = scene
             .intersect(&Ray::new(d * 4.0, -d), 0.001, 100.0)
             .unwrap();
@@ -633,13 +624,13 @@ fn tessellated_sphere_matches_the_analytic_radius() {
 
 #[test]
 fn random_triangle_soup_agrees_with_moller_trumbore() {
-    let mut rng = Lcg::new(21);
+    let mut rng = Rng::new(21);
     let mut verts = Vec::new();
     let mut tris = Vec::new();
     for i in 0..5000u32 {
-        let c = rng.vec(-10.0, 10.0);
+        let c = vec3(&mut rng, -10.0, 10.0);
         for _ in 0..3 {
-            verts.push(c + rng.vec(-0.6, 0.6));
+            verts.push(c + vec3(&mut rng, -0.6, 0.6));
         }
         tris.push([3 * i, 3 * i + 1, 3 * i + 2]);
     }
@@ -650,7 +641,7 @@ fn random_triangle_soup_agrees_with_moller_trumbore() {
 
     let mut hits = 0;
     for _ in 0..600 {
-        let ray = Ray::new(rng.vec(-12.0, 12.0), rng.dir());
+        let ray = Ray::new(vec3(&mut rng, -12.0, 12.0), dir(&mut rng));
         let (t_min, t_max) = (1e-3f32, 50.0f32);
         let mut best: Option<(f32, u32)> = None;
         for (i, tri) in tris.iter().enumerate() {
@@ -773,10 +764,13 @@ fn quad_hits_report_the_right_fan_triangle() {
 #[test]
 fn committing_the_same_input_twice_gives_identical_answers() {
     let build = || {
-        let mut rng = Lcg::new(99);
+        let mut rng = Rng::new(99);
         let mut b = SceneBuilder::new();
         for _ in 0..3000 {
-            b.attach(sphere(rng.vec(-20.0, 20.0), rng.range(0.1, 1.0)));
+            b.attach(sphere(
+                vec3(&mut rng, -20.0, 20.0),
+                range(&mut rng, 0.1, 1.0),
+            ));
         }
         let (v, t) = grid(20);
         b.attach(mesh(v, t));
@@ -784,9 +778,9 @@ fn committing_the_same_input_twice_gives_identical_answers() {
     };
     let (a, b) = (build(), build());
     assert_eq!(a.primitive_count(), b.primitive_count());
-    let mut rng = Lcg::new(100);
+    let mut rng = Rng::new(100);
     for _ in 0..500 {
-        let ray = Ray::new(rng.vec(-25.0, 25.0), rng.dir());
+        let ray = Ray::new(vec3(&mut rng, -25.0, 25.0), dir(&mut rng));
         let ha = a.intersect(&ray, 1e-3, 100.0);
         let hb = b.intersect(&ray, 1e-3, 100.0);
         match (ha, hb) {
@@ -807,14 +801,14 @@ fn committing_the_same_input_twice_gives_identical_answers() {
 
 #[test]
 fn scene_queries_are_safe_from_many_threads() {
-    let mut rng = Lcg::new(7);
+    let mut rng = Rng::new(7);
     let mut b = SceneBuilder::new();
     for _ in 0..500 {
-        b.attach(sphere(rng.vec(-5.0, 5.0), rng.range(0.1, 0.5)));
+        b.attach(sphere(vec3(&mut rng, -5.0, 5.0), range(&mut rng, 0.1, 0.5)));
     }
     let scene = Arc::new(b.commit());
     let rays: Vec<Ray> = (0..2000)
-        .map(|_| Ray::new(rng.vec(-8.0, 8.0), rng.dir()))
+        .map(|_| Ray::new(vec3(&mut rng, -8.0, 8.0), dir(&mut rng)))
         .collect();
     let reference: Vec<Option<(u32, u32)>> = rays
         .iter()

@@ -10,11 +10,21 @@ on:
   release:
     types: [created]
 
+# The checks only read the repository; the release job widens this for
+# itself to upload assets.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Turn `cargo` warnings into errors as well, so a new deprecation or an
   # unused import fails the build instead of scrolling past in the log.
   RUSTFLAGS: -D warnings
+  # One toolchain for every job, releases included. Clippy's lint set grows
+  # with each stable, so an unpinned `stable` gate breaks every six weeks on
+  # code nobody touched; and the release build has to compile the same
+  # code the checks validated (let chains and `is_multiple_of` need 1.88+).
+  RUST_VERSION: "1.98.1"
 
 jobs:
   # Formatting is a pure text check: no dependencies, no build. It runs in
@@ -24,7 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup component add rustfmt
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt
+          rustup default ${{ env.RUST_VERSION }}
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -35,8 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup component add clippy
-      - uses: Swatinem/rust-cache@v2
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy
+          rustup default ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -49,21 +65,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
+          rustup default ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Run tests
         run: cargo test --workspace --no-fail-fast --verbose
+      # The subdivision allocation ceilings are pinned by an `#[ignore]`d
+      # probe that counts requested bytes through a global allocator, so it
+      # has to run alone; the flags are the ones its documentation gives.
+      - name: Subdivision memory probe
+        run: cargo test -p crust-core --lib subdivision_memory_probe -- --ignored --nocapture --test-threads=1
 
   release:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
     if: github.event_name == 'release' && github.event.action == 'created'
     needs: [fmt, clippy, test]
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl, x86_64-apple-darwin]
     steps:
-      - uses: actions/checkout@master
+      - uses: actions/checkout@v4
       - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
         env:
@@ -71,4 +98,4 @@ jobs:
         with:
           RUSTTARGET: ${{ matrix.target }}
           EXTRA_FILES: "README.md LICENSE"
-          TOOLCHAIN_VERSION: 1.85.1
+          TOOLCHAIN_VERSION: ${{ env.RUST_VERSION }}
