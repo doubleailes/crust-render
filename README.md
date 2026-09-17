@@ -164,7 +164,7 @@ Samples: `samples/materialx_basic.usda` is a self-contained fixture (20 KiB
 of textures, what the tests run against); `materialx_teapot.usda`,
 `materialx_lion.usda` and `materialx_showcase.usda` are shot layers for the
 DPEL assets, which are not checked in — download
-[MaterialXTeapotLion](https://dpel.aswf.io/) into `samples/` first.
+[MaterialXTeapotLion](https://dpel.aswf.io/materialx-teapot-lion/) first.
 `cargo run --release -p crust-render --example mtlx_shade -- file.mtlx` prints
 the OpenPBR parameters a graph reduces to at a given `(u, v)` — the way to
 check a MaterialX surface, since a wrong colour-space decode still renders as
