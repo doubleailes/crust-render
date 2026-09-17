@@ -796,35 +796,65 @@ fn subdiv_level(prim: &Prim) -> u32 {
 // -----------------------------------------------------------------------
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
-/// authored points/counts/indices plus the (memoized, so pointer-comparable)
-/// material. Prims agreeing on all of it share one local-space triangle BVH.
+/// authored points/counts/indices **and texture chart**, plus the (memoized,
+/// so pointer-comparable) material. Prims agreeing on all of it share one
+/// local-space triangle BVH.
+///
+/// The chart belongs in the identity because a [`MeshSlot`] owns the `UvMap`
+/// that *every* placement of it shades through: the table is built once, from
+/// whichever prim interned the slot first, and shared by `Arc` thereafter. Two
+/// prims with the same points, topology and material but different
+/// `primvars:st` — the same panel charted into two UDIM tiles, the idiom
+/// `samples/materialx_basic.usda` is built around — would otherwise collide,
+/// and the second would silently shade through the first's chart. The failure
+/// is not visible as an error: it is a texture that reads plausibly and is
+/// simply the wrong tile.
+///
+/// The chart is folded in only when one was read, which is exactly when the
+/// bound material reports `uses_uv()`. An untextured stage hashes nothing
+/// extra and dedupes as before.
 #[derive(PartialEq, Eq, Hash)]
 struct MeshKey {
     geo_hash: u64,
     n_points: usize,
     n_indices: usize,
+    /// Authored UV values, or `None` when the mesh carries no chart. A
+    /// discriminator beside the hash, like the two counts above.
+    n_uvs: Option<usize>,
     material: usize,
 }
 
 impl MeshKey {
-    fn new(
-        points: &[Vec3f],
-        counts: &[i32],
-        indices: &[i32],
-        material: &Arc<dyn Material>,
-    ) -> Self {
+    fn new(src: &MeshSource, material: &Arc<dyn Material>) -> Self {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for p in points {
+        for p in &src.points {
             p.x.to_bits().hash(&mut h);
             p.y.to_bits().hash(&mut h);
             p.z.to_bits().hash(&mut h);
         }
-        counts.hash(&mut h);
-        indices.hash(&mut h);
+        src.counts.hash(&mut h);
+        src.indices.hash(&mut h);
+        // All three parts of the chart: the values, the indirection, and the
+        // interpolation that decides which index addresses them. Two meshes
+        // agreeing on the values but not on `face_varying` produce different
+        // tables from the same array.
+        match &src.uvs {
+            Some(uv) => {
+                1u8.hash(&mut h);
+                for c in &uv.values {
+                    c[0].to_bits().hash(&mut h);
+                    c[1].to_bits().hash(&mut h);
+                }
+                uv.indices.hash(&mut h);
+                uv.face_varying.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
         MeshKey {
             geo_hash: h.finish(),
-            n_points: points.len(),
-            n_indices: indices.len(),
+            n_points: src.points.len(),
+            n_indices: src.indices.len(),
+            n_uvs: src.uvs.as_ref().map(|uv| uv.values.len()),
             material: Arc::as_ptr(material) as *const u8 as usize,
         }
     }
@@ -899,7 +929,7 @@ impl MeshArena {
     /// first sight; `None` if nothing survives triangulation (matching the
     /// old behaviour, which also did not cache a failed mesh).
     fn intern(&mut self, prim: &Prim, src: &MeshSource, material: &Arc<dyn Material>) -> Option<u32> {
-        let key = MeshKey::new(&src.points, &src.counts, &src.indices, material);
+        let key = MeshKey::new(src, material);
         if let Some(&slot) = self.by_key.get(&key) {
             debug!("Mesh at {} shares geometry with an earlier prim", prim.path());
             return Some(slot);
