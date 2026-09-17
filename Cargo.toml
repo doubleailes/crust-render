@@ -13,6 +13,18 @@ glam = { version = "0.33.2", features = ["serde"] }
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
 rand = "0.9.2"
+# Decoder-side image formats. Declared once so `crust-assets` (which decodes)
+# and `crust-render` (which writes PNGs) resolve the same package; the
+# `hdr`/`jpeg` features are the decoder's and reach crust-render through
+# feature unification whether stated here or not.
+image = { version = "0.25.6", default-features = false, features = ["png", "hdr", "jpeg"] }
+# Pure-Rust Ptex reader (lib name `ptex`). Pinned by `rev` because the crate is
+# not published and `Cargo.lock` is not checked in — without it a fresh clone
+# silently takes whatever `main` points at. Hoisted so the decoder crate and
+# the probe examples that read `.ptx` directly can never disagree on the pin:
+# two crates naming a git dependency must match URL and rev byte for byte, or
+# Cargo sees two packages with the same lib name.
+ptex-rs = { git = "https://github.com/doubleailes/ptex-rs", rev = "36212f65dbd4caf7fb8786b34da5c041cc59d7f1" }
 
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.

@@ -1,0 +1,17 @@
+[package]
+name = "crust-assets"
+version = { workspace = true }
+edition = { workspace = true }
+license-file = { workspace = true }
+description = "Host-side asset decoders for Crust Render: crust_core::AssetLoader over exr, image and ptex-rs (environment maps, Ptex, UV/UDIM textures)"
+
+[lib]
+name = "crust_assets"
+path = "src/lib.rs"
+
+[dependencies]
+crust-core = { path = "../crust-core" }
+exr.workspace = true
+image.workspace = true
+ptex-rs.workspace = true
+tracing.workspace = true

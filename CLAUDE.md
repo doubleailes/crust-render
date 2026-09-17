@@ -15,6 +15,8 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 # Build / render (single binary in the workspace, so bare cargo run works)
 cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
 cargo run --release -- -i samples/cornellbox.usda
+cargo run --release -- -i samples/materialx_teapot.usda    # MaterialX + UDIM (needs the DPEL download)
+cargo run --release -- -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
 
@@ -43,6 +45,13 @@ cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did th
 cargo run --release -p crust-render --example scene_bounds -- scene.usda
 cargo run --release -p crust-render --example tex_probe -- texture.ptx
 cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 y1]
+
+# What OpenPBR parameters does a MaterialX graph actually reduce to? A wrong
+# albedo decode is a plausible pastel and a wrong mask is a plausible blend, so
+# a MaterialX surface cannot be checked by eye -- this prints the numbers at a
+# named point on the chart. See "MaterialX" under USD import.
+cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
 
 # Is a Ptex file actually being addressed correctly? Neither check renders
 # anything -- a wrong Ptex lookup still produces a plausible-looking surface,
@@ -84,7 +93,10 @@ difference); `CRUST_PTEX=0` declines every Ptex texture so surfaces fall back to
 constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution loaded
 (log2 edge length, default 5 = 32x32); `CRUST_SUBDIV=0` forces every
 `crust:subdivisionLevel` to 0 so subdivision-surface meshes render their base cage — the
-A/B that separates a subdivision artifact from a material or lighting one.
+A/B that separates a subdivision artifact from a material or lighting one; `CRUST_TEX=0`
+declines every UV texture so a MaterialX surface renders on its constant inputs (the
+`CRUST_PTEX=0` of the UV path), and `CRUST_TEX_MAX` caps each decoded texture tile's edge
+length in pixels (default 1024).
 
 ## Measuring a change
 
@@ -121,7 +133,7 @@ rather than plateauing.
 
 ## Workspace layout
 
-Five crates under `crates/`:
+Six crates under `crates/`:
 
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
@@ -135,9 +147,20 @@ Five crates under `crates/`:
   parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
   glam + rayon; deliberately swappable for Embree bindings behind the same seam.
 
+- **`crust-mtlx`** (lib name `crust_mtlx`) — the MaterialX `.mtlx` reader,
+  factored out the same way as `crust-rt`: a standalone library with **no crust
+  dependency** (roxmltree + glam only) behind a seam crust-core consumes.
+  `parse` (XML → name-addressed graph), `value` (the one runtime value), `eval`
+  (the graph compiled to a slot-indexed `Program`), `bsdf` (the `layer`/`mix`
+  tree flattened to weighted `Lobe`s), and `compile()` running all three for one
+  material node. It names the one thing it asks of its host — `Texture`, a
+  `(u, v) → RGBA` sampler — and crust-core re-exports that trait as its own
+  `Texture2D`, exactly as it adopts `crust_rt::Geometry`. What a renderer does
+  with the lobes is not decided here; crust's OpenPBR pooling is in crust-core.
 - **`crust-core`** — the engine as a library (`crust_core`): renderer, integrator,
-  materials, lights, volumes, path guiding, USD import — everything above the
-  intersection layer, which it consumes from `crust-rt` through `rt_world.rs`
+  materials, lights, volumes, path guiding, USD import (MaterialX through
+  `crust-mtlx`, with `material/materialx.rs` as the adapter — `MtlxMaterial` and
+  the lobe pooling onto `OpenPBR`) — everything above the intersection layer, which it consumes from `crust-rt` through `rt_world.rs`
   (`WorldBuilder`/`World`: kernel geometries paired with a `geom_id`-indexed
   material table).
   UI-free by design: no progress-bar or image-encoding dependencies; progress is
@@ -153,12 +176,27 @@ Five crates under `crates/`:
   instanced scene they answer different questions: `top_level` is what the root
   BVH traverses, `unique` descends into instances counting each distinct
   prototype **once** and is therefore what occupies memory.
-- **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene`, calls the
-  `Renderer` (wiring an `indicatif` bar to the progress callback), writes the EXR and
-  the tone-mapped PNG. `main.rs` is the only file.
+- **`crust-assets`** (lib name `crust_assets`) — the host side of
+  `crust_core::AssetLoader` for a program that reads files: `FileAssets`
+  implements the trait over `exr`, `image` and `ptex-rs`, and the decoders
+  behind it are public — `load_exr_environment` / `load_image_environment`,
+  `PtexColor` (+ `read_channel`, `max_log2_from_env`), `UvTexture` (UDIM sets,
+  the `CRUST_TEX_MAX` cap) and one `srgb_to_linear`. Everything that knows a
+  file format lives here, so the probe examples decode a texture *exactly* the
+  way the renderer does instead of carrying copies (`read_channel` used to
+  exist three times). Owns the `CRUST_PTEX`, `CRUST_TEX`, `CRUST_PTEX_MAX_LOG2`
+  and `CRUST_TEX_MAX` switches.
+- **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene` (with
+  `crust_assets::FileAssets`), calls the `Renderer` (wiring an `indicatif` bar to the
+  progress callback), writes the EXR and the tone-mapped PNG. `main.rs` is the only
+  source file, and it only *writes* images — decoding is `crust-assets`.
 - **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
   `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
-- **`openqmc-rs`** (crate/lib name `openqmc`) — a self-contained, from-scratch Rust port
+Two libraries were extracted out of this tree into repositories of their own on the
+same principle (zero crust types in the API, generally useful, published) and are
+consumed as ordinary dependencies:
+
+- **`openqmc-rs`** (crates.io; crate `openqmc-rs`, lib name `openqmc`) — a self-contained, from-scratch Rust port
   of [AcademySoftwareFoundation/openqmc](https://github.com/AcademySoftwareFoundation/openqmc)
   (Apache-2.0), the quasi-Monte Carlo sampling library. Modules map one-to-one to the
   upstream `oqmc/*.h` headers (`pcg`, `reverse`, `rotate`, `permute`, `encode`, `float`,
@@ -318,10 +356,15 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate the *continuous* component
   toward a given direction — what NEE and guided MIS need; `None` = no continuous
   component at all, and per its contract that decision must never depend on `wi`),
-  and `emitted()`. Exactly two implementations: **`OpenPBR`**,
+  and `emitted()`. Three implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
-  constructors used by `world.rs` and the USD fallback), and **`Emissive`**, a pure
-  emitter with no geometry knowledge. Shared shading helpers (aniso GGX VNDF sampling,
+  constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
+  emitter with no geometry knowledge, and **`MtlxMaterial`**
+  (`material/materialx.rs`), which evaluates a MaterialX graph per shading point and
+  *delegates* the BSDF to the `OpenPBR` it reduces to — so sampling, MIS
+  densities and energy compensation stay in one place. Two hooks gate the
+  per-triangle side tables the importer would otherwise build for every mesh:
+  `face_texture()` for Ptex and `uses_uv()` for the `primvars:st` chart. Shared shading helpers (aniso GGX VNDF sampling,
   Schlick/F82 Fresnel, EON diffuse, Charlie sheen, thin-film, Cauchy dispersion) live in
   `material/brdf.rs`. The OpenPBR formulas are aligned against the MaterialX nodegraph
   and Adobe's `openpbr-bsdf` reference — the item-by-item alignment record (with the
@@ -501,8 +544,101 @@ Schema mapping:
     island's `sheen = 1` erased all base colour (Ptex included) and rendered smooth
     plastic. `subsurface*`, `diffuseTransmission` and `specularTint` have no equivalent
     lobe and are dropped.
+  - **`.mtlx` reference** → the MaterialX graph, read by crust itself
+    (`crust-mtlx` + `material/materialx.rs`, below). Checked at each point the USD path gives up,
+    not first: finding the reference means walking the prim's composition
+    graph, which a stage of ordinary USD materials should not pay for.
   - Unbound geometry → grey diffuse `OpenPBR`.
-- **Ptex** (`texture.rs`, plus the decoder in `crust-render/src/main.rs`) — per-face colour textures via
+- **MaterialX** (`crates/crust-mtlx`, adapter in `material/materialx.rs`) — `.mtlx` look-dev graphs, read directly.
+  USD's own answer is a file-format plugin that composes a `.mtlx` into the
+  stage as `UsdShade` prims; **openusd ships none**, so a `Material` prim whose
+  only opinion is `references = @foo.mtlx@</MaterialX/Materials/name>` composes
+  to a prim with a `Material` type name and *nothing inside it*. Every schema
+  query then fails and the surface falls back to grey — which is what the two
+  DPEL assets (MaterialX Teapot, MaterialX Lion) did on import. The reader is
+  the standalone `crust-mtlx` crate — `parse.rs` (XML → a flat,
+  name-addressable graph), `value.rs` (the one runtime value), `eval.rs` (the
+  graph compiled to a slot-indexed program), `bsdf.rs` (the BSDF tree
+  flattened to weighted lobes) — and crust-core's `material/materialx.rs` is
+  the adapter: `MtlxMaterial` (impl `Material`), `reduce()` pooling the lobes
+  onto OpenPBR, and the importer-facing `load()`.
+  - **Compiled once, not walked per hit.** A look-dev graph must be evaluated
+    per shading point — its textures and masks are the point — but the teapot's
+    ceramic graph is ~50 nodes consulted several times per path vertex (sample,
+    then once per NEE and guide evaluation). So the graph is compiled into a
+    `Program`: a topologically ordered `Vec<Op>` whose operands are slot
+    *indices*. Evaluation is a linear scan with no name hashing and no
+    allocation (the value stack is a thread-local scratch buffer). ~30 node
+    types are implemented; an unknown one degrades that one input to a constant
+    and is reported once per material, never fails the material.
+  - **The BSDF reduction is the lossy part, and deliberately so.** MaterialX
+    assembles a look from *standalone* BSDF nodes (`oren_nayar_diffuse_bsdf`,
+    `dielectric_bsdf`, `conductor_bsdf`, `sheen_bsdf`) glued with `layer` and
+    `mix`; crust has one übershader with a fixed lobe stack. At **compile
+    time** the tree is flattened — a `mix(fg, bg, m)` sends `m` down one branch
+    and `1 − m` down the other, a `layer` sends full weight down both — so each
+    leaf arrives with a weight that is a product of mask expressions, compiled
+    into the same program. At **shading time** the leaves pool by kind and the
+    pools normalise into OpenPBR parameters (diffuse+metal → `base_color` and
+    `base_metalness` as their ratio; dielectric+conductor → one joint
+    `specular_roughness`; sheen → fuzz). A leaf's own `weight` input multiplies
+    its path weight, which is what silences the `weight = 0` "transmission
+    dummy" both assets use as a mix's null branch. What this cannot represent:
+    two dielectrics of *different* roughness layered over one another collapse
+    to one weighted roughness. A `conductor_bsdf` fed by `artistic_ior` is
+    reduced back to a reflectivity colour through the exact inverse of
+    Gulbrandsen's formula, so a metal authored either way lands on the same
+    OpenPBR metal lobe.
+  - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
+    set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
+    which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
+    `roxmltree` rejects the whole document with an `InvalidChar`. `parse.rs`
+    escapes the two specified tokens first, so this is not "the UDIM path is
+    wrong" but "no material at all" if it is ever removed.
+  - **Verified in numbers, not by eye** — `examples/mtlx_shade` prints the
+    OpenPBR parameters a graph reduces to at a named `(u, v)`. This is what
+    settled the teapot: the render looked washed out against the reference, and
+    the probe showed the graph producing exactly the right deep blue
+    (0.005, 0.024, 0.074) on the body against light ribs — so the fault was the
+    sample scene's exposure, not the material. A mis-decoded albedo is a
+    plausible pastel and a mask read at the wrong colour space is a plausible
+    blend; comparing renders settles nothing.
+  - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
+    KiB of textures, what `tests/usd_scene.rs` runs against) and
+    `samples/materialx_teapot.usda` (the shot layer for the DPEL teapot, which
+    is gitignored and must be downloaded).
+- **UV textures** (`texture.rs`, host decoder in `crust-assets/src/uv_texture.rs`) —
+  the chart a `primvars:st` primvar carries, as opposed to Ptex's per-face
+  parameterisation. `Texture2D` is `crust_mtlx::Texture` re-exported — the
+  standalone reader has to name the sampler it consumes and crust-core adopts
+  that name, the same way it adopts `crust_rt::Geometry`; a separate crust-core
+  trait plus adapter would put a second vtable hop on every texel fetch that fat
+  LTO cannot remove. It is shaped like `PtexTexture` and for the same
+  reason: a production UDIM set is fourteen 4K images per map, so the host
+  decodes and hands back a **sampler**, and `Texture2D::eval` takes
+  **unwrapped** coordinates — `u = 3.4` is the fourth UDIM tile, not `0.4` of
+  the first, and tile selection is the host's addressing job. `AssetLoader::load_texture`
+  carries the colour space with the path, because the file does not say: an
+  8-bit PNG holding albedo is display-encoded while the same encoding holding a
+  normal, a roughness or a mask is raw data. MaterialX states it per input
+  (`colorspace="srgb_texture"`), and **anything else, including an absent
+  attribute, means raw**.
+  - `UvMap` (`rt_world.rs`) carries per-triangle **corner** UVs, not per-vertex:
+    USD's `st` is usually `faceVarying`, and a vertex on a UV seam has one
+    position but two texture coordinates. Built only when the bound material
+    reports `uses_uv()` — 36 bytes a triangle that an untextured production
+    stage should not pay.
+  - **Tangents exist only on baked geometry.** A tangent frame is world-space,
+    so it can only be built once a placement is known — and a prototype shared
+    by N instances has N transforms against one table. Instanced meshes
+    therefore carry UVs (which no transform touches) and no tangent, and normal
+    maps on them fall back to the geometric normal.
+  - **The resolution cap is not an optimisation.** Fourteen 4096² tiles is 674
+    MiB for one map, and the teapot's ceramic binds four across two materials.
+    `CRUST_TEX_MAX` (default 1024) box-filters each tile down at load; tiles are
+    kept as `u8` and converted through a 256-entry table on lookup, since the
+    files are 8-bit PNGs and nothing recovers precision that was never there.
+- **Ptex** (`texture.rs`, plus the decoder in `crust-assets/src/ptex_texture.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
   island's Ptex shader paths — `PxrPtexture.filename` and `HwPtexTexture_1.file` —
@@ -593,7 +729,7 @@ Schema mapping:
   - **crust-core decodes nothing.** `inputs:texture:file` is resolved against the USD
     layer's directory and handed to the host through the `AssetLoader` trait
     (`Scene::from_usd_with_assets`); `Scene::from_usd` passes `NoAssets`, which warns and
-    falls back to the uniform colour. `crust-render` implements it with `exr` (OpenEXR)
+    falls back to the uniform colour. `crust-assets` implements it with `exr` (OpenEXR)
     and `image` (`.hdr` and LDR, the latter un-gamma'd to linear). This is the seam
     general texture support should grow through.
 - `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
@@ -771,6 +907,32 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   there), so it is a correctness improvement for other stages rather than a fix for this
   one. The regression test would need rewriting to assert the geometry arrives instead of
   that it is skipped.
+- **MaterialX caveats.** The BSDF reduction projects a layered MaterialX stack
+  onto one OpenPBR lobe set, so layering that OpenPBR cannot express is
+  averaged: two dielectrics of different roughness over one another become one
+  intermediate roughness (the teapot's ceramic layers a 0.002 glaze and a
+  mask-driven rougher one exactly this way). Fixing it properly means a layered
+  BSDF material, not a different reduction. `subsurface_bsdf` maps to OpenPBR's
+  subsurface weight but not its radius; `thin_film_bsdf` is pooled as an
+  ordinary dielectric; MaterialX transmission maps to no lobe, so a
+  MaterialX-authored glass renders opaque. The graph is re-evaluated at every
+  `scatter`/`eval` call on a vertex rather than memoised per hit, which is the
+  obvious optimisation if MaterialX surfaces ever dominate a render. Only
+  document-scope and `<nodegraph>` nodes are read — `<nodedef>` custom node
+  *implementations* are not, so a graph instantiating one gets that input at a
+  constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
+  come from USD.
+- **UV texture caveats.** Sampling is bilinear with no mip pyramid and no
+  filter width, so a texture minified far below its resolution aliases (the cap
+  hides most of this by accident, not by design). Normal maps need a tangent,
+  which only baked single-placement geometry has (above). A **subdivided** mesh
+  carries no chart at all: refining a face-varying UV channel is a second
+  synthetic hierarchy through the refiner, and carrying the cage's UVs onto
+  refined triangles would stretch every texture across the patch it came from —
+  so such a mesh warns and renders on its material's constant inputs. Only
+  `primvars:st` (and `uv`/`st0`/`UVMap` as fallbacks) is read; there is no
+  general primvar plumbing and no second UV set. `texcoord`'s `index` input is
+  ignored for the same reason.
 - **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
   skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other

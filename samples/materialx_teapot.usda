@@ -1,0 +1,133 @@
+#usda 1.0
+(
+    doc = """Render wrapper for the DPEL MaterialX Teapot.
+
+    `MaterialXTeapotLion-1.0/Teapot/teapot.usda` is an *asset* layer: geometry
+    plus material bindings, and deliberately no camera, no lights and no render
+    settings. Rendering it directly falls back to the procedural camera, which
+    frames a 0.2 m object from ten metres away, and to the built-in sky
+    gradient. This layer supplies the shot.
+
+    The teapot is Z-up and roughly 0.21 x 0.19 x 0.26, centred near
+    (0.013, -0.002, 0.132) — so every light and distance here is in the tens of
+    centimetres, not the metres a room-scale scene would use.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def "Teapot" (
+        prepend references = @MaterialXTeapotLion-1.0/Teapot/teapot.usda@
+    )
+    {
+    }
+
+    # A neutral ground so the teapot casts a shadow and picks up bounce. Two
+    # triangles rather than a UsdGeomPlane, which crust does not import.
+    def Mesh "Ground" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)]
+        rel material:binding = </World/Looks/GroundMaterial>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "GroundMaterial"
+        {
+            token outputs:surface.connect = </World/Looks/GroundMaterial/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.6, 0.6, 0.62)
+                float inputs:roughness = 0.75
+                float inputs:metallic = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    # Sky. A DomeLight replaces crust's built-in gradient outright, which
+    # matters here: that gradient is authored Y-up and this stage is Z-up, so
+    # without a dome the "sky" would come from the side.
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.55, 0.62, 0.75)
+        # A DomeLight's intensity is radiance, so a uniform dome puts roughly
+        # `pi * intensity` of irradiance on an upward-facing surface. 0.25 is
+        # therefore already a bright overcast sky in linear light; the value
+        # that reads as "ambient" on a 0..1 display is well under 1.
+        # Raised from there only until the sweep behind the teapot reads as
+        # the reference's near-white studio background.
+        float inputs:intensity = 0.45
+    }
+
+    # Key. Rect lights emit along their local -Z, so this one is rotated to
+    # face down and back toward the camera.
+    def RectLight "Key"
+    {
+        color3f inputs:color = (1, 0.96, 0.9)
+        # Radiance, not power: this light subtends ~0.5 sr from the teapot,
+        # so its irradiance there is roughly `intensity/2`. At the tens of
+        # centimetres this scene works at, that makes single digits the
+        # correct order of magnitude — the hundreds an interior scene would
+        # use blow the ground to pure white here.
+        float inputs:intensity = 14
+        float inputs:width = 0.5
+        float inputs:height = 0.5
+        matrix4d xformOp:transform = ( (0.9061, 0.4226, 0, 0), (-0.2500, 0.5360, 0.8061, 0), (0.3406, -0.7303, 0.5918, 0), (0.30, -0.55, 0.62, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    # Rim, from behind and to the left, to separate the silhouette from the
+    # ground and give the metal handle something to catch.
+    def RectLight "Rim"
+    {
+        color3f inputs:color = (0.75, 0.82, 1.0)
+        float inputs:intensity = 8
+        float inputs:width = 0.4
+        float inputs:height = 0.4
+        matrix4d xformOp:transform = ( (-0.8000, -0.6000, 0, 0), (0.2400, -0.3200, 0.9165, 0), (-0.5499, 0.7332, 0.4000, 0), (-0.35, 0.45, 0.35, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 42
+        float horizontalAperture = 36
+        float focusDistance = 0.7109
+        # f/0 means a pinhole: with a 0.2 m subject at 0.7 m any real aperture
+        # would throw most of the teapot out of focus, and depth of field is
+        # not what this scene is here to show.
+        float fStop = 0
+        matrix4d xformOp:transform = (
+            (0.744185141, 0.667973410, -0.000000000, 0),
+            (-0.225500346, 0.251228573, 0.941293683, 0),
+            (0.628759151, -0.700496772, 0.337588806, 0),
+            (0.460000000, -0.500000000, 0.360000000, 1)
+        )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+
+# crust resolves render settings through the stage's `renderSettingsPrimPath`
+# metadatum, falling back to the conventional `/Render/settings` — so the prim
+# has to live there, not at the stage root.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (960, 540)
+        int crust:samplesPerPixel = 128
+        int crust:maxDepth = 12
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+    }
+}

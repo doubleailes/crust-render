@@ -30,6 +30,30 @@ pub struct HitRecord {
     /// mapped out of the hit triangle's barycentrics. Meaningless — and left
     /// at zero — when `face_id` is [`HitRecord::NO_FACE`].
     pub face_uv: (f32, f32),
+    /// Interpolated `primvars:st` texture coordinates, the chart a *UV*
+    /// texture indexes — unrelated to `face_uv`, which is Ptex's per-face
+    /// parameterisation. Deliberately **not** wrapped into `[0, 1]`: a UDIM
+    /// set addresses its tiles by the integer part, so clamping here would
+    /// collapse fourteen 4K tiles onto one.
+    ///
+    /// Left at `(0, 0)` — with `has_uv` false — for geometry carrying no `st`
+    /// primvar, or whose material asks for no UV texture.
+    pub uv: (f32, f32),
+    /// World-space surface tangent along increasing `u`, already
+    /// orthogonalised against `normal` and unit length. The frame a
+    /// tangent-space normal map is expressed in; the bitangent is
+    /// `normal × tangent`.
+    ///
+    /// `Vec3A::ZERO` when no tangent is known, which a material must read as
+    /// "shade with the geometric normal" rather than as a degenerate frame.
+    /// The importer can only build one for *baked* (single-placement)
+    /// geometry — see [`crate::UvMap::tangents`].
+    pub tangent: Vec3A,
+    /// Whether `uv` carries a real texture coordinate.
+    ///
+    /// Distinct from `uv != (0, 0)`: the origin of the chart is a perfectly
+    /// ordinary texel, so a sentinel value would alias onto valid data.
+    pub has_uv: bool,
 }
 
 /// Hand-written rather than derived so `face_id` defaults to
@@ -44,6 +68,9 @@ impl Default for HitRecord {
             front_face: false,
             face_id: HitRecord::NO_FACE,
             face_uv: (0.0, 0.0),
+            uv: (0.0, 0.0),
+            tangent: Vec3A::ZERO,
+            has_uv: false,
         }
     }
 }

@@ -61,3 +61,53 @@ impl std::fmt::Debug for PtexRef {
         write!(f, "Ptex({} faces)", self.0.num_faces())
     }
 }
+
+// ---------------------------------------------------------------------------
+// UV textures
+// ---------------------------------------------------------------------------
+
+/// How a texture file's stored values relate to linear radiometric ones.
+///
+/// Carried across the [`crate::AssetLoader`] seam rather than decided inside
+/// it, because the file itself does not say: an 8-bit PNG holding albedo is
+/// display-encoded while the *same encoding* holding a normal map, a roughness
+/// or a mask is raw data, and un-gamma'ing the latter would bend every value
+/// toward zero. MaterialX states it per input (`colorspace="srgb_texture"`),
+/// which is where crust reads it from — see `docs/color_management.md`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ColorSpace {
+    /// sRGB display-encoded; the host applies the inverse EOTF at load.
+    Srgb,
+    /// Already linear, or not a colour at all (normals, roughness, masks).
+    Raw,
+}
+
+impl ColorSpace {
+    /// Maps a MaterialX `colorspace` attribute onto a decode.
+    ///
+    /// `srgb_texture` (and the older `sRGB`-family spellings) mean
+    /// display-encoded, and **anything else, including an absent attribute,
+    /// means raw**. That default is the correct one and not merely
+    /// convenient — normal, roughness, ORM and mask maps carry no colour, and
+    /// the DPEL assets mark only their albedos. One function so the importer
+    /// and the probe examples cannot drift on which spellings they accept.
+    pub fn from_mtlx(name: Option<&str>) -> ColorSpace {
+        match name.map(str::to_ascii_lowercase).as_deref() {
+            Some("srgb_texture" | "srgb" | "srgb_tx" | "g22_rec709" | "g18_rec709") => {
+                ColorSpace::Srgb
+            }
+            _ => ColorSpace::Raw,
+        }
+    }
+}
+
+/// The UV-addressed texture sampler, and its shareable handle.
+///
+/// Defined by the `crust-mtlx` crate rather than here, for the same reason
+/// `Geometry` is defined by `crust-rt`: the standalone library has to *name*
+/// the thing it consumes, and crust-core adopts that name as its own UV
+/// sampler interface. A separate crust-core trait with an adapter would put a
+/// second vtable hop on every texel fetch that fat LTO cannot remove — and a
+/// blanket `impl` bridging the two is forbidden by the orphan rule anyway.
+/// `Texture2D` is the crust-side name; it is the same trait.
+pub use crust_mtlx::{Texture as Texture2D, TextureRef};

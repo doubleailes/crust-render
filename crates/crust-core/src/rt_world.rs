@@ -8,6 +8,7 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
 use crust_rt::{AABB, Geometry, MASK_ALL, SceneBuilder};
+use glam::Vec3A;
 use std::sync::Arc;
 
 /// How one triangle sits inside the polygon it was cut from.
@@ -99,9 +100,106 @@ impl FaceMap {
     }
 }
 
-/// A geometry's face table, plus whether its placement mirrored the winding.
-struct FaceRef {
-    map: Arc<FaceMap>,
+/// Per-triangle `primvars:st` texture coordinates, and the tangent frame a
+/// normal map needs to be read in.
+///
+/// Parallel to [`FaceMap`] but answering a different question: `FaceMap` maps a
+/// triangle back to the *polygon* it was cut from (Ptex's addressing), whereas
+/// this carries the mesh's UV chart, which a UDIM image set indexes. A mesh can
+/// want either, both, or neither.
+///
+/// Corner UVs rather than a per-vertex array because USD's `st` is usually
+/// **faceVarying**: a vertex on a UV seam carries a different coordinate in
+/// each face touching it, so there is no per-point value to interpolate. Held
+/// behind an `Arc` for the same reason as `FaceMap` — one distinct mesh, many
+/// placements.
+pub struct UvMap {
+    /// Corner `(u, v)` per triangle, index-parallel with the triangle list
+    /// handed to the kernel, in the triangle's *original* vertex order.
+    pub uvs: Vec<[[f32; 2]; 3]>,
+    /// World-space `dP/du` per triangle, index-parallel with `uvs`.
+    ///
+    /// Empty when no tangent could be built. The importer computes these from
+    /// *world-space* vertices, which only exist for geometry it baked flat —
+    /// an instanced prototype's triangles live in prototype space, and its
+    /// placements each apply a different transform, so one table cannot hold a
+    /// world-space tangent for all of them. Such meshes therefore carry UVs
+    /// (which no transform touches) and no tangent, and normal maps on them
+    /// fall back to the geometric normal.
+    pub tangents: Vec<Vec3A>,
+}
+
+impl UvMap {
+    /// Interpolates the hit triangle's corner UVs and returns them with the
+    /// triangle's tangent, or `None` when `prim_id` is out of range.
+    ///
+    /// `swapped` undoes a mirrored placement's index swap exactly as
+    /// [`FaceMap::resolve`] does: corner UVs are stored in original vertex
+    /// order, so restoring the barycentrics to that order is all it takes.
+    pub fn resolve(&self, prim_id: u32, u: f32, v: f32, swapped: bool) -> Option<((f32, f32), Vec3A)> {
+        let i = prim_id as usize;
+        let [a, b, c] = *self.uvs.get(i)?;
+        let (u, v) = if swapped { (v, u) } else { (u, v) };
+        let w = 1.0 - u - v;
+        let tangent = self.tangents.get(i).copied().unwrap_or(Vec3A::ZERO);
+        Some((
+            (
+                w * a[0] + u * b[0] + v * c[0],
+                w * a[1] + u * b[1] + v * c[1],
+            ),
+            tangent,
+        ))
+    }
+
+    /// Builds the per-triangle tangents from world-space vertices.
+    ///
+    /// The tangent is the standard solve of
+    /// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which
+    /// `u` grows across the triangle. A degenerate UV triangle (zero area in
+    /// texture space, which a collapsed or unwrapped-flat face produces) has
+    /// no such direction; it gets `ZERO`, which the shader reads as "no
+    /// tangent frame" rather than as a valid but arbitrary one.
+    pub fn build_tangents(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
+        self.tangents.clear();
+        self.tangents.reserve(tris.len());
+        for (t, tri) in tris.iter().enumerate() {
+            let Some(uv) = self.uvs.get(t) else {
+                self.tangents.push(Vec3A::ZERO);
+                continue;
+            };
+            let (p0, p1, p2) = (
+                verts[tri[0] as usize],
+                verts[tri[1] as usize],
+                verts[tri[2] as usize],
+            );
+            let (e1, e2) = (p1 - p0, p2 - p0);
+            let (du1, dv1) = (uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
+            let (du2, dv2) = (uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+            let det = du1 * dv2 - du2 * dv1;
+            let t = if det.abs() > 1e-20 {
+                let tan = (e1 * dv2 - e2 * dv1) / det;
+                if tan.length_squared() > 1e-30 {
+                    tan.normalize()
+                } else {
+                    Vec3A::ZERO
+                }
+            } else {
+                Vec3A::ZERO
+            };
+            self.tangents.push(t);
+        }
+    }
+}
+
+/// A geometry's side tables, plus whether its placement mirrored the winding.
+///
+/// One struct rather than two parallel `Vec`s because the mirror flag and the
+/// barycentric convention it corrects are shared: both tables index the same
+/// triangles and both must undo the same swap.
+#[derive(Default)]
+struct SideTables {
+    map: Option<Arc<FaceMap>>,
+    uv: Option<Arc<UvMap>>,
     swapped: bool,
 }
 
@@ -112,9 +210,9 @@ pub struct WorldBuilder {
     rt: SceneBuilder,
     materials: Vec<Arc<dyn Material>>,
     /// Sparse, indexed by `geom_id`: only geometries whose material actually
-    /// samples a per-face texture carry a table, so a scene with no Ptex pays
-    /// one `None` per geometry and nothing more.
-    faces: Vec<Option<FaceRef>>,
+    /// samples a per-face or UV texture carry a table, so a scene with no
+    /// textures pays one empty entry per geometry and nothing more.
+    faces: Vec<SideTables>,
 }
 
 impl WorldBuilder {
@@ -138,7 +236,7 @@ impl WorldBuilder {
     ) -> u32 {
         let id = self.rt.attach_masked(geometry, mask);
         self.materials.push(material);
-        self.faces.push(None);
+        self.faces.push(SideTables::default());
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
     }
@@ -152,7 +250,24 @@ impl WorldBuilder {
     /// # Panics
     /// If `id` was never attached or reserved.
     pub fn set_face_map(&mut self, id: u32, map: Arc<FaceMap>, swapped: bool) {
-        self.faces[id as usize] = Some(FaceRef { map, swapped });
+        let t = &mut self.faces[id as usize];
+        t.map = Some(map);
+        t.swapped = swapped;
+    }
+
+    /// Records the per-triangle UV table for a geometry, so hits on it report
+    /// `primvars:st` coordinates and a tangent frame.
+    ///
+    /// `swapped` when the placement mirrored the triangle winding, exactly as
+    /// for [`WorldBuilder::set_face_map`] — a geometry carrying both tables
+    /// shares the one flag, since both index the same triangles.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_uv_map(&mut self, id: u32, map: Arc<UvMap>, swapped: bool) {
+        let t = &mut self.faces[id as usize];
+        t.uv = Some(map);
+        t.swapped = swapped;
     }
 
     /// Number of geometries attached so far.
@@ -221,7 +336,7 @@ pub struct WorldHit<'a> {
 pub struct World {
     scene: crust_rt::Scene,
     materials: Vec<Arc<dyn Material>>,
-    faces: Vec<Option<FaceRef>>,
+    faces: Vec<SideTables>,
 }
 
 impl World {
@@ -231,12 +346,20 @@ impl World {
         // The kernel reports triangle barycentrics; a per-face-textured mesh
         // needs the polygon they belong to. Geometries without a table (the
         // overwhelming majority) skip straight past this.
-        let (face_id, face_uv) = match &self.faces[h.geom_id as usize] {
-            Some(f) => match f.map.resolve(h.prim_id, h.u, h.v, f.swapped) {
+        let tables = &self.faces[h.geom_id as usize];
+        let (face_id, face_uv) = match &tables.map {
+            Some(m) => match m.resolve(h.prim_id, h.u, h.v, tables.swapped) {
                 Some((face, u, v)) => (face, (u, v)),
                 None => (HitRecord::NO_FACE, (0.0, 0.0)),
             },
             None => (HitRecord::NO_FACE, (0.0, 0.0)),
+        };
+        let (uv, tangent, has_uv) = match &tables.uv {
+            Some(m) => match m.resolve(h.prim_id, h.u, h.v, tables.swapped) {
+                Some((uv, tangent)) => (uv, tangent, true),
+                None => ((0.0, 0.0), Vec3A::ZERO, false),
+            },
+            None => ((0.0, 0.0), Vec3A::ZERO, false),
         };
         Some(WorldHit {
             rec: HitRecord {
@@ -246,6 +369,9 @@ impl World {
                 front_face: h.front_face,
                 face_id,
                 face_uv,
+                uv,
+                tangent,
+                has_uv,
             },
             mat: self.materials[h.geom_id as usize].as_ref(),
             geom_id: h.geom_id,

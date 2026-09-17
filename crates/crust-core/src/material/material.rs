@@ -95,6 +95,18 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// Whether this material reads [`HitRecord::uv`] — i.e. samples a
+    /// UV-addressed texture or a normal map.
+    ///
+    /// Gates the per-triangle UV table exactly as [`Material::face_texture`]
+    /// gates the per-face one, and for the same reason: the table is as large
+    /// as the triangle list (36 bytes a triangle, corner UVs plus a tangent),
+    /// and a production stage is overwhelmingly geometry that never reads a
+    /// texture coordinate. Those meshes should pay nothing.
+    fn uses_uv(&self) -> bool {
+        false
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

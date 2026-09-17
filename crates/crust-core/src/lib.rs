@@ -12,6 +12,10 @@ mod medium;
 mod ray;
 mod rt_world;
 mod scene;
+/// MaterialX surfaces — `MtlxMaterial`, the lobe pooling onto OpenPBR, and
+/// the importer's `load`. The document reader itself is the `crust-mtlx`
+/// crate, re-exported below as [`mtlx`].
+pub use material::materialx;
 mod stats;
 mod texture;
 mod tracer;
@@ -26,6 +30,8 @@ pub type PathSampler = openqmc::SobolSampler;
 /// The intersection kernel (Embree-shaped scene/geometry API), re-exported
 /// so applications can build [`rt::Geometry`] values for [`WorldBuilder`].
 pub use crust_rt as rt;
+/// The standalone MaterialX reader crust-core builds `MtlxMaterial` on.
+pub use crust_mtlx as mtlx;
 
 pub use aabb::AABB;
 pub use buffer::Buffer;
@@ -44,13 +50,13 @@ pub use light::{
 pub use material::*;
 pub use medium::Medium;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
-pub use rt_world::{FaceMap, FanSlice, World, WorldBuilder, WorldHit};
+pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderStats, SceneCounters,
     peak_memory_bytes,
 };
-pub use texture::{PtexRef, PtexTexture};
+pub use texture::{ColorSpace, PtexRef, PtexTexture, Texture2D, TextureRef};
 pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};
