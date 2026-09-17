@@ -15,18 +15,37 @@ env:
 
 jobs:
   build:
+    name: build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+      - name: Build
+        run: cargo build --workspace --verbose
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+      # `--no-fail-fast` keeps going past the first failing test binary so a
+      # run reports every broken target at once, not just the first.
+      - name: Run tests
+        run: cargo test --workspace --no-fail-fast --verbose
+
   release:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
     if: github.event_name == 'release' && github.event.action == 'created'
-    needs: [build]
+    needs: [build, test]
     strategy:
       fail-fast: false
       matrix:
