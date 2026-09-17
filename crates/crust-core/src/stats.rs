@@ -577,7 +577,7 @@ impl fmt::Display for RenderStats {
         writeln!(f, "Profile by time (* = nested, counted in its parent)")?;
         writeln!(f, "{rule}")?;
         let mut by_time: Vec<&Phase> = self.phases.iter().collect();
-        by_time.sort_by(|a, b| b.duration.cmp(&a.duration));
+        by_time.sort_by_key(|p| std::cmp::Reverse(p.duration));
         for p in by_time {
             let marker = if p.depth > 0 { "*" } else { " " };
             writeln!(
