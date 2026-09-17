@@ -88,12 +88,15 @@ pub fn flatten(
     }
     match node.category.as_str() {
         "surfacematerial" => {
-            if let Some(n) = bsdf_input(c, node, "surfaceshader") {
+            // `surfaceshader`-typed, not BSDF-typed, and the node's only
+            // connection — there is nothing to disambiguate, so this follows
+            // whatever it points at.
+            if let Some(n) = connected_node(c, node, "surfaceshader") {
                 flatten(c, &n, weight, depth + 1, out);
             }
         }
         "surface" => {
-            if let Some(n) = bsdf_input(c, node, "bsdf") {
+            if let Some(n) = connected_node(c, node, "bsdf") {
                 flatten(c, &n, weight, depth + 1, out);
             }
         }
@@ -138,12 +141,16 @@ pub fn flatten(
             }
         }
         "multiply" => {
-            // `multiply(BSDF, float|color)` attenuates a lobe. The scalar side
-            // is whichever input is not itself a BSDF.
-            let (bsdf, scalar) = match (bsdf_input(c, node, "in1"), bsdf_input(c, node, "in2")) {
-                (Some(n), _) => (Some(n), "in2"),
-                (None, Some(n)) => (Some(n), "in1"),
-                _ => (None, "in2"),
+            // `multiply(BSDF, float|color)` attenuates a lobe. Which side
+            // holds the BSDF is decided by the declared type, never by
+            // position: the scalar side is routinely a connected node (a
+            // texture, a mask chain) rather than a literal, so taking the
+            // first *connected* input would make that scalar the BSDF. The
+            // real branch would then be compiled as the attenuation value and
+            // every lobe under it silently lost.
+            let (bsdf, scalar) = match bsdf_input(c, node, "in1") {
+                Some(n) => (Some(n), "in2"),
+                None => (bsdf_input(c, node, "in2"), "in1"),
             };
             if let Some(n) = bsdf {
                 let s = c.input_or(node, scalar, Val::ONE);
@@ -222,8 +229,12 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, weight: u32) -> Option<Lobe> {
     })
 }
 
-/// Follows a BSDF-typed input to the node feeding it.
-fn bsdf_input(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
+/// Follows an input to the node feeding it, whatever that node's type.
+///
+/// For inputs that cannot be confused with an operand of another type — a
+/// `surfacematerial`'s one shader, a `surface`'s one bsdf. Where two inputs
+/// compete for the same role, use [`bsdf_input`] instead.
+fn connected_node(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
     let input = node.input(name)?;
     let scope = node.graph.clone().unwrap_or_default();
     match &input.source {
@@ -233,6 +244,31 @@ fn bsdf_input(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
         }
         Source::Value(_) => None,
     }
+}
+
+/// Follows a **BSDF-typed** input to the node feeding it, and `None` for one
+/// carrying anything else.
+///
+/// The type is what separates a BSDF branch from an operand beside it, and it
+/// has to be checked rather than inferred from position: `multiply`'s two
+/// inputs are both ordinary connections, and only the declared type says
+/// which of them is the lobe and which the attenuation.
+///
+/// Either declaration counts — the input's own `type`, or the target node's.
+/// A conformant document states both, but a `type` attribute omitted on an
+/// input parses as `float` (its schema default), and dropping a branch over
+/// that would trade this bug for a quieter one: a node declared
+/// `type="BSDF"` is a BSDF whatever the edge to it says.
+fn bsdf_input(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
+    let declared = node.input(name).is_some_and(|i| is_bsdf_type(&i.type_name));
+    let target = connected_node(c, node, name)?;
+    (declared || is_bsdf_type(&target.type_name)).then_some(target)
+}
+
+/// MaterialX's type name for a BSDF, as authored (`BSDF`, upper case in every
+/// document the specification's own examples ship).
+fn is_bsdf_type(type_name: &str) -> bool {
+    type_name.eq_ignore_ascii_case("bsdf")
 }
 
 #[cfg(test)]
@@ -285,6 +321,97 @@ mod tests {
         <input name="mix" type="float" value="0.25" />
       </mix>
     </materialx>"#;
+
+    /// `multiply` with the *scalar* authored first, and as a connected node
+    /// rather than a literal — which is how a mask or a texture reaches an
+    /// attenuation in a real look-dev graph.
+    const SCALAR_FIRST: &str = r#"<materialx>
+      <constant name="k" type="float">
+        <input name="value" type="float" value="0.25" />
+      </constant>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+        <input name="color" type="color3" value="0.8, 0.2, 0.2" />
+      </oren_nayar_diffuse_bsdf>
+      <multiply name="m" type="BSDF">
+        <input name="in1" type="float" nodename="k" />
+        <input name="in2" type="BSDF" nodename="d" />
+      </multiply>
+    </materialx>"#;
+
+    #[test]
+    fn a_multiply_finds_its_bsdf_whichever_input_holds_it() {
+        // The regression this pins: the operand used to be whichever input
+        // resolved to a node *first*, so a connected scalar in `in1` was
+        // taken as the BSDF — the real branch became the attenuation value
+        // and its lobe vanished from the reduction entirely.
+        let w = weights(SCALAR_FIRST, "m");
+        assert_eq!(w.len(), 1, "the BSDF branch was dropped: {w:?}");
+        assert_eq!(w[0].0, LobeKind::Diffuse);
+        assert!((w[0].1 - 0.25).abs() < 1e-5, "weight {}", w[0].1);
+    }
+
+    #[test]
+    fn a_multiply_still_attenuates_a_bsdf_authored_first() {
+        // The conventional order, with a literal scalar, is unchanged.
+        let w = weights(
+            r#"<materialx>
+                 <conductor_bsdf name="c" type="BSDF">
+                   <input name="roughness" type="float" value="0.1" />
+                 </conductor_bsdf>
+                 <multiply name="m" type="BSDF">
+                   <input name="in1" type="BSDF" nodename="c" />
+                   <input name="in2" type="float" value="0.5" />
+                 </multiply>
+               </materialx>"#,
+            "m",
+        );
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].0, LobeKind::Conductor);
+        assert!((w[0].1 - 0.5).abs() < 1e-5, "weight {}", w[0].1);
+    }
+
+    #[test]
+    fn a_surfacematerial_still_reaches_its_bsdf() {
+        // `surfaceshader` and `surfacematerial` inputs are not BSDF-typed, so
+        // the type check must not be applied to them — the whole material
+        // would reduce to no lobes at all.
+        let w = weights(
+            r#"<materialx>
+                 <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+                   <input name="color" type="color3" value="0.8, 0.8, 0.8" />
+                 </oren_nayar_diffuse_bsdf>
+                 <surface name="s" type="surfaceshader">
+                   <input name="bsdf" type="BSDF" nodename="d" />
+                 </surface>
+                 <surfacematerial name="mat" type="material">
+                   <input name="surfaceshader" type="surfaceshader" nodename="s" />
+                 </surfacematerial>
+               </materialx>"#,
+            "mat",
+        );
+        assert_eq!(w, vec![(LobeKind::Diffuse, 1.0)]);
+    }
+
+    #[test]
+    fn an_untyped_edge_to_a_bsdf_node_is_still_a_bsdf() {
+        // A `type` attribute omitted on the input parses as `float`. The node
+        // it points at declares `BSDF`, and that is enough — rejecting here
+        // would drop a branch that used to reduce correctly.
+        let w = weights(
+            r#"<materialx>
+                 <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+                   <input name="color" type="color3" value="0.5, 0.5, 0.5" />
+                 </oren_nayar_diffuse_bsdf>
+                 <multiply name="m" type="BSDF">
+                   <input name="in1" nodename="d" />
+                   <input name="in2" type="float" value="0.5" />
+                 </multiply>
+               </materialx>"#,
+            "m",
+        );
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!((w[0].1 - 0.5).abs() < 1e-5, "weight {}", w[0].1);
+    }
 
     #[test]
     fn a_mix_partitions_weight_between_its_branches() {
