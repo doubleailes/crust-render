@@ -587,9 +587,13 @@ Schema mapping:
     pools normalise into OpenPBR parameters (diffuse+metal → `base_color` and
     `base_metalness` as their ratio; dielectric+conductor → one joint
     `specular_roughness`; sheen → fuzz). A leaf's own `weight` input multiplies
-    its path weight; a leaf whose weight is a *literal* zero — the "transmission
-    dummy" both assets use as a mix's null branch — is pruned at flatten time
-    rather than carried at weight 0. **Two specular lobes.** The flattening
+    its path weight; a branch that is a *literal* zero — either a leaf whose
+    `weight` is 0, the "transmission dummy" both assets use as a mix's null
+    branch, or a `multiply(BSDF, 0)` — is pruned at flatten time rather than
+    carried at weight 0. Both forms have to be pruned, and for the structural
+    reason rather than the numeric one: `reduce` drops a zero-weight lobe
+    anyway, but the `layer` promotion below counts it as a specular interface
+    first. **Two specular lobes.** The flattening
     keeps one structural fact: a dielectric that is the `top` of a `layer`
     whose base already carries a specular (another dielectric, a conductor)
     arrives as `LobeKind::Coat` and pools onto OpenPBR's coat lobe with its own
@@ -603,7 +607,7 @@ Schema mapping:
     reduces to `coat_weight = 0` at every point — correctly, and worth knowing
     before blaming the coat for anything the teapot does. The decision is
     by tree shape, never by evaluated weight (a per-point flip would draw a
-    seam along a mask's zero contour), which is why the literal-zero dummy has
+    seam along a mask's zero contour), which is why a literal-zero branch has
     to be pruned before the layer looks at its base. What this still cannot
     represent: three or more stacked dielectrics pool their upper ones into one
     coat roughness, and a coat dielectric's `tint` is ignored (MaterialX tints

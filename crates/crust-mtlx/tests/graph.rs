@@ -1220,6 +1220,100 @@ fn a_connected_zero_weight_leaf_still_reaches_the_pool() {
 }
 
 #[test]
+fn a_literal_zero_multiply_is_pruned_at_compile_time() {
+    // `multiply(BSDF, 0)` is the other way to author a null branch, and it has
+    // to prune for the same reason a literal `weight = 0` leaf does: the lobe
+    // under it can never contribute, but it would still count as a specular
+    // interface and promote a dielectric layered above it to a coat.
+    let l = lobes_of(
+        r#"<materialx>
+             <dielectric_bsdf name="t" type="BSDF" />
+             <multiply name="m" type="BSDF">
+               <input name="in1" type="BSDF" nodename="t" />
+               <input name="in2" type="float" value="0" />
+             </multiply>
+           </materialx>"#,
+        "m",
+    );
+    assert!(l.is_empty(), "a literal x0 branch reached the pools: {l:?}");
+}
+
+#[test]
+fn a_zero_multiplied_dielectric_does_not_promote_the_glaze_above_it() {
+    // The shape this regression is about: a diffuse base with a
+    // zero-multiplied dielectric over it, all under a clear glaze. The glaze
+    // must stay the *base specular* — the only specular interface the surface
+    // actually has — rather than becoming a coat over a base that carries none.
+    let l = lobes_of(
+        r#"<materialx>
+             <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+             <dielectric_bsdf name="dummy" type="BSDF" />
+             <multiply name="off" type="BSDF">
+               <input name="in1" type="BSDF" nodename="dummy" />
+               <input name="in2" type="float" value="0" />
+             </multiply>
+             <layer name="inner" type="BSDF">
+               <input name="top" type="BSDF" nodename="off" />
+               <input name="base" type="BSDF" nodename="d" />
+             </layer>
+             <dielectric_bsdf name="clear" type="BSDF">
+               <input name="roughness" type="vector2" value="0.02, 0.02" />
+             </dielectric_bsdf>
+             <layer name="L" type="BSDF">
+               <input name="top" type="BSDF" nodename="clear" />
+               <input name="base" type="BSDF" nodename="inner" />
+             </layer>
+           </materialx>"#,
+        "L",
+    );
+    let kinds: Vec<LobeKind> = l.iter().map(|x| x.0).collect();
+    assert_eq!(
+        kinds,
+        vec![LobeKind::Diffuse, LobeKind::Dielectric],
+        "the zero-multiplied dummy promoted the glaze: {l:?}"
+    );
+}
+
+#[test]
+fn a_connected_zero_multiply_still_reaches_the_pool() {
+    // Literals only, same as the leaf weight: a connected scalar is a runtime
+    // value, and pruning on it would make the lobe set — and with it the
+    // coat-vs-base-specular decision — depend on the shading point.
+    let l = lobes_of(
+        r#"<materialx>
+             <constant name="k" type="float">
+               <input name="value" type="float" value="0" />
+             </constant>
+             <dielectric_bsdf name="t" type="BSDF" />
+             <multiply name="m" type="BSDF">
+               <input name="in1" type="BSDF" nodename="t" />
+               <input name="in2" type="float" nodename="k" />
+             </multiply>
+           </materialx>"#,
+        "m",
+    );
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(approx(l[0].1, 0.0), "weight {}", l[0].1);
+}
+
+#[test]
+fn a_partly_zero_colour_multiply_is_not_pruned() {
+    // A `color3` scalar is pruned only when every lane is zero. Testing lane 0
+    // alone would drop a branch that still transmits green and blue.
+    let l = lobes_of(
+        r#"<materialx>
+             <dielectric_bsdf name="t" type="BSDF" />
+             <multiply name="m" type="BSDF">
+               <input name="in1" type="BSDF" nodename="t" />
+               <input name="in2" type="color3" value="0, 0.4, 0.4" />
+             </multiply>
+           </materialx>"#,
+        "m",
+    );
+    assert_eq!(l.len(), 1, "a partly-zero colour pruned the branch: {l:?}");
+}
+
+#[test]
 fn add_sums_both_branches_at_full_weight() {
     let l = lobes_of(
         &format!(

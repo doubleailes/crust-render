@@ -899,6 +899,38 @@ mod tests {
     }
 
     #[test]
+    fn a_glaze_over_a_zero_multiplied_dummy_stays_the_base_specular() {
+        // The other way to author a null branch: `multiply(BSDF, 0)` rather
+        // than a leaf `weight = 0`. It has to prune for the same reason — the
+        // lobe beneath it can never contribute, but left in place it counts as
+        // a specular interface and promotes the glaze above it to a coat over
+        // a base that carries no specular at all.
+        let text = format!(
+            r#"<materialx>{DIFFUSE}{CLEAR}
+                 <dielectric_bsdf name="dummy" type="BSDF" />
+                 <multiply name="off" type="BSDF">
+                   <input name="in1" type="BSDF" nodename="dummy" />
+                   <input name="in2" type="float" value="0" />
+                 </multiply>
+                 {}
+                 {}</materialx>"#,
+            layer("inner", "off", "d"),
+            layer("L", "clear", "inner")
+        );
+        let m = reduced(&text, "L");
+        assert_eq!(
+            m.coat_weight, 0.0,
+            "the zero-multiplied dummy promoted the glaze"
+        );
+        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        assert!(
+            near(m.specular_roughness, (0.02f32).sqrt()),
+            "the glaze did not land on the base specular: {}",
+            m.specular_roughness
+        );
+    }
+
+    #[test]
     fn a_glaze_over_a_diffuse_alone_has_no_coat() {
         let text = format!(
             "<materialx>{DIFFUSE}{CLEAR}{}</materialx>",
