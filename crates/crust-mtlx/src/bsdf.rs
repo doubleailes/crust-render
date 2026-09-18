@@ -204,7 +204,18 @@ fn flatten_inner(
                 Some(n) => (Some(n), "in2"),
                 None => (bsdf_input(c, node, "in2"), "in1"),
             };
-            if let Some(n) = bsdf {
+            //
+            // A literal-zero scalar prunes the branch outright, for exactly
+            // the reason `leaf` prunes a literal `weight = 0`: the child would
+            // flatten to lobes that contribute nothing to any pool — `reduce`
+            // drops them on `w <= 1e-5` — while still counting as a specular
+            // interface in the `layer` promotion above, pushing a surviving
+            // top dielectric into the coat. Numerically this changes nothing;
+            // structurally it is the difference between a base specular and a
+            // clearcoat, which attenuate the substrate very differently.
+            if let Some(n) = bsdf
+                && !literal_zero(node, scalar)
+            {
                 let s = c.input_or(node, scalar, Val::ONE);
                 let w = c.emit(Op::Binary {
                     op: super::eval::BinOp::Mul,
@@ -220,6 +231,27 @@ fn flatten_inner(
             }
         }
     }
+}
+
+/// True when `input` is authored as a *literal* whose every meaningful lane is
+/// zero.
+///
+/// Only a literal counts. A value arriving through a connection is a runtime
+/// quantity even when it happens to evaluate to zero, and pruning on it would
+/// make the lobe set depend on the shading point — precisely what the
+/// structural coat promotion must never do, or a mask's zero contour becomes a
+/// seam between a clearcoat and a base specular.
+///
+/// Every lane, not just lane 0: a `multiply` scalar may be a `color3`, and
+/// `(0, 0.4, 0.4)` is not a pruned branch.
+fn literal_zero(node: &Node, input: &str) -> bool {
+    node.input(input).is_some_and(|i| match &i.source {
+        Source::Value(v) => {
+            let lanes = (v.arity as usize).clamp(1, 4);
+            v.v[..lanes].iter().all(|&c| c == 0.0)
+        }
+        _ => false,
+    })
 }
 
 /// Builds a leaf lobe, or `None` for a BSDF node this reduction has no pool
@@ -251,10 +283,7 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, weight: u32, over_specular: bool) -> 
     // branch is exactly such a dielectric, sitting in the base under the real
     // glaze. Only a literal is pruned; a weight *connected* to a constant or a
     // mask is a runtime value and reaches the pool like any other.
-    if let Some(input) = node.input("weight")
-        && let Source::Value(v) = &input.source
-        && v.x() == 0.0
-    {
+    if literal_zero(node, "weight") {
         return None;
     }
 
