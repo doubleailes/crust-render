@@ -1407,10 +1407,6 @@ fn trace_path(
             let shadow_tr =
                 shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
             if shadow_tr != Vec3A::ZERO {
-                // Unsigned: lights behind the ray-facing normal are reachable
-                // through a continuous transmission lobe (opaque materials
-                // evaluate to zero there anyway).
-                let cosine = rec.normal.dot(light_dir_unit).abs();
                 let light_pdf = (ls.pdf / n_lights).max(1e-6);
 
                 // Evaluate the BSDF toward the light direction. Delta and
@@ -1432,7 +1428,12 @@ fn trace_path(
                         _ => brdf_pdf,
                     };
                     let weight = strategy.light_weight(light_pdf, bounce_pdf);
-                    nee += ls.radiance * brdf_value * cosine * shadow_tr * weight / light_pdf;
+                    // `brdf_value` already carries the geometric cosine —
+                    // `Material::eval` returns `brdf · |cos|` (unsigned, so a
+                    // continuous transmission lobe can see a light behind the
+                    // ray-facing normal). Applying it again here is what used
+                    // to make this an integral of `brdf · cos²`.
+                    nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf;
                 }
             }
         }
@@ -1451,17 +1452,15 @@ fn trace_path(
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         if let Some(sample) = sample_bounce_direction(&ray, &rec, mat, guiding_here, v) {
             let dir = sample.ray.direction().normalize();
-            // The codebase convention multiplies the material's brdf*|cos|
-            // value by the cosine again — unsigned, so continuous
-            // transmission directions (behind the ray-facing normal) are not
-            // zeroed. Delta samples carry their full throughput in `value`
-            // and skip the factor entirely.
-            let cosine = if sample.delta {
-                1.0
-            } else {
-                rec.normal.dot(dir).abs()
-            };
-            let mut factor = sample.value * cosine / sample.pdf;
+            // `sample.value` is the material's `brdf · |cos|` (delta lobes
+            // carry their whole throughput there instead), so the estimator is
+            // just `value / pdf`. This used to multiply by the cosine a second
+            // time, making every bounce an integral of `brdf · cos²` — a
+            // Lambertian surface then reflected 2/3 of its albedo. NEE applied
+            // the same extra factor, so the two stayed consistent with each
+            // other and every `--strategy` agreed on the dimmed answer, which
+            // is why no MIS test caught it; the furnace test did.
+            let mut factor = sample.value / sample.pdf;
 
             // Russian roulette on the continuation: survive with probability
             // tracking the throughput, dividing it out on survival. Applies
@@ -1531,14 +1530,13 @@ fn trace_path(
     for vrec in records.iter().rev() {
         if let Some(t) = &vrec.train {
             // The full incident radiance (reflected + the raw hit emission),
-            // weighted by cos² to match this tracer's estimator, which
-            // multiplies the codebase's brdf*|cos| material values by the
-            // cosine again.
+            // weighted by the cosine to match this tracer's estimator. One
+            // cosine, not two: the material's value already carries it and the
+            // integrator no longer applies a second.
             train_out.push(SampleData {
                 pos: t.pos,
                 dir: t.dir,
-                radiance: (luminance(radiance + vrec.next_emit) * t.cos * t.cos)
-                    .min(TRAIN_RADIANCE_CLAMP),
+                radiance: (luminance(radiance + vrec.next_emit) * t.cos).min(TRAIN_RADIANCE_CLAMP),
             });
         }
         radiance = vrec.segment_emit
