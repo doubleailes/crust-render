@@ -374,19 +374,39 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         }
     }
 
-    // Base colour is a diffuse/metal blend, and metalness is their ratio:
-    // OpenPBR mixes its metal and dielectric-base lobes by `base_metalness`
-    // off one `base_color`, which is exactly the shape of these two pools.
+    // Base colour is a diffuse/metal blend off one `base_color`, which is
+    // exactly the shape of these two pools.
     let base_total = diffuse.w + metal.w + sss.w;
     let mut m = base.clone();
     if base_total > 1e-5 {
-        m.base_metalness = (metal.w / base_total).clamp(0.0, 1.0);
         m.base_color = (diffuse.color + metal.color + sss.color) / base_total;
         m.base_weight = base_total.clamp(0.0, 1.0);
     } else if spec.w > 1e-5 || coat.w > 1e-5 {
         // A purely specular stack (a bare glass shell): keep the specular
         // interfaces, but do not leave an unlit grey base under them.
         m.base_weight = 0.0;
+    }
+
+    // How much surface the dielectric *base* covers. Diffuse and a dielectric
+    // interface are **layered**, not partitioned — `layer(dielectric, diffuse)`
+    // hands both full weight over the same area — so the base they share covers
+    // the larger of the two rather than their sum. Taking the max is also what
+    // lets a bare dielectric with nothing opaque under it still count as a
+    // dielectric base, which is the case that used to vanish.
+    let diel_base = (diffuse.w + sss.w).max(spec.w);
+
+    // Metal against that base. The two *are* mutually exclusive — a `mix` is
+    // what puts a conductor beside a dielectric base — so this ratio is exactly
+    // what OpenPBR's `base_metalness` means, and `eval_specular` reads it as
+    // the metal half's whole coverage.
+    //
+    // The denominator has to include the dielectric interface, not just the
+    // opaque pools: `mix(conductor, bare_dielectric)` has no diffuse at all, so
+    // dividing by `diffuse + metal + sss` pinned metalness to 1 and
+    // `eval_specular` then dropped the dielectric half entirely.
+    let substrate = diel_base + metal.w;
+    if substrate > 1e-5 {
+        m.base_metalness = (metal.w / substrate).clamp(0.0, 1.0);
     }
     // NOT un-squared: `oren_nayar_diffuse_bsdf`'s `roughness` is its Oren-Nayar
     // sigma, not a microfacet alpha. Only the GGX lobes below convert.
@@ -415,18 +435,20 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         // Already perceptual — it is the OpenPBR base, not a MaterialX alpha.
         base.specular_roughness
     };
-    // Asymmetric on purpose, and the asymmetry is the point: the conductor's
-    // coverage is *already* carried by `base_metalness` above, while the
-    // dielectric's is carried by nothing else. `eval_specular` scales the metal
-    // lobe by `specular_weight * base_metalness`, so taking `max(spec.w,
-    // metal.w)` here made a mask-driven conductor render at m² of its energy
-    // instead of m — on the DPEL lion's gold, exactly the mask value too dark.
-    // So: the dielectric's coverage when there is a dielectric interface,
-    // otherwise full weight and let `base_metalness` do the masking.
-    m.specular_weight = if spec.w > 1e-5 {
-        spec.w.clamp(0.0, 1.0)
-    } else if metal.w > 1e-5 {
-        1.0
+    // The interface's coverage *within* the dielectric base, which is what
+    // OpenPBR's `specular_weight` means — not its coverage of the whole
+    // surface. `eval_specular` already scales the dielectric half by
+    // `(1 - base_metalness)`, so storing the raw pool weight here counted the
+    // same masking twice; the render sees `(1 - base_metalness) * this`, and
+    // that product is what has to come back out as the authored coverage.
+    //
+    // A material with no dielectric leaf lands on 0, and that is now the right
+    // answer rather than a problem: the metal half no longer reads this, so
+    // there is nothing left to keep alive with a synthetic 1.0. That synthetic
+    // weight was itself a defect — it gave every conductor-only graph a
+    // full-strength white dielectric lobe its author never wrote.
+    m.specular_weight = if diel_base > 1e-5 {
+        (spec.w / diel_base).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -576,6 +598,89 @@ mod tests {
         (a - b).abs() < 1e-4
     }
 
+    /// The dielectric and conductor pools must each keep their own authored
+    /// coverage through the reduction.
+    ///
+    /// `eval_specular` applies `base_metalness` to the metal half and
+    /// `(1 - base_metalness) * specular_weight` to the dielectric half, so
+    /// those two products *are* the coverages the render sees. While the
+    /// dielectric's coverage lived in `specular_weight`, which scaled both
+    /// halves, each pool multiplied the other: a conductor at 0.25 under a
+    /// glaze at 0.75 rendered its metal at 0.25 x 0.75.
+    #[test]
+    fn unequal_dielectric_and_conductor_coverage_survive_the_reduction() {
+        let text = format!(
+            r#"<materialx>{DIFFUSE}
+                 <dielectric_bsdf name="glaze" type="BSDF">
+                   <input name="roughness" type="vector2" value="0.04, 0.04" />
+                 </dielectric_bsdf>
+                 {}
+                 <conductor_bsdf name="c" type="BSDF">
+                   <input name="roughness" type="float" value="0.01" />
+                 </conductor_bsdf>
+                 <mix name="m" type="BSDF">
+                   <input name="fg" type="BSDF" nodename="c" />
+                   <input name="bg" type="BSDF" nodename="db" />
+                   <input name="mix" type="float" value="0.25" />
+                 </mix>
+               </materialx>"#,
+            layer("db", "glaze", "d")
+        );
+        let m = reduced(&text, "m");
+
+        // Authored: the conductor over a quarter of the surface, the glaze over
+        // the diffuse across the other three quarters. Each must arrive intact.
+        let metal_coverage = m.base_metalness;
+        let diel_coverage = (1.0 - m.base_metalness) * m.specular_weight;
+        assert!(
+            near(metal_coverage, 0.25),
+            "conductor coverage {metal_coverage}, authored 0.25"
+        );
+        assert!(
+            near(diel_coverage, 0.75),
+            "dielectric coverage {diel_coverage}, authored 0.75"
+        );
+    }
+
+    /// A conductor mixed with a *bare* dielectric — nothing opaque under it —
+    /// must keep both branches.
+    ///
+    /// `base_metalness` was the metal's share of the diffuse/metal/subsurface
+    /// pools alone, so with no diffuse it pinned to 1 and `eval_specular`
+    /// dropped the dielectric half outright. A dielectric base exists whenever
+    /// a dielectric interface does, whether or not anything sits beneath it.
+    #[test]
+    fn a_conductor_mixed_with_a_bare_dielectric_keeps_both_branches() {
+        let text = r#"<materialx>
+            <dielectric_bsdf name="g" type="BSDF">
+              <input name="roughness" type="vector2" value="0.04, 0.04" />
+            </dielectric_bsdf>
+            <conductor_bsdf name="c" type="BSDF">
+              <input name="roughness" type="float" value="0.01" />
+            </conductor_bsdf>
+            <mix name="m" type="BSDF">
+              <input name="fg" type="BSDF" nodename="c" />
+              <input name="bg" type="BSDF" nodename="g" />
+              <input name="mix" type="float" value="0.5" />
+            </mix>
+          </materialx>"#;
+        let m = reduced(text, "m");
+        assert!(
+            m.base_metalness < 1.0,
+            "metalness pinned to 1 with no diffuse, which zeroes the dielectric"
+        );
+        assert!(
+            near(m.base_metalness, 0.5),
+            "conductor coverage {}, authored 0.5",
+            m.base_metalness
+        );
+        let diel_coverage = (1.0 - m.base_metalness) * m.specular_weight;
+        assert!(
+            near(diel_coverage, 0.5),
+            "dielectric coverage {diel_coverage}, authored 0.5"
+        );
+    }
+
     /// A masked conductor must not pay its own coverage twice.
     ///
     /// `base_metalness` already carries how much of the surface is metal, and
@@ -598,11 +703,17 @@ mod tests {
             </mix>
           </materialx>"#;
         let m = reduced(text, "m");
-        assert!(near(m.base_metalness, 0.5), "metal {}", m.base_metalness);
         assert!(
-            near(m.specular_weight, 1.0),
+            near(m.base_metalness, 0.5),
             "the conductor's coverage was counted twice: {}",
-            m.specular_weight
+            m.base_metalness
+        );
+        // No dielectric leaf in this graph, so no dielectric interface. The
+        // metal half reads `base_metalness` alone, so there is nothing to keep
+        // alive with a synthetic weight here.
+        assert_eq!(
+            m.specular_weight, 0.0,
+            "a graph with no dielectric grew a specular interface"
         );
     }
 
@@ -741,7 +852,12 @@ mod tests {
         );
         let m = reduced(&text, "L");
         assert!(near(m.base_metalness, 1.0), "metal {}", m.base_metalness);
-        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        // The varnish is the *coat*; nothing is left as a base dielectric, and
+        // the metal no longer needs `specular_weight` held at 1 to survive.
+        assert_eq!(
+            m.specular_weight, 0.0,
+            "the varnish was counted as a base specular as well as a coat"
+        );
         assert!(
             near(m.specular_roughness, (0.1f32).sqrt()),
             "spec rough {}",

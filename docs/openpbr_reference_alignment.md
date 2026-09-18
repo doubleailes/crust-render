@@ -27,7 +27,7 @@ Five divergences from the reference graph, fixed to match:
 | # | Divergence | Fix |
 |---|------------|-----|
 | 4 | `transmission_color` applied at the interface *and* as Beer-Lambert absorption when `transmission_depth > 0` (double color) | Interface BTDF is untinted when a medium owns the color (`if_transmission_tint`) |
-| 5 | Metal Fresnel was plain Schlick on `base_color`; no F82 edge tint, no `base_weight`/`specular_weight`, no thin film on metal | F82-tint model (`fresnel_f82_tint`, `F0 = base_color·base_weight`, edge tint `specular_color`, lobe scaled by `specular_weight`) + per-channel-IOR thin film on the metal path |
+| 5 | Metal Fresnel was plain Schlick on `base_color`; no F82 edge tint, no `base_weight`/`specular_weight`, no thin film on metal | F82-tint model (`fresnel_f82_tint`, `F0 = base_color·base_weight`, edge tint `specular_color`) + per-channel-IOR thin film on the metal path. The lobe is *not* scaled by `specular_weight` — see the note below |
 | 6 | `coat_color` tinted the coat *reflection* | Coat reflection is untinted; `coat_color` attenuates light transmitted to the substrate |
 | 7 | Emission ignored the coat | View-dependent coated emission via `Material::emitted_directional` (later upgraded in Phase 5 below) |
 | 8 | Ad-hoc anisotropy remap (signed ±1) | Spec formula: `αₓ = r²·√(2/(1+(1−a)²))`, `αᵧ = (1−a)·αₓ`, `a ∈ [0,1]` |
@@ -155,7 +155,12 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
   and an exit strategy (module header "Phase 5").
-- **`specular_weight` semantics** — crust scales the finished dielectric
+- **`specular_weight` semantics** — `specular_weight` weighs the **dielectric
+  base's** specular interface and nothing else: it scales the finished
+  dielectric lobe, and the metal lobe takes its coverage from `base_metalness`
+  alone. Scaling both by it left the two unable to hold independent coverage,
+  which the MaterialX reduction needs when a graph mixes a conductor and a
+  dielectric at different weights. crust scales the finished dielectric
   lobe by `specular_weight`; Adobe remaps F0 back to an IOR
   (`ior_from_f0`), which also moves the TIR angle. crust used to scale F0
   itself, which was worse than merely approximate: Schlick is

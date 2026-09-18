@@ -321,10 +321,13 @@ impl LobePmf {
         let spec_luma = luma(m.specular_color).max(0.02);
         let fuzz_luma = luma(m.fuzz_color).max(0.02);
 
-        // Metal reflectivity is base_color · base_weight scaled by
-        // specular_weight (the reference's `metal_bsdf` weight input).
-        let w_metal =
-            m.base_metalness * m.specular_weight * luma(m.base_color * m.base_weight).max(0.02);
+        // Metal reflectivity is base_color · base_weight, covered by
+        // base_metalness. No `specular_weight` here, matching `eval_specular`:
+        // a pure metal carries no dielectric interface, so its
+        // `specular_weight` is legitimately 0 and weighting by it would leave
+        // the specular lobe essentially unsampled while `eval_all` still
+        // returned its full energy — fireflies on every metal.
+        let w_metal = m.base_metalness * luma(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
@@ -532,13 +535,22 @@ fn eval_specular(
     };
 
     // Metal slab per the MaterialX reference `generalized_schlick_bsdf`:
-    // F0 = base_color · base_weight, F82 edge tint = specular_color, the
-    // whole lobe scaled by specular_weight — with its own thin-film variant
-    // (`metal_bsdf_tf`) blended in by thin_film_weight.
+    // F0 = base_color · base_weight, F82 edge tint = specular_color, coverage
+    // from base_metalness — with its own thin-film variant (`metal_bsdf_tf`)
+    // blended in by thin_film_weight.
+    //
+    // Deliberately *not* scaled by `specular_weight`. That parameter belongs to
+    // the dielectric base — it is how much of that base carries a specular
+    // interface — and a metal has no dielectric interface to weigh. While both
+    // halves were scaled by it the two could not hold independent coverage,
+    // which is exactly what the MaterialX reduction needs: a conductor and a
+    // dielectric mixed at unequal weights had each multiply the other, and a
+    // mix with no diffuse under it pinned `base_metalness` to 1 and dropped
+    // the dielectric half outright.
     let metal_term = if m.base_metalness > 0.0 {
         let metal_f0 = m.base_color * m.base_weight;
         let f_metal_base = fresnel_f82_tint(v_dot_h, metal_f0, m.specular_color);
-        let f_metal = (if m.thin_film_weight > 0.0 {
+        let f_metal = if m.thin_film_weight > 0.0 {
             let f_iri = thin_film_fresnel_metal(
                 v_dot_h,
                 outer_ior,
@@ -549,7 +561,7 @@ fn eval_specular(
             f_metal_base * (1.0 - m.thin_film_weight) + f_iri * m.thin_film_weight
         } else {
             f_metal_base
-        }) * m.specular_weight;
+        };
         f_metal * m.base_metalness
     } else {
         Vec3A::ZERO
@@ -677,13 +689,16 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
     let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
-    // Both halves of `eval_specular` now end in a multiply by
-    // `specular_weight`, so at zero the whole call is exactly +0.0 and can be
-    // skipped by the same bit-identity argument as the coat and fuzz below.
+    // Skippable only when *neither* half can contribute: the dielectric ends in
+    // a multiply by `specular_weight` and the metal in one by `base_metalness`,
+    // so both must be zero for the call to be exactly +0.0 — the same
+    // bit-identity argument as the coat and fuzz below. Testing
+    // `specular_weight` alone would silently shade a pure metal black, since
+    // that is precisely the material with no dielectric interface to weigh.
     // Worth the branch: every unbound prim and every `UsdPreviewSurface`-less
     // material reduces to `OpenPBR::diffuse()`, which is the whole of
     // cornellbox and Kitchen_set.
-    let (spec_diel, spec_metal) = if m.specular_weight > 0.0 {
+    let (spec_diel, spec_metal) = if m.specular_weight > 0.0 || m.base_metalness > 0.0 {
         eval_specular(m, v_local, l_local, h_local, ax, ay)
     } else {
         (Vec3A::ZERO, Vec3A::ZERO)
@@ -1693,6 +1708,58 @@ mod tests {
         assert!(
             on.length() < off.length() * 0.99,
             "the darkening stopped darkening: {on} vs {off}"
+        );
+    }
+
+    /// The metal lobe must not read `specular_weight`.
+    ///
+    /// The two halves of `eval_specular` carry independent coverage —
+    /// `base_metalness` for the metal, `(1 - base_metalness) * specular_weight`
+    /// for the dielectric — and that independence is what lets the MaterialX
+    /// reduction hand through a conductor and a dielectric mixed at unequal
+    /// weights. While both halves were scaled by `specular_weight`, one pool's
+    /// coverage multiplied the other's.
+    #[test]
+    fn the_metal_lobe_does_not_scale_with_specular_weight() {
+        let v = Vec3A::new(0.6, 0.0, 0.8).normalize();
+        let l = Vec3A::new(-0.5, 0.3, 0.81).normalize();
+        let h = (v + l).normalize();
+
+        let at = |w: f32| {
+            let m = OpenPBR {
+                base_metalness: 1.0,
+                specular_weight: w,
+                ..OpenPBR::default()
+            };
+            let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, 0.0);
+            eval_specular(&m, v, l, h, ax, ay).1
+        };
+        let full = at(1.0);
+        assert!(full.length() > 1e-6, "test is vacuous: metal lobe is black");
+        assert_eq!(
+            at(0.4),
+            full,
+            "the metal lobe moved with a parameter that belongs to the dielectric base"
+        );
+        assert_eq!(at(0.0), full, "a pure metal lost its lobe entirely");
+    }
+
+    /// `eval_all` must not skip `eval_specular` for a pure metal. Its
+    /// `specular_weight` is legitimately 0 — there is no dielectric interface —
+    /// and the metal half is gated by `base_metalness` instead.
+    #[test]
+    fn a_pure_metal_is_still_shaded_with_no_dielectric_interface() {
+        let m = OpenPBR {
+            base_metalness: 1.0,
+            specular_weight: 0.0,
+            specular_roughness: 0.3,
+            ..OpenPBR::default()
+        };
+        let v = Vec3A::new(0.4, 0.0, 0.917).normalize();
+        let l = Vec3A::new(-0.35, 0.2, 0.915).normalize();
+        assert!(
+            eval_all(&m, v, l, true).length() > 1e-6,
+            "a pure metal shaded black because it had no dielectric interface"
         );
     }
 
