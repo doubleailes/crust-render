@@ -19,7 +19,10 @@ crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true
 tracing.workspace = true
-openusd = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
+openusd = { version = "0.7", default-features = false }
+# The typed schema views (UsdGeom / UsdLux / UsdShade / UsdRender) left the
+# core crate in openusd 0.7 and ship separately, versioned in lockstep.
+openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
 # Catmull-Clark subdivision at USD import. Not published on crates.io, so a
 # git dependency; pinned to a tag because `Cargo.lock` is not checked in —

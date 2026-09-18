@@ -833,11 +833,35 @@ Schema mapping:
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
 
-**`openusd` is tracked at `0.6`**, not 0.5. Two composition bugs that made the Moana
-island unreadable were fixed in 0.6.0 (both written up under `docs/issues/`), and the
-importer is written against that release's API: `Stage::prim` (0.5's `prim_at`) and
-`sdf::Value::Token` carrying an interned `tf::Token` rather than a `String`. Going back
-to 0.5 means undoing those two renames *and* reinstating the island workaround.
+**`openusd` is tracked at `0.7`**, and **the typed schemas are a second crate**:
+0.7 moved `UsdGeom` / `UsdLux` / `UsdShade` / `UsdRender` out of the core crate into
+[`openusd-schemas`](https://docs.rs/openusd-schemas), versioned in lockstep and carrying
+the `geom` / `lux` / `shade` / `render` feature flags the core crate used to. So
+`openusd::schemas::geom` is now `openusd_schemas::geom`, and core `openusd` has no
+features left but `serde`.
+
+Three API changes came with it, all in `scene/usd_import.rs`:
+
+- `Stage::prim` / `Stage::attribute` / `sdf::Layer::prim` take any path-like argument and
+  therefore return a `Result` whose error is a *parse* failure. Every call here passes an
+  already-parsed `sdf::Path`, so `prim_at()` wraps the unreachable arm once rather than
+  scattering the same `expect` over a dozen sites.
+- `StagePopulationMask::new` is fallible (a mask path must be an absolute prim path).
+  `open_stage` reports it as an ordinary `Error::UsdOpen` — `stream_roots` only ever
+  yields composed top-level prim paths, so a failure would be a bug, not bad input.
+- `Material::compute_surface_source` takes an **ordered render-context list** and returns
+  the whole resolved terminal (every source driving it) instead of one shader. 0.6 took no
+  argument: universal terminal first, then every authored context alphabetically. The
+  `SURFACE_RENDER_CONTEXTS` const restores that preference — `""` (the universal context)
+  leads, `glslfx` is the only namespaced one crust decodes, and an `ri` surface is a
+  PxrDisneyBsdf that `has_shader_id` already caught upstream of the call. Verified
+  output-preserving: all 15 checked-in sample scenes render **pixel-identical** to the 0.6
+  build at 16 spp (`exr_diff`, 0 differing pixels).
+
+Earlier history worth knowing when reading old branches: 0.6.0 fixed two composition bugs
+that made the Moana island unreadable (written up under `docs/issues/`), and renamed 0.5's
+`prim_at` to `Stage::prim` and made `sdf::Value::Token` carry an interned `tf::Token`
+rather than a `String`.
 
 ## Rendering the Moana island
 
@@ -1025,9 +1049,11 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   excluded from continuous mixtures — carrying window-model energy
   (`(1−R)/(1+R)` transmittance, boosted `2R/(1+R)` reflection, view-dependent tint). The guide-vs-BSDF selection probability is fixed (no learned α), and
   spatial lookups are not parallax-compensated.
-- **Volume regions** (`volume.rs`) have no OpenVDB / `UsdVolVolume` import (openusd 0.5
-  ships no `vol` feature) — density is homogeneous, procedural fBm noise, or an inline
-  voxel grid authored in the USDA. No volume path guiding (volume vertices push
+- **Volume regions** (`volume.rs`) have no OpenVDB / `UsdVolVolume` import — density is
+  homogeneous, procedural fBm noise, or an inline voxel grid authored in the USDA.
+  (`openusd-schemas` 0.7 does ship a `vol` feature — `Volume` plus `OpenVDBAsset` /
+  `Field3DAsset` views — so this is now an unwritten importer rather than a missing
+  dependency; it was the latter through openusd 0.6.) No volume path guiding (volume vertices push
   `train: None`; volume-heavy scenes train the surface field on noisier estimates —
   slower convergence, not bias). One global majorant per region — no coarse max-grid, so
   a high `densityScale` over a large box tracks slowly. Emissive volumes are not

@@ -195,7 +195,9 @@ fn read_mesh(stage_path: &str, prim_path: &str) -> Result<Mesh, String> {
     let stage =
         usd::Stage::open(stage_path).map_err(|e| format!("cannot open {stage_path}: {e}"))?;
     let path = sdf::Path::new(prim_path).map_err(|e| format!("bad prim path: {e}"))?;
-    let prim = stage.prim(path);
+    let prim = stage
+        .prim(path)
+        .map_err(|e| format!("bad prim path: {e}"))?;
 
     let int_vec = |name: &str| -> Result<Vec<i32>, String> {
         match prim.attribute(name).get::<sdf::Value>() {

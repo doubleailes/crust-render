@@ -25,7 +25,8 @@ exr.workspace = true
 # (`tex_probe`, `ptex_seams`) — the decoded `PtexColor` deliberately does not
 # replace those, since they sample without the colour decode.
 [dev-dependencies]
-openusd = { version = "0.7", default-features = false, features = ["geom"] }
+openusd = { version = "0.7", default-features = false }
+openusd-schemas = { version = "0.7", default-features = false, features = ["geom"] }
 ptex-rs.workspace = true
 
 [dependencies.tracing-subscriber]

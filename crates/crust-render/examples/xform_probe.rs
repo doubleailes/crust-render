@@ -10,8 +10,8 @@
 //! cargo run --release -p crust-render --example xform_probe -- stage.usda /prim/path
 //! ```
 
-use openusd::schemas::geom::{Xform, Xformable};
 use openusd::{sdf, usd};
+use openusd_schemas::geom::{Xform, Xformable};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
