@@ -145,9 +145,10 @@ crate (no renderer dependency, just an XML parser and `glam`):
   `conductor_bsdf` / `sheen_bsdf` nodes glued with `layer` and `mix`, which is
   how production look-dev is authored — is **flattened into weighted lobes**
   at compile time and pooled onto OpenPBR's lobe stack at shading time, so
-  sampling, MIS and energy compensation stay in the one übershader. Layering
-  OpenPBR cannot express (two dielectrics of different roughness stacked)
-  averages rather than nests;
+  sampling, MIS and energy compensation stay in the one übershader. A
+  dielectric layered over another specular (a glaze over a satin glaze, a
+  varnish over metal) becomes OpenPBR's **coat** — the second specular lobe —
+  with its own roughness and IOR; only deeper stacks average;
 - `image` nodes resolve through the `AssetLoader` seam to **UV/UDIM**
   textures (`primvars:st`, `<UDIM>` tile sets, per-input colour space from
   the graph's own `colorspace` attribute) with a tangent frame for normal

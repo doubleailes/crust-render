@@ -19,14 +19,27 @@
 //! The pooling is the lossy part, and deliberately so. crust-mtlx flattens a
 //! `layer`/`mix` tree into weighted lobes at compile time (see its `bsdf`
 //! module); **at shading time** those lobes are pooled by kind and the pools
-//! normalised into OpenPBR parameters. What this cannot represent, and does
-//! not pretend to: two dielectric lobes of *different* roughness layered over
-//! one another collapse to a single weighted roughness, because OpenPBR has
-//! one specular lobe. On the teapot's ceramic that merges the smooth glaze
-//! (roughness 0.002) with the rough stained glaze under its own mask — the
-//! mask still drives the blend, but the result is one intermediate lobe rather
-//! than two. Representing it properly needs a layered-BSDF material, not a
-//! different reduction.
+//! normalised into OpenPBR parameters. OpenPBR has two specular lobes, and the
+//! flattening keeps the one structural fact that tells them apart: a
+//! dielectric layered directly over a diffuse is the **base specular** (that
+//! is how OpenPBR's own dielectric base is built), while a dielectric layered
+//! over a base that already carries a specular — another dielectric, a
+//! conductor — arrives as a [`LobeKind::Coat`] and lands on OpenPBR's coat
+//! lobe with its own roughness and IOR. The teapot's ceramic, a smooth glaze
+//! (roughness 0.002) over a mask-driven rougher one over diffuse, therefore
+//! keeps both lobes; a varnish over a conductor keeps its varnish (the single
+//! pool used to lose it outright, since a metal base zeroes the dielectric
+//! Fresnel term).
+//!
+//! What this still cannot represent: a stack of *three* or more dielectrics
+//! pools its upper ones into one coat roughness; a coat dielectric's `tint`
+//! is ignored, because MaterialX tints the coat's *reflection* while OpenPBR's
+//! `coat_color` is absorption on the way through to the substrate; and the
+//! promotion is decided by the tree, not by weights — a glaze over a base
+//! specular whose mask evaluates to zero at some point still shades there as
+//! coat-over-diffuse. That last one is a choice: deciding per point would
+//! draw a hard seam along the mask's zero contour, since a coat and a base
+//! specular attenuate the substrate very differently.
 //!
 //! The division of labour with the host is the same as everywhere else in
 //! crust: nothing here decodes pixels. An `image` node's file crosses the
@@ -274,7 +287,8 @@ impl Pool {
 /// (emission, transmission, thin-film) keeps a sensible value instead of zero.
 pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option<Vec3A>) {
     let get = |i: u32| slots.get(i as usize).copied().unwrap_or(Val::ZERO);
-    let (mut diffuse, mut spec, mut metal, mut sheen, mut sss) = (
+    let (mut diffuse, mut spec, mut coat, mut metal, mut sheen, mut sss) = (
+        Pool::default(),
         Pool::default(),
         Pool::default(),
         Pool::default(),
@@ -301,6 +315,7 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         match l.kind {
             LobeKind::Diffuse => diffuse.add(w, color, rough, 0.0),
             LobeKind::Dielectric => spec.add(w, color, rough, ior),
+            LobeKind::Coat => coat.add(w, color, rough, ior),
             LobeKind::Conductor => {
                 // Recover the reflectivity colour OpenPBR's metal lobe takes.
                 // `ior`/`extinction` are the general authoring; when the graph
@@ -336,9 +351,9 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         m.base_metalness = (metal.w / base_total).clamp(0.0, 1.0);
         m.base_color = (diffuse.color + metal.color + sss.color) / base_total;
         m.base_weight = base_total.clamp(0.0, 1.0);
-    } else if spec.w > 1e-5 {
-        // A purely specular stack (a bare glass shell): keep the coat, but do
-        // not leave an unlit grey base under it.
+    } else if spec.w > 1e-5 || coat.w > 1e-5 {
+        // A purely specular stack (a bare glass shell): keep the specular
+        // interfaces, but do not leave an unlit grey base under them.
         m.base_weight = 0.0;
     }
     m.base_diffuse_roughness = diffuse.mean(diffuse.roughness, 0.0).clamp(0.0, 1.0);
@@ -358,6 +373,17 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
     };
     m.specular_color = spec.mean_color(Vec3A::ONE);
     m.specular_ior = spec.mean(spec.ior, base.specular_ior).clamp(1.0, 3.0);
+
+    // The second specular lobe. `coat_color` and `coat_darkening` stay at the
+    // base defaults: a MaterialX dielectric's `tint` multiplies its
+    // *reflection*, whereas OpenPBR's coat reflection is untinted and
+    // `coat_color` is the absorption of light passing through to the
+    // substrate — mapping one onto the other would tint the wrong thing.
+    m.coat_weight = coat.w.clamp(0.0, 1.0);
+    m.coat_roughness = coat
+        .mean(coat.roughness, base.coat_roughness)
+        .clamp(0.0, 1.0);
+    m.coat_ior = coat.mean(coat.ior, base.coat_ior).clamp(1.0, 3.0);
 
     m.fuzz_weight = sheen.w.clamp(0.0, 1.0);
     m.fuzz_color = sheen.mean_color(Vec3A::ONE);
@@ -454,5 +480,145 @@ mod tests {
             "{}",
             m.base_metalness
         );
+    }
+
+    // --- Two specular lobes -------------------------------------------------
+
+    const DIFFUSE: &str = r#"<oren_nayar_diffuse_bsdf name="d" type="BSDF">
+        <input name="color" type="color3" value="0.6, 0.1, 0.1" />
+      </oren_nayar_diffuse_bsdf>"#;
+    const SATIN: &str = r#"<dielectric_bsdf name="satin" type="BSDF">
+        <input name="roughness" type="vector2" value="0.4, 0.4" />
+        <input name="ior" type="float" value="1.5" />
+      </dielectric_bsdf>"#;
+    const CLEAR: &str = r#"<dielectric_bsdf name="clear" type="BSDF">
+        <input name="roughness" type="vector2" value="0.02, 0.02" />
+        <input name="ior" type="float" value="1.6" />
+      </dielectric_bsdf>"#;
+
+    fn layer(name: &str, top: &str, base: &str) -> String {
+        format!(
+            r#"<layer name="{name}" type="BSDF">
+                 <input name="top" type="BSDF" nodename="{top}" />
+                 <input name="base" type="BSDF" nodename="{base}" />
+               </layer>"#
+        )
+    }
+
+    fn reduced(text: &str, root: &str) -> OpenPBR {
+        let (lobes, slots) = evaluate(text, root);
+        reduce(&lobes, &slots, &OpenPBR::default()).0
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn a_two_roughness_stack_keeps_both() {
+        // The teapot ceramic's shape. The single-pool reduction averaged the
+        // two roughnesses into one lobe; now each keeps its own.
+        let text = format!(
+            "<materialx>{DIFFUSE}{SATIN}{CLEAR}{}{}</materialx>",
+            layer("inner", "satin", "d"),
+            layer("outer", "clear", "inner")
+        );
+        let m = reduced(&text, "outer");
+        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        assert!(
+            near(m.specular_roughness, 0.4),
+            "spec rough {}",
+            m.specular_roughness
+        );
+        assert!(near(m.specular_ior, 1.5), "spec ior {}", m.specular_ior);
+        assert!(near(m.coat_weight, 1.0), "coat {}", m.coat_weight);
+        assert!(
+            near(m.coat_roughness, 0.02),
+            "coat rough {}",
+            m.coat_roughness
+        );
+        assert!(near(m.coat_ior, 1.6), "coat ior {}", m.coat_ior);
+        assert!(near(m.base_metalness, 0.0), "metal {}", m.base_metalness);
+        assert!(near(m.base_weight, 1.0), "base {}", m.base_weight);
+    }
+
+    #[test]
+    fn a_varnish_over_a_conductor_is_a_coat_over_metal() {
+        let text = format!(
+            r#"<materialx>{CLEAR}
+                 <conductor_bsdf name="c" type="BSDF">
+                   <input name="roughness" type="float" value="0.1" />
+                 </conductor_bsdf>
+                 {}</materialx>"#,
+            layer("L", "clear", "c")
+        );
+        let m = reduced(&text, "L");
+        assert!(near(m.base_metalness, 1.0), "metal {}", m.base_metalness);
+        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        assert!(
+            near(m.specular_roughness, 0.1),
+            "spec rough {}",
+            m.specular_roughness
+        );
+        assert!(near(m.coat_weight, 1.0), "coat {}", m.coat_weight);
+        assert!(
+            near(m.coat_roughness, 0.02),
+            "coat rough {}",
+            m.coat_roughness
+        );
+    }
+
+    #[test]
+    fn a_glaze_over_a_pruned_dummy_stays_the_base_specular() {
+        // The transmission dummy sits in the base as a mix's null branch; it
+        // must not turn the glaze above it into a coat over nothing.
+        let text = format!(
+            r#"<materialx>{DIFFUSE}{CLEAR}
+                 <dielectric_bsdf name="dummy" type="BSDF">
+                   <input name="weight" type="float" value="0" />
+                 </dielectric_bsdf>
+                 <mix name="m" type="BSDF">
+                   <input name="fg" type="BSDF" nodename="d" />
+                   <input name="bg" type="BSDF" nodename="dummy" />
+                   <input name="mix" type="float" value="0.5" />
+                 </mix>
+                 {}</materialx>"#,
+            layer("L", "clear", "m")
+        );
+        let m = reduced(&text, "L");
+        assert_eq!(m.coat_weight, 0.0, "the dummy promoted the glaze");
+        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        assert!(
+            near(m.specular_roughness, 0.02),
+            "spec rough {}",
+            m.specular_roughness
+        );
+    }
+
+    #[test]
+    fn a_glaze_over_a_diffuse_alone_has_no_coat() {
+        let text = format!(
+            "<materialx>{DIFFUSE}{CLEAR}{}</materialx>",
+            layer("L", "clear", "d")
+        );
+        let m = reduced(&text, "L");
+        assert_eq!(m.coat_weight, 0.0);
+        assert!(near(m.specular_weight, 1.0));
+        assert!(near(m.specular_roughness, 0.02));
+    }
+
+    #[test]
+    fn a_bare_two_dielectric_shell_has_no_base() {
+        let text = format!(
+            "<materialx>{SATIN}{CLEAR}{}</materialx>",
+            layer("L", "clear", "satin")
+        );
+        let m = reduced(&text, "L");
+        assert_eq!(
+            m.base_weight, 0.0,
+            "an unlit grey base was left under the shell"
+        );
+        assert!(near(m.coat_weight, 1.0), "coat {}", m.coat_weight);
+        assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
     }
 }

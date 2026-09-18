@@ -1,7 +1,7 @@
 #usda 1.0
 (
-    doc = """MaterialX import fixture: two quads bound to materials that exist
-    only inside a `.mtlx` document.
+    doc = """MaterialX import fixture: four quads bound to three materials that
+    exist only inside a `.mtlx` document.
 
     Small and self-contained on purpose. The assets this feature was written
     for — the DPEL MaterialX Teapot and Lion — are two gigabytes and
@@ -12,7 +12,10 @@
 
     The left quad spans UDIM tile 1001 and the right one tile 1002, so a render
     that shows both checkers is evidence the tile is selected from the integer
-    part of `u` rather than wrapped into one image.
+    part of `u` rather than wrapped into one image. The bottom row is the
+    dirtied metal on the left and, on the right, the lacquer: two dielectrics
+    layered over a diffuse, which is the shape that has to reduce to OpenPBR's
+    two specular lobes (base specular + coat) rather than one averaged one.
     """
     defaultPrim = "World"
     metersPerUnit = 1
@@ -31,6 +34,12 @@ def Xform "World"
 
         def Material "Metal" (
             prepend references = @materialx_basic.mtlx@</MaterialX/Materials/mtlx_metal>
+        )
+        {
+        }
+
+        def Material "Lacquer" (
+            prepend references = @materialx_basic.mtlx@</MaterialX/Materials/mtlx_lacquer>
         )
         {
         }
@@ -64,18 +73,33 @@ def Xform "World"
         rel material:binding = </World/Looks/Ceramic>
     }
 
-    # The metal, on a quad below the two tiles.
+    # The metal, on a quad below the left tile.
     def Mesh "MetalBar" (
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
-        point3f[] points = [(-2.1, -1.2, 0), (2.1, -1.2, 0), (2.1, -0.2, 0), (-2.1, -0.2, 0)]
+        point3f[] points = [(-2.1, -1.2, 0), (-0.1, -1.2, 0), (-0.1, -0.2, 0), (-2.1, -0.2, 0)]
         texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
             interpolation = "faceVarying"
         )
         rel material:binding = </World/Looks/Metal>
+    }
+
+    # The lacquer, below the right tile: a sharp highlight from the clear coat
+    # over the satin one's broad highlight, on a red base.
+    def Mesh "LacquerBar" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.1, -1.2, 0), (2.1, -1.2, 0), (2.1, -0.2, 0), (0.1, -0.2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/Lacquer>
     }
 
     def DomeLight "Sky"

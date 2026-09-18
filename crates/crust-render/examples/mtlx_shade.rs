@@ -5,8 +5,10 @@
 //! surface — a mis-decoded albedo is a plausible pastel, a mask read at the
 //! wrong colour space is a plausible blend — so comparing renders by eye
 //! settles nothing. This prints the numbers instead: the base colour,
-//! metalness, roughness and lobe weights the reduction produces at whatever
-//! `(u, v)` you name, which can be checked against the texture's own texels.
+//! metalness, roughness, lobe weights and the coat (the second specular lobe
+//! a dielectric layered over another specular reduces to) the reduction
+//! produces at whatever `(u, v)` you name, which can be checked against the
+//! texture's own texels.
 //!
 //! ```sh
 //! cargo run --release -p crust-render --example mtlx_shade -- \
@@ -80,8 +82,8 @@ fn main() {
     // direction matters (these graphs compute a view-dependent glaze path
     // length), so it is stated rather than left at a default.
     println!(
-        "{:>6} {:>6}   {:>22} {:>6} {:>6} {:>6}",
-        "u", "v", "base_color", "metal", "rough", "spec"
+        "{:>6} {:>6}   {:>22} {:>6} {:>6} {:>6} {:>6} {:>10}",
+        "u", "v", "base_color", "metal", "rough", "spec", "coat", "coat_rough"
     );
     for (u, v) in points {
         let rec = HitRecord {
@@ -98,13 +100,15 @@ fn main() {
         let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
         let m = loaded.material.probe(&r, &rec);
         println!(
-            "{u:>6.3} {v:>6.3}   ({:>6.4} {:>6.4} {:>6.4}) {:>6.3} {:>6.4} {:>6.3}",
+            "{u:>6.3} {v:>6.3}   ({:>6.4} {:>6.4} {:>6.4}) {:>6.3} {:>6.4} {:>6.3} {:>6.3} {:>10.4}",
             m.base_color.x,
             m.base_color.y,
             m.base_color.z,
             m.base_metalness,
             m.specular_roughness,
-            m.specular_weight
+            m.specular_weight,
+            m.coat_weight,
+            m.coat_roughness
         );
     }
 }

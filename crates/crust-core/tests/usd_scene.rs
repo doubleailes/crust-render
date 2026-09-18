@@ -1241,7 +1241,7 @@ fn a_materialx_reference_resolves_to_a_real_material() {
     let scene =
         Scene::from_usd(&sample("materialx_basic.usda")).expect("failed to open materialx_basic");
 
-    assert!(scene.world.count() >= 3, "expected the three quads");
+    assert!(scene.world.count() >= 4, "expected the four quads");
 
     // The grey fallback is `OpenPBR::diffuse(0.5)`: no continuous specular and
     // a flat mid-grey. A resolved MaterialX material reports that it reads
@@ -1251,8 +1251,92 @@ fn a_materialx_reference_resolves_to_a_real_material() {
         .filter(|&g| scene.world.material(g).uses_uv())
         .count();
     assert_eq!(
-        textured, 3,
-        "expected all three quads to carry MaterialX materials, got {textured}"
+        textured, 4,
+        "expected all four quads to carry MaterialX materials, got {textured}"
+    );
+}
+
+/// Two specular lobes. A dielectric layered over a base that already carries
+/// a specular is OpenPBR's coat, not a second contribution to the base
+/// specular pool — so the lacquer's clear varnish and satin undercoat keep
+/// their own roughnesses instead of averaging into one intermediate lobe.
+/// Checked in numbers rather than pixels, because a wrong reduction still
+/// renders as a plausible glossy surface.
+#[test]
+fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
+    use crust_core::{HitRecord, Ray, Vec3A, materialx};
+
+    let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
+    let loaded = materialx::load(
+        &sample("materialx_basic.mtlx"),
+        Some("mtlx_lacquer"),
+        &decline,
+    )
+    .expect("mtlx_lacquer compiles");
+    assert!(loaded.unsupported.is_empty(), "{:?}", loaded.unsupported);
+
+    // A hit looking straight down at a flat, upward-facing patch.
+    let rec = HitRecord {
+        p: Vec3A::ZERO,
+        normal: Vec3A::Z,
+        t: 1.0,
+        front_face: true,
+        face_id: HitRecord::NO_FACE,
+        face_uv: (0.0, 0.0),
+        uv: (0.5, 0.5),
+        tangent: Vec3A::X,
+        has_uv: true,
+    };
+    let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
+    let m = loaded.material.probe(&r, &rec);
+
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    assert!(near(m.coat_weight, 1.0), "coat weight {}", m.coat_weight);
+    assert!(
+        near(m.coat_roughness, 0.02),
+        "coat roughness {}",
+        m.coat_roughness
+    );
+    assert!(near(m.coat_ior, 1.5), "coat ior {}", m.coat_ior);
+    assert!(
+        near(m.specular_weight, 1.0),
+        "specular weight {}",
+        m.specular_weight
+    );
+    assert!(
+        near(m.specular_roughness, 0.4),
+        "the two roughnesses averaged into one lobe: {}",
+        m.specular_roughness
+    );
+    assert!(
+        near(m.base_metalness, 0.0),
+        "metalness {}",
+        m.base_metalness
+    );
+    assert!(near(m.base_weight, 1.0), "base weight {}", m.base_weight);
+    assert!(
+        m.base_color.x > m.base_color.y && m.base_color.x > m.base_color.z,
+        "red base lost: {}",
+        m.base_color
+    );
+
+    // And the single-dielectric ceramic is untouched: one glaze over diffuse
+    // is the base specular, with no coat.
+    let ceramic = materialx::load(
+        &sample("materialx_basic.mtlx"),
+        Some("mtlx_ceramic"),
+        &decline,
+    )
+    .expect("mtlx_ceramic compiles");
+    let c = ceramic.material.probe(&r, &rec);
+    assert_eq!(
+        c.coat_weight, 0.0,
+        "a lone glaze over diffuse became a coat"
+    );
+    assert!(
+        near(c.specular_roughness, 0.06),
+        "ceramic glaze roughness {}",
+        c.specular_roughness
     );
 }
 
