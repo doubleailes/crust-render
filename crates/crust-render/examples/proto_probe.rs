@@ -39,7 +39,8 @@ fn main() {
     let start = match args.get(1) {
         Some(p) => stage.prim(sdf::Path::new(p).expect("bad path")),
         None => stage.prim(sdf::Path::abs_root()),
-    };
+    }
+    .expect("prim handle");
     let Some(inst) = find_instance(&start, 0) else {
         println!("no instanceable prim found");
         return;
@@ -51,7 +52,7 @@ fn main() {
     };
     println!("prototype {proto_path}\n");
 
-    let proto = stage.prim(proto_path.clone());
+    let proto = stage.prim(proto_path.clone()).expect("prototype handle");
     let mut counts = Counts::default();
     walk(&stage, &proto, 0, &mut counts);
 
@@ -115,14 +116,14 @@ fn walk(stage: &usd::Stage, prim: &usd::Prim, depth: usize, c: &mut Counts) {
     let ty = prim.type_name().ok().flatten().unwrap_or_default();
 
     // The two ways of asking the same question.
-    let by_path = stage.prim(path.clone());
+    let by_path = stage.prim(path.clone()).expect("prim handle");
     let path_ty = by_path.type_name().ok().flatten().unwrap_or_default();
     let path_ok = !path_ty.is_empty();
     if path_ok {
         c.path_valid += 1;
     }
     let schema_mesh = matches!(
-        openusd::schemas::geom::Mesh::get(stage, path.clone()),
+        openusd_schemas::geom::Mesh::get(stage, path.clone()),
         Ok(Some(_))
     );
     let points_ok = matches!(

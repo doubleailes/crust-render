@@ -31,19 +31,35 @@ use glam::{Affine3A, Mat3A, Vec3, Vec3A};
 
 use super::subdiv;
 use openusd::gf::{Matrix4d, Vec3f};
-use openusd::schemas::geom::{
+use openusd::sdf;
+use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask};
+use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, InterpolateBoundary,
     Mesh as UsdMesh, PointBased, PointInstancer, Sphere as UsdSphere, SubdivisionScheme, Xform,
     Xformable,
 };
-use openusd::schemas::lux::{
+use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
     RectLight, SphereLight,
 };
-use openusd::schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
-use openusd::schemas::shade::{self, Material as UsdMaterial, MaterialBindingAPI, Shader};
-use openusd::sdf;
-use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask};
+use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
+use openusd_schemas::shade::{
+    self, Material as UsdMaterial, MaterialBindingAPI, Shader, TerminalSource,
+};
+
+/// `Stage::prim` for a path that is already an `sdf::Path`.
+///
+/// openusd 0.7 widened the argument to any path-like value, so the call now
+/// returns a `Result` whose error is a *parse* failure. Every caller here
+/// hands it a path that was parsed or composed already, which is why the
+/// error arm is unreachable rather than merely unlikely. A `Prim` handle
+/// asserts nothing about composed content either way — querying it is what
+/// finds out whether a prim is there.
+fn prim_at(stage: &Stage, path: sdf::Path) -> Prim {
+    stage
+        .prim(path)
+        .expect("an already-parsed sdf::Path cannot fail to parse")
+}
 
 const DEFAULT_SPP: u32 = 128;
 const DEFAULT_MAX_DEPTH: u32 = 32;
@@ -97,7 +113,7 @@ fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
         debug!("Streaming import disabled by CRUST_STREAM_IMPORT=0");
         return Vec::new();
     }
-    let pseudo_root = stage.prim(sdf::Path::abs_root());
+    let pseudo_root = prim_at(stage, sdf::Path::abs_root());
     let Ok(top) = pseudo_root.children() else {
         return Vec::new();
     };
@@ -274,7 +290,16 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
 fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
     let mut builder = Stage::builder().load(InitialLoadSet::LoadAll);
     if let Some(p) = mask {
-        builder = builder.mask(StagePopulationMask::new([p]));
+        // Fallible since openusd 0.7: a mask path must be an absolute prim
+        // path. These come from `stream_roots`, which yields composed
+        // top-level prim paths, so a failure here is a bug rather than bad
+        // input — but it is reported rather than panicked on, like every
+        // other way opening a stage can fail.
+        let mask = StagePopulationMask::new([p]).map_err(|e| crate::Error::UsdOpen {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        builder = builder.mask(mask);
     }
     builder.open(path_str).map_err(|e| crate::Error::UsdOpen {
         path: path.to_path_buf(),
@@ -331,7 +356,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         let stage = open_stage(path, path_str, None)?;
         traverse_into(
             &stage,
-            stage.prim(sdf::Path::abs_root()),
+            prim_at(&stage, sdf::Path::abs_root()),
             GMat4::IDENTITY,
             &mut ctx,
         );
@@ -345,7 +370,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             // would, while everything outside the chunk stays absent.
             traverse_into(
                 &stage,
-                stage.prim(sdf::Path::abs_root()),
+                prim_at(&stage, sdf::Path::abs_root()),
                 GMat4::IDENTITY,
                 &mut ctx,
             );
@@ -2325,7 +2350,7 @@ fn prototype_parts(
     if let Some(parts) = caches.protos.get(&key) {
         return parts.clone();
     }
-    let root = stage.prim(proto_path.clone());
+    let root = prim_at(stage, proto_path.clone());
     let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
     if parts.is_empty() {
         warn!("Prototype {} contributed no geometry", key.1);
@@ -2726,10 +2751,10 @@ fn build_camera(stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Option
 fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
     let mut ancestors: Vec<Prim> = Vec::new();
     let mut cur_path = prim.path().clone();
-    ancestors.push(stage.prim(cur_path.clone()));
+    ancestors.push(prim_at(stage, cur_path.clone()));
     while let Some(parent) = cur_path.parent() {
         cur_path = parent;
-        ancestors.push(stage.prim(cur_path.clone()));
+        ancestors.push(prim_at(stage, cur_path.clone()));
         if cur_path.as_str() == "/" {
             break;
         }
@@ -3079,6 +3104,17 @@ fn resolve_material(
     resolved
 }
 
+/// Render contexts `compute_surface_source` is asked for, strongest first.
+///
+/// openusd 0.6 took no argument: it tried the universal terminal, then every
+/// authored context in alphabetical order. 0.7 takes the preference list
+/// explicitly and appends the universal context *last* unless it is named, so
+/// the empty string leads here to keep a plain `outputs:surface` winning over
+/// any render-specific one. `glslfx` is the preview context and the only
+/// namespaced one crust can decode; an `ri` surface is a PxrDisneyBsdf, which
+/// `has_shader_id` catches before this call is ever reached.
+const SURFACE_RENDER_CONTEXTS: &[&str] = &["", "glslfx"];
+
 fn resolve_material_uncached(
     stage: &Stage,
     mat_path: &sdf::Path,
@@ -3128,25 +3164,34 @@ fn resolve_material_uncached(
         return Arc::new(disney_to_openpbr(stage, mat_path, caches));
     }
 
-    let shader = match mat.compute_surface_source() {
-        Ok(Some(s)) => s,
-        _ => {
-            // The MaterialX case reaches here when the material prim itself
-            // composed (a wrapper layer `over`s it, so the prim exists) but
-            // its shader network lives in the unreadable `.mtlx`.
-            try_mtlx!();
-            warn!(
-                "Material {} has no surface shader — using default grey OpenPBR",
-                mat_path
-            );
-            return default_material();
-        }
+    // openusd 0.7 hands back the whole resolved terminal — every source
+    // driving it, in connection order — where 0.6 returned the one shader.
+    // The first source whose endpoint is a `Shader`-typed prim is that shader;
+    // a source can point at an untyped prim, which is USD's invalid-shader
+    // result and not something to decode.
+    let resolved = mat
+        .compute_surface_source(SURFACE_RENDER_CONTEXTS)
+        .ok()
+        .flatten();
+    let Some(shader) = resolved
+        .as_ref()
+        .and_then(|terminal| terminal.sources().iter().find_map(TerminalSource::shader))
+    else {
+        // The MaterialX case reaches here when the material prim itself
+        // composed (a wrapper layer `over`s it, so the prim exists) but
+        // its shader network lives in the unreadable `.mtlx`.
+        try_mtlx!();
+        warn!(
+            "Material {} has no surface shader — using default grey OpenPBR",
+            mat_path
+        );
+        return default_material();
     };
 
-    let shader_id = shader_info_id(&shader);
+    let shader_id = shader_info_id(shader);
     debug!("Material {mat_path}: surface shader id = {shader_id:?}");
     match shader_id.as_deref() {
-        Some("crust:openpbr") => decode_crust_openpbr(&shader),
+        Some("crust:openpbr") => decode_crust_openpbr(shader),
         Some("UsdPreviewSurface") => {
             // The preview surface may still be the Ptex-driven one — the Moana
             // island wires its `diffuseColor` to a Ptex node — so consult the
@@ -3251,7 +3296,7 @@ fn preview_surface_openpbr(stage: &Stage, mat_path: &sdf::Path) -> OpenPBR {
 /// material may declare several context outputs and USD gives no ordering
 /// between them without a configured render context.
 fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
-    let Ok(children) = stage.prim(mat_path.clone()).children() else {
+    let Ok(children) = prim_at(stage, mat_path.clone()).children() else {
         return false;
     };
     children
@@ -3289,7 +3334,7 @@ fn disney_to_openpbr(
     mat_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
 ) -> OpenPBR {
-    let prim = stage.prim(mat_path.clone());
+    let prim = prim_at(stage, mat_path.clone());
     let f = |n: &str| custom_f32(&prim, &format!("inputs:{n}"));
     let c = |n: &str| custom_vec3(&prim, &format!("inputs:{n}"));
 
@@ -3361,7 +3406,7 @@ fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::Pat
     // composition graph knows both, so the candidate spec paths come from its
     // nodes rather than from the stage path.
     let mut paths = vec![mat_path.clone()];
-    if let Ok(graph) = stage.prim(mat_path.clone()).prim_index().graph() {
+    if let Ok(graph) = prim_at(stage, mat_path.clone()).prim_index().graph() {
         for node in graph.all_nodes() {
             let p = node.path().clone();
             if !paths.contains(&p) {
@@ -3379,7 +3424,7 @@ fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::Pat
         // a few layers — and it sidesteps having to map a node's `LayerId`
         // back to an identifier, which openusd does not expose.
         for path in &paths {
-            let Some(spec) = layer.prim(path.clone()) else {
+            let Ok(Some(spec)) = layer.prim(path.clone()) else {
                 continue;
             };
             let Ok(Some(sdf::Value::ReferenceListOp(list))) = spec.field("references") else {
@@ -3507,7 +3552,7 @@ fn material_ptex(
     mat_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
 ) -> Option<crate::PtexRef> {
-    let prim = stage.prim(mat_path.clone());
+    let prim = prim_at(stage, mat_path.clone());
     let value = prim
         .attribute("inputs:surfaceMap")
         .get::<sdf::Value>()
@@ -3735,7 +3780,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     }
 
     // Custom `crust:*` attrs. We look them up on the RenderSettings prim.
-    let prim = stage.prim(path);
+    let prim = prim_at(stage, path);
     let spp = custom_i32(&prim, "crust:samplesPerPixel").unwrap_or(DEFAULT_SPP as i32) as u32;
     let max_depth = custom_i32(&prim, "crust:maxDepth").unwrap_or(DEFAULT_MAX_DEPTH as i32) as u32;
     let min_spp =

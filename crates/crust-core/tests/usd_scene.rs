@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use crust_core::Scene;
-use openusd::schemas::shade::{Material as UsdMaterial, MaterialBindingAPI};
 use openusd::sdf;
 use openusd::usd::{PrimPredicate, Stage};
+use openusd_schemas::shade::{Material as UsdMaterial, MaterialBindingAPI, TerminalSource};
 
 fn sample(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -300,9 +300,17 @@ fn openpbr_showcase_materials_all_decode() {
     let mut mats = 0;
     for p in &prims {
         if let Ok(Some(mat)) = UsdMaterial::get(&stage, p.clone()) {
-            let shader = mat
-                .compute_surface_source()
+            // Since openusd 0.7 the terminal resolves against an explicit
+            // render-context list (the empty string is the universal context)
+            // and yields every source driving it rather than one shader.
+            let terminal = mat
+                .compute_surface_source(&[""])
                 .unwrap()
+                .unwrap_or_else(|| panic!("Material {} has no surface shader", p));
+            let shader = terminal
+                .sources()
+                .iter()
+                .find_map(TerminalSource::shader)
                 .unwrap_or_else(|| panic!("Material {} has no surface shader", p));
             let id = shader
                 .id()

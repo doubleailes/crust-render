@@ -36,7 +36,7 @@ fn main() {
 
     // Walk the whole composed stage, descending into prototypes when an
     // instance is met, and report every PointInstancer found either way.
-    let root = stage.prim(sdf::Path::abs_root());
+    let root = stage.prim(sdf::Path::abs_root()).expect("root prim handle");
     let mut seen = Vec::new();
     walk(&stage, &root, 0, rel_name, &mut seen, false);
 
@@ -114,7 +114,7 @@ fn walk(
     // matching what the importer does.
     if prim.is_instance().unwrap_or(false) {
         if let Ok(Some(proto_path)) = prim.prototype() {
-            let proto = stage.prim(proto_path);
+            let proto = stage.prim(proto_path).expect("prototype handle");
             if let Ok(kids) = proto.children() {
                 for k in kids.iter() {
                     walk(stage, k, depth + 1, rel_name, seen, true);
