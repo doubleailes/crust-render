@@ -479,9 +479,18 @@ fn eval_specular(
     // Fresnels are non-negative and finite (`fresnel_f82_tint` clamps to
     // [0,1]), so the dropped term is exactly +0.0 and `x + 0.0 == x`.
 
-    // Dielectric-specular path: F_dielectric · brdf · (1 − metalness)
+    // Dielectric-specular path: F_dielectric · brdf · (1 − metalness) ·
+    // specular_weight.
+    //
+    // `specular_weight` scales the finished lobe and is deliberately *not*
+    // folded into F0. Schlick is `F0 + (1 − F0)(1 − cosθ)⁵`, so an F0 of zero
+    // still returns 1.0 at grazing: scaling F0 left a surface with no specular
+    // interface at all — `OpenPBR::diffuse()`, and every MaterialX body whose
+    // dielectrics were all promoted to the coat — emitting a full-strength
+    // white glossy rim at the fallback roughness. Scaling the term instead
+    // makes the lobe linear in the weight, which is what the parameter means.
     let diel_term = if m.base_metalness < 1.0 {
-        let f0_diel_base = m.specular_color * f0_diel_scalar * m.specular_weight;
+        let f0_diel_base = m.specular_color * f0_diel_scalar;
 
         // Thin-film interference (Phase 2): replaces the Fresnel with an
         // iridescent one at 3 wavelengths, blended by thin_film_weight.
@@ -513,7 +522,7 @@ fn eval_specular(
         } else {
             f_diel
         };
-        f_diel * (1.0 - m.base_metalness)
+        f_diel * (1.0 - m.base_metalness) * m.specular_weight
     } else {
         Vec3A::ZERO
     };
@@ -641,7 +650,17 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
     let f_avg_diel = f0_from_ior(m.specular_ior);
 
     let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
-    let specular = eval_specular(m, v_local, l_local, h_local, ax, ay);
+    // Both halves of `eval_specular` now end in a multiply by
+    // `specular_weight`, so at zero the whole call is exactly +0.0 and can be
+    // skipped by the same bit-identity argument as the coat and fuzz below.
+    // Worth the branch: every unbound prim and every `UsdPreviewSurface`-less
+    // material reduces to `OpenPBR::diffuse()`, which is the whole of
+    // cornellbox and Kitchen_set.
+    let specular = if m.specular_weight > 0.0 {
+        eval_specular(m, v_local, l_local, h_local, ax, ay)
+    } else {
+        Vec3A::ZERO
+    };
 
     // Absent layers are skipped, not multiplied by zero. Both lobes end in a
     // multiply by their weight, and both are finite for every input — every
@@ -1573,6 +1592,55 @@ mod tests {
         assert_eq!(m.thin_film_ior, 1.4);
         assert_eq!(m.transmission_dispersion_abbe_number, 20.0);
         assert_eq!(m.subsurface_radius_scale, Vec3A::new(1.0, 0.5, 0.25));
+    }
+
+    /// A `specular_weight` of zero must leave no dielectric lobe at all.
+    ///
+    /// The regression: `specular_weight` used to be folded into F0, and Schlick
+    /// is `F0 + (1 − F0)(1 − cosθ)⁵`, which returns **1.0 at grazing** however
+    /// small F0 is. So `OpenPBR::diffuse()` — every unbound prim, and every
+    /// MaterialX body whose dielectrics were all promoted to the coat — carried
+    /// a full-strength white glossy rim at the fallback roughness 0.3, on a
+    /// material with no specular interface whatsoever.
+    #[test]
+    fn a_zero_specular_weight_has_no_dielectric_lobe() {
+        let m = OpenPBR::diffuse(Vec3A::splat(0.5));
+        assert_eq!(m.specular_weight, 0.0, "preset changed under the test");
+        // Grazing on both sides, which is where the old form peaked.
+        let v = Vec3A::new(0.999, 0.0, 0.0447).normalize();
+        let l = Vec3A::new(-0.999, 0.0, 0.0447).normalize();
+        let h = (v + l).normalize();
+        let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, 0.0);
+        assert_eq!(
+            eval_specular(&m, v, l, h, ax, ay),
+            Vec3A::ZERO,
+            "a white rim survived on a material with no specular"
+        );
+    }
+
+    /// `specular_weight` scales the lobe, so the lobe is linear in it. Folding
+    /// it into F0 did not satisfy this at any angle off normal — which is the
+    /// shortest statement of what the bug was.
+    #[test]
+    fn the_dielectric_lobe_is_linear_in_specular_weight() {
+        let mut m = OpenPBR {
+            base_metalness: 0.0,
+            ..OpenPBR::default()
+        };
+        let v = Vec3A::new(0.6, 0.0, 0.8).normalize();
+        let l = Vec3A::new(-0.5, 0.3, 0.81).normalize();
+        let h = (v + l).normalize();
+        let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, 0.0);
+
+        m.specular_weight = 1.0;
+        let full = eval_specular(&m, v, l, h, ax, ay);
+        m.specular_weight = 0.5;
+        let half = eval_specular(&m, v, l, h, ax, ay);
+        assert!(full.length() > 1e-6, "test is vacuous: lobe is black");
+        assert!(
+            (half * 2.0 - full).length() < 1e-5,
+            "not linear in specular_weight: {half} vs {full}"
+        );
     }
 
     /// `alpha_to_roughness` is the exact inverse of `roughness_to_alpha_aniso`
