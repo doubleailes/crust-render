@@ -37,26 +37,49 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ", "xformOp:scale"]
     }
 
-    # The floor is the only geometry of the set. The overview's seamless
-    # cyclorama is played by the dome plus a near-white floor: a Lambertian
-    # floor of albedo a under a uniform dome of radiance L reflects a*L, so at
-    # a ~ 1 the floor meets the sky at the horizon and there is no line to
-    # see — real cyclorama paper is this white for the same reason.
+    # The set is a cyclorama: floor running back into a cove that ramps up out
+    # of frame, both the same white matte paper. It has to be real geometry.
+    # With the room dim — which is what the overview's dark glaze implies — a
+    # DomeLight can no longer play the background; it would read as a dark band
+    # across the top of frame. So the sweep is lit geometry and the dome is
+    # only ambient.
     #
-    # The plane has to be big enough that its *edge* leaves the frame, which
-    # 8x8 was not: the camera sits 0.28 up and looks 7.9 degrees down with an
-    # 8.9 degree half-FOV, so the far edge of an 8x8 floor subtends 4.7 degrees
-    # above the axis and landed at y = 254 — the hard horizontal line across
-    # the top of the old render was that edge, not a horizon. At 60x60 the edge
-    # is below the true horizon and out of frame, and the only transition left
-    # is floor-meets-sky, which the matched albedo hides.
+    # The cove is a quarter-arc of radius 6 tangent to the floor at y = 3,
+    # faceted into six quads, and the curvature is the point. A flat backdrop
+    # meeting a flat floor changes surface normal in one step, and the two then
+    # respond differently to the same lights: a vertical wall sits at about
+    # half the floor's illumination, and even a 53 degree ramp left an 18% jump
+    # right at the join — a hard horizontal line across the frame. Curving it
+    # turns that step into a gradient no single facet betrays. Real cycloramas
+    # are coved for exactly this reason.
+    #
+    # 24 facets, not 6, because the importer ignores authored `normals` and
+    # shades every polygon flat: at 6 the normal turns 15 degrees per facet and
+    # the brightness stepped 10% at a facet boundary, which read as a hard line
+    # across the backdrop. At 24 the step is under 2% and invisible. The arc
+    # clears the top-of-frame line by y = 5.2; everything past that is there
+    # for the glaze to reflect rather than for the camera to see.
+    #
+    # The join is at y = 3. The camera sits 0.28 up and looks 7.9 degrees down
+    # with an 8.9 degree half-FOV, so that lands at y = 298 in frame: floor
+    # below, cove above, and the cove has left frame by y = 3.3 in world.
     def Mesh "Floor" (
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
-        point3f[] points = [(-30, -30, 0), (30, -30, 0), (30, 30, 0), (-30, 30, 0)]
+        point3f[] points = [(-20, -20, 0), (20, -20, 0), (20, 3, 0), (-20, 3, 0)]
+        rel material:binding = </World/Looks/Sweep>
+    }
+
+    def Mesh "Cove" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8, 8, 9, 11, 10, 10, 11, 13, 12, 12, 13, 15, 14, 14, 15, 17, 16, 16, 17, 19, 18, 18, 19, 21, 20, 20, 21, 23, 22, 22, 23, 25, 24, 24, 25, 27, 26, 26, 27, 29, 28, 28, 29, 31, 30, 30, 31, 33, 32, 32, 33, 35, 34, 34, 35, 37, 36, 36, 37, 39, 38, 38, 39, 41, 40, 40, 41, 43, 42, 42, 43, 45, 44, 44, 45, 47, 46, 46, 47, 49, 48]
+        point3f[] points = [(-20, 3.0000, 0.0000), (20, 3.0000, 0.0000), (-20, 3.3924, 0.0128), (20, 3.3924, 0.0128), (-20, 3.7832, 0.0513), (20, 3.7832, 0.0513), (-20, 4.1705, 0.1153), (20, 4.1705, 0.1153), (-20, 4.5529, 0.2044), (20, 4.5529, 0.2044), (-20, 4.9286, 0.3184), (20, 4.9286, 0.3184), (-20, 5.2961, 0.4567), (20, 5.2961, 0.4567), (-20, 5.6537, 0.6188), (20, 5.6537, 0.6188), (-20, 6.0000, 0.8038), (20, 6.0000, 0.8038), (-20, 6.3334, 1.0112), (20, 6.3334, 1.0112), (-20, 6.6526, 1.2399), (20, 6.6526, 1.2399), (-20, 6.9561, 1.4890), (20, 6.9561, 1.4890), (-20, 7.2426, 1.7574), (20, 7.2426, 1.7574), (-20, 7.5110, 2.0439), (20, 7.5110, 2.0439), (-20, 7.7601, 2.3474), (20, 7.7601, 2.3474), (-20, 7.9888, 2.6666), (20, 7.9888, 2.6666), (-20, 8.1962, 3.0000), (20, 8.1962, 3.0000), (-20, 8.3812, 3.3463), (20, 8.3812, 3.3463), (-20, 8.5433, 3.7039), (20, 8.5433, 3.7039), (-20, 8.6816, 4.0714), (20, 8.6816, 4.0714), (-20, 8.7956, 4.4471), (20, 8.7956, 4.4471), (-20, 8.8847, 4.8295), (20, 8.8847, 4.8295), (-20, 8.9487, 5.2168), (20, 8.9487, 5.2168), (-20, 8.9872, 5.6076), (20, 8.9872, 5.6076), (-20, 9.0000, 6.0000), (20, 9.0000, 6.0000)]
         rel material:binding = </World/Looks/Sweep>
     }
 
@@ -94,60 +117,82 @@ def Xform "World"
         }
     }
 
-    # The dome is the shot. Measured off the overview, the sweep sits at 0.605
-    # linear and is flat to within 4% from the top of frame to the bottom, and
-    # nothing on the teapot is blown — the brightest rib patches only reach
-    # ~0.40 grey. That is a large even source, not a hot softbox, so the dome
-    # carries ~90% of the light and the two rectangles only give the shadows a
-    # direction. A DomeLight's radiance is `intensity * color` and an escaping
-    # camera ray reads it directly, so this number *is* the backdrop value.
-    def DomeLight "Sky"
+    # A dim room, not a bright dome. The overview's glaze is *dark*: the body
+    # between the ribs sits near 0.02 linear, and a glaze of F0 ~ 0.037 over a
+    # base of ~0.03 reads about 0.067 x ambient, which puts the ambient near
+    # 0.2 — not the 0.6 the sweep reads. The sweep is bright because it is lit,
+    # not because the room is. This is the whole difference between the two
+    # looks: a dome bright enough to double as the background makes every
+    # glossy surface mirror one flat grey, so the ribs lose their contrast and
+    # the softbox reflections disappear into the veil.
+    def DomeLight "Ambient"
     {
-        color3f inputs:color = (0.97, 0.967, 1.0)
-        float inputs:intensity = 0.60
+        color3f inputs:color = (0.95, 0.96, 1.0)
+        float inputs:intensity = 0.25
     }
 
-    # A large softbox high in front and to the right. In the overview both
-    # shadows fall to the *left* of their object and are shallow — the teapot's
-    # contact shadow is 0.71 of the clear floor and the lion's 0.62 — which is
-    # most of the way to what dome occlusion alone produces under a closed
-    # object. So the key is here for direction, not for level.
+    # Key: a softbox high and to the camera right. Its reflection is the band
+    # of bright dashes across the upper third of the teapot in the overview,
+    # broken into dashes because each rib turns through the highlight, and it
+    # is what throws both cast shadows left and short.
     #
-    # It sits ~3x further out than a dramatic key would. Distance is what
-    # flattens the floor: the near floor used to be 1.9x brighter than the far
-    # floor purely from this light's inverse square, which is a gradient the
-    # overview's sweep does not have.
-    #
-    # Its radiance must stay *above* the dome's, which is the non-obvious
-    # constraint here. A light's geometry occludes the dome behind it for
-    # shadow and indirect rays, so a panel is only a net gain where it is
-    # brighter than the sky it covers — a wide, gentle one at 0.55 against a
-    # dome of 0.615 measurably *darkened* the floor and deepened the shadows,
-    # acting as a gobo. Hence bright and small rather than dim and wide: 2.5x
-    # the dome's radiance, over a solid angle chosen so that its reflection in
-    # the glaze reads as a broad streak rather than a hard rectangle. Net gain
-    # goes as `(I - L) x area`, so size and intensity trade off along that
-    # curve: bigger and softer is free as long as `I` stays clear of `L`.
+    # Far and bright rather than near and gentle, which is the whole trick of
+    # this rig. Distance buys even coverage: at one unit this box put 1.0
+    # linear on the floor just in front of it and clipped, while the subject
+    # got no more, because a white sweep and a dark glaze at the same distance
+    # receive the same irradiance. At five units the falloff across the set is
+    # negligible. Small solid angle plus high radiance is then what buys the
+    # *contrast*: the glaze mirrors a small, very bright rectangle instead of a
+    # large dim one, so the highlight is a hard bright dash on a dark body.
     def RectLight "Key"
     {
-        color3f inputs:color = (1, 0.97, 0.93)
-        float inputs:intensity = 1.0
-        float inputs:width = 3.0
-        float inputs:height = 3.0
-        matrix4d xformOp:transform = ( (0.8944, 0.4472, 0, 0), (-0.2981, 0.5963, 0.7454, 0), (0.3333, -0.6667, 0.6667, 0), (1.65, -3.0, 3.15, 1) )
+        color3f inputs:color = (1, 0.98, 0.95)
+        float inputs:intensity = 9.6
+        float inputs:width = 3.4
+        float inputs:height = 3.4
+        matrix4d xformOp:transform = ( (0.848048, 0.529919, -0.000000, 0.000000), (-0.354585, 0.567455, 0.743145, 0.000000), (0.393807, -0.630223, 0.669131, 0.000000), (3.938068, -6.302226, 6.821306, 1.000000) )
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
-    # Cool fill from the left, weaker, to keep the glaze's left flank alive and
-    # to stop the key's shadow going flat. Moved out on the same ray and scaled
-    # by the same factor, for the same reason.
+    # Fill: wider, lower, cooler and much weaker, from the camera left. It
+    # opens the shadow side without planting a second obvious highlight.
     def RectLight "Fill"
     {
-        color3f inputs:color = (0.85, 0.9, 1.0)
-        float inputs:intensity = 0.82
-        float inputs:width = 2.6
-        float inputs:height = 2.6
-        matrix4d xformOp:transform = ( (0.7071, -0.7071, 0, 0), (0.3536, 0.3536, 0.8660, 0), (-0.6124, -0.6124, 0.5, 0), (-2.7, -2.7, 2.25, 1) )
+        color3f inputs:color = (0.93, 0.96, 1.0)
+        float inputs:intensity = 4.0
+        float inputs:width = 3.8
+        float inputs:height = 3.8
+        matrix4d xformOp:transform = ( (0.529919, -0.848048, 0.000000, 0.000000), (0.290050, 0.181243, 0.939693, 0.000000), (-0.796905, -0.497961, 0.342020, 0.000000), (-7.969045, -4.979612, 3.550201, 1.000000) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    # Top strip, nearly overhead: the lid's bright curved streak and the lit
+    # upper edges of spout and shoulder. A strip, not a square, so it reads as
+    # a long thin highlight across a curved top.
+    def RectLight "Top"
+    {
+        color3f inputs:color = (1, 0.99, 0.97)
+        float inputs:intensity = 8.0
+        float inputs:width = 3.2
+        float inputs:height = 1.4
+        matrix4d xformOp:transform = ( (0.990268, 0.139173, -0.000000, 0.000000), (-0.132361, 0.941801, 0.309017, 0.000000), (0.043007, -0.306010, 0.951057, 0.000000), (0.387062, -2.754087, 8.689509, 1.000000) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    # The light on the cyc, which every studio rigs separately and booms over
+    # the sweep rather than placing with the key. Position is the whole point:
+    # from up near the cove it is 3.5x closer to the backdrop than to the floor
+    # in front of the subjects, so it lifts the far end — which the key cannot
+    # reach — without touching the near floor. Rigged out front with the other
+    # boxes it just raised the whole sweep uniformly and the gradient stayed.
+    # It sits 34 degrees above the top of frame, so it is never in shot.
+    def RectLight "Sweep"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 0.66
+        float inputs:width = 8.0
+        float inputs:height = 3.0
+        matrix4d xformOp:transform = ( (1.000000, 0.000000, -0.000000, 0.000000), (0.000000, 0.669131, 0.743145, 0.000000), (0.000000, -0.743145, 0.669131, 0.000000), (0.000000, 3.324679, 3.408870, 1.000000) )
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
