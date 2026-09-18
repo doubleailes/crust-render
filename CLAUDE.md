@@ -594,10 +594,14 @@ Schema mapping:
     whose base already carries a specular (another dielectric, a conductor)
     arrives as `LobeKind::Coat` and pools onto OpenPBR's coat lobe with its own
     roughness and IOR, while a dielectric directly over a diffuse stays the
-    base specular (that is how OpenPBR's own dielectric base is built). So the
-    teapot's clear glaze over its mask-driven satin glaze keeps both lobes, and
-    a varnish over a conductor keeps its varnish — the single pool used to lose
-    it, since a metal base zeroes the dielectric Fresnel term. The decision is
+    base specular (that is how OpenPBR's own dielectric base is built). So a
+    varnish over a conductor keeps its varnish — the single pool used to lose
+    it, since a metal base zeroes the dielectric Fresnel term — and the DPEL
+    **lion**, whose glaze sits over a `mix(conductor, diffuse)`, reduces to
+    `coat_weight = 1`. The **teapot** does not: its glaze sits over a plain
+    `oren_nayar_diffuse_bsdf`, so both its glazes stay the base specular and it
+    reduces to `coat_weight = 0` at every point — correctly, and worth knowing
+    before blaming the coat for anything the teapot does. The decision is
     by tree shape, never by evaluated weight (a per-point flip would draw a
     seam along a mask's zero contour), which is why the literal-zero dummy has
     to be pruned before the layer looks at its base. What this still cannot
@@ -607,6 +611,23 @@ Schema mapping:
     `conductor_bsdf` fed by `artistic_ior` is reduced back to a reflectivity
     colour through the exact inverse of Gulbrandsen's formula, so a metal
     authored either way lands on the same OpenPBR metal lobe.
+  - **Two unit conversions the reduction owes MaterialX**, both easy to
+    re-break. First, a MaterialX specular BSDF's `roughness` input is the GGX
+    **alpha**, not a perceptual roughness — that is what `roughness_anisotropy`
+    exists to produce, and the DPEL teapot's `.mtlx` makes it explicit with
+    `power` nodes named `desquare_roughness_*`. crust's OpenPBR roughness is
+    perceptual and gets squared again, so `reduce()` takes the square root
+    once, *after* pooling (`√` is concave, so pooling in alpha and converting
+    at the end is both cheaper and the better stand-in for a GGX mixture). Only
+    the GGX lobes convert: `oren_nayar_diffuse_bsdf`'s roughness is an
+    Oren-Nayar sigma and `sheen_bsdf`'s drives the Charlie NDF directly.
+    Second, a MaterialX coat arrives with `coat_darkening = 0`, set on the base
+    in `load()`: MaterialX's `layer` is single-scattering, so imposing
+    OpenPBR's coat-underside TIR bounce series would darken a substrate the
+    source material never darkened (on the lion, by a factor of 0.52).
+    Relatedly, `specular_weight` takes the *dielectric* pool's coverage only —
+    a conductor's coverage already lives in `base_metalness`, and counting it
+    twice rendered masked gold at m² of its energy.
   - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
     set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
     which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
