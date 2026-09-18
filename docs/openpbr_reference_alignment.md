@@ -111,6 +111,14 @@ toward grazing; at normal incidence the round trip recovers exactly
 (matching `openpbr_compute_emission`), replacing the earlier MaterialX
 `generalized_schlick_edf` approximation.
 
+The darkening term is the spec's `Δ = (1 − K̄)/(1 − K̄·E_base)` with
+`K̄ = 1 − (1 − F0)/η²` (the coat underside's hemispherical reflectance, TIR
+included — ≈0.57 at η = 1.5), faded as `1 + coat_weight·coat_darkening·(Δ − 1)`.
+An earlier form computed `E/(1 − K̄(1 − E))` with `K̄ ≈ F0`, which tends to `E`
+for dark bases and so applied the base colour twice (a 0.05 car-paint
+substrate was scaled by ~0.055); the corrected ratio is bounded below by
+`1 − K̄`.
+
 ## Remaining gaps vs. the Adobe reference
 
 Known, deliberate, and recorded here so nobody rediscovers them:

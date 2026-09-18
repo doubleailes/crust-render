@@ -281,17 +281,38 @@ pub fn sheen_charlie(n_dot_v: f32, n_dot_l: f32, n_dot_h: f32, roughness: f32) -
     sheen_charlie_d(n_dot_h, roughness) * sheen_charlie_v(n_dot_v, n_dot_l)
 }
 
-/// A Fresnel-averaged approximation of the darkening a physical coat
-/// produces on the base layer through multi-bounce internal reflection. This
-/// is the closed-form energy-compensation form recommended in the OpenPBR
-/// spec. `coat_darkening ∈ [0, 1]` fades between "no darkening" (`0`, useful
-/// for artistic mixes) and "full physical darkening" (`1`).
-pub fn coat_darkening_factor(base_color: Vec3A, coat_ior: f32, darkening: f32) -> Vec3A {
-    let f_avg = f0_from_ior(coat_ior) + (1.0 - f0_from_ior(coat_ior)) * 0.05;
-    let dark =
-        base_color / (Vec3A::ONE - f_avg * (Vec3A::ONE - base_color)).max(Vec3A::splat(1e-4));
-    let one = Vec3A::ONE;
-    one * (1.0 - darkening) + dark * darkening
+/// The darkening a physical coat produces on the base beneath it through
+/// internal reflection — the OpenPBR spec's closed form.
+///
+/// Light the base reflects back up meets the coat's underside, where a
+/// fraction `K̄` returns down (Fresnel plus, dominantly, total internal
+/// reflection) and `1 − K̄` escapes; summing the bounces against a base of
+/// albedo `E` gives an effective albedo `E·(1 − K̄)/(1 − K̄·E)`, i.e. a
+/// factor `Δ = (1 − K̄)/(1 − K̄·E)` on the base. `K̄` is the coat underside's
+/// hemispherical reflectance, `1 − (1 − F0)/η²` — the `1/η²` is the TIR
+/// cone, which is why it is ~0.57 at η = 1.5 and not the ~0.04 of the outer
+/// Fresnel. A white base is not darkened at all (`Δ = 1`); a dark one is
+/// darkened toward `1 − K̄`, never toward zero — the factor is a *ratio*,
+/// applied on top of the base colour the lobes already carry, not a darkened
+/// albedo (an earlier form here returned `E/(1 − K̄(1 − E))`, which tends to
+/// `E` for dark bases and so applied the base colour twice).
+///
+/// `coat_weight` fades the factor for partial coverage and `darkening ∈
+/// [0, 1]` is the artistic dial between "no darkening" and full physics,
+/// both as `1 + coat_weight·darkening·(Δ − 1)`.
+pub fn coat_darkening_factor(
+    base_color: Vec3A,
+    coat_ior: f32,
+    coat_weight: f32,
+    darkening: f32,
+) -> Vec3A {
+    let f0 = f0_from_ior(coat_ior);
+    let eta = coat_ior.max(1.0);
+    let k = 1.0 - (1.0 - f0) / (eta * eta);
+    let e = base_color.clamp(Vec3A::ZERO, Vec3A::ONE);
+    let delta = (1.0 - k) / (Vec3A::ONE - k * e).max(Vec3A::splat(1e-4));
+    let t = (coat_weight * darkening).clamp(0.0, 1.0);
+    Vec3A::ONE + (delta - Vec3A::ONE) * t
 }
 
 // -------- Thin-film interference (Belcour & Barla 2017, simplified) --------

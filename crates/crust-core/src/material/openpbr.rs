@@ -611,7 +611,7 @@ fn coat_attenuation(m: &OpenPBR, cos_v: f32, cos_l: f32) -> Vec3A {
     if m.coat_weight <= 0.0 {
         return Vec3A::ONE;
     }
-    let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_darkening);
+    let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_weight, m.coat_darkening);
     coat_passage(m, cos_v) * coat_passage(m, cos_l) * dark
 }
 
@@ -1206,7 +1206,12 @@ impl Material for OpenPBR {
         if self.coat_weight <= 0.0 {
             return uncoated;
         }
-        let dark = coat_darkening_factor(self.base_color, self.coat_ior, self.coat_darkening);
+        let dark = coat_darkening_factor(
+            self.base_color,
+            self.coat_ior,
+            self.coat_weight,
+            self.coat_darkening,
+        );
         uncoated * coat_passage(self, cos_theta_o) * dark
     }
 }
@@ -1573,8 +1578,52 @@ mod tests {
     #[test]
     fn coat_darkening_identity_at_zero() {
         // darkening = 0 → returns Vec3A::ONE regardless of base_color / ior.
-        let v = coat_darkening_factor(Vec3A::new(0.7, 0.3, 0.2), 1.6, 0.0);
+        let v = coat_darkening_factor(Vec3A::new(0.7, 0.3, 0.2), 1.6, 1.0, 0.0);
         assert!((v - Vec3A::ONE).length() < 1e-4);
+    }
+
+    #[test]
+    fn coat_darkening_is_one_for_a_white_base() {
+        // Every bounce a white base sends back up eventually escapes, so the
+        // geometric series sums to exactly the uncoated albedo.
+        let v = coat_darkening_factor(Vec3A::ONE, 1.5, 1.0, 1.0);
+        assert!((v - Vec3A::ONE).abs().max_element() < 1e-5, "{v}");
+    }
+
+    #[test]
+    fn coat_darkening_does_not_square_a_dark_base() {
+        // The regression this pins: the factor is a ratio bounded below by
+        // 1 − K̄ (≈ 0.43 at η = 1.5), applied on top of the base colour the
+        // lobes already carry. The old form tended to the base colour itself
+        // for dark bases, so a 0.05 red base was multiplied by ~0.055 and a
+        // car-paint substrate went nearly black under its clearcoat.
+        let e = 0.05;
+        let v = coat_darkening_factor(Vec3A::splat(e), 1.5, 1.0, 1.0).x;
+        let f0 = f0_from_ior(1.5);
+        let k = 1.0 - (1.0 - f0) / (1.5 * 1.5);
+        let expected = (1.0 - k) / (1.0 - k * e);
+        assert!((v - expected).abs() < 1e-5, "{v} != {expected}");
+        assert!(
+            v > 0.4 && v < 0.5,
+            "dark base factor {v} out of the physical range"
+        );
+        assert!(v > 4.0 * e, "the base colour was applied twice: {v}");
+        // Darker bases darken more, but monotonically toward 1 − K̄.
+        let mid = coat_darkening_factor(Vec3A::splat(0.5), 1.5, 1.0, 1.0).x;
+        assert!(mid > v && mid < 1.0, "mid-grey factor {mid}");
+    }
+
+    #[test]
+    fn coat_darkening_fades_with_coat_weight() {
+        let full = coat_darkening_factor(Vec3A::splat(0.3), 1.5, 1.0, 1.0);
+        let half = coat_darkening_factor(Vec3A::splat(0.3), 1.5, 0.5, 1.0);
+        let none = coat_darkening_factor(Vec3A::splat(0.3), 1.5, 0.0, 1.0);
+        assert!((none - Vec3A::ONE).abs().max_element() < 1e-6, "{none}");
+        let expected = Vec3A::ONE.lerp(full, 0.5);
+        assert!(
+            (half - expected).abs().max_element() < 1e-5,
+            "{half} != {expected}"
+        );
     }
 
     #[test]
