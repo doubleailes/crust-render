@@ -119,6 +119,24 @@ for dark bases and so applied the base colour twice (a 0.05 car-paint
 substrate was scaled by ~0.055); the corrected ratio is bounded below by
 `1 − K̄`.
 
+The passage and the darkening apply to **different** sets of lobes, and the
+code keeps them in separate functions (`coat_attenuation`, `coat_darkening`)
+to make that hard to re-merge. The `(1 − F)` passage is geometry — every
+photon that reaches the substrate pays it whatever lobe it then meets — so it
+multiplies everything under the coat. Δ is a substrate-*albedo* term, computed
+from `base_color`, so it multiplies only the lobes whose reflectance
+`base_color` describes: the diffuse slab, the metal slab (whose F0 literally
+*is* `base_color·base_weight`) and emission, which originates inside the
+substrate. It must not reach the base **dielectric** lobe, whose reflectance is
+~4% and white: running that through a Δ derived from a saturated base both
+dimmed and tinted it, so a clearcoated red plastic's white highlight came out a
+dim pink one.
+
+Note also that the MaterialX importer sets `coat_darkening = 0` on every coat
+it produces. MaterialX's `layer` node is single-scattering (`base·(1 − F) +
+top`) and models no bounce series, so imposing Δ on a promoted coat would
+darken a substrate the source material never darkened.
+
 ## Remaining gaps vs. the Adobe reference
 
 Known, deliberate, and recorded here so nobody rediscovers them:
@@ -128,12 +146,23 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   *directional* specular energy complement; crust uses a flat
   `(1 − F_avg)` coupling. Closing this means porting the Apache-2.0 LUT
   data tables. This is the largest remaining quality gap at high roughness.
+  It is also an energy *gain*, not just a loss: the flat 0.96 leaves the
+  diffuse almost untouched while the specular lobe adds up to ~0.35 at
+  grazing, so a coloured surface desaturates toward its silhouette. A
+  hand-rolled `1 − F(μ_v)` substitute is not a fix — it breaks reciprocity
+  unless symmetrised as `√((1 − E(μ_v))(1 − E(μ_l)))`.
 - **Random-walk subsurface entry** — non-transmissive SSS materials never
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
   and an exit strategy (module header "Phase 5").
-- **`specular_weight` semantics** — crust scales F0 directly; Adobe remaps
-  F0 back to an IOR (`ior_from_f0`), which also moves the TIR angle.
+- **`specular_weight` semantics** — crust scales the finished dielectric
+  lobe by `specular_weight`; Adobe remaps F0 back to an IOR
+  (`ior_from_f0`), which also moves the TIR angle. crust used to scale F0
+  itself, which was worse than merely approximate: Schlick is
+  `F0 + (1 − F0)(1 − cosθ)⁵`, so an F0 of zero still returns 1.0 at grazing
+  and a `specular_weight = 0` surface — every unbound prim — carried a
+  full-strength white rim. Scaling the lobe makes it linear in the weight;
+  the IOR remap is still not done.
   Related: the coat-aware base-IOR ratio (TIR fix) and coat-induced
   specular roughening are skipped.
 - **Fuzz** — Charlie sheen D × Imageworks visibility with a scalar
