@@ -625,9 +625,24 @@ Schema mapping:
     in `load()`: MaterialX's `layer` is single-scattering, so imposing
     OpenPBR's coat-underside TIR bounce series would darken a substrate the
     source material never darkened (on the lion, by a factor of 0.52).
-    Relatedly, `specular_weight` takes the *dielectric* pool's coverage only —
-    a conductor's coverage already lives in `base_metalness`, and counting it
-    twice rendered masked gold at m² of its energy.
+    Relatedly, the dielectric and conductor pools carry **independent
+    coverage**, and keeping them independent takes both halves of the seam.
+    `base_metalness` is the conductor's share of the substrate and
+    `specular_weight` is the dielectric interface's share of the *dielectric
+    base* (not of the whole surface), so `eval_specular` reconstructs the two as
+    `base_metalness` and `(1 − base_metalness)·specular_weight` and each comes
+    back as authored. The metal lobe therefore does **not** read
+    `specular_weight` — that parameter belongs to the dielectric base, and a
+    metal has no dielectric interface to weigh. While it scaled both halves, one
+    pool's coverage multiplied the other: a conductor at 0.25 under a glaze at
+    0.75 rendered its metal at 0.25 × 0.75. Two consequences worth knowing: the
+    dielectric base's coverage is `max(diffuse + sss, dielectric)` rather than a
+    sum, because MaterialX's `layer` puts an interface *on top of* a substrate
+    rather than beside it — and a conductor mixed with a *bare* dielectric used
+    to pin `base_metalness` to 1 and lose the dielectric outright. A graph with
+    no base `dielectric_bsdf` at all — the lion, whose glazes are both coats, and
+    the teapot's metal — now reduces to `specular_weight = 0`, which is correct:
+    it has no base specular, and it used to be given one.
   - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
     set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
     which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
