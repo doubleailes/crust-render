@@ -211,7 +211,22 @@ pub fn load(
     let material = MtlxMaterial {
         program: c.program,
         lobes: c.lobes,
-        base: OpenPBR::default(),
+        // `coat_darkening` is the one default a MaterialX material must *not*
+        // inherit. OpenPBR's coat darkening is the bounce series between the
+        // coat's underside and the substrate: a fraction `K̄` of what the base
+        // reflects is turned back down by total internal reflection and
+        // re-absorbed. MaterialX's `layer` models nothing of the sort — it is
+        // single-scattering, `base·(1 − F) + top` — so a coat that exists only
+        // because `reduce()` promoted a `dielectric_bsdf` must not impose it.
+        // It is not a small correction: at the DPEL lion's `coat_ior` of 1.45,
+        // `K̄ = 0.540`, and against its substrate albedo of ~0.22 the factor is
+        // 0.52 — the whole body at half brightness against the asset's own
+        // reference render. A material authored as OpenPBR keeps the spec
+        // default of 1.0; only this path opts out.
+        base: OpenPBR {
+            coat_darkening: 0.0,
+            ..OpenPBR::default()
+        },
         name: c.root_name,
     };
     let summary = format!("{material:?}");
@@ -285,6 +300,10 @@ impl Pool {
 ///
 /// `base` is the material's authored defaults, so anything no lobe speaks to
 /// (emission, transmission, thin-film) keeps a sensible value instead of zero.
+/// `coat_darkening` is one of those — no lobe speaks to it — and `load()`
+/// supplies it as 0 rather than OpenPBR's 1.0, because MaterialX's `layer` is
+/// single-scattering and models no coat-underside bounce series. See the
+/// comment there before re-deriving it here.
 pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option<Vec3A>) {
     let get = |i: u32| slots.get(i as usize).copied().unwrap_or(Val::ZERO);
     let (mut diffuse, mut spec, mut coat, mut metal, mut sheen, mut sss) = (

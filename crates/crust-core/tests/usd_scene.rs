@@ -1340,6 +1340,50 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
     );
 }
 
+/// A MaterialX coat must not carry OpenPBR's multiple-scattering darkening.
+///
+/// `coat_darkening_factor` models the bounce series between the coat's
+/// underside and the substrate — light the base reflects up, total internal
+/// reflection turns back down, the base absorbs again. MaterialX's `layer` has
+/// no such term: it is single-scattering, `base·(1 − F) + top`. So a coat that
+/// exists only because `reduce()` promoted a `dielectric_bsdf` must arrive with
+/// the darkening switched off, or the reduction darkens a substrate the source
+/// material never darkened. On the DPEL lion that was a factor of 0.52 over the
+/// whole body.
+#[test]
+fn a_materialx_coat_carries_no_multiple_scattering_darkening() {
+    use crust_core::{HitRecord, Ray, Vec3A, materialx};
+
+    let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
+    let loaded = materialx::load(
+        &sample("materialx_basic.mtlx"),
+        Some("mtlx_lacquer"),
+        &decline,
+    )
+    .expect("mtlx_lacquer compiles");
+
+    let rec = HitRecord {
+        p: Vec3A::ZERO,
+        normal: Vec3A::Z,
+        t: 1.0,
+        front_face: true,
+        face_id: HitRecord::NO_FACE,
+        face_uv: (0.0, 0.0),
+        uv: (0.5, 0.5),
+        tangent: Vec3A::X,
+        has_uv: true,
+    };
+    let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
+    let m = loaded.material.probe(&r, &rec);
+
+    // Not vacuous: this material really does reduce to a coat.
+    assert_eq!(m.coat_weight, 1.0, "coat weight {}", m.coat_weight);
+    assert_eq!(
+        m.coat_darkening, 0.0,
+        "a MaterialX coat inherited OpenPBR's multiple-scattering darkening"
+    );
+}
+
 /// The texture files a `.mtlx` names must reach the host, resolved against the
 /// **document's own** directory — MaterialX anchors asset paths on itself, not
 /// on the USD layer that referenced it — and with the `<UDIM>` token intact,
