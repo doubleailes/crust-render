@@ -82,7 +82,10 @@ scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
 scripts/check_images.sh check  <dir>           # re-render and diff; exits non-zero on any change
 scripts/bench_ab.sh -a <binA> -b <binB> [scenes...]   # interleaved A/B of two binaries
 
-# CI runs: cargo build --verbose && cargo test --verbose
+# CI runs (toolchain pinned, RUSTFLAGS=-D warnings), as three parallel jobs:
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast
 ```
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
@@ -584,13 +587,26 @@ Schema mapping:
     pools normalise into OpenPBR parameters (diffuse+metal → `base_color` and
     `base_metalness` as their ratio; dielectric+conductor → one joint
     `specular_roughness`; sheen → fuzz). A leaf's own `weight` input multiplies
-    its path weight, which is what silences the `weight = 0` "transmission
-    dummy" both assets use as a mix's null branch. What this cannot represent:
-    two dielectrics of *different* roughness layered over one another collapse
-    to one weighted roughness. A `conductor_bsdf` fed by `artistic_ior` is
-    reduced back to a reflectivity colour through the exact inverse of
-    Gulbrandsen's formula, so a metal authored either way lands on the same
-    OpenPBR metal lobe.
+    its path weight; a leaf whose weight is a *literal* zero — the "transmission
+    dummy" both assets use as a mix's null branch — is pruned at flatten time
+    rather than carried at weight 0. **Two specular lobes.** The flattening
+    keeps one structural fact: a dielectric that is the `top` of a `layer`
+    whose base already carries a specular (another dielectric, a conductor)
+    arrives as `LobeKind::Coat` and pools onto OpenPBR's coat lobe with its own
+    roughness and IOR, while a dielectric directly over a diffuse stays the
+    base specular (that is how OpenPBR's own dielectric base is built). So the
+    teapot's clear glaze over its mask-driven satin glaze keeps both lobes, and
+    a varnish over a conductor keeps its varnish — the single pool used to lose
+    it, since a metal base zeroes the dielectric Fresnel term. The decision is
+    by tree shape, never by evaluated weight (a per-point flip would draw a
+    seam along a mask's zero contour), which is why the literal-zero dummy has
+    to be pruned before the layer looks at its base. What this still cannot
+    represent: three or more stacked dielectrics pool their upper ones into one
+    coat roughness, and a coat dielectric's `tint` is ignored (MaterialX tints
+    the coat's reflection; OpenPBR's `coat_color` is substrate absorption). A
+    `conductor_bsdf` fed by `artistic_ior` is reduced back to a reflectivity
+    colour through the exact inverse of Gulbrandsen's formula, so a metal
+    authored either way lands on the same OpenPBR metal lobe.
   - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
     set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
     which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
@@ -606,7 +622,8 @@ Schema mapping:
     plausible pastel and a mask read at the wrong colour space is a plausible
     blend; comparing renders settles nothing.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
-    KiB of textures, what `tests/usd_scene.rs` runs against), and the two shot
+    KiB of textures, what `tests/usd_scene.rs` runs against; its `mtlx_lacquer`
+    is the two-dielectric stack that must reduce to base specular + coat), and the two shot
     layers for the DPEL assets, which are gitignored and must be downloaded:
     `samples/materialx_teapot.usda` and `samples/materialx_lion.usda`, plus
     `samples/materialx_showcase.usda` composing both after the `overview.png`
@@ -923,11 +940,12 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   one. The regression test would need rewriting to assert the geometry arrives instead of
   that it is skipped.
 - **MaterialX caveats.** The BSDF reduction projects a layered MaterialX stack
-  onto one OpenPBR lobe set, so layering that OpenPBR cannot express is
-  averaged: two dielectrics of different roughness over one another become one
-  intermediate roughness (the teapot's ceramic layers a 0.002 glaze and a
-  mask-driven rougher one exactly this way). Fixing it properly means a layered
-  BSDF material, not a different reduction. `subsurface_bsdf` maps to OpenPBR's
+  onto one OpenPBR lobe set. Two stacked dielectrics survive (the upper one is
+  the coat), but a *third* is averaged into the coat's roughness, a coat's
+  `tint` is dropped, and a glaze over a base specular whose mask is zero at
+  some point still shades there as coat-over-diffuse (the promotion is
+  structural, by design). Anything past two specular interfaces needs a
+  layered BSDF material, not a different reduction. `subsurface_bsdf` maps to OpenPBR's
   subsurface weight but not its radius; `thin_film_bsdf` is pooled as an
   ordinary dielectric; MaterialX transmission maps to no lobe, so a
   MaterialX-authored glass renders opaque. The graph is re-evaluated at every

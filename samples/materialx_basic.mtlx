@@ -118,4 +118,45 @@
   <surfacematerial name="mtlx_metal" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="metal_surface" />
   </surfacematerial>
+
+  <!-- Lacquer: two specular lobes. A clear, near-mirror varnish layered over
+       a satin dielectric over a red diffuse, which is the DPEL teapot
+       ceramic's shape (a 0.002 glaze over a mask-driven rougher one). The
+       outer dielectric sits above a base that already carries a specular, so
+       it reduces to OpenPBR's coat lobe instead of pooling with the satin
+       one into a single averaged roughness. Texture-free on purpose: the
+       fixture's texture count is pinned by a test. -->
+
+  <oren_nayar_diffuse_bsdf name="lacquer_base" type="BSDF">
+    <input name="color" type="color3" value="0.55, 0.08, 0.06" />
+    <input name="roughness" type="float" value="0.3" />
+  </oren_nayar_diffuse_bsdf>
+
+  <dielectric_bsdf name="lacquer_satin" type="BSDF">
+    <input name="roughness" type="vector2" value="0.4, 0.4" />
+    <input name="ior" type="float" value="1.5" />
+  </dielectric_bsdf>
+
+  <layer name="satin_over_base" type="BSDF">
+    <input name="top" type="BSDF" nodename="lacquer_satin" />
+    <input name="base" type="BSDF" nodename="lacquer_base" />
+  </layer>
+
+  <dielectric_bsdf name="lacquer_clear" type="BSDF">
+    <input name="roughness" type="vector2" value="0.02, 0.02" />
+    <input name="ior" type="float" value="1.5" />
+  </dielectric_bsdf>
+
+  <layer name="lacquered" type="BSDF">
+    <input name="top" type="BSDF" nodename="lacquer_clear" />
+    <input name="base" type="BSDF" nodename="satin_over_base" />
+  </layer>
+
+  <surface name="lacquer_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="lacquered" />
+  </surface>
+
+  <surfacematerial name="mtlx_lacquer" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="lacquer_surface" />
+  </surfacematerial>
 </materialx>

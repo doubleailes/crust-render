@@ -1171,16 +1171,52 @@ fn a_leaf_weight_input_scales_its_lobe() {
     let l = lobes_of(
         r#"<materialx>
              <dielectric_bsdf name="t" type="BSDF">
-               <input name="weight" type="float" value="0" />
+               <input name="weight" type="float" value="0.25" />
              </dielectric_bsdf>
            </materialx>"#,
         "t",
     );
     assert_eq!(l.len(), 1);
-    assert!(
-        approx(l[0].1, 0.0),
-        "a weight-0 dummy must reach the pool with no weight"
+    assert!(approx(l[0].1, 0.25), "own weight not applied: {}", l[0].1);
+}
+
+#[test]
+fn a_literal_zero_weight_leaf_is_pruned_at_compile_time() {
+    // The transmission dummy both DPEL assets use as a mix's null branch. It
+    // contributes nothing to any pool, so dropping it changes no parameter —
+    // but left in place it would count as a specular interface and promote a
+    // glaze layered above it to a coat over nothing.
+    let l = lobes_of(
+        r#"<materialx>
+             <dielectric_bsdf name="t" type="BSDF">
+               <input name="weight" type="float" value="0" />
+             </dielectric_bsdf>
+           </materialx>"#,
+        "t",
     );
+    assert!(
+        l.is_empty(),
+        "a literal weight-0 dummy reached the pools: {l:?}"
+    );
+}
+
+#[test]
+fn a_connected_zero_weight_leaf_still_reaches_the_pool() {
+    // Pruning is for literals only: a connected weight is a runtime value,
+    // even when the node it comes from is a constant zero.
+    let l = lobes_of(
+        r#"<materialx>
+             <constant name="k" type="float">
+               <input name="value" type="float" value="0" />
+             </constant>
+             <dielectric_bsdf name="t" type="BSDF">
+               <input name="weight" type="float" nodename="k" />
+             </dielectric_bsdf>
+           </materialx>"#,
+        "t",
+    );
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(approx(l[0].1, 0.0), "weight {}", l[0].1);
 }
 
 #[test]
@@ -1260,7 +1296,7 @@ fn a_lobe_authoring_a_normal_records_it() {
 #[test]
 fn sample_document_parses_with_its_bare_udim_tokens() {
     let d = Doc::open(&sample_mtlx()).expect("samples/materialx_basic.mtlx parses");
-    assert_eq!(d.by_category("surfacematerial").count(), 2);
+    assert_eq!(d.by_category("surfacematerial").count(), 3);
     let f = d.find("", "base_color_tex").unwrap().input("file").unwrap();
     assert_eq!(f.text.as_deref(), Some("textures/mtlx_base.<UDIM>.png"));
     assert_eq!(f.colorspace.as_deref(), Some("srgb_texture"));
@@ -1277,6 +1313,22 @@ fn sample_ceramic_compiles_to_a_layered_diffuse_and_dielectric() {
     assert!(kinds.contains(&LobeKind::Dielectric));
     assert_eq!(kinds.len(), 2);
     assert!(!c.program.ops.is_empty());
+}
+
+#[test]
+fn sample_lacquer_compiles_to_diffuse_dielectric_and_coat() {
+    // Two specular lobes: the clear varnish sits over a base that already
+    // carries the satin dielectric, so it is the coat — in tree order, base
+    // before top, innermost first.
+    let c = compile(&sample_mtlx(), Some("mtlx_lacquer"), &decline).expect("compiles");
+    assert_eq!(c.root_name, "mtlx_lacquer");
+    assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
+    assert_eq!(c.textures, 0, "the lacquer is texture-free by design");
+    let kinds: Vec<LobeKind> = c.lobes.iter().map(|l| l.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![LobeKind::Diffuse, LobeKind::Dielectric, LobeKind::Coat]
+    );
 }
 
 #[test]
