@@ -415,8 +415,18 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         // Already perceptual — it is the OpenPBR base, not a MaterialX alpha.
         base.specular_roughness
     };
-    m.specular_weight = if spec.w > 1e-5 || metal.w > 1e-5 {
-        spec.w.max(metal.w).clamp(0.0, 1.0)
+    // Asymmetric on purpose, and the asymmetry is the point: the conductor's
+    // coverage is *already* carried by `base_metalness` above, while the
+    // dielectric's is carried by nothing else. `eval_specular` scales the metal
+    // lobe by `specular_weight * base_metalness`, so taking `max(spec.w,
+    // metal.w)` here made a mask-driven conductor render at m² of its energy
+    // instead of m — on the DPEL lion's gold, exactly the mask value too dark.
+    // So: the dielectric's coverage when there is a dielectric interface,
+    // otherwise full weight and let `base_metalness` do the masking.
+    m.specular_weight = if spec.w > 1e-5 {
+        spec.w.clamp(0.0, 1.0)
+    } else if metal.w > 1e-5 {
+        1.0
     } else {
         0.0
     };
@@ -564,6 +574,36 @@ mod tests {
 
     fn near(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    /// A masked conductor must not pay its own coverage twice.
+    ///
+    /// `base_metalness` already carries how much of the surface is metal, and
+    /// `eval_specular` scales the metal lobe by `specular_weight *
+    /// base_metalness`. Setting `specular_weight = max(spec.w, metal.w)` there
+    /// made a `mix`-masked conductor render at m² of its energy rather than m.
+    #[test]
+    fn a_masked_conductor_does_not_halve_its_own_weight() {
+        let text = r#"<materialx>
+            <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+              <input name="color" type="color3" value="0.6, 0.1, 0.1" />
+            </oren_nayar_diffuse_bsdf>
+            <conductor_bsdf name="c" type="BSDF">
+              <input name="roughness" type="float" value="0.01" />
+            </conductor_bsdf>
+            <mix name="m" type="BSDF">
+              <input name="fg" type="BSDF" nodename="c" />
+              <input name="bg" type="BSDF" nodename="d" />
+              <input name="mix" type="float" value="0.5" />
+            </mix>
+          </materialx>"#;
+        let m = reduced(text, "m");
+        assert!(near(m.base_metalness, 0.5), "metal {}", m.base_metalness);
+        assert!(
+            near(m.specular_weight, 1.0),
+            "the conductor's coverage was counted twice: {}",
+            m.specular_weight
+        );
     }
 
     // --- MaterialX roughness is a GGX alpha ---------------------------------
