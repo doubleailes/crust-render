@@ -1000,12 +1000,25 @@ fn best_spatial_split(prims: &[PrimNode], refs: &[PrimRef], bbox: &AABB) -> Opti
     for r in refs {
         let b0 = bin_of(r.bbox.minimum[axis]);
         let b1 = bin_of(r.bbox.maximum[axis]);
-        entry[b0] += 1;
-        exit[b1] += 1;
         if b0 == b1 {
+            entry[b0] += 1;
+            exit[b1] += 1;
             add(b0, r.bbox);
             continue;
         }
+        // Entry and exit are counted at the first and last bin the reference
+        // actually *lands* in, not at the ends of its bounding box, and the
+        // difference is load-bearing. A reference's bbox is conservative — for
+        // a reference produced by an earlier spatial split it is the clipped
+        // box, which can overlap a bin the triangle itself misses entirely, so
+        // `clipped_aabb` comes back `None` there. Counting the ends of the
+        // bbox regardless left bins holding a count with no bounds, and the
+        // cost loop below then took `lc > 0` as a promise that `lb` was
+        // `Some`. On the DPEL lion's high-resolution mesh that promise broke
+        // and the builder panicked outright. Deriving both from the same pass
+        // is what makes the invariant true rather than merely usual.
+        let mut first: Option<usize> = None;
+        let mut last = b0;
         for b in b0..=b1 {
             let (bin_lo, bin_hi) = (lo + b as f32 * width, lo + (b + 1) as f32 * width);
             if let Some(c) = prims[r.idx as usize]
@@ -1013,7 +1026,15 @@ fn best_spatial_split(prims: &[PrimNode], refs: &[PrimRef], bbox: &AABB) -> Opti
                 .and_then(|c| intersect_aabb(&c, &r.bbox))
             {
                 add(b, c);
+                first.get_or_insert(b);
+                last = b;
             }
+        }
+        // No bin took it: the reference contributes nothing to this split, so
+        // it must not be counted into either child either.
+        if let Some(f) = first {
+            entry[f] += 1;
+            exit[last] += 1;
         }
     }
 
@@ -1040,8 +1061,10 @@ fn best_spatial_split(prims: &[PrimNode], refs: &[PrimRef], bbox: &AABB) -> Opti
         if lc == 0 || rc == 0 {
             continue;
         }
-        let cost = surface_area(&lb.expect("lc > 0")) * lc as f32
-            + surface_area(&rb.expect("rc > 0")) * rc as f32;
+        // Safe by construction: a bin is only counted in `entry`/`exit` when
+        // the same pass gave it bounds, so a non-zero count implies `Some`.
+        let cost = surface_area(&lb.expect("lc > 0 implies bounds")) * lc as f32
+            + surface_area(&rb.expect("rc > 0 implies bounds")) * rc as f32;
         if best.as_ref().is_none_or(|b| cost < b.cost) {
             best = Some(SpatSplit {
                 axis,
@@ -1381,6 +1404,53 @@ mod tests {
     use super::*;
     use crate::prim::{SpherePrim, TrianglePrim};
     use crate::ray::MASK_ALL;
+
+    /// A reference whose bounding box reaches into bins the primitive itself
+    /// misses must not be counted into a child it contributes no bounds to.
+    ///
+    /// This is the shape of a real crash. A `PrimRef`'s bbox is conservative:
+    /// for a reference produced by an earlier spatial split it is the clipped
+    /// box, which can overlap a bin where the exact triangle clip comes back
+    /// empty. `best_spatial_split` used to take entry and exit from the ends
+    /// of that bbox while filling `bounds` only where the clip succeeded, so a
+    /// bin could carry a count with no bounds — and the cost loop reads a
+    /// non-zero count as a promise that the bounds are `Some`. Building the
+    /// DPEL lion's high-resolution mesh broke that promise and panicked with
+    /// `rc > 0`.
+    ///
+    /// Here the triangle occupies only the far left of the node, while the
+    /// reference claims the whole width, so every bin but the first clips to
+    /// nothing.
+    #[test]
+    fn a_reference_wider_than_its_primitive_does_not_outvote_its_own_bounds() {
+        let tri = TrianglePrim {
+            v0: Vec3A::new(0.0, 0.0, 0.0),
+            v1: Vec3A::new(0.05, 1.0, 0.0),
+            v2: Vec3A::new(0.0, 0.0, 1.0),
+            normals: None,
+            geom_id: 0,
+            prim_id: 0,
+            mask: MASK_ALL,
+        };
+        let prims = vec![PrimNode::Triangle(tri)];
+        let node = AABB {
+            minimum: Vec3A::new(0.0, 0.0, 0.0),
+            maximum: Vec3A::new(1.0, 1.0, 1.0),
+        };
+        // The lie: a reference spanning the whole node for a triangle that
+        // only reaches x = 0.05.
+        let refs = vec![PrimRef { bbox: node, idx: 0 }];
+
+        // Must not panic, and must not claim a split whose right side holds
+        // references but no geometry.
+        if let Some(split) = best_spatial_split(&prims, &refs, &node) {
+            assert!(
+                split.cost.is_finite(),
+                "spatial split reported a non-finite cost: {}",
+                split.cost
+            );
+        }
+    }
 
     /// The traversal stack must behave identically either side of the
     /// inline/spill boundary. Tested directly rather than through a tree
