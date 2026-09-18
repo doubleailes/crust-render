@@ -66,7 +66,11 @@ def Xform "World"
         # that reads as "ambient" on a 0..1 display is well under 1.
         # Raised from there only until the sweep behind the teapot reads as
         # the reference's near-white studio background.
-        float inputs:intensity = 0.45
+                # Scaled by 2/3 when the integrator's duplicated cosine was removed:
+        # every diffuse surface got 1.5x brighter, which put this shot's ground
+        # at 0.9 linear and on the edge of clipping. This is an exposure trim,
+        # not a relighting — the ratios between the three sources are unchanged.
+float inputs:intensity = 0.30
     }
 
     # Key. Rect lights emit along their local -Z, so this one is rotated to
@@ -79,7 +83,11 @@ def Xform "World"
         # centimetres this scene works at, that makes single digits the
         # correct order of magnitude — the hundreds an interior scene would
         # use blow the ground to pure white here.
-        float inputs:intensity = 14
+                # Scaled by 2/3 when the integrator's duplicated cosine was removed:
+        # every diffuse surface got 1.5x brighter, which put this shot's ground
+        # at 0.9 linear and on the edge of clipping. This is an exposure trim,
+        # not a relighting — the ratios between the three sources are unchanged.
+float inputs:intensity = 9.3
         float inputs:width = 0.5
         float inputs:height = 0.5
         matrix4d xformOp:transform = ( (0.9061, 0.4226, 0, 0), (-0.2500, 0.5360, 0.8061, 0), (0.3406, -0.7303, 0.5918, 0), (0.30, -0.55, 0.62, 1) )
@@ -91,7 +99,11 @@ def Xform "World"
     def RectLight "Rim"
     {
         color3f inputs:color = (0.75, 0.82, 1.0)
-        float inputs:intensity = 8
+                # Scaled by 2/3 when the integrator's duplicated cosine was removed:
+        # every diffuse surface got 1.5x brighter, which put this shot's ground
+        # at 0.9 linear and on the edge of clipping. This is an exposure trim,
+        # not a relighting — the ratios between the three sources are unchanged.
+float inputs:intensity = 5.3
         float inputs:width = 0.4
         float inputs:height = 0.4
         matrix4d xformOp:transform = ( (-0.8000, -0.6000, 0, 0), (0.2400, -0.3200, 0.9165, 0), (-0.5499, 0.7332, 0.4000, 0), (-0.35, 0.45, 0.35, 1) )
