@@ -44,6 +44,25 @@ pub fn roughness_to_alpha_aniso(roughness: f32, anisotropy: f32) -> (f32, f32) {
     (ax.max(1e-4), ay.max(1e-4))
 }
 
+/// Inverse of `roughness_to_alpha_aniso` **at zero anisotropy**: `r = √α`.
+///
+/// Exists for the MaterialX seam. MaterialX's physically-based BSDF nodes
+/// (`dielectric_bsdf`, `conductor_bsdf`, `generalized_schlick_bsdf`) take the
+/// microfacet **alpha** directly — which is why `standard_surface` feeds them
+/// through `roughness_anisotropy`, whose whole job is to square the
+/// artist-facing roughness first, and why the DPEL teapot's `.mtlx` has `power`
+/// nodes named `desquare_roughness_*` in front of its conductors. crust's
+/// OpenPBR parameters are perceptual and get squared on the way in, so a value
+/// arriving from MaterialX has to be un-squared once or it is squared twice.
+///
+/// Only exact at anisotropy 0: above it the forward map carries an extra
+/// `√(2/(1 + (1 − a)²))` stretch. That is fine here — the reduction collapses
+/// MaterialX's `vector2` roughness to lane 0 and never sets
+/// `specular_roughness_anisotropy`, so anisotropy never reaches this path.
+pub fn alpha_to_roughness(alpha: f32) -> f32 {
+    alpha.max(0.0).sqrt()
+}
+
 /// Anisotropic GGX NDF, evaluated in the tangent frame where `h` is expressed
 /// via `n·h`, `h·t`, `h·b` (all cosines).
 pub fn ggx_d_aniso(n_dot_h: f32, h_dot_t: f32, h_dot_b: f32, ax: f32, ay: f32) -> f32 {

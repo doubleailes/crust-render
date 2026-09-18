@@ -1575,6 +1575,20 @@ mod tests {
         assert_eq!(m.subsurface_radius_scale, Vec3A::new(1.0, 0.5, 0.25));
     }
 
+    /// `alpha_to_roughness` is the exact inverse of `roughness_to_alpha_aniso`
+    /// at zero anisotropy, which is the only regime the MaterialX reduction
+    /// uses it in. Above zero anisotropy the forward map carries an extra
+    /// stretch factor and the pair no longer round-trips — deliberately not
+    /// asserted here, because nothing relies on it.
+    #[test]
+    fn alpha_and_roughness_round_trip_at_zero_anisotropy() {
+        for a in [1e-4f32, 0.002, 0.049, 0.25, 0.64, 1.0] {
+            let (ax, ay) = roughness_to_alpha_aniso(alpha_to_roughness(a), 0.0);
+            assert!((ax - a).abs() < 1e-6, "ax {ax} for alpha {a}");
+            assert!((ay - a).abs() < 1e-6, "ay {ay} for alpha {a}");
+        }
+    }
+
     #[test]
     fn coat_darkening_identity_at_zero() {
         // darkening = 0 → returns Vec3A::ONE regardless of base_color / ior.
