@@ -48,6 +48,7 @@
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
+use crate::material::brdf::alpha_to_roughness;
 use crate::material::{Material, OpenPBR, ScatterSample};
 use crate::ray::Ray;
 use crust_mtlx::{Lobe, LobeKind, Program, ShadeCtx, TextureLoader, Val, reflectivity_from_ior};
@@ -294,6 +295,18 @@ impl Pool {
             neutral
         }
     }
+
+    /// `mean`, for a pool whose roughness accumulator is in MaterialX's
+    /// **alpha** rather than crust's perceptual roughness. The neutral is
+    /// already perceptual (it comes from the OpenPBR base), so only the pooled
+    /// branch is converted.
+    fn mean_alpha(&self, total: f32, neutral: f32) -> f32 {
+        if self.w > 1e-6 {
+            alpha_to_roughness(total / self.w)
+        } else {
+            neutral
+        }
+    }
 }
 
 /// Folds the evaluated lobes into an OpenPBR parameter set.
@@ -375,14 +388,31 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         // interfaces, but do not leave an unlit grey base under them.
         m.base_weight = 0.0;
     }
+    // NOT un-squared: `oren_nayar_diffuse_bsdf`'s `roughness` is its Oren-Nayar
+    // sigma, not a microfacet alpha. Only the GGX lobes below convert.
     m.base_diffuse_roughness = diffuse.mean(diffuse.roughness, 0.0).clamp(0.0, 1.0);
 
     // The specular lobe serves both the dielectric coat and the metal's own
-    // microfacet distribution, so its roughness is their joint weighted mean.
+    // microfacet distribution, so its roughness is their joint weighted mean —
+    // taken in MaterialX's alpha, then un-squared once (`alpha_to_roughness`)
+    // because crust's `specular_roughness` is perceptual and gets squared again
+    // by `roughness_to_alpha_aniso`.
+    //
+    // Pooling *then* converting, rather than converting each lobe as it lands,
+    // is a deliberate choice. `√` is concave, so `mean(√α) ≤ √(mean α)`; the two
+    // agree only when a single lobe contributes, which is every case that
+    // cannot tell them apart. What is genuinely linear across a GGX mixture is
+    // the slope second moment, ∝ α², so the moment-preserving pool would be
+    // `√(Σ wᵢαᵢ²)` — and against that, averaging in α is the closer of the two,
+    // while `mean(√α)` is biased *smooth*. It also keeps this joint spec+metal
+    // numerator meaningful, since it only makes sense in one space. If the pool
+    // ever needs to preserve the moment exactly, accumulate `rough*rough` in
+    // `Pool::add` and take `sqrt(sqrt(mean))` here.
     let rough_w = spec.w + metal.w;
     m.specular_roughness = if rough_w > 1e-5 {
-        ((spec.roughness + metal.roughness) / rough_w).clamp(0.0, 1.0)
+        alpha_to_roughness(((spec.roughness + metal.roughness) / rough_w).clamp(0.0, 1.0))
     } else {
+        // Already perceptual — it is the OpenPBR base, not a MaterialX alpha.
         base.specular_roughness
     };
     m.specular_weight = if spec.w > 1e-5 || metal.w > 1e-5 {
@@ -400,12 +430,15 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
     // substrate — mapping one onto the other would tint the wrong thing.
     m.coat_weight = coat.w.clamp(0.0, 1.0);
     m.coat_roughness = coat
-        .mean(coat.roughness, base.coat_roughness)
+        .mean_alpha(coat.roughness, base.coat_roughness)
         .clamp(0.0, 1.0);
     m.coat_ior = coat.mean(coat.ior, base.coat_ior).clamp(1.0, 3.0);
 
     m.fuzz_weight = sheen.w.clamp(0.0, 1.0);
     m.fuzz_color = sheen.mean_color(Vec3A::ONE);
+    // NOT un-squared: `sheen_bsdf`'s `roughness` drives the Charlie NDF
+    // directly in MaterialX, exactly as `fuzz_roughness` does here. It is not a
+    // GGX alpha.
     m.fuzz_roughness = sheen.mean(sheen.roughness, 0.3).clamp(0.0, 1.0);
 
     if sss.w > 1e-5 {
@@ -533,6 +566,100 @@ mod tests {
         (a - b).abs() < 1e-4
     }
 
+    // --- MaterialX roughness is a GGX alpha ---------------------------------
+
+    /// MaterialX's physically-based BSDF nodes take the microfacet **alpha**,
+    /// not an artist-facing roughness — that is what `roughness_anisotropy`
+    /// exists to produce, and why the DPEL teapot's `.mtlx` puts `power` nodes
+    /// named `desquare_roughness_*` in front of its conductors. crust squares
+    /// its own `*_roughness` on the way into GGX, so the reduction has to
+    /// un-square once or the value is squared twice and every MaterialX
+    /// surface renders far sharper than authored.
+    #[test]
+    fn a_materialx_roughness_is_an_alpha_and_is_unsquared() {
+        let text = format!(
+            r#"<materialx>{DIFFUSE}
+                 <dielectric_bsdf name="g" type="BSDF">
+                   <input name="roughness" type="vector2" value="0.25, 0.25" />
+                 </dielectric_bsdf>
+                 {}</materialx>"#,
+            layer("L", "g", "d")
+        );
+        let m = reduced(&text, "L");
+        assert!(
+            near(m.specular_roughness, 0.5),
+            "alpha 0.25 should reduce to roughness 0.5, got {}",
+            m.specular_roughness
+        );
+    }
+
+    /// The pool averages in alpha and un-squares once at the end, rather than
+    /// un-squaring each lobe as it lands. This is the case that tells the two
+    /// apart: `√` is concave, so `mean(√α) < √(mean α)` whenever two lobes of
+    /// different roughness both contribute. Per-lobe conversion would give
+    /// `(0.2 + 0.8)/2 = 0.5` here; pooling in alpha gives `√0.34`.
+    #[test]
+    fn the_alpha_pool_averages_before_it_unsquares() {
+        let text = format!(
+            r#"<materialx>{DIFFUSE}
+                 <dielectric_bsdf name="a" type="BSDF">
+                   <input name="roughness" type="vector2" value="0.04, 0.04" />
+                 </dielectric_bsdf>
+                 <dielectric_bsdf name="b" type="BSDF">
+                   <input name="roughness" type="vector2" value="0.64, 0.64" />
+                 </dielectric_bsdf>
+                 <mix name="g" type="BSDF">
+                   <input name="fg" type="BSDF" nodename="a" />
+                   <input name="bg" type="BSDF" nodename="b" />
+                   <input name="mix" type="float" value="0.5" />
+                 </mix>
+                 {}</materialx>"#,
+            layer("L", "g", "d")
+        );
+        let m = reduced(&text, "L");
+        assert!(
+            near(m.specular_roughness, (0.34f32).sqrt()),
+            "expected sqrt(mean alpha) = {}, got {}",
+            (0.34f32).sqrt(),
+            m.specular_roughness
+        );
+        assert!(
+            !near(m.specular_roughness, 0.5),
+            "the pool converted per lobe instead of after the mean"
+        );
+    }
+
+    /// Only the GGX lobes are in alpha. `oren_nayar_diffuse_bsdf`'s roughness
+    /// is its Oren-Nayar sigma and `sheen_bsdf`'s drives the Charlie NDF
+    /// directly, exactly as crust's own parameters do — converting either
+    /// would be a second bug in the opposite direction.
+    #[test]
+    fn an_oren_nayar_sigma_and_a_sheen_roughness_are_not_alphas() {
+        let text = r#"<materialx>
+            <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+              <input name="roughness" type="float" value="0.2" />
+            </oren_nayar_diffuse_bsdf>
+            <sheen_bsdf name="s" type="BSDF">
+              <input name="roughness" type="float" value="0.5" />
+            </sheen_bsdf>
+            <layer name="L" type="BSDF">
+              <input name="top" type="BSDF" nodename="s" />
+              <input name="base" type="BSDF" nodename="d" />
+            </layer>
+          </materialx>"#;
+        let m = reduced(text, "L");
+        assert!(
+            near(m.base_diffuse_roughness, 0.2),
+            "oren-nayar sigma {}",
+            m.base_diffuse_roughness
+        );
+        assert!(
+            near(m.fuzz_roughness, 0.5),
+            "sheen roughness {}",
+            m.fuzz_roughness
+        );
+    }
+
     #[test]
     fn a_two_roughness_stack_keeps_both() {
         // The teapot ceramic's shape. The single-pool reduction averaged the
@@ -544,15 +671,16 @@ mod tests {
         );
         let m = reduced(&text, "outer");
         assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
+        // The authored numbers are GGX alphas; crust's roughness is perceptual.
         assert!(
-            near(m.specular_roughness, 0.4),
+            near(m.specular_roughness, (0.4f32).sqrt()),
             "spec rough {}",
             m.specular_roughness
         );
         assert!(near(m.specular_ior, 1.5), "spec ior {}", m.specular_ior);
         assert!(near(m.coat_weight, 1.0), "coat {}", m.coat_weight);
         assert!(
-            near(m.coat_roughness, 0.02),
+            near(m.coat_roughness, (0.02f32).sqrt()),
             "coat rough {}",
             m.coat_roughness
         );
@@ -575,13 +703,13 @@ mod tests {
         assert!(near(m.base_metalness, 1.0), "metal {}", m.base_metalness);
         assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
         assert!(
-            near(m.specular_roughness, 0.1),
+            near(m.specular_roughness, (0.1f32).sqrt()),
             "spec rough {}",
             m.specular_roughness
         );
         assert!(near(m.coat_weight, 1.0), "coat {}", m.coat_weight);
         assert!(
-            near(m.coat_roughness, 0.02),
+            near(m.coat_roughness, (0.02f32).sqrt()),
             "coat rough {}",
             m.coat_roughness
         );
@@ -608,7 +736,7 @@ mod tests {
         assert_eq!(m.coat_weight, 0.0, "the dummy promoted the glaze");
         assert!(near(m.specular_weight, 1.0), "spec {}", m.specular_weight);
         assert!(
-            near(m.specular_roughness, 0.02),
+            near(m.specular_roughness, (0.02f32).sqrt()),
             "spec rough {}",
             m.specular_roughness
         );
@@ -623,7 +751,7 @@ mod tests {
         let m = reduced(&text, "L");
         assert_eq!(m.coat_weight, 0.0);
         assert!(near(m.specular_weight, 1.0));
-        assert!(near(m.specular_roughness, 0.02));
+        assert!(near(m.specular_roughness, (0.02f32).sqrt()));
     }
 
     #[test]

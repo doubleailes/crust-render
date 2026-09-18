@@ -1292,8 +1292,9 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
 
     let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
     assert!(near(m.coat_weight, 1.0), "coat weight {}", m.coat_weight);
+    // The `.mtlx` authors GGX alphas; crust's roughness is perceptual.
     assert!(
-        near(m.coat_roughness, 0.02),
+        near(m.coat_roughness, (0.02f32).sqrt()),
         "coat roughness {}",
         m.coat_roughness
     );
@@ -1304,7 +1305,7 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
         m.specular_weight
     );
     assert!(
-        near(m.specular_roughness, 0.4),
+        near(m.specular_roughness, (0.4f32).sqrt()),
         "the two roughnesses averaged into one lobe: {}",
         m.specular_roughness
     );
@@ -1334,7 +1335,7 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
         "a lone glaze over diffuse became a coat"
     );
     assert!(
-        near(c.specular_roughness, 0.06),
+        near(c.specular_roughness, (0.06f32).sqrt()),
         "ceramic glaze roughness {}",
         c.specular_roughness
     );
