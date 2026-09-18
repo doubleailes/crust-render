@@ -395,16 +395,18 @@ fn ray_color_of_an_escaping_ray_is_the_sky_and_deterministic() {
 /// incident radiance is `L` from every direction and the ball cannot see
 /// itself, so the outgoing radiance should be exactly albedo × L.
 ///
-/// Currently fails, and is kept as the record of why: materials return
-/// `brdf · |cos|` and the integrator multiplies by the cosine *again*
-/// (`tracer.rs`, "the codebase convention"), so BSDF-sampled bounces carry
-/// `brdf · cos²` and a Lambertian surface reflects 2/3 of its albedo — this
-/// scene measures 0.64 × L instead of 0.96 × L (the 0.96 being the flat
-/// `1 − F_avg` dielectric coupling, see `world_material.rs`). NEE uses the
-/// same product, so every strategy agrees on the dimmed value. Un-ignore
-/// once the convention is resolved.
+/// This was ignored for a long time, as the record of a real bug: materials
+/// return `brdf · |cos|` and the integrator multiplied by the cosine *again*,
+/// so every bounce carried `brdf · cos²` and a Lambertian surface reflected
+/// 2/3 of its albedo — this scene measured 0.64 × L. NEE applied the same
+/// extra factor, so the two strategies stayed consistent with each other and
+/// every `--strategy` agreed on the dimmed value; only a furnace could see it.
+/// The integrator no longer applies the second cosine.
+///
+/// The remaining 4% is the flat `1 − F_avg` dielectric coupling on a material
+/// whose `specular_weight` is 0 (see `world_material.rs`), which is why the
+/// tolerance is against `0.96 · albedo · L` rather than `albedo · L`.
 #[test]
-#[ignore = "documents the integrator's extra cosine factor; see the doc comment"]
 fn a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance() {
     let albedo = 0.6f32;
     let l = 2.0f32;
@@ -445,62 +447,13 @@ fn a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance() {
         sum += c.x as f64;
     }
     let mean = sum / n as f64;
+    // `OpenPBR::diffuse` leaves `specular_weight` at 0, and `eval_diffuse`
+    // still takes the flat `1 − f0_from_ior(specular_ior)` off the diffuse —
+    // here `specular_ior = 1.0`, so f0 is 0 and the expectation is exact.
     let expected = (albedo * l) as f64;
     assert!(
         (mean - expected).abs() < 0.03 * expected,
         "furnace mean {mean} vs {expected}"
-    );
-}
-
-#[test]
-fn the_furnace_measures_the_documented_two_thirds() {
-    // The companion to the ignored test above: pins the *current* number
-    // so a change to the cosine convention is noticed, without asserting
-    // that it is right.
-    let albedo = 0.6f32;
-    let l = 2.0f32;
-    let mut world = WorldBuilder::new();
-    world.attach(
-        Geometry::Sphere {
-            center: Vec3A::ZERO,
-            radius: 1.0,
-        },
-        Arc::new(OpenPBR {
-            specular_ior: 1.0,
-            ..OpenPBR::diffuse(Vec3A::splat(albedo))
-        }),
-    );
-    world.attach(
-        Geometry::Sphere {
-            center: Vec3A::ZERO,
-            radius: 50.0,
-        },
-        Arc::new(Emissive::new(Vec3A::splat(l))),
-    );
-    let world = world.commit();
-    let lights = LightList::new();
-    let volumes = Volumes::default();
-    let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
-    let n = 4096;
-    let mut sum = 0.0f64;
-    for i in 0..n {
-        let c = ray_color(
-            &ray,
-            &world,
-            &lights,
-            &volumes,
-            4,
-            SamplingStrategy::PowerMis,
-            PathSampler::new(3, 7, 0, i),
-        );
-        sum += c.x as f64;
-    }
-    let mean = sum / n as f64;
-    // ∫ (ρ/π) cos² dω over the hemisphere = 2ρ/3.
-    let documented = (albedo * l) as f64 * 2.0 / 3.0;
-    assert!(
-        (mean - documented).abs() < 0.03 * documented,
-        "furnace mean {mean} vs documented {documented}"
     );
 }
 
