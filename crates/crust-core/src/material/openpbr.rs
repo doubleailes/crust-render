@@ -445,6 +445,10 @@ fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) ->
     eon_diffuse(rho, m.base_diffuse_roughness, v_local, l_local) * (1.0 - f_avg_diel)
 }
 
+/// The base specular lobe, returned as `(dielectric, metal)` rather than their
+/// sum because the coat treats them differently: the substrate-albedo darkening
+/// applies to the metal slab and not to the white dielectric interface. See
+/// [`coat_darkening`]. Callers with no coat simply add the two.
 fn eval_specular(
     m: &OpenPBR,
     v_local: Vec3A,
@@ -452,7 +456,7 @@ fn eval_specular(
     h_local: Vec3A,
     ax: f32,
     ay: f32,
-) -> Vec3A {
+) -> (Vec3A, Vec3A) {
     let n_dot_v = v_local.z.max(1e-4);
     let n_dot_l = l_local.z.max(1e-4);
     let n_dot_h = h_local.z.max(1e-4);
@@ -552,7 +556,7 @@ fn eval_specular(
     };
 
     let brdf = d * g / (4.0 * n_dot_v * n_dot_l);
-    (metal_term + diel_term) * brdf
+    (diel_term * brdf, metal_term * brdf)
 }
 
 fn eval_coat(
@@ -611,17 +615,40 @@ fn coat_passage(m: &OpenPBR, cos_theta: f32) -> Vec3A {
 /// light passes through the coat twice — in along the view direction, out
 /// along the light direction — and each passage pays its own
 /// Fresnel-weighted transmission and view-dependent absorption
-/// (`coat_passage`), times the multi-bounce darkening factor. Applied as a
-/// per-channel multiplier to (base_specular + base_diffuse). This is the
-/// incoming × outgoing base-layer scale of the Adobe reference coating
-/// lobe; at normal incidence the two passages recover exactly the authored
-/// round-trip `coat_color`.
+/// (`coat_passage`). Applied as a per-channel multiplier to **everything**
+/// under the coat. This is the incoming × outgoing base-layer scale of the
+/// Adobe reference coating lobe; at normal incidence the two passages
+/// recover exactly the authored round-trip `coat_color`.
+///
+/// The multi-bounce darkening is deliberately *not* here — see
+/// [`coat_darkening`], which `eval_all` applies to a narrower set of lobes.
 fn coat_attenuation(m: &OpenPBR, cos_v: f32, cos_l: f32) -> Vec3A {
     if m.coat_weight <= 0.0 {
         return Vec3A::ONE;
     }
-    let dark = coat_darkening_factor(m.base_color, m.coat_ior, m.coat_weight, m.coat_darkening);
-    coat_passage(m, cos_v) * coat_passage(m, cos_l) * dark
+    coat_passage(m, cos_v) * coat_passage(m, cos_l)
+}
+
+/// The coat's multi-bounce darkening factor Δ, or `ONE` when there is no coat.
+///
+/// Kept apart from [`coat_attenuation`] because the two apply to different
+/// things. The `(1 − F)` passage is geometry: every photon reaching the
+/// substrate pays it, whatever lobe it then meets. Δ is a *substrate albedo*
+/// term — it is derived from `base_color` — so it belongs only to the lobes
+/// whose reflectance `base_color` actually describes.
+///
+/// Concretely it must not touch the base **dielectric** lobe. That lobe's
+/// reflectance is ~4% and white; multiplying it by a Δ computed from a
+/// saturated `base_color` both dimmed and tinted it, turning a clearcoated red
+/// plastic's white highlight into a dim pink one. It does still apply to the
+/// metal lobe, where `base_color` *is* the slab's F0
+/// (`metal_f0 = base_color · base_weight`) and the bounce series is genuinely
+/// that colour, and to emission, which originates inside the substrate.
+fn coat_darkening(m: &OpenPBR) -> Vec3A {
+    if m.coat_weight <= 0.0 {
+        return Vec3A::ONE;
+    }
+    coat_darkening_factor(m.base_color, m.coat_ior, m.coat_weight, m.coat_darkening)
 }
 
 fn eval_fuzz(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, h_local: Vec3A) -> Vec3A {
@@ -656,10 +683,10 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
     // Worth the branch: every unbound prim and every `UsdPreviewSurface`-less
     // material reduces to `OpenPBR::diffuse()`, which is the whole of
     // cornellbox and Kitchen_set.
-    let specular = if m.specular_weight > 0.0 {
+    let (spec_diel, spec_metal) = if m.specular_weight > 0.0 {
         eval_specular(m, v_local, l_local, h_local, ax, ay)
     } else {
-        Vec3A::ZERO
+        (Vec3A::ZERO, Vec3A::ZERO)
     };
 
     // Absent layers are skipped, not multiplied by zero. Both lobes end in a
@@ -689,12 +716,18 @@ fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bool) -> Vec3
     };
 
     // Layered composition (top→bottom): fuzz over coat over base.
-    //  throughput = fuzz + (1 - fuzz_weight) · (coat + coat_atten · base)
+    //  throughput = fuzz + (1 - fuzz_weight) ·
+    //               (coat + coat_atten · (dark · (diffuse + metal) + diel))
     // The coat attenuation is per-direction (view in, light out), evaluated
-    // against the normal cosines, not the half-vector.
+    // against the normal cosines, not the half-vector, and every lobe under the
+    // coat pays it. The substrate-albedo darkening `dark` is narrower: it is
+    // derived from `base_color`, so it applies to the lobes that colour
+    // describes — diffuse and the metal slab — and not to the base dielectric
+    // interface, whose ~4% reflectance is white. See `coat_darkening`.
     let coat_atten = coat_attenuation(m, v_local.z, l_local.z);
+    let dark = coat_darkening(m);
     let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
-    fuzz + base_atten * (coat + coat_atten * (diffuse + specular))
+    fuzz + base_atten * (coat + coat_atten * (dark * (diffuse + spec_metal) + spec_diel))
 }
 
 // ---------------------------------------------------------------------------
@@ -1594,6 +1627,75 @@ mod tests {
         assert_eq!(m.subsurface_radius_scale, Vec3A::new(1.0, 0.5, 0.25));
     }
 
+    /// The coat's substrate-albedo darkening must not reach the base dielectric
+    /// highlight.
+    ///
+    /// Δ is derived from `base_color`, so it is as coloured as the substrate
+    /// is. The base dielectric interface reflects ~4% and reflects it white;
+    /// running it through Δ turned a clearcoated red plastic's white highlight
+    /// into a dim pink one. `coat_attenuation` — what every lobe under the coat
+    /// pays — must therefore be achromatic whenever `coat_color` is.
+    #[test]
+    fn a_coat_does_not_tint_what_passes_through_it() {
+        let m = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::ONE,
+            coat_darkening: 1.0,
+            base_color: Vec3A::new(0.8, 0.05, 0.05),
+            ..OpenPBR::default()
+        };
+        let a = coat_attenuation(&m, 1.0, 1.0);
+        assert!(
+            (a.x - a.y).abs() < 1e-6 && (a.y - a.z).abs() < 1e-6,
+            "a white coat tinted the passage: {a}"
+        );
+        // And the darkening itself is still chromatic — it just lives apart.
+        let d = coat_darkening(&m);
+        assert!(
+            (d.x - d.y).abs() > 1e-3,
+            "the darkening lost its substrate colour: {d}"
+        );
+    }
+
+    /// Splitting Δ out of `coat_attenuation` must not disable it. A coated
+    /// diffuse base is still darker with the darkening on than off.
+    #[test]
+    fn a_coat_still_darkens_a_diffuse_base() {
+        let base = OpenPBR {
+            coat_weight: 1.0,
+            coat_color: Vec3A::ONE,
+            base_color: Vec3A::splat(0.2),
+            specular_weight: 0.0,
+            ..OpenPBR::default()
+        };
+        let v = Vec3A::new(0.3, 0.0, 0.954).normalize();
+        let l = Vec3A::new(-0.2, 0.2, 0.959).normalize();
+
+        let on = eval_all(
+            &OpenPBR {
+                coat_darkening: 1.0,
+                ..base.clone()
+            },
+            v,
+            l,
+            true,
+        );
+        let off = eval_all(
+            &OpenPBR {
+                coat_darkening: 0.0,
+                ..base
+            },
+            v,
+            l,
+            true,
+        );
+        assert!(off.length() > 1e-6, "test is vacuous: material is black");
+        assert!(
+            on.length() < off.length() * 0.99,
+            "the darkening stopped darkening: {on} vs {off}"
+        );
+    }
+
     /// A `specular_weight` of zero must leave no dielectric lobe at all.
     ///
     /// The regression: `specular_weight` used to be folded into F0, and Schlick
@@ -1611,11 +1713,13 @@ mod tests {
         let l = Vec3A::new(-0.999, 0.0, 0.0447).normalize();
         let h = (v + l).normalize();
         let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, 0.0);
+        let (diel, metal) = eval_specular(&m, v, l, h, ax, ay);
         assert_eq!(
-            eval_specular(&m, v, l, h, ax, ay),
+            diel,
             Vec3A::ZERO,
             "a white rim survived on a material with no specular"
         );
+        assert_eq!(metal, Vec3A::ZERO, "a diffuse preset grew a metal lobe");
     }
 
     /// `specular_weight` scales the lobe, so the lobe is linear in it. Folding
@@ -1633,9 +1737,9 @@ mod tests {
         let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, 0.0);
 
         m.specular_weight = 1.0;
-        let full = eval_specular(&m, v, l, h, ax, ay);
+        let full = eval_specular(&m, v, l, h, ax, ay).0;
         m.specular_weight = 0.5;
-        let half = eval_specular(&m, v, l, h, ax, ay);
+        let half = eval_specular(&m, v, l, h, ax, ay).0;
         assert!(full.length() > 1e-6, "test is vacuous: lobe is black");
         assert!(
             (half * 2.0 - full).length() < 1e-5,
