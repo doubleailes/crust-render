@@ -40,15 +40,23 @@ def Xform "World"
     # The floor is the only geometry of the set. The overview's seamless
     # cyclorama is played by the dome plus a near-white floor: a Lambertian
     # floor of albedo a under a uniform dome of radiance L reflects a*L, so at
-    # a ~ 0.98 the floor meets the sky at the horizon and there is no line to
+    # a ~ 1 the floor meets the sky at the horizon and there is no line to
     # see — real cyclorama paper is this white for the same reason.
+    #
+    # The plane has to be big enough that its *edge* leaves the frame, which
+    # 8x8 was not: the camera sits 0.28 up and looks 7.9 degrees down with an
+    # 8.9 degree half-FOV, so the far edge of an 8x8 floor subtends 4.7 degrees
+    # above the axis and landed at y = 254 — the hard horizontal line across
+    # the top of the old render was that edge, not a horizon. At 60x60 the edge
+    # is below the true horizon and out of frame, and the only transition left
+    # is floor-meets-sky, which the matched albedo hides.
     def Mesh "Floor" (
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
-        point3f[] points = [(-4, -4, 0), (4, -4, 0), (4, 4, 0), (-4, 4, 0)]
+        point3f[] points = [(-30, -30, 0), (30, -30, 0), (30, 30, 0), (-30, 30, 0)]
         rel material:binding = </World/Looks/Sweep>
     }
 
@@ -58,44 +66,88 @@ def Xform "World"
         {
             token outputs:surface.connect = </World/Looks/Sweep/Surface.outputs:surface>
 
+            # Deliberately `crust:openpbr` rather than `UsdPreviewSurface`, to
+            # get a *purely* Lambertian sweep: `specularWeight = 0` removes the
+            # dielectric interface and `specularIor = 1` removes the flat
+            # `1 - F_avg` the diffuse would otherwise still pay for it. Both
+            # matter. A preview surface keeps a specular lobe whose Fresnel
+            # climbs toward grazing, and the top of this frame *is* grazing —
+            # the floor there is seen almost edge-on — so the sweep came out
+            # 18% brighter at the top of frame than at the bottom, a tilt the
+            # overview's sweep does not have. Matte cyclorama paper has no
+            # specular either.
+            #
+            # With albedo 1 and no specular loss, a Lambertian floor under a
+            # uniform dome of radiance L reflects exactly L: the floor and the
+            # sky are then the *same value*, and the horizon cannot be seen
+            # however the camera is pointed.
             def Shader "Surface"
             {
-                uniform token info:id = "UsdPreviewSurface"
-                color3f inputs:diffuseColor = (0.98, 0.98, 0.99)
-                float inputs:roughness = 0.8
-                float inputs:metallic = 0
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (1, 1, 1)
+                float inputs:baseWeight = 1
+                float inputs:baseMetalness = 0
+                float inputs:specularWeight = 0
+                float inputs:specularIor = 1
                 token outputs:surface
             }
         }
     }
 
+    # The dome is the shot. Measured off the overview, the sweep sits at 0.605
+    # linear and is flat to within 4% from the top of frame to the bottom, and
+    # nothing on the teapot is blown — the brightest rib patches only reach
+    # ~0.40 grey. That is a large even source, not a hot softbox, so the dome
+    # carries ~90% of the light and the two rectangles only give the shadows a
+    # direction. A DomeLight's radiance is `intensity * color` and an escaping
+    # camera ray reads it directly, so this number *is* the backdrop value.
     def DomeLight "Sky"
     {
-        color3f inputs:color = (0.9, 0.92, 0.97)
-        float inputs:intensity = 0.8
+        color3f inputs:color = (0.97, 0.967, 1.0)
+        float inputs:intensity = 0.60
     }
 
-    # A large softbox high in front and to the right — the overview's shadows
-    # fall gently back and to the left of each object and have soft edges, so
-    # the key is big and not far off the camera axis.
+    # A large softbox high in front and to the right. In the overview both
+    # shadows fall to the *left* of their object and are shallow — the teapot's
+    # contact shadow is 0.71 of the clear floor and the lion's 0.62 — which is
+    # most of the way to what dome occlusion alone produces under a closed
+    # object. So the key is here for direction, not for level.
+    #
+    # It sits ~3x further out than a dramatic key would. Distance is what
+    # flattens the floor: the near floor used to be 1.9x brighter than the far
+    # floor purely from this light's inverse square, which is a gradient the
+    # overview's sweep does not have.
+    #
+    # Its radiance must stay *above* the dome's, which is the non-obvious
+    # constraint here. A light's geometry occludes the dome behind it for
+    # shadow and indirect rays, so a panel is only a net gain where it is
+    # brighter than the sky it covers — a wide, gentle one at 0.55 against a
+    # dome of 0.615 measurably *darkened* the floor and deepened the shadows,
+    # acting as a gobo. Hence bright and small rather than dim and wide: 2.5x
+    # the dome's radiance, over a solid angle chosen so that its reflection in
+    # the glaze reads as a broad streak rather than a hard rectangle. Net gain
+    # goes as `(I - L) x area`, so size and intensity trade off along that
+    # curve: bigger and softer is free as long as `I` stays clear of `L`.
     def RectLight "Key"
     {
         color3f inputs:color = (1, 0.97, 0.93)
-        float inputs:intensity = 5
-        float inputs:width = 1.2
-        float inputs:height = 1.2
-        matrix4d xformOp:transform = ( (0.8944, 0.4472, 0, 0), (-0.2981, 0.5963, 0.7454, 0), (0.3333, -0.6667, 0.6667, 0), (0.55, -1.0, 1.05, 1) )
+        float inputs:intensity = 1.0
+        float inputs:width = 3.0
+        float inputs:height = 3.0
+        matrix4d xformOp:transform = ( (0.8944, 0.4472, 0, 0), (-0.2981, 0.5963, 0.7454, 0), (0.3333, -0.6667, 0.6667, 0), (1.65, -3.0, 3.15, 1) )
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
-    # Cool fill from the left, weaker, to keep the glaze's left flank alive.
+    # Cool fill from the left, weaker, to keep the glaze's left flank alive and
+    # to stop the key's shadow going flat. Moved out on the same ray and scaled
+    # by the same factor, for the same reason.
     def RectLight "Fill"
     {
         color3f inputs:color = (0.85, 0.9, 1.0)
-        float inputs:intensity = 2.5
-        float inputs:width = 1.0
-        float inputs:height = 1.0
-        matrix4d xformOp:transform = ( (0.7071, -0.7071, 0, 0), (0.3536, 0.3536, 0.8660, 0), (-0.6124, -0.6124, 0.5, 0), (-0.9, -0.9, 0.75, 1) )
+        float inputs:intensity = 0.82
+        float inputs:width = 2.6
+        float inputs:height = 2.6
+        matrix4d xformOp:transform = ( (0.7071, -0.7071, 0, 0), (0.3536, 0.3536, 0.8660, 0), (-0.6124, -0.6124, 0.5, 0), (-2.7, -2.7, 2.25, 1) )
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
