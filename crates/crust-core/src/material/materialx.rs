@@ -118,6 +118,7 @@ impl MtlxMaterial {
             tangent: rec.tangent,
             view: r_in.direction(),
             position: rec.p,
+            uv_width: rec.uv_width,
         };
         SLOTS.with(|cell| {
             let mut slots = cell.borrow_mut();
@@ -513,6 +514,7 @@ mod tests {
                 tangent: Vec3A::X,
                 view: -Vec3A::Z,
                 position: Vec3A::ZERO,
+                uv_width: 0.0,
             },
             &mut slots,
         );

@@ -24,14 +24,21 @@ use glam::Vec3A;
 /// caches lazily needs its own interior synchronisation.
 pub trait PtexTexture: Send + Sync {
     /// Samples face `face_id` at `(u, v)`, both in the face's own `[0, 1]`
-    /// parametric space.
+    /// parametric space, over a footprint `width` wide.
+    ///
+    /// `width` is the **diameter** of that footprint in the same per-face
+    /// units, so `1.0` is the whole face. Like the decode and the resolution
+    /// cap, what to do with it is the host's policy; **`0.0` means
+    /// point-sample the finest level the host holds**, which is what a caller
+    /// with no derivatives must pass and what this trait did before it had
+    /// the parameter at all.
     ///
     /// Must not panic: an out-of-range `face_id` or a non-finite coordinate is
     /// the caller's bug, but a texture is consulted from inside the integrator
     /// where a panic would take down a render thread. Return a sensible
     /// fallback instead. Values are linear, not display-encoded — undoing any
     /// transfer function baked into the file is the host's job.
-    fn eval(&self, face_id: u32, u: f32, v: f32) -> Vec3A;
+    fn eval(&self, face_id: u32, u: f32, v: f32, width: f32) -> Vec3A;
 
     /// Number of faces the file holds. The importer compares this against the
     /// bound mesh's face count: Ptex face ids *are* mesh face indices, so a
@@ -51,8 +58,8 @@ pub struct PtexRef(pub std::sync::Arc<dyn PtexTexture>);
 impl PtexRef {
     /// Samples the texture — see [`PtexTexture::eval`].
     #[inline]
-    pub fn eval(&self, face_id: u32, u: f32, v: f32) -> Vec3A {
-        self.0.eval(face_id, u, v)
+    pub fn eval(&self, face_id: u32, u: f32, v: f32, width: f32) -> Vec3A {
+        self.0.eval(face_id, u, v, width)
     }
 }
 

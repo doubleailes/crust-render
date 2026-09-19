@@ -59,6 +59,27 @@ impl Camera {
         }
     }
 
+    /// The world-space width one pixel spans at ray parameter `t = 1`.
+    ///
+    /// This is the numerator of a primary ray's cone spread. `get_ray` builds
+    /// its direction as `lower_left_corner + s·horizontal + t·vertical -
+    /// origin`, and `lower_left_corner` is offset from the origin by
+    /// `focus_dist · w` — so the direction lands *on the focus plane* at ray
+    /// parameter 1, and one pixel of `s` moves that landing point by exactly
+    /// `horizontal / res_w`. The two axes are averaged because the cone is
+    /// isotropic; a non-square pixel is filtered by the mean of its sides.
+    ///
+    /// `focus_dist` cancels: `|horizontal| = focus_dist · viewport_width` and
+    /// the direction's length at frame centre is `focus_dist`, so dividing by
+    /// it leaves `2·tan(vfov/2)/res_h` — the classic per-pixel angle, which is
+    /// what the unit test pins. The division is the caller's, per ray, because
+    /// the direction is longer towards the frame edge and that pixel really
+    /// does subtend a smaller angle.
+    pub fn pixel_span(&self, res_w: usize, res_h: usize) -> f32 {
+        0.5 * (self.horizontal.length() / res_w.max(1) as f32
+            + self.vertical.length() / res_h.max(1) as f32)
+    }
+
     /// Generates a ray originating from the camera through the viewport.
     ///
     /// # Parameters

@@ -39,6 +39,11 @@ pub struct ShadeCtx {
     /// negation.
     pub view: Vec3A,
     pub position: Vec3A,
+    /// Diameter of the shading point's texture footprint, in the same UV
+    /// units as `uv` — what [`crate::Texture::eval`] filters over. `0.0` asks
+    /// every texture in the graph to point-sample, which is what a host that
+    /// tracks no footprint should leave it at.
+    pub uv_width: f32,
 }
 
 /// A componentwise binary operator.
@@ -214,7 +219,13 @@ impl Program {
                     Some(t) => {
                         let u = ctx.uv.0 * scale[0] + offset[0];
                         let v = ctx.uv.1 * scale[1] + offset[1];
-                        let rgba = t.eval(u, v);
+                        // `uvtiling` scales the coordinates, so it scales the
+                        // footprint with them: a texture tiled 10× is being
+                        // minified 10× and must read a coarser level to match.
+                        // The two axes are averaged because the width is one
+                        // isotropic number.
+                        let w = ctx.uv_width * 0.5 * (scale[0].abs() + scale[1].abs());
+                        let rgba = t.eval(u, v, w);
                         Val {
                             v: rgba,
                             arity: *arity,
@@ -733,6 +744,7 @@ mod tests {
                 tangent: Vec3A::X,
                 view: -Vec3A::Z,
                 position: Vec3A::ZERO,
+                uv_width: 0.0,
             },
             &mut slots,
         );

@@ -996,6 +996,20 @@ impl MeshArena {
             (_, faces) => faces,
         };
         check_face_count(prim, src.base_face_count, material.as_ref());
+        // Texture-footprint densities, built here and only here: this is the
+        // one funnel every shared mesh passes through — direct meshes, baked
+        // or instanced, and prototype parts alike — and the one place that
+        // holds the mesh's *local* vertices, which is the frame the densities
+        // have to be in. After the subdiv remap above, so a refined mesh's
+        // sub-face UVs are the ones measured.
+        let faces = faces.map(|mut m| {
+            m.build_density(&verts, &tris);
+            Arc::new(m)
+        });
+        let uvs = uvs.map(|mut m| {
+            m.build_density(&verts, &tris);
+            Arc::new(m)
+        });
         let slot = self.slots.len() as u32;
         self.slots.push(MeshSlot {
             local: Some(MeshGeom {
@@ -1003,8 +1017,8 @@ impl MeshArena {
                 tris,
                 normals: src.normals.clone(),
             }),
-            faces: faces.map(Arc::new),
-            uvs: uvs.map(Arc::new),
+            faces,
+            uvs,
             committed: None,
             n_place: 0,
         });
@@ -1105,6 +1119,15 @@ fn emit_mesh(
                 // space, which is the frame a tangent has to be in.
                 let uvs = uvs.map(|mut m| {
                     m.build_tangents(&verts, &tris);
+                    // Already world-space here, so the density is too and the
+                    // placement scale stays at its default 1.0. This arm does
+                    // not go through `MeshArena::intern`, so it is the one
+                    // other place densities are built.
+                    m.build_density(&verts, &tris);
+                    Arc::new(m)
+                });
+                let faces = faces.map(|mut m| {
+                    m.build_density(&verts, &tris);
                     Arc::new(m)
                 });
                 let geom_id = world.attach_masked(
@@ -1120,7 +1143,7 @@ fn emit_mesh(
                 // through `bake_indices`, so the winding — and with it the
                 // barycentric order — is whatever the transform produced.
                 if let Some(map) = faces {
-                    world.set_face_map(geom_id, Arc::new(map), false);
+                    world.set_face_map(geom_id, map, false);
                 }
                 if let Some(map) = uvs {
                     world.set_uv_map(geom_id, map, false);
@@ -1210,6 +1233,11 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
                 let mut m = UvMap {
                     uvs: shared.uvs.clone(),
                     tangents: Vec::new(),
+                    // Cloned rather than rebuilt from the baked vertices:
+                    // densities live in the *local* frame, alongside the
+                    // `FaceMap` this placement shares, and the placement's
+                    // own scale is recorded separately.
+                    density: shared.density.clone(),
                 };
                 m.build_tangents(&verts, &tris);
                 Arc::new(m)
@@ -1231,6 +1259,11 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, mirrored);
             }
+            // The vertices were baked into world space but the densities were
+            // not: they are shared with (or cloned from) the slot's
+            // local-frame tables, so the placement's scale still has to be
+            // divided out at lookup.
+            world.set_placement_scale(p.geom_id, placement_scale(&p.l2w));
             baked += 1;
         } else {
             let scene = meshes.committed_scene(p.slot);
@@ -1258,6 +1291,7 @@ fn flush_meshes(world: &mut WorldBuilder, meshes: &mut MeshArena, pending: Vec<M
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, false);
             }
+            world.set_placement_scale(p.geom_id, placement_scale(&l2w));
             instanced += 1;
         }
     }
@@ -1612,7 +1646,21 @@ fn remap_subdivided_faces(map: FaceMap, sub: &subdiv::SubdivFaces) -> FaceMap {
         faces,
         slices,
         uvs: Some(uvs),
+        density: Vec::new(),
     }
+}
+
+/// The uniform scale a placement applies, as the geometric mean of its three
+/// axis scales.
+///
+/// Both side tables' densities are in the mesh's local frame, so this is what
+/// converts a world-space texture footprint into that frame. `cbrt` of the
+/// determinant is the mean because the determinant is the product of the
+/// three scales; a non-uniform placement is therefore filtered by their mean,
+/// which is all an isotropic cone could have used anyway.
+fn placement_scale(l2w: &Affine3A) -> f32 {
+    let det = l2w.matrix3.determinant().abs();
+    if det > 0.0 { det.cbrt() } else { 1.0 }
 }
 
 /// Warns when a per-face texture's face count disagrees with the mesh's.
@@ -1721,12 +1769,18 @@ fn triangulate(
         faces,
         slices,
         uvs: None,
+        density: Vec::new(),
     });
     // Tangents are left empty here: they need *world-space* vertices, which
-    // only exist once a placement is decided. See `UvMap::tangents`.
+    // only exist once a placement is decided. See `UvMap::tangents`. The
+    // densities are left empty for the opposite reason: they want the mesh's
+    // *local* vertices, which this function does not receive, so the callers
+    // that hold them fill them in (`MeshArena::intern`, and the
+    // non-invertible bake below).
     let uv_map = uv_src.map(|_| UvMap {
         uvs,
         tangents: Vec::new(),
+        density: Vec::new(),
     });
     Some((tris, map, uv_map))
 }
@@ -2197,6 +2251,13 @@ fn attach_proto_parts(
         if let Some(map) = &part.uvs {
             world.set_uv_map(geom_id, map.clone(), false);
         }
+        // `part.local` is already folded in, so this is the scale from the
+        // prototype's own frame — the frame the shared densities are in — to
+        // world. A prototype containing *nested* instances is the exception:
+        // the inner placements' scales live inside the committed kernel scene
+        // and are invisible here, so such geometry filters against the outer
+        // scale alone. See the instancing caveats in CLAUDE.md.
+        world.set_placement_scale(geom_id, placement_scale(&Affine3A::from_mat4(xf)));
         attached += 1;
     }
     attached
@@ -4227,6 +4288,7 @@ mod face_table_tests {
             faces: vec![0, 1],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
             uvs: None,
+            density: Vec::new(),
         };
         let sub = subdiv::SubdivFaces {
             base_face: vec![u32::MAX, u32::MAX],

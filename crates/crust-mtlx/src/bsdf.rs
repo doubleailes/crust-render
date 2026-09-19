@@ -401,6 +401,7 @@ mod tests {
                 tangent: Vec3A::X,
                 view: -Vec3A::Z,
                 position: Vec3A::ZERO,
+                uv_width: 0.0,
             },
             &mut slots,
         );

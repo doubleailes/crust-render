@@ -538,6 +538,14 @@ impl Renderer {
         // domain that is never derived leaves `root` untouched.
         let motion = self.world.has_motion();
 
+        // One pixel's world-space width, for the primary ray's cone. Hoisted
+        // out of the sample loop: it depends only on the camera and the
+        // resolution, neither of which moves within a render.
+        let pixel_span = ray_cones_enabled().then(|| {
+            self.camera
+                .pixel_span(self.settings.width, self.settings.height)
+        });
+
         for sample in 0..cfg.spp {
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
                 .new_domain(tile);
@@ -564,7 +572,17 @@ impl Renderer {
             } else {
                 0.0
             };
-            let r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
+            let mut r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
+            if let Some(span) = pixel_span {
+                // `pixel_span` is the width one pixel covers at ray parameter
+                // 1; the cone wants it per world unit, and the direction is
+                // unnormalized, so divide by its length. An aperture is
+                // deliberately ignored: a non-negative cone cannot express a
+                // footprint that *converges* to the focus plane, and defocus
+                // is resolved by sampling rather than by filtering anyway.
+                let spread = span / r.direction().length().max(1e-9);
+                r = r.with_cone(crate::RayCone { width: 0.0, spread });
+            }
             stats.camera_rays += 1;
             let color = trace_path(
                 &r,
@@ -756,6 +774,15 @@ pub fn ray_color(
 /// guide can never produce: they keep their placeholder pdf, are never mixed
 /// with a continuous density, and their value is divided by `1-α` to
 /// compensate for the coin reducing the delta lobe's selection probability.
+/// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
+/// footprint to zero, which makes every texture point-sample its finest level
+/// — the A/B that separates "the mip pyramids changed the image" from "the
+/// footprints did". Read once: this is consulted per camera ray.
+fn ray_cones_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CRUST_RAY_CONES").as_deref() != Ok("0"))
+}
+
 fn sample_bounce_direction(
     r: &Ray,
     rec: &HitRecord,
@@ -785,6 +812,12 @@ fn sample_bounce_direction(
                 value,
                 pdf,
                 delta: false,
+                // The field's directional structure is a coarse quadtree
+                // and the material never picked a lobe here, so there is no
+                // honest narrow answer to give: take the widest. Guiding
+                // only steers secondary bounces, where the cone is already
+                // near-saturated, so this costs sharpness nowhere it had any.
+                spread: crate::RayCone::MAX_SPREAD,
             });
         }
         // Material with no continuous component: pure BSDF sampling.
@@ -1234,12 +1267,20 @@ fn trace_path(
                 records.push(vrec);
                 // Preserve the carried medium: scattering in fog inside a
                 // glass interior must keep attenuating in the glass.
+                // A phase function scatters over the whole sphere, so the
+                // cone saturates here exactly as a diffuse bounce does; only
+                // the width it reached on the way in carries forward.
+                let cone = ray.cone().scattered(
+                    ray.cone().width_at((p - ray.origin()).length()),
+                    crate::RayCone::MAX_SPREAD,
+                );
                 ray = match ray.medium() {
                     Some(m) => Ray::new_in_medium(p, dir, m.clone()),
                     None => Ray::new(p, dir),
                 }
                 .with_time(ray.time())
-                .with_mask(crate::ray::MASK_INDIRECT);
+                .with_mask(crate::ray::MASK_INDIRECT)
+                .with_cone(cone);
                 remaining -= 1;
                 continue;
             }
@@ -1306,9 +1347,14 @@ fn trace_path(
             }
             stats.vertices += 1;
             records.push(vrec);
+            let cone = ray.cone().scattered(
+                ray.cone().width_at((pos - ray.origin()).length()),
+                crate::RayCone::MAX_SPREAD,
+            );
             ray = Ray::new_in_medium(pos, dir, medium)
                 .with_time(ray.time())
-                .with_mask(crate::ray::MASK_INDIRECT);
+                .with_mask(crate::ray::MASK_INDIRECT)
+                .with_cone(cone);
             remaining -= 1;
             prev = None;
             continue;
@@ -1337,6 +1383,11 @@ fn trace_path(
         };
         let rec: HitRecord = hit.rec;
         let mat = hit.mat;
+        // The cone's perpendicular cross-section where it met this surface.
+        // `World::intersect` has already derived the shader-facing texture
+        // widths from the same quantity; this is the bounce side of it, kept
+        // free of the grazing `1/|cos|` stretch so it cannot compound.
+        let cone_width_here = ray.cone().width_at(rec.t * ray.direction().length());
 
         // Attenuation across the arriving segment: volume-region
         // transmittance times the carried medium's. For a *scattering*
@@ -1504,11 +1555,17 @@ fn trace_path(
                 stats.vertices += 1;
                 records.push(vrec);
                 // Materials build the scattered ray without path context;
-                // stamp the path's shutter time and the indirect category.
+                // stamp the path's shutter time, the indirect category, and
+                // the texture-filtering cone this bounce leaves behind. The
+                // cone starts at the width it arrived with — the
+                // perpendicular cross-section, *not* the grazing-stretched
+                // footprint `World::intersect` handed the shader — and picks
+                // up the sampled lobe's own angular width.
                 ray = sample
                     .ray
                     .with_time(ray.time())
-                    .with_mask(crate::ray::MASK_INDIRECT);
+                    .with_mask(crate::ray::MASK_INDIRECT)
+                    .with_cone(ray.cone().scattered(cone_width_here, sample.spread));
                 remaining -= 1;
                 continue;
             }

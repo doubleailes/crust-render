@@ -48,7 +48,7 @@ pub use light::{
 };
 pub use material::*;
 pub use medium::Medium;
-pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
+pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone};
 pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets};

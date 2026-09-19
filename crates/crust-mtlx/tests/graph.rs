@@ -26,6 +26,7 @@ fn ctx() -> ShadeCtx {
         tangent: Vec3A::X,
         view: -Vec3A::Z,
         position: Vec3A::new(1.0, 2.0, 3.0),
+        uv_width: 0.0,
     }
 }
 
@@ -826,7 +827,7 @@ fn hand_built_ops_evaluate() {
 struct Flat([f32; 4]);
 
 impl Texture for Flat {
-    fn eval(&self, _u: f32, _v: f32) -> [f32; 4] {
+    fn eval(&self, _u: f32, _v: f32, _width: f32) -> [f32; 4] {
         self.0
     }
 }
@@ -835,7 +836,7 @@ impl Texture for Flat {
 struct Echo;
 
 impl Texture for Echo {
-    fn eval(&self, u: f32, v: f32) -> [f32; 4] {
+    fn eval(&self, u: f32, v: f32, _width: f32) -> [f32; 4] {
         [u, v, 0.0, 1.0]
     }
 }

@@ -165,7 +165,7 @@ fn a_single_sample_png_loads_as_one_tile() {
     assert!(w > 0 && h > 0);
     assert!(w <= DEFAULT_MAX_EDGE && h <= DEFAULT_MAX_EDGE);
     assert_eq!(tex.bytes(), w * h * 3, "8-bit RGB storage");
-    let px = tex.eval(0.5, 0.5);
+    let px = tex.eval(0.5, 0.5, 0.0);
     for c in px {
         assert!((0.0..=1.0).contains(&c), "{px:?}");
     }
@@ -180,9 +180,9 @@ fn a_sample_udim_set_loads_both_tiles() {
     .expect("the <UDIM> set loads");
     assert_eq!(tex.tile_count(), 2, "1001 and 1002 are on disk");
     // Both tiles answer; a tile that is not on disk reads black.
-    let a = tex.eval(0.5, 0.5);
-    let b = tex.eval(1.5, 0.5);
-    let hole = tex.eval(0.5, 1.5);
+    let a = tex.eval(0.5, 0.5, 0.0);
+    let b = tex.eval(1.5, 0.5, 0.0);
+    let hole = tex.eval(0.5, 1.5, 0.0);
     assert!(a.iter().all(|c| c.is_finite()));
     assert!(b.iter().all(|c| c.is_finite()));
     assert_eq!(hole[..3], [0.0, 0.0, 0.0]);
@@ -197,7 +197,7 @@ fn the_normal_map_set_loads_raw() {
     .expect("normal set loads");
     assert_eq!(tex.tile_count(), 2);
     // A tangent-space normal map is mostly blue-ish: z ≈ 1 encodes as ~1.
-    let px = tex.eval(0.5, 0.5);
+    let px = tex.eval(0.5, 0.5, 0.0);
     assert!(px[2] > 0.5, "normal map blue channel {px:?}");
 }
 
@@ -216,7 +216,11 @@ fn colour_space_changes_the_decoded_value() {
         (h as f32 * 0.3).floor() + 0.5,
     );
     let (u, v) = (u / w as f32, v / h as f32);
-    let (r, s, g) = (raw.eval(u, v), srgb.eval(u, v), g22.eval(u, v));
+    let (r, s, g) = (
+        raw.eval(u, v, 0.0),
+        srgb.eval(u, v, 0.0),
+        g22.eval(u, v, 0.0),
+    );
     for ch in 0..3 {
         let encoded = r[ch];
         if encoded > 0.02 && encoded < 0.98 {
@@ -236,7 +240,7 @@ fn file_assets_hands_back_a_texture2d() {
     let tex: std::sync::Arc<dyn Texture2D> = FileAssets
         .load_texture(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw)
         .expect("through the trait");
-    let px = tex.eval(0.25, 0.25);
+    let px = tex.eval(0.25, 0.25, 0.0);
     assert!(px.iter().all(|c| c.is_finite()));
 }
 
@@ -252,12 +256,12 @@ fn a_written_gradient_is_sampled_at_the_right_place() {
     }
     img.save(&path).unwrap();
     let tex = UvTexture::open(&path, ColorSpace::Raw).expect("loads");
-    let left = tex.eval(0.02, 0.5);
-    let right = tex.eval(0.98, 0.5);
+    let left = tex.eval(0.02, 0.5, 0.0);
+    let right = tex.eval(0.98, 0.5, 0.0);
     assert!(left[0] < 0.1 && left[2] > 0.9, "left is blue: {left:?}");
     assert!(right[0] > 0.9 && right[2] < 0.1, "right is red: {right:?}");
     // Wrapping: u = 1.02 reads like u = 0.02.
-    let wrapped = tex.eval(1.02, 0.5);
+    let wrapped = tex.eval(1.02, 0.5, 0.0);
     assert!(
         (wrapped[0] - left[0]).abs() < 0.05,
         "{wrapped:?} vs {left:?}"
@@ -268,14 +272,14 @@ fn a_written_gradient_is_sampled_at_the_right_place() {
 #[test]
 fn alpha_channel_reads_one_for_rgb_files() {
     let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw).unwrap();
-    assert_eq!(tex.eval(0.5, 0.5)[3], 1.0);
+    assert_eq!(tex.eval(0.5, 0.5, 0.0)[3], 1.0);
 }
 
 #[test]
 fn non_finite_coordinates_do_not_panic() {
     let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw).unwrap();
     for (u, v) in [(f32::NAN, 0.5), (0.5, f32::INFINITY), (-1e30, 1e30)] {
-        let px = tex.eval(u, v);
+        let px = tex.eval(u, v, 0.0);
         assert_eq!(px.len(), 4);
     }
     let set = UvTexture::open(
@@ -283,7 +287,7 @@ fn non_finite_coordinates_do_not_panic() {
         ColorSpace::Raw,
     )
     .unwrap();
-    let _ = set.eval(f32::NAN, f32::NAN);
+    let _ = set.eval(f32::NAN, f32::NAN, 0.0);
 }
 
 // ---------------------------------------------------------------------------
