@@ -169,10 +169,13 @@ crate (no renderer dependency, just an XML parser and `glam`):
   full resolution) and keeps a trilinear mip pyramid below that cap, selected
   per hit by the ray cone's footprint. `CRUST_TEX_STREAM=1` swaps that whole
   path for a **streaming tile cache** instead: textures pre-converted to a
-  tiled, mip-mapped `.tx` (OIIO's format, read and written natively — it is a
-  plain TIFF) are paged in a 64x64 tile at a time under a byte budget, so
-  memory stops tracking the scene's texture footprint and the resolution cap
-  stops being needed at all.
+  tiled, mip-mapped `.tx` (OIIO's format, read and written natively) are paged
+  in a 64x64 tile at a time under a byte budget, so memory stops tracking the
+  scene's texture footprint and the resolution cap stops being needed at all.
+  A `.tx` is backed by a tiled TIFF for 8-bit sources and by a tiled,
+  mip-mapped **OpenEXR** for float ones — the backing is picked by magic number
+  rather than extension, and the choice follows the source's actual range, so
+  an HDR texture keeps values above 1.0 that a `u8` tile would clip.
 
 The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
 `<` inside an attribute value, which is not well-formed XML. MaterialX's own
@@ -412,6 +415,12 @@ the full, per-feature detail and workarounds:
   [`ptex-rs`](https://github.com/doubleailes/ptex-rs) addresses randomly, so the fix is a
   `PtexCache` equivalent there — exactly as the C++ Ptex library ships one — not a second
   cache here.
+- **An HDR texture's range stops at the shader.** A streamed `.tx` with an EXR backing
+  carries values above 1.0 intact, but the only textured input crust has is base colour,
+  and an albedo above 1 creates energy — the diffuse lobe clamps it, correctly. The
+  input that *would* use the range is emission, and no MaterialX EDF node is implemented,
+  so a graph cannot drive it from an image. That, rather than the file format, is what
+  HDR textures are waiting on.
 - **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
   layer is averaged into the coat rather than kept distinct, and MaterialX transmission
   nodes have no glass lobe equivalent yet.
