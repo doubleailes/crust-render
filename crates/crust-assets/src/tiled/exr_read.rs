@@ -98,6 +98,24 @@ impl ExrFile {
             )));
         }
         let tile_edge = tw;
+        // Sub-sampled channels (a chroma-decimated layer) would put a channel's
+        // rows on a different grid from the tile's, and every row index below
+        // would be off. Nothing that writes textures produces them.
+        if header
+            .channels
+            .list
+            .iter()
+            .any(|c| c.sampling != exr::math::Vec2(1, 1))
+        {
+            return Err(invalid("sub-sampled channels are not supported"));
+        }
+        // A data window that does not start at the origin would make the tile
+        // grid computed below disagree with the block positions reported later.
+        // Textures are written at the origin; refusing is cheaper than carrying
+        // an offset through every lookup for a case that does not arise.
+        if header.own_attributes.layer_position != exr::math::Vec2(0, 0) {
+            return Err(invalid("a data window offset from the origin"));
+        }
         let rgb = resolve_rgb(header)?;
 
         let levels: Vec<LevelInfo> = mip_map_levels(tiles.rounding_mode, header.layer_size)
@@ -354,9 +372,6 @@ fn read_offset_table(file: &mut BufReader<File>, chunk_count: usize) -> io::Resu
             .collect();
         if offsets.iter().copied().min() == Some(candidate + span) {
             return Ok(offsets);
-        }
-        if candidate == here {
-            continue;
         }
     }
     Err(match last {

@@ -158,6 +158,8 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
+| Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
+| Streamed `.tx`, EXR backing (`half` tiles) | — | none (decoded once at conversion) | ✅ correct — the file stores linear samples and records which space they came from |
 
 The `is_hdr` branch in `load_image_environment` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
@@ -180,18 +182,34 @@ plausible-looking bug rather than an obvious one.
 | **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture.rs`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
 | **Mip levels** | `uv_texture.rs`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
 | **Ptex mip levels** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since Ptex texels are stored linear `f32`. |
-| **`.tx` mip levels** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
+| **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
+| **`.tx` mip levels (EXR backing)** | `crust-assets/src/tiled/exr_write.rs` | **linear**, not re-encoded | The samples are already light: a float file has no transfer curve, so the decode happened once at conversion and the reduction is a plain average (`reduce_half_linear`, written next to `reduce_half` so the two cannot drift on anything but the curve). |
 
-Because a `.tx` stores display-encoded texels but reduces in linear light, the
-colour space is **baked into every level above 0** and cannot be reinterpreted
-afterwards. Read a chain built for sRGB as raw and level 0 stays perfectly
-correct while every coarser level is wrong — an error that appears only under
-minification and looks exactly like a filtering bug. So the space is written
-into the file (`crust:mipspace=` in `ImageDescription`, following OIIO's own
-`oiio:SHA-1=` convention) and a mismatch makes the streaming path decline,
-falling back to preloading. A file with no marker — anything `maketx` wrote —
-is accepted, since its chain came from a different filter and there is nothing
-to match against.
+There are therefore **three** decode points, not two, and which one applies is
+decided by a tile's payload rather than by its file:
+
+| Payload | Stored as | Decoded | Where |
+| --- | --- | --- | --- |
+| `TileData::U8` (8-/16-bit TIFF) | the file's own encoding | per lookup, through the 256-entry table | `Tile::rgb` |
+| `TileData::Half` (EXR, float TIFF) | **linear** | never — it is already light | — |
+| preloaded `UvTexture` | the file's own encoding | per lookup, through the same table | `UvTexture::sample_level` |
+
+Because a TIFF-backed `.tx` stores display-encoded texels but reduces in linear
+light, the colour space is **baked into every level above 0** and cannot be
+reinterpreted afterwards. Read a chain built for sRGB as raw and level 0 stays
+perfectly correct while every coarser level is wrong — an error that appears
+only under minification and looks exactly like a filtering bug. An EXR-backed
+`.tx` gets there from the other side: its texels were decoded once, at
+conversion, so binding it under a different space would apply a curve to data
+that has already had one removed.
+
+So the space is written into the file — `crust:mipspace=` in
+`ImageDescription` for TIFF (following OIIO's own `oiio:SHA-1=` convention) and
+as a header attribute for EXR, where custom attributes are first-class — and it
+means "the space this file is to be bound with" for both. A mismatch makes the
+streaming path decline, falling back to preloading. A file with no marker —
+anything `maketx` wrote — is accepted, since its chain came from a different
+filter and there is nothing to match against.
 
 The difference is not academic. A black/white checkerboard averaged in
 sRGB-encoded bytes gives `127/255 ≈ 0.5` *encoded*, which decodes to **0.21

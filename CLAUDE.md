@@ -85,8 +85,11 @@ python3 scripts/gen_texture_alias_scene.py /tmp/alias --measure
 
 # Streaming textures. Convert once (the mip chain is reduced in linear light,
 # the same `reduce_half` the in-memory pyramid uses, so a streamed render and a
-# preloaded one agree texel for texel), then render with the cache on.
+# preloaded one agree texel for texel), then render with the cache on. A float
+# source takes the EXR backing and keeps its range; `--format` overrides.
 cargo run --release -p crust-render --example maketx -- 'albedo.<UDIM>.png' srgb_texture
+cargo run --release -p crust-render --example maketx -- sky.exr raw            # half tiles
+cargo run --release -p crust-render --example maketx -- albedo.png srgb_texture --format=exr
 CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
 
 # --- The optimization loop (see "Measuring a change" below) --------------
@@ -127,7 +130,8 @@ for a streaming one that pages 64x64 tiles out of a `.tx` under a byte budget se
 `CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own). It is opt-in, and it falls back
 to preloading for any texture it declines — no converted sibling beside the asset, a mip
 chain reduced in a different colour space, a file it cannot read — so turning it on can
-make a render slower but never break it.
+make a render slower but never break it. A `.tx` is backed by either a tiled TIFF (`u8`
+tiles) or a tiled mip EXR (`half` tiles), picked by magic number rather than extension.
 
 ## Measuring a change
 
@@ -760,6 +764,52 @@ Schema mapping:
     still cannot help a scene that binds more than fits. Production renderers
     convert once, offline, to a tiled mip-mapped file and stream tiles behind a
     bounded cache, so memory scales with the *cache* instead.
+  - **Two backings, one seam.** A `.tx` is either a tiled mip **TIFF** with
+    `u8` tiles or a tiled mip **EXR** with `half` ones, and `TiledFile` picks
+    between them by **magic number** — which is what makes `maketx --format exr
+    -o foo.tx`, an EXR inside a file named `.tx`, simply work. The split is by
+    *sample type*, not container: unsigned integer samples (8- and 16-bit TIFF)
+    page in as `TileData::U8` exactly as before, float samples as
+    `TileData::Half`. An 8-bit texture pays nothing for HDR existing — its
+    tiles, its bytes and its bit-identical agreement with the preload path are
+    untouched — and an HDR one is not silently clipped to fit an 8-bit cache.
+    The one branch is `Tile::rgb`, on a value that is constant for a whole
+    texture and therefore perfectly predicted.
+  - **Why EXR and not float TIFF.** TIFF can hold `f32`, but the format is the
+    smaller half of the question and the industry already answered it: OIIO's
+    `maketx --format exr` writes 64x64-tiled, full-MIPMAP, zipped `half` with
+    `textureformat`/`wrapmodes` as first-class header attributes (better
+    provenance than TIFF, which has to smuggle them through `ImageDescription`),
+    V-Ray's native streaming texture format *is* tiled mip EXR, and Karma
+    recommends `.exr` or `.rat`. Adding EXR is the opposite of diverging from
+    OIIO; a TIFF-only path was the narrower one. `half` rather than `f32`
+    because it is what every streaming texture format stores and what keeps an
+    HDR tile at twice a `u8` tile rather than four times — a texture is shading
+    input, not a render target.
+  - **The EXR reader is hand-rolled around the block API; the writer is not.**
+    `exr` writes tiles and mip levels through its ordinary public API
+    (`Blocks::Tiles` + `Levels::Mip`), so unlike TIFF there is no container
+    code at all — `exr_write.rs` is the pyramid, the de-interleave to planar,
+    and the attributes. Reading is the sharp part: `filter_chunks`, the one
+    entry point that looks like random access, **consumes** the reader and
+    sorts the offsets, so `exr_read.rs` composes the layer beneath it —
+    `MetaData::read_from_buffered` → offset table → seek → `Chunk::read` →
+    `UncompressedBlock::decompress_chunk` → `lines()`. Three details worth
+    keeping: `enumerate_ordered_header_block_indices()` supplies the
+    `(level, tile) → chunk index` map (EXR mandates no chunk order, so it must
+    not be assumed row-major); `decompress_chunk` returns **native**-endian
+    samples, so reading them is a reinterpret; and the level sizes come from
+    the header's own `RoundingMode` rather than from `div_ceil`, because
+    `maketx` writes `ROUND_DOWN` while crust writes `ROUND_UP` to match
+    `reduce_half`.
+  - **The offset table is probed, not trusted.** `MetaData` is read through a
+    `PeekRead` that may hold one byte it has consumed and not handed back, so
+    the reader's position afterwards is either the table's start or one past
+    it. The table is self-describing — chunks begin immediately after it, so
+    its smallest entry equals its own end — and that identity picks between the
+    two candidates. The current `exr` happens to land exactly right, so the
+    fallback is forced by a test (`the_offset_table_is_found_even_when_the_
+    reader_is_a_byte_late`) rather than left to rot.
   - **`.tx` is a plain TIFF.** Tiled 64x64, mip levels as chained IFDs,
     Deflate. `tiff` 0.11.3 reads one tile at one level with a real seek
     (`seek_to_image` + `read_chunk`, which walks the cached `TileOffsets`
@@ -794,14 +844,25 @@ Schema mapping:
     closure rather than returning an `Arc`, because one refcount pair per texel
     was the difference between streaming costing 4x a preloaded render and
     costing 2x.
-  - **The colour space is recorded in the file** (`crust:mipspace=` in
-    ImageDescription) and a mismatch is refused. A `.tx` stores display-encoded
-    texels but reduces its levels in *linear light*, so the space is baked into
-    every level above 0: read an sRGB chain as raw and level 0 is perfectly
-    correct while every coarser level is wrong — visible only under
-    minification and, by eye, indistinguishable from a filtering bug. A file
+  - **The colour space is recorded in the file** (`crust:mipspace=`, in
+    ImageDescription for TIFF and as a header attribute for EXR) and a mismatch
+    is refused. It means "the space this file is to be bound with", and the two
+    backings reach that from opposite directions. A TIFF `.tx` stores
+    display-encoded texels and reduces its levels in *linear light*, so the
+    space is baked into every level above 0: read an sRGB chain as raw and
+    level 0 is perfectly correct while every coarser level is wrong — visible
+    only under minification and, by eye, indistinguishable from a filtering
+    bug. An EXR `.tx` stores **linear** texels, decoded once at conversion
+    because EXR has no transfer curve of its own, so binding it under another
+    space would apply a curve to data that has already had one removed. A file
     with no marker (anything `maketx` wrote) is accepted, since its chain came
     from OIIO's filter and there is nothing to match against.
+  - **Which backing a conversion produces is decided by the source's range**,
+    not its extension: `maketx` writes EXR for a source that actually carries
+    values above 1.0 and TIFF otherwise, so a `.hdr` of an overcast sky does
+    not pay double for a range it never uses. `--format tiff|exr` overrides
+    either way, and a TIFF conversion that clips is warned about rather than
+    done quietly.
   - **The invariant.** For any texture at or below the preload cap, streamed
     and preloaded renders must be **bit-identical** — same level 0, same
     `reduce_half`, same level selection. `samples/materialx_basic` at 16 spp:
@@ -810,7 +871,13 @@ Schema mapping:
     discarded, preload uncapped 142.46 MiB / 0.231s, **streamed at a 16 MiB
     budget 15.94 MiB / 0.449s and bit-identical to the uncapped preload**. The
     ~2x render cost is the honest worst case — one textured plane at depth 2,
-    so nearly every shading call is a fetch.
+    so nearly every shading call is a fetch. That invariant is about the `u8`
+    path and stays exactly as it was; the `half` path is where the two paths
+    are *supposed* to disagree. Measured at the seam rather than in a render: a
+    Radiance source whose white checks are at 8.0 comes back at 8.0 streamed
+    and at exactly 1.0 preloaded (`to_rgb8()` clips it), while below 1.0 the
+    two agree to within the 8 bits the preload path keeps — so the divergence
+    is the range and not a different lookup.
   - **Conversion is explicit**, via `examples/maketx`. Auto-converting on first
     use (Arnold's `autotx`) is a deliberate follow-up: a renderer that silently
     writes multi-gigabyte files next to a read-only asset library is a surprise
@@ -1208,12 +1275,31 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   equivalent in [`ptex-rs`](https://github.com/doubleailes/ptex-rs) — exactly as the C++
   Ptex library ships one — rather than a second cache in `crust-assets`. Do not bolt
   Ptex onto the `.tx` tile cache; the two formats want different keys and the
-  per-face pyramid is already on disk. On the UV side: conversion is explicit rather than
-  automatic, the writer handles 8-bit RGB only (16-bit and float `.tx` files are read but
-  flattened to 8 bits on page-in, matching what the preload path does), there is no
+  per-face pyramid is already on disk — and Ptex is still 8-bit through `PtexColor`
+  regardless, so an HDR `.ptx` gains nothing from the EXR backing either.
+  On the UV side: conversion is explicit rather than
+  automatic, 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
+  the renderer decodes `u8` through a 256-entry table, and two more bits of an LDR
+  texture is not worth halving what the byte budget holds), there is no
   single-flight on a miss so two workers can decode the same tile at once (counted as
   "concurrent double fills", bounded by the thread count), and the cache is per-process
-  rather than shared between renders.
+  rather than shared between renders. The EXR backing reads RGB (or a replicated single
+  channel) and ignores alpha, refuses ripmaps, multi-layer and deep files, and requires
+  square tiles; the TIFF writer still emits 8-bit RGB only, so an HDR conversion is an
+  EXR conversion.
+- **An HDR texture's range reaches the shader and then meets a clamp.** The streaming
+  path now carries values above 1.0 all the way to `Texture2D::eval`, but the only
+  textured input crust has is `base_color`, and an albedo above 1 creates energy —
+  `eon_diffuse` clamps ρ to 1, correctly. So today the range survives the *texture*
+  and not the *image*: rendering a checkerboard whose white checks are at 8.0 differs
+  from the 8-bit version mostly where bilinear and mip averaging mix an over-bright
+  texel with a dark one before the clamp, which measures the clamp rather than the
+  texture. The input that would use the range is **emission**, and there is no path to
+  it: `crust-mtlx` implements no EDF node (`uniform_edf` and friends), so a MaterialX
+  graph cannot drive `emission_color` from an image at all. That — not the file format
+  — is what an HDR texture is waiting on, and it is why the range claim is verified at
+  the seam (`hdr_survives_streaming_and_does_not_survive_preloading`) rather than by a
+  sample scene.
 - **Texture filtering caveats.** Minification is filtered now (ray cones plus
   trilinear mip pyramids, above), so what remains is the shape of that filter
   rather than its absence. It is **isotropic**: a chart stretched in one axis is
