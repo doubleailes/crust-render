@@ -6,8 +6,18 @@
 
 <br/>
 
-A toy, high-quality path tracer written in safe, modern Rust — inspired by PBRT, `Ray Tracing in One Weekend`, and Autodesk Standard Surface.
-Completely in a vibe coding mood.
+A physically-based path tracer written in 100% safe Rust (edition 2024, `forbid(unsafe_code)`
+on every crate). It loads scenes directly from **USD** — including production-scale assets
+such as Disney Animation's [Moana Island](#moana-benchmark) dataset — and implements its own
+watertight ray/triangle kernel, SBVH acceleration structure, OpenPBR übershader, MaterialX
+graph reader, volumetric integrator and Practical Path Guiding, with no dependency on Embree,
+OpenPGL, or any existing renderer core. It is an independent, single-author project rather
+than a production renderer: the architecture and formulas are informed by PBRT, *Ray Tracing
+in One Weekend*, Autodesk Standard Surface / OpenPBR and the published Embree/OpenPGL papers,
+but every kernel, material model and importer here is a from-scratch implementation, and the
+[known limitations](#known-limitations) — no GPU path, no deformation motion blur, no OpenVDB
+import — are documented rather than hidden. See `docs/embree_comparison.md` for a detailed,
+feature-by-feature comparison against Embree's intersection kernels.
 
 ## 📸 Preview
 
@@ -319,6 +329,39 @@ MIS matches the cleaner of the two everywhere.
 
 ![moana](images/moana_island_full.png)
 
+Disney Animation's [Moana Island scene](https://www.disneyanimation.com/resources/moana-island-scene/)
+is the industry's standard stress test for production renderers — 20 heavily-instanced
+elements (foliage, ocean, terrain, dressed sets) totaling billions of triangles once
+instances are expanded. Crust imports `usd/island.usda` directly, with no preprocessing,
+flattening, or format conversion, and renders it end to end.
+
+Measured numbers from that import (see `CLAUDE.md` for the full breakdown):
+
+- **3,151,850** geometries composing to **21,904,388** top-level BVH primitives, importing
+  in ~6m18s (of which ~4m45s is USD traversal) at a **~47.6 GiB** peak.
+- **~57.7 M** unique top-level triangles across the 20 elements — the largest being the
+  ocean (`osOcean`, 15.6 M), coral (`isCoral`, 14.5 M) and the two mountains (6.7 M / 6.4 M
+  triangles) — with instancing (native `instanceable` prims and `PointInstancer`s, nested
+  to arbitrary depth) reusing shared geometry rather than duplicating it, which is what
+  keeps memory bounded on a dataset this size.
+- A **streaming importer**: rather than composing the whole USD stage at once, the
+  importer opens a cheap index stage, then composes and drops one masked stage per
+  top-level subtree. This bounds peak composition to roughly one element at a time
+  instead of the whole island — **117.10 GiB / 13:20 → 43.76 GiB / 09:19** measured on
+  this scene, with pixel-identical output.
+- **Ptex** per-face texturing over the island's 2,576,238 texture faces, mip-capped by
+  default to keep memory tractable: **4.58 GiB** at the default 32×32 cap versus
+  **494 GiB** if every face loaded at its authored full resolution.
+- Two `UsdLuxDomeLight` environment textures authored on the stage (a modeling choice
+  in the source asset, not a crust limitation) currently both decode and both light the
+  scene, peaking at ~11 GiB for that pair alone — the first lever to pull if memory is
+  tight is disabling the inactive one (`sky_dome_cam_llc`).
+
+This is a correctness and scalability benchmark, not a performance claim: the point is
+that a hand-written, dependency-light Rust importer and renderer can open, resolve
+material bindings and instancing for, and render a real production dataset of this size
+without special-casing it.
+
 ### CLI
 
 ```bash
@@ -331,3 +374,28 @@ cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
     -b                                 # bucket (16×16 tile) rendering
     -l debug                           # log level
 ```
+
+### Known limitations
+
+Documented gaps rather than silent ones — see `CLAUDE.md`'s "Known incomplete work" for
+the full, per-feature detail and workarounds:
+
+- **No GPU path.** Everything runs on the CPU, parallelized with Rayon; there is no
+  wavefront/GPU renderer and no coherent ray-packet traversal.
+- **SIMD stops at 128 bits.** BVH traversal and triangle packets use SSE2/NEON-width
+  vectors (`glam`); reaching AVX2/AVX-512 in safe, portable Rust would need
+  `std::simd` (nightly-only) or `unsafe` intrinsics, so it is deliberately not done.
+- **Motion blur is transform-only.** Linear matrix lerp per instance; no deformation
+  (per-vertex) blur and no quaternion-correct rotation blur.
+- **No OpenVDB / `UsdVolVolume` import.** Volumes are homogeneous, procedural noise, or
+  an inline voxel grid authored directly in USD.
+- **UV texture filtering is bilinear with no mip pyramid**, so far-minified textures can
+  alias; Ptex textures are mip-capped by a fixed resolution ceiling instead.
+- **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
+  layer is averaged into the coat rather than kept distinct, and MaterialX transmission
+  nodes have no glass lobe equivalent yet.
+- **Path guiding covers surfaces only** — no volume/phase-function guiding, and it
+  trains on luminance rather than a chromatic distribution.
+- Some USD light types (`DiskLight`, `CylinderLight`) and material inputs
+  (`subsurface*`/`specularTint` on `PxrDisneyBsdf`) are read and warned about rather
+  than mapped.
