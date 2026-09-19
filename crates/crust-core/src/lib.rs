@@ -54,7 +54,7 @@ pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets};
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderStats, SceneCounters,
-    peak_memory_bytes,
+    TextureCacheStats, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, Texture2D, TextureRef};
 pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};

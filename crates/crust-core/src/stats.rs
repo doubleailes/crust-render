@@ -217,6 +217,60 @@ pub struct RenderStats {
     pub image: ImageCounters,
     /// Integrator work; empty unless the host asked the renderer for it.
     pub rays: RayStats,
+    /// Streaming texture cache; empty unless the host streams textures and
+    /// pushed its counters in.
+    ///
+    /// Pushed rather than collected, because the cache lives in the *host*
+    /// (`crust-assets`) and the dependency runs that way — crust-core cannot
+    /// reach into it. `main.rs` snapshots it after the render exactly as it
+    /// already assigns `stats.rays`.
+    pub textures: TextureCacheStats,
+}
+
+/// What a streaming texture cache did over a render.
+///
+/// Three tiers of hit are counted separately because they answer different
+/// questions. Microcache hits say whether the sampler's access pattern is
+/// coherent — a bilinear tap reads one tile four times, so a low number here
+/// means something is wrong upstream. Shard hits say the tile was resident.
+/// And `redundant` — tiles paged in more than once over one render — is the
+/// only number that distinguishes "the cache is full" from "the cache is too
+/// small for the working set", which is the question an operator actually has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextureCacheStats {
+    pub micro_hits: u64,
+    pub hits: u64,
+    pub misses: u64,
+    /// Tiles decoded again after being evicted — the budget is below the
+    /// working set.
+    pub redundant: u64,
+    /// Tiles two workers decoded at the same time. Wasted, but bounded by the
+    /// thread count and unrelated to the budget; kept separate from
+    /// `redundant` because the remedies are different.
+    pub raced: u64,
+    pub evictions: u64,
+    pub bytes_read: u64,
+    pub peak_bytes: u64,
+    pub errors: u64,
+    pub budget_bytes: u64,
+}
+
+impl TextureCacheStats {
+    pub fn lookups(&self) -> u64 {
+        self.micro_hits + self.hits + self.misses
+    }
+
+    /// Fraction of lookups answered without touching the disk.
+    pub fn hit_rate(&self) -> f64 {
+        match self.lookups() {
+            0 => 0.0,
+            n => (self.micro_hits + self.hits) as f64 / n as f64,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lookups() == 0
+    }
 }
 
 impl RenderStats {
@@ -531,6 +585,91 @@ impl fmt::Display for RenderStats {
                 "paths ended: depth cap",
                 thousands(r.ended_depth as usize)
             )?;
+        }
+
+        // -- Texture cache ---------------------------------------------
+        let t = &self.textures;
+        if !t.is_empty() {
+            writeln!(f, "{rule}")?;
+            writeln!(f, "Texture Cache")?;
+            writeln!(f, "{rule}")?;
+            writeln!(f, "  {:<28} {}", "lookups", thousands(t.lookups() as usize))?;
+            writeln!(
+                f,
+                "  {:<28} {} ({:.1}%)",
+                "  thread microcache hits",
+                thousands(t.micro_hits as usize),
+                100.0 * t.micro_hits as f64 / t.lookups().max(1) as f64
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {} ({:.1}%)",
+                "  cache hits",
+                thousands(t.hits as usize),
+                100.0 * t.hits as f64 / t.lookups().max(1) as f64
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {} ({:.1}%)",
+                "  misses (read from disk)",
+                thousands(t.misses as usize),
+                100.0 * t.misses as f64 / t.lookups().max(1) as f64
+            )?;
+            writeln!(f, "  {:<28} {:.2}%", "hit rate", 100.0 * t.hit_rate())?;
+            writeln!(
+                f,
+                "  {:<28} {} / {}",
+                "peak resident / budget",
+                human_bytes(t.peak_bytes),
+                human_bytes(t.budget_bytes)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "read from disk",
+                human_bytes(t.bytes_read)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {}",
+                "evictions",
+                thousands(t.evictions as usize)
+            )?;
+            // The line worth reading when a render is slower than it should
+            // be: a tile decoded again after being evicted means the budget is
+            // below the working set, which is the one thing a bigger budget
+            // actually fixes.
+            writeln!(
+                f,
+                "  {:<28} {}{}",
+                "re-read after eviction",
+                thousands(t.redundant as usize),
+                if t.redundant > t.misses / 4 && t.misses > 0 {
+                    "   (raise CRUST_TEX_CACHE_MB)"
+                } else {
+                    ""
+                }
+            )?;
+            // Deliberately a separate line: two workers decoding the same tile
+            // at once is wasted work bounded by the thread count, and no
+            // amount of budget removes it. Reporting it as thrashing sent the
+            // first measured render chasing a cache size that was 0.006% full.
+            if t.raced > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "concurrent double fills",
+                    thousands(t.raced as usize)
+                )?;
+            }
+            if t.errors > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "tile read errors",
+                    thousands(t.errors as usize)
+                )?;
+            }
         }
 
         if self.phases.is_empty() {
