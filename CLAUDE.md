@@ -953,7 +953,21 @@ Schema mapping:
     can be made against a real asset directly. Levels are reduced **in memory from the
     decoded linear base**, not by asking the reader for each resolution: every extra read
     takes `&mut self` through the serial load loop (another seek and inflate) and comes
-    back display-encoded, needing the `powf(2.2)` again. A level's offset is walked rather
+    back display-encoded, needing the `powf(2.2)` again — and averaging in that encoding
+    is not averaging light, which is the whole reason the pyramid is built here.
+    **Which texels get averaged is the file's business, though, not ours**: a
+    `meshtype = triangle` Ptex packs *two* triangles into each square of texels, the
+    upright one and its mirror across the anti-diagonal, so Ptex reduces three texels of
+    the upright 2x2 with the one mirrored texel that completes it
+    (`w-1-2u`, `w-1-2v` — note the index swap) rather than with the neighbour
+    below-right. `PtexColor` reads `mesh_type()` once at open and picks `reduce_triangle`
+    or `reduce_quad` accordingly; a 2x2 box over a triangle face mixes texels from both
+    triangles and is wrong at every level above 0 by up to ~65% while still looking like
+    plausible texture, which is why `triangle_levels_match_ptex_rs_reduction` compares
+    against `ptex::utils::reduce_tri` rather than against an expectation written by
+    hand, and why a second test pins that the two reductions really do disagree.
+    Triangle faces also clamp both axes together, since the format defines only
+    symmetric reductions for them. A level's offset is walked rather
     than stored — `Face` gains one `u8` in its existing padding, which over 2.5 M faces is
     the difference between free and a per-face offset array. The `+1/3` figure holds for
     square faces only: once a non-square face's short axis pins at one texel the chain
@@ -1336,7 +1350,13 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   the instance chain — and a **non-uniform** placement collapses to `cbrt(|det|)`,
   so a `(1, 1, 10)` scale is off by up to ~4.6× on the stretched axis. Both
   degrade to a slightly wrong level, never to a wrong lookup. Ptex still does not
-  filter across **face boundaries**. The guide branch of `sample_bounce_direction`
+  filter across **face boundaries**, and on a **triangle** Ptex it does not filter
+  across the packed anti-diagonal either: the mip chain is Ptex's own triangular
+  reduction now, but `sample_level` is still a plain bilinear tap on the square, so a
+  tap within half a texel of the diagonal picks up the mirrored triangle where
+  `PtexTriangleFilter` would not. The face mapping is right either way — a
+  three-vertex face resolves through `FanSlice::Triangle`, whose barycentrics *are*
+  Ptex's parametric coordinates. The guide branch of `sample_bounce_direction`
   reports the widest possible lobe spread rather than the material's own, since it
   never picked a lobe; that costs sharpness only on guided secondary bounces,
   where the cone is near-saturated anyway.
