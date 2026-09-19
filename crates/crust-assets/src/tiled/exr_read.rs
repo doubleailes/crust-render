@@ -216,13 +216,12 @@ impl ExrFile {
         let header = &self.meta.headers[0];
         let mut out = vec![f16::ZERO; tw * th * 3];
         for line in block.lines(&header.channels) {
-            // A block holds every channel of every one of its rows, so most of
-            // what it yields is a channel this texture does not use — an alpha,
-            // a data pass, a depth. Skipping early is what keeps an RGBA file
-            // from costing a third more than an RGB one.
-            // Which output slots this channel feeds — usually exactly one, but
-            // a single-channel file maps its one channel to all three, which is
-            // how a mask bound as a colour comes back grey instead of red.
+            // Which output slots this channel feeds. Usually exactly one — but
+            // none at all for a channel this texture does not use (an alpha, a
+            // data pass, a depth), which a block yields alongside the rest and
+            // which is skipped here rather than converted and thrown away; and
+            // all three for a single-channel file, which is how a mask bound as
+            // a colour comes back grey instead of red.
             let slots = self.rgb.map(|c| c == line.location.channel);
             if !slots.iter().any(|&b| b) {
                 continue;
