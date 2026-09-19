@@ -43,14 +43,15 @@ import subprocess
 import sys
 import zlib
 
-TEX = 1024  # checker texture edge, texels
+TEX = 1024  # checker texture edge, texels (--size overrides)
 CHECK = 8  # texels per check square
 REPEAT = 64  # how many times the chart tiles across the plane
 HALF = 400.0  # plane half-extent in world units
+UDIM = 1  # how many UDIM tiles across (--udim); 1 means a single image
 
 
-def write_checker_png(path):
-    """A TEX x TEX black/white checkerboard, 8-bit RGB, written by hand.
+def write_checker_png(path, tex=None, phase=0):
+    """A tex x tex black/white checkerboard, 8-bit RGB, written by hand.
 
     By hand because the repository's Python has no image library and adding
     one to run a generator would be a poor trade. A PNG is a signature, an
@@ -63,17 +64,20 @@ def write_checker_png(path):
         out = struct.pack(">I", len(data)) + tag + data
         return out + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
+    tex = tex or TEX
     raw = bytearray()
-    for y in range(TEX):
+    for y in range(tex):
         raw.append(0)  # filter: None
         row = bytearray()
-        for x in range(TEX):
-            on = ((x // CHECK) + (y // CHECK)) % 2 == 0
+        for x in range(tex):
+            on = ((x // CHECK) + (y // CHECK) + phase) % 2 == 0
             v = 245 if on else 10
-            row += bytes((v, v, v))
+            # A per-tile tint in the other two channels, so a chart that reads
+            # the wrong UDIM tile is visible rather than merely plausible.
+            row += bytes((v, (v + phase * 37) % 256, (v + phase * 91) % 256))
         raw += row
     png = b"\x89PNG\r\n\x1a\n"
-    png += chunk(b"IHDR", struct.pack(">IIBBBBB", TEX, TEX, 8, 2, 0, 0, 0))
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", tex, tex, 8, 2, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
     png += chunk(b"IEND", b"")
     with open(path, "wb") as f:
@@ -87,7 +91,7 @@ MTLX = """<?xml version="1.0"?>
        explain a difference between two renders of it. -->
   <nodegraph name="checker_ng">
     <tiledimage name="checker_tex" type="color3">
-      <input name="file" type="filename" value="checker.png" colorspace="srgb_texture" />
+      <input name="file" type="filename" value="{chart}" colorspace="srgb_texture" />
       <input name="uvtiling" type="vector2" value="{repeat}, {repeat}" />
     </tiledimage>
     <output name="out" type="color3" nodename="checker_tex" />
@@ -141,7 +145,7 @@ def Xform "World"
             (-{half}, 0, {half}), ({half}, 0, {half}),
             ({half}, 0, -{half}), (-{half}, 0, -{half})
         ]
-        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        texCoord2f[] primvars:st = [(0, 0), ({umax}, 0), ({umax}, 1), (0, 1)] (
             interpolation = "faceVarying"
         )
         rel material:binding = </World/Looks/Checker>
@@ -252,17 +256,40 @@ def measure(outdir):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != "--measure"]
+    flags = {a.split("=")[0]: a.split("=", 1)[-1] for a in sys.argv[1:] if a.startswith("--")}
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     outdir = args[0] if args else "/tmp/alias"
+    tex = int(flags.get("--size", TEX))
+    udim = max(1, min(10, int(flags.get("--udim", UDIM))))
     os.makedirs(outdir, exist_ok=True)
-    write_checker_png(os.path.join(outdir, "checker.png"))
+
+    # `--size` and `--udim` exist to build a working set preloading genuinely
+    # cannot hold. The default 1024 checker is 3 MB and fits in anything; 8
+    # UDIM tiles at 4096 is 400 MB of authored texture against a cache budget
+    # the operator chooses, which is the comparison the streaming path is for.
+    if udim > 1:
+        for i in range(udim):
+            write_checker_png(
+                os.path.join(outdir, f"checker.{1001 + i}.png"), tex, phase=i
+            )
+        chart = "checker.<UDIM>.png"
+    else:
+        write_checker_png(os.path.join(outdir, "checker.png"), tex)
+        chart = "checker.png"
+
     with open(os.path.join(outdir, "alias.mtlx"), "w") as f:
-        f.write(MTLX.format(repeat=REPEAT))
+        # With a UDIM set the chart itself already spans the tiles (`st` runs
+        # 0..udim), so the tiling must be 1 — multiplying the two sends `u`
+        # past the 10x10 UDIM grid, where every lookup reads black. That is
+        # exactly what happened the first time, and an empty texture-cache
+        # block in `--stats` is what caught it.
+        f.write(MTLX.format(repeat=REPEAT if udim == 1 else 1, chart=chart))
     with open(os.path.join(outdir, "alias.usda"), "w") as f:
-        f.write(USDA.format(half=HALF))
-    print(f"wrote {outdir}/alias.usda, alias.mtlx, checker.png")
-    print(f"  {TEX}x{TEX} checker, {CHECK}-texel squares, tiled {REPEAT}x "
-          f"over a {2 * HALF}-unit plane")
+        f.write(USDA.format(half=HALF, umax=udim))
+    authored = udim * tex * tex * 3
+    print(f"wrote {outdir}/alias.usda, alias.mtlx, {chart}")
+    print(f"  {tex}x{tex} checker, {CHECK}-texel squares, {udim} UDIM tile(s), "
+          f"{authored / (1024 * 1024):.0f} MiB authored")
     if "--measure" in sys.argv:
         measure(outdir)
     else:

@@ -14,7 +14,7 @@
 //! resident, and streaming does not, so above the cap the streamed image is the
 //! sharper and more correct one. That is the feature, not a discrepancy.
 
-use super::cache::{TileCache, TileId, with_microcache};
+use super::cache::{TileCache, TileId, with_tile};
 use super::read::{LevelInfo, TiledFile};
 use crate::uv_texture::to_linear_table;
 use crust_core::{ColorSpace, Texture2D};
@@ -157,25 +157,30 @@ impl StreamingTexture {
     fn texel(&self, chart: &Chart, level: usize, li: &LevelInfo, x: usize, y: usize) -> [f32; 3] {
         let edge = chart.file.tile_edge();
         let (index, lx, ly) = li.locate(x, y, edge);
-        let Some(tile) = with_microcache(
+        let miss = [self.fallback[0], self.fallback[1], self.fallback[2]];
+        // The texel is read *inside* the cache's borrow rather than through a
+        // returned handle: at ~8.7 M fetches a frame, cloning an `Arc` per
+        // texel costs more than the lookup it is part of.
+        with_tile(
             &self.cache,
             TileId {
                 file: chart.id,
                 level: level as u8,
                 tile: index,
             },
-        ) else {
-            return [self.fallback[0], self.fallback[1], self.fallback[2]];
-        };
-        if lx >= tile.width || ly >= tile.height {
-            return [self.fallback[0], self.fallback[1], self.fallback[2]];
-        }
-        let o = (ly * tile.width + lx) * 3;
-        [
-            self.to_linear[tile.pixels[o] as usize],
-            self.to_linear[tile.pixels[o + 1] as usize],
-            self.to_linear[tile.pixels[o + 2] as usize],
-        ]
+            |tile| {
+                if lx >= tile.width || ly >= tile.height {
+                    return miss;
+                }
+                let o = (ly * tile.width + lx) * 3;
+                [
+                    self.to_linear[tile.pixels[o] as usize],
+                    self.to_linear[tile.pixels[o + 1] as usize],
+                    self.to_linear[tile.pixels[o + 2] as usize],
+                ]
+            },
+        )
+        .unwrap_or(miss)
     }
 
     /// Bilinear lookup within one level, at coordinates already reduced to
