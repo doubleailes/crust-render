@@ -16,4 +16,5 @@ image.workspace = true
 ptex-rs.workspace = true
 tiff.workspace = true
 flate2.workspace = true
+half.workspace = true
 tracing.workspace = true

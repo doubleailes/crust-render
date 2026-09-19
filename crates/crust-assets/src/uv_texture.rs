@@ -543,6 +543,39 @@ pub(crate) fn reduce_half(
     (pixels, w, h)
 }
 
+/// The same reduction for data that is **already linear**: a 2x2 box average of
+/// `f32` RGB, with no decode and no re-encode because there is no encoding.
+///
+/// Deliberately written next to [`reduce_half`] rather than generalised over
+/// the sample type. The two have to agree on everything *except* the transfer
+/// curve — the `div_ceil` halving, the clamp to the last row and column, the
+/// order of the four taps — and an EXR-backed `.tx` and a TIFF-backed one that
+/// disagreed on level sizes would each be internally consistent and produce
+/// different images. Keeping them adjacent is what makes a change to one an
+/// obvious omission in the other.
+///
+/// Axes halve by `div_ceil`, never `>> 1`, for the reason [`reduce_half`]
+/// records: the samplers map `x = u * width - 0.5`, so flooring an odd axis
+/// drops its last half-texel and that level's domain slips against level 0's.
+pub(crate) fn reduce_half_linear(src: &[f32], sw: usize, sh: usize) -> (Vec<f32>, usize, usize) {
+    let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
+    let mut pixels = vec![0.0f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = (2 * x).min(sw - 1);
+            let x1 = (2 * x + 1).min(sw - 1);
+            let y0 = (2 * y).min(sh - 1);
+            let y1 = (2 * y + 1).min(sh - 1);
+            let o = (y * w + x) * 3;
+            for k in 0..3 {
+                let at = |xi: usize, yi: usize| src[(yi * sw + xi) * 3 + k];
+                pixels[o + k] = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+            }
+        }
+    }
+    (pixels, w, h)
+}
+
 /// The transfer function that re-encodes a linear value back to the file's
 /// own space — the inverse of [`to_linear_table`], used only when averaging a
 /// mip level.
@@ -576,14 +609,7 @@ pub(crate) fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
 pub(crate) fn to_linear_table(space: ColorSpace) -> [f32; 256] {
     let mut table = [0.0f32; 256];
     for (i, v) in table.iter_mut().enumerate() {
-        let c = i as f32 / 255.0;
-        *v = match space.gamma() {
-            Some(g) => c.powf(g),
-            None => match space {
-                ColorSpace::Srgb => crate::srgb_to_linear(c),
-                _ => c,
-            },
-        };
+        *v = crate::to_linear(space, i as f32 / 255.0);
     }
     table
 }

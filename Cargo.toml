@@ -38,6 +38,11 @@ tiff = { version = "0.11.3", default-features = false, features = ["deflate"] }
 # compression inside the bulk strip writer, which is not a path a tiled file
 # can take — so the zlib stream is ours to produce.
 flate2 = "1.1"
+# `half` is EXR's native sample type, and a streamed HDR tile is stored in it
+# rather than widened to `f32`: the cache's budget is a byte count, so the
+# payload's size *is* the residency policy. Already in the lock via `exr`
+# (and `ptex-rs`), so naming it here adds no package.
+half = "2.7"
 
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.

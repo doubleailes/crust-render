@@ -24,6 +24,35 @@ pub fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
     EnvironmentMap::new(w, h, pixels)
 }
 
+/// An EXR's RGB samples, interleaved, row-major, linear — nothing else.
+///
+/// The same decode [`load_exr_environment`] does, without the importance-
+/// sampling structure an [`EnvironmentMap`] builds on top. It exists for the
+/// `.tx` converter, which needs the pixels and none of the rest, and it lives
+/// here so there is still exactly one place in the workspace that knows how to
+/// read an EXR.
+pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
+    let image = read_first_rgba_layer_from_file(
+        path,
+        |resolution, _| {
+            let (w, h) = (resolution.width(), resolution.height());
+            (w, h, vec![0.0f32; w * h * 3])
+        },
+        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
+         pos,
+         (r, g, b, _a): (f32, f32, f32, f32)| {
+            let o = (pos.y() * *w + pos.x()) * 3;
+            pixels[o] = r;
+            pixels[o + 1] = g;
+            pixels[o + 2] = b;
+        },
+    )
+    .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
+    .ok()?;
+    let (w, h, pixels) = image.layer_data.channel_data.pixels;
+    Some((pixels, w, h))
+}
+
 pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
     // `image::open`'s default 512MiB decode-allocation limit is well below a
     // production-scale panorama (e.g. a 16k HDRI): lift it for this trusted,

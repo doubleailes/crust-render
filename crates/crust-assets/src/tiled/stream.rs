@@ -15,7 +15,7 @@
 //! sharper and more correct one. That is the feature, not a discrepancy.
 
 use super::cache::{TileCache, TileId, with_tile};
-use super::read::{LevelInfo, TiledFile};
+use super::{LevelInfo, TiledFile};
 use crate::uv_texture::to_linear_table;
 use crust_core::{ColorSpace, Texture2D};
 use std::path::Path;
@@ -40,6 +40,11 @@ pub struct StreamingTexture {
     /// lookup, against stored bytes in the file's own encoding. Decoding to
     /// linear `f32` in the cache instead would quadruple every tile and work
     /// directly against the budget the cache exists to hold.
+    ///
+    /// Unused by an EXR-backed chart, whose texels were decoded once at
+    /// conversion and stored linear — the table is still built and still
+    /// handed to [`Tile::rgb`], which ignores it on that arm. Two samplers to
+    /// keep in step would cost more than one dead array.
     to_linear: [f32; 256],
     tiled: bool,
     fallback: [f32; 4],
@@ -146,6 +151,13 @@ impl StreamingTexture {
         self.charts[0].file.level_count()
     }
 
+    /// Whether this texture's tiles arrive already linear — `half` payloads
+    /// from an EXR backing rather than `u8` ones from a TIFF. Reported at load,
+    /// since it is the difference between a tile costing 12 KiB and 24 KiB.
+    pub fn is_linear(&self) -> bool {
+        self.charts[0].file.is_linear()
+    }
+
     /// One texel of one level, through the cache.
     ///
     /// `x`/`y` are level coordinates, already clamped by the caller. The tile
@@ -172,12 +184,9 @@ impl StreamingTexture {
                 if lx >= tile.width || ly >= tile.height {
                     return miss;
                 }
-                let o = (ly * tile.width + lx) * 3;
-                [
-                    self.to_linear[tile.pixels[o] as usize],
-                    self.to_linear[tile.pixels[o + 1] as usize],
-                    self.to_linear[tile.pixels[o + 2] as usize],
-                ]
+                // `Tile::rgb` is where the two payloads part: a `u8` tile goes
+                // through the decode table, a `half` one is already light.
+                tile.rgb(ly * tile.width + lx, &self.to_linear)
             },
         )
         .unwrap_or(miss)
@@ -400,6 +409,149 @@ mod tests {
         );
         assert_eq!(c.errors, 0);
         let _ = std::fs::remove_dir_all(png.parent().unwrap());
+    }
+
+    /// **The claim the EXR backing exists for.**
+    ///
+    /// A texture with highlights at 8.0 keeps them when streamed and loses
+    /// them when preloaded, because the preload path decodes every source
+    /// through `to_rgb8()` and an 8-bit tile has nowhere to put a value above
+    /// 1.0. Below 1.0 the two still agree to 8-bit quantisation, which is what
+    /// makes this a statement about *range* rather than about two unrelated
+    /// images.
+    #[test]
+    fn hdr_survives_streaming_and_does_not_survive_preloading() {
+        let dir = std::env::temp_dir().join("crust_stream_hdr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // Radiance RGBE, because that is a float format the *preload* path can
+        // read — it goes through `image`, which has no EXR decoder here. Its
+        // shared exponent is lossy, so the comparison below is against what the
+        // file actually holds rather than against what was written to it.
+        let (w, h) = (64usize, 64usize);
+        let authored: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let bright = (i % 8) < 4;
+                if bright {
+                    [8.0f32, 8.0, 8.0]
+                } else {
+                    [0.25, 0.5, 0.75]
+                }
+            })
+            .collect();
+        let hdr = dir.join("src.hdr");
+        {
+            let file = std::fs::File::create(&hdr).expect("create");
+            let pixels: Vec<image::Rgb<f32>> = authored
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .copied()
+                .map(image::Rgb)
+                .collect();
+            image::codecs::hdr::HdrEncoder::new(std::io::BufWriter::new(file))
+                .encode(&pixels, w, h)
+                .expect("write hdr");
+        }
+        // What the file holds, which is what both paths are given.
+        let decoded = image::ImageReader::open(&hdr)
+            .expect("open")
+            .with_guessed_format()
+            .expect("format")
+            .decode()
+            .expect("decode")
+            .to_rgb32f()
+            .into_raw();
+
+        let tx = dir.join("src.tx");
+        crate::tiled::write_tx_exr(&tx, &decoded, w, h, crust_core::ColorSpace::Raw)
+            .expect("write tx");
+
+        let pre = UvTexture::open_with(&hdr, crust_core::ColorSpace::Raw, true).expect("preload");
+        let cache = Arc::new(TileCache::new(8 * 1024 * 1024));
+        let stream = StreamingTexture::open(&tx, crust_core::ColorSpace::Raw, cache, |_, _| None)
+            .expect("stream");
+        assert!(stream.is_linear(), "an EXR backing pages in half tiles");
+
+        // Point-sampled at texel centres, so no interpolation blurs the two
+        // populations into each other.
+        let at = |x: usize, y: usize| {
+            let (u, v) = (
+                (x as f32 + 0.5) / w as f32,
+                1.0 - (y as f32 + 0.5) / h as f32,
+            );
+            (stream.eval(u, v, 0.0), pre.eval(u, v, 0.0), {
+                let o = (y * w + x) * 3;
+                [decoded[o], decoded[o + 1], decoded[o + 2]]
+            })
+        };
+
+        let (bright_s, bright_p, bright_src) = at(1, 3);
+        assert!(bright_src[0] > 4.0, "the fixture must actually be HDR");
+        for k in 0..3 {
+            assert!(
+                (bright_s[k] - bright_src[k]).abs() < 0.01 * bright_src[k],
+                "streamed channel {k}: {} against {}",
+                bright_s[k],
+                bright_src[k]
+            );
+            assert_eq!(bright_p[k], 1.0, "preloaded channel {k} must clip to 1.0");
+        }
+
+        let (dim_s, dim_p, dim_src) = at(5, 3);
+        for k in 0..3 {
+            assert!(
+                (dim_s[k] - dim_src[k]).abs() < 0.002,
+                "streamed channel {k}: {} against {}",
+                dim_s[k],
+                dim_src[k]
+            );
+            // Below 1.0 the two are the same image to within the 8 bits the
+            // preload path keeps — so the divergence above really is the range
+            // and not a different lookup.
+            assert!(
+                (dim_s[k] - dim_p[k]).abs() <= 1.0 / 255.0,
+                "channel {k}: streamed {} against preloaded {}",
+                dim_s[k],
+                dim_p[k]
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The colour-space marker discriminates on the EXR backing too, where it
+    /// means something slightly different — "the space this file's linear
+    /// samples were decoded from" rather than "the space its levels were
+    /// averaged in". Binding it under another space would put a transfer curve
+    /// on data that has already had one removed.
+    #[test]
+    fn an_exr_backing_also_refuses_the_wrong_colour_space() {
+        let dir = std::env::temp_dir().join("crust_stream_exrspace");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tx = dir.join("s.tx");
+        let (w, h) = (32usize, 32usize);
+        let src: Vec<f32> = (0..w * h * 3).map(|i| (i % 17) as f32 / 16.0).collect();
+        crate::tiled::write_tx_exr(&tx, &src, w, h, crust_core::ColorSpace::Srgb).expect("write");
+
+        let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
+        assert_eq!(
+            TiledFile::open(&tx).expect("open").mip_space(),
+            Some("srgb_texture")
+        );
+        assert!(
+            StreamingTexture::open(&tx, crust_core::ColorSpace::Srgb, cache.clone(), |_, _| {
+                None
+            })
+            .is_some()
+        );
+        assert!(
+            StreamingTexture::open(&tx, crust_core::ColorSpace::Raw, cache, |_, _| None).is_none()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `.tx` whose mip chain was reduced in one colour space must not be

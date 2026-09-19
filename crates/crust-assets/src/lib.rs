@@ -29,7 +29,7 @@ mod ptex_texture;
 pub mod tiled;
 mod uv_texture;
 
-pub use environment::{load_exr_environment, load_image_environment};
+pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
 pub use ptex_texture::{DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, read_channel};
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
 
@@ -50,6 +50,24 @@ pub fn srgb_to_linear(c: f32) -> f32 {
         c / 12.92
     } else {
         ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// One encoded sample, in `space`, as linear light.
+///
+/// The scalar form of the 256-entry table the texture decoders build. It exists
+/// for the one caller that has samples rather than bytes — the `.tx` converter,
+/// which must linearise a display-encoded source *once* before writing it to a
+/// float file that has no transfer curve of its own. Defined here so that
+/// caller cannot invent a second sRGB curve.
+#[inline]
+pub fn to_linear(space: ColorSpace, encoded: f32) -> f32 {
+    match space.gamma() {
+        Some(g) => encoded.max(0.0).powf(g),
+        None => match space {
+            ColorSpace::Srgb => srgb_to_linear(encoded),
+            _ => encoded,
+        },
     }
 }
 
@@ -130,7 +148,7 @@ impl FileAssets {
         }
     }
 
-    /// The `.tx` that would back `path`, if one exists next to it.
+    /// Where a streamable backing for `path` might be, best candidate first.
     ///
     /// A scene names its textures as the artist authored them — `.png`,
     /// `.exr` — so the streaming path looks for a converted sibling rather
@@ -138,8 +156,25 @@ impl FileAssets {
     /// converting on first use instead is a deliberate follow-up, because a
     /// renderer that silently writes multi-gigabyte files next to a read-only
     /// asset library is a surprise nobody asked for.
-    fn tx_sibling(path: &Path) -> std::path::PathBuf {
-        path.with_extension("tx")
+    ///
+    /// An asset already named `.tx` is taken as-is, and so is one named
+    /// `.exr`: a tiled, mip-mapped EXR *is* the streaming format for V-Ray and
+    /// Karma, so a stage that names one directly should stream it rather than
+    /// hunt for a sibling. Both candidates are only *tried* — an ordinary
+    /// scanline EXR declines at open and falls through to the sibling, and then
+    /// to preloading.
+    fn stream_candidates(path: &Path) -> Vec<std::path::PathBuf> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let sibling = path.with_extension("tx");
+        match ext.as_str() {
+            "tx" => vec![path.to_path_buf()],
+            "exr" => vec![path.to_path_buf(), sibling],
+            _ => vec![sibling],
+        }
     }
 
     fn open_streaming(
@@ -147,28 +182,32 @@ impl FileAssets {
         path: &Path,
         space: ColorSpace,
     ) -> Option<std::sync::Arc<dyn Texture2D>> {
-        let candidate = if path.extension().is_some_and(|e| e == "tx") {
-            path.to_path_buf()
-        } else {
-            Self::tx_sibling(path)
-        };
-        let started = Instant::now();
-        let tex = tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
-            let name = candidate.to_string_lossy();
-            uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-        })?;
-        let (w, h) = tex.size();
-        info!(
-            "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {:?}) in {:?}",
-            candidate.display(),
-            tex.chart_count(),
-            w,
-            h,
-            tex.level_count(),
-            space,
-            started.elapsed()
-        );
-        Some(std::sync::Arc::new(tex))
+        for candidate in Self::stream_candidates(path) {
+            let started = Instant::now();
+            let Some(tex) =
+                tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
+                    let name = candidate.to_string_lossy();
+                    uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
+                })
+            else {
+                continue;
+            };
+            let (w, h) = tex.size();
+            info!(
+                "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {} tiles, {:?}) \
+                 in {:?}",
+                candidate.display(),
+                tex.chart_count(),
+                w,
+                h,
+                tex.level_count(),
+                if tex.is_linear() { "half" } else { "8-bit" },
+                space,
+                started.elapsed()
+            );
+            return Some(std::sync::Arc::new(tex));
+        }
+        None
     }
 }
 
