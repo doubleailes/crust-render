@@ -129,9 +129,24 @@ pub(crate) trait Backend: Debug + Send + Sync {
 ///
 /// Cheap to clone — the cache holds one per file and the sampler holds one per
 /// UDIM chart — because everything behind it is immutable and shared.
+///
+/// **The geometry is copied out of the backing, not asked of it.** `levels`,
+/// `tile_edge` and the rest are answered from fields here while `inner` is
+/// touched only to open a cursor or read a tile. That is not redundancy: a
+/// texel fetch asks for the tile edge and its level's layout, and routing those
+/// through `dyn Backend` put an unelidable indirect call in the hottest loop in
+/// a textured render — worth ~110 M instructions, 3% of a whole frame, on a
+/// path where the answer cannot change after `open`.
 #[derive(Clone, Debug)]
 pub struct TiledFile {
     inner: Arc<dyn Backend>,
+    /// `Arc` rather than `Vec` so a clone per UDIM chart and per cache entry
+    /// copies a pointer instead of a dozen `LevelInfo`s.
+    levels: Arc<[LevelInfo]>,
+    tile_edge: usize,
+    mip_space: Option<Arc<str>>,
+    linear: bool,
+    path: Arc<Path>,
 }
 
 impl TiledFile {
@@ -163,28 +178,37 @@ impl TiledFile {
                 ));
             }
         };
-        Ok(TiledFile { inner })
+        Ok(TiledFile {
+            levels: inner.levels().into(),
+            tile_edge: inner.tile_edge(),
+            mip_space: inner.mip_space().map(Arc::from),
+            linear: inner.linear(),
+            path: Arc::from(inner.path()),
+            inner,
+        })
     }
 
     pub fn levels(&self) -> &[LevelInfo] {
-        self.inner.levels()
+        &self.levels
     }
 
+    #[inline]
     pub fn level(&self, n: usize) -> LevelInfo {
-        let l = self.inner.levels();
-        l[n.min(l.len() - 1)]
+        self.levels[n.min(self.levels.len() - 1)]
     }
 
+    #[inline]
     pub fn level_count(&self) -> usize {
-        self.inner.levels().len()
+        self.levels.len()
     }
 
+    #[inline]
     pub fn tile_edge(&self) -> usize {
-        self.inner.tile_edge()
+        self.tile_edge
     }
 
     pub fn path(&self) -> &Path {
-        self.inner.path()
+        &self.path
     }
 
     /// Whether this file is the one to bind in `space`.
@@ -205,21 +229,21 @@ impl TiledFile {
     /// usefully match against, and refusing it would rule out every
     /// pre-existing production asset.
     pub fn mip_space_matches(&self, space: &str) -> bool {
-        match self.inner.mip_space() {
-            Some(recorded) => recorded == space,
+        match &self.mip_space {
+            Some(recorded) => &**recorded == space,
             None => true,
         }
     }
 
     /// The recorded space, for reporting a mismatch.
     pub fn mip_space(&self) -> Option<&str> {
-        self.inner.mip_space()
+        self.mip_space.as_deref()
     }
 
     /// Whether this file's texels arrive already linear — reported at load, and
     /// the difference between a `u8` tile and a `half` one.
     pub fn is_linear(&self) -> bool {
-        self.inner.linear()
+        self.linear
     }
 
     /// A fresh cursor onto this file. The cache keeps a small pool of these;

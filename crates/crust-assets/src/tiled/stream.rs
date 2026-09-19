@@ -46,6 +46,10 @@ pub struct StreamingTexture {
     /// handed to [`Tile::rgb`], which ignores it on that arm. Two samplers to
     /// keep in step would cost more than one dead array.
     to_linear: [f32; 256],
+    /// Whether this texture's tiles arrive already linear. A property of the
+    /// *file*, read once at open, which is what lets the texel fetch pick its
+    /// decode from a loop-invariant field instead of from every tile.
+    linear: bool,
     tiled: bool,
     fallback: [f32; 4],
 }
@@ -125,10 +129,12 @@ impl StreamingTexture {
             return None;
         }
 
+        let linear = charts[0].file.is_linear();
         Some(StreamingTexture {
             charts,
             cache,
             to_linear: to_linear_table(space),
+            linear,
             tiled,
             // Mid-grey, not black: a tile that fails to page in should read as
             // an obviously wrong surface rather than as a shadow, which is
@@ -155,7 +161,7 @@ impl StreamingTexture {
     /// from an EXR backing rather than `u8` ones from a TIFF. Reported at load,
     /// since it is the difference between a tile costing 12 KiB and 24 KiB.
     pub fn is_linear(&self) -> bool {
-        self.charts[0].file.is_linear()
+        self.linear
     }
 
     /// One texel of one level, through the cache.
@@ -166,29 +172,52 @@ impl StreamingTexture {
     /// the nominal stride shears the right-hand column of every texture whose
     /// size is not a multiple of it.
     #[inline]
-    fn texel(&self, chart: &Chart, level: usize, li: &LevelInfo, x: usize, y: usize) -> [f32; 3] {
+    fn texel<const HALF: bool>(
+        &self,
+        chart: &Chart,
+        level: usize,
+        li: &LevelInfo,
+        x: usize,
+        y: usize,
+    ) -> [f32; 3] {
         let edge = chart.file.tile_edge();
         let (index, lx, ly) = li.locate(x, y, edge);
         let miss = [self.fallback[0], self.fallback[1], self.fallback[2]];
+        let id = TileId {
+            file: chart.id,
+            level: level as u8,
+            tile: index,
+        };
         // The texel is read *inside* the cache's borrow rather than through a
         // returned handle: at ~8.7 M fetches a frame, cloning an `Arc` per
         // texel costs more than the lookup it is part of.
-        with_tile(
-            &self.cache,
-            TileId {
-                file: chart.id,
-                level: level as u8,
-                tile: index,
-            },
-            |tile| {
-                if lx >= tile.width || ly >= tile.height {
-                    return miss;
-                }
-                // `Tile::rgb` is where the two payloads part: a `u8` tile goes
-                // through the decode table, a `half` one is already light.
-                tile.rgb(ly * tile.width + lx, &self.to_linear)
-            },
-        )
+        //
+        // **`HALF` is a const, not a field**, so this reads as a branch and
+        // compiles to none: the whole sampler is monomorphised twice and
+        // `eval` picks between them once per call, from the file's own kind.
+        //
+        // That is not micro-tuning, it is the entire cost of a second payload
+        // existing, and callgrind priced every cheaper attempt at it. A single
+        // closure matching a `TileData` enum grew past what LLVM would inline
+        // into `with_tile`: `texel` went 414.9 M to 471.5 M instructions *and*
+        // grew a 216.7 M-instruction out-of-line `texel::{closure#0}` that had
+        // not existed, for +21% wall clock on an 8-bit render that gains
+        // nothing from HDR. Two closures chosen by a field brought it to
+        // +8.5%, a byte payload instead of an enum to +6%, and each time the
+        // residue was the same shape: a per-texel decision that is per-texture
+        // information. Const generics say that outright — at 4.3 M lookups a
+        // frame, 19 instructions of "which payload is this" is 20% of the
+        // whole fetch.
+        with_tile(&self.cache, id, |tile| {
+            if lx >= tile.width || ly >= tile.height {
+                return miss;
+            }
+            if HALF {
+                tile.rgb_half(lx, ly)
+            } else {
+                tile.rgb_u8(lx, ly, &self.to_linear)
+            }
+        })
         .unwrap_or(miss)
     }
 
@@ -199,7 +228,13 @@ impl StreamingTexture {
     /// the clamp-to-edge: the two are supposed to produce identical images, and
     /// a half-texel difference here would show up as a scene-wide shift that
     /// no test of either alone would catch.
-    fn sample_level(&self, chart: &Chart, level: usize, u: f32, v: f32) -> [f32; 4] {
+    fn sample_level<const HALF: bool>(
+        &self,
+        chart: &Chart,
+        level: usize,
+        u: f32,
+        v: f32,
+    ) -> [f32; 4] {
         let li = chart.file.level(level);
         let (w, h) = (li.width, li.height);
         let x = u * w as f32 - 0.5;
@@ -210,10 +245,10 @@ impl StreamingTexture {
         let clampi = |i: f32, n: usize| (i.max(0.0) as usize).min(n.saturating_sub(1));
         let (x0i, y0i) = (clampi(x0, w), clampi(y0, h));
         let (x1i, y1i) = (clampi(x0 + 1.0, w), clampi(y0 + 1.0, h));
-        let a = self.texel(chart, level, &li, x0i, y0i);
-        let b = self.texel(chart, level, &li, x1i, y0i);
-        let c = self.texel(chart, level, &li, x0i, y1i);
-        let d = self.texel(chart, level, &li, x1i, y1i);
+        let a = self.texel::<HALF>(chart, level, &li, x0i, y0i);
+        let b = self.texel::<HALF>(chart, level, &li, x1i, y0i);
+        let c = self.texel::<HALF>(chart, level, &li, x0i, y1i);
+        let d = self.texel::<HALF>(chart, level, &li, x1i, y1i);
         let mut out = [0.0f32; 4];
         for k in 0..3 {
             let top = a[k] + (b[k] - a[k]) * fx;
@@ -229,25 +264,31 @@ impl StreamingTexture {
     /// Kept line-for-line equivalent to `UvTexture::sample_tile` — same widest-
     /// axis measure, same magnification short-circuit before the `log2` (which
     /// was worth ~9% of render when it was missing), same floor and lerp.
-    fn sample_chart(&self, chart: &Chart, u: f32, v: f32, width: f32) -> [f32; 4] {
+    fn sample_chart<const HALF: bool>(
+        &self,
+        chart: &Chart,
+        u: f32,
+        v: f32,
+        width: f32,
+    ) -> [f32; 4] {
         let levels = chart.file.level_count();
         if levels == 1 || width <= 0.0 {
-            return self.sample_level(chart, 0, u, v);
+            return self.sample_level::<HALF>(chart, 0, u, v);
         }
         let l0 = chart.file.level(0);
         let across = l0.width.max(l0.height) as f32;
         let texels = width * across;
         if texels <= 1.0 {
-            return self.sample_level(chart, 0, u, v);
+            return self.sample_level::<HALF>(chart, 0, u, v);
         }
         let lod = texels.log2().clamp(0.0, (levels - 1) as f32);
         let lo = lod.floor();
         let frac = lod - lo;
-        let a = self.sample_level(chart, lo as usize, u, v);
+        let a = self.sample_level::<HALF>(chart, lo as usize, u, v);
         if frac <= 0.0 {
             return a;
         }
-        let b = self.sample_level(chart, (lo as usize + 1).min(levels - 1), u, v);
+        let b = self.sample_level::<HALF>(chart, (lo as usize + 1).min(levels - 1), u, v);
         let mut out = [0.0f32; 4];
         for k in 0..3 {
             out[k] = a[k] + (b[k] - a[k]) * frac;
@@ -258,7 +299,20 @@ impl StreamingTexture {
 }
 
 impl Texture2D for StreamingTexture {
+    /// The one place the payload is dispatched on: once per lookup rather than
+    /// once per texel, and into a sampler monomorphised for that payload. See
+    /// [`StreamingTexture::texel`] for what the alternatives cost.
     fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+        if self.linear {
+            self.eval_as::<true>(u, v, width)
+        } else {
+            self.eval_as::<false>(u, v, width)
+        }
+    }
+}
+
+impl StreamingTexture {
+    fn eval_as<const HALF: bool>(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }
@@ -270,12 +324,12 @@ impl Texture2D for StreamingTexture {
             }
             let number = 1001 + tu as u32 + 10 * tv as u32;
             match self.charts.iter().find(|c| c.number == number) {
-                Some(c) => self.sample_chart(c, u - tu, v - tv, width),
+                Some(c) => self.sample_chart::<HALF>(c, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],
             }
         } else {
             let wrap = |x: f32| x - x.floor();
-            self.sample_chart(&self.charts[0], wrap(u), wrap(v), width)
+            self.sample_chart::<HALF>(&self.charts[0], wrap(u), wrap(v), width)
         }
     }
 }

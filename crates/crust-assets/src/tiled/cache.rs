@@ -59,61 +59,81 @@ pub struct TileId {
     pub tile: u32,
 }
 
-/// A tile's texels, interleaved RGB, in whatever representation the file
-/// stores them in.
+/// How a tile's bytes are to be read.
 ///
-/// **The variant is chosen by the source's sample type, not by its container.**
-/// Unsigned integer samples — the 8- and 16-bit TIFFs that make up every
-/// authored albedo — stay `U8` and keep the 256-entry decode table that has
-/// always served them; float samples, whether from an EXR or a float TIFF,
-/// become `Half`. That split is the whole point of the payload being an enum:
-/// an 8-bit texture pays nothing for HDR existing, and an HDR texture is not
-/// silently clipped to fit an 8-bit cache.
+/// **The payload is bytes either way, deliberately.** An `enum` holding
+/// `Vec<u8>` or `Vec<f16>` is the obvious modelling, and it puts a tag check on
+/// the hottest path in a textured render — where it cost 25 instructions a
+/// texel and ~10% of wall clock on an 8-bit render that gained nothing from HDR
+/// existing (measured; see `StreamingTexture::texel`). Which kind a tile holds
+/// is a property of its *file*, so the sampler already knows it before it asks,
+/// and the flag here is what that knowledge is checked against rather than what
+/// it is read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileKind {
+    /// Three `u8` a texel, in the file's own encoding; the sampler decodes
+    /// through its colour-space table.
+    U8,
+    /// Three little-endian `f16` a texel, already **linear**; no decode.
+    Half,
+}
+
+/// A tile's texels: interleaved RGB, as bytes, plus how to read them.
 ///
-/// `Half` rather than `F32` because it is EXR's own storage type and because a
-/// tile's size *is* the residency policy here — the cache bounds bytes, so
-/// widening every sample to four bytes would halve how much texture fits in the
-/// same budget to recover precision the file never had.
-#[derive(Clone, Debug, PartialEq)]
-pub enum TileData {
-    /// Texels in the file's own encoding; the sampler applies its colour-space
-    /// table on lookup.
-    U8(Vec<u8>),
-    /// Texels in **linear** light already; the sampler applies nothing.
-    Half(Vec<f16>),
+/// The split is by the source's *sample type*, not its container — 8- and
+/// 16-bit TIFF samples are `U8`, float samples from either backing are `Half`.
+/// So an 8-bit texture pays nothing for HDR existing, and an HDR one is not
+/// silently clipped to fit an 8-bit cache. `half` rather than `f32` because it
+/// is what every streaming texture format stores and what keeps an HDR tile at
+/// twice a `u8` tile rather than four times: a texture is shading input, not a
+/// render target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TileData {
+    pub bytes: Vec<u8>,
+    pub kind: TileKind,
 }
 
 impl TileData {
-    /// Component count — three per texel either way.
+    /// An 8-bit payload, as decoded.
+    pub fn u8(bytes: Vec<u8>) -> TileData {
+        TileData {
+            bytes,
+            kind: TileKind::U8,
+        }
+    }
+
+    /// A `half` payload from samples already in memory. The EXR reader builds
+    /// its bytes directly and does not come through here.
+    pub fn half(samples: &[f16]) -> TileData {
+        let mut bytes = Vec::with_capacity(samples.len() * 2);
+        for s in samples {
+            bytes.extend_from_slice(&s.to_bits().to_le_bytes());
+        }
+        TileData {
+            bytes,
+            kind: TileKind::Half,
+        }
+    }
+
+    /// A `half` payload whose bytes were assembled by the caller.
+    pub fn half_bytes(bytes: Vec<u8>) -> TileData {
+        TileData {
+            bytes,
+            kind: TileKind::Half,
+        }
+    }
+
+    /// Components (not bytes) — three per texel either way.
     pub fn len(&self) -> usize {
-        match self {
-            TileData::U8(v) => v.len(),
-            TileData::Half(v) => v.len(),
+        match self.kind {
+            TileKind::U8 => self.bytes.len(),
+            TileKind::Half => self.bytes.len() / 2,
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    fn bytes(&self) -> u64 {
-        match self {
-            TileData::U8(v) => v.len() as u64,
-            TileData::Half(v) => (v.len() * std::mem::size_of::<f16>()) as u64,
-        }
-    }
-}
-
-/// A decoded tile, clipped to its level's bounds.
-///
-/// `width` is the tile's *own* width, which for an edge tile is less than the
-/// file's tile edge. Indexing by the nominal edge instead shears every texture
-/// whose size is not a multiple of it.
-#[derive(Debug)]
-pub struct Tile {
-    pub data: TileData,
-    pub width: usize,
-    pub height: usize,
 }
 
 #[cfg(test)]
@@ -121,48 +141,84 @@ impl TileData {
     /// The `u8` payload, for tests that compare a tile against the source
     /// bytes it was cut from.
     pub fn expect_u8(&self) -> &[u8] {
-        match self {
-            TileData::U8(v) => v,
-            other => panic!("expected an 8-bit tile, got {other:?}"),
-        }
+        assert_eq!(self.kind, TileKind::U8, "expected an 8-bit tile");
+        &self.bytes
     }
 
     /// The `half` payload, for tests that check a float source survived.
-    pub fn expect_half(&self) -> &[f16] {
-        match self {
-            TileData::Half(v) => v,
-            other => panic!("expected a half tile, got {other:?}"),
-        }
+    pub fn expect_half(&self) -> Vec<f16> {
+        assert_eq!(self.kind, TileKind::Half, "expected a half tile");
+        self.bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| f16::from_bits(u16::from_le_bytes(*b)))
+            .collect()
     }
 }
 
+/// A decoded tile, clipped to its level's bounds.
+///
+/// `width` is the tile's *own* width, which for an edge tile is less than the
+/// file's tile edge. Indexing it by the nominal edge instead shears every
+/// texture whose size is not a multiple of it.
+#[derive(Debug)]
+pub struct Tile {
+    pub data: TileData,
+    pub width: usize,
+    pub height: usize,
+}
+
 impl Tile {
-    /// One texel as linear RGB, by texel index within the tile.
+    /// One texel of an **8-bit** tile, decoded through `to_linear`.
     ///
-    /// The single place the two payloads differ, and deliberately so: the
-    /// branch is on a value that is constant for the whole texture, so it
-    /// predicts perfectly, and keeping it here means the sampler, the bilinear
-    /// tap and the trilinear blend above it are written once rather than twice.
+    /// `x` and `y` must already be inside the tile — the caller checks, because
+    /// it has a fallback colour to return and this does not. The payload is
+    /// exactly `width · height · 3` bytes by construction (see
+    /// [`Tile::well_formed`]), so the index cannot escape it.
+    ///
+    /// Deliberately the same shape the sampler had before there was a second
+    /// payload, down to indexing rather than `get`ting and to not taking the
+    /// fallback as an argument: passing a `[f32; 3]` in cost it a
+    /// materialisation on every lookup, including the overwhelming majority
+    /// that never need it.
     #[inline]
-    pub fn rgb(&self, texel: usize, to_linear: &[f32; 256]) -> [f32; 3] {
-        let o = texel * 3;
-        match &self.data {
-            TileData::U8(v) => [
-                to_linear[v[o] as usize],
-                to_linear[v[o + 1] as usize],
-                to_linear[v[o + 2] as usize],
-            ],
-            // Already linear: a float file carries scene-referred values, and
-            // putting a transfer curve on them would be inventing one.
-            TileData::Half(v) => [v[o].to_f32(), v[o + 1].to_f32(), v[o + 2].to_f32()],
-        }
+    pub fn rgb_u8(&self, x: usize, y: usize, to_linear: &[f32; 256]) -> [f32; 3] {
+        let o = (y * self.width + x) * 3;
+        let v = &self.data.bytes;
+        [
+            to_linear[v[o] as usize],
+            to_linear[v[o + 1] as usize],
+            to_linear[v[o + 2] as usize],
+        ]
+    }
+
+    /// One texel of a **half** tile. No decode: a float file carries
+    /// scene-referred values, and putting a transfer curve on them would be
+    /// inventing one. Same contract as [`Tile::rgb_u8`] on bounds.
+    #[inline]
+    pub fn rgb_half(&self, x: usize, y: usize) -> [f32; 3] {
+        let o = (y * self.width + x) * 6;
+        let v = &self.data.bytes;
+        let at = |k: usize| f16::from_bits(u16::from_le_bytes([v[k], v[k + 1]])).to_f32();
+        [at(o), at(o + 2), at(o + 4)]
+    }
+
+    /// Whether the payload really is `width · height` texels — the invariant
+    /// the two accessors above rely on instead of checking per texel.
+    ///
+    /// Asserted where tiles are made rather than where they are read: a backend
+    /// returns a tile clipped to its level, so this is a statement about the
+    /// readers, and it is worth failing a test over rather than a texel.
+    pub fn well_formed(&self) -> bool {
+        self.data.len() == self.width * self.height * 3
     }
 
     fn bytes(&self) -> u64 {
         // The `Vec`'s own header and the `Arc` count are deliberately included:
         // a budget that only counts payload under-reports by ~10% on small
         // tiles, and the whole point of the number is that it bounds RSS.
-        self.data.bytes() + std::mem::size_of::<Tile>() as u64 + 16
+        self.data.bytes.len() as u64 + std::mem::size_of::<Tile>() as u64 + 16
     }
 }
 
@@ -425,6 +481,19 @@ impl TileCache {
             width,
             height,
         });
+        // The accessors index without checking, so this is where the size is
+        // established. A backend that returned the wrong shape would be a bug
+        // in the backend, and one a test should catch rather than a render.
+        debug_assert!(
+            tile.well_formed(),
+            "{}: level {} tile {} is {}x{} but holds {} components",
+            slot.file.path().display(),
+            id.level,
+            id.tile,
+            width,
+            height,
+            tile.data.len()
+        );
         let bytes = tile.bytes();
         self.stats.bytes_read.fetch_add(bytes, Ordering::Relaxed);
 

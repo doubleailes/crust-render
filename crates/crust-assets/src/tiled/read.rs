@@ -157,7 +157,7 @@ impl TiffFile {
         let (tw, th) = self.levels[level].tile_size(index, self.tile_edge);
         let texels = tw * th;
         match raw {
-            DecodingResult::U8(v) => Ok(TileData::U8(to_rgb(&v, texels, index)?)),
+            DecodingResult::U8(v) => Ok(TileData::u8(to_rgb(&v, texels, index)?)),
             // 16-bit integer samples are narrowed to 8, matching what the
             // preload path does with them: the renderer converts `u8` through a
             // 256-entry table, and widening the payload to keep two more bits
@@ -167,12 +167,12 @@ impl TiffFile {
             // `TileData` has a second variant.
             DecodingResult::U16(v) => {
                 let narrowed: Vec<u8> = v.iter().map(|&s| (s >> 8) as u8).collect();
-                Ok(TileData::U8(to_rgb(&narrowed, texels, index)?))
+                Ok(TileData::u8(to_rgb(&narrowed, texels, index)?))
             }
-            DecodingResult::F16(v) => Ok(TileData::Half(to_rgb(&v, texels, index)?)),
+            DecodingResult::F16(v) => Ok(TileData::half(&to_rgb(&v, texels, index)?)),
             DecodingResult::F32(v) => {
                 let halved: Vec<f16> = v.iter().map(|&s| f16::from_f32(s)).collect();
-                Ok(TileData::Half(to_rgb(&halved, texels, index)?))
+                Ok(TileData::half(&to_rgb(&halved, texels, index)?))
             }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,

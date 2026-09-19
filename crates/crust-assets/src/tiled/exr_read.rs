@@ -214,7 +214,10 @@ impl ExrFile {
         let origin = block.index.pixel_position;
 
         let header = &self.meta.headers[0];
-        let mut out = vec![f16::ZERO; tw * th * 3];
+        // Built as bytes rather than as `f16`s and converted afterwards: the
+        // cache stores a tile as bytes, so assembling them here saves a copy of
+        // every tile that is paged in.
+        let mut out = vec![0u8; tw * th * 6];
         for line in block.lines(&header.channels) {
             // Which output slots this channel feeds. Usually exactly one — but
             // none at all for a channel this texture does not use (an alpha, a
@@ -251,15 +254,16 @@ impl ExrFile {
                         f16::from_f32(u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as f32)
                     }
                 };
-                let o = (row * tw + start + i) * 3;
+                let bits = v.to_bits().to_le_bytes();
+                let o = (row * tw + start + i) * 6;
                 for (k, &wanted) in slots.iter().enumerate() {
                     if wanted {
-                        out[o + k] = v;
+                        out[o + k * 2..o + k * 2 + 2].copy_from_slice(&bits);
                     }
                 }
             }
         }
-        Ok(TileData::Half(out))
+        Ok(TileData::half_bytes(out))
     }
 }
 
