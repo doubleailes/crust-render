@@ -1,3 +1,9 @@
+//! The CLI: parse args, build a `Scene`, render, write the images.
+//!
+//! `forbid(unsafe_code)`, like every crate here but `crust-core` — whose one
+//! exception is a test-only counting allocator.
+#![forbid(unsafe_code)]
+
 use clap::Parser;
 use crust_assets::FileAssets;
 use crust_core::Buffer;
@@ -163,10 +169,14 @@ fn main() {
         .init();
     let input = cli.input;
     let output = cli.output;
+    // Built before the scene and kept until after the render: it owns the
+    // streaming tile cache, whose counters the `--stats` report reads once the
+    // last ray has been traced.
+    let assets = FileAssets::new();
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
         debug!("Scene loaded at path: {:?}", input_path);
-        match Scene::from_usd_with_assets(input_path, &FileAssets) {
+        match Scene::from_usd_with_assets(input_path, &assets) {
             Ok(scene) => scene,
             Err(e) => {
                 error!("Failed to load USD scene: {}", e);
@@ -257,6 +267,10 @@ fn main() {
     let duration: Duration = start.elapsed();
     stats.record("Render", 0, duration);
     stats.rays = ray_stats;
+    // Snapshotted after the render rather than during it: the counters are
+    // relaxed atomics bumped from every worker, so they are only meaningful
+    // once the last one has stopped.
+    stats.textures = assets.texture_cache_stats();
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();

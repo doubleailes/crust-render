@@ -54,6 +54,19 @@ pub struct HitRecord {
     /// Distinct from `uv != (0, 0)`: the origin of the chart is a perfectly
     /// ordinary texel, so a sentinel value would alias onto valid data.
     pub has_uv: bool,
+    /// Width of the ray's texture footprint at this hit, in the *chart's* UV
+    /// units — the filter width a UV texture should read `uv` with.
+    ///
+    /// `0.0` means "point-sample the finest level": no cone was stamped on
+    /// the ray (`CRUST_RAY_CONES=0`), or the geometry carries no density
+    /// table to convert the cone's world-space width with. That is exactly
+    /// the behaviour that predates mip pyramids, which is what makes the
+    /// switch an honest A/B.
+    pub uv_width: f32,
+    /// Width of the ray's texture footprint at this hit, in `face_id`'s own
+    /// `[0, 1]²` — the filter width a Ptex texture should read `face_uv`
+    /// with. `0.0` carries the same meaning as `uv_width`.
+    pub face_width: f32,
 }
 
 /// Hand-written rather than derived so `face_id` defaults to
@@ -71,6 +84,8 @@ impl Default for HitRecord {
             uv: (0.0, 0.0),
             tangent: Vec3A::ZERO,
             has_uv: false,
+            uv_width: 0.0,
+            face_width: 0.0,
         }
     }
 }

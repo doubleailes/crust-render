@@ -6,8 +6,10 @@
 
 <br/>
 
-A physically-based path tracer written in 100% safe Rust (edition 2024, `forbid(unsafe_code)`
-on every crate). It loads scenes directly from **USD** — including production-scale assets
+A physically-based path tracer written in 100% safe Rust (edition 2024,
+`forbid(unsafe_code)` on every crate but `crust-core`, which is `deny` so that one
+test-only counting allocator — a `GlobalAlloc`, which cannot be implemented safely — can
+opt out explicitly). It loads scenes directly from **USD** — including production-scale assets
 such as Disney Animation's [Moana Island](#moana-benchmark) dataset — and implements its own
 watertight ray/triangle kernel, SBVH acceleration structure, OpenPBR übershader, MaterialX
 graph reader, volumetric integrator and Practical Path Guiding, with no dependency on Embree,
@@ -164,7 +166,16 @@ crate (no renderer dependency, just an XML parser and `glam`):
   the graph's own `colorspace` attribute) with a tangent frame for normal
   maps; the host decoder in `crust-assets` caps tile resolution
   (`CRUST_TEX_MAX`, default 1024 — the teapot's ceramic alone is 2.7 GB at
-  full resolution).
+  full resolution) and keeps a trilinear mip pyramid below that cap, selected
+  per hit by the ray cone's footprint. `CRUST_TEX_STREAM=1` swaps that whole
+  path for a **streaming tile cache** instead: textures pre-converted to a
+  tiled, mip-mapped `.tx` (OIIO's format, read and written natively) are paged
+  in a 64x64 tile at a time under a byte budget, so memory stops tracking the
+  scene's texture footprint and the resolution cap stops being needed at all.
+  A `.tx` is backed by a tiled TIFF for 8-bit sources and by a tiled,
+  mip-mapped **OpenEXR** for float ones — the backing is picked by magic number
+  rather than extension, and the choice follows the source's actual range, so
+  an HDR texture keeps values above 1.0 that a `u8` tile would clip.
 
 The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
 `<` inside an attribute value, which is not well-formed XML. MaterialX's own
@@ -351,7 +362,10 @@ Measured numbers from that import (see `CLAUDE.md` for the full breakdown):
   this scene, with pixel-identical output.
 - **Ptex** per-face texturing over the island's 2,576,238 texture faces, mip-capped by
   default to keep memory tractable: **4.58 GiB** at the default 32×32 cap versus
-  **494 GiB** if every face loaded at its authored full resolution.
+  **494 GiB** if every face loaded at its authored full resolution. Each face carries a
+  mip pyramid below that cap, so the cap is a memory ceiling rather than an accidental
+  anti-aliaser — and can therefore come down: 16×16 plus a full pyramid is around
+  2.45 GiB, under half the default, and filters better at distance.
 - Two `UsdLuxDomeLight` environment textures authored on the stage (a modeling choice
   in the source asset, not a crust limitation) currently both decode and both light the
   scene, peaking at ~11 GiB for that pair alone — the first lever to pull if memory is
@@ -389,8 +403,24 @@ the full, per-feature detail and workarounds:
   (per-vertex) blur and no quaternion-correct rotation blur.
 - **No OpenVDB / `UsdVolVolume` import.** Volumes are homogeneous, procedural noise, or
   an inline voxel grid authored directly in USD.
-- **UV texture filtering is bilinear with no mip pyramid**, so far-minified textures can
-  alias; Ptex textures are mip-capped by a fixed resolution ceiling instead.
+- **Texture filtering is isotropic.** Minification is filtered — ray cones give each hit
+  a footprint, and both the UV and Ptex paths read trilinear mip pyramids from it — but
+  the filter has no direction, so a chart stretched in one axis over-blurs at grazing
+  angles where an EWA or ripmap filter would not. Cone spread also ignores surface
+  curvature and the lens aperture.
+- **Ptex textures are still fully resident.** UV textures can stream (see above);
+  `.ptx` files cannot, so `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the
+  island's 494 GiB of authored Ptex is only renderable because of it. This is a limitation
+  of the *reader* rather than of crust: a `.ptx` is already a per-face mip pyramid that
+  [`ptex-rs`](https://github.com/doubleailes/ptex-rs) addresses randomly, so the fix is a
+  `PtexCache` equivalent there — exactly as the C++ Ptex library ships one — not a second
+  cache here.
+- **An HDR texture's range stops at the shader.** A streamed `.tx` with an EXR backing
+  carries values above 1.0 intact, but the only textured input crust has is base colour,
+  and an albedo above 1 creates energy — the diffuse lobe clamps it, correctly. The
+  input that *would* use the range is emission, and no MaterialX EDF node is implemented,
+  so a graph cannot drive it from an image. That, rather than the file format, is what
+  HDR textures are waiting on.
 - **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
   layer is averaged into the coat rather than kept distinct, and MaterialX transmission
   nodes have no glass lobe equivalent yet.

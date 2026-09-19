@@ -31,7 +31,8 @@ The work is split across the two crates along the same seam as everything else:
 (`usd_import.rs`), but decodes no **asset** — every image and Ptex decoder lives
 in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `PtexTexture` trait pins the contract at that boundary
-(`crust-core/src/texture.rs:32`): values returned from `eval` are linear, not
+(`crust-core/src/texture.rs`, the `PtexTexture` trait): values returned from
+`eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
 ## Three transfer curves, deliberately
@@ -42,7 +43,7 @@ interchangeable:
 | Curve | Formula | Where |
 | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open`); UV textures tagged `g22_rec709` |
+| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
 | **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture.rs`, `to_linear_table`) |
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
@@ -65,7 +66,7 @@ networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
 that reasoning in a comment at the call site (`usd_import.rs:2856-2861`,
-`crust-assets/src/ptex_texture.rs`, `PtexColor::open`).
+`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`).
 
 How much does the distinction matter? Across most of the range, very little —
 maximum absolute difference over `[0,1]` is 0.0085, and at 0.5 the two give
@@ -157,6 +158,8 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
+| Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
+| Streamed `.tx`, EXR backing (`half` tiles) | — | none (decoded once at conversion) | ✅ correct — the file stores linear samples and records which space they came from |
 
 The `is_hdr` branch in `load_image_environment` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
@@ -167,6 +170,63 @@ on the format, not applied blanket. Pinned by
 Ptex texels are decoded once at load into the preloaded immutable buffer, not
 per lookup — which is also why `CRUST_PTEX_MAX_LOG2`'s mip cap and the decode
 share the same pass.
+
+## Where texels get averaged, and in which space
+
+Two places reduce a texture at load, and they deliberately use **different
+spaces**. Both are correct for what they are for, and mixing them up is a
+plausible-looking bug rather than an obvious one.
+
+| Reduction | Where | Space | Why |
+| --- | --- | --- | --- |
+| **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture.rs`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
+| **Mip levels** | `uv_texture.rs`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
+| **Ptex mip levels** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since Ptex texels are stored linear `f32`. |
+| **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
+| **`.tx` mip levels (EXR backing)** | `crust-assets/src/tiled/exr_write.rs` | **linear**, not re-encoded | The samples are already light: a float file has no transfer curve, so the decode happened once at conversion and the reduction is a plain average (`reduce_half_linear`, written next to `reduce_half` so the two cannot drift on anything but the curve). |
+
+There are therefore **three** decode points, not two, and which one applies is
+decided by a tile's payload rather than by its file:
+
+| Payload | Stored as | Decoded | Where |
+| --- | --- | --- | --- |
+| `TileData::U8` (8-/16-bit TIFF) | the file's own encoding | per lookup, through the 256-entry table | `Tile::rgb` |
+| `TileData::Half` (EXR, float TIFF) | **linear** | never — it is already light | — |
+| preloaded `UvTexture` | the file's own encoding | per lookup, through the same table | `UvTexture::sample_level` |
+
+Because a TIFF-backed `.tx` stores display-encoded texels but reduces in linear
+light, the colour space is **baked into every level above 0** and cannot be
+reinterpreted afterwards. Read a chain built for sRGB as raw and level 0 stays
+perfectly correct while every coarser level is wrong — an error that appears
+only under minification and looks exactly like a filtering bug. An EXR-backed
+`.tx` gets there from the other side: its texels were decoded once, at
+conversion, so binding it under a different space would apply a curve to data
+that has already had one removed.
+
+So the space is written into the file — `crust:mipspace=` in
+`ImageDescription` for TIFF (following OIIO's own `oiio:SHA-1=` convention) and
+as a header attribute for EXR, where custom attributes are first-class — and it
+means "the space this file is to be bound with" for both. A mismatch makes the
+streaming path decline, falling back to preloading. A file with no marker —
+anything `maketx` wrote — is accepted, since its chain came from a different
+filter and there is nothing to match against.
+
+The difference is not academic. A black/white checkerboard averaged in
+sRGB-encoded bytes gives `127/255 ≈ 0.5` *encoded*, which decodes to **0.21
+linear** — less than half the light actually present. Averaged in linear and
+re-encoded it gives 0.5 linear, which stores as `188/255`. Pinned by
+`levels_average_in_linear_light_not_in_the_file_encoding` in
+`crust-assets/tests/decoders.rs`.
+
+UV mip levels are stored back as `u8` in the file's own encoding rather than
+as linear `f32`, so the lookup's `u8`-indexed decode table is unchanged and the
+pyramid costs a third of the base rather than four times it. The re-encode uses
+`linear_to_srgb` or the matching inverse power law, chosen by
+[`encode_fn`][enc] — matched on the `ColorSpace` variant rather than on
+`gamma()`, so adding a colour space is a compile error there instead of a
+silent fall-through to `Raw`.
+
+[enc]: ../crates/crust-assets/src/uv_texture.rs
 
 ## Scalar inputs are never converted
 
@@ -212,7 +272,7 @@ crossing the `AssetLoader` seam names its space — that is what makes
 `srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. USD
 *attribute* reads are not covered: their curves remain independent inline
 implementations (`usd_import.rs` `disney_to_openpbr`, `crust-assets`
-`PtexColor::open`) that happen to agree, and nothing forces a newly added
+`PtexColor::open_with`) that happen to agree, and nothing forces a newly added
 colour attribute to state its source space; the default behaviour of adding
 one is to get gap #1 again, silently.
 
@@ -240,7 +300,19 @@ CRUST_PTEX=0 cargo run --release -- -i scene.usda -o out.exr
 # What are the actual texel values, before and after decode?
 cargo run --release -p crust-render --example tex_probe -- texture.ptx
 cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 y1]
+
+# Is it the decode, or the mip level it is being read at? These turn off the
+# filtering without touching the decode, so a difference that survives them is
+# a colour-space question and one that does not is a filtering question.
+CRUST_TEX_MIP=0 CRUST_PTEX_MIP=0 cargo run --release -- -i scene.usda -o out.exr
+CRUST_RAY_CONES=0 cargo run --release -- -i scene.usda -o out.exr
 ```
+
+The two are worth separating early, because a mip level averaged in the wrong
+space has the *same* signature as a missing decode — a minified surface that
+drifts darker than it should — and the fix is in a different file. A pyramid
+built on encoded bytes loses light at every level, so the error grows with
+distance from the camera; a missing decode is wrong at every distance equally.
 
 `tex_probe` exists specifically to settle whether a texture is
 display-encoded or linear: it prints raw values, so the overshoot signature of

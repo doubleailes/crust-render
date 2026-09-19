@@ -32,6 +32,76 @@ pub enum FanSlice {
     Unmappable,
 }
 
+/// Per-triangle parametric density: how many texture-space units one unit of
+/// the mesh's *own* space covers, i.e. `sqrt(parametric_area / world_area)`.
+///
+/// This is the conversion a texture footprint needs. A ray cone arrives at a
+/// hit knowing only how wide it is in world units; a mip level is chosen in
+/// texels, and the bridge between them is how stretched the chart is over
+/// this particular triangle.
+///
+/// `0.0` means "no answer" — a degenerate triangle in either space — and
+/// every consumer reads that as point-sampling the finest level, the same way
+/// a `ZERO` tangent reads as "no tangent frame".
+///
+/// It is a *ratio of areas*, so it is invariant under exchanging two of a
+/// triangle's vertices: a mirrored placement's index swap needs no correction
+/// here, unlike every other lookup in this file. Do not add a `swapped` arm.
+///
+/// Always built in the mesh's local frame, never in world space. At
+/// `flush_meshes` a baked placement gets a *shared* `FaceMap` (local) and a
+/// *cloned* `UvMap`, and one placement scale cannot serve one table in world
+/// space and the other in local; the placement's own scale is recorded
+/// separately, on `SideTables`.
+fn triangle_density(param_area: f32, p0: Vec3A, p1: Vec3A, p2: Vec3A) -> f32 {
+    let world_area = 0.5 * (p1 - p0).cross(p2 - p0).length();
+    if world_area <= 1e-20 || param_area <= 1e-20 {
+        return 0.0;
+    }
+    (param_area / world_area).sqrt()
+}
+
+/// The ray cone's footprint *across the surface* at a hit, in world units.
+///
+/// Two steps. The cone's own diameter after `t · |dir|` world units of
+/// travel — `t` is in the ray's unnormalized parameterisation, which is why
+/// the direction's length appears — and then the grazing stretch: a cone
+/// meeting a surface at angle θ paints an ellipse `1/|cos θ|` longer than its
+/// cross-section.
+///
+/// That stretch is applied **here and discarded**. It must never be folded
+/// back into the ray's cone: it would then multiply again at every subsequent
+/// bounce, and a handful of grazing hits would send every texture to its 1×1
+/// level. The clamp is the other half of the same concern — `normal` is the
+/// interpolated shading normal, which goes to a zero dot product at a
+/// smooth-shaded silhouette where the real footprint is perfectly finite.
+fn footprint_width(ray: &Ray, t: f32, normal: Vec3A) -> f32 {
+    let dir = ray.direction();
+    let len = dir.length();
+    let width = ray.cone().width_at(t * len);
+    if width <= 0.0 {
+        return 0.0;
+    }
+    let cos = if len > 0.0 {
+        (dir.dot(normal) / len).abs()
+    } else {
+        1.0
+    };
+    width / cos.max(MIN_GRAZING_COS)
+}
+
+/// Floor on the grazing `1/|cos θ|` footprint stretch — five times the
+/// cross-section, and no more.
+const MIN_GRAZING_COS: f32 = 0.2;
+
+/// Half the absolute cross product of a UV triangle's two edges — its area in
+/// parametric space.
+fn uv_area(uv: &[[f32; 2]; 3]) -> f32 {
+    let (du1, dv1) = (uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
+    let (du2, dv2) = (uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+    0.5 * (du1 * dv2 - du2 * dv1).abs()
+}
+
 /// Maps each triangle of one distinct mesh back to the polygon it came from.
 ///
 /// Ptex face ids are indices into a mesh's *original* `faceVertexCounts`, but
@@ -53,6 +123,10 @@ pub struct FaceMap {
     /// corners carry its patch of the cage face. `None` for unsubdivided
     /// meshes, whose triangles resolve through `slices` alone.
     pub uvs: Option<Vec<[[f32; 2]; 3]>>,
+    /// Face-space units per unit of local space, per triangle — see
+    /// [`triangle_density`]. Empty when [`FaceMap::build_density`] was never
+    /// called, which every consumer reads as "point-sample".
+    pub density: Vec<f32>,
 }
 
 impl FaceMap {
@@ -98,6 +172,47 @@ impl FaceMap {
         };
         Some((face, fu.clamp(0.0, 1.0), fv.clamp(0.0, 1.0)))
     }
+
+    /// Face-space units per unit of local space for `prim_id`, or `0.0` when
+    /// the table was never built or the triangle is degenerate.
+    #[inline]
+    pub fn density(&self, prim_id: u32) -> f32 {
+        self.density.get(prim_id as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Builds the per-triangle density from the mesh's own (local) vertices.
+    ///
+    /// The parametric area is `0.5` for every mapped fan slice, and that is
+    /// exact rather than approximate: `Triangle` is the identity, and both
+    /// quad arms of [`FaceMap::resolve`] are unit-determinant shears, so all
+    /// three carry the standard simplex onto a region of area exactly half
+    /// the face's unit square.
+    ///
+    /// A *subdivided* mesh is the exception and must not use that constant.
+    /// Its triangles carry explicit corner UVs covering a sub-rectangle of
+    /// the base-cage face, so the area is `4^-L` of the constant; at level 3
+    /// the constant would over-estimate the footprint 64× and every Ptex
+    /// lookup on the mesh would read its 1×1 level.
+    pub fn build_density(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
+        self.density.clear();
+        self.density.reserve(tris.len());
+        for (t, tri) in tris.iter().enumerate() {
+            let param = match (&self.uvs, self.slices.get(t)) {
+                (_, Some(FanSlice::Unmappable)) | (_, None) => 0.0,
+                (Some(uvs), Some(_)) => match uvs.get(t) {
+                    Some(uv) => uv_area(uv),
+                    None => 0.0,
+                },
+                (None, Some(_)) => 0.5,
+            };
+            self.density.push(triangle_density(
+                param,
+                verts[tri[0] as usize],
+                verts[tri[1] as usize],
+                verts[tri[2] as usize],
+            ));
+        }
+    }
 }
 
 /// Per-triangle `primvars:st` texture coordinates, and the tangent frame a
@@ -127,6 +242,14 @@ pub struct UvMap {
     /// (which no transform touches) and no tangent, and normal maps on them
     /// fall back to the geometric normal.
     pub tangents: Vec<Vec3A>,
+    /// Chart UV units per unit of local space, per triangle — see
+    /// [`triangle_density`]. Empty when [`UvMap::build_density`] was never
+    /// called, which every consumer reads as "point-sample".
+    ///
+    /// Unlike `tangents`, this *is* built for instanced prototypes: a density
+    /// is a scalar, so one local-space table plus the placement's own scale
+    /// answers for every placement, where a world-space direction could not.
+    pub density: Vec<f32>,
 }
 
 impl UvMap {
@@ -195,6 +318,33 @@ impl UvMap {
             self.tangents.push(t);
         }
     }
+
+    /// Chart UV units per unit of local space for `prim_id`, or `0.0` when
+    /// the table was never built or the triangle is degenerate.
+    #[inline]
+    pub fn density(&self, prim_id: u32) -> f32 {
+        self.density.get(prim_id as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Builds the per-triangle density from the mesh's own (local) vertices.
+    ///
+    /// Unlike [`UvMap::build_tangents`] this wants *local* vertices, not
+    /// world-space ones, and is therefore built once per distinct mesh rather
+    /// than once per placement — see [`triangle_density`] for why the two
+    /// differ.
+    pub fn build_density(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
+        self.density.clear();
+        self.density.reserve(tris.len());
+        for (t, tri) in tris.iter().enumerate() {
+            let param = self.uvs.get(t).map(uv_area).unwrap_or(0.0);
+            self.density.push(triangle_density(
+                param,
+                verts[tri[0] as usize],
+                verts[tri[1] as usize],
+                verts[tri[2] as usize],
+            ));
+        }
+    }
 }
 
 /// A geometry's side tables, plus whether its placement mirrored the winding.
@@ -202,11 +352,35 @@ impl UvMap {
 /// One struct rather than two parallel `Vec`s because the mirror flag and the
 /// barycentric convention it corrects are shared: both tables index the same
 /// triangles and both must undo the same swap.
-#[derive(Default)]
 struct SideTables {
     map: Option<Arc<FaceMap>>,
     uv: Option<Arc<UvMap>>,
     swapped: bool,
+    /// The placement's uniform scale — `cbrt(|det|)` of its linear part.
+    ///
+    /// Both tables' densities are in the mesh's *local* frame, so a texture
+    /// footprint arriving in world units has to be divided by this before it
+    /// can be multiplied by one. `1.0` where the table was already built on
+    /// world-space vertices.
+    scale: f32,
+}
+
+/// Hand-written rather than derived, for one field: `scale` must default to
+/// `1.0`, not `0.0`.
+///
+/// `attach_masked` pushes a `SideTables` for *every* geometry, textured or
+/// not, so a derived default would divide every footprint by zero and hand
+/// each texture an infinite width — which reads as a perfectly plausible
+/// coarse mip and would be a miserable thing to track down.
+impl Default for SideTables {
+    fn default() -> Self {
+        SideTables {
+            map: None,
+            uv: None,
+            swapped: false,
+            scale: 1.0,
+        }
+    }
 }
 
 /// Scene-construction container: kernel geometries plus the material
@@ -274,6 +448,24 @@ impl WorldBuilder {
         let t = &mut self.faces[id as usize];
         t.uv = Some(map);
         t.swapped = swapped;
+    }
+
+    /// Records the uniform scale of this geometry's placement, which converts
+    /// a world-space texture footprint into the local frame both side tables'
+    /// densities are expressed in.
+    ///
+    /// `cbrt(|det|)` is the geometric mean of the three axis scales, so a
+    /// non-uniform placement is filtered by that mean: a `(1, 1, 10)` scale
+    /// reads a mip up to ~4.6× off on the stretched axis. That degrades to a
+    /// slightly wrong level, never to a wrong lookup, and an exact answer
+    /// would need per-axis densities the isotropic cone could not use anyway.
+    ///
+    /// Only needed where the tables are in local space, i.e. everywhere the
+    /// vertices were not baked into world space first.
+    pub fn set_placement_scale(&mut self, id: u32, scale: f32) {
+        if scale.is_finite() && scale > 0.0 {
+            self.faces[id as usize].scale = scale;
+        }
     }
 
     /// Number of geometries attached so far.
@@ -367,6 +559,30 @@ impl World {
             },
             None => ((0.0, 0.0), Vec3A::ZERO, false),
         };
+        // The ray's texture footprint, converted into each parameterisation
+        // the shader might index. Zero unless the ray carries a cone *and*
+        // this geometry carries the density to convert it with, and zero
+        // reads as "point-sample the finest level" everywhere downstream.
+        let (uv_width, face_width) = match (tables.map.is_some() || tables.uv.is_some())
+            .then(|| footprint_width(ray, h.t, h.normal))
+        {
+            Some(w) if w > 0.0 => {
+                // Both densities are in the mesh's local frame, so undo the
+                // placement's scale before applying one.
+                let local = w / tables.scale;
+                (
+                    tables
+                        .uv
+                        .as_ref()
+                        .map_or(0.0, |m| local * m.density(h.prim_id)),
+                    tables
+                        .map
+                        .as_ref()
+                        .map_or(0.0, |m| local * m.density(h.prim_id)),
+                )
+            }
+            _ => (0.0, 0.0),
+        };
         Some(WorldHit {
             rec: HitRecord {
                 p: ray.at(h.t),
@@ -378,6 +594,8 @@ impl World {
                 uv,
                 tangent,
                 has_uv,
+                uv_width,
+                face_width,
             },
             mat: self.materials[h.geom_id as usize].as_ref(),
             geom_id: h.geom_id,
@@ -457,6 +675,7 @@ mod tests {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
             uvs: None,
+            density: Vec::new(),
         }
     }
 
@@ -512,6 +731,7 @@ mod tests {
             faces: vec![3],
             slices: vec![FanSlice::Unmappable],
             uvs: None,
+            density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
     }
@@ -533,6 +753,7 @@ mod tests {
                 [[0.0, 0.5], [0.5, 0.5], [0.5, 1.0]],
                 [[0.0, 0.5], [0.5, 1.0], [0.0, 1.0]],
             ]),
+            density: Vec::new(),
         }
     }
 
@@ -574,6 +795,7 @@ mod tests {
             faces: vec![u32::MAX],
             slices: vec![FanSlice::Unmappable],
             uvs: Some(vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]),
+            density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
         assert_eq!(m.resolve(9, 0.25, 0.25, false), None);

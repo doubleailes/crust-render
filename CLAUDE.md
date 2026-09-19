@@ -76,6 +76,22 @@ cargo run --release -p crust-render --example xform_probe -- stage.usda /prim   
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
 
+# Does texture filtering actually remove the aliasing? No checked-in sample
+# minifies a texture, so this generates the case that does -- a checkerboard
+# plane receding to the horizon -- and measures each configuration against a
+# high-spp reference OF ITSELF (aliasing does not converge, so comparing
+# filtered against unfiltered would measure bias, not error).
+python3 scripts/gen_texture_alias_scene.py /tmp/alias --measure
+
+# Streaming textures. Convert once (the mip chain is reduced in linear light,
+# the same `reduce_half` the in-memory pyramid uses, so a streamed render and a
+# preloaded one agree texel for texel), then render with the cache on. A float
+# source takes the EXR backing and keeps its range; `--format` overrides.
+cargo run --release -p crust-render --example maketx -- 'albedo.<UDIM>.png' srgb_texture
+cargo run --release -p crust-render --example maketx -- sky.exr raw            # half tiles
+cargo run --release -p crust-render --example maketx -- albedo.png srgb_texture --format=exr
+CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
@@ -101,7 +117,21 @@ constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution
 A/B that separates a subdivision artifact from a material or lighting one; `CRUST_TEX=0`
 declines every UV texture so a MaterialX surface renders on its constant inputs (the
 `CRUST_PTEX=0` of the UV path), and `CRUST_TEX_MAX` caps each decoded texture tile's edge
-length in pixels (default 1024).
+length in pixels (default 1024). Texture *filtering* has three more, which pair up:
+`CRUST_TEX_MIP=0` and `CRUST_PTEX_MIP=0` build no mip pyramid (one level per tile / per
+face, a third less memory, and `eval`'s width ignored structurally rather than by a
+branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids still
+resident. Either side alone is bit-identical to the pre-filtering renderer, and the two
+produce the same image as each other — which is what makes them an honest A/B of the two
+halves: the pyramid, and the footprint that selects from it.
+
+Texture *residency* has two more. `CRUST_TEX_STREAM=1` swaps the preloaded `UvTexture`
+for a streaming one that pages 64x64 tiles out of a `.tx` under a byte budget set by
+`CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own). It is opt-in, and it falls back
+to preloading for any texture it declines — no converted sibling beside the asset, a mip
+chain reduced in a different colour space, a file it cannot read — so turning it on can
+make a render slower but never break it. A `.tx` is backed by either a tiled TIFF (`u8`
+tiles) or a tiled mip EXR (`half` tiles), picked by magic number rather than extension.
 
 ## Measuring a change
 
@@ -710,6 +740,188 @@ Schema mapping:
     `CRUST_TEX_MAX` (default 1024) box-filters each tile down at load; tiles are
     kept as `u8` and converted through a 256-entry table on lookup, since the
     files are 8-bit PNGs and nothing recovers precision that was never there.
+  - **Each tile carries a mip pyramid** below that cap, read trilinearly at the
+    hit's footprint (see "Texture filtering" below). Two details that are easy
+    to re-break. Levels average in **linear light** and re-encode through the
+    colour space's inverse curve, because averaging display-encoded bytes is
+    not averaging light: a black/white checker comes out at 0.21 linear instead
+    of 0.5, and the chain drifts darker at every level. The `CRUST_TEX_MAX`
+    reduction deliberately does *not* — it averages in the file's own encoding,
+    to keep a capped tile matching a DCC's preview of the same file — so the
+    two conventions differ on purpose; `docs/color_management.md` records both.
+    And axes halve by **`div_ceil`**, not `>> 1`: `decode_tile` reduces by an
+    arbitrary integer factor, so an odd level 0 is routine (3000×2000 under a
+    1024 cap is 1000×666), and the lookup maps `x = u·width − 0.5`, so flooring
+    an odd axis drops its last half-texel and that level's domain slips against
+    level 0's — visible as a crawl across mip transitions on a slow camera move.
+    **An odd axis is then a resample, not a 2×2 box**, and `axis_taps` weights
+    it by area: the lookup reads each texel as an equal-width slice of the
+    whole tile, so a destination texel is the average of the source over
+    exactly its own `src/dst ≤ 2` texels (at most three of them). Clamping the
+    source index instead — reading the trailing texel twice and averaging it
+    as though two were there — hands that column a third of the level's weight
+    where it is owed a fifth, at *every* level: a 5-wide row of
+    `[250, 200, 150, 100, 50]` came out `[225, 125, 50]`, mean 133 against the
+    source's 150, and a 25-wide tile lit only at its right edge bottomed out
+    **6× too bright** while the same tile lit at its *left* edge came out too
+    dark — an 8× disagreement decided by nothing but which end the clamp was
+    at. On an **even** axis every overlap is exactly 1.0 and the divisor
+    exactly 4.0, so the reduction is bit-identical to what it was; every
+    checked-in texture is 64×64, so no sample golden moves and the
+    streamed-versus-preloaded invariant is untouched. Both halves of that hold
+    only because `reduce_half` and `reduce_half_linear` share `axis_taps` —
+    they back the TIFF and EXR `.tx` writers, and one fixed without the other
+    would leave two internally consistent chains that disagree. A `.tx`
+    written by an older build still carries old-filter odd levels; they are
+    gitignored artefacts `maketx` regenerates, so this is a note rather than a
+    migration.
+- **Streaming textures** (`crust-assets/src/tiled/`) — the residency half of the
+  texture problem, as opposed to the filtering half above. Opt-in via
+  `CRUST_TEX_STREAM=1`; the preloaded `UvTexture` remains the default and the
+  correctness oracle.
+  - **Why.** Preloading makes memory scale with the scene's total texture
+    footprint, which is the only reason `CRUST_TEX_MAX` exists — and a cap is a
+    poor residency policy, because it discards authored detail permanently and
+    still cannot help a scene that binds more than fits. Production renderers
+    convert once, offline, to a tiled mip-mapped file and stream tiles behind a
+    bounded cache, so memory scales with the *cache* instead.
+  - **Two backings, one seam.** A `.tx` is either a tiled mip **TIFF** with
+    `u8` tiles or a tiled mip **EXR** with `half` ones, and `TiledFile` picks
+    between them by **magic number** — which is what makes `maketx --format exr
+    -o foo.tx`, an EXR inside a file named `.tx`, simply work. The split is by
+    *sample type*, not container: unsigned integer samples (8- and 16-bit TIFF)
+    page in as `TileKind::U8` exactly as before, float samples as
+    `TileKind::Half`. An 8-bit texture pays nothing for HDR existing — its
+    tiles, its bytes and its bit-identical agreement with the preload path are
+    untouched — and an HDR one is not silently clipped to fit an 8-bit cache.
+    A tile's payload is bytes plus that kind rather than an enum over two
+    buffers, and the sampler reads it through `Tile::rgb_u8` or `Tile::rgb_half`
+    chosen by a const generic — for the measured reason two bullets down.
+  - **Why EXR and not float TIFF.** TIFF can hold `f32`, but the format is the
+    smaller half of the question and the industry already answered it: OIIO's
+    `maketx --format exr` writes 64x64-tiled, full-MIPMAP, zipped `half` with
+    `textureformat`/`wrapmodes` as first-class header attributes (better
+    provenance than TIFF, which has to smuggle them through `ImageDescription`),
+    V-Ray's native streaming texture format *is* tiled mip EXR, and Karma
+    recommends `.exr` or `.rat`. Adding EXR is the opposite of diverging from
+    OIIO; a TIFF-only path was the narrower one. `half` rather than `f32`
+    because it is what every streaming texture format stores and what keeps an
+    HDR tile at twice a `u8` tile rather than four times — a texture is shading
+    input, not a render target.
+  - **The EXR reader is hand-rolled around the block API; the writer is not.**
+    `exr` writes tiles and mip levels through its ordinary public API
+    (`Blocks::Tiles` + `Levels::Mip`), so unlike TIFF there is no container
+    code at all — `exr_write.rs` is the pyramid, the de-interleave to planar,
+    and the attributes. Reading is the sharp part: `filter_chunks`, the one
+    entry point that looks like random access, **consumes** the reader and
+    sorts the offsets, so `exr_read.rs` composes the layer beneath it —
+    `MetaData::read_from_buffered` → offset table → seek → `Chunk::read` →
+    `UncompressedBlock::decompress_chunk` → `lines()`. Three details worth
+    keeping: `enumerate_ordered_header_block_indices()` supplies the
+    `(level, tile) → chunk index` map (EXR mandates no chunk order, so it must
+    not be assumed row-major); `decompress_chunk` returns **native**-endian
+    samples, so reading them is a reinterpret; and the level sizes come from
+    the header's own `RoundingMode` rather than from `div_ceil`, because
+    `maketx` writes `ROUND_DOWN` while crust writes `ROUND_UP` to match
+    `reduce_half`.
+  - **The offset table is probed, not trusted.** `MetaData` is read through a
+    `PeekRead` that may hold one byte it has consumed and not handed back, so
+    the reader's position afterwards is either the table's start or one past
+    it. The table is self-describing — chunks begin immediately after it, so
+    its smallest entry equals its own end — and that identity picks between the
+    two candidates. The current `exr` happens to land exactly right, so the
+    fallback is forced by a test (`the_offset_table_is_found_even_when_the_
+    reader_is_a_byte_late`) rather than left to rot.
+  - **`.tx` is a plain TIFF.** Tiled 64x64, mip levels as chained IFDs,
+    Deflate. `tiff` 0.11.3 reads one tile at one level with a real seek
+    (`seek_to_image` + `read_chunk`, which walks the cached `TileOffsets`
+    table); it **cannot write** tiled, so `write.rs` supplies the tile grid, the
+    per-tile zlib stream and the tile tags while borrowing `DirectoryEncoder`
+    for the header, IFD chaining and entry serialisation. Three upstream
+    hazards are designed around: tiled **LZW** fails to decode (#395) so only
+    Deflate is ever written; `PlanarConfiguration = 2` **panics** inside
+    `expand_chunk` (#403) so planar files are refused at open rather than
+    allowed to abort a worker; and the right-edge fix (#400) is in the
+    `read_image` assembly path, which is why only `read_chunk` is used.
+  - **A tile is written padded and read back clipped.** TIFF6 says a tile is
+    always `TileWidth x TileLength`, but `tiff` returns `chunk_data_dimensions`,
+    so an edge tile is narrower. Indexing it by the nominal edge reads 64 texels
+    of stride into a 22-texel row and shears the right-hand column of every
+    texture whose size is not a multiple of 64.
+  - **The cache is OIIO's algorithm, not an LRU.** `check_max_mem` there is a
+    clock hand giving each entry one second chance, `try_lock`ed so a thread
+    that finds a sweep in progress carries on rather than queueing behind it —
+    the budget is a target, not an invariant, and is briefly exceeded by
+    whatever other threads insert while one sweeps. That is a few hundred lines
+    of `std::sync`, which is why there is no `moka`/`quick_cache` dependency:
+    both carry internal `unsafe`, and the whole workspace is now
+    `forbid(unsafe_code)` (`crust-core` is `deny`, for one test-only
+    `GlobalAlloc`).
+  - **Three tiers, and the top one does the work.** A per-thread two-entry
+    microcache, then 64 sharded maps, then a decode. Measured on the alias
+    scene: **98.6% of 8.7 M lookups never reach a lock**, because a bilinear tap
+    reads one tile four times and trilinear alternates between two levels —
+    which is why there are two slots and not one. It also means the lookup path
+    itself, not contention, is what to optimise: `with_tile` hands the tile to a
+    closure rather than returning an `Arc`, because one refcount pair per texel
+    was the difference between streaming costing 4x a preloaded render and
+    costing 2x.
+  - **The second backing must cost the first one nothing, and twice it did
+    not.** `bench_ab` against the pre-EXR binary on the 8-UDIM alias scene said
+    **+21%** on an 8-bit streamed render — a path that gains nothing from HDR
+    existing. Callgrind found both causes and the fixes are load-bearing, not
+    tidying. First, a `TileData` **enum** read per texel: matching it inside the
+    `with_tile` closure grew that closure past what LLVM would inline, so
+    `texel` went 414.9 M → 471.5 M instructions *and* grew a 216.7 M
+    out-of-line `texel::{closure#0}` that had not existed. The payload is
+    therefore bytes plus a `TileKind`, and the sampler is monomorphised over a
+    `const HALF: bool` decided once per `eval` from the file's own kind — the
+    information is per *texture*, so it does not belong in a per-texel branch.
+    Second, and larger, the `dyn Backend` facade itself: `texel` asks for
+    `tile_edge()` and `level()`, and routing those through a vtable is an
+    indirect call in the hottest loop in a textured render. `TiledFile` now
+    **copies** the geometry out of the backing at open and touches `inner` only
+    to read a tile. Together: `texel::<false>` is 414,851,273 instructions,
+    equal to the pre-EXR binary's to the instruction, whole-render instructions
+    are +0.017%, and wall clock lands at −5.4% min / −6.1% mean (i.e. noise).
+  - **The colour space is recorded in the file** (`crust:mipspace=`, in
+    ImageDescription for TIFF and as a header attribute for EXR) and a mismatch
+    is refused. It means "the space this file is to be bound with", and the two
+    backings reach that from opposite directions. A TIFF `.tx` stores
+    display-encoded texels and reduces its levels in *linear light*, so the
+    space is baked into every level above 0: read an sRGB chain as raw and
+    level 0 is perfectly correct while every coarser level is wrong — visible
+    only under minification and, by eye, indistinguishable from a filtering
+    bug. An EXR `.tx` stores **linear** texels, decoded once at conversion
+    because EXR has no transfer curve of its own, so binding it under another
+    space would apply a curve to data that has already had one removed. A file
+    with no marker (anything `maketx` wrote) is accepted, since its chain came
+    from OIIO's filter and there is nothing to match against.
+  - **Which backing a conversion produces is decided by the source's range**,
+    not its extension: `maketx` writes EXR for a source that actually carries
+    values above 1.0 and TIFF otherwise, so a `.hdr` of an overcast sky does
+    not pay double for a range it never uses. `--format tiff|exr` overrides
+    either way, and a TIFF conversion that clips is warned about rather than
+    done quietly.
+  - **The invariant.** For any texture at or below the preload cap, streamed
+    and preloaded renders must be **bit-identical** — same level 0, same
+    `reduce_half`, same level selection. `samples/materialx_basic` at 16 spp:
+    0 of 230 400 pixels differ. Measured on 8 UDIM tiles of 2048² (96 MiB
+    authored), 640x360 at 4 spp: preload capped 54.16 MiB / 0.223s with detail
+    discarded, preload uncapped 142.46 MiB / 0.231s, **streamed at a 16 MiB
+    budget 15.94 MiB / 0.449s and bit-identical to the uncapped preload**. The
+    ~2x render cost is the honest worst case — one textured plane at depth 2,
+    so nearly every shading call is a fetch. That invariant is about the `u8`
+    path and stays exactly as it was; the `half` path is where the two paths
+    are *supposed* to disagree. Measured at the seam rather than in a render: a
+    Radiance source whose white checks are at 8.0 comes back at 8.0 streamed
+    and at exactly 1.0 preloaded (`to_rgb8()` clips it), while below 1.0 the
+    two agree to within the 8 bits the preload path keeps — so the divergence
+    is the range and not a different lookup.
+  - **Conversion is explicit**, via `examples/maketx`. Auto-converting on first
+    use (Arnold's `autotx`) is a deliberate follow-up: a renderer that silently
+    writes multi-gigabyte files next to a read-only asset library is a surprise
+    nobody asked for.
 - **Ptex** (`texture.rs`, plus the decoder in `crust-assets/src/ptex_texture.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
@@ -750,7 +962,37 @@ Schema mapping:
     default (`CRUST_PTEX_MAX_LOG2` overrides as a log2 edge length) — full resolution is
     authored for close-ups, so `isLavaRocks`' 631 MB / 11 384-face colour file costs
     130 MiB instead of several GB, at a resolution far past what a 595×520 framing
-    resolves. Texels are decoded to linear once at load (the island's graph gammas raw
+    resolves. **Beneath that cap each face carries a full mip pyramid** down to 1×1,
+    selected per hit by the ray cone's footprint (see "Texture filtering" below). The two
+    answer different questions and it is worth keeping them apart: the cap is the
+    *ceiling* on detail, the pyramid is what makes minification below it correct. The cap
+    used to double as an accidental anti-aliaser, and now that it does not have to, it can
+    come **down**: the island is recorded below at 1.84 GiB with a 16×16 base against 4.58
+    GiB flat at 32×32, so 16×16 plus a pyramid is around 2.45 GiB — derived from that
+    figure rather than re-measured — for under half the memory and better filtering at
+    distance. `examples/tex_probe`'s budget table counts the pyramid, so that comparison
+    can be made against a real asset directly. Levels are reduced **in memory from the
+    decoded linear base**, not by asking the reader for each resolution: every extra read
+    takes `&mut self` through the serial load loop (another seek and inflate) and comes
+    back display-encoded, needing the `powf(2.2)` again — and averaging in that encoding
+    is not averaging light, which is the whole reason the pyramid is built here.
+    **Which texels get averaged is the file's business, though, not ours**: a
+    `meshtype = triangle` Ptex packs *two* triangles into each square of texels, the
+    upright one and its mirror across the anti-diagonal, so Ptex reduces three texels of
+    the upright 2x2 with the one mirrored texel that completes it
+    (`w-1-2u`, `w-1-2v` — note the index swap) rather than with the neighbour
+    below-right. `PtexColor` reads `mesh_type()` once at open and picks `reduce_triangle`
+    or `reduce_quad` accordingly; a 2x2 box over a triangle face mixes texels from both
+    triangles and is wrong at every level above 0 by up to ~65% while still looking like
+    plausible texture, which is why `triangle_levels_match_ptex_rs_reduction` compares
+    against `ptex::utils::reduce_tri` rather than against an expectation written by
+    hand, and why a second test pins that the two reductions really do disagree.
+    Triangle faces also clamp both axes together, since the format defines only
+    symmetric reductions for them. A level's offset is walked rather
+    than stored — `Face` gains one `u8` in its existing padding, which over 2.5 M faces is
+    the difference between free and a per-face offset array. The `+1/3` figure holds for
+    square faces only: once a non-square face's short axis pins at one texel the chain
+    halves rather than quarters, so 64×16 lands at 1.335×. Texels are decoded to linear once at load (the island's graph gammas raw
     Ptex, and `HwPtexTexture_1` declares `sourceColorSpace = "sRGB"`; treating the data as
     already linear overshoots albedo ~4×, which `examples/tex_probe` exists to settle).
     `docs/color_management.md` is the per-input inventory of which colour space every
@@ -781,6 +1023,66 @@ Schema mapping:
     either way, since face ids index cage faces and subdivided face tables map back to
     them), and the reference's `islandsunEnv.tex` environment is a
     RenderMan-only format.
+- **Texture filtering** (`ray.rs`'s `RayCone`, `camera.rs`, `rt_world.rs`, the two
+  decoders) — how a texture lookup learns how much texture a pixel covers, which is
+  what a mip level is chosen from. Both texture paths sampled a single resolution
+  before this; minification was suppressed only by accident, because the memory caps
+  threw away the high frequencies first.
+  - **The footprint is a ray cone**, not ray differentials: a path tracer spawns one
+    ray at a time, so the four extra rays differentials want have nowhere to come
+    from, while two floats ride along free. `RayCone { width, spread }` is the
+    footprint's **diameter perpendicular to the ray** and its growth per world unit.
+  - **Primary rays** get `spread = Camera::pixel_span / |direction()|`. `get_ray`'s
+    direction lands on the focus plane at ray parameter 1, so one pixel of `s` moves
+    that point by `horizontal / res_w` — and dividing by the direction's length makes
+    `focus_dist` cancel, leaving `2·tan(vfov/2)/res_h` down the frame's axis. Pinned
+    by a test, because a wrong derivation here still looks plausible. The per-pixel
+    `1/|direction()|` is kept rather than simplified away: at the frame edge the
+    direction is longer and that pixel really does subtend less.
+  - **Two invariants that are easy to break.** The grazing `1/|cos θ|` stretch is
+    applied on the way *out* to a texture width and discarded — folded back into the
+    cone it compounds at every bounce (five grazing hits is 3125×) and every deep
+    texture reads its 1×1 level. And a bounce's lobe width comes from
+    `ScatterSample::spread`, **not** from `pdf`: by the time the tracer sees a sample
+    the pdf may have been replaced by the guide/BSDF mixture, so a near-mirror under a
+    trained guiding field would report a broad density and blur its own reflection.
+    A cosine lobe's pdf also goes to zero at grazing, which says nothing about how
+    wide the lobe is.
+  - **Cone → texture space** goes through a per-triangle **density**,
+    `sqrt(parametric_area / world_area)`, on `UvMap` (chart units) and `FaceMap`
+    (face units). Always built in the mesh's **local** frame with the placement's
+    `cbrt(|det|)` recorded per `geom_id`: at `flush_meshes` a baked placement shares
+    a local-space `FaceMap` while cloning its `UvMap`, and one scale cannot serve one
+    table in world space and the other in local. `MeshArena::intern` is the single
+    funnel every shared mesh passes through, so there are only two build sites (the
+    other is the non-invertible bake, whose vertices are already world-space and
+    which therefore takes scale 1.0). Being a *ratio of areas* a density needs no
+    mirror-swap correction, unlike every other lookup in `rt_world.rs` — do not add
+    a `swapped` arm. `FaceMap`'s parametric area is the constant 0.5 for every mapped
+    fan slice (both quad arms are unit-determinant shears, `Triangle` is the
+    identity), **except** on a subdivided mesh, whose triangles carry explicit
+    sub-face UVs: the constant would over-estimate by 4^L, 64× at level 3, and send
+    every Ptex lookup on the mesh to its coarsest level.
+  - **`SideTables::Default` is hand-written for one field**: `scale` must be 1.0, not
+    0.0. `attach_masked` pushes one per geometry, so a derived default divides every
+    footprint by zero and hands each texture an infinite width — which renders as a
+    perfectly plausible coarse mip.
+  - **`0.0` means point-sample** throughout: both `eval` methods take a width and
+    both read zero as "finest level", so a host that tracks no footprint gets the
+    historical behaviour rather than a wrong one. `Op::Texture` scales the width by
+    `uvtiling` alongside the coordinates — a texture tiled 10× is minified 10×.
+  - **Magnification short-circuits before the `log2`.** It is the common case, its
+    answer is level 0 regardless, and taking it through the clamp instead measured
+    ~9% of render on a scene whose output does not change at all.
+  - **Verified numerically** (`scripts/gen_texture_alias_scene.py --measure`), because
+    a wrong mip level is a plausible blur. Aliasing does not converge, so each
+    configuration is compared against a high-spp reference *of itself* — comparing
+    filtered against unfiltered would measure the bias between two different correct
+    answers. On the generated checkerboard plane, 16 spp against 1024 spp: RMSE
+    0.01024 filtered against 0.04211 point-sampled, a **4.11× reduction**. Cost is
+    ~1.7% of render on a magnified textured sample and ~19% on that plane, which is
+    the honest worst case (one textured plane, depth 2, so nearly every shading call
+    is a trilinear fetch).
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
@@ -1019,9 +1321,67 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
   come from USD.
-- **UV texture caveats.** Sampling is bilinear with no mip pyramid and no
-  filter width, so a texture minified far below its resolution aliases (the cap
-  hides most of this by accident, not by design). Normal maps need a tangent,
+- **Texture residency caveats.** UV textures stream (above); **Ptex does not**, so
+  `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the island's 494 GiB of
+  authored Ptex is renderable only because of it. That is a limitation of the *reader*,
+  not of crust: a `.ptx` is already a per-face mip pyramid and `ptex-rs` already
+  addresses it randomly through `get_data_at_res`, so the fix is a `PtexCache`
+  equivalent in [`ptex-rs`](https://github.com/doubleailes/ptex-rs) — exactly as the C++
+  Ptex library ships one — rather than a second cache in `crust-assets`. Do not bolt
+  Ptex onto the `.tx` tile cache; the two formats want different keys and the
+  per-face pyramid is already on disk — and Ptex is still 8-bit through `PtexColor`
+  regardless, so an HDR `.ptx` gains nothing from the EXR backing either.
+  On the UV side: conversion is explicit rather than
+  automatic, 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
+  the renderer decodes `u8` through a 256-entry table, and two more bits of an LDR
+  texture is not worth halving what the byte budget holds), there is no
+  single-flight on a miss so two workers can decode the same tile at once (counted as
+  "concurrent double fills", bounded by the thread count), and the cache is per-process
+  rather than shared between renders. The EXR backing reads RGB (or a replicated single
+  channel) and ignores alpha, refuses ripmaps, multi-layer and deep files, and requires
+  square tiles; the TIFF writer still emits 8-bit RGB only, so an HDR conversion is an
+  EXR conversion.
+- **An HDR texture's range reaches the shader and then meets a clamp.** The streaming
+  path now carries values above 1.0 all the way to `Texture2D::eval`, but the only
+  textured input crust has is `base_color`, and an albedo above 1 creates energy —
+  `eon_diffuse` clamps ρ to 1, correctly. So today the range survives the *texture*
+  and not the *image*: rendering a checkerboard whose white checks are at 8.0 differs
+  from the 8-bit version mostly where bilinear and mip averaging mix an over-bright
+  texel with a dark one before the clamp, which measures the clamp rather than the
+  texture. The input that would use the range is **emission**, and there is no path to
+  it: `crust-mtlx` implements no EDF node (`uniform_edf` and friends), so a MaterialX
+  graph cannot drive `emission_color` from an image at all. That — not the file format
+  — is what an HDR texture is waiting on, and it is why the range claim is verified at
+  the seam (`hdr_survives_streaming_and_does_not_survive_preloading`) rather than by a
+  sample scene.
+- **Texture filtering caveats.** Minification is filtered now (ray cones plus
+  trilinear mip pyramids, above), so what remains is the shape of that filter
+  rather than its absence. It is **isotropic**: a chart stretched in one axis is
+  filtered by the geometric mean of the two, so grazing minification over-blurs
+  where an EWA or ripmap filter would not — the `1/|cos θ|` stretch widens the
+  footprint without giving it a direction. Cone spread ignores **surface
+  curvature**, so a reflection in a curved mirror filters as though the mirror
+  were flat, and ignores the **lens aperture** (a non-negative cone cannot
+  express a footprint converging to the focus plane — harmless, since defocus is
+  resolved by sampling) and the **IOR change across a refraction**. The
+  **base-resolution cap remains**: the pyramid retires aliasing, not the ceiling,
+  so a close-up still cannot resolve past 32×32 (Ptex) or 1024 (UV). **Nested
+  instances** filter against the outer placement's scale only — the inner
+  placements live inside a committed kernel scene and the kernel does not surface
+  the instance chain — and a **non-uniform** placement collapses to `cbrt(|det|)`,
+  so a `(1, 1, 10)` scale is off by up to ~4.6× on the stretched axis. Both
+  degrade to a slightly wrong level, never to a wrong lookup. Ptex still does not
+  filter across **face boundaries**, and on a **triangle** Ptex it does not filter
+  across the packed anti-diagonal either: the mip chain is Ptex's own triangular
+  reduction now, but `sample_level` is still a plain bilinear tap on the square, so a
+  tap within half a texel of the diagonal picks up the mirrored triangle where
+  `PtexTriangleFilter` would not. The face mapping is right either way — a
+  three-vertex face resolves through `FanSlice::Triangle`, whose barycentrics *are*
+  Ptex's parametric coordinates. The guide branch of `sample_bounce_direction`
+  reports the widest possible lobe spread rather than the material's own, since it
+  never picked a lobe; that costs sharpness only on guided secondary bounces,
+  where the cone is near-saturated anyway.
+- **UV texture caveats.** Normal maps need a tangent,
   which only baked single-placement geometry has (above). A **subdivided** mesh
   carries no chart at all: refining a face-varying UV channel is a second
   synthetic hierarchy through the refiner, and carrying the cage's UVs onto
@@ -1029,7 +1389,14 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   so such a mesh warns and renders on its material's constant inputs. Only
   `primvars:st` (and `uv`/`st0`/`UVMap` as fallbacks) is read; there is no
   general primvar plumbing and no second UV set. `texcoord`'s `index` input is
-  ignored for the same reason.
+  ignored for the same reason. And `decode_tile`'s `CRUST_TEX_MAX` resize has a
+  cousin of the odd-level defect the mip chain was just fixed for: it takes
+  `floor(sw / factor)` destination texels and **drops the remainder columns**
+  rather than covering them, so a 2050-wide source under a 1024 cap loses one
+  column of 2050 and the tile's domain slips by that much. Under a destination
+  texel, against the full mis-weighted one the mip chain had — and unlike that
+  one it is a *resize* averaged in the file's own encoding, so fixing it would
+  move every render of a texture above the cap. Worth doing, not urgent.
 - **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
   skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other

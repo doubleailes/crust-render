@@ -48,12 +48,14 @@ fn main() {
     let mut max_abs = 0.0f32;
     let mut max_rel = 0.0f32;
     let mut sum_abs = 0.0f64;
+    let mut sum_sq = 0.0f64;
     for p in 0..aw * ah {
         let mut pixel_differs = false;
         for c in 0..3 {
             let (x, y) = (a[p * 4 + c], b[p * 4 + c]);
             let d = (x - y).abs();
             sum_abs += d as f64;
+            sum_sq += (d as f64) * (d as f64);
             if d != 0.0 {
                 pixel_differs = true;
                 max_abs = max_abs.max(d);
@@ -85,4 +87,9 @@ fn main() {
     );
     println!("max abs diff: {max_abs:e}   max rel diff: {max_rel:e}");
     println!("mean abs diff: {:e}", sum_abs / (total * 3) as f64);
+    // RMSE alongside the mean, because they answer different questions: the
+    // mean is dominated by how *much* of the image moved, while the square
+    // weights the outliers — which is what aliasing is. A filtered render
+    // improves the RMSE against its own reference far more than the mean.
+    println!("rmse: {:e}", (sum_sq / (total * 3) as f64).sqrt());
 }

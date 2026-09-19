@@ -96,6 +96,10 @@ fn main() {
             uv: (u, v),
             tangent: Vec3A::X,
             has_uv: true,
+            // Point-sample: this probe reports what the graph evaluates to at a
+            // named (u, v), not what a filtered render would show there.
+            uv_width: 0.0,
+            face_width: 0.0,
         };
         let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
         let m = loaded.material.probe(&r, &rec);
