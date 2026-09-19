@@ -132,7 +132,7 @@ impl PtexColor {
 }
 
 impl PtexTexture for PtexColor {
-    fn eval(&self, face_id: u32, u: f32, v: f32) -> Vec3A {
+    fn eval(&self, face_id: u32, u: f32, v: f32, _width: f32) -> Vec3A {
         let Some(f) = self.faces.get(face_id as usize) else {
             return self.fallback;
         };

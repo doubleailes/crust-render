@@ -243,7 +243,7 @@ impl UvTexture {
 }
 
 impl Texture2D for UvTexture {
-    fn eval(&self, u: f32, v: f32) -> [f32; 4] {
+    fn eval(&self, u: f32, v: f32, _width: f32) -> [f32; 4] {
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }
@@ -400,7 +400,7 @@ mod tests {
     /// The channel values a tile is written with, recovered from a lookup.
     /// Raw decode, so the round trip is exact.
     fn sampled(tex: &UvTexture, u: f32, v: f32) -> [u8; 3] {
-        let px = tex.eval(u, v);
+        let px = tex.eval(u, v, 0.0);
         [
             (px[0] * 255.0).round() as u8,
             (px[1] * 255.0).round() as u8,

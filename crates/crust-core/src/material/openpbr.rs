@@ -910,6 +910,32 @@ fn interface_iors(ior: f32, entering: bool) -> (f32, f32) {
 
 /// GGX alphas for the transmission lobe. Roughness is floored so the
 /// distribution stays finite for nominally perfect glass.
+/// The angular width a sampled lobe adds to the path's texture-filtering
+/// cone (see [`crate::RayCone`]).
+///
+/// A GGX lobe of perceptual roughness `r` reflects over roughly its alpha
+/// `r²`, so `2·alpha` is the diameter measure a cone wants; the anisotropic
+/// case takes the mean of the two alphas, matching the cone's own isotropy.
+/// A cosine lobe covers the hemisphere and saturates the cone outright —
+/// after a diffuse bounce there is no footprint left worth tracking, which is
+/// why indirect illumination reads a coarse mip in every renderer that does
+/// this.
+fn lobe_spread(m: &OpenPBR, lobe: Lobe) -> f32 {
+    let from_alpha = |(ax, ay): (f32, f32)| (ax + ay).min(crate::RayCone::MAX_SPREAD);
+    match lobe {
+        Lobe::Diffuse | Lobe::Fuzz => crate::RayCone::MAX_SPREAD,
+        Lobe::Specular => from_alpha(roughness_to_alpha_aniso(
+            m.specular_roughness,
+            m.specular_roughness_anisotropy,
+        )),
+        Lobe::Coat => from_alpha(roughness_to_alpha_aniso(
+            m.coat_roughness,
+            m.coat_roughness_anisotropy,
+        )),
+        Lobe::Transmission => from_alpha(transmission_alphas(m)),
+    }
+}
+
 fn transmission_alphas(m: &OpenPBR) -> (f32, f32) {
     roughness_to_alpha_aniso(
         m.specular_roughness.max(0.01),
@@ -1080,7 +1106,7 @@ impl OpenPBR {
         }
         let (u, v) = rec.face_uv;
         Some(OpenPBR {
-            base_color: tex.eval(rec.face_id, u, v),
+            base_color: tex.eval(rec.face_id, u, v, rec.face_width),
             base_color_ptex: None,
             ..self.clone()
         })
@@ -1132,6 +1158,7 @@ impl OpenPBR {
                     value: brdf * l_local.z.abs(),
                     pdf,
                     delta: false,
+                    spread: lobe_spread(self, lobe),
                 });
             }
 
@@ -1146,6 +1173,10 @@ impl OpenPBR {
                 value: throughput / p_select,
                 pdf,
                 delta: true,
+                // A thin wall is a delta interface: the ray passes straight
+                // through, so the cone it arrived with is the cone it leaves
+                // with.
+                spread: 0.0,
             });
         }
 
@@ -1193,6 +1224,7 @@ impl OpenPBR {
             value: brdf * n_dot_l,
             pdf,
             delta: false,
+            spread: lobe_spread(self, lobe),
         })
     }
 

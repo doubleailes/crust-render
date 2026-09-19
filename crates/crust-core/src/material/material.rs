@@ -19,6 +19,18 @@ pub struct ScatterSample {
     /// a continuous density — no guide-mixture pdf, no light-MIS weight; it
     /// carries its bounce-hit emission at full weight.
     pub delta: bool,
+    /// Angular width the sampled lobe adds to the path's texture-filtering
+    /// cone ([`crate::RayCone`]), in radians under the small-angle
+    /// approximation the cone is built on.
+    ///
+    /// Deliberately reported by the material rather than derived from `pdf`:
+    /// by the time the tracer sees a sample, `pdf` may have been replaced by
+    /// the guide/BSDF mixture density, so a near-mirror under a trained
+    /// guiding field would report a broad density and blur its own
+    /// reflection. It also goes to zero at grazing angles for a cosine lobe,
+    /// which says nothing about how wide that lobe is. `0.0` keeps the
+    /// arriving cone as it was, which is what a delta lobe wants.
+    pub spread: f32,
 }
 
 /// The `Material` trait defines the behavior of materials in the ray tracing system.

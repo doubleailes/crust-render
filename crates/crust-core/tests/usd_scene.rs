@@ -983,7 +983,7 @@ struct SlowPtexAssets {
 struct ConstTexture;
 
 impl crust_core::PtexTexture for ConstTexture {
-    fn eval(&self, _face_id: u32, _u: f32, _v: f32) -> crust_core::Vec3A {
+    fn eval(&self, _face_id: u32, _u: f32, _v: f32, _width: f32) -> crust_core::Vec3A {
         crust_core::Vec3A::splat(0.25)
     }
     fn num_faces(&self) -> usize {
@@ -1294,6 +1294,10 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
         uv: (0.5, 0.5),
         tangent: Vec3A::X,
         has_uv: true,
+        // Point-sample: this probe reports what the graph evaluates to at a
+        // named (u, v), not what a filtered render would show there.
+        uv_width: 0.0,
+        face_width: 0.0,
     };
     let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
     let m = loaded.material.probe(&r, &rec);
@@ -1381,6 +1385,10 @@ fn a_materialx_coat_carries_no_multiple_scattering_darkening() {
         uv: (0.5, 0.5),
         tangent: Vec3A::X,
         has_uv: true,
+        // Point-sample: this probe reports what the graph evaluates to at a
+        // named (u, v), not what a filtered render would show there.
+        uv_width: 0.0,
+        face_width: 0.0,
     };
     let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
     let m = loaded.material.probe(&r, &rec);

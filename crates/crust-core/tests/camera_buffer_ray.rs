@@ -2,7 +2,7 @@
 //! the renderer-side `Ray`, and `HitRecord`.
 
 use crust_core::{
-    Buffer, Camera, HitRecord, MASK_ALL, MASK_CAMERA, MASK_SHADOW, Medium, Ray, Vec3A,
+    Buffer, Camera, HitRecord, MASK_ALL, MASK_CAMERA, MASK_SHADOW, Medium, Ray, RayCone, Vec3A,
 };
 use std::sync::Arc;
 
@@ -307,4 +307,70 @@ fn camera_respects_an_arbitrary_look_direction() {
         .direction()
         .normalize();
     assert!(up.y > r.direction().normalize().y);
+}
+
+// ---------------------------------------------------------------------------
+// Texture-filtering footprint (`Camera::pixel_span` / `RayCone`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pixel_span_is_the_classic_per_pixel_angle_at_frame_centre() {
+    // The whole ray-cone derivation rests on `pixel_span / |direction()|`
+    // collapsing to `2·tan(vfov/2) / res_h` down the frame's axis. Check it
+    // against the trigonometry directly rather than against itself.
+    let cam = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 45.0, 1.0, 0.0, 1.0);
+    let centre = cam.get_ray(0.5, 0.5, [0.5, 0.5], 0.0);
+    let spread = cam.pixel_span(720, 720) / centre.direction().length();
+    let expected = 2.0 * (45.0_f32.to_radians() / 2.0).tan() / 720.0;
+    assert!(
+        (spread - expected).abs() < 1e-7,
+        "spread {spread} vs {expected}"
+    );
+}
+
+#[test]
+fn pixel_span_does_not_depend_on_the_focus_distance() {
+    // `|horizontal|` scales with `focus_dist` and so does the direction the
+    // span is divided by, so the two cancel. If they ever stop cancelling,
+    // every depth-of-field scene silently reads the wrong mip level.
+    let near = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 60.0, 1.5, 0.1, 1.0);
+    let far = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 60.0, 1.5, 0.1, 17.0);
+    for (s, t) in [(0.5, 0.5), (0.0, 0.0), (1.0, 0.25)] {
+        let a =
+            near.pixel_span(320, 240) / near.get_ray(s, t, [0.5, 0.5], 0.0).direction().length();
+        let b = far.pixel_span(320, 240) / far.get_ray(s, t, [0.5, 0.5], 0.0).direction().length();
+        assert!((a - b).abs() < 1e-7, "at ({s}, {t}): {a} vs {b}");
+    }
+}
+
+#[test]
+fn a_ray_carries_no_footprint_unless_one_is_stamped_on() {
+    // Every texture reads a zero-width cone as "point-sample the finest
+    // level", which is what keeps `CRUST_RAY_CONES=0` and every host that
+    // never builds a cone on the historical code path.
+    let r = Ray::new(Vec3A::ZERO, Vec3A::X);
+    assert_eq!(r.cone(), RayCone::default());
+    assert_eq!(r.cone().width_at(1e6), 0.0);
+}
+
+#[test]
+fn a_cone_widens_with_distance_and_never_sharpens_at_a_bounce() {
+    let cone = RayCone {
+        width: 0.0,
+        spread: 0.01,
+    };
+    assert!((cone.width_at(10.0) - 0.1).abs() < 1e-6);
+
+    // A bounce starts at the width it arrived with and only ever adds.
+    let next = cone.scattered(0.1, 0.05);
+    assert_eq!(next.width, 0.1);
+    assert!((next.spread - 0.06).abs() < 1e-6);
+    assert!(cone.scattered(0.1, -1.0).spread >= cone.spread);
+
+    // Spread saturates: a chain of diffuse bounces must not run to infinity.
+    let mut c = cone;
+    for _ in 0..8 {
+        c = c.scattered(c.width_at(1.0), RayCone::MAX_SPREAD);
+    }
+    assert_eq!(c.spread, RayCone::MAX_SPREAD);
 }

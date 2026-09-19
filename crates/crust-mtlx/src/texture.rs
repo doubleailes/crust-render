@@ -4,7 +4,7 @@
 //! expansion, resolution policy and colour-space handling are all the host's
 //! (a production UDIM set is fourteen 4K images per map, and how many of them
 //! to hold is not a MaterialX question). What the compiled program needs is a
-//! value at `(u, v)`, and that is the whole trait.
+//! value at `(u, v)` over a given filter width, and that is the whole trait.
 
 use std::sync::Arc;
 
@@ -14,17 +14,26 @@ use std::sync::Arc;
 /// [`Texture::eval`] from every render thread, so implementations are shared
 /// immutably — a host that caches lazily needs its own synchronisation.
 pub trait Texture: Send + Sync {
-    /// Samples at `(u, v)`, returning linear RGBA.
+    /// Samples at `(u, v)` over a footprint `width` wide, returning linear
+    /// RGBA.
     ///
     /// `u`/`v` arrive **unwrapped** — `u = 3.4` is the fourth UDIM tile, not
     /// `0.4` of the first — because tile selection is the host's addressing
     /// job. A non-UDIM texture wraps them itself (MaterialX's default address
     /// mode is `periodic`).
     ///
-    /// Must not panic: a non-finite coordinate is the caller's bug, but this
-    /// is consulted from inside a renderer's inner loop where a panic takes
-    /// down a worker thread. Return a fallback instead.
-    fn eval(&self, u: f32, v: f32) -> [f32; 4];
+    /// `width` is the **diameter** of that footprint in the same UV units, so
+    /// one unit is one UDIM tile. It is a request, not a promise: how (or
+    /// whether) to filter over it is the host's resolution policy, exactly as
+    /// the decode is. **`0.0` means point-sample the finest detail the host
+    /// holds**, and is what a caller with no derivatives must pass — a
+    /// renderer that tracks no footprint therefore gets the unfiltered
+    /// behaviour rather than a wrong one.
+    ///
+    /// Must not panic: a non-finite coordinate or width is the caller's bug,
+    /// but this is consulted from inside a renderer's inner loop where a
+    /// panic takes down a worker thread. Return a fallback instead.
+    fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4];
 }
 
 /// A shared handle to a [`Texture`], carryable inside an [`crate::Op`].
@@ -37,8 +46,8 @@ pub struct TextureRef(pub Arc<dyn Texture>);
 impl TextureRef {
     /// Samples the texture — see [`Texture::eval`].
     #[inline]
-    pub fn eval(&self, u: f32, v: f32) -> [f32; 4] {
-        self.0.eval(u, v)
+    pub fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+        self.0.eval(u, v, width)
     }
 }
 
