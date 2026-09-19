@@ -49,6 +49,12 @@ fn main() {
 /// Only reads headers and face tables — no pixel data — so it is fast even
 /// over thousands of files, and it accounts for faces *smaller* than the cap
 /// rather than assuming every face pays the maximum.
+///
+/// Counts the mip pyramid the loader now builds under each capped face, so
+/// the comparison table across caps answers the question that matters: a
+/// *lower* cap with correct minification filtering can both cost less and
+/// look better at distance than a higher flat one. `CRUST_PTEX_MIP=0` renders
+/// the base column instead.
 fn budget_dir(dir: &str, cap: i8) {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_ptx(std::path::Path::new(dir), &mut files);
@@ -82,8 +88,20 @@ fn budget_dir(dir: &str, cap: i8) {
                 1u64 << info.res.ulog2.min(cap).max(0),
                 1u64 << info.res.vlog2.min(cap).max(0),
             );
-            // The loader stores interleaved f32 RGB.
-            bytes += w * h * 3 * 4;
+            // The loader stores interleaved f32 RGB, as a mip pyramid: each
+            // level halves both axes until both reach one texel. That is
+            // about 4/3 of the base, and a shade more for a non-square face,
+            // whose chain halves rather than quarters once the short axis has
+            // pinned — so it is summed rather than scaled by 4/3.
+            let (mut lw, mut lh) = (w, h);
+            loop {
+                bytes += lw * lh * 3 * 4;
+                if lw <= 1 && lh <= 1 {
+                    break;
+                }
+                lw = (lw / 2).max(1);
+                lh = (lh / 2).max(1);
+            }
             full += (1u64 << info.res.ulog2.max(0)) * (1u64 << info.res.vlog2.max(0)) * 3 * 4;
         }
         let group = f
