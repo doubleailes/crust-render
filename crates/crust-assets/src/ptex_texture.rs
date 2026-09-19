@@ -294,8 +294,13 @@ impl PtexTexture for PtexColor {
         // level-0 resolution. Measured against the denser axis: an isotropic
         // footprint over a 64x16 face is minified most where the texels are,
         // and reading the coarser level is the choice that does not alias.
-        let lod = (width * w.max(h) as f32).log2();
-        let lod = lod.clamp(0.0, (f.levels - 1) as f32);
+        let texels = width * w.max(h) as f32;
+        // Magnification short-circuit, as in `UvTexture::sample_tile`: the
+        // answer is level 0 and the `log2` would only confirm it.
+        if texels <= 1.0 {
+            return self.sample_level(f.offset as usize, w, h, fu, fv);
+        }
+        let lod = texels.log2().clamp(0.0, (f.levels - 1) as f32);
         let lo = lod.floor();
         let frac = lod - lo;
         let (off_a, wa, ha) = f.level(lo as usize);
