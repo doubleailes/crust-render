@@ -47,6 +47,22 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
+/// The inverse of [`srgb_to_linear`]: linear `[0, 1]` back to display-encoded.
+///
+/// Needed only to re-encode a mip level after averaging its parents in linear
+/// light. Levels are stored `u8` like the file they came from, so the
+/// averaging has to round-trip through the transfer function — and doing the
+/// averaging in linear is the whole point, since summing display-encoded
+/// values is not summing light.
+#[inline]
+pub fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// The host side of `crust_core::AssetLoader`, reading from the filesystem.
 ///
 /// The engine asks for pixels, this decodes them: OpenEXR through `exr`,

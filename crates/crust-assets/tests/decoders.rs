@@ -164,7 +164,27 @@ fn a_single_sample_png_loads_as_one_tile() {
     let (w, h) = tex.tile_size();
     assert!(w > 0 && h > 0);
     assert!(w <= DEFAULT_MAX_EDGE && h <= DEFAULT_MAX_EDGE);
-    assert_eq!(tex.bytes(), w * h * 3, "8-bit RGB storage");
+    // 8-bit RGB storage, plus the mip chain: each level halves both axes, so
+    // the series sums to just under 4/3 of the base.
+    let (mut lw, mut lh, mut expect, mut levels) = (w, h, 0usize, 0usize);
+    loop {
+        expect += lw * lh * 3;
+        levels += 1;
+        if lw <= 1 && lh <= 1 {
+            break;
+        }
+        (lw, lh) = (lw.div_ceil(2), lh.div_ceil(2));
+    }
+    assert_eq!(
+        tex.bytes(),
+        expect,
+        "8-bit RGB storage over the whole pyramid"
+    );
+    assert_eq!(tex.level_count(), levels);
+    assert!(
+        tex.bytes() < w * h * 3 * 4 / 3 + 3,
+        "pyramid costs under a third extra"
+    );
     let px = tex.eval(0.5, 0.5, 0.0);
     for c in px {
         assert!((0.0..=1.0).contains(&c), "{px:?}");
@@ -325,4 +345,132 @@ fn read_channel_decodes_every_ptex_data_type() {
         read_channel(&0xC000u16.to_le_bytes(), ptex::DataType::Half),
         -2.0
     );
+}
+
+// ---------------------------------------------------------------------------
+// Mip pyramids
+// ---------------------------------------------------------------------------
+
+/// A checkerboard of pure black and white texels, written as a PNG.
+///
+/// The one pattern where the right answer is known in advance: every 2x2 box
+/// holds two black and two white texels, so every mip level above the base is
+/// uniform mid-grey *in linear light* — which is what makes it a test of the
+/// averaging space and not just of the arithmetic.
+fn write_checker(path: &std::path::Path, n: u32) {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("temp dir");
+    let img = image::RgbImage::from_fn(n, n, |x, y| {
+        if (x + y) % 2 == 0 {
+            image::Rgb([255, 255, 255])
+        } else {
+            image::Rgb([0, 0, 0])
+        }
+    });
+    img.save(path).expect("write png");
+}
+
+#[test]
+fn a_wide_footprint_converges_to_the_mean_and_a_zero_one_does_not() {
+    let dir = std::env::temp_dir().join("crust_mip_checker");
+    let _ = std::fs::remove_dir_all(&dir);
+    let p = dir.join("checker.png");
+    write_checker(&p, 64);
+    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("checker loads");
+    assert!(tex.level_count() > 1, "a pyramid was built");
+
+    // A footprint covering the whole tile reads the 1x1 level, which is the
+    // average of the board: mid-grey.
+    let wide = tex.eval(0.5, 0.5, 4.0);
+    for c in &wide[..3] {
+        assert!((c - 0.5).abs() < 0.02, "wide sample {wide:?}");
+    }
+    // A zero footprint still sees the board's full contrast: two texel
+    // centres a texel apart must differ, which is exactly the aliasing the
+    // pyramid exists to filter and the point sample must not hide.
+    let a = tex.eval(0.5 / 64.0, 0.5 / 64.0, 0.0);
+    let b = tex.eval(1.5 / 64.0, 0.5 / 64.0, 0.0);
+    assert!((a[0] - b[0]).abs() > 0.9, "point samples {a:?} vs {b:?}");
+}
+
+#[test]
+fn a_zero_footprint_is_exactly_what_the_unmipped_texture_returns() {
+    // The guarantee `CRUST_RAY_CONES=0` rests on, and the reason the pyramid
+    // could be landed without moving a single checked-in render: with no
+    // footprint the lookup must reach level 0 and nothing else, bit for bit.
+    let dir = std::env::temp_dir().join("crust_mip_zero");
+    let _ = std::fs::remove_dir_all(&dir);
+    let p = dir.join("checker.png");
+    write_checker(&p, 32);
+
+    let mipped = UvTexture::open_with(&p, ColorSpace::Srgb, true).expect("loads");
+    let flat = UvTexture::open_with(&p, ColorSpace::Srgb, false).expect("loads");
+
+    assert_eq!(flat.level_count(), 1);
+    assert!(mipped.level_count() > 1);
+    for i in 0..17 {
+        for j in 0..17 {
+            let (u, v) = (i as f32 / 16.0, j as f32 / 16.0);
+            assert_eq!(
+                mipped.eval(u, v, 0.0),
+                flat.eval(u, v, 0.0),
+                "at ({u}, {v})"
+            );
+        }
+    }
+}
+
+#[test]
+fn levels_average_in_linear_light_not_in_the_file_encoding() {
+    // The distinction this test exists for: averaging a black/white checker
+    // in sRGB-encoded bytes gives 127/255 ≈ 0.5 *encoded*, which decodes to
+    // 0.21 linear — less than half the light actually there. Averaging in
+    // linear and re-encoding gives 0.5 linear, which is 188/255 encoded.
+    let dir = std::env::temp_dir().join("crust_mip_linear");
+    let _ = std::fs::remove_dir_all(&dir);
+    let p = dir.join("checker.png");
+    write_checker(&p, 16);
+    let tex = UvTexture::open(&p, ColorSpace::Srgb).expect("loads");
+    let coarse = tex.eval(0.5, 0.5, 4.0);
+    assert!(
+        (coarse[0] - 0.5).abs() < 0.02,
+        "coarsest level should be 0.5 linear, got {coarse:?} \
+         (0.21 would mean the average was taken in the file's encoding)"
+    );
+}
+
+#[test]
+fn an_odd_level_halves_by_div_ceil_so_every_level_spans_the_whole_tile() {
+    // `decode_tile` reduces by an arbitrary integer factor, so odd level-0
+    // dimensions are routine. Flooring would drop the last half-texel and
+    // each level's domain would slip against level 0's.
+    let dir = std::env::temp_dir().join("crust_mip_odd");
+    let _ = std::fs::remove_dir_all(&dir);
+    let p = dir.join("odd.png");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // 25x9: both axes odd, and they run out at different levels.
+    image::RgbImage::from_fn(25, 9, |x, _| {
+        image::Rgb([if x < 13 { 255 } else { 0 }, 128, 64])
+    })
+    .save(&p)
+    .expect("write png");
+    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+    // 25 -> 13 -> 7 -> 4 -> 2 -> 1 is six levels; 9 reaches 1 sooner and pins.
+    assert_eq!(tex.level_count(), 6);
+    // Every level still spans the whole tile: u = 0.01 lands in the light
+    // half and u = 0.99 in the dark one at every level that still has texels
+    // to tell them apart. A floored halving would slip each level's domain
+    // and let the halves drift across the midpoint.
+    for w in [0.0, 0.05, 0.1, 0.2] {
+        let left = tex.eval(0.01, 0.5, w);
+        let right = tex.eval(0.99, 0.5, w);
+        assert!(
+            left[0] > 0.5 && right[0] < 0.5,
+            "width {w}: {left:?} / {right:?}"
+        );
+    }
+    // The coarsest level is one texel, so it is the whole tile's mean and
+    // both edges read the same thing — the chain really does bottom out.
+    let a = tex.eval(0.01, 0.5, 8.0);
+    let b = tex.eval(0.99, 0.5, 8.0);
+    assert_eq!(a, b);
 }
