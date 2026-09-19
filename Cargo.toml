@@ -25,6 +25,19 @@ image = { version = "0.25.6", default-features = false, features = ["png", "hdr"
 # two crates naming a git dependency must match URL and rev byte for byte, or
 # Cargo sees two packages with the same lib name.
 ptex-rs = { git = "https://github.com/doubleailes/ptex-rs", rev = "36212f65dbd4caf7fb8786b34da5c041cc59d7f1" }
+# Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
+# tile at a time. Deliberately NOT routed through `image`'s `tiff` feature:
+# that pins 0.9, which predates the chunk API this needs (`read_chunk`,
+# `seek_to_image`), and pulling both would put two copies of the crate in the
+# graph under one lib name. `default-features = false` drops the fax/jpeg/lzw
+# decoders crust never asks for, leaving `tiff` + `quick-error` as the only new
+# packages — `flate2` and `half` are already here via png/ptex-rs/zip and exr.
+tiff = { version = "0.11.3", default-features = false, features = ["deflate"] }
+# Already in the graph transitively (png, ptex-rs, zip); named here because the
+# `.tx` writer deflates each tile itself. The `tiff` crate only applies its own
+# compression inside the bulk strip writer, which is not a path a tiled file
+# can take — so the zlib stream is ours to produce.
+flate2 = "1.1"
 
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.

@@ -21,6 +21,7 @@
 
 mod environment;
 mod ptex_texture;
+pub mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment};
