@@ -154,6 +154,16 @@ impl TileToken {
     }
 }
 
+/// Expands a `<UDIM>` / `<UVTILE>` token in `name` for chart coordinates
+/// `(u, v)`, or `None` when the name carries no token.
+///
+/// Shared with the streaming path so the two discover the same set of tiles:
+/// a sweep that disagreed about which files exist would make the two texture
+/// backends cover different parts of the chart.
+pub(crate) fn expand_token(name: &str, u: u32, v: u32) -> Option<String> {
+    TileToken::detect(name).map(|t| t.expand(name, u, v))
+}
+
 /// The UDIM number of the tile at zero-based chart coordinates.
 ///
 /// The internal tile key, whichever token named the file.

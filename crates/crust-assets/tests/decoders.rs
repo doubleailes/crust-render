@@ -82,7 +82,7 @@ fn the_sample_sky_exr_decodes() {
 
 #[test]
 fn file_assets_dispatches_on_extension() {
-    let map = FileAssets
+    let map = FileAssets::new()
         .load_environment(&samples().join("sky_env.exr"))
         .expect("exr through the trait");
     assert_eq!(map.width(), 2 * map.height());
@@ -93,14 +93,14 @@ fn missing_files_decline_rather_than_panic() {
     let ghost = samples().join("does_not_exist.exr");
     assert!(load_exr_environment(&ghost).is_none());
     assert!(load_image_environment(&samples().join("does_not_exist.png")).is_none());
-    assert!(FileAssets.load_environment(&ghost).is_none());
+    assert!(FileAssets::new().load_environment(&ghost).is_none());
     assert!(
-        FileAssets
+        FileAssets::new()
             .load_ptex(&samples().join("does_not_exist.ptx"))
             .is_none()
     );
     assert!(
-        FileAssets
+        FileAssets::new()
             .load_texture(&samples().join("does_not_exist.png"), ColorSpace::Raw)
             .is_none()
     );
@@ -257,7 +257,7 @@ fn colour_space_changes_the_decoded_value() {
 
 #[test]
 fn file_assets_hands_back_a_texture2d() {
-    let tex: std::sync::Arc<dyn Texture2D> = FileAssets
+    let tex: std::sync::Arc<dyn Texture2D> = FileAssets::new()
         .load_texture(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw)
         .expect("through the trait");
     let px = tex.eval(0.25, 0.25, 0.0);

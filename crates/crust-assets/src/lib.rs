@@ -70,7 +70,102 @@ pub fn linear_to_srgb(c: f32) -> f32 {
 /// Radiance `.hdr` and LDR images through `image`, per-face Ptex through
 /// `ptex-rs`. LDR pixels are un-gamma'd to linear, since the renderer works
 /// in linear light and an sRGB-encoded sky would be noticeably wrong.
-pub struct FileAssets;
+pub struct FileAssets {
+    /// The tile cache every streaming texture shares. Present whether or not
+    /// streaming is on, so the counters can be reported either way — an empty
+    /// one costs 64 empty maps.
+    cache: std::sync::Arc<tiled::TileCache>,
+    /// Read once at construction, not per `load_texture`: the switch decides
+    /// which backend every texture in the render uses, and reading the
+    /// environment per call would let it change mid-import.
+    streaming: bool,
+}
+
+impl Default for FileAssets {
+    fn default() -> Self {
+        FileAssets::new()
+    }
+}
+
+impl FileAssets {
+    pub fn new() -> FileAssets {
+        let streaming = std::env::var("CRUST_TEX_STREAM").as_deref() == Ok("1");
+        let budget = tiled::TileCache::budget_from_env();
+        if streaming {
+            info!(
+                "Streaming textures from .tx with a {:.0} MiB tile cache",
+                budget as f64 / (1024.0 * 1024.0)
+            );
+        }
+        FileAssets {
+            cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
+            streaming,
+        }
+    }
+
+    /// The tile cache's counters, in the shape `--stats` reports.
+    ///
+    /// Converted here rather than in `crust-core` because the dependency runs
+    /// that way: `crust-assets` knows about `crust-core`, not the reverse, so
+    /// the host pushes its numbers in — exactly as `main.rs` already assigns
+    /// `stats.rays` from what the renderer handed back.
+    pub fn texture_cache_stats(&self) -> crust_core::TextureCacheStats {
+        let c = self.cache.counters();
+        crust_core::TextureCacheStats {
+            micro_hits: c.micro_hits,
+            hits: c.hits,
+            misses: c.misses,
+            redundant: c.redundant,
+            raced: c.raced,
+            evictions: c.evictions,
+            bytes_read: c.bytes_read,
+            peak_bytes: c.peak_bytes,
+            errors: c.errors,
+            budget_bytes: c.budget_bytes,
+        }
+    }
+
+    /// The `.tx` that would back `path`, if one exists next to it.
+    ///
+    /// A scene names its textures as the artist authored them — `.png`,
+    /// `.exr` — so the streaming path looks for a converted sibling rather
+    /// than demanding the USD be rewritten. `examples/maketx` produces them;
+    /// converting on first use instead is a deliberate follow-up, because a
+    /// renderer that silently writes multi-gigabyte files next to a read-only
+    /// asset library is a surprise nobody asked for.
+    fn tx_sibling(path: &Path) -> std::path::PathBuf {
+        path.with_extension("tx")
+    }
+
+    fn open_streaming(
+        &self,
+        path: &Path,
+        space: ColorSpace,
+    ) -> Option<std::sync::Arc<dyn Texture2D>> {
+        let candidate = if path.extension().is_some_and(|e| e == "tx") {
+            path.to_path_buf()
+        } else {
+            Self::tx_sibling(path)
+        };
+        let started = Instant::now();
+        let tex = tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
+            let name = candidate.to_string_lossy();
+            uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
+        })?;
+        let (w, h) = tex.size();
+        info!(
+            "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {:?}) in {:?}",
+            candidate.display(),
+            tex.chart_count(),
+            w,
+            h,
+            tex.level_count(),
+            space,
+            started.elapsed()
+        );
+        Some(std::sync::Arc::new(tex))
+    }
+}
 
 impl AssetLoader for FileAssets {
     fn load_environment(&self, path: &Path) -> Option<EnvironmentMap> {
@@ -108,6 +203,15 @@ impl AssetLoader for FileAssets {
         if std::env::var("CRUST_TEX").as_deref() == Ok("0") {
             debug!("CRUST_TEX=0: ignoring {}", path.display());
             return None;
+        }
+        // Streaming first, preloading as the fallback. Anything the streaming
+        // path declines — no `.tx` beside the asset, a mip chain reduced in
+        // another colour space, a file it cannot read — lands here, so turning
+        // the switch on can make a render slower but never break it.
+        if self.streaming
+            && let Some(streamed) = self.open_streaming(path, space)
+        {
+            return Some(streamed);
         }
         let started = Instant::now();
         let loaded = UvTexture::open(path, space)?;

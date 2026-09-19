@@ -99,7 +99,14 @@ pub struct CacheStats {
     pub micro_hits: AtomicU64,
     pub hits: AtomicU64,
     pub misses: AtomicU64,
-    pub redundant: AtomicU64,
+    /// Successful tile decodes. Every one is either a tile's first, a
+    /// re-read after eviction, or a concurrent double fill; `counters()`
+    /// separates the three by subtraction rather than by counting them
+    /// independently, because the three events are observed under different
+    /// locks and a thread can be the second to mark a tile seen while being
+    /// the first to insert it.
+    pub decoded: AtomicU64,
+    pub raced: AtomicU64,
     pub evictions: AtomicU64,
     pub bytes_read: AtomicU64,
     pub peak_bytes: AtomicU64,
@@ -113,6 +120,7 @@ pub struct CacheCounters {
     pub hits: u64,
     pub misses: u64,
     pub redundant: u64,
+    pub raced: u64,
     pub evictions: u64,
     pub bytes_read: u64,
     pub peak_bytes: u64,
@@ -216,11 +224,30 @@ impl TileCache {
 
     pub fn counters(&self) -> CacheCounters {
         let s = &self.stats;
+        // Distinct tiles ever decoded, across every file.
+        let distinct = lock(&self.files)
+            .map(|files| {
+                files
+                    .iter()
+                    .map(|f| lock(&f.seen).map(|s| s.len() as u64).unwrap_or(0))
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
         CacheCounters {
             micro_hits: s.micro_hits.load(Ordering::Relaxed),
             hits: s.hits.load(Ordering::Relaxed),
             misses: s.misses.load(Ordering::Relaxed),
-            redundant: s.redundant.load(Ordering::Relaxed),
+            // Exact, and free of the race an independently counted version
+            // had: every successful decode is a first read, a re-read after
+            // eviction, or a double fill, and the other two are counted
+            // unambiguously — `distinct` under the file's own lock, `raced`
+            // under the shard lock that decided it.
+            redundant: s
+                .decoded
+                .load(Ordering::Relaxed)
+                .saturating_sub(distinct)
+                .saturating_sub(s.raced.load(Ordering::Relaxed)),
+            raced: s.raced.load(Ordering::Relaxed),
             evictions: s.evictions.load(Ordering::Relaxed),
             bytes_read: s.bytes_read.load(Ordering::Relaxed),
             peak_bytes: s.peak_bytes.load(Ordering::Relaxed),
@@ -267,13 +294,11 @@ impl TileCache {
             files.get(id.file as usize)?.clone()
         };
 
-        // A tile paged in twice over one render was evicted between the two
-        // reads — the budget is too small for the working set. Counted here
-        // because it is the one number that says so directly.
-        if let Some(mut seen) = lock(&slot.seen)
-            && !seen.insert((id.level, id.tile))
-        {
-            self.stats.redundant.fetch_add(1, Ordering::Relaxed);
+        // Which distinct tiles this file has ever yielded. Only the *count*
+        // is used, at report time, to separate a re-read after eviction from a
+        // double fill — see `CacheStats::decoded`.
+        if let Some(mut seen) = lock(&slot.seen) {
+            seen.insert((id.level, id.tile));
         }
 
         let mut dec = match lock(&slot.readers).and_then(|mut p| p.pop()) {
@@ -333,12 +358,19 @@ impl TileCache {
                 .is_none(),
             None => false,
         };
+        self.stats.decoded.fetch_add(1, Ordering::Relaxed);
         if inserted {
             let now = self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes;
             self.stats.peak_bytes.fetch_max(now, Ordering::Relaxed);
             if now > self.budget {
                 self.make_room();
             }
+        } else {
+            // The slot was already full, so another thread decoded the same
+            // tile while this one was decoding it. Wasted work, but bounded by
+            // the thread count and no reason to touch the budget — the two
+            // would be indistinguishable if they shared a counter.
+            self.stats.raced.fetch_add(1, Ordering::Relaxed);
         }
         Some(tile)
     }
