@@ -29,7 +29,8 @@
 //! worker, so every lock is taken with poison recovery and every failure
 //! returns `None` for the caller to turn into a fallback colour.
 
-use super::read::{TileReader, TiledFile};
+use super::{TileReader, TiledFile};
+use half::f16;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -58,24 +59,110 @@ pub struct TileId {
     pub tile: u32,
 }
 
-/// A decoded tile: `u8` RGB, clipped to its level's bounds.
+/// A tile's texels, interleaved RGB, in whatever representation the file
+/// stores them in.
+///
+/// **The variant is chosen by the source's sample type, not by its container.**
+/// Unsigned integer samples — the 8- and 16-bit TIFFs that make up every
+/// authored albedo — stay `U8` and keep the 256-entry decode table that has
+/// always served them; float samples, whether from an EXR or a float TIFF,
+/// become `Half`. That split is the whole point of the payload being an enum:
+/// an 8-bit texture pays nothing for HDR existing, and an HDR texture is not
+/// silently clipped to fit an 8-bit cache.
+///
+/// `Half` rather than `F32` because it is EXR's own storage type and because a
+/// tile's size *is* the residency policy here — the cache bounds bytes, so
+/// widening every sample to four bytes would halve how much texture fits in the
+/// same budget to recover precision the file never had.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TileData {
+    /// Texels in the file's own encoding; the sampler applies its colour-space
+    /// table on lookup.
+    U8(Vec<u8>),
+    /// Texels in **linear** light already; the sampler applies nothing.
+    Half(Vec<f16>),
+}
+
+impl TileData {
+    /// Component count — three per texel either way.
+    pub fn len(&self) -> usize {
+        match self {
+            TileData::U8(v) => v.len(),
+            TileData::Half(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn bytes(&self) -> u64 {
+        match self {
+            TileData::U8(v) => v.len() as u64,
+            TileData::Half(v) => (v.len() * std::mem::size_of::<f16>()) as u64,
+        }
+    }
+}
+
+/// A decoded tile, clipped to its level's bounds.
 ///
 /// `width` is the tile's *own* width, which for an edge tile is less than the
 /// file's tile edge. Indexing by the nominal edge instead shears every texture
 /// whose size is not a multiple of it.
 #[derive(Debug)]
 pub struct Tile {
-    pub pixels: Vec<u8>,
+    pub data: TileData,
     pub width: usize,
     pub height: usize,
 }
 
+#[cfg(test)]
+impl TileData {
+    /// The `u8` payload, for tests that compare a tile against the source
+    /// bytes it was cut from.
+    pub fn expect_u8(&self) -> &[u8] {
+        match self {
+            TileData::U8(v) => v,
+            other => panic!("expected an 8-bit tile, got {other:?}"),
+        }
+    }
+
+    /// The `half` payload, for tests that check a float source survived.
+    pub fn expect_half(&self) -> &[f16] {
+        match self {
+            TileData::Half(v) => v,
+            other => panic!("expected a half tile, got {other:?}"),
+        }
+    }
+}
+
 impl Tile {
+    /// One texel as linear RGB, by texel index within the tile.
+    ///
+    /// The single place the two payloads differ, and deliberately so: the
+    /// branch is on a value that is constant for the whole texture, so it
+    /// predicts perfectly, and keeping it here means the sampler, the bilinear
+    /// tap and the trilinear blend above it are written once rather than twice.
+    #[inline]
+    pub fn rgb(&self, texel: usize, to_linear: &[f32; 256]) -> [f32; 3] {
+        let o = texel * 3;
+        match &self.data {
+            TileData::U8(v) => [
+                to_linear[v[o] as usize],
+                to_linear[v[o + 1] as usize],
+                to_linear[v[o + 2] as usize],
+            ],
+            // Already linear: a float file carries scene-referred values, and
+            // putting a transfer curve on them would be inventing one.
+            TileData::Half(v) => [v[o].to_f32(), v[o + 1].to_f32(), v[o + 2].to_f32()],
+        }
+    }
+
     fn bytes(&self) -> u64 {
         // The `Vec`'s own header and the `Arc` count are deliberately included:
         // a budget that only counts payload under-reports by ~10% on small
         // tiles, and the whole point of the number is that it bounds RSS.
-        self.pixels.len() as u64 + std::mem::size_of::<Tile>() as u64 + 16
+        self.data.bytes() + std::mem::size_of::<Tile>() as u64 + 16
     }
 }
 
@@ -328,13 +415,13 @@ impl TileCache {
             pool.push(dec);
         }
 
-        let pixels = read?;
+        let data = read?;
         let (width, height) = slot
             .file
             .level(id.level as usize)
             .tile_size(id.tile, slot.file.tile_edge());
         let tile = Arc::new(Tile {
-            pixels,
+            data,
             width,
             height,
         });
@@ -552,7 +639,7 @@ mod tests {
                         tile,
                     })
                     .expect("cached");
-                assert_eq!(via.pixels, direct, "level {level} tile {tile}");
+                assert_eq!(via.data, direct, "level {level} tile {tile}");
                 let (tw, th) = li.tile_size(tile, TILE_EDGE);
                 assert_eq!((via.width, via.height), (tw, th));
             }
@@ -566,6 +653,69 @@ mod tests {
         });
         assert_eq!(cache.counters().hits, before.hits + 1);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The cache is indifferent to what backs a file, and its byte budget is
+    /// not.
+    ///
+    /// A `half` tile is six bytes a texel against a `u8` tile's three, so the
+    /// same budget holds half as many of them. That is the honest cost of HDR
+    /// and it has to show up in the accounting rather than in a surprise at
+    /// render time — a budget that counted payloads it does not hold would
+    /// bound nothing.
+    #[test]
+    fn half_tiles_are_budgeted_at_their_real_size() {
+        clear_microcache();
+        let dir = std::env::temp_dir().join("crust_tilecache_half");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("t.tx");
+        let (w, h) = (512usize, 512usize);
+        let src: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                [x * 0.125, y * 0.0625, 12.5]
+            })
+            .collect();
+        crate::tiled::write_tx_exr(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+
+        let tf = TiledFile::open(&path).expect("open");
+        let budget = 1024 * 1024;
+        let cache = TileCache::new(budget);
+        let id = cache.intern(tf.clone()).expect("intern");
+        let mut dec = tf.reader().expect("reader");
+
+        let l0 = tf.level(0);
+        let tiles = (l0.across * l0.down) as u32;
+        for tile in 0..tiles {
+            let direct = tf.read_tile(&mut dec, 0, tile).expect("direct");
+            let via = cache
+                .get(TileId {
+                    file: id,
+                    level: 0,
+                    tile,
+                })
+                .expect("cached");
+            assert_eq!(via.data, direct, "tile {tile}");
+        }
+
+        let c = cache.counters();
+        // Six bytes a texel, plus the per-tile header the budget deliberately
+        // counts. A `u8` file of the same size would report half of this.
+        let texels = (w * h) as u64;
+        assert!(
+            c.bytes_read >= texels * 6 && c.bytes_read < texels * 6 + tiles as u64 * 128,
+            "{} bytes for {texels} texels",
+            c.bytes_read
+        );
+        assert!(c.evictions > 0, "a 1 MiB budget must have swept");
+        assert!(
+            cache.resident() <= budget * 2,
+            "resident {} against a {budget}-byte budget",
+            cache.resident()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The budget is a bound on residency, not a suggestion.
@@ -634,7 +784,12 @@ mod tests {
         let l0 = tf.level(0);
         let tiles = (l0.across * l0.down) as u32;
         let want: Vec<Vec<u8>> = (0..tiles)
-            .map(|t| tf.read_tile(&mut dec, 0, t).expect("direct"))
+            .map(|t| {
+                tf.read_tile(&mut dec, 0, t)
+                    .expect("direct")
+                    .expect_u8()
+                    .to_vec()
+            })
             .collect();
         let want = Arc::new(want);
 
@@ -655,7 +810,11 @@ mod tests {
                                 tile: t,
                             })
                             .expect("tile");
-                        assert_eq!(got.pixels, want[t as usize], "tile {t} on thread {k}");
+                        assert_eq!(
+                            got.data.expect_u8(),
+                            want[t as usize],
+                            "tile {t} on thread {k}"
+                        );
                     }
                 })
             })
@@ -688,21 +847,15 @@ mod tests {
             level: 1,
             tile: 0,
         };
-        let first = with_tile(&cache, a, |t| t.pixels.clone()).expect("a");
-        let second = with_tile(&cache, b, |t| t.pixels.clone()).expect("b");
+        let first = with_tile(&cache, a, |t| t.data.clone()).expect("a");
+        let second = with_tile(&cache, b, |t| t.data.clone()).expect("b");
         let base = cache.counters();
 
         // Four alternating taps — the trilinear pattern — must all be
         // microcache hits, because two slots hold both levels at once.
         for _ in 0..2 {
-            assert_eq!(
-                with_tile(&cache, a, |t| t.pixels.clone()).expect("a"),
-                first
-            );
-            assert_eq!(
-                with_tile(&cache, b, |t| t.pixels.clone()).expect("b"),
-                second
-            );
+            assert_eq!(with_tile(&cache, a, |t| t.data.clone()).expect("a"), first);
+            assert_eq!(with_tile(&cache, b, |t| t.data.clone()).expect("b"), second);
         }
         let now = cache.counters();
         assert_eq!(now.micro_hits, base.micro_hits + 4);
