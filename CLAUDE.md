@@ -769,12 +769,13 @@ Schema mapping:
     between them by **magic number** — which is what makes `maketx --format exr
     -o foo.tx`, an EXR inside a file named `.tx`, simply work. The split is by
     *sample type*, not container: unsigned integer samples (8- and 16-bit TIFF)
-    page in as `TileData::U8` exactly as before, float samples as
-    `TileData::Half`. An 8-bit texture pays nothing for HDR existing — its
+    page in as `TileKind::U8` exactly as before, float samples as
+    `TileKind::Half`. An 8-bit texture pays nothing for HDR existing — its
     tiles, its bytes and its bit-identical agreement with the preload path are
     untouched — and an HDR one is not silently clipped to fit an 8-bit cache.
-    The one branch is `Tile::rgb`, on a value that is constant for a whole
-    texture and therefore perfectly predicted.
+    A tile's payload is bytes plus that kind rather than an enum over two
+    buffers, and the sampler reads it through `Tile::rgb_u8` or `Tile::rgb_half`
+    chosen by a const generic — for the measured reason two bullets down.
   - **Why EXR and not float TIFF.** TIFF can hold `f32`, but the format is the
     smaller half of the question and the industry already answered it: OIIO's
     `maketx --format exr` writes 64x64-tiled, full-MIPMAP, zipped `half` with
