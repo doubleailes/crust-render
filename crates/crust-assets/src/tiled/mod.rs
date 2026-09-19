@@ -23,8 +23,12 @@
 //! reduces exactly as the in-memory pyramid does, which is what lets a streamed
 //! render and a preloaded one agree texel for texel.
 
+mod cache;
+mod read;
 mod write;
 
+pub use cache::{CacheCounters, DEFAULT_BUDGET_BYTES, Tile, TileCache, TileId, with_microcache};
+pub use read::{LevelInfo, TileReader, TiledFile};
 pub use write::{TILE_EDGE, write_tx};
 
 #[cfg(test)]
@@ -142,6 +146,136 @@ mod tests {
         // asks for levels in whatever order the rays happen to need them.
         dec.seek_to_image(0).expect("back to level 0");
         assert_eq!(dec.dimensions().expect("dims"), (w as u32, h as u32));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `TiledFile` recovers, through its own API, exactly the image the writer
+    /// was given — every level, every tile, every texel.
+    ///
+    /// The round-trip above proves the *format* works; this proves the reader's
+    /// geometry does. The two are separable failures: `locate` and `tile_size`
+    /// can each be wrong in ways that still decode successfully and simply
+    /// return the wrong texels, which is the class of bug a texture makes
+    /// impossible to see by eye.
+    #[test]
+    fn the_reader_recovers_every_level_texel_for_texel() {
+        let dir = std::env::temp_dir().join("crust_tx_reader");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("read.tx");
+
+        // Deliberately not a multiple of the tile edge in either axis, so the
+        // right column and bottom row of tiles are both clipped.
+        let (w, h) = (200usize, 70usize);
+        let src: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [
+                    (x * 7 % 251) as u8,
+                    (y * 13 % 251) as u8,
+                    ((x + y) % 251) as u8,
+                ]
+            })
+            .collect();
+        let levels = write_tx(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+
+        let tf = TiledFile::open(&path).expect("open");
+        assert_eq!(tf.tile_edge(), TILE_EDGE);
+        assert_eq!(tf.level_count(), levels.len());
+        let mut dec = tf.reader().expect("reader");
+
+        // Level 0 must come back bit-exact: nothing has filtered it. Walked a
+        // tile at a time and reconstructed into a full image, which checks
+        // `locate` and `tile_size` against each other — a coordinate the two
+        // disagree about lands in the wrong place and shows up as a gap.
+        let l0 = tf.level(0);
+        assert_eq!((l0.width, l0.height), (w, h));
+        let mut rebuilt = vec![0u8; w * h * 3];
+        for idx in 0..(l0.across * l0.down) as u32 {
+            let (tw, th) = l0.tile_size(idx, TILE_EDGE);
+            let tile = tf.read_tile(&mut dec, 0, idx).expect("tile");
+            let (tx, ty) = (idx as usize % l0.across, idx as usize / l0.across);
+            for ly in 0..th {
+                for lx in 0..tw {
+                    let (x, y) = (tx * TILE_EDGE + lx, ty * TILE_EDGE + ly);
+                    let d = (y * w + x) * 3;
+                    rebuilt[d..d + 3].copy_from_slice(&tile[(ly * tw + lx) * 3..][..3]);
+                }
+            }
+        }
+        assert_eq!(rebuilt, src, "level 0 did not reconstruct");
+
+        // And `locate` agrees with that reconstruction for a sample of texels,
+        // including the ones in the clipped right column and bottom row.
+        for &(x, y) in &[(0, 0), (63, 63), (64, 0), (199, 69), (128, 64), (199, 0)] {
+            let (idx, lx, ly) = l0.locate(x, y, TILE_EDGE);
+            let (tw, _) = l0.tile_size(idx, TILE_EDGE);
+            let tile = tf.read_tile(&mut dec, 0, idx).expect("tile");
+            let s = (y * w + x) * 3;
+            assert_eq!(
+                &tile[(ly * tw + lx) * 3..][..3],
+                &src[s..s + 3],
+                "texel ({x}, {y}) via tile {idx}"
+            );
+        }
+
+        // Every coarser level reads, reports the geometry the writer recorded,
+        // and its tiles are the size the clipping rule says they are.
+        for (n, &(lw, lh)) in levels.iter().enumerate() {
+            let li = tf.level(n);
+            assert_eq!((li.width, li.height), (lw, lh), "level {n} size");
+            assert_eq!(li.across, lw.div_ceil(TILE_EDGE));
+            assert_eq!(li.down, lh.div_ceil(TILE_EDGE));
+            for idx in 0..(li.across * li.down) as u32 {
+                let (tw, th) = li.tile_size(idx, TILE_EDGE);
+                let tile = tf.read_tile(&mut dec, n, idx).expect("tile");
+                assert_eq!(tile.len(), tw * th * 3, "level {n} tile {idx}");
+            }
+        }
+
+        // Asking past the last level clamps rather than failing — the sampler
+        // clamps too, but a cache that asked one level too far should degrade
+        // to the coarsest rather than error a worker.
+        let past = tf.read_tile(&mut dec, 99, 0).expect("clamped level");
+        assert_eq!(past.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that is not tiled, or is planar, must decline at open.
+    ///
+    /// Planar especially: `PlanarConfiguration = 2` panics inside
+    /// `expand_chunk` on `tiff` 0.11.3 (image-tiff#403), and with
+    /// `panic = "abort"` that is the process, not the worker. Declining at open
+    /// turns it into a texture that falls back to a constant colour.
+    #[test]
+    fn a_stripped_or_unreadable_file_declines_rather_than_panicking() {
+        let dir = std::env::temp_dir().join("crust_tx_reject");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // Not a TIFF at all.
+        let junk = dir.join("junk.tx");
+        std::fs::write(&junk, b"this is not a tiff").expect("write");
+        assert!(TiledFile::open(&junk).is_err());
+
+        // A real, valid, *stripped* TIFF — the common mistake of pointing the
+        // streaming path at an unconverted file.
+        let stripped = dir.join("stripped.tx");
+        {
+            let f = std::fs::File::create(&stripped).expect("create");
+            let mut enc =
+                tiff::encoder::TiffEncoder::new(std::io::BufWriter::new(f)).expect("encoder");
+            let img: Vec<u8> = vec![128; 32 * 32 * 3];
+            enc.write_image::<tiff::encoder::colortype::RGB8>(32, 32, &img)
+                .expect("write stripped");
+        }
+        let err = TiledFile::open(&stripped).expect_err("stripped must decline");
+        assert!(
+            err.to_string().contains("tiled"),
+            "the message should say what is wrong: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
