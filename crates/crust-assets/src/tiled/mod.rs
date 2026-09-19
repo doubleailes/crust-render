@@ -28,7 +28,7 @@ mod read;
 mod stream;
 mod write;
 
-pub use cache::{CacheCounters, DEFAULT_BUDGET_BYTES, Tile, TileCache, TileId, with_microcache};
+pub use cache::{CacheCounters, DEFAULT_BUDGET_BYTES, Tile, TileCache, TileId, with_tile};
 pub use read::{LevelInfo, TileReader, TiledFile};
 pub use stream::StreamingTexture;
 pub(crate) use write::space_name;
