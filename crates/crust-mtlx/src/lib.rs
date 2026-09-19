@@ -20,6 +20,9 @@
 //! [`compile`] runs all three for one material node. The crate decodes *no
 //! pixels*: an `image` node's file is handed to the caller's
 //! [`TextureLoader`], which returns a [`Texture`] sampler or declines.
+//! `forbid(unsafe_code)`: no `unsafe` here, and `roxmltree` was chosen over a
+//! streaming parser partly to keep it that way.
+#![forbid(unsafe_code)]
 
 pub mod bsdf;
 pub mod eval;

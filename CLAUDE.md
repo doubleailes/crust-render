@@ -83,6 +83,12 @@ scripts/test_simd_matrix.sh -p crust-rt
 # filtered against unfiltered would measure bias, not error).
 python3 scripts/gen_texture_alias_scene.py /tmp/alias --measure
 
+# Streaming textures. Convert once (the mip chain is reduced in linear light,
+# the same `reduce_half` the in-memory pyramid uses, so a streamed render and a
+# preloaded one agree texel for texel), then render with the cache on.
+cargo run --release -p crust-render --example maketx -- 'albedo.<UDIM>.png' srgb_texture
+CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
@@ -115,6 +121,13 @@ branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids stil
 resident. Either side alone is bit-identical to the pre-filtering renderer, and the two
 produce the same image as each other — which is what makes them an honest A/B of the two
 halves: the pyramid, and the footprint that selects from it.
+
+Texture *residency* has two more. `CRUST_TEX_STREAM=1` swaps the preloaded `UvTexture`
+for a streaming one that pages 64x64 tiles out of a `.tx` under a byte budget set by
+`CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own). It is opt-in, and it falls back
+to preloading for any texture it declines — no converted sibling beside the asset, a mip
+chain reduced in a different colour space, a file it cannot read — so turning it on can
+make a render slower but never break it.
 
 ## Measuring a change
 
@@ -737,6 +750,71 @@ Schema mapping:
     1024 cap is 1000×666), and the lookup maps `x = u·width − 0.5`, so flooring
     an odd axis drops its last half-texel and that level's domain slips against
     level 0's — visible as a crawl across mip transitions on a slow camera move.
+- **Streaming textures** (`crust-assets/src/tiled/`) — the residency half of the
+  texture problem, as opposed to the filtering half above. Opt-in via
+  `CRUST_TEX_STREAM=1`; the preloaded `UvTexture` remains the default and the
+  correctness oracle.
+  - **Why.** Preloading makes memory scale with the scene's total texture
+    footprint, which is the only reason `CRUST_TEX_MAX` exists — and a cap is a
+    poor residency policy, because it discards authored detail permanently and
+    still cannot help a scene that binds more than fits. Production renderers
+    convert once, offline, to a tiled mip-mapped file and stream tiles behind a
+    bounded cache, so memory scales with the *cache* instead.
+  - **`.tx` is a plain TIFF.** Tiled 64x64, mip levels as chained IFDs,
+    Deflate. `tiff` 0.11.3 reads one tile at one level with a real seek
+    (`seek_to_image` + `read_chunk`, which walks the cached `TileOffsets`
+    table); it **cannot write** tiled, so `write.rs` supplies the tile grid, the
+    per-tile zlib stream and the tile tags while borrowing `DirectoryEncoder`
+    for the header, IFD chaining and entry serialisation. Three upstream
+    hazards are designed around: tiled **LZW** fails to decode (#395) so only
+    Deflate is ever written; `PlanarConfiguration = 2` **panics** inside
+    `expand_chunk` (#403) so planar files are refused at open rather than
+    allowed to abort a worker; and the right-edge fix (#400) is in the
+    `read_image` assembly path, which is why only `read_chunk` is used.
+  - **A tile is written padded and read back clipped.** TIFF6 says a tile is
+    always `TileWidth x TileLength`, but `tiff` returns `chunk_data_dimensions`,
+    so an edge tile is narrower. Indexing it by the nominal edge reads 64 texels
+    of stride into a 22-texel row and shears the right-hand column of every
+    texture whose size is not a multiple of 64.
+  - **The cache is OIIO's algorithm, not an LRU.** `check_max_mem` there is a
+    clock hand giving each entry one second chance, `try_lock`ed so a thread
+    that finds a sweep in progress carries on rather than queueing behind it —
+    the budget is a target, not an invariant, and is briefly exceeded by
+    whatever other threads insert while one sweeps. That is a few hundred lines
+    of `std::sync`, which is why there is no `moka`/`quick_cache` dependency:
+    both carry internal `unsafe`, and the whole workspace is now
+    `forbid(unsafe_code)` (`crust-core` is `deny`, for one test-only
+    `GlobalAlloc`).
+  - **Three tiers, and the top one does the work.** A per-thread two-entry
+    microcache, then 64 sharded maps, then a decode. Measured on the alias
+    scene: **98.6% of 8.7 M lookups never reach a lock**, because a bilinear tap
+    reads one tile four times and trilinear alternates between two levels —
+    which is why there are two slots and not one. It also means the lookup path
+    itself, not contention, is what to optimise: `with_tile` hands the tile to a
+    closure rather than returning an `Arc`, because one refcount pair per texel
+    was the difference between streaming costing 4x a preloaded render and
+    costing 2x.
+  - **The colour space is recorded in the file** (`crust:mipspace=` in
+    ImageDescription) and a mismatch is refused. A `.tx` stores display-encoded
+    texels but reduces its levels in *linear light*, so the space is baked into
+    every level above 0: read an sRGB chain as raw and level 0 is perfectly
+    correct while every coarser level is wrong — visible only under
+    minification and, by eye, indistinguishable from a filtering bug. A file
+    with no marker (anything `maketx` wrote) is accepted, since its chain came
+    from OIIO's filter and there is nothing to match against.
+  - **The invariant.** For any texture at or below the preload cap, streamed
+    and preloaded renders must be **bit-identical** — same level 0, same
+    `reduce_half`, same level selection. `samples/materialx_basic` at 16 spp:
+    0 of 230 400 pixels differ. Measured on 8 UDIM tiles of 2048² (96 MiB
+    authored), 640x360 at 4 spp: preload capped 54.16 MiB / 0.223s with detail
+    discarded, preload uncapped 142.46 MiB / 0.231s, **streamed at a 16 MiB
+    budget 15.94 MiB / 0.449s and bit-identical to the uncapped preload**. The
+    ~2x render cost is the honest worst case — one textured plane at depth 2,
+    so nearly every shading call is a fetch.
+  - **Conversion is explicit**, via `examples/maketx`. Auto-converting on first
+    use (Arnold's `autotx`) is a deliberate follow-up: a renderer that silently
+    writes multi-gigabyte files next to a read-only asset library is a surprise
+    nobody asked for.
 - **Ptex** (`texture.rs`, plus the decoder in `crust-assets/src/ptex_texture.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
@@ -1122,6 +1200,20 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
   come from USD.
+- **Texture residency caveats.** UV textures stream (above); **Ptex does not**, so
+  `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the island's 494 GiB of
+  authored Ptex is renderable only because of it. That is a limitation of the *reader*,
+  not of crust: a `.ptx` is already a per-face mip pyramid and `ptex-rs` already
+  addresses it randomly through `get_data_at_res`, so the fix is a `PtexCache`
+  equivalent in [`ptex-rs`](https://github.com/doubleailes/ptex-rs) — exactly as the C++
+  Ptex library ships one — rather than a second cache in `crust-assets`. Do not bolt
+  Ptex onto the `.tx` tile cache; the two formats want different keys and the
+  per-face pyramid is already on disk. On the UV side: conversion is explicit rather than
+  automatic, the writer handles 8-bit RGB only (16-bit and float `.tx` files are read but
+  flattened to 8 bits on page-in, matching what the preload path does), there is no
+  single-flight on a miss so two workers can decode the same tile at once (counted as
+  "concurrent double fills", bounded by the thread count), and the cache is per-process
+  rather than shared between renders.
 - **Texture filtering caveats.** Minification is filtered now (ray cones plus
   trilinear mip pyramids, above), so what remains is the shape of that filter
   rather than its absence. It is **isotropic**: a chart stretched in one axis is

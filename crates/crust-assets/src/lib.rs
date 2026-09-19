@@ -18,6 +18,11 @@
 //! `CRUST_PTEX_MAX_LOG2` and `CRUST_TEX_MAX` cap the decoded resolutions —
 //! see the respective modules for why those caps are what make production
 //! assets loadable at all.
+//! `forbid(unsafe_code)`: this crate contains no `unsafe`, and the attribute
+//! is what keeps the README's "100% safe Rust" true rather than aspirational.
+//! It is load-bearing here — the tile cache was hand-rolled rather than taking
+//! a concurrent-cache dependency precisely so this would still hold.
+#![forbid(unsafe_code)]
 
 mod environment;
 mod ptex_texture;

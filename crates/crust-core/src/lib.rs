@@ -1,3 +1,15 @@
+//! The engine as a library: renderer, integrator, materials, lights,
+//! volumes, path guiding and USD import.
+//!
+//! `deny(unsafe_code)` rather than `forbid`, for exactly one reason: the
+//! subdivision allocation probe in `scene/subdiv.rs` installs a counting
+//! `GlobalAlloc`, and implementing that trait is inherently unsafe. `deny`
+//! lets that one test module opt out explicitly and visibly; `forbid` could
+//! not be overridden at all, and dropping the lint entirely would leave the
+//! claim unchecked everywhere else. Every other crate in the workspace is
+//! `forbid`.
+#![deny(unsafe_code)]
+
 mod aabb;
 mod buffer;
 mod camera;

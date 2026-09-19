@@ -1,3 +1,9 @@
+//! The CLI: parse args, build a `Scene`, render, write the images.
+//!
+//! `forbid(unsafe_code)`, like every crate here but `crust-core` — whose one
+//! exception is a test-only counting allocator.
+#![forbid(unsafe_code)]
+
 use clap::Parser;
 use crust_assets::FileAssets;
 use crust_core::Buffer;

@@ -30,6 +30,10 @@
 //! masks test against the ray's category bit exactly like Embree's. Hits
 //! carry `geom_id`/`prim_id` — the application owns the mapping from IDs
 //! to materials or anything else; this crate never sees shading data.
+//! `forbid(unsafe_code)`: the kernel is 100% safe Rust, which is the reason
+//! `docs/simd.md` records for stopping at 128-bit vectors rather than reaching
+//! for `core::arch` intrinsics.
+#![forbid(unsafe_code)]
 
 #[cfg(feature = "traversal-stats")]
 pub use bvh::stats as traversal_stats;

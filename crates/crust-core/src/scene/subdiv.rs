@@ -678,6 +678,12 @@ mod tests {
     static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+    // The crate is `deny(unsafe_code)`; this is the one exception, and it is
+    // scoped to the impl rather than to the module so anything else added
+    // nearby is still caught. `GlobalAlloc` cannot be implemented safely —
+    // that is the trait's contract, not a shortcut taken here — and the whole
+    // construct is `#[cfg(test)]`, so no `unsafe` reaches a shipped build.
+    #[allow(unsafe_code)]
     unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
         unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
             use std::sync::atomic::Ordering::Relaxed;
