@@ -844,6 +844,24 @@ Schema mapping:
     closure rather than returning an `Arc`, because one refcount pair per texel
     was the difference between streaming costing 4x a preloaded render and
     costing 2x.
+  - **The second backing must cost the first one nothing, and twice it did
+    not.** `bench_ab` against the pre-EXR binary on the 8-UDIM alias scene said
+    **+21%** on an 8-bit streamed render — a path that gains nothing from HDR
+    existing. Callgrind found both causes and the fixes are load-bearing, not
+    tidying. First, a `TileData` **enum** read per texel: matching it inside the
+    `with_tile` closure grew that closure past what LLVM would inline, so
+    `texel` went 414.9 M → 471.5 M instructions *and* grew a 216.7 M
+    out-of-line `texel::{closure#0}` that had not existed. The payload is
+    therefore bytes plus a `TileKind`, and the sampler is monomorphised over a
+    `const HALF: bool` decided once per `eval` from the file's own kind — the
+    information is per *texture*, so it does not belong in a per-texel branch.
+    Second, and larger, the `dyn Backend` facade itself: `texel` asks for
+    `tile_edge()` and `level()`, and routing those through a vtable is an
+    indirect call in the hottest loop in a textured render. `TiledFile` now
+    **copies** the geometry out of the backing at open and touches `inner` only
+    to read a tile. Together: `texel::<false>` is 414,851,273 instructions,
+    equal to the pre-EXR binary's to the instruction, whole-render instructions
+    are +0.017%, and wall clock lands at −5.4% min / −6.1% mean (i.e. noise).
   - **The colour space is recorded in the file** (`crust:mipspace=`, in
     ImageDescription for TIFF and as a header attribute for EXR) and a mismatch
     is refused. It means "the space this file is to be bound with", and the two
