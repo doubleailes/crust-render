@@ -76,6 +76,13 @@ cargo run --release -p crust-render --example xform_probe -- stage.usda /prim   
 # codegen: runs the suite with AVX/AVX2/AVX-512 off, with AVX2+FMA, and native.
 scripts/test_simd_matrix.sh -p crust-rt
 
+# Does texture filtering actually remove the aliasing? No checked-in sample
+# minifies a texture, so this generates the case that does -- a checkerboard
+# plane receding to the horizon -- and measures each configuration against a
+# high-spp reference OF ITSELF (aliasing does not converge, so comparing
+# filtered against unfiltered would measure bias, not error).
+python3 scripts/gen_texture_alias_scene.py /tmp/alias --measure
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
@@ -101,7 +108,13 @@ constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution
 A/B that separates a subdivision artifact from a material or lighting one; `CRUST_TEX=0`
 declines every UV texture so a MaterialX surface renders on its constant inputs (the
 `CRUST_PTEX=0` of the UV path), and `CRUST_TEX_MAX` caps each decoded texture tile's edge
-length in pixels (default 1024).
+length in pixels (default 1024). Texture *filtering* has three more, which pair up:
+`CRUST_TEX_MIP=0` and `CRUST_PTEX_MIP=0` build no mip pyramid (one level per tile / per
+face, a third less memory, and `eval`'s width ignored structurally rather than by a
+branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids still
+resident. Either side alone is bit-identical to the pre-filtering renderer, and the two
+produce the same image as each other — which is what makes them an honest A/B of the two
+halves: the pyramid, and the footprint that selects from it.
 
 ## Measuring a change
 
@@ -710,6 +723,20 @@ Schema mapping:
     `CRUST_TEX_MAX` (default 1024) box-filters each tile down at load; tiles are
     kept as `u8` and converted through a 256-entry table on lookup, since the
     files are 8-bit PNGs and nothing recovers precision that was never there.
+  - **Each tile carries a mip pyramid** below that cap, read trilinearly at the
+    hit's footprint (see "Texture filtering" below). Two details that are easy
+    to re-break. Levels average in **linear light** and re-encode through the
+    colour space's inverse curve, because averaging display-encoded bytes is
+    not averaging light: a black/white checker comes out at 0.21 linear instead
+    of 0.5, and the chain drifts darker at every level. The `CRUST_TEX_MAX`
+    reduction deliberately does *not* — it averages in the file's own encoding,
+    to keep a capped tile matching a DCC's preview of the same file — so the
+    two conventions differ on purpose; `docs/color_management.md` records both.
+    And axes halve by **`div_ceil`**, not `>> 1`: `decode_tile` reduces by an
+    arbitrary integer factor, so an odd level 0 is routine (3000×2000 under a
+    1024 cap is 1000×666), and the lookup maps `x = u·width − 0.5`, so flooring
+    an odd axis drops its last half-texel and that level's domain slips against
+    level 0's — visible as a crawl across mip transitions on a slow camera move.
 - **Ptex** (`texture.rs`, plus the decoder in `crust-assets/src/ptex_texture.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
@@ -750,7 +777,23 @@ Schema mapping:
     default (`CRUST_PTEX_MAX_LOG2` overrides as a log2 edge length) — full resolution is
     authored for close-ups, so `isLavaRocks`' 631 MB / 11 384-face colour file costs
     130 MiB instead of several GB, at a resolution far past what a 595×520 framing
-    resolves. Texels are decoded to linear once at load (the island's graph gammas raw
+    resolves. **Beneath that cap each face carries a full mip pyramid** down to 1×1,
+    selected per hit by the ray cone's footprint (see "Texture filtering" below). The two
+    answer different questions and it is worth keeping them apart: the cap is the
+    *ceiling* on detail, the pyramid is what makes minification below it correct. The cap
+    used to double as an accidental anti-aliaser, and now that it does not have to, it can
+    come **down**: the island is recorded below at 1.84 GiB with a 16×16 base against 4.58
+    GiB flat at 32×32, so 16×16 plus a pyramid is around 2.45 GiB — derived from that
+    figure rather than re-measured — for under half the memory and better filtering at
+    distance. `examples/tex_probe`'s budget table counts the pyramid, so that comparison
+    can be made against a real asset directly. Levels are reduced **in memory from the
+    decoded linear base**, not by asking the reader for each resolution: every extra read
+    takes `&mut self` through the serial load loop (another seek and inflate) and comes
+    back display-encoded, needing the `powf(2.2)` again. A level's offset is walked rather
+    than stored — `Face` gains one `u8` in its existing padding, which over 2.5 M faces is
+    the difference between free and a per-face offset array. The `+1/3` figure holds for
+    square faces only: once a non-square face's short axis pins at one texel the chain
+    halves rather than quarters, so 64×16 lands at 1.335×. Texels are decoded to linear once at load (the island's graph gammas raw
     Ptex, and `HwPtexTexture_1` declares `sourceColorSpace = "sRGB"`; treating the data as
     already linear overshoots albedo ~4×, which `examples/tex_probe` exists to settle).
     `docs/color_management.md` is the per-input inventory of which colour space every
@@ -781,6 +824,66 @@ Schema mapping:
     either way, since face ids index cage faces and subdivided face tables map back to
     them), and the reference's `islandsunEnv.tex` environment is a
     RenderMan-only format.
+- **Texture filtering** (`ray.rs`'s `RayCone`, `camera.rs`, `rt_world.rs`, the two
+  decoders) — how a texture lookup learns how much texture a pixel covers, which is
+  what a mip level is chosen from. Both texture paths sampled a single resolution
+  before this; minification was suppressed only by accident, because the memory caps
+  threw away the high frequencies first.
+  - **The footprint is a ray cone**, not ray differentials: a path tracer spawns one
+    ray at a time, so the four extra rays differentials want have nowhere to come
+    from, while two floats ride along free. `RayCone { width, spread }` is the
+    footprint's **diameter perpendicular to the ray** and its growth per world unit.
+  - **Primary rays** get `spread = Camera::pixel_span / |direction()|`. `get_ray`'s
+    direction lands on the focus plane at ray parameter 1, so one pixel of `s` moves
+    that point by `horizontal / res_w` — and dividing by the direction's length makes
+    `focus_dist` cancel, leaving `2·tan(vfov/2)/res_h` down the frame's axis. Pinned
+    by a test, because a wrong derivation here still looks plausible. The per-pixel
+    `1/|direction()|` is kept rather than simplified away: at the frame edge the
+    direction is longer and that pixel really does subtend less.
+  - **Two invariants that are easy to break.** The grazing `1/|cos θ|` stretch is
+    applied on the way *out* to a texture width and discarded — folded back into the
+    cone it compounds at every bounce (five grazing hits is 3125×) and every deep
+    texture reads its 1×1 level. And a bounce's lobe width comes from
+    `ScatterSample::spread`, **not** from `pdf`: by the time the tracer sees a sample
+    the pdf may have been replaced by the guide/BSDF mixture, so a near-mirror under a
+    trained guiding field would report a broad density and blur its own reflection.
+    A cosine lobe's pdf also goes to zero at grazing, which says nothing about how
+    wide the lobe is.
+  - **Cone → texture space** goes through a per-triangle **density**,
+    `sqrt(parametric_area / world_area)`, on `UvMap` (chart units) and `FaceMap`
+    (face units). Always built in the mesh's **local** frame with the placement's
+    `cbrt(|det|)` recorded per `geom_id`: at `flush_meshes` a baked placement shares
+    a local-space `FaceMap` while cloning its `UvMap`, and one scale cannot serve one
+    table in world space and the other in local. `MeshArena::intern` is the single
+    funnel every shared mesh passes through, so there are only two build sites (the
+    other is the non-invertible bake, whose vertices are already world-space and
+    which therefore takes scale 1.0). Being a *ratio of areas* a density needs no
+    mirror-swap correction, unlike every other lookup in `rt_world.rs` — do not add
+    a `swapped` arm. `FaceMap`'s parametric area is the constant 0.5 for every mapped
+    fan slice (both quad arms are unit-determinant shears, `Triangle` is the
+    identity), **except** on a subdivided mesh, whose triangles carry explicit
+    sub-face UVs: the constant would over-estimate by 4^L, 64× at level 3, and send
+    every Ptex lookup on the mesh to its coarsest level.
+  - **`SideTables::Default` is hand-written for one field**: `scale` must be 1.0, not
+    0.0. `attach_masked` pushes one per geometry, so a derived default divides every
+    footprint by zero and hands each texture an infinite width — which renders as a
+    perfectly plausible coarse mip.
+  - **`0.0` means point-sample** throughout: both `eval` methods take a width and
+    both read zero as "finest level", so a host that tracks no footprint gets the
+    historical behaviour rather than a wrong one. `Op::Texture` scales the width by
+    `uvtiling` alongside the coordinates — a texture tiled 10× is minified 10×.
+  - **Magnification short-circuits before the `log2`.** It is the common case, its
+    answer is level 0 regardless, and taking it through the clamp instead measured
+    ~9% of render on a scene whose output does not change at all.
+  - **Verified numerically** (`scripts/gen_texture_alias_scene.py --measure`), because
+    a wrong mip level is a plausible blur. Aliasing does not converge, so each
+    configuration is compared against a high-spp reference *of itself* — comparing
+    filtered against unfiltered would measure the bias between two different correct
+    answers. On the generated checkerboard plane, 16 spp against 1024 spp: RMSE
+    0.01024 filtered against 0.04211 point-sampled, a **4.11× reduction**. Cost is
+    ~1.7% of render on a magnified textured sample and ~19% on that plane, which is
+    the honest worst case (one textured plane, depth 2, so nearly every shading call
+    is a trilinear fetch).
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
@@ -1019,9 +1122,28 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
   come from USD.
-- **UV texture caveats.** Sampling is bilinear with no mip pyramid and no
-  filter width, so a texture minified far below its resolution aliases (the cap
-  hides most of this by accident, not by design). Normal maps need a tangent,
+- **Texture filtering caveats.** Minification is filtered now (ray cones plus
+  trilinear mip pyramids, above), so what remains is the shape of that filter
+  rather than its absence. It is **isotropic**: a chart stretched in one axis is
+  filtered by the geometric mean of the two, so grazing minification over-blurs
+  where an EWA or ripmap filter would not — the `1/|cos θ|` stretch widens the
+  footprint without giving it a direction. Cone spread ignores **surface
+  curvature**, so a reflection in a curved mirror filters as though the mirror
+  were flat, and ignores the **lens aperture** (a non-negative cone cannot
+  express a footprint converging to the focus plane — harmless, since defocus is
+  resolved by sampling) and the **IOR change across a refraction**. The
+  **base-resolution cap remains**: the pyramid retires aliasing, not the ceiling,
+  so a close-up still cannot resolve past 32×32 (Ptex) or 1024 (UV). **Nested
+  instances** filter against the outer placement's scale only — the inner
+  placements live inside a committed kernel scene and the kernel does not surface
+  the instance chain — and a **non-uniform** placement collapses to `cbrt(|det|)`,
+  so a `(1, 1, 10)` scale is off by up to ~4.6× on the stretched axis. Both
+  degrade to a slightly wrong level, never to a wrong lookup. Ptex still does not
+  filter across **face boundaries**. The guide branch of `sample_bounce_direction`
+  reports the widest possible lobe spread rather than the material's own, since it
+  never picked a lobe; that costs sharpness only on guided secondary bounces,
+  where the cone is near-saturated anyway.
+- **UV texture caveats.** Normal maps need a tangent,
   which only baked single-placement geometry has (above). A **subdivided** mesh
   carries no chart at all: refining a face-varying UV channel is a second
   synthetic hierarchy through the refiner, and carrying the cage's UVs onto

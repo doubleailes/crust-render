@@ -164,7 +164,8 @@ crate (no renderer dependency, just an XML parser and `glam`):
   the graph's own `colorspace` attribute) with a tangent frame for normal
   maps; the host decoder in `crust-assets` caps tile resolution
   (`CRUST_TEX_MAX`, default 1024 — the teapot's ceramic alone is 2.7 GB at
-  full resolution).
+  full resolution) and keeps a trilinear mip pyramid below that cap, selected
+  per hit by the ray cone's footprint.
 
 The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
 `<` inside an attribute value, which is not well-formed XML. MaterialX's own
@@ -351,7 +352,10 @@ Measured numbers from that import (see `CLAUDE.md` for the full breakdown):
   this scene, with pixel-identical output.
 - **Ptex** per-face texturing over the island's 2,576,238 texture faces, mip-capped by
   default to keep memory tractable: **4.58 GiB** at the default 32×32 cap versus
-  **494 GiB** if every face loaded at its authored full resolution.
+  **494 GiB** if every face loaded at its authored full resolution. Each face carries a
+  mip pyramid below that cap, so the cap is a memory ceiling rather than an accidental
+  anti-aliaser — and can therefore come down: 16×16 plus a full pyramid is around
+  2.45 GiB, under half the default, and filters better at distance.
 - Two `UsdLuxDomeLight` environment textures authored on the stage (a modeling choice
   in the source asset, not a crust limitation) currently both decode and both light the
   scene, peaking at ~11 GiB for that pair alone — the first lever to pull if memory is
@@ -389,8 +393,12 @@ the full, per-feature detail and workarounds:
   (per-vertex) blur and no quaternion-correct rotation blur.
 - **No OpenVDB / `UsdVolVolume` import.** Volumes are homogeneous, procedural noise, or
   an inline voxel grid authored directly in USD.
-- **UV texture filtering is bilinear with no mip pyramid**, so far-minified textures can
-  alias; Ptex textures are mip-capped by a fixed resolution ceiling instead.
+- **Texture filtering is isotropic.** Minification is filtered — ray cones give each hit
+  a footprint, and both the UV and Ptex paths read trilinear mip pyramids from it — but
+  the filter has no direction, so a chart stretched in one axis over-blurs at grazing
+  angles where an EWA or ripmap filter would not. Cone spread also ignores surface
+  curvature and the lens aperture, and the base-resolution caps still bound how much
+  detail a close-up can resolve.
 - **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
   layer is averaged into the coat rather than kept distinct, and MaterialX transmission
   nodes have no glass lobe equivalent yet.

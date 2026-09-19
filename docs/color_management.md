@@ -31,7 +31,8 @@ The work is split across the two crates along the same seam as everything else:
 (`usd_import.rs`), but decodes no **asset** — every image and Ptex decoder lives
 in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `PtexTexture` trait pins the contract at that boundary
-(`crust-core/src/texture.rs:32`): values returned from `eval` are linear, not
+(`crust-core/src/texture.rs`, the `PtexTexture` trait): values returned from
+`eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
 ## Three transfer curves, deliberately
@@ -42,7 +43,7 @@ interchangeable:
 | Curve | Formula | Where |
 | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open`); UV textures tagged `g22_rec709` |
+| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
 | **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture.rs`, `to_linear_table`) |
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
@@ -65,7 +66,7 @@ networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
 that reasoning in a comment at the call site (`usd_import.rs:2856-2861`,
-`crust-assets/src/ptex_texture.rs`, `PtexColor::open`).
+`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`).
 
 How much does the distinction matter? Across most of the range, very little —
 maximum absolute difference over `[0,1]` is 0.0085, and at 0.5 the two give
@@ -168,6 +169,35 @@ Ptex texels are decoded once at load into the preloaded immutable buffer, not
 per lookup — which is also why `CRUST_PTEX_MAX_LOG2`'s mip cap and the decode
 share the same pass.
 
+## Where texels get averaged, and in which space
+
+Two places reduce a texture at load, and they deliberately use **different
+spaces**. Both are correct for what they are for, and mixing them up is a
+plausible-looking bug rather than an obvious one.
+
+| Reduction | Where | Space | Why |
+| --- | --- | --- | --- |
+| **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture.rs`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
+| **Mip levels** | `uv_texture.rs`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
+| **Ptex mip levels** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since Ptex texels are stored linear `f32`. |
+
+The difference is not academic. A black/white checkerboard averaged in
+sRGB-encoded bytes gives `127/255 ≈ 0.5` *encoded*, which decodes to **0.21
+linear** — less than half the light actually present. Averaged in linear and
+re-encoded it gives 0.5 linear, which stores as `188/255`. Pinned by
+`levels_average_in_linear_light_not_in_the_file_encoding` in
+`crust-assets/tests/decoders.rs`.
+
+UV mip levels are stored back as `u8` in the file's own encoding rather than
+as linear `f32`, so the lookup's `u8`-indexed decode table is unchanged and the
+pyramid costs a third of the base rather than four times it. The re-encode uses
+`linear_to_srgb` or the matching inverse power law, chosen by
+[`encode_fn`][enc] — matched on the `ColorSpace` variant rather than on
+`gamma()`, so adding a colour space is a compile error there instead of a
+silent fall-through to `Raw`.
+
+[enc]: ../crates/crust-assets/src/uv_texture.rs
+
 ## Scalar inputs are never converted
 
 Roughness, weights, IOR, anisotropy, metalness, opacity, `intensity`,
@@ -212,7 +242,7 @@ crossing the `AssetLoader` seam names its space — that is what makes
 `srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. USD
 *attribute* reads are not covered: their curves remain independent inline
 implementations (`usd_import.rs` `disney_to_openpbr`, `crust-assets`
-`PtexColor::open`) that happen to agree, and nothing forces a newly added
+`PtexColor::open_with`) that happen to agree, and nothing forces a newly added
 colour attribute to state its source space; the default behaviour of adding
 one is to get gap #1 again, silently.
 
@@ -240,7 +270,19 @@ CRUST_PTEX=0 cargo run --release -- -i scene.usda -o out.exr
 # What are the actual texel values, before and after decode?
 cargo run --release -p crust-render --example tex_probe -- texture.ptx
 cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 y1]
+
+# Is it the decode, or the mip level it is being read at? These turn off the
+# filtering without touching the decode, so a difference that survives them is
+# a colour-space question and one that does not is a filtering question.
+CRUST_TEX_MIP=0 CRUST_PTEX_MIP=0 cargo run --release -- -i scene.usda -o out.exr
+CRUST_RAY_CONES=0 cargo run --release -- -i scene.usda -o out.exr
 ```
+
+The two are worth separating early, because a mip level averaged in the wrong
+space has the *same* signature as a missing decode — a minified surface that
+drifts darker than it should — and the fix is in a different file. A pyramid
+built on encoded bytes loses light at every level, so the error grows with
+distance from the camera; a missing decode is wrong at every distance equally.
 
 `tex_probe` exists specifically to settle whether a texture is
 display-encoded or linear: it prints raw values, so the overshoot signature of
