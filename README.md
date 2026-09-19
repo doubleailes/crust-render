@@ -6,8 +6,10 @@
 
 <br/>
 
-A physically-based path tracer written in 100% safe Rust (edition 2024, `forbid(unsafe_code)`
-on every crate). It loads scenes directly from **USD** — including production-scale assets
+A physically-based path tracer written in 100% safe Rust (edition 2024,
+`forbid(unsafe_code)` on every crate but `crust-core`, which is `deny` so that one
+test-only counting allocator — a `GlobalAlloc`, which cannot be implemented safely — can
+opt out explicitly). It loads scenes directly from **USD** — including production-scale assets
 such as Disney Animation's [Moana Island](#moana-benchmark) dataset — and implements its own
 watertight ray/triangle kernel, SBVH acceleration structure, OpenPBR übershader, MaterialX
 graph reader, volumetric integrator and Practical Path Guiding, with no dependency on Embree,
@@ -165,7 +167,12 @@ crate (no renderer dependency, just an XML parser and `glam`):
   maps; the host decoder in `crust-assets` caps tile resolution
   (`CRUST_TEX_MAX`, default 1024 — the teapot's ceramic alone is 2.7 GB at
   full resolution) and keeps a trilinear mip pyramid below that cap, selected
-  per hit by the ray cone's footprint.
+  per hit by the ray cone's footprint. `CRUST_TEX_STREAM=1` swaps that whole
+  path for a **streaming tile cache** instead: textures pre-converted to a
+  tiled, mip-mapped `.tx` (OIIO's format, read and written natively — it is a
+  plain TIFF) are paged in a 64x64 tile at a time under a byte budget, so
+  memory stops tracking the scene's texture footprint and the resolution cap
+  stops being needed at all.
 
 The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
 `<` inside an attribute value, which is not well-formed XML. MaterialX's own
@@ -397,8 +404,14 @@ the full, per-feature detail and workarounds:
   a footprint, and both the UV and Ptex paths read trilinear mip pyramids from it — but
   the filter has no direction, so a chart stretched in one axis over-blurs at grazing
   angles where an EWA or ripmap filter would not. Cone spread also ignores surface
-  curvature and the lens aperture, and the base-resolution caps still bound how much
-  detail a close-up can resolve.
+  curvature and the lens aperture.
+- **Ptex textures are still fully resident.** UV textures can stream (see above);
+  `.ptx` files cannot, so `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the
+  island's 494 GiB of authored Ptex is only renderable because of it. This is a limitation
+  of the *reader* rather than of crust: a `.ptx` is already a per-face mip pyramid that
+  [`ptex-rs`](https://github.com/doubleailes/ptex-rs) addresses randomly, so the fix is a
+  `PtexCache` equivalent there — exactly as the C++ Ptex library ships one — not a second
+  cache here.
 - **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
   layer is averaged into the coat rather than kept distinct, and MaterialX transmission
   nodes have no glass lobe equivalent yet.
