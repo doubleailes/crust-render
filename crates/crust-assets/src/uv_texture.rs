@@ -75,8 +75,9 @@ impl Tile {
 
     /// Appends halved levels until both axes reach one texel.
     ///
-    /// Each level is a 2x2 box average of its parent, computed in **linear
-    /// light** and re-encoded to `u8` through `encode` — averaging
+    /// Each level is a box average of its parent over each new texel's own
+    /// footprint — a plain 2x2 whenever both axes are even — computed in
+    /// **linear light** and re-encoded to `u8` through `encode`; averaging
     /// display-encoded values is not averaging light, and a mip chain built
     /// that way drifts darker at every level. (The `CRUST_TEX_MAX` reduction
     /// in `decode_tile` deliberately does average in the file's encoding, to
@@ -492,8 +493,107 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
     Some(Tile::unmipped(number, pixels, w, h))
 }
 
-/// One mip level from the one above it: a 2x2 box average, in linear light,
-/// re-encoded to `u8` in the file's own space.
+/// Which source texels one destination texel of an axis reduction covers, and
+/// how much of each it covers.
+///
+/// A destination texel is an equal-width slice of the `[0, 1]` domain — that
+/// is exactly how `sample_level` reconstructs it, mapping
+/// `x = u * width - 0.5` — so texel `j` of a `src -> dst` reduction owns the
+/// source interval `[j·s, (j+1)·s]` for `s = src/dst`, and its value is the
+/// average of the source *over that interval*. Weights are the overlaps.
+///
+/// Three taps is the ceiling, not a guess: `dst` is `src.div_ceil(2)`, so
+/// `s <= 2`, and an interval of length at most 2 meets at most three unit
+/// cells (worst case `src = 5`, whose middle texel spans `[5/3, 10/3]` and
+/// touches source texels 1, 2 and 3). Checked for every `src` up to 9000.
+#[derive(Clone, Copy, Debug)]
+struct Tap {
+    /// First source texel this destination texel overlaps.
+    start: usize,
+    /// How many it overlaps: 1, 2 or 3.
+    count: usize,
+    /// Overlap per source texel, **unnormalised** — see [`weighted`].
+    weight: [f32; 3],
+}
+
+/// The taps for one axis, and the weight each destination texel totals.
+///
+/// Built once per axis per level rather than per texel: every row of a level
+/// resamples its columns identically, and there are only `dst` of them.
+fn axis_taps(src: usize, dst: usize) -> (Vec<Tap>, f32) {
+    // **The bounds are `j * src / dst`, not `lo + s`, and they are `f64`.**
+    // Accumulating `lo + s` in `f32` lets the interval drift off the end of
+    // the axis: at `src = 1795` the last texel came out covering 1.99878
+    // source texels against the 1.99889 every other texel covered, so
+    // dividing them all by one total biased that texel by 5e-5. Computing
+    // each bound from its own integers instead makes `hi(j)` and `lo(j + 1)`
+    // the same expression — the taps tile with no gap and no overlap — and
+    // makes the last `hi` exactly `src`, since the quotient is an integer and
+    // IEEE division returns it exactly. `f64` because `j * src` passes 2^24
+    // for a large level, which is where `f32` stops counting integers.
+    let (fsrc, fdst) = (src as f64, dst as f64);
+    let mut taps = Vec::with_capacity(dst);
+    for j in 0..dst {
+        let lo = j as f64 * fsrc / fdst;
+        let hi = (j + 1) as f64 * fsrc / fdst;
+        let mut tap = Tap {
+            start: (lo as usize).min(src - 1),
+            count: 0,
+            weight: [0.0; 3],
+        };
+        let mut i = tap.start;
+        while i < src && (i as f64) < hi {
+            let overlap = hi.min((i + 1) as f64) - lo.max(i as f64);
+            if overlap > 0.0 {
+                debug_assert!(tap.count < 3, "an axis tap cannot reach four texels");
+                if tap.count < 3 {
+                    tap.weight[tap.count] = overlap as f32;
+                    tap.count += 1;
+                }
+            }
+            i += 1;
+        }
+        // Unreachable while `dst <= src` — but a zero-weight texel would
+        // divide by zero below, so it falls back to its own start texel whole.
+        if tap.count == 0 {
+            tap.weight[0] = 1.0;
+            tap.count = 1;
+        }
+        taps.push(tap);
+    }
+    // The same for every destination texel, the taps tiling the axis. Summed
+    // from the first texel's weights rather than from `src / dst` so it is
+    // the `f32` sum the inner loop actually accumulates against — on an even
+    // axis that is exactly `2.0`, which is what keeps the even case exact.
+    let sum: f32 = taps[0].weight[..taps[0].count].iter().sum();
+    (taps, sum)
+}
+
+/// One destination texel: the source over its footprint, area-weighted.
+///
+/// **`total` divides once, at the end.** On an even axis every overlap is
+/// exactly `1.0` and the axis sum exactly `2.0`, so `total` is exactly `4.0`
+/// and this reduces to `(((a + b) + c) + d) / 4.0` in row-major order — bit
+/// for bit what the old `0.25 * (a + b + c + d)` produced. That is what keeps
+/// every power-of-two texture, and with it every checked-in golden and the
+/// streamed-versus-preloaded invariant, exactly where it was. Pre-normalising
+/// the weights instead would spend four roundings where this spends one, and
+/// the even case would drift.
+#[inline]
+fn weighted(row: &Tap, col: &Tap, total: f32, at: impl Fn(usize, usize) -> f32) -> f32 {
+    let mut acc = 0.0;
+    for dy in 0..row.count {
+        let wy = row.weight[dy];
+        for dx in 0..col.count {
+            acc += wy * col.weight[dx] * at(col.start + dx, row.start + dy);
+        }
+    }
+    acc / total
+}
+
+/// One mip level from the one above it: a box average over each destination
+/// texel's own footprint, in linear light, re-encoded to `u8` in the file's
+/// own space. On an even axis that footprint is exactly 2x2.
 ///
 /// Shared by the in-memory pyramid ([`Tile::build_pyramid`]) and the `.tx`
 /// writer ([`crate::tiled::write_tx`]) **on purpose**. A streamed render and a
@@ -514,9 +614,17 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
 /// samplers map `x = u * width - 0.5`, so every level has to span the whole
 /// `[0, 1]` domain. Flooring an odd axis drops its last half-texel and that
 /// level's domain slips against level 0's — a crawl across mip transitions on
-/// a slow camera move. Source indices clamp to the last row and column, so an
-/// odd axis averages two samples where a full 2x2 is not available rather than
-/// reading past the level.
+/// a slow camera move.
+///
+/// **On an odd axis that makes the reduction a resample, not a 2x2 box**, and
+/// it is weighted by area — see [`axis_taps`]. Taking the 2x2 with the source
+/// index clamped to the last column instead, which is what this did before,
+/// hands the trailing column a third of the level's weight where it is owed a
+/// fifth: a 5-wide row of `[250, 200, 150, 100, 50]` came out
+/// `[225, 125, 50]`, mean 133 against the source's 150, and the drift
+/// compounds at every level. A 25-wide tile lit only at its right edge
+/// bottomed out **6x too bright**, and the same tile lit at its *left* edge
+/// too dark — the clamp is at one end, so the two disagreed by 8x.
 pub(crate) fn reduce_half(
     src: &[u8],
     sw: usize,
@@ -525,17 +633,18 @@ pub(crate) fn reduce_half(
     encode: fn(f32) -> f32,
 ) -> (Vec<u8>, usize, usize) {
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
+    let (cols, xsum) = axis_taps(sw, w);
+    let (rows, ysum) = axis_taps(sh, h);
+    // One divisor for the whole level: the taps tile each axis exactly, so
+    // every destination texel carries the same total weight.
+    let total = ysum * xsum;
     let mut pixels = vec![0u8; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let x0 = (2 * x).min(sw - 1);
-            let x1 = (2 * x + 1).min(sw - 1);
-            let y0 = (2 * y).min(sh - 1);
-            let y1 = (2 * y + 1).min(sh - 1);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, col) in cols.iter().enumerate() {
             let o = (y * w + x) * 3;
             for k in 0..3 {
                 let at = |xi: usize, yi: usize| to_linear[src[(yi * sw + xi) * 3 + k] as usize];
-                let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+                let mean = weighted(row, col, total, at);
                 pixels[o + k] = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
             }
         }
@@ -543,33 +652,35 @@ pub(crate) fn reduce_half(
     (pixels, w, h)
 }
 
-/// The same reduction for data that is **already linear**: a 2x2 box average of
-/// `f32` RGB, with no decode and no re-encode because there is no encoding.
+/// The same reduction for data that is **already linear**: the same
+/// area-weighted box average of `f32` RGB, with no decode and no re-encode
+/// because there is no encoding.
 ///
 /// Deliberately written next to [`reduce_half`] rather than generalised over
 /// the sample type. The two have to agree on everything *except* the transfer
-/// curve — the `div_ceil` halving, the clamp to the last row and column, the
-/// order of the four taps — and an EXR-backed `.tx` and a TIFF-backed one that
-/// disagreed on level sizes would each be internally consistent and produce
-/// different images. Keeping them adjacent is what makes a change to one an
-/// obvious omission in the other.
+/// curve — the `div_ceil` halving, the [`axis_taps`] weighting, the order the
+/// taps are summed in — and an EXR-backed `.tx` and a TIFF-backed one that
+/// disagreed on odd levels would each be internally consistent and produce
+/// different images, which is the hardest kind of disagreement to see. Keeping
+/// them adjacent is what makes a change to one an obvious omission in the
+/// other; `the_two_reducers_agree_on_an_odd_level` is what makes it a failing
+/// test rather than a reading exercise.
 ///
 /// Axes halve by `div_ceil`, never `>> 1`, for the reason [`reduce_half`]
 /// records: the samplers map `x = u * width - 0.5`, so flooring an odd axis
 /// drops its last half-texel and that level's domain slips against level 0's.
 pub(crate) fn reduce_half_linear(src: &[f32], sw: usize, sh: usize) -> (Vec<f32>, usize, usize) {
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
+    let (cols, xsum) = axis_taps(sw, w);
+    let (rows, ysum) = axis_taps(sh, h);
+    let total = ysum * xsum;
     let mut pixels = vec![0.0f32; w * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let x0 = (2 * x).min(sw - 1);
-            let x1 = (2 * x + 1).min(sw - 1);
-            let y0 = (2 * y).min(sh - 1);
-            let y1 = (2 * y + 1).min(sh - 1);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, col) in cols.iter().enumerate() {
             let o = (y * w + x) * 3;
             for k in 0..3 {
                 let at = |xi: usize, yi: usize| src[(yi * sw + xi) * 3 + k];
-                pixels[o + k] = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+                pixels[o + k] = weighted(row, col, total, at);
             }
         }
     }
@@ -793,6 +904,170 @@ mod tests {
     fn raw_is_the_identity() {
         for encoded in [0u8, 1, 77, 255] {
             assert_eq!(at(ColorSpace::Raw, encoded), encoded as f32 / 255.0);
+        }
+    }
+
+    /// Greyscale texels as a level: value `v` in all three channels.
+    fn grey(values: &[u8]) -> Vec<u8> {
+        values.iter().flat_map(|&v| [v, v, v]).collect()
+    }
+
+    /// The red channel of every texel of a level.
+    fn reds(level: &[u8]) -> Vec<u8> {
+        level.iter().step_by(3).copied().collect()
+    }
+
+    /// Reduces one row under `Raw`, where the decode table and `encode` are
+    /// the identity and a level is its own u8 values back.
+    fn reduce_row(values: &[u8]) -> Vec<u8> {
+        let table = to_linear_table(ColorSpace::Raw);
+        let (out, w, h) = reduce_half(
+            &grey(values),
+            values.len(),
+            1,
+            &table,
+            encode_fn(ColorSpace::Raw),
+        );
+        assert_eq!((w, h), (values.len().div_ceil(2), 1));
+        reds(&out)
+    }
+
+    /// **An odd axis is resampled by area, not by duplicating its last
+    /// texel.**
+    ///
+    /// The sampler maps `x = u * width - 0.5`, so it reads each destination
+    /// texel as an equal-width slice of the whole tile. Five source texels
+    /// into three therefore means each new texel averages the source over
+    /// exactly its own 5/3 of the row: `[1, 2/3]`, `[1/3, 1, 1/3]`,
+    /// `[2/3, 1]`, normalised. Clamping the source index instead — which is
+    /// what this did — makes the last texel the average of source column 4
+    /// alone, a fifth of the domain stretched over a third of it.
+    ///
+    /// The numbers are chosen to land exactly, and the two schemes are 5, 25
+    /// and 20 units apart, so the tolerance for the round trip through the
+    /// 256-entry table cannot blur them together.
+    #[test]
+    fn an_odd_axis_is_area_weighted_not_edge_duplicated() {
+        let got = reduce_row(&[250, 200, 150, 100, 50]);
+        let want = [230u8, 150, 70]; // clamped gave [225, 125, 50]
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g as i32 - w as i32).abs() <= 1,
+                "texel {i}: got {g}, want {w} (the whole level is {got:?})"
+            );
+        }
+    }
+
+    /// And because the taps tile the axis, the level's mean is the source's.
+    ///
+    /// This is the half that shows up in a render: the clamp gave the
+    /// trailing column a third of the level's weight where it is owed a
+    /// fifth, so the mean drifted at *every* level and the drift compounded
+    /// down the chain.
+    #[test]
+    fn an_odd_level_preserves_the_mean() {
+        let src = [250u8, 200, 150, 100, 50];
+        let got = reduce_row(&src);
+        let mean = |v: &[u8]| v.iter().map(|&x| x as f32).sum::<f32>() / v.len() as f32;
+        assert!(
+            (mean(&got) - mean(&src)).abs() < 1.0,
+            "level mean {} against source mean {} (the clamp gave 133.3)",
+            mean(&got),
+            mean(&src),
+        );
+    }
+
+    /// **An even axis must reduce exactly as it always has**, bit for bit.
+    ///
+    /// Every overlap on an even axis is exactly `1.0` and the axis total
+    /// exactly `2.0`, so `weighted` divides by exactly `4.0` and the result is
+    /// the old `0.25 * (a + b + c + d)` unchanged. Every checked-in texture is
+    /// 64x64, so this is what says the sample goldens cannot move — and with
+    /// them the streamed-versus-preloaded invariant, which compares a `.tx`
+    /// chain against an in-memory one.
+    #[test]
+    fn an_even_axis_reduces_exactly_as_it_did() {
+        let (sw, sh) = (8usize, 6usize);
+        let src: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let table = to_linear_table(ColorSpace::Srgb);
+        let encode = encode_fn(ColorSpace::Srgb);
+        let (got, w, h) = reduce_half(&src, sw, sh, &table, encode);
+        assert_eq!((w, h), (4, 3));
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..3 {
+                    let at = |xi: usize, yi: usize| table[src[(yi * sw + xi) * 3 + k] as usize];
+                    let mean = 0.25
+                        * (at(2 * x, 2 * y)
+                            + at(2 * x + 1, 2 * y)
+                            + at(2 * x, 2 * y + 1)
+                            + at(2 * x + 1, 2 * y + 1));
+                    let want = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+                    assert_eq!(got[(y * w + x) * 3 + k], want, "at ({x}, {y}) channel {k}");
+                }
+            }
+        }
+    }
+
+    /// The two reducers back the TIFF and the EXR `.tx` writer, and their doc
+    /// comments promise they agree on everything but the transfer curve.
+    ///
+    /// Left to prose, that promise is exactly the kind a change keeps half of:
+    /// an EXR-backed `.tx` and a TIFF-backed one that disagreed on odd levels
+    /// would each be internally consistent, and nothing would look wrong until
+    /// two renders of the same texture were diffed against each other.
+    #[test]
+    fn the_two_reducers_agree_on_an_odd_level() {
+        let (sw, sh) = (7usize, 5usize);
+        let bytes: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 11 % 251) as u8).collect();
+        let floats: Vec<f32> = bytes.iter().map(|&b| b as f32 / 255.0).collect();
+
+        let (from_u8, w, h) = reduce_half(
+            &bytes,
+            sw,
+            sh,
+            &to_linear_table(ColorSpace::Raw),
+            encode_fn(ColorSpace::Raw),
+        );
+        let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh);
+        assert_eq!((w, h), (lw, lh), "the two disagree on level size");
+        for (i, (&b, &f)) in from_u8.iter().zip(from_f32.iter()).enumerate() {
+            let quantised = (f * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+            assert_eq!(b, quantised, "component {i}");
+        }
+    }
+
+    /// Three taps is the ceiling `Tap` is sized for, and it is arithmetic
+    /// rather than an observation — but the arithmetic is easy to get wrong,
+    /// and a fourth would be silently dropped in release.
+    #[test]
+    fn no_destination_texel_reaches_more_than_three_source_texels() {
+        // Dense up to 2000 — the drift this caught first was at 1795 — plus
+        // sizes past where `f32` stops counting `j * src` exactly.
+        let sizes = (1..2000usize).chain([4095, 4096, 8191, 8192, 16383, 16384]);
+        for src in sizes {
+            let dst = src.div_ceil(2);
+            let (taps, sum) = axis_taps(src, dst);
+            assert_eq!(taps.len(), dst);
+            for (j, t) in taps.iter().enumerate() {
+                assert!((1..=3).contains(&t.count), "src {src} texel {j}: {t:?}");
+                assert!(t.start + t.count <= src, "src {src} texel {j} runs past");
+                let total: f32 = t.weight[..t.count].iter().sum();
+                assert!(
+                    (total - sum).abs() < 1e-5,
+                    "src {src} texel {j} totals {total}, not {sum} — the taps \
+                     must tile the axis or the level's mean drifts"
+                );
+            }
+            // An even axis is the plain 2x2, exactly: this is the property
+            // `an_even_axis_reduces_exactly_as_it_did` rests on.
+            if src % 2 == 0 {
+                assert_eq!(sum, 2.0);
+                assert!(
+                    taps.iter()
+                        .all(|t| t.count == 2 && t.weight[..2] == [1.0, 1.0])
+                );
+            }
         }
     }
 }

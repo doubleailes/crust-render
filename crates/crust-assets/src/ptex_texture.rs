@@ -342,6 +342,16 @@ type LevelReduction = fn(&mut [f32], usize, usize, usize, usize, usize, usize);
 /// pinned at one texel: Ptex switches to a one-axis `reduce_u`/`reduce_v` there
 /// and this clamps the second sample onto the first, which is the same average
 /// by a different route — see `reduce_matches_ptex_rs_on_a_square_face`.
+///
+/// **The clamp here is exact, unlike the one `uv_texture`'s `reduce_half` had
+/// to give up.** That one duplicated the trailing texel of an *odd* axis and
+/// averaged it as though two were present, which over-weighted one edge and
+/// needed area-weighted taps to fix. A Ptex `Res` is log2-encoded, so a face
+/// axis is a power of two and is never odd above 1: the only clamp that ever
+/// fires is a pinned axis, where the destination texel really does cover
+/// exactly one source row and `(a + a + b + b) / 4` really is `(a + b) / 2`.
+/// Area weighting would be a no-op, and `reduce_triangle`'s mirrored tap is
+/// not a box filter at all — do not carry that fix across.
 fn reduce_quad(
     texels: &mut [f32],
     src_off: usize,
