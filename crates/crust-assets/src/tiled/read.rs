@@ -62,6 +62,10 @@ pub struct TiledFile {
     path: PathBuf,
     levels: Vec<LevelInfo>,
     tile_edge: usize,
+    /// The colour space this file's mip chain was reduced in, as the writer
+    /// recorded it, or `None` for a file that did not say (anything `maketx`
+    /// produced).
+    mip_space: Option<String>,
 }
 
 impl TiledFile {
@@ -91,6 +95,16 @@ impl TiledFile {
                 "planar (PlanarConfiguration = 2) TIFFs are not supported",
             ));
         }
+
+        // Read before seeking anywhere: this is level 0's IFD, which is where
+        // the writer puts the provenance.
+        let mip_space = dec
+            .get_tag_ascii_string(Tag::ImageDescription)
+            .ok()
+            .and_then(|d| {
+                d.split_whitespace()
+                    .find_map(|f| f.strip_prefix("crust:mipspace=").map(str::to_owned))
+            });
 
         let (tw, th) = dec.chunk_dimensions();
         if tw == 0 || th == 0 || tw != th {
@@ -139,6 +153,7 @@ impl TiledFile {
             path: path.to_path_buf(),
             levels,
             tile_edge,
+            mip_space,
         })
     }
 
@@ -160,6 +175,31 @@ impl TiledFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether this file's mip chain was reduced in `space`.
+    ///
+    /// A `.tx` stores display-encoded texels but reduces its levels in linear
+    /// light, so the space is baked into every level above 0 and cannot be
+    /// reinterpreted afterwards. Reading an sRGB-reduced chain as raw leaves
+    /// level 0 perfectly correct and every coarser level wrong — a discrepancy
+    /// that appears only under minification and reads exactly like a filtering
+    /// bug, which is why it is checked rather than trusted.
+    ///
+    /// A file with no marker (anything `maketx` wrote) is accepted: its chain
+    /// came from a different filter anyway, so there is nothing crust could
+    /// usefully match against, and refusing it would rule out every
+    /// pre-existing production asset.
+    pub fn mip_space_matches(&self, space: &str) -> bool {
+        match &self.mip_space {
+            Some(recorded) => recorded == space,
+            None => true,
+        }
+    }
+
+    /// The recorded space, for reporting a mismatch.
+    pub fn mip_space(&self) -> Option<&str> {
+        self.mip_space.as_deref()
     }
 
     /// A fresh cursor onto this file. The cache keeps a small pool of these;

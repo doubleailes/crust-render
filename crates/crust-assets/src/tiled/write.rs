@@ -94,10 +94,27 @@ pub fn write_tx(
         .map_err(|e| io::Error::other(format!("tiff header: {e}")))?;
 
     for (n, (pixels, w, h)) in levels.iter().enumerate() {
-        write_level(&mut enc, pixels, *w, *h, n)?;
+        write_level(&mut enc, pixels, *w, *h, n, space)?;
     }
 
     Ok(levels.iter().map(|(_, w, h)| (*w, *h)).collect())
+}
+
+/// The `ImageDescription` string recording which colour space a file's mip
+/// chain was reduced in. Parsed back by [`crate::tiled::mip_space`].
+pub(crate) fn mip_space_tag(space: ColorSpace) -> String {
+    format!("crust:mipspace={}", space_name(space))
+}
+
+/// The stable spelling of a colour space in a `.tx`. Matched on the variant so
+/// a new one is a compile error here rather than a silently unlabelled file.
+pub(crate) fn space_name(space: ColorSpace) -> &'static str {
+    match space {
+        ColorSpace::Srgb => "srgb_texture",
+        ColorSpace::Gamma22 => "g22_rec709",
+        ColorSpace::Gamma18 => "g18_rec709",
+        ColorSpace::Raw => "raw",
+    }
 }
 
 /// One mip level as one IFD: every tile's compressed bytes, then the tags that
@@ -108,6 +125,7 @@ fn write_level<W: Write + io::Seek>(
     w: usize,
     h: usize,
     level: usize,
+    space: ColorSpace,
 ) -> io::Result<()> {
     let across = w.div_ceil(TILE_EDGE);
     let down = h.div_ceil(TILE_EDGE);
@@ -207,6 +225,19 @@ fn write_level<W: Write + io::Seek>(
         .map_err(|e| io::Error::other(format!("tiff wrapmodes: {e}")))?;
     dir.write_tag(Tag::Software, "crust-render")
         .map_err(|e| io::Error::other(format!("tiff Software: {e}")))?;
+    // The colour space the *mip chain* was reduced in, recorded so a reader
+    // can refuse a file whose pyramid does not match what it is about to
+    // decode with.
+    //
+    // This is not redundant with the material's own `colorspace` attribute: the
+    // levels are averaged in linear light and re-encoded, so a chain built for
+    // sRGB and read as raw is wrong at every level above 0 while level 0 is
+    // perfectly fine — a discrepancy that appears only under minification and
+    // looks exactly like a filtering bug. OIIO puts its own provenance in
+    // ImageDescription the same way (`oiio:SHA-1=`), so this follows the
+    // convention rather than inventing a tag.
+    dir.write_tag(Tag::ImageDescription, mip_space_tag(space).as_str())
+        .map_err(|e| io::Error::other(format!("tiff ImageDescription: {e}")))?;
 
     dir.finish()
         .map_err(|e| io::Error::other(format!("tiff directory finish: {e}")))?;
