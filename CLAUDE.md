@@ -754,6 +754,27 @@ Schema mapping:
     1024 cap is 1000×666), and the lookup maps `x = u·width − 0.5`, so flooring
     an odd axis drops its last half-texel and that level's domain slips against
     level 0's — visible as a crawl across mip transitions on a slow camera move.
+    **An odd axis is then a resample, not a 2×2 box**, and `axis_taps` weights
+    it by area: the lookup reads each texel as an equal-width slice of the
+    whole tile, so a destination texel is the average of the source over
+    exactly its own `src/dst ≤ 2` texels (at most three of them). Clamping the
+    source index instead — reading the trailing texel twice and averaging it
+    as though two were there — hands that column a third of the level's weight
+    where it is owed a fifth, at *every* level: a 5-wide row of
+    `[250, 200, 150, 100, 50]` came out `[225, 125, 50]`, mean 133 against the
+    source's 150, and a 25-wide tile lit only at its right edge bottomed out
+    **6× too bright** while the same tile lit at its *left* edge came out too
+    dark — an 8× disagreement decided by nothing but which end the clamp was
+    at. On an **even** axis every overlap is exactly 1.0 and the divisor
+    exactly 4.0, so the reduction is bit-identical to what it was; every
+    checked-in texture is 64×64, so no sample golden moves and the
+    streamed-versus-preloaded invariant is untouched. Both halves of that hold
+    only because `reduce_half` and `reduce_half_linear` share `axis_taps` —
+    they back the TIFF and EXR `.tx` writers, and one fixed without the other
+    would leave two internally consistent chains that disagree. A `.tx`
+    written by an older build still carries old-filter odd levels; they are
+    gitignored artefacts `maketx` regenerates, so this is a note rather than a
+    migration.
 - **Streaming textures** (`crust-assets/src/tiled/`) — the residency half of the
   texture problem, as opposed to the filtering half above. Opt-in via
   `CRUST_TEX_STREAM=1`; the preloaded `UvTexture` remains the default and the
@@ -1368,7 +1389,14 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   so such a mesh warns and renders on its material's constant inputs. Only
   `primvars:st` (and `uv`/`st0`/`UVMap` as fallbacks) is read; there is no
   general primvar plumbing and no second UV set. `texcoord`'s `index` input is
-  ignored for the same reason.
+  ignored for the same reason. And `decode_tile`'s `CRUST_TEX_MAX` resize has a
+  cousin of the odd-level defect the mip chain was just fixed for: it takes
+  `floor(sw / factor)` destination texels and **drops the remainder columns**
+  rather than covering them, so a 2050-wide source under a 1024 cap loses one
+  column of 2050 and the tile's domain slips by that much. Under a destination
+  texel, against the full mis-weighted one the mip chain had — and unlike that
+  one it is a *resize* averaged in the file's own encoding, so fixing it would
+  move every render of a texture above the cap. Worth doing, not urgent.
 - **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
   skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other

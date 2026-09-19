@@ -473,4 +473,62 @@ fn an_odd_level_halves_by_div_ceil_so_every_level_spans_the_whole_tile() {
     let a = tex.eval(0.01, 0.5, 8.0);
     let b = tex.eval(0.99, 0.5, 8.0);
     assert_eq!(a, b);
+    // And it is the tile's *actual* mean: 13 of 25 columns lit, so 0.52.
+    // Reducing by a clamped 2x2 instead gave the trailing column a third of
+    // each level's weight where it is owed a fifth, and this bottomed out at
+    // 0.41 — the energy walked toward the right edge, level by level.
+    assert!(
+        (a[0] - 13.0 / 25.0).abs() < 0.01,
+        "coarsest level {a:?} against the tile's mean of 0.52"
+    );
+}
+
+/// **An odd level must not move the tile's energy toward one edge.**
+///
+/// A single lit column at one end of an odd axis is the sharpest form of the
+/// question, because the answer is arithmetic: whatever else a mip chain does,
+/// a 25-wide tile with one column at full brightness has a mean of 1/25, and
+/// its 1x1 level *is* its mean.
+///
+/// Reducing by a 2x2 with the source index clamped to the last column read the
+/// trailing column twice and averaged it as though two were there, so the lit
+/// column was worth a third of the next level wherever it sat at the right
+/// edge, and only a fifth of it at the left. Lit right, this bottomed out at
+/// 0.25 — **six times** the truth; lit left, at 0.03. Area weighting gives
+/// both 1/25, which is the point: the answer cannot depend on which end of the
+/// row the energy sits at, and the old one did, by a factor of eight.
+#[test]
+fn an_odd_level_keeps_the_tile_mean_wherever_the_energy_sits() {
+    let dir = std::env::temp_dir().join("crust_mip_odd_edge");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    // 25x9 again, both axes odd, but asymmetric: one lit column, at the left
+    // in one texture and at the right in the other. `Raw`, so a texel's value
+    // is its byte and the mean is arithmetic all the way down.
+    let mut coarsest = Vec::new();
+    for (name, lit) in [("left", 0u32), ("right", 24u32)] {
+        let p = dir.join(format!("{name}.png"));
+        image::RgbImage::from_fn(25, 9, |x, _| {
+            image::Rgb(if x == lit { [255, 255, 255] } else { [0, 0, 0] })
+        })
+        .save(&p)
+        .expect("write png");
+        let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+        let got = tex.eval(0.5, 0.5, 64.0)[0];
+        assert!(
+            (got - 1.0 / 25.0).abs() < 0.01,
+            "{name}-lit tile bottoms out at {got}, not the tile mean 0.04"
+        );
+        coarsest.push(got);
+    }
+    // Stated as a symmetry too, which needs no reference value at all: the
+    // same energy at opposite edges has to reduce to the same number.
+    assert!(
+        (coarsest[0] - coarsest[1]).abs() < 0.005,
+        "lit left gave {} and lit right {} — a reduction that can tell the \
+         two apart is weighting one edge more than the other",
+        coarsest[0],
+        coarsest[1],
+    );
 }
