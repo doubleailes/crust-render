@@ -40,14 +40,90 @@ use crust_core::{ColorSpace, Texture2D};
 use std::path::Path;
 use tracing::error;
 
-/// One decoded UDIM tile.
-struct Tile {
-    /// UDIM number, `1001 + u + 10·v`.
-    number: u32,
-    /// Row-major RGB, 3 bytes a texel.
+/// One resolution of one tile: row-major RGB, 3 bytes a texel.
+struct Level {
     pixels: Vec<u8>,
     width: usize,
     height: usize,
+}
+
+/// One decoded UDIM tile, as a mip pyramid.
+///
+/// `levels[0]` is the tile as `decode_tile` produced it (already under the
+/// `CRUST_TEX_MAX` cap); each further level halves both axes until both reach
+/// one texel. A tile with a single level is the pre-pyramid behaviour exactly:
+/// no level to select between, so `width` is ignored structurally rather than
+/// by a branch, which is what `CRUST_TEX_MIP=0` relies on.
+struct Tile {
+    /// UDIM number, `1001 + u + 10·v`.
+    number: u32,
+    levels: Vec<Level>,
+}
+
+impl Tile {
+    /// The tile as authored, with no coarser levels.
+    fn unmipped(number: u32, pixels: Vec<u8>, width: usize, height: usize) -> Tile {
+        Tile {
+            number,
+            levels: vec![Level {
+                pixels,
+                width,
+                height,
+            }],
+        }
+    }
+
+    /// Appends halved levels until both axes reach one texel.
+    ///
+    /// Each level is a 2x2 box average of its parent, computed in **linear
+    /// light** and re-encoded to `u8` through `encode` — averaging
+    /// display-encoded values is not averaging light, and a mip chain built
+    /// that way drifts darker at every level. (The `CRUST_TEX_MAX` reduction
+    /// in `decode_tile` deliberately does average in the file's encoding, to
+    /// keep a capped tile matching a DCC's preview of the same file; the two
+    /// conventions are recorded in `docs/color_management.md`.)
+    ///
+    /// Axes halve by `div_ceil`, not by `>> 1`. `decode_tile` reduces by an
+    /// arbitrary integer factor, so level 0 is routinely odd — a 3000x2000
+    /// source under a 1024 cap is 1000x666 — and `sample_tile` maps
+    /// `x = u·width − 0.5`, so every level has to cover the whole `[0, 1]`
+    /// domain. Flooring an odd axis drops its last half-texel and the level's
+    /// domain slips against level 0's, which shows up as a crawl across mip
+    /// transitions on a slow camera move.
+    fn build_pyramid(&mut self, to_linear: &[f32; 256], encode: fn(f32) -> f32) {
+        loop {
+            let src = self.levels.last().expect("a tile always has level 0");
+            if src.width <= 1 && src.height <= 1 {
+                break;
+            }
+            let (w, h) = (src.width.div_ceil(2), src.height.div_ceil(2));
+            let mut pixels = vec![0u8; w * h * 3];
+            for y in 0..h {
+                for x in 0..w {
+                    // Clamped to the last row/column, so an odd axis averages
+                    // two samples where a full 2x2 is not available rather
+                    // than reading past the level.
+                    let x0 = (2 * x).min(src.width - 1);
+                    let x1 = (2 * x + 1).min(src.width - 1);
+                    let y0 = (2 * y).min(src.height - 1);
+                    let y1 = (2 * y + 1).min(src.height - 1);
+                    let o = (y * w + x) * 3;
+                    for k in 0..3 {
+                        let at = |xi: usize, yi: usize| {
+                            to_linear[src.pixels[(yi * src.width + xi) * 3 + k] as usize]
+                        };
+                        let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+                        pixels[o + k] = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            self.levels.push(Level {
+                pixels,
+                width: w,
+                height: h,
+            });
+        }
+    }
 }
 
 /// The filename token that addresses a tile set, and how it spells a tile.
@@ -128,12 +204,33 @@ pub struct UvTexture {
 /// It is a *cap*, not a resize: a smaller tile is kept as authored.
 pub const DEFAULT_MAX_EDGE: usize = 1024;
 
+/// Are mip pyramids built? `CRUST_TEX_MIP=0` keeps each tile at its single
+/// capped level, which is the pre-pyramid behaviour bit for bit — a one-level
+/// tile has nothing to select between — and costs a third less memory. The
+/// A/B for "did the pyramid change this, or did the footprint?", paired with
+/// `CRUST_RAY_CONES=0` on the other side.
+fn mip_enabled() -> bool {
+    std::env::var("CRUST_TEX_MIP").as_deref() != Ok("0")
+}
+
 impl UvTexture {
     /// Opens `path` — a single image, or a tile set when the name carries a
     /// `<UDIM>` or `<UVTILE>` token — decoding every tile present on disk at
     /// or below the `CRUST_TEX_MAX` edge cap. `None` when nothing could be
     /// decoded.
     pub fn open(path: &Path, space: ColorSpace) -> Option<UvTexture> {
+        UvTexture::open_with(path, space, mip_enabled())
+    }
+
+    /// [`UvTexture::open`] with the mip decision passed in rather than read
+    /// from the environment.
+    ///
+    /// `mip = false` is exactly what `CRUST_TEX_MIP=0` produces: one level per
+    /// tile, a third less memory, and `eval`'s `width` ignored structurally.
+    /// Spelled out as an argument so a caller comparing the two — a test, a
+    /// probe — does not have to mutate a process-global the rest of the
+    /// program is reading.
+    pub fn open_with(path: &Path, space: ColorSpace, mip: bool) -> Option<UvTexture> {
         let max_edge = std::env::var("CRUST_TEX_MAX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -173,7 +270,13 @@ impl UvTexture {
         }
 
         let to_linear = to_linear_table(space);
-        let (width, height) = (tiles[0].width, tiles[0].height);
+        if mip {
+            let encode = encode_fn(space);
+            for t in &mut tiles {
+                t.build_pyramid(&to_linear, encode);
+            }
+        }
+        let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
         Some(UvTexture {
             tiles,
             to_linear,
@@ -183,9 +286,19 @@ impl UvTexture {
         })
     }
 
-    /// Bytes held, for the load-time report.
+    /// Bytes held, for the load-time report. Counts every mip level, so a
+    /// full pyramid reports 4/3 of its base.
     pub fn bytes(&self) -> usize {
-        self.tiles.iter().map(|t| t.pixels.len()).sum()
+        self.tiles
+            .iter()
+            .flat_map(|t| t.levels.iter())
+            .map(|l| l.pixels.len())
+            .sum()
+    }
+
+    /// Mip levels the first tile holds — 1 when no pyramid was built.
+    pub fn level_count(&self) -> usize {
+        self.tiles.first().map_or(0, |t| t.levels.len())
     }
 
     /// Tiles decoded — 1 for a single image.
@@ -198,15 +311,54 @@ impl UvTexture {
         (self.width, self.height)
     }
 
-    /// Bilinear lookup inside one tile, at coordinates already reduced to
-    /// `[0, 1)`.
+    /// Trilinear lookup inside one tile, at coordinates already reduced to
+    /// `[0, 1)` and over a footprint `width` wide *in tile units*.
+    ///
+    /// The level is `log2(width · texels_across)`: a footprint covering one
+    /// texel of level 0 reads level 0, one covering two reads level 1, and so
+    /// on. The two bracketing levels are sampled bilinearly and blended, so a
+    /// surface receding from the camera crosses mip levels smoothly instead
+    /// of stepping.
+    ///
+    /// `width <= 0` — a caller with no derivatives, or `CRUST_RAY_CONES=0` —
+    /// and a tile with no pyramid both short-circuit to a single bilinear tap
+    /// on level 0, which is bit-identical to what this did before it had
+    /// levels at all.
+    fn sample_tile(&self, t: &Tile, u: f32, v: f32, width: f32) -> [f32; 4] {
+        if t.levels.len() == 1 || width <= 0.0 {
+            return self.sample_level(&t.levels[0], u, v);
+        }
+        // Measured against the widest axis: an isotropic footprint over an
+        // anisotropic tile is minified most where the texels are densest, and
+        // reading the coarser of the two is the choice that does not alias.
+        let across = t.levels[0].width.max(t.levels[0].height) as f32;
+        let lod = (width * across).log2();
+        let top = (t.levels.len() - 1) as f32;
+        let lod = lod.clamp(0.0, top);
+        let lo = lod.floor();
+        let frac = lod - lo;
+        let a = self.sample_level(&t.levels[lo as usize], u, v);
+        if frac <= 0.0 {
+            return a;
+        }
+        let b = self.sample_level(&t.levels[(lo as usize + 1).min(t.levels.len() - 1)], u, v);
+        let mut out = [0.0f32; 4];
+        for k in 0..3 {
+            out[k] = a[k] + (b[k] - a[k]) * frac;
+        }
+        out[3] = 1.0;
+        out
+    }
+
+    /// Bilinear lookup inside one mip level, at coordinates already reduced
+    /// to `[0, 1)`.
     ///
     /// Bilinear rather than nearest because these charts are magnified: a 4K
     /// tile capped to 1024 covers a few hundred pixels of the framing, so the
     /// texel grid is plainly visible under point sampling — the artefact the
     /// dome light's own nearest-texel sampling is still criticised for in
     /// `CLAUDE.md`.
-    fn sample_tile(&self, t: &Tile, u: f32, v: f32) -> [f32; 4] {
+    fn sample_level(&self, t: &Level, u: f32, v: f32) -> [f32; 4] {
         // Image rows run top-down while `v` grows upward, the same flip the
         // rest of the graphics world applies between UV and raster space.
         let x = u * t.width as f32 - 0.5;
@@ -243,10 +395,13 @@ impl UvTexture {
 }
 
 impl Texture2D for UvTexture {
-    fn eval(&self, u: f32, v: f32, _width: f32) -> [f32; 4] {
+    fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }
+        // A non-finite width is the caller's bug; point-sample rather than
+        // propagate a NaN into a level index.
+        let width = if width.is_finite() { width } else { 0.0 };
         if self.tiled {
             let (tu, tv) = (u.floor(), v.floor());
             // Outside the 10x10 tile grid there is no tile by definition;
@@ -257,13 +412,13 @@ impl Texture2D for UvTexture {
             }
             let number = udim_number(tu as u32, tv as u32);
             match self.tiles.iter().find(|t| t.number == number) {
-                Some(t) => self.sample_tile(t, u - tu, v - tv),
+                Some(t) => self.sample_tile(t, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],
             }
         } else {
             // MaterialX's default address mode is `periodic`.
             let wrap = |x: f32| x - x.floor();
-            self.sample_tile(&self.tiles[0], wrap(u), wrap(v))
+            self.sample_tile(&self.tiles[0], wrap(u), wrap(v), width)
         }
     }
 }
@@ -297,12 +452,7 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
     }
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
-        return Some(Tile {
-            number,
-            pixels: img.into_raw(),
-            width: sw,
-            height: sh,
-        });
+        return Some(Tile::unmipped(number, img.into_raw(), sw, sh));
     }
     let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
     let src = img.as_raw();
@@ -338,12 +488,26 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
             }
         }
     }
-    Some(Tile {
-        number,
-        pixels,
-        width: w,
-        height: h,
-    })
+    Some(Tile::unmipped(number, pixels, w, h))
+}
+
+/// The transfer function that re-encodes a linear value back to the file's
+/// own space — the inverse of [`to_linear_table`], used only when averaging a
+/// mip level.
+///
+/// A function rather than a table because the input is a continuous average,
+/// not one of 256 stored values; it runs once per texel of levels 1 and up,
+/// which is a third of the base and only at load.
+fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
+    // Matched on the variant rather than on `gamma()`, so a new colour space
+    // is a compile error here instead of silently taking the `Raw` arm and
+    // storing linear values in a display-encoded table.
+    match space {
+        ColorSpace::Srgb => crate::linear_to_srgb,
+        ColorSpace::Gamma22 => |c: f32| c.max(0.0).powf(1.0 / 2.2),
+        ColorSpace::Gamma18 => |c: f32| c.max(0.0).powf(1.0 / 1.8),
+        ColorSpace::Raw => |c: f32| c,
+    }
 }
 
 /// The 256-entry decode table for one colour space.
