@@ -130,6 +130,18 @@ impl PtexColor {
         let dt = tx.data_type();
         let scale = dt.one_value_inv();
         let max_log2 = max_log2_from_env();
+        // Which reduction the pyramid is built with, decided once for the
+        // file rather than guessed per face. A triangle texture packs *two*
+        // triangles into its square of texels — the upright one and its
+        // mirror across the anti-diagonal — so averaging a 2x2 block of it
+        // mixes texels from both, and every level above 0 comes out wrong in
+        // a way that still looks like plausible texture. See `reduce_triangle`.
+        let triangle = tx.mesh_type() == ptex::MeshType::Triangle;
+        let reduce: LevelReduction = if triangle {
+            reduce_triangle
+        } else {
+            reduce_quad
+        };
 
         let n_faces = tx.num_faces();
         let mut faces = Vec::with_capacity(n_faces);
@@ -139,8 +151,16 @@ impl PtexColor {
             let info = *tx.face_info(faceid).map_err(|e| e.to_string())?;
             // Clamp each axis independently: Ptex faces are frequently
             // non-square (64x16 is common) and clamping the pair together
-            // would distort the aspect the file chose.
-            let res = ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2));
+            // would distort the aspect the file chose. A *triangle* face is
+            // square by construction and the format defines only symmetric
+            // reductions for one (`ptex-rs` refuses an anisotropic request
+            // outright), so there the pair clamps together.
+            let res = if triangle {
+                let l = info.res.ulog2.min(info.res.vlog2).min(max_log2);
+                ptex::Res::new(l, l)
+            } else {
+                ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2))
+            };
             let (w, h) = (res.u(), res.v());
             let offset = texels.len() as u32;
             let levels = if mip { level_count(w, h) } else { 1 };
@@ -182,31 +202,21 @@ impl PtexColor {
             // asking the reader for each coarser resolution. The reader takes
             // `&mut self` per read and caches no pixels, so every extra level
             // would be another seek and inflate through this serial loop —
-            // and would come back display-encoded, needing the `powf` again.
-            // These texels are already linear `f32`, and Ptex resolutions are
-            // power-of-two per axis by construction, so halving is exact and
-            // the average is taken in the light it represents.
+            // and would come back display-encoded, needing the `powf` again,
+            // which is the part that matters: these texels are already linear
+            // `f32`, and a mip level stands in for integrating light over a
+            // footprint, so the average belongs in the light it represents
+            // rather than in the file's encoding. Ptex resolutions are
+            // power-of-two per axis by construction, so halving is exact.
+            //
+            // What `reduce` does *not* get to choose is which texels to
+            // average: that is the file's parameterisation, and it is taken
+            // from the mesh type above.
             let face = faces.last().expect("just pushed");
             for k in 1..face.levels as usize {
                 let (src_off, sw, sh) = face.level(k - 1);
                 let (dst_off, dw, dh) = face.level(k);
-                for y in 0..dh {
-                    for x in 0..dw {
-                        // One axis pins at 1 while the other keeps halving on
-                        // a non-square face (64x16 is common), so the source
-                        // index is clamped rather than assumed to be 2x.
-                        let x0 = (2 * x).min(sw - 1);
-                        let x1 = (2 * x + 1).min(sw - 1);
-                        let y0 = (2 * y).min(sh - 1);
-                        let y1 = (2 * y + 1).min(sh - 1);
-                        for ch in 0..3 {
-                            let at =
-                                |xi: usize, yi: usize| texels[src_off + (yi * sw + xi) * 3 + ch];
-                            let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
-                            texels[dst_off + (y * dw + x) * 3 + ch] = mean;
-                        }
-                    }
-                }
+                reduce(&mut texels, src_off, sw, sh, dst_off, dw, dh);
             }
         }
 
@@ -317,6 +327,103 @@ impl PtexTexture for PtexColor {
     }
 }
 
+/// How one coarser mip level is built from the level above it.
+///
+/// `(texels, src_off, sw, sh, dst_off, dw, dh)`; source and destination are
+/// disjoint ranges of the same arena, and both levels are interleaved linear
+/// RGB. Which of the two implementations a file gets is decided by its mesh
+/// type at open, never per face.
+type LevelReduction = fn(&mut [f32], usize, usize, usize, usize, usize, usize);
+
+/// One coarser level of a **quad** face: the 2x2 box average, in linear light.
+///
+/// Matches `ptex::utils::reduce` texel for texel on a square face, including
+/// the order the four are summed in. It diverges deliberately once an axis has
+/// pinned at one texel: Ptex switches to a one-axis `reduce_u`/`reduce_v` there
+/// and this clamps the second sample onto the first, which is the same average
+/// by a different route — see `reduce_matches_ptex_rs_on_a_square_face`.
+fn reduce_quad(
+    texels: &mut [f32],
+    src_off: usize,
+    sw: usize,
+    sh: usize,
+    dst_off: usize,
+    dw: usize,
+    dh: usize,
+) {
+    for y in 0..dh {
+        for x in 0..dw {
+            // One axis pins at 1 while the other keeps halving on a
+            // non-square face (64x16 is common), so the source index is
+            // clamped rather than assumed to be 2x.
+            let x0 = (2 * x).min(sw - 1);
+            let x1 = (2 * x + 1).min(sw - 1);
+            let y0 = (2 * y).min(sh - 1);
+            let y1 = (2 * y + 1).min(sh - 1);
+            for ch in 0..3 {
+                let at = |xi: usize, yi: usize| texels[src_off + (yi * sw + xi) * 3 + ch];
+                let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+                texels[dst_off + (y * dw + x) * 3 + ch] = mean;
+            }
+        }
+    }
+}
+
+/// One coarser level of a **triangle** face: Ptex's mirrored reduction, in
+/// linear light.
+///
+/// A triangle texture is stored as a `w x w` square holding *two* triangles:
+/// the upright one at `u + v < w`, and its mirror across the anti-diagonal
+/// filling the rest. So the 2x2 block a quad reduction would average is not
+/// one neighbourhood — for a texel near the diagonal it straddles both
+/// triangles — and the fourth sample of the quad block is simply the wrong
+/// texel. `PtexUtils::reduceTri` (and `ptex::utils::reduce_tri`, which this
+/// follows exactly) averages three texels of the upright block with the one
+/// mirrored texel that completes it:
+///
+/// ```text
+/// dst[v][u] = ¼·( src[2v][2u] + src[2v][2u+1] + src[2v+1][2u]
+///                 + src[w-1-2u][w-1-2v] )
+/// ```
+///
+/// Note the index swap in the mirrored term — row from `u`, column from `v`.
+/// Getting it backwards is a transpose that still produces plausible texture,
+/// which is why `triangle_levels_match_ptex_rs_reduction` compares against
+/// `ptex-rs` rather than against an expectation written out by hand.
+///
+/// The reduction is done here rather than by asking the reader for each
+/// coarser resolution (which would also be correct — `get_data_at_res` calls
+/// `reduce_tri` itself) for the reason the caller records: the reader returns
+/// display-encoded texels, and a mip level averaged in that encoding is not an
+/// average of light.
+fn reduce_triangle(
+    texels: &mut [f32],
+    src_off: usize,
+    sw: usize,
+    sh: usize,
+    dst_off: usize,
+    dw: usize,
+    dh: usize,
+) {
+    // Triangle faces are square and reduce symmetrically; `open_with` clamps
+    // both axes together to keep that true even for a malformed file.
+    debug_assert_eq!(sw, sh, "a triangle face must be square");
+    debug_assert_eq!(dw, dh, "a triangle level must be square");
+    for v in 0..dw {
+        for u in 0..dw {
+            for ch in 0..3 {
+                let at = |x: usize, y: usize| texels[src_off + (y * sw + x) * 3 + ch];
+                let mean = 0.25
+                    * (at(2 * u, 2 * v)
+                        + at(2 * u + 1, 2 * v)
+                        + at(2 * u, 2 * v + 1)
+                        + at(sw - 1 - 2 * v, sw - 1 - 2 * u));
+                texels[dst_off + (v * dw + u) * 3 + ch] = mean;
+            }
+        }
+    }
+}
+
 /// Reads one channel of Ptex data as an unnormalized float.
 #[inline]
 pub fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
@@ -374,25 +481,144 @@ mod tests {
         for k in 1..face.levels as usize {
             let (src, sw, sh) = face.level(k - 1);
             let (dst, dw, dh) = face.level(k);
-            for y in 0..dh {
-                for x in 0..dw {
-                    for ch in 0..3 {
-                        let at = |xi: usize, yi: usize| {
-                            texels[src + (yi.min(sh - 1) * sw + xi.min(sw - 1)) * 3 + ch]
-                        };
-                        texels[dst + (y * dw + x) * 3 + ch] = 0.25
-                            * (at(2 * x, 2 * y)
-                                + at(2 * x + 1, 2 * y)
-                                + at(2 * x, 2 * y + 1)
-                                + at(2 * x + 1, 2 * y + 1));
-                    }
-                }
-            }
+            // The same function `open_with` uses, not a copy of it: a fixture
+            // that built its levels its own way would agree with the loader
+            // only by coincidence.
+            reduce_quad(&mut texels, src, sw, sh, dst, dw, dh);
         }
         PtexColor {
             faces: vec![face],
             texels,
             fallback: Vec3A::splat(0.5),
+        }
+    }
+
+    /// Runs `ptex-rs`'s own reduction over the same linear values, so the two
+    /// can be compared texel for texel.
+    ///
+    /// `ptex::utils` is generic over the file's sample type; `Float` is the
+    /// one whose arithmetic is ours — `quarter_sum` there is
+    /// `0.25 * (a + b + c + d)`, summed in the order reproduced here — so the
+    /// comparison is exact rather than approximate, and a wrong *choice* of
+    /// texels cannot hide inside a tolerance.
+    fn ptex_rs_reduce(src: &[f32], w: usize, h: usize, triangle: bool) -> Vec<f32> {
+        let bytes: Vec<u8> = src.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (dw, dh) = (w / 2, h / 2);
+        let mut dst = vec![0u8; dw * dh * 3 * 4];
+        let (sstride, dstride) = (w * 3 * 4, dw * 3 * 4);
+        if triangle {
+            ptex::utils::reduce_tri(
+                &bytes,
+                sstride,
+                w,
+                h,
+                &mut dst,
+                dstride,
+                ptex::DataType::Float,
+                3,
+            );
+        } else {
+            ptex::utils::reduce(
+                &bytes,
+                sstride,
+                w,
+                h,
+                &mut dst,
+                dstride,
+                ptex::DataType::Float,
+                3,
+            );
+        }
+        dst.as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(f32::from_le_bytes)
+            .collect()
+    }
+
+    /// A `w x h` face of values no two of which are equal, so any misaddressed
+    /// texel changes the answer.
+    fn distinct(w: usize, h: usize) -> Vec<f32> {
+        (0..w * h * 3).map(|i| 1.0 + i as f32 * 0.25).collect()
+    }
+
+    /// Runs one reduction over a fresh arena and returns the coarse level.
+    fn level_1(src: &[f32], w: usize, h: usize, reduce: LevelReduction) -> Vec<f32> {
+        let (dw, dh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut arena = src.to_vec();
+        arena.resize(w * h * 3 + dw * dh * 3, 0.0);
+        reduce(&mut arena, 0, w, h, w * h * 3, dw, dh);
+        arena[w * h * 3..].to_vec()
+    }
+
+    /// **The triangle reduction is Ptex's, not a 2x2 box.**
+    ///
+    /// A triangle texture packs two mirrored triangles into its square, so the
+    /// fourth sample of a coarse texel is the mirrored one across the
+    /// anti-diagonal rather than the neighbour below-right. Averaging the 2x2
+    /// block instead mixes texels from both triangles, and the result is not
+    /// obviously wrong — it is plausible texture at every coarse level, which
+    /// is exactly why this is checked against `ptex-rs` rather than by eye.
+    #[test]
+    fn triangle_levels_match_ptex_rs_reduction() {
+        for w in [2usize, 4, 8, 16] {
+            let src = distinct(w, w);
+            let ours = level_1(&src, w, w, reduce_triangle);
+            assert_eq!(
+                ours,
+                ptex_rs_reduce(&src, w, w, true),
+                "triangle reduction of a {w}x{w} face"
+            );
+        }
+    }
+
+    /// And the two reductions really do disagree, so the test above fails if
+    /// the mesh-type branch in `open_with` is ever dropped.
+    ///
+    /// They coincide at 2x2 — where the mirrored texel *is* the fourth texel —
+    /// so the check starts at 4x4, which is the smallest face that can tell
+    /// the two apart.
+    #[test]
+    fn the_quad_reduction_would_be_a_different_answer_on_a_triangle() {
+        for w in [4usize, 8, 16] {
+            let src = distinct(w, w);
+            assert_ne!(
+                level_1(&src, w, w, reduce_triangle),
+                level_1(&src, w, w, reduce_quad),
+                "a {w}x{w} triangle face must not reduce like a quad"
+            );
+        }
+    }
+
+    /// The quad reduction is pinned the same way, so the other branch of the
+    /// mesh-type decision is not the untested one.
+    #[test]
+    fn reduce_matches_ptex_rs_on_a_square_face() {
+        for (w, h) in [(2usize, 2usize), (8, 8), (16, 4)] {
+            let src = distinct(w, h);
+            assert_eq!(
+                level_1(&src, w, h, reduce_quad),
+                ptex_rs_reduce(&src, w, h, false),
+                "quad reduction of a {w}x{h} face"
+            );
+        }
+    }
+
+    /// Once an axis has pinned at one texel, Ptex reduces the other axis alone
+    /// and this clamps instead — the same average, reached differently. Pinned
+    /// so the divergence stays a deliberate one: `reduce` would produce no rows
+    /// at all for `vw == 1`, so there is nothing to compare against there.
+    #[test]
+    fn a_pinned_axis_averages_along_the_axis_that_is_left() {
+        let src = distinct(4, 1);
+        let got = level_1(&src, 4, 1, reduce_quad);
+        for x in 0..2 {
+            for ch in 0..3 {
+                let a = src[(2 * x) * 3 + ch];
+                let b = src[(2 * x + 1) * 3 + ch];
+                assert_eq!(got[x * 3 + ch], 0.5 * (a + b));
+            }
         }
     }
 
