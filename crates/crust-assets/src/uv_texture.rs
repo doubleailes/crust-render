@@ -96,31 +96,12 @@ impl Tile {
             if src.width <= 1 && src.height <= 1 {
                 break;
             }
-            let (w, h) = (src.width.div_ceil(2), src.height.div_ceil(2));
-            let mut pixels = vec![0u8; w * h * 3];
-            for y in 0..h {
-                for x in 0..w {
-                    // Clamped to the last row/column, so an odd axis averages
-                    // two samples where a full 2x2 is not available rather
-                    // than reading past the level.
-                    let x0 = (2 * x).min(src.width - 1);
-                    let x1 = (2 * x + 1).min(src.width - 1);
-                    let y0 = (2 * y).min(src.height - 1);
-                    let y1 = (2 * y + 1).min(src.height - 1);
-                    let o = (y * w + x) * 3;
-                    for k in 0..3 {
-                        let at = |xi: usize, yi: usize| {
-                            to_linear[src.pixels[(yi * src.width + xi) * 3 + k] as usize]
-                        };
-                        let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
-                        pixels[o + k] = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
-                    }
-                }
-            }
+            let (pixels, width, height) =
+                reduce_half(&src.pixels, src.width, src.height, to_linear, encode);
             self.levels.push(Level {
                 pixels,
-                width: w,
-                height: h,
+                width,
+                height,
             });
         }
     }
@@ -501,6 +482,57 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
     Some(Tile::unmipped(number, pixels, w, h))
 }
 
+/// One mip level from the one above it: a 2x2 box average, in linear light,
+/// re-encoded to `u8` in the file's own space.
+///
+/// Shared by the in-memory pyramid ([`Tile::build_pyramid`]) and the `.tx`
+/// writer ([`crate::tiled::write_tx`]) **on purpose**. A streamed render and a
+/// preloaded one are supposed to agree texel for texel, and the only way to be
+/// sure of that is for the two paths to run the same code rather than two
+/// copies of the same intent.
+///
+/// Averaging in linear and not in the file's encoding is the point: summing
+/// display-encoded values is not summing light, and a chain built that way
+/// drifts darker at every level (a black/white checker comes out at 0.21
+/// instead of 0.5). Note that the `CRUST_TEX_MAX` reduction in `decode_tile`
+/// deliberately does the opposite — it is a *resize*, meant to match a DCC's
+/// preview of the same file, not a filter. `docs/color_management.md` records
+/// both conventions.
+///
+/// Axes halve by `div_ceil`, never `>> 1`: level 0 is routinely odd (an
+/// arbitrary integer `CRUST_TEX_MAX` factor, or an odd authored size), and the
+/// samplers map `x = u * width - 0.5`, so every level has to span the whole
+/// `[0, 1]` domain. Flooring an odd axis drops its last half-texel and that
+/// level's domain slips against level 0's — a crawl across mip transitions on
+/// a slow camera move. Source indices clamp to the last row and column, so an
+/// odd axis averages two samples where a full 2x2 is not available rather than
+/// reading past the level.
+pub(crate) fn reduce_half(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    to_linear: &[f32; 256],
+    encode: fn(f32) -> f32,
+) -> (Vec<u8>, usize, usize) {
+    let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
+    let mut pixels = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = (2 * x).min(sw - 1);
+            let x1 = (2 * x + 1).min(sw - 1);
+            let y0 = (2 * y).min(sh - 1);
+            let y1 = (2 * y + 1).min(sh - 1);
+            let o = (y * w + x) * 3;
+            for k in 0..3 {
+                let at = |xi: usize, yi: usize| to_linear[src[(yi * sw + xi) * 3 + k] as usize];
+                let mean = 0.25 * (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1));
+                pixels[o + k] = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    (pixels, w, h)
+}
+
 /// The transfer function that re-encodes a linear value back to the file's
 /// own space — the inverse of [`to_linear_table`], used only when averaging a
 /// mip level.
@@ -508,7 +540,7 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
 /// A function rather than a table because the input is a continuous average,
 /// not one of 256 stored values; it runs once per texel of levels 1 and up,
 /// which is a third of the base and only at load.
-fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
+pub(crate) fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
     // Matched on the variant rather than on `gamma()`, so a new colour space
     // is a compile error here instead of silently taking the `Raw` arm and
     // storing linear values in a display-encoded table.
@@ -531,7 +563,7 @@ fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
 /// toe that keeps near-black values well above the power law (up to 19x at
 /// 0.01 — `docs/color_management.md` tabulates it). Collapsing them into one
 /// curve is wrong in the shadows for 2.2 and wrong everywhere for 1.8.
-fn to_linear_table(space: ColorSpace) -> [f32; 256] {
+pub(crate) fn to_linear_table(space: ColorSpace) -> [f32; 256] {
     let mut table = [0.0f32; 256];
     for (i, v) in table.iter_mut().enumerate() {
         let c = i as f32 / 255.0;

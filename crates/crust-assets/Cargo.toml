@@ -14,4 +14,6 @@ crust-core = { path = "../crust-core" }
 exr.workspace = true
 image.workspace = true
 ptex-rs.workspace = true
+tiff.workspace = true
+flate2.workspace = true
 tracing.workspace = true
