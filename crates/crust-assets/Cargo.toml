@@ -13,7 +13,7 @@ path = "src/lib.rs"
 crust-core = { path = "../crust-core" }
 exr.workspace = true
 image.workspace = true
-ptex-rs.workspace = true
+ptex.workspace = true
 tiff.workspace = true
 flate2.workspace = true
 half.workspace = true
