@@ -116,6 +116,31 @@ pub struct FileAssets {
     /// pyramid, which is the whole reason Ptex was the format waiting on a
     /// reader-side cache rather than on a conversion step.
     ptex_streaming: bool,
+    /// Every Ptex texture opened, so the render can be reported on and — for
+    /// the streamed ones — re-budgeted as more arrive. See [`PtexHandle`].
+    ptex: std::sync::Mutex<Vec<PtexHandle>>,
+}
+
+/// Floor on a streamed Ptex texture's share of the budget: 4 MiB.
+///
+/// A stage binding more textures than the budget has megabytes would otherwise
+/// give each one zero, and a zero budget in `ptex::CacheOptions` disables
+/// caching outright — every texel fetch back to a seek and an inflate. Better
+/// to overshoot the total than to silently turn the cache off, so the floor
+/// wins and the report shows a budget above what was asked for.
+const MIN_PTEX_SHARE: usize = 4 * 1024 * 1024;
+
+/// One opened Ptex texture, as `FileAssets` remembers it.
+///
+/// Held for two reasons that both only show up on a real stage. A preloaded
+/// texture is remembered so `--stats` can report *which backend ran* and what
+/// it cost — without that the report is silent about Ptex and an operator
+/// cannot tell a streamed island from a preloaded one. A streamed one is
+/// remembered because its budget has to be revised downward as siblings
+/// arrive; see [`FileAssets::rebudget_ptex`].
+enum PtexHandle {
+    Preloaded { faces: usize, bytes: usize },
+    Streamed(std::sync::Arc<PtexStream>),
 }
 
 impl Default for FileAssets {
@@ -145,7 +170,79 @@ impl FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
             ptex_streaming,
+            ptex: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Splits the Ptex budget evenly over every streamed texture opened so far.
+    ///
+    /// **`CRUST_PTEX_CACHE_MB` is the render's budget, not a file's**, and
+    /// keeping that true takes this. The `.tx` path gets it for free: every
+    /// streaming texture there shares one `TileCache`, so the total is the
+    /// budget by construction. `ptex::SharedReader` owns its cache instead —
+    /// which is the right shape for a *library*, since a `.ptx` is a
+    /// self-contained pyramid — so N textures opened at the full budget would
+    /// hold N times it. That is not a rounding error on a production stage:
+    /// the Moana island binds Ptex per element, so the default 1 GiB would
+    /// become tens of GiB, and the feature whose entire purpose is to bound
+    /// residency would be unbounded in the number of textures.
+    ///
+    /// An even split rather than a demand-driven one. It is not what OIIO
+    /// would do — a shared pool serves whichever texture is hot — but it is
+    /// what the reader's API allows without a second cache here, and the
+    /// property that matters (the total is what was asked for) holds either
+    /// way. Re-dividing on each open rather than once at the end because the
+    /// count is only known when the import is done, and a texture must be
+    /// usable the moment it is opened.
+    fn rebudget_ptex(&self, opened: &[PtexHandle]) {
+        let streams: Vec<_> = opened
+            .iter()
+            .filter_map(|h| match h {
+                PtexHandle::Streamed(s) => Some(s),
+                PtexHandle::Preloaded { .. } => None,
+            })
+            .collect();
+        if streams.is_empty() {
+            return;
+        }
+        // At least one tile each, or a stage with thousands of textures gives
+        // every one a budget of zero and turns the cache off entirely.
+        let share = (ptex_stream::cache_budget_from_env() / streams.len()).max(MIN_PTEX_SHARE);
+        for s in &streams {
+            s.set_budget(share);
+        }
+    }
+
+    /// Ptex residency and cache counters, in the shape `--stats` reports.
+    ///
+    /// Reports for **both** backends, because the first question the report
+    /// has to answer is which one ran. Pushed into `RenderStats` by the host
+    /// exactly as `texture_cache_stats` is.
+    pub fn ptex_stats(&self) -> crust_core::PtexCacheStats {
+        let opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = crust_core::PtexCacheStats::default();
+        for h in opened.iter() {
+            out.textures += 1;
+            match h {
+                PtexHandle::Preloaded { faces, bytes } => {
+                    out.faces += *faces as u64;
+                    out.preloaded_bytes += *bytes as u64;
+                }
+                PtexHandle::Streamed(s) => {
+                    let st = s.stats();
+                    out.streamed += 1;
+                    out.faces += s.faces() as u64;
+                    out.micro_hits += st.micro_hits;
+                    out.reader_lookups += st.reader_lookups;
+                    out.cache_hits += st.cache.hits;
+                    out.cache_misses += st.cache.misses;
+                    out.evictions += st.cache.evictions;
+                    out.resident_bytes += st.cache.bytes_resident as u64;
+                    out.budget_bytes += st.cache.bytes_budget as u64;
+                }
+            }
+        }
+        out
     }
 
     /// The tile cache's counters, in the shape `--stats` reports.
@@ -312,14 +409,23 @@ impl AssetLoader for FileAssets {
         if self.ptex_streaming {
             match PtexStream::open(path) {
                 Ok(tex) => {
+                    let tex = std::sync::Arc::new(tex);
+                    let mut opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
+                    opened.push(PtexHandle::Streamed(tex.clone()));
+                    // Every sibling's share shrinks as this one joins, so the
+                    // total stays what was asked for rather than growing with
+                    // the texture count.
+                    self.rebudget_ptex(&opened);
                     info!(
-                        "Streaming Ptex {} ({} faces, {:.0} MiB budget) opened in {:?}",
+                        "Streaming Ptex {} ({} faces) opened in {:?} — {} textures now sharing \
+                         {:.0} MiB",
                         path.display(),
-                        PtexTexture::num_faces(&tex),
+                        PtexTexture::num_faces(tex.as_ref()),
+                        started.elapsed(),
+                        opened.len(),
                         ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
-                        started.elapsed()
                     );
-                    return Some(std::sync::Arc::new(tex));
+                    return Some(tex);
                 }
                 Err(e) => {
                     error!(
@@ -338,6 +444,13 @@ impl AssetLoader for FileAssets {
                     tex.bytes() as f64 / (1024.0 * 1024.0),
                     started.elapsed()
                 );
+                self.ptex
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(PtexHandle::Preloaded {
+                        faces: PtexTexture::num_faces(&tex),
+                        bytes: tex.bytes(),
+                    });
                 Some(std::sync::Arc::new(tex))
             }
             Err(e) => {

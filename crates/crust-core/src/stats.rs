@@ -225,6 +225,61 @@ pub struct RenderStats {
     /// reach into it. `main.rs` snapshots it after the render exactly as it
     /// already assigns `stats.rays`.
     pub textures: TextureCacheStats,
+    /// Ptex residency; empty unless the scene bound a `.ptx`. Pushed by the
+    /// host for the same reason `textures` is.
+    pub ptex: PtexCacheStats,
+}
+
+/// What Ptex cost over a render, under whichever backend ran.
+///
+/// Unlike [`TextureCacheStats`] this reports for the **preloading** path too,
+/// because the first question it has to answer is which backend ran at all.
+/// Without that the report is silent about Ptex, and on a stage where Ptex is
+/// gigabytes — the island's is 4.58 GiB at the default cap — an operator
+/// cannot tell a streamed run from a preloaded one except by diffing peak RSS
+/// against a run they have to do separately.
+///
+/// A mixed report is possible and is not a bug: streaming falls back to
+/// preloading for a file it cannot open, so `streamed < textures` means some
+/// file declined, which is exactly when you want to be told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PtexCacheStats {
+    /// Textures opened, by either backend.
+    pub textures: u32,
+    /// How many of those streamed.
+    pub streamed: u32,
+    pub faces: u64,
+    /// Resident bytes held by the **preloaded** textures. Fixed for the
+    /// render, and the number streaming exists to replace.
+    pub preloaded_bytes: u64,
+    pub micro_hits: u64,
+    /// Texel fetches that reached the reader rather than this thread's slots.
+    pub reader_lookups: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub evictions: u64,
+    /// Bytes the streamed caches hold *now* — a live figure, bounded by
+    /// `budget_bytes`, not a peak.
+    pub resident_bytes: u64,
+    pub budget_bytes: u64,
+}
+
+impl PtexCacheStats {
+    pub fn lookups(&self) -> u64 {
+        self.micro_hits + self.reader_lookups
+    }
+
+    /// Share of texel fetches answered without touching the reader's mutex.
+    pub fn micro_rate(&self) -> f64 {
+        match self.lookups() {
+            0 => 0.0,
+            n => self.micro_hits as f64 / n as f64,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.textures == 0
+    }
 }
 
 /// What a streaming texture cache did over a render.
@@ -668,6 +723,90 @@ impl fmt::Display for RenderStats {
                     "  {:<28} {}",
                     "tile read errors",
                     thousands(t.errors as usize)
+                )?;
+            }
+        }
+
+        // -- Ptex ------------------------------------------------------
+        let p = &self.ptex;
+        if !p.is_empty() {
+            writeln!(f, "{rule}")?;
+            writeln!(f, "Ptex")?;
+            writeln!(f, "{rule}")?;
+            // The line the whole block exists for. An island run's peak RSS
+            // cannot be read without knowing which backend produced it.
+            let backend = match (p.streamed, p.textures) {
+                (0, _) => "preloaded".to_string(),
+                (n, t) if n == t => "streamed".to_string(),
+                (n, t) => format!("{n} streamed, {} preloaded (fell back)", t - n),
+            };
+            writeln!(f, "  {:<28} {}", "backend", backend)?;
+            writeln!(
+                f,
+                "  {:<28} {} ({} faces)",
+                "textures",
+                thousands(p.textures as usize),
+                thousands(p.faces as usize)
+            )?;
+            if p.preloaded_bytes > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "preloaded resident",
+                    human_bytes(p.preloaded_bytes)
+                )?;
+            }
+            if p.streamed > 0 {
+                // Resident is live rather than peak, and the budget is the
+                // total across every streamed texture -- `FileAssets` divides
+                // one budget over them so this is what was asked for, not a
+                // multiple of it.
+                writeln!(
+                    f,
+                    "  {:<28} {} / {} over {} textures",
+                    "streamed resident / budget",
+                    human_bytes(p.resident_bytes),
+                    human_bytes(p.budget_bytes),
+                    thousands(p.streamed as usize)
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "texel fetches",
+                    thousands(p.lookups() as usize)
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} {} ({:.1}%)",
+                    "  thread microcache hits",
+                    thousands(p.micro_hits as usize),
+                    100.0 * p.micro_rate()
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "  reader cache hits",
+                    thousands(p.cache_hits as usize)
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} {}",
+                    "  reads from disk",
+                    thousands(p.cache_misses as usize)
+                )?;
+                // Same reasoning as the `.tx` block's re-read line: evictions
+                // running with the misses means the budget is under the
+                // working set, which is the one thing raising it fixes.
+                writeln!(
+                    f,
+                    "  {:<28} {}{}",
+                    "evictions",
+                    thousands(p.evictions as usize),
+                    if p.evictions > p.cache_misses / 4 && p.cache_misses > 0 {
+                        "   (raise CRUST_PTEX_CACHE_MB)"
+                    } else {
+                        ""
+                    }
                 )?;
             }
         }
