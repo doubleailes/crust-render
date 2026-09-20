@@ -128,6 +128,69 @@ finds its hit at index 0 either way. Both halves are asserted in
 `the_microcache_absorbs_most_taps`, so shrinking the slot count back fails the
 test rather than quietly costing a render its cache.
 
+## The budget is the render's, not a file's
+
+`ptex::SharedReader` owns its cache. That is the right shape for a *library* —
+a `.ptx` is a self-contained pyramid and a reader should not need to know about
+its siblings — but it means N textures opened at `CRUST_PTEX_CACHE_MB` each
+hold **N times** it. The `.tx` path never had this problem: every streaming
+texture there shares one `TileCache`, so the total is the budget by
+construction.
+
+It is not a rounding error on a production stage. The Moana island binds Ptex
+per element, so the default 1 GiB would have become tens of GiB — and the
+feature whose entire purpose is to bound residency would have been unbounded in
+the texture count.
+
+`FileAssets::rebudget_ptex` divides one budget over the streamed textures as
+they arrive, re-dividing on each open (the count is only final when the import
+is, and a texture has to be usable the moment it is opened). An even split
+rather than the demand-driven pool OIIO would use — that would need a second
+cache here, which is the design ruled out above — but the property that matters
+holds: **the total is what was asked for.** `MIN_PTEX_SHARE` (4 MiB) floors each
+share, because a zero budget in `ptex::CacheOptions` disables caching outright
+and overshooting the total beats silently turning the cache off.
+
+Pinned by `one_budget_is_shared_across_textures_not_repeated_per_file`, which
+first asserts the naive total *does* multiply — so the sharing is testing
+something.
+
+## Reading it in `--stats`
+
+`--stats` prints a `Ptex` block, and unlike the `Texture Cache` block it reports
+for **both** backends, because the first question it has to answer is which one
+ran:
+
+```
+Ptex
+  backend                      streamed
+  textures                     2 (6 faces)
+  streamed resident / budget   11.98 KiB / 8.00 MiB over 2 textures
+  texel fetches                5 612 932
+    thread microcache hits     5 612 515 (100.0%)
+    reader cache hits          366
+    reads from disk            8
+  evictions                    0
+```
+
+against a preloaded run's:
+
+```
+Ptex
+  backend                      preloaded
+  textures                     2 (6 faces)
+  preloaded resident           38.06 KiB
+```
+
+`backend` can also read `N streamed, M preloaded (fell back)`, which is not a
+bug — streaming falls back per file — but is exactly when you want to be told.
+`evictions` running with the misses is the line that says the budget is under
+the working set, the one thing raising it fixes.
+
+Without this block an island run's peak RSS cannot be interpreted: the number
+is dominated by geometry and the SBVH build transient, so a streamed run and a
+preloaded one differ by the Ptex residency buried inside a much larger figure.
+
 ## Cost
 
 `samples/ptex_quads.usda` is built to be the honest worst case: two textured

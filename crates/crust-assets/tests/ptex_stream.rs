@@ -457,3 +457,61 @@ fn concurrent_lookups_agree_with_the_oracle() {
         }
     });
 }
+
+/// **The budget belongs to the render, not to a file.**
+///
+/// `ptex::SharedReader` owns its cache, which is the right shape for a
+/// library — a `.ptx` is a self-contained pyramid — but it means N textures
+/// opened at `CRUST_PTEX_CACHE_MB` each would hold N times it. On a stage that
+/// binds Ptex per element (the Moana island does, across its 20 elements) the
+/// default 1 GiB would become tens of GiB, and the feature whose whole purpose
+/// is to bound residency would be unbounded in the texture count.
+///
+/// `FileAssets` divides one budget over the streamed textures as they arrive.
+/// This pins the property directly on the mechanism: open several, re-budget
+/// the way `rebudget_ptex` does, and the *total* is what was asked for.
+#[test]
+fn one_budget_is_shared_across_textures_not_repeated_per_file() {
+    let names = ["quad_tiled", "quad_u8", "tri_u16", "quad_f32"];
+    let total = 64 * 1024 * 1024;
+
+    let streams: Vec<_> = names
+        .iter()
+        .map(|n| PtexStream::open_with(&fixture(n), total, None, true).expect(n))
+        .collect();
+
+    // Opened at the full budget each, which is the bug: four textures, four
+    // times the budget.
+    let naive: usize = streams.iter().map(|s| s.stats().cache.bytes_budget).sum();
+    assert_eq!(
+        naive,
+        total * names.len(),
+        "a per-file budget should multiply — if this stopped being true the \
+         sharing below is testing nothing"
+    );
+
+    // Shared, as `FileAssets` does it.
+    let share = total / streams.len();
+    for s in &streams {
+        s.set_budget(share);
+    }
+    let shared: usize = streams.iter().map(|s| s.stats().cache.bytes_budget).sum();
+    assert_eq!(
+        shared, total,
+        "the total must be the budget that was asked for"
+    );
+
+    // And the textures still work at their reduced budget.
+    for (n, s) in names.iter().zip(&streams) {
+        let pre = PtexColor::open_with(&fixture(n), true, 4).expect(n);
+        let capped = PtexStream::open_with(&fixture(n), share, Some(4), true).expect(n);
+        for &(u, v) in grid().iter().take(64) {
+            assert_eq!(
+                bits(capped.eval(0, u, v, 0.0)),
+                bits(pre.eval(0, u, v, 0.0)),
+                "{n} after re-budgeting"
+            );
+        }
+        assert!(s.faces() > 0);
+    }
+}

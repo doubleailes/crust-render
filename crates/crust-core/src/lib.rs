@@ -65,8 +65,8 @@ pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets};
 pub use stats::{
-    ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderStats, SceneCounters,
-    TextureCacheStats, peak_memory_bytes,
+    ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats, RayStats, RenderStats,
+    SceneCounters, TextureCacheStats, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, Texture2D, TextureRef};
 pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};

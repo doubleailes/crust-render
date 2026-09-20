@@ -1041,6 +1041,20 @@ Schema mapping:
     measured 0.000 hit rate there against 0.998 with four; and the budget moves residency
     only — a 4 MiB render is bit-identical to a 1 GiB one. `docs/ptex_streaming.md` has
     the measurements and the reasoning.
+    **`CRUST_PTEX_CACHE_MB` is the render's budget, not a file's**, and that takes work
+    here: `ptex::SharedReader` owns its cache (right for a library, wrong for a scene),
+    so N textures opened at the full budget would hold N times it — on a stage binding
+    Ptex per element, like the island, the default 1 GiB would become tens of GiB and
+    the feature would be unbounded in the texture count. `FileAssets::rebudget_ptex`
+    divides one budget over the streamed textures as they arrive, floored at
+    `MIN_PTEX_SHARE` (4 MiB, since a zero budget disables caching outright). The `.tx`
+    path gets this for free — every streaming texture there shares one `TileCache`.
+  - **`--stats` prints a `Ptex` block**, and unlike the `Texture Cache` one it reports
+    for *both* backends, because the first question it has to answer is which ran:
+    `backend`, textures and faces, preloaded resident bytes, and for a streamed run the
+    live resident/budget total, the three fetch tiers and evictions. Without it an
+    island run's peak RSS is uninterpretable — the figure is dominated by geometry and
+    the SBVH build transient, with Ptex residency buried inside it.
   - `CRUST_PTEX=0` declines every texture so the same scene renders on its constant
     `baseColor` — the A/B switch that separates a wrong Ptex lookup from a wrong material
     or wrong lighting. It applies to both backends.

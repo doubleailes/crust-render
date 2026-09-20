@@ -291,6 +291,22 @@ impl PtexStream {
         }
     }
 
+    /// Re-budgets this texture's cache.
+    ///
+    /// Exists for one reason: the budget belongs to the *render*, not to a
+    /// file. `ptex::SharedReader` owns its cache, so N textures opened at
+    /// `CRUST_PTEX_CACHE_MB` each would hold N times that — and a production
+    /// stage binds Ptex per element, so N is not small. `FileAssets` divides
+    /// the total as textures arrive; see `rebudget_ptex` there.
+    pub fn set_budget(&self, bytes: usize) {
+        self.reader.set_cache_budget(bytes);
+    }
+
+    /// Faces the file holds, for the load-time and `--stats` report.
+    pub fn faces(&self) -> usize {
+        self.n_faces
+    }
+
     /// Bytes the cache currently holds. Unlike `PtexColor::bytes` this moves
     /// during a render and is bounded by the budget rather than by the asset.
     pub fn bytes(&self) -> usize {

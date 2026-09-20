@@ -271,6 +271,7 @@ fn main() {
     // relaxed atomics bumped from every worker, so they are only meaningful
     // once the last one has stopped.
     stats.textures = assets.texture_cache_stats();
+    stats.ptex = assets.ptex_stats();
     info!("Time elapsed in rendering() is: {:?}", duration);
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
