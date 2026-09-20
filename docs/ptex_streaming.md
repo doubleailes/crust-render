@@ -147,13 +147,57 @@ they arrive, re-dividing on each open (the count is only final when the import
 is, and a texture has to be usable the moment it is opened). An even split
 rather than the demand-driven pool OIIO would use — that would need a second
 cache here, which is the design ruled out above — but the property that matters
-holds: **the total is what was asked for.** `MIN_PTEX_SHARE` (4 MiB) floors each
+holds: **the total is what was asked for.** `MIN_PTEX_SHARE` (1 MiB) floors each
 share, because a zero budget in `ptex::CacheOptions` disables caching outright
-and overshooting the total beats silently turning the cache off.
+and overshooting the total beats silently turning the cache off — but it is a
+backstop, not the policy; see the next section for what actually bounds the
+reader count.
 
 Pinned by `one_budget_is_shared_across_textures_not_repeated_per_file`, which
 first asserts the naive total *does* multiply — so the sharing is testing
 something.
+
+## Not every texture is worth a cache slot
+
+The island is what forced this, and the numbers are its own. It binds **3 618**
+`.ptx` totalling **5.98 GiB** preloaded, and they are Pareto-distributed:
+
+| | textures | share of bytes |
+| --- | --- | --- |
+| top 2 (`trunk0001`, twice) | 0.06% | 42% |
+| top 25 | 0.7% | 88% |
+| >= 1 MiB | 167 (4.6%) | 97% |
+| < 1 MiB | 3 451 (95%) | 3% |
+
+The median texture is under a kilobyte. An even split over all 3 618 gives the
+four textures holding *half the bytes* a 0.3 MiB cache each — smaller than one
+of their faces, so every read comes back `oversized` and nothing caches at all
+— while 3 451 sub-kilobyte files each hold a slot they can never fill.
+Flooring the share instead (this module's first answer) multiplies out:
+3 618 x 4 MiB is **14.1 GiB**, worse than the 5.98 GiB preload it replaces.
+
+So admission is per texture, and priced against the alternative:
+**a texture smaller than the cache slot it would occupy should just be
+preloaded.** `PtexStream::preload_bytes` answers what preloading would cost
+from the parsed header alone — `face_infos()` carries every face's resolution
+with no pixel I/O — so the test is exact and free. Below
+`DEFAULT_STREAM_MIN_MB` (8 MiB, `CRUST_PTEX_STREAM_MIN_MB`), preload.
+
+| threshold | streamed | share each | preloaded | total | vs preload |
+| --- | --- | --- | --- | --- | --- |
+| 0 (admit all) | 3 618 | 0.3 MiB | 0 | 1.0 GiB | nothing caches |
+| 1 MiB | 167 | 6.1 MiB | 0.18 GiB | 1.18 GiB | 5.1x |
+| **8 MiB** | **39** | **26 MiB** | **0.54 GiB** | **1.54 GiB** | **3.9x** |
+| 64 MiB | 14 | 73 MiB | 1.15 GiB | 2.15 GiB | 2.8x |
+
+8 MiB is the balance: a lower threshold wins on paper but starves each reader
+below a working set, and the headline total is worthless if nothing caches.
+`CRUST_PTEX_STREAM_MIN_MB=0` admits everything, which is what the sample
+scene's A/B needs — its fixtures are kilobytes, so by default they preload and
+the comparison would measure nothing. `--stats` says `backend` either way.
+
+Pinned by `the_island_distribution_stays_bounded_under_admission`, whose
+bucket table is derived from the 3 618 real rows rather than invented.
 
 ## Reading it in `--stats`
 

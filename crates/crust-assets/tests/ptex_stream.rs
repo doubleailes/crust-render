@@ -515,3 +515,118 @@ fn one_budget_is_shared_across_textures_not_repeated_per_file() {
         assert!(s.faces() > 0);
     }
 }
+
+/// **A texture smaller than its own cache slot should be preloaded, not
+/// streamed.**
+///
+/// The island is what forced this. It binds **3 618** `.ptx` totalling 5.98
+/// GiB preloaded, and they are Pareto-distributed: 167 of them hold 97% of
+/// the bytes, the top 25 hold 88%, and the median is under a kilobyte.
+/// Dividing one budget evenly over all 3 618 hands the four textures holding
+/// half the bytes a 0.3 MiB cache each — below a single face, so every read
+/// comes back oversized and nothing caches — while 3 451 sub-kilobyte
+/// textures each sit on a slot they cannot fill. Flooring the share instead
+/// multiplies out to 14.1 GiB, worse than the preload it replaces.
+///
+/// So admission is per texture and priced against the alternative.
+/// `preload_bytes` answers it from the header with no pixel I/O, which is
+/// what makes it usable as a test rather than a guess — this checks that it
+/// is both *free* and *right*, by comparing it against what the preloading
+/// backend actually allocates for the same file and cap.
+#[test]
+fn admission_prices_a_texture_against_preloading_it() {
+    for &(name, _) in FIXTURES {
+        let path = fixture(name);
+        for cap in [2i8, 4, 5] {
+            let stream = PtexStream::open_with(&path, 8 << 20, None, true).expect(name);
+            let predicted = stream.preload_bytes(cap);
+            let actual = PtexColor::open_with(&path, true, cap).expect(name).bytes();
+
+            // Within a few percent: both count the same texels and the same
+            // chain, and differ only in per-face bookkeeping. Close enough to
+            // decide a policy on, which is all it is for.
+            let err = (predicted as f64 - actual as f64).abs() / actual as f64;
+            assert!(
+                err < 0.05,
+                "{name} cap {cap}: predicted {predicted} bytes from the header, \
+                 preloading actually took {actual} ({:.1}% off)",
+                err * 100.0
+            );
+        }
+    }
+}
+
+/// The island's distribution, run through the admission rule.
+///
+/// Not a mock of the renderer — a direct check that the *policy arithmetic*
+/// does what the measurement says, using the real per-texture sizes taken
+/// from a full island render's log. Without this the numbers in
+/// `DEFAULT_STREAM_MIN_MB` are a claim in a comment; with it, changing the
+/// rule and making the island worse fails here.
+#[test]
+fn the_island_distribution_stays_bounded_under_admission() {
+    // Resident MiB per texture, bucketed by magnitude from a full island
+    // render's `--stats` log: `(count, mean MiB)` per decade. Derived from
+    // the 3 618 real rows rather than invented, so the count and the total
+    // are the asset's, not a guess — it reproduces both exactly.
+    const ISLAND: &[(usize, f64)] = &[
+        (2, 1288.3000), // >= 1 GiB : 2.516 GiB — the two trunk0001 copies
+        (2, 404.2500),  // 256-1024 : 0.790 GiB
+        (10, 155.5000), // 64-256   : 1.519 GiB
+        (14, 35.0357),  // 16-64    : 0.479 GiB
+        (69, 5.9000),   // 4-16     : 0.398 GiB
+        (70, 1.4229),   // 1-4      : 0.097 GiB
+        (3451, 0.0527), // < 1 MiB  : 0.177 GiB — 95% of the files, 3% of the bytes
+    ];
+    let total_mib: f64 = ISLAND.iter().map(|(n, m)| *n as f64 * m).sum();
+    let count: usize = ISLAND.iter().map(|(n, _)| n).sum();
+    assert_eq!(count, 3618, "the island's texture count");
+    assert!(
+        (total_mib / 1024.0 - 5.9756).abs() < 0.01,
+        "the island's preloaded total should be 5.98 GiB, modelled {:.2} GiB",
+        total_mib / 1024.0
+    );
+
+    let budget_mib = 1024.0;
+    let threshold = crust_assets::PTEX_DEFAULT_STREAM_MIN_MB as f64;
+
+    let streamed: usize = ISLAND
+        .iter()
+        .filter(|(_, m)| *m >= threshold)
+        .map(|(n, _)| n)
+        .sum();
+    let preloaded_mib: f64 = ISLAND
+        .iter()
+        .filter(|(_, m)| *m < threshold)
+        .map(|(n, m)| *n as f64 * m)
+        .sum();
+    let total = budget_mib + preloaded_mib;
+
+    // The share each streamed reader gets has to be big enough to hold a
+    // working set; that is the half an even split gets wrong.
+    let share = budget_mib / streamed as f64;
+    assert!(
+        share >= 8.0,
+        "each of {streamed} streamed readers gets only {share:.1} MiB — below a \
+         large face, so reads come back oversized and nothing caches"
+    );
+
+    // And the whole thing has to beat preloading by a real margin, or there
+    // is no reason to turn it on.
+    assert!(
+        total < total_mib / 3.0,
+        "streaming the island would take {:.2} GiB against {:.2} GiB preloaded — \
+         not worth the fetch cost",
+        total / 1024.0,
+        total_mib / 1024.0
+    );
+
+    eprintln!(
+        "island under admission: {streamed} streamed at {share:.0} MiB each + \
+         {:.2} GiB preloaded = {:.2} GiB, against {:.2} GiB fully preloaded ({:.1}x)",
+        preloaded_mib / 1024.0,
+        total / 1024.0,
+        total_mib / 1024.0,
+        total_mib / total
+    );
+}

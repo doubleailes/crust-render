@@ -20,9 +20,15 @@
              feeds channel 0 to all three, which is the rule both backends
              apply.
 
-             Renders the same either way, which is the point:
+             Renders the same either way, which is the point. Note the
+             CRUST_PTEX_STREAM_MIN_MB=0: these textures are kilobytes, and by
+             default a texture smaller than the cache slot it would occupy is
+             preloaded instead of streamed (see DEFAULT_STREAM_MIN_MB), so
+             without it the streamed run quietly preloads and the A/B compares
+             nothing. `--stats` says `backend` either way.
                  cargo run --release -- -i samples/ptex_quads.usda -o a.exr
-                 CRUST_PTEX_STREAM=1 cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+                 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
+                     cargo run --release -- -i samples/ptex_quads.usda -o b.exr
                  cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
              With CRUST_PTEX_MAX_LOG2 set so both backends hold the same
              resolution, those two images are bit-identical; see

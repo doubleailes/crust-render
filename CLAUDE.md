@@ -96,8 +96,10 @@ CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda -
 # pyramid, so this just turns the reader's cache on. Capping both backends
 # alike is what makes the A/B an equality rather than a comparison of two
 # different resolutions; uncapped is what streaming is *for*.
+# CRUST_PTEX_STREAM_MIN_MB=0 because these fixtures are kilobytes and a
+# texture smaller than its own cache slot is preloaded by default.
 CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
-CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 \
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     cargo run --release -- -i samples/ptex_quads.usda -o b.exr
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
 CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 \
