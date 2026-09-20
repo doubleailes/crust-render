@@ -1,0 +1,187 @@
+# Streaming Ptex
+
+How `CRUST_PTEX_STREAM=1` works, what it is bit-identical to, where it is
+deliberately not, and what it costs. Written the way `docs/color_management.md`
+is — as the record you consult before blaming the streaming path for something,
+rather than as a feature announcement.
+
+## Why, and why it took a dependency bump
+
+Preloading makes memory scale with the scene's total Ptex footprint. On the
+Moana island that is 2 576 238 faces: **4.58 GiB** at the default 32×32 cap,
+1.84 GiB at 16×16, and **494 GiB** at the authored resolution. So
+`CRUST_PTEX_MAX_LOG2` was never a tuning knob — it is the thing that makes the
+island loadable at all, at the price of discarding authored detail permanently
+and of still being unable to help a scene that binds more than fits.
+
+The UV path answered this a while ago with `.tx` tile streaming. Ptex could
+not, and "Known incomplete work" was specific about why and about where the
+fix belonged:
+
+> That is a limitation of the *reader*, not of crust: a `.ptx` is already a
+> per-face mip pyramid and `ptex-rs` already addresses it randomly through
+> `get_data_at_res`, so the fix is a `PtexCache` equivalent in `ptex-rs` —
+> exactly as the C++ Ptex library ships one — rather than a second cache in
+> `crust-assets`. Do not bolt Ptex onto the `.tx` tile cache; the two formats
+> want different keys and the per-face pyramid is already on disk.
+
+Upstream now ships exactly that. `ptex::SharedReader` is a `&self` reader over
+an LRU of decoded blocks under a byte budget, and `tile_layout` / `tile_info` /
+`get_tile` make one tile of one level of one face addressable without
+materialising the face. `crates/crust-assets/src/ptex_stream.rs` is therefore a
+*sampler over* that reader and not a cache: level selection, tile addressing,
+the colour decode, and a per-thread microcache.
+
+**There is no conversion step**, and that is the substantive difference from
+the `.tx` path. `maketx` exists because a `.png` is not tiled or mip-mapped; a
+`.ptx` already is both. The missing piece was never a format.
+
+## What it changes for the caps
+
+| | preloaded (default) | streamed |
+| --- | --- | --- |
+| `CRUST_PTEX_MAX_LOG2` unset | 32×32 per face | **uncapped** |
+| `CRUST_PTEX_MAX_LOG2` set | that ceiling | that ceiling |
+| memory scales with | the scene's Ptex | `CRUST_PTEX_CACHE_MB` |
+| mip chain | reduced in linear light, in memory | the file's, off disk |
+
+An unset cap meaning "uncapped" is the point of the feature. An explicitly set
+one still applies, because that is what makes the two backends comparable at a
+resolution both hold — which is how every equality below is measured.
+
+## The invariant
+
+**At a resolution both backends hold, streaming changes where the texels live
+and nothing else.**
+
+End to end, `samples/ptex_quads.usda` at 16 spp with `CRUST_PTEX_MAX_LOG2=5` on
+both sides:
+
+```
+320x180  differing pixels: 0/57600 (0.0000%)
+max abs diff: 0e0   rmse: 0e0
+```
+
+Texel for texel, `crates/crust-assets/tests/ptex_stream.rs` compares
+`PtexTexture::eval` bit-for-bit across four fixtures (`u8` 1- and 4-channel,
+`uint16` triangle, `float32`), every face, ~1 400 sample points per face, and
+caps from 0 up to the authored resolution. The `u8` decode table is pinned
+against the scalar decode it memoises, which is what lets that be an equality
+rather than a tolerance.
+
+The capped-reduction arm is tested separately (`a_capped_reduction_agrees_too`)
+because it is the one where `is_tiled` is false and a "tile" is the whole face
+— a bug there would hide behind the tiled fixture passing.
+
+**The budget moves residency, not the image.** A 4 MiB-budget render of the
+sample scene is bit-identical to a 1 GiB one.
+
+## Where the two legitimately differ
+
+Above the base level, and in one direction.
+
+A preloaded pyramid is reduced **in memory from the decoded linear base**,
+because averaging display-encoded texels is not averaging light — that is the
+whole reason `PtexColor` builds its own chain instead of asking the reader for
+each resolution. A streamed level cannot be: it is on disk, reduced by the
+writer (or recomputed by the reader) in the file's own encoding, and decoded to
+linear only once it arrives.
+
+`x^2.2` is convex, so the mean of the decoded texels is never below the decode
+of their mean: **the streamed chain is the darker one.** Measured on
+`quad_tiled.ptx` across six footprint widths and the full sample grid:
+
+```
+mip-chain divergence: streamed darker by up to 0.1474, brighter by at most 0.0
+```
+
+This is the same defect `crust:mipspace` guards against for `.tx`. It is
+accepted here rather than fixed because the fix — reducing in linear light from
+streamed base tiles — means a second pyramid cache of crust's own, which is
+precisely the design ruled out above. It is also what every production Ptex
+cache does.
+
+In a render it shows up only under minification. On the sample scene uncapped,
+8 898 of 57 600 pixels differ from the uncapped preload (rmse 0.023), all of
+them in the minified tiled panel.
+
+## Four microcache slots, not two
+
+`tiled::cache`'s per-thread microcache keeps two entries and measured 98.6% of
+8.7 M lookups never reaching a lock. The Ptex one keeps **four**, and the
+difference is measured rather than inherited.
+
+A `.tx` is one tile grid over the whole texture, so a bilinear tap straddling a
+seam is rare. A `.ptx` grids **per face**, and the faces large enough to be
+tiled are exactly the ones a streamed render spends its time in — so seams are
+routine, and a lookup on a *four-tile corner*, where the u and the v tap both
+straddle, needs four distinct tiles for its four taps. With two slots each tap
+evicts one the same lookup is about to ask for:
+
+| | 2 slots | 4 slots |
+| --- | --- | --- |
+| tap inside a tile | 0.999 | 0.999 |
+| tap on a four-tile corner | **0.000** | 0.998 |
+
+A total thrash, for one extra `Option` pair per thread and a linear scan that
+finds its hit at index 0 either way. Both halves are asserted in
+`the_microcache_absorbs_most_taps`, so shrinking the slot count back fails the
+test rather than quietly costing a render its cache.
+
+## Cost
+
+`samples/ptex_quads.usda` is built to be the honest worst case: two textured
+planes filling the frame at depth 3, so nearly every shading call is a texture
+fetch and there is no geometry for the kernel to spend time in. Interleaved
+min-of-7 (sequential comparisons on a loaded machine lie — see "Measuring a
+change"), uncapped preload against a 4 MiB streamed budget:
+
+| | render | peak RSS |
+| --- | --- | --- |
+| preload, uncapped | 0.123 s | 18.36 MiB |
+| stream, 4 MiB budget | 0.342 s | 10.27 MiB |
+
+~2.8×, against the UV path's ~2× on its own worst case. Both are worst cases
+and neither is what a real frame looks like; what the table is for is the
+shape — residency bounded by a number you choose, paid for in fetch cost.
+
+## Testing it yourself
+
+```bash
+# The equality.
+CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 \
+    cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
+
+# The point: uncapped, under a budget, with the counters.
+CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 \
+    cargo run --release -- -i samples/ptex_quads.usda --stats -o c.exr
+
+# The unit invariants.
+cargo test -p crust-assets --test ptex_stream -- --nocapture
+```
+
+`samples/ptex_quads.usda` is the repository's first scene to bind a `.ptx`, so
+`scripts/check_images.sh` covers Ptex now by its `samples/*.usda` glob. Its
+textures are under `samples/textures/` — four files from the reference C++ Ptex
+writer, see `ptex_fixtures.md` there — kept in one place so the unit invariant
+and the rendered one cannot be checked against different bytes.
+
+## Known gaps
+
+- **Not the default**, and should not become one until it has been run against
+  a real asset. Everything above is measured on fixtures and a synthetic scene;
+  the island is the test that matters and needs the DPEL download.
+- **The mip chain divergence** above. Bounded and one-directional, but real.
+- **Ptex is 8-bit through both backends** (`PtexColor` and `PtexStream` both
+  decode to `f32` but the island's files are `u8`), so an HDR `.ptx` gains
+  nothing here — the same gap the `.tx` EXR backing closed for UV textures.
+- **No single-flight on a miss**, inherited from the reader: two workers can
+  decode the same tile at once. Bounded by the thread count.
+- **No cross-face filtering**, unchanged from preloading — see the filtering
+  caveats in CLAUDE.md. Streaming neither helps nor hurts it.
+- **A `crust:openpbr` material still cannot bind Ptex at all**, streamed or
+  not: `inputs:surfaceMap` is consulted only for `UsdPreviewSurface` and
+  `PxrDisneyBsdf`. Unrelated to residency, found while writing the sample
+  scene, and worth fixing separately.
