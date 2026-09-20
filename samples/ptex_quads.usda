@@ -1,0 +1,153 @@
+#usda 1.0
+(
+    doc = """Two Ptex-textured meshes, and the repository's first scene that
+             binds a .ptx at all.
+
+             Ptex face ids ARE mesh face indices, so each mesh here has exactly
+             as many quads as its texture has faces, in the same order: the
+             `Colour` panel is four quads against quad_u8.ptx's four faces, and
+             the `Tiled` panel is two against quad_tiled.ptx's two. Get that
+             wrong and nothing errors -- every lookup simply shades from the
+             wrong texel, which is the failure mode `examples/ptex_verify`
+             exists to catch on a real asset.
+
+             quad_tiled.ptx is the one worth having: its face 0 is 1024x512 and
+             is genuinely stored as a grid of tiles over stored mip levels, so
+             this scene is what puts the streaming backend's tile addressing,
+             seam-crossing bilinear taps and mip selection through a render
+             rather than through a unit test. Its faces are single-channel, so
+             that panel reads as greyscale by design -- a one-channel file
+             feeds channel 0 to all three, which is the rule both backends
+             apply.
+
+             Renders the same either way, which is the point:
+                 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
+                 CRUST_PTEX_STREAM=1 cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+                 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
+             With CRUST_PTEX_MAX_LOG2 set so both backends hold the same
+             resolution, those two images are bit-identical; see
+             docs/ptex_streaming.md. CRUST_PTEX=0 drops both textures to their
+             constant baseColor, which is the A/B that separates a wrong
+             lookup from wrong lighting."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 0, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Four quads in a 2x2 arrangement, one per face of quad_u8.ptx. Authored
+    # in face order 0,1,2,3 so a face id means what the texture thinks it
+    # means; the winding is counter-clockwise seen from +Z, which is where the
+    # camera is.
+    def Mesh "Colour" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 4, 3,
+            1, 2, 5, 4,
+            3, 4, 7, 6,
+            4, 5, 8, 7
+        ]
+        point3f[] points = [
+            (-3.1, -1.5, 0), (-2.05, -1.5, 0), (-1.0, -1.5, 0),
+            (-3.1, -0.45, 0), (-2.05, -0.45, 0), (-1.0, -0.45, 0),
+            (-3.1,  0.6,  0), (-2.05,  0.6,  0), (-1.0,  0.6,  0)
+        ]
+        rel material:binding = </World/Looks/ColourPtex>
+    }
+
+    # Two quads for quad_tiled.ptx. Face 0 is the 1024x512 tiled one and gets
+    # the wide panel; face 1 is 8x8 and gets the small square beside it.
+    def Mesh "Tiled" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 4, 3,
+            1, 2, 5, 4
+        ]
+        point3f[] points = [
+            (0.4, -1.05, 0), (2.9, -1.05, 0), (3.5, -1.05, 0),
+            (0.4,  0.2,  0), (2.9,  0.2,  0), (3.5,  0.2,  0)
+        ]
+        rel material:binding = </World/Looks/TiledPtex>
+    }
+
+    def Scope "Looks"
+    {
+        # `inputs:surfaceMap` on the Material prim is the hook the importer
+        # reads: both of the island's Ptex shader paths (PxrPtexture.filename,
+        # HwPtexTexture_1.file) `.connect` to an interface input of that name,
+        # so reading it directly gets the file without walking either network.
+        # The surface is a `UsdPreviewSurface` because that is one of the two
+        # shader ids the importer consults `inputs:surfaceMap` for (the other
+        # is `PxrDisneyBsdf`, which is what the island authors). Note that
+        # crust's own `crust:openpbr` is NOT one of them: it decodes its
+        # shader's inputs 1:1 and never looks at the material's interface, so
+        # a `crust:openpbr` material silently renders untextured. Worth
+        # knowing before authoring a Ptex material the native way.
+        #
+        # The texture replaces `baseColor` per shading point; the authored
+        # `diffuseColor` below is what `CRUST_PTEX=0` falls back to.
+        def Material "ColourPtex"
+        {
+            asset inputs:surfaceMap = @textures/quad_u8.ptx@
+            token outputs:surface.connect = </World/Looks/ColourPtex/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+        }
+
+        def Material "TiledPtex"
+        {
+            asset inputs:surfaceMap = @textures/quad_tiled.ptx@
+            token outputs:surface.connect = </World/Looks/TiledPtex/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+        }
+    }
+
+    # A uniform dome, so what the image shows is the texture and not a
+    # lighting gradient. A wrong texel is then a wrong colour rather than a
+    # plausible shadow.
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 3
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0
+        int crust:frame = 0
+    }
+}
