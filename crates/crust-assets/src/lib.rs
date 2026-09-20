@@ -25,12 +25,19 @@
 #![forbid(unsafe_code)]
 
 mod environment;
+mod ptex_stream;
 mod ptex_texture;
 pub mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
-pub use ptex_texture::{DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, read_channel};
+pub use ptex_stream::{
+    DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, PtexStream, StreamStats as PtexStreamStats,
+    cache_budget_from_env as ptex_cache_budget_from_env, stream_enabled as ptex_stream_enabled,
+};
+pub use ptex_texture::{
+    DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
+};
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
 
 use crust_core::{AssetLoader, ColorSpace, EnvironmentMap, PtexTexture, Texture2D};
@@ -102,6 +109,13 @@ pub struct FileAssets {
     /// which backend every texture in the render uses, and reading the
     /// environment per call would let it change mid-import.
     streaming: bool,
+    /// The same, for Ptex. A separate switch rather than a shared one because
+    /// the two answer different questions: `CRUST_TEX_STREAM` needs a `.tx`
+    /// converted beside the asset and silently declines without one, while
+    /// `CRUST_PTEX_STREAM` needs nothing — a `.ptx` is already a tiled per-face
+    /// pyramid, which is the whole reason Ptex was the format waiting on a
+    /// reader-side cache rather than on a conversion step.
+    ptex_streaming: bool,
 }
 
 impl Default for FileAssets {
@@ -120,9 +134,17 @@ impl FileAssets {
                 budget as f64 / (1024.0 * 1024.0)
             );
         }
+        let ptex_streaming = ptex_stream::stream_enabled();
+        if ptex_streaming {
+            info!(
+                "Streaming Ptex with a {:.0} MiB cache",
+                ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0)
+            );
+        }
         FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
+            ptex_streaming,
         }
     }
 
@@ -282,6 +304,31 @@ impl AssetLoader for FileAssets {
             return None;
         }
         let started = Instant::now();
+        // Streaming first when it is on, preloading when it is not or when
+        // the file declines it. The fallback matters for the same reason the
+        // `.tx` path's does: turning residency on can make a render slower
+        // but must never break one, so a `.ptx` this cannot open tile-wise
+        // still renders — just resident.
+        if self.ptex_streaming {
+            match PtexStream::open(path) {
+                Ok(tex) => {
+                    info!(
+                        "Streaming Ptex {} ({} faces, {:.0} MiB budget) opened in {:?}",
+                        path.display(),
+                        PtexTexture::num_faces(&tex),
+                        ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
+                        started.elapsed()
+                    );
+                    return Some(std::sync::Arc::new(tex));
+                }
+                Err(e) => {
+                    error!(
+                        "Could not stream Ptex {}: {e} — preloading instead",
+                        path.display()
+                    );
+                }
+            }
+        }
         match PtexColor::open(path) {
             Ok(tex) => {
                 info!(

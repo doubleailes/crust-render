@@ -40,12 +40,17 @@ pub const DEFAULT_MAX_LOG2: i8 = 5;
 /// the pyramid is what makes minification below it correct. With both, the
 /// cap can come *down*: the island at a 16x16 base plus a full pyramid is
 /// ~2.45 GiB against 4.58 GiB flat at 32x32, and filters better at distance.
-fn mip_enabled() -> bool {
+pub(crate) fn mip_enabled() -> bool {
     std::env::var("CRUST_PTEX_MIP").as_deref() != Ok("0")
 }
 
 /// Mip levels a `w`x`h` face holds: halve both axes until both reach one.
-fn level_count(w: usize, h: usize) -> u8 {
+///
+/// `pub(crate)` so the streaming backend can be pinned against this chain
+/// rather than against a second copy of it: the two must agree on how many
+/// levels a face has and how big each one is, or a `lod` computed from one
+/// addresses the other's.
+pub(crate) fn level_count(w: usize, h: usize) -> u8 {
     let (mut w, mut h, mut n) = (w, h, 1u8);
     while w > 1 || h > 1 {
         w = (w / 2).max(1);
@@ -53,6 +58,21 @@ fn level_count(w: usize, h: usize) -> u8 {
         n += 1;
     }
     n
+}
+
+/// Size of mip level `k` of a `w`x`h` face, by the same halving.
+///
+/// [`Face::level`] answers this alongside the offset into the arena, but the
+/// streaming backend has no arena, so the size half is factored out here for
+/// both to be compared against.
+#[cfg(test)]
+pub(crate) fn level_size(w: usize, h: usize, k: usize) -> (usize, usize) {
+    let (mut w, mut h) = (w, h);
+    for _ in 0..k {
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    (w, h)
 }
 
 /// One face's mip pyramid within [`PtexColor::texels`].
@@ -113,14 +133,16 @@ impl PtexColor {
     /// `Err` carries a message suitable for a warning; the caller falls back to
     /// a constant colour rather than failing the render.
     pub fn open(path: &Path) -> Result<Self, String> {
-        PtexColor::open_with(path, mip_enabled())
+        PtexColor::open_with(path, mip_enabled(), max_log2_from_env())
     }
 
-    /// [`PtexColor::open`] with the mip decision passed in rather than read
-    /// from the environment — the same seam `UvTexture::open_with` offers,
-    /// and for the same reason: comparing both sides should not mean mutating
-    /// a process-global the rest of the program is reading.
-    pub fn open_with(path: &Path, mip: bool) -> Result<Self, String> {
+    /// [`PtexColor::open`] with the policy passed in rather than read from
+    /// the environment — the same seam `UvTexture::open_with` offers, and for
+    /// the same reason: comparing both sides should not mean mutating a
+    /// process-global the rest of the program is reading. `PtexStream` needs
+    /// the resolution cap on that seam too, since pinning the two backends
+    /// against each other means asking both for the same one.
+    pub fn open_with(path: &Path, mip: bool, max_log2: i8) -> Result<Self, String> {
         let mut tx = ptex::PtexReader::open(path).map_err(|e| e.to_string())?;
 
         let n_chan = tx.num_channels();
@@ -129,7 +151,6 @@ impl PtexColor {
         }
         let dt = tx.data_type();
         let scale = dt.one_value_inv();
-        let max_log2 = max_log2_from_env();
         // Which reduction the pyramid is built with, decided once for the
         // file rather than guessed per face. A triangle texture packs *two*
         // triangles into its square of texels — the upright one and its
@@ -447,19 +468,30 @@ pub fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
 
 /// `CRUST_PTEX_MAX_LOG2`, validated, or [`DEFAULT_MAX_LOG2`].
 pub fn max_log2_from_env() -> i8 {
-    match std::env::var("CRUST_PTEX_MAX_LOG2") {
-        Ok(v) => match v.parse::<i8>() {
-            // Ptex resolutions are log2-encoded in an i8; 14 is 16384, well
-            // past any authored face.
-            Ok(n) if (0..=14).contains(&n) => n,
-            _ => {
-                tracing::warn!(
-                    "CRUST_PTEX_MAX_LOG2={v} is not an integer in 0..=14 — using {DEFAULT_MAX_LOG2}"
-                );
-                DEFAULT_MAX_LOG2
-            }
-        },
-        Err(_) => DEFAULT_MAX_LOG2,
+    max_log2_from_env_opt().unwrap_or(DEFAULT_MAX_LOG2)
+}
+
+/// `CRUST_PTEX_MAX_LOG2`, validated, or `None` when it is not set.
+///
+/// The preloading path has no use for the distinction — an absent cap there
+/// means the default one, since preloading a production `.ptx` uncapped is
+/// what the cap exists to prevent. The streaming path does: it holds a cache
+/// rather than the texture, so *its* default is no cap at all, and only an
+/// explicitly authored ceiling should lower it. Reading the variable is
+/// still one function, so the validation and the warning cannot diverge
+/// between the two backends.
+pub fn max_log2_from_env_opt() -> Option<i8> {
+    let v = std::env::var("CRUST_PTEX_MAX_LOG2").ok()?;
+    match v.parse::<i8>() {
+        // Ptex resolutions are log2-encoded in an i8; 14 is 16384, well past
+        // any authored face.
+        Ok(n) if (0..=14).contains(&n) => Some(n),
+        _ => {
+            tracing::warn!(
+                "CRUST_PTEX_MAX_LOG2={v} is not an integer in 0..=14 — using the default"
+            );
+            None
+        }
     }
 }
 
