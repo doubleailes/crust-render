@@ -32,8 +32,10 @@ mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
 pub use ptex_stream::{
-    DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, PtexStream, StreamStats as PtexStreamStats,
+    DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
+    PtexStream, StreamStats as PtexStreamStats,
     cache_budget_from_env as ptex_cache_budget_from_env, stream_enabled as ptex_stream_enabled,
+    stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
 };
 pub use ptex_texture::{
     DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
@@ -121,14 +123,18 @@ pub struct FileAssets {
     ptex: std::sync::Mutex<Vec<PtexHandle>>,
 }
 
-/// Floor on a streamed Ptex texture's share of the budget: 4 MiB.
+/// Floor on a streamed Ptex texture's share of the budget: 1 MiB.
 ///
-/// A stage binding more textures than the budget has megabytes would otherwise
-/// give each one zero, and a zero budget in `ptex::CacheOptions` disables
-/// caching outright — every texel fetch back to a seek and an inflate. Better
-/// to overshoot the total than to silently turn the cache off, so the floor
-/// wins and the report shows a budget above what was asked for.
-const MIN_PTEX_SHARE: usize = 4 * 1024 * 1024;
+/// A zero budget in `ptex::CacheOptions` disables caching outright — every
+/// texel fetch back to a seek and an inflate — so overshooting the total beats
+/// silently turning the cache off, and the report shows the overshoot.
+///
+/// **It is a backstop and must not be the policy**, which is the lesson the
+/// island taught: at 3 618 admitted readers a 4 MiB floor asked for 14.1 GiB,
+/// worse than the 5.98 GiB preload it replaced. Admission
+/// (`DEFAULT_STREAM_MIN_MB`) is what keeps the count small enough that this
+/// rarely fires at all — raising it is treating the symptom.
+const MIN_PTEX_SHARE: usize = 1024 * 1024;
 
 /// One opened Ptex texture, as `FileAssets` remembers it.
 ///
@@ -205,8 +211,12 @@ impl FileAssets {
         if streams.is_empty() {
             return;
         }
-        // At least one tile each, or a stage with thousands of textures gives
-        // every one a budget of zero and turns the cache off entirely.
+        // A backstop, not the policy. Admission (`DEFAULT_STREAM_MIN_MB`) is
+        // what keeps this count small enough for the shares to be usable —
+        // 39 readers on the island rather than 3 618. The floor only catches
+        // a stage that still manages to admit more readers than the budget
+        // has megabytes, where a share of zero would disable caching outright
+        // and re-read every texel.
         let share = (ptex_stream::cache_budget_from_env() / streams.len()).max(MIN_PTEX_SHARE);
         for s in &streams {
             s.set_budget(share);
@@ -409,23 +419,40 @@ impl AssetLoader for FileAssets {
         if self.ptex_streaming {
             match PtexStream::open(path) {
                 Ok(tex) => {
-                    let tex = std::sync::Arc::new(tex);
-                    let mut opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
-                    opened.push(PtexHandle::Streamed(tex.clone()));
-                    // Every sibling's share shrinks as this one joins, so the
-                    // total stays what was asked for rather than growing with
-                    // the texture count.
-                    self.rebudget_ptex(&opened);
-                    info!(
-                        "Streaming Ptex {} ({} faces) opened in {:?} — {} textures now sharing \
+                    // Admission. Opening read headers only, so this costs a
+                    // seek and answers exactly: a texture that would preload
+                    // for less than the cache slot it is about to occupy is
+                    // cheaper resident than streamed. See
+                    // `DEFAULT_STREAM_MIN_MB` for the island distribution that
+                    // makes this necessary rather than tidy.
+                    let would = tex.preload_bytes(max_log2_from_env());
+                    let floor = ptex_stream::stream_min_bytes_from_env();
+                    if would < floor {
+                        debug!(
+                            "Ptex {} would preload in {:.2} MiB, under the {:.0} MiB                              streaming floor — preloading it instead",
+                            path.display(),
+                            would as f64 / (1024.0 * 1024.0),
+                            floor as f64 / (1024.0 * 1024.0),
+                        );
+                    } else {
+                        let tex = std::sync::Arc::new(tex);
+                        let mut opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
+                        opened.push(PtexHandle::Streamed(tex.clone()));
+                        // Every sibling's share shrinks as this one joins, so the
+                        // total stays what was asked for rather than growing with
+                        // the texture count.
+                        self.rebudget_ptex(&opened);
+                        info!(
+                            "Streaming Ptex {} ({} faces) opened in {:?} — {} textures now sharing \
                          {:.0} MiB",
-                        path.display(),
-                        PtexTexture::num_faces(tex.as_ref()),
-                        started.elapsed(),
-                        opened.len(),
-                        ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
-                    );
-                    return Some(tex);
+                            path.display(),
+                            PtexTexture::num_faces(tex.as_ref()),
+                            started.elapsed(),
+                            opened.len(),
+                            ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
+                        );
+                        return Some(tex);
+                    }
                 }
                 Err(e) => {
                     error!(

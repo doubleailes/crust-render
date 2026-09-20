@@ -68,6 +68,56 @@ pub fn stream_enabled() -> bool {
     std::env::var("CRUST_PTEX_STREAM").as_deref() == Ok("1")
 }
 
+/// Default admission threshold: a texture streams only if **preloading** it
+/// would cost more than 8 MiB.
+///
+/// **This exists because a production stage's Ptex is Pareto-distributed, and
+/// an even split over all of it is the wrong answer.** Measured on the Moana
+/// island, which binds **3 618** `.ptx` totalling 5.98 GiB preloaded:
+///
+/// | | textures | share of bytes |
+/// | --- | --- | --- |
+/// | top 25 | 0.7% | 87.9% |
+/// | >= 1 MiB | 167 | 97.0% |
+/// | all the rest | 3 451 | 3.0% |
+///
+/// The median texture is under a kilobyte. Giving each of 3 618 readers a
+/// slice of one budget hands the four textures that hold *half the bytes* a
+/// 0.3 MiB cache each — below a single face, so every read comes back
+/// `oversized` and nothing caches at all — while 3 451 sub-kilobyte textures
+/// each hold a slot they will never fill. Flooring the slice instead (this
+/// module's first answer) multiplies out: 3 618 x 4 MiB is **14.1 GiB**,
+/// worse than the 5.98 GiB preload it replaces.
+///
+/// So the test is per texture and it is the honest one: **a texture smaller
+/// than the cache slot it would occupy should just be preloaded.** On the
+/// island 8 MiB admits 39 readers at ~26 MiB each — a real working set — and
+/// preloads 0.54 GiB of small ones, for ~1.54 GiB against 5.98 GiB, a 3.9x
+/// reduction with every large texture properly streamed.
+///
+/// `CRUST_PTEX_STREAM_MIN_MB` overrides it; `0` admits everything, which is
+/// what reproduces the even-split behaviour for comparison.
+pub const DEFAULT_STREAM_MIN_MB: usize = 8;
+
+/// `CRUST_PTEX_STREAM_MIN_MB`, validated, as a byte count. See
+/// [`DEFAULT_STREAM_MIN_MB`].
+pub fn stream_min_bytes_from_env() -> usize {
+    let mb = match std::env::var("CRUST_PTEX_STREAM_MIN_MB") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    "CRUST_PTEX_STREAM_MIN_MB={v} is not an integer — using \
+                     {DEFAULT_STREAM_MIN_MB}"
+                );
+                DEFAULT_STREAM_MIN_MB
+            }
+        },
+        Err(_) => DEFAULT_STREAM_MIN_MB,
+    };
+    mb * 1024 * 1024
+}
+
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
 /// of one texel.
 ///
@@ -305,6 +355,41 @@ impl PtexStream {
     /// Faces the file holds, for the load-time and `--stats` report.
     pub fn faces(&self) -> usize {
         self.n_faces
+    }
+
+    /// What **preloading** this texture would cost, in bytes, from the header
+    /// alone.
+    ///
+    /// `face_infos()` is parsed at open and carries every face's resolution
+    /// with no pixel I/O, so this is exact and free — which is what makes it
+    /// usable as an admission test rather than a guess. It mirrors
+    /// `PtexColor::bytes()`: each face clamped to `max_log2` by the same rule,
+    /// as linear `f32` RGB, plus the mip chain below it.
+    ///
+    /// `max_log2` is the *preloading* cap (`CRUST_PTEX_MAX_LOG2`, defaulting
+    /// to 32x32), not this stream's own ceiling. The question being asked is
+    /// what the alternative would cost, so it has to be priced the way the
+    /// alternative prices it.
+    pub fn preload_bytes(&self, max_log2: i8) -> usize {
+        let mut floats = 0usize;
+        for info in self.reader.face_infos() {
+            let res = if self.triangle {
+                let l = info.res.ulog2.min(info.res.vlog2).min(max_log2);
+                ptex::Res::new(l, l)
+            } else {
+                ptex::Res::new(info.res.ulog2.min(max_log2), info.res.vlog2.min(max_log2))
+            };
+            let (mut w, mut h) = (res.u(), res.v());
+            loop {
+                floats += w * h * 3;
+                if w == 1 && h == 1 {
+                    break;
+                }
+                w = (w / 2).max(1);
+                h = (h / 2).max(1);
+            }
+        }
+        floats * std::mem::size_of::<f32>() + self.n_faces * 8
     }
 
     /// Bytes the cache currently holds. Unlike `PtexColor::bytes` this moves
