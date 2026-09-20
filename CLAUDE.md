@@ -92,6 +92,17 @@ cargo run --release -p crust-render --example maketx -- sky.exr raw            #
 cargo run --release -p crust-render --example maketx -- albedo.png srgb_texture --format=exr
 CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
 
+# Streaming Ptex. No conversion step -- a .ptx is already a tiled per-face mip
+# pyramid, so this just turns the reader's cache on. Capping both backends
+# alike is what makes the A/B an equality rather than a comparison of two
+# different resolutions; uncapped is what streaming is *for*.
+CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 \
+    cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
+CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 \
+    cargo run --release -- -i scene.usda --stats
+
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
@@ -132,6 +143,16 @@ to preloading for any texture it declines — no converted sibling beside the as
 chain reduced in a different colour space, a file it cannot read — so turning it on can
 make a render slower but never break it. A `.tx` is backed by either a tiled TIFF (`u8`
 tiles) or a tiled mip EXR (`half` tiles), picked by magic number rather than extension.
+
+Ptex has the same pair. `CRUST_PTEX_STREAM=1` swaps `PtexColor` for a `PtexStream` that
+pages one tile of one level of one face out of the `.ptx` under `CRUST_PTEX_CACHE_MB`
+(default 1024, matching the UV budget), and falls back to preloading for a file it cannot
+open — same policy, same reason. It needs **no conversion step**, which is the whole
+difference between the two: a `.ptx` is already a tiled per-face mip pyramid, so the
+missing piece was never a format but a cache, and that cache now lives in `ptex-rs`
+(`SharedReader`) rather than here. With it on, `CRUST_PTEX_MAX_LOG2` stops being load-bearing:
+an unset cap means *uncapped*, and setting one is how the two backends are compared at a
+resolution both hold. See `docs/ptex_streaming.md`.
 
 ## Measuring a change
 
@@ -215,12 +236,13 @@ Six crates under `crates/`:
   `crust_core::AssetLoader` for a program that reads files: `FileAssets`
   implements the trait over `exr`, `image` and `ptex-rs`, and the decoders
   behind it are public — `load_exr_environment` / `load_image_environment`,
-  `PtexColor` (+ `read_channel`, `max_log2_from_env`), `UvTexture` (UDIM sets,
+  `PtexColor` (+ `read_channel`, `max_log2_from_env`), `PtexStream` (the
+  tile-paging backend behind `CRUST_PTEX_STREAM`), `UvTexture` (UDIM sets,
   the `CRUST_TEX_MAX` cap) and one `srgb_to_linear`. Everything that knows a
   file format lives here, so the probe examples decode a texture *exactly* the
   way the renderer does instead of carrying copies (`read_channel` used to
-  exist three times). Owns the `CRUST_PTEX`, `CRUST_TEX`, `CRUST_PTEX_MAX_LOG2`
-  and `CRUST_TEX_MAX` switches.
+  exist three times). Owns the `CRUST_PTEX`, `CRUST_TEX`, `CRUST_PTEX_MAX_LOG2`,
+  `CRUST_TEX_MAX`, `CRUST_PTEX_STREAM` and `CRUST_PTEX_CACHE_MB` switches.
 - **`crust-render`** — the thin CLI binary. Parses args, builds a `Scene` (with
   `crust_assets::FileAssets`), calls the `Renderer` (wiring an `indicatif` bar to the
   progress callback), writes the EXR and the tone-mapped PNG. `main.rs` is the only
@@ -956,7 +978,8 @@ Schema mapping:
     mesh; a nested instancer groups per (prototype, part)), so one table serves
     every placement and the `prim_id` a hit reports indexes it unambiguously
     however many instance levels it passed through.
-  - The host **preloads every face** into one immutable buffer: `PtexReader` reads from
+  - The host **preloads every face** into one immutable buffer by default (the streaming
+    alternative is the next bullet): `PtexReader` reads from
     disk on each call (`&mut self`, pixel data uncached), and a path tracer asks from every
     thread in an unpredictable order. Faces load **mip-reduced**, capped at 32×32 by
     default (`CRUST_PTEX_MAX_LOG2` overrides as a log2 edge length) — full resolution is
@@ -999,9 +1022,34 @@ Schema mapping:
     input is assumed to be in and what curve is applied — including the two gaps that
     are still open (`UsdPreviewSurface` colours are read undecoded, and nothing enforces
     that a new colour input states its space at all).
+  - **Streaming** (`texture.rs`'s seam again, host side in `crust-assets/src/ptex_stream.rs`)
+    — the residency alternative to that preload, opt-in via `CRUST_PTEX_STREAM=1` under
+    a `CRUST_PTEX_CACHE_MB` byte budget (default 1024). `PtexStream` pages one tile of one
+    level of one face through `ptex::SharedReader`, so memory scales with the cache
+    instead of with the asset and **the resolution cap stops being load-bearing**: an
+    unset `CRUST_PTEX_MAX_LOG2` means uncapped. Unlike the UV path there is no conversion
+    step, because a `.ptx` is *already* a tiled per-face mip pyramid — the missing piece
+    was a cache, and it is the reader's, not crust's. Preloading remains the default, the
+    oracle, and the fallback for a file that will not open. Four things worth keeping:
+    the base level is **bit-identical** to the preloaded one (0 of 57 600 pixels differ on
+    `samples/ptex_quads.usda` at 16 spp with both capped alike, and texel-for-texel across
+    four fixtures and every cap in `tests/ptex_stream.rs`); the **coarser levels are not**,
+    since a streamed level is reduced on disk in the file's encoding while a preloaded one
+    is reduced in linear light, which convexity makes the streamed chain the darker of by
+    up to 0.147; the microcache keeps **four** slots rather than the `.tx` cache's two,
+    because a `.ptx` grids per *face* so a four-tile-corner tap is routine and two slots
+    measured 0.000 hit rate there against 0.998 with four; and the budget moves residency
+    only — a 4 MiB render is bit-identical to a 1 GiB one. `docs/ptex_streaming.md` has
+    the measurements and the reasoning.
   - `CRUST_PTEX=0` declines every texture so the same scene renders on its constant
     `baseColor` — the A/B switch that separates a wrong Ptex lookup from a wrong material
-    or wrong lighting.
+    or wrong lighting. It applies to both backends.
+  - **A `crust:openpbr` material cannot bind Ptex**, and nothing warns. `inputs:surfaceMap`
+    is consulted only for `UsdPreviewSurface` and `PxrDisneyBsdf` — the two the island
+    authors — because `decode_crust_openpbr` reads its shader's inputs 1:1 and never looks
+    at the material's interface. A Ptex material authored the native way therefore renders
+    on its constant `baseColor`, which is indistinguishable from `CRUST_PTEX=0`.
+    `samples/ptex_quads.usda` uses `UsdPreviewSurface` for that reason.
   - **Verified numerically, not by eye** — a wrong face id or a transposed `(u,v)` still
     renders as plausible rock, so appearance proves nothing and the reference image
     (different camera, lighting, displacement and subdivision) proves less. Two
@@ -1321,16 +1369,20 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
   come from USD.
-- **Texture residency caveats.** UV textures stream (above); **Ptex does not**, so
-  `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the island's 494 GiB of
-  authored Ptex is renderable only because of it. That is a limitation of the *reader*,
-  not of crust: a `.ptx` is already a per-face mip pyramid and `ptex-rs` already
-  addresses it randomly through `get_data_at_res`, so the fix is a `PtexCache`
-  equivalent in [`ptex-rs`](https://github.com/doubleailes/ptex-rs) — exactly as the C++
-  Ptex library ships one — rather than a second cache in `crust-assets`. Do not bolt
-  Ptex onto the `.tx` tile cache; the two formats want different keys and the
-  per-face pyramid is already on disk — and Ptex is still 8-bit through `PtexColor`
-  regardless, so an HDR `.ptx` gains nothing from the EXR backing either.
+- **Texture residency caveats.** Ptex streams now (`CRUST_PTEX_STREAM=1`, above and in
+  `docs/ptex_streaming.md`), so what is left is the shape of it rather than its absence.
+  The cache is the reader's, which is what this section used to ask for and is still the
+  right place for it — do not grow a second one here, and do not bolt Ptex onto the `.tx`
+  tile cache. What remains: the **mip chain differs** from the preloaded one above the
+  base level, because a streamed level comes off disk reduced in the file's own encoding
+  while a preloaded pyramid is reduced in linear light — convexity makes the streamed
+  chain the darker, measured at up to 0.147 on the tiled fixture, and the base level is
+  bit-identical. `PtexColor` remains the default and the oracle. Ptex is still 8-bit
+  through both backends, so an HDR `.ptx` gains nothing from either. Filtering across
+  face boundaries is still not attempted (see the filtering caveats), and the streaming
+  path does not change that. Cost on the worst case (`samples/ptex_quads.usda`, two
+  textured planes filling frame): ~2.8x the preloaded render, against ~2x for the UV
+  path's.
   On the UV side: conversion is explicit rather than
   automatic, 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
   the renderer decodes `u8` through a 256-entry table, and two more bits of an LDR
