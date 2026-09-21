@@ -366,6 +366,29 @@ Measured numbers from that import (see `CLAUDE.md` for the full breakdown):
   mip pyramid below that cap, so the cap is a memory ceiling rather than an accidental
   anti-aliaser — and can therefore come down: 16×16 plus a full pyramid is around
   2.45 GiB, under half the default, and filters better at distance.
+- **Streaming Ptex**, which replaces that cap: the pyramid stays on disk and one tile of
+  one level of one face is paged in behind a bounded cache, so memory scales with the
+  cache rather than with the asset. Measured at 640×360 / 8 spp against the same build
+  preloading: Ptex residency **5.98 → 0.61 GiB**, `Load assets` **01:40.7 → 27.3 s**,
+  traverse-phase RSS **47.34 → 41.48 GiB**, peak RSS **51.28 → 47.08 GiB**, and `Render`
+  costs **+1.2%** — the whole run finished 69 s sooner. It is opt-in, and on this scene
+  it takes **two** environment variables rather than one:
+
+  ```bash
+  CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_CACHE_MB=2048 \
+      cargo run --release -- -i usd/island.usda --stats
+  ```
+
+  `CRUST_PTEX_STREAM_MIPSPACE=file` is the one that is easy to miss, and without it
+  nothing streams. A `.ptx`'s stored mip levels were reduced in the file's own display
+  encoding, while the preloaded pyramid is reduced in linear light — the same mismatch
+  `crust:mipspace` refuses for streamed UV textures, and refused here for the same
+  reason: level 0 stays perfectly correct and only minification is wrong, so it reads as
+  a filtering bug rather than a colour one. So a mipmapped `.ptx` is declined and
+  preloaded by default, which on the island means all of them. `=file` accepts the
+  file's chain (darker under minification, up to 0.147 on the tiled test fixture) and the
+  residency above; `--stats` prints which backend actually ran either way. See
+  `docs/ptex_streaming.md`.
 - Two `UsdLuxDomeLight` environment textures authored on the stage (a modeling choice
   in the source asset, not a crust limitation) currently both decode and both light the
   scene, peaking at ~11 GiB for that pair alone — the first lever to pull if memory is
@@ -408,13 +431,15 @@ the full, per-feature detail and workarounds:
   the filter has no direction, so a chart stretched in one axis over-blurs at grazing
   angles where an EWA or ripmap filter would not. Cone spread also ignores surface
   curvature and the lens aperture.
-- **Ptex textures are still fully resident.** UV textures can stream (see above);
-  `.ptx` files cannot, so `CRUST_PTEX_MAX_LOG2` still caps per-face resolution and the
-  island's 494 GiB of authored Ptex is only renderable because of it. This is a limitation
-  of the *reader* rather than of crust: a `.ptx` is already a per-face mip pyramid that
-  [`ptex-rs`](https://github.com/doubleailes/ptex-rs) addresses randomly, so the fix is a
-  `PtexCache` equivalent there — exactly as the C++ Ptex library ships one — not a second
-  cache here.
+- **Streamed Ptex cannot build its mip chain in linear light.** Ptex streams now —
+  [`ptex-rs`](https://github.com/doubleailes/ptex-rs) grew the `PtexCache` equivalent this
+  needed, so the cache is the reader's rather than a second one here — but a level read
+  off disk was reduced in the file's own encoding, where the preloaded pyramid is reduced
+  in linear light. That is refused rather than shipped quietly, so a mipmapped `.ptx`
+  preloads unless `CRUST_PTEX_STREAM_MIPSPACE=file` opts into the file's chain (see the
+  Moana section above). Retiring the gate needs the reduction to happen in the reader
+  against a declared working space; doing it here would mean a second pyramid cache *and*
+  a full-resolution read to answer a coarse lookup.
 - **An HDR texture's range stops at the shader.** A streamed `.tx` with an EXR backing
   carries values above 1.0 intact, but the only textured input crust has is base colour,
   and an albedo above 1 creates energy — the diffuse lobe clamps it, correctly. The
