@@ -248,6 +248,13 @@ pub struct PtexCacheStats {
     pub textures: u32,
     /// How many of those streamed.
     pub streamed: u32,
+    /// Preloaded because they were **under the streaming size threshold** —
+    /// a policy decision, not a failure. Counted apart from `open_failed`
+    /// because the two mean opposite things to whoever reads the report: the
+    /// first says the admission rule worked, the second says a file is broken.
+    pub below_threshold: u32,
+    /// Preloaded because streaming them **failed** — the fallback firing.
+    pub open_failed: u32,
     pub faces: u64,
     /// Resident bytes held by the **preloaded** textures. Fixed for the
     /// render, and the number streaming exists to replace.
@@ -735,10 +742,41 @@ impl fmt::Display for RenderStats {
             writeln!(f, "{rule}")?;
             // The line the whole block exists for. An island run's peak RSS
             // cannot be read without knowing which backend produced it.
-            let backend = match (p.streamed, p.textures) {
-                (0, _) => "preloaded".to_string(),
-                (n, t) if n == t => "streamed".to_string(),
-                (n, t) => format!("{n} streamed, {} preloaded (fell back)", t - n),
+            // A mixed report is the normal case on a production stage, not a
+            // warning — the island streams 39 of 3 618 and preloads the rest
+            // by design. So "declined" and "failed" are named separately:
+            // the first says the admission rule worked, the second says a
+            // file is broken, and calling both a fallback (as this line once
+            // did) reads as 3 579 errors.
+            let backend = if p.streamed == 0 && p.below_threshold == 0 && p.open_failed == 0 {
+                // Nothing streamed and nothing considered: streaming is off.
+                "preloaded".to_string()
+            } else if p.streamed == p.textures {
+                "streamed".to_string()
+            } else {
+                // A mixed report is the normal case on a production stage, not
+                // a warning — the island streams 39 of 3 618 and preloads the
+                // rest by design. So the two reasons are named separately: one
+                // says the admission rule worked, the other says a file is
+                // broken. Calling both a fallback, as this line once did, read
+                // as 3 579 errors.
+                let mut parts = Vec::new();
+                if p.streamed > 0 {
+                    parts.push(format!("{} streamed", thousands(p.streamed as usize)));
+                }
+                if p.below_threshold > 0 {
+                    parts.push(format!(
+                        "{} preloaded under the size threshold",
+                        thousands(p.below_threshold as usize)
+                    ));
+                }
+                if p.open_failed > 0 {
+                    parts.push(format!(
+                        "{} PRELOADED BECAUSE STREAMING FAILED",
+                        thousands(p.open_failed as usize)
+                    ));
+                }
+                parts.join(", ")
             };
             writeln!(f, "  {:<28} {}", "backend", backend)?;
             writeln!(
