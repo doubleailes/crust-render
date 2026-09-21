@@ -33,8 +33,10 @@ mod uv_texture;
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
-    PtexStream, StreamStats as PtexStreamStats,
-    cache_budget_from_env as ptex_cache_budget_from_env, stream_enabled as ptex_stream_enabled,
+    MICRO_SLOTS as PTEX_MICRO_SLOTS, PtexStream, StreamStats as PtexStreamStats,
+    cache_budget_from_env as ptex_cache_budget_from_env, micro_reserve as ptex_micro_reserve,
+    micro_retained_bytes as ptex_micro_retained_bytes, micro_slot_max as ptex_micro_slot_max,
+    micro_threads as ptex_micro_threads, stream_enabled as ptex_stream_enabled,
     stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
 };
 pub use ptex_texture::{
@@ -244,10 +246,13 @@ impl FileAssets {
         if streams.is_empty() {
             return;
         }
-        // Exact. `n * (budget / n) <= budget` because integer division
-        // floors, so the total can only come in at or under what was asked
-        // for — never over it, whatever the count.
-        let share = ptex_stream::cache_budget_from_env() / streams.len();
+        // Exact, and over what is left after the microcaches take theirs.
+        // Thread-local tiles are real residency, so their allowance comes
+        // *out of* the budget rather than sitting beside it — see
+        // `ptex_stream::micro_reserve`. `n * (x / n) <= x` because integer
+        // division floors, so readers plus microcaches are still at or under
+        // what was asked for, whatever the count.
+        let share = Self::ptex_reader_total() / streams.len();
         for s in &streams {
             s.set_budget(share);
         }
@@ -260,7 +265,17 @@ impl FileAssets {
     /// at all would make a small budget mean "no streaming" rather than "a
     /// small cache".
     fn max_streams() -> usize {
-        (ptex_stream::cache_budget_from_env() / MIN_PTEX_SHARE).max(1)
+        (Self::ptex_reader_total() / MIN_PTEX_SHARE).max(1)
+    }
+
+    /// The render's Ptex budget less the thread-local microcaches' share.
+    ///
+    /// What is left for the readers, and the number every division below is
+    /// against — so the two halves of Ptex residency sum to the configured
+    /// total rather than the readers alone matching it.
+    fn ptex_reader_total() -> usize {
+        let total = ptex_stream::cache_budget_from_env();
+        total - ptex_stream::micro_reserve(total)
     }
 
     /// Streamed textures opened so far. Callers hold the lock.
@@ -278,7 +293,14 @@ impl FileAssets {
     /// exactly as `texture_cache_stats` is.
     pub fn ptex_stats(&self) -> crust_core::PtexCacheStats {
         let opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out = crust_core::PtexCacheStats::default();
+        let mut out = crust_core::PtexCacheStats {
+            // Process-wide rather than per texture: one set of slots per
+            // thread serves every stream, keyed by texture id.
+            micro_retained_bytes: ptex_stream::micro_retained_bytes(),
+            micro_reserve_bytes: ptex_stream::micro_reserve(ptex_stream::cache_budget_from_env())
+                as u64,
+            ..Default::default()
+        };
         for h in opened.iter() {
             out.textures += 1;
             match h {

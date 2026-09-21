@@ -197,7 +197,76 @@ type MicroSlots = [Option<(TileId, ptex::PixelData)>; MICRO_SLOTS];
 
 /// See [`MicroSlots`]: four is the corner case's tap count, not a round
 /// number. Dropping it to two is what the 0.000 above measures.
-const MICRO_SLOTS: usize = 4;
+pub const MICRO_SLOTS: usize = 4;
+
+/// Absolute ceiling on one microcache slot: 256 KiB.
+///
+/// **The microcache holds `ptex::PixelData`, which is memory the reader's
+/// budget does not know about**, so without a ceiling it is an unbounded
+/// second cache wearing the word "micro". The pathological case is not a
+/// normal tile — 128x128 at four channels is 64 KiB, and four of those per
+/// thread is nothing — it is a block upstream has *refused* to cache: a face
+/// too big for the budget comes back `oversized`, deliberately uncached, and
+/// retaining it here put it straight back into residency, times four slots,
+/// times every worker thread, entirely off the books.
+///
+/// 256 KiB clears any real Ptex tile (256x256 at four channels) while
+/// excluding the whole-face reads that are the oversized case. It is an
+/// absolute bound *and* a relative one: [`micro_reserve`] takes the smaller
+/// of this and half the budget, so a small budget shrinks the slots rather
+/// than being quietly exceeded by them.
+const MICRO_SLOT_MAX: usize = 256 * 1024;
+
+/// Worker threads to size the microcache reserve for.
+///
+/// The allowance is per *thread*, since every one has its own slots.
+/// `available_parallelism` is what rayon defaults its pool to, memoised
+/// because this is read per texture open and the answer cannot change.
+pub fn micro_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// The share of a render's Ptex budget set aside for thread-local tiles.
+///
+/// **This is what makes the microcache accounted rather than additional.**
+/// Every slot on every thread can hold one tile, so the honest total is
+/// `threads * MICRO_SLOTS * slot_size`, and that has to come *out of*
+/// `CRUST_PTEX_CACHE_MB` rather than sit beside it — `FileAssets` subtracts
+/// this before dividing the rest among the readers, so the two together are
+/// still the number that was asked for.
+///
+/// Capped at half the budget so a small one is not consumed entirely by
+/// thread-local slots; below that the slots simply get smaller, and once
+/// [`micro_slot_max`] falls under a real tile the microcache retains nothing
+/// at all. That is the correct degradation: every tap then goes to the
+/// reader, which is slower and still right.
+pub fn micro_reserve(total: usize) -> usize {
+    (micro_threads() * MICRO_SLOTS * MICRO_SLOT_MAX).min(total / 2)
+}
+
+/// The largest tile one microcache slot may retain, given a render budget.
+///
+/// A tile above this is handed to the caller and dropped rather than kept —
+/// which is exactly upstream's own rule for a block that does not fit its
+/// budget, and the reason this exists: the microcache must not re-admit what
+/// the reader deliberately refused.
+pub fn micro_slot_max(total: usize) -> usize {
+    micro_reserve(total) / (micro_threads() * MICRO_SLOTS)
+}
+
+/// Bytes the thread-local microcaches currently hold, process-wide.
+///
+/// Maintained on insert and eviction — the miss path only, so a hit still
+/// touches no shared state. Reported by `--stats` beside the reader's own
+/// resident figure, because a number that is not reported is a number nobody
+/// checks against the budget.
+static MICRO_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes retained across every thread's microcache. See [`MICRO_BYTES`].
+pub fn micro_retained_bytes() -> u64 {
+    MICRO_BYTES.load(Ordering::Relaxed)
+}
 
 thread_local! {
     static MICRO: std::cell::RefCell<MicroSlots> =
@@ -264,6 +333,11 @@ pub struct PtexStream {
     /// `CRUST_PTEX_MIP=0` pins every lookup to the base level, as it does for
     /// the preloading path.
     mip: bool,
+    /// Largest tile a microcache slot may retain — see [`micro_slot_max`].
+    /// Anything above it is handed to the caller and dropped, which is what
+    /// keeps thread-local retention inside the render's budget instead of
+    /// beside it.
+    micro_max: usize,
     fallback: Vec3A,
     micro_hits: AtomicU64,
     reader_lookups: AtomicU64,
@@ -276,9 +350,11 @@ impl PtexStream {
     /// `Err` carries a message suitable for a warning; the caller falls back
     /// to preloading rather than failing the render.
     pub fn open(path: &Path) -> Result<Self, String> {
+        let total = cache_budget_from_env();
         PtexStream::open_with(
             path,
-            cache_budget_from_env(),
+            total,
+            micro_slot_max(total),
             max_log2_from_env_opt(),
             crate::ptex_texture::mip_enabled(),
         )
@@ -288,9 +364,14 @@ impl PtexStream {
     /// the environment — the seam `PtexColor::open_with` offers, and for the
     /// same reason: comparing both sides should not mean mutating a
     /// process-global the rest of the program is reading.
+    /// `micro_max` is the per-slot ceiling on thread-local retention, which
+    /// is policy for the same reason the budget is — see [`micro_slot_max`],
+    /// which derives the render-wide default. A test passes it directly so it
+    /// can drive the case that matters: a tile larger than what may be kept.
     pub fn open_with(
         path: &Path,
         budget_bytes: usize,
+        micro_max: usize,
         cap: Option<i8>,
         mip: bool,
     ) -> Result<Self, String> {
@@ -325,6 +406,7 @@ impl PtexStream {
             lut,
             cap,
             mip,
+            micro_max,
             reader,
             fallback: Vec3A::splat(0.5),
             micro_hits: AtomicU64::new(0),
@@ -473,10 +555,25 @@ impl PtexStream {
             .get_tile(id.face as usize, res, id.tile as usize)
             .ok()?;
         let r = f.take()?(&data);
+        // **Retain only what fits a slot.** A block bigger than this is one
+        // upstream itself declined to cache (`oversized`), and keeping it
+        // here would put it back into residency off the books — four slots
+        // deep, on every worker thread. Dropping it costs a re-read next tap
+        // and keeps the budget honest, which is the trade the whole feature
+        // is about.
+        if data.len() > self.micro_max {
+            return Some(r);
+        }
         MICRO.with(|m| {
             let mut slots = m.borrow_mut();
-            // Newest in front, the rest shifted down one.
+            // Take the entry about to fall off the end *before* rotating, so
+            // its bytes leave the accounting with it; `rotate_right` then
+            // puts that hole in front for the new tile.
+            if let Some((_, old)) = slots[MICRO_SLOTS - 1].take() {
+                MICRO_BYTES.fetch_sub(old.len() as u64, Ordering::Relaxed);
+            }
             slots.rotate_right(1);
+            MICRO_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
             slots[0] = Some((id, data));
         });
         Some(r)

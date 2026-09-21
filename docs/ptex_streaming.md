@@ -185,6 +185,54 @@ Pinned by `one_budget_is_shared_across_textures_not_repeated_per_file`, which
 first asserts the naive total *does* multiply — so the sharing is testing
 something.
 
+## The microcache is inside the budget, not beside it
+
+The per-thread slots hold `ptex::PixelData` — decoded tiles the reader's byte
+budget does not know about. Left unbounded that makes the microcache a second
+cache wearing the word "micro", and the case that bites is not an ordinary
+tile: 128x128 at four channels is 64 KiB and four per thread is nothing. It is
+a block upstream has **refused**. A face too big for the budget comes back
+`oversized`, deliberately uncached — and retaining it here put it straight
+back into residency, four slots deep, on every worker thread, entirely off the
+books. Reader eviction and re-budgeting could not release it, and `--stats`
+could not see it.
+
+Three things fix that, and all three are needed:
+
+1. **A slot has a ceiling.** `MICRO_SLOT_MAX` is 256 KiB, which clears any
+   real Ptex tile (256x256 at four channels) and excludes the whole-face reads
+   that are the oversized case. A tile above it is handed to the caller and
+   dropped — the same rule upstream applies, so the microcache never re-admits
+   what the reader declined.
+2. **The allowance comes out of the budget.** `micro_reserve` is
+   `threads * MICRO_SLOTS * MICRO_SLOT_MAX`, capped at half the budget, and
+   `FileAssets` subtracts it *before* dividing the rest among the readers. So
+   the two halves of Ptex residency sum to `CRUST_PTEX_CACHE_MB` rather than
+   the readers alone matching it. Below the cap the slots shrink rather than
+   the budget being exceeded, and once a slot falls under a real tile the
+   microcache retains nothing at all — every tap then goes to the reader,
+   which is slower and still correct.
+3. **It is reported.** `--stats` prints `thread tiles / reserve` beside the
+   reader's resident figure. A number nobody can see is a number nobody checks
+   against the budget.
+
+Measured at a 1 MiB budget on a 4-thread box: the reserve is 512 KiB, a slot
+is 32 KiB, and a whole-face read of the 1024x512 fixture is 512 KiB — so
+retention grows by **0 bytes** across 16 900 taps, all of which go to the
+reader. At the default 1 GiB the reserve is 4 MiB and a slot 256 KiB, so
+ordinary tiles are kept as before and the microcache still hits 100% on the
+sample scene.
+
+Pinned by `a_tile_larger_than_a_slot_is_never_retained`, which drives exactly
+that case and asserts on the process-wide retained total, and by
+`the_microcache_allowance_comes_out_of_the_budget`, which checks the reserve
+arithmetic across budgets.
+
+**What is still approximate**: a tile stays in a slot until that slot is
+reused, so dropping a texture does not immediately release its tiles. That is
+bounded by the reserve rather than by the texture, which is the property that
+matters; releasing on drop would need upstream to account for live handles.
+
 ## Not every texture is worth a cache slot
 
 The island is what forced this, and the numbers are its own. It binds **3 618**
