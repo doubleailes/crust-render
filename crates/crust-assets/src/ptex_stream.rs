@@ -29,8 +29,8 @@
 //! Opt-in via `CRUST_PTEX_STREAM=1`; [`PtexColor`] stays the default and the
 //! correctness oracle. See `streamed_and_preloaded_agree_texel_for_texel` in
 //! `tests/ptex_stream.rs` for the invariant that pins the two together, and
-//! the module docs on [`level_res`] for the one place they are *supposed* to
-//! disagree.
+//! the docs on [`MipSpace`] for the one place they cannot agree — and what
+//! is refused rather than documented as a result.
 
 use crate::{max_log2_from_env_opt, read_channel};
 use crust_core::{PtexTexture, Vec3A};
@@ -118,6 +118,59 @@ pub fn stream_min_bytes_from_env() -> usize {
     mb * 1024 * 1024
 }
 
+/// Which mip chain a streamed texture is allowed to read.
+///
+/// **The chain is where the two backends part company, and the project's own
+/// standard for that is refusal rather than a footnote.** A `.tx` records
+/// the colour space its levels were reduced in (`crust:mipspace`) and a
+/// mismatch is refused outright, for the reason the mismatch is dangerous:
+/// level 0 stays perfectly correct and every coarser level is wrong, so it
+/// shows up only under minification and looks exactly like a filtering bug.
+///
+/// A `.ptx` has no such marker and needs none — the answer is known. Crust
+/// binds Ptex colour as display-encoded and decodes it by 2.2
+/// ([`decode_sample`]), while a `.ptx`'s stored levels were reduced in the
+/// file's own encoding. That is the mismatch, always, so the default is
+/// [`MipSpace::Linear`]: a texture that would read a curve-decoded chain is
+/// declined and preloaded, where [`PtexColor`](crate::PtexColor) builds the
+/// pyramid in linear light from the decoded base.
+///
+/// [`MipSpace::File`] is the opt-in that takes the file's chain instead. It
+/// is what every production Ptex cache does and what the measured residency
+/// figures in `docs/ptex_streaming.md` were taken with, so it is a real mode
+/// and not a debug switch — but it is a render that trades a known bias
+/// (darker minified texture, up to 0.147 on the tiled fixture) for the
+/// memory, and that trade is the operator's to make rather than the
+/// default.
+///
+/// The cost of the default is worth stating plainly: with the mip pyramid on
+/// — which it is unless `CRUST_PTEX_MIP=0` — every mipmapped `.ptx` preloads,
+/// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
+/// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
+/// comes back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MipSpace {
+    /// Refuse a chain reduced in the file's encoding; preload such a texture.
+    #[default]
+    Linear,
+    /// Accept the file's own chain, bias and all.
+    File,
+}
+
+/// `CRUST_PTEX_STREAM_MIPSPACE`, validated. See [`MipSpace`].
+pub fn mip_space_from_env() -> MipSpace {
+    match std::env::var("CRUST_PTEX_STREAM_MIPSPACE").as_deref() {
+        Ok("file") => MipSpace::File,
+        Ok("linear") | Err(_) => MipSpace::Linear,
+        Ok(v) => {
+            tracing::warn!(
+                "CRUST_PTEX_STREAM_MIPSPACE={v} is not `linear` or `file` — using `linear`"
+            );
+            MipSpace::Linear
+        }
+    }
+}
+
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
 /// of one texel.
 ///
@@ -133,27 +186,29 @@ fn level_count(res: ptex::Res) -> u8 {
 
 /// Resolution of mip level `k` of a face whose finest level is `base`.
 ///
-/// **Here is where the two backends legitimately part company, and it is
-/// worth stating plainly rather than discovering in a render.** A preloaded
-/// texture decodes its base to linear light and reduces *that*, because
-/// averaging display-encoded texels is not averaging light. A streamed
-/// texture cannot: the coarser level is on disk, reduced by the writer (or
-/// recomputed by the reader) in the file's own encoding, and decoded to
-/// linear only once it is here. Convexity says which way it goes — `x^2.2` is
-/// convex, so the mean of the decoded texels is never below the decode of
-/// their mean, and the streamed chain is therefore the *darker* of the two at
-/// every level above the base.
+/// **The level this names comes off disk already reduced, and that is the
+/// one place the two backends cannot be made to agree.** A preloaded texture
+/// decodes its base to linear light and reduces *that*, because averaging
+/// display-encoded texels is not averaging light. A streamed texture cannot:
+/// the coarser level was reduced by the writer (or is recomputed by the
+/// reader) in the file's own encoding, and is decoded to linear only once it
+/// is here. Convexity says which way it goes — `x^2.2` is convex, so the mean
+/// of the decoded texels is never below the decode of their mean, and the
+/// streamed chain is therefore the *darker* of the two at every level above
+/// the base.
 ///
-/// This is the same defect `crust:mipspace` guards against for `.tx`, and the
-/// reason `PtexColor` builds its pyramid in memory instead of asking the
-/// reader for each resolution. It is accepted here because the alternative —
-/// reducing in linear light from streamed base tiles — needs a second pyramid
-/// cache of crust's own, which is precisely the design "Known incomplete
-/// work" ruled out. It is also what every production Ptex cache does.
+/// This is the same defect `crust:mipspace` guards against for `.tx`, and
+/// there it is **refused** rather than described — a mismatched chain reads
+/// as perfectly correct at level 0 and wrong only under minification, which
+/// by eye is indistinguishable from a filtering bug. So it is refused here
+/// too: see [`MipSpace`], which declines to stream a texture whose chain
+/// would be read this way and preloads it instead. This function is reached
+/// only under `CRUST_PTEX_STREAM_MIPSPACE=file`, the explicit opt-in that
+/// takes the file's chain and the residency that comes with it.
 ///
 /// `tests/ptex_stream.rs` measures the divergence rather than asserting it
-/// away, and the *base* level, which is what a close-up reads, is bit-identical
-/// between the two.
+/// away, and the *base* level, which is what the refusal preserves and what a
+/// close-up reads, is bit-identical between the two.
 fn level_res(base: ptex::Res, k: u8) -> ptex::Res {
     let k = k as i8;
     ptex::Res::new((base.ulog2 - k).max(0), (base.vlog2 - k).max(0))
@@ -432,6 +487,34 @@ impl PtexStream {
     /// the total as textures arrive; see `rebudget_ptex` there.
     pub fn set_budget(&self, bytes: usize) {
         self.reader.set_cache_budget(bytes);
+    }
+
+    /// Can every lookup this texture will serve be answered from level 0?
+    ///
+    /// The admission test for [`MipSpace::Linear`], and the reason it is a
+    /// question about the *texture* rather than a flat refusal: the chain is
+    /// only a problem if a coarse level can ever be read. Two cases where
+    /// none can, and both are real —
+    ///
+    /// - `CRUST_PTEX_MIP=0` pins every lookup to the base level, so there is
+    ///   no chain to be reduced in the wrong space. This is the streaming
+    ///   configuration that is exact *and* unbounded, and the one the
+    ///   `streamed_and_preloaded_agree_texel_for_texel` invariant covers.
+    /// - Every face is a single texel on both axes once the cap is applied,
+    ///   so `level_count` is 1 throughout. Degenerate, but it costs one pass
+    ///   over headers already parsed to say so rather than preload a texture
+    ///   that has nothing to get wrong.
+    ///
+    /// Anything else reads a level the file reduced in its own encoding, and
+    /// under the default policy is preloaded instead — see [`MipSpace`].
+    pub fn chain_is_exact(&self) -> bool {
+        if !self.mip {
+            return true;
+        }
+        self.reader
+            .face_infos()
+            .iter()
+            .all(|i| level_count(self.base_res(i.res)) == 1)
     }
 
     /// Faces the file holds, for the load-time and `--stats` report.

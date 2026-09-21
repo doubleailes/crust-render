@@ -260,6 +260,13 @@ pub struct PtexCacheStats {
     /// textures were big enough to want streaming and the budget could not
     /// seat them, so it is the line that says "raise CRUST_PTEX_CACHE_MB".
     pub budget_full: u32,
+    /// Preloaded because streaming them would have read a mip chain the file
+    /// reduced in its own colour encoding, where the preloaded pyramid is
+    /// reduced in linear light. A correctness refusal, and the default
+    /// policy — `CRUST_PTEX_STREAM_MIPSPACE=file` accepts the file's chain
+    /// instead. Counted apart because it is the line that explains a render
+    /// where `CRUST_PTEX_STREAM=1` was set and nothing streamed.
+    pub mip_space: u32,
     pub faces: u64,
     /// Resident bytes held by the **preloaded** textures. Fixed for the
     /// render, and the number streaming exists to replace.
@@ -766,6 +773,7 @@ impl fmt::Display for RenderStats {
             let backend = if p.streamed == 0
                 && p.below_threshold == 0
                 && p.budget_full == 0
+                && p.mip_space == 0
                 && p.open_failed == 0
             {
                 // Nothing streamed and nothing considered: streaming is off.
@@ -793,6 +801,13 @@ impl fmt::Display for RenderStats {
                     parts.push(format!(
                         "{} preloaded for want of budget (raise CRUST_PTEX_CACHE_MB)",
                         thousands(p.budget_full as usize)
+                    ));
+                }
+                if p.mip_space > 0 {
+                    parts.push(format!(
+                        "{} preloaded for a linear mip chain \
+                         (CRUST_PTEX_STREAM_MIPSPACE=file to stream them)",
+                        thousands(p.mip_space as usize)
                     ));
                 }
                 if p.open_failed > 0 {

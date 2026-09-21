@@ -96,13 +96,26 @@ CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda -
 # pyramid, so this just turns the reader's cache on. Capping both backends
 # alike is what makes the A/B an equality rather than a comparison of two
 # different resolutions; uncapped is what streaming is *for*.
-# CRUST_PTEX_STREAM_MIN_MB=0 because these fixtures are kilobytes and a
-# texture smaller than its own cache slot is preloaded by default.
+# Two variables are needed beyond the switch, and leaving either out makes the
+# A/B compare a preloaded render against itself and agree for the wrong reason:
+#   CRUST_PTEX_STREAM_MIN_MB=0  -- these fixtures are kilobytes, and a texture
+#       smaller than its own cache slot is preloaded by default.
+#   CRUST_PTEX_STREAM_MIPSPACE=file -- a mipmapped .ptx is preloaded by
+#       default, because its stored levels were reduced in the file's own
+#       encoding while the preloaded pyramid is reduced in linear light. This
+#       takes the file's chain (darker under minification, up to 0.147 on the
+#       tiled fixture) and the residency that comes with it.
+# `--stats` says `backend` either way, and names the variable that declined.
 CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
+    CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- -i samples/ptex_quads.usda -o b.exr
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
-CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 \
+# The configuration that streams under the *default* policy: no pyramid, so no
+# chain to reduce in the wrong space. Exact and uncapped, at the cost of the
+# pyramid's anti-aliasing.
+CRUST_PTEX_STREAM=1 CRUST_PTEX_MIP=0 cargo run --release -- -i scene.usda --stats
+CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- -i scene.usda --stats
 
 # --- The optimization loop (see "Measuring a change" below) --------------
@@ -154,7 +167,20 @@ difference between the two: a `.ptx` is already a tiled per-face mip pyramid, so
 missing piece was never a format but a cache, and that cache now lives in `ptex-rs`
 (`SharedReader`) rather than here. With it on, `CRUST_PTEX_MAX_LOG2` stops being load-bearing:
 an unset cap means *uncapped*, and setting one is how the two backends are compared at a
-resolution both hold. See `docs/ptex_streaming.md`.
+resolution both hold.
+**`CRUST_PTEX_STREAM_MIPSPACE` is the second gate, and it is on the correctness side of
+the trade rather than the tuning side.** A `.ptx`'s stored mip levels were reduced in the
+file's own encoding while `PtexColor` reduces in linear light from the decoded base, which
+is the same mismatch `crust:mipspace` **refuses** for `.tx` — and refuses for the reason
+it is dangerous, not for tidiness: level 0 stays perfectly correct and only coarser levels
+are wrong, so it reads as a filtering bug rather than a colour one. So it is refused here
+too. The default (`linear`) declines to stream a texture whose lookups could reach such a
+level and preloads it instead, which under a mip pyramid means *every* mipmapped `.ptx`:
+`CRUST_PTEX_STREAM=1` alone therefore streams nothing on a normal render, and `--stats`
+says so on the `backend` line. `=file` takes the file's chain and the residency with it
+(the island figures below are all `=file` figures), and `CRUST_PTEX_MIP=0` is the third
+way out — no pyramid, so nothing to get wrong, exact and uncapped. See
+`docs/ptex_streaming.md`.
 
 ## Measuring a change
 
@@ -1038,11 +1064,33 @@ Schema mapping:
     four fixtures and every cap in `tests/ptex_stream.rs`); the **coarser levels are not**,
     since a streamed level is reduced on disk in the file's encoding while a preloaded one
     is reduced in linear light, which convexity makes the streamed chain the darker of by
-    up to 0.147; the microcache keeps **four** slots rather than the `.tx` cache's two,
+    up to 0.147 — **so a texture that could read one is declined by default and preloaded**
+    (`MipSpace`, `CRUST_PTEX_STREAM_MIPSPACE`, below); the microcache keeps **four** slots
+    rather than the `.tx` cache's two,
     because a `.ptx` grids per *face* so a four-tile-corner tap is routine and two slots
     measured 0.000 hit rate there against 0.998 with four; and the budget moves residency
     only — a 4 MiB render is bit-identical to a 1 GiB one. `docs/ptex_streaming.md` has
     the measurements and the reasoning.
+    **The mip chain is refused, not documented, and that is the project's own standard
+    rather than a new rule.** `crust:mipspace` refuses a `.tx` whose levels were reduced
+    in the wrong colour space, because the failure is invisible — level 0 is perfectly
+    correct and only minification is wrong, which by eye is a filtering bug and nothing
+    else. A `.ptx` has no marker and needs none: crust decodes Ptex by 2.2 and the file
+    reduced before that, so the mismatch is unconditional. `MipSpace::Linear` (the
+    default) therefore declines such a texture at admission and preloads it, reported as
+    its own `backend` reason. The gate asks about the *texture*
+    (`PtexStream::chain_is_exact`), not the switch, so the two configurations with no
+    chain to get wrong still stream: `CRUST_PTEX_MIP=0` (exact *and* uncapped — the base
+    level is the bit-identical one — at the cost of anti-aliasing), and a texture whose
+    every face is one texel under the cap. `CRUST_PTEX_STREAM_MIPSPACE=file` is the
+    opt-in that takes the file's chain instead; it is what the C++ `PtexCache` does and
+    what **every measurement in `docs/ptex_streaming.md` was taken with**, the island's
+    included — so with a pyramid on, `CRUST_PTEX_STREAM=1` by itself now streams nothing.
+    That is deliberate, and the lever is one variable. The fix that would retire both
+    gates is a reader that reduces in a declared working space: building the linear chain
+    here would need a second pyramid cache (the design "Known incomplete work" ruled out)
+    *and* a level-0 read to answer a coarse lookup, which defeats streaming exactly where
+    the island uses it.
     **`CRUST_PTEX_CACHE_MB` is the render's budget, not a file's**, and that takes work
     here: `ptex::SharedReader` owns its cache (right for a library, wrong for a scene),
     so N textures opened at the full budget would hold N times it — on a stage binding
@@ -1278,7 +1326,10 @@ pyramid, which adds the expected 4/3. (1.84 GiB at a 16x16 base, 736 MiB at 8x8,
 **494 GiB** at full resolution, which is why the cap was not an optimisation but the
 thing that made the island possible.)
 
-**Streaming replaces that cap** (`CRUST_PTEX_STREAM=1`, `docs/ptex_streaming.md`).
+**Streaming replaces that cap** (`CRUST_PTEX_STREAM=1` **plus
+`CRUST_PTEX_STREAM_MIPSPACE=file`** — every island `.ptx` is mipmapped, so the default
+policy declines them all and the switch alone reproduces the preloaded column exactly;
+see `docs/ptex_streaming.md`).
 Measured at 640x360 / 8 spp against the same build preloading: Ptex residency **5.98 ->
 0.61 GiB** (39 textures streamed, 3 579 preloaded under the size threshold), Ptex decode
 **84.8 s -> 14.0 s** so `Load assets` falls 01:40.7 -> 27.3 s, `Traverse prims` RSS
@@ -1423,11 +1474,17 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   `docs/ptex_streaming.md`), so what is left is the shape of it rather than its absence.
   The cache is the reader's, which is what this section used to ask for and is still the
   right place for it — do not grow a second one here, and do not bolt Ptex onto the `.tx`
-  tile cache. What remains: the **mip chain differs** from the preloaded one above the
-  base level, because a streamed level comes off disk reduced in the file's own encoding
+  tile cache. What remains: the **mip chain cannot be built in linear light from streamed
+  tiles**, because a streamed level comes off disk reduced in the file's own encoding
   while a preloaded pyramid is reduced in linear light — convexity makes the streamed
   chain the darker, measured at up to 0.147 on the tiled fixture, and the base level is
-  bit-identical. `PtexColor` remains the default and the oracle. Ptex is still 8-bit
+  bit-identical. That is now *refused* rather than merely recorded
+  (`CRUST_PTEX_STREAM_MIPSPACE`, above), which makes the gap a live restriction rather
+  than a wrong render: with a pyramid on, streaming is off unless the operator opts into
+  the file's chain. Retiring both gates needs the reduction to happen in the reader,
+  against a declared working space — not a second pyramid cache here, which would also
+  have to read level 0 to answer a coarse lookup. `PtexColor` remains the default and
+  the oracle. Ptex is still 8-bit
   through both backends, so an HDR `.ptx` gains nothing from either. Filtering across
   face boundaries is still not attempted (see the filtering caveats), and the streaming
   path does not change that. Cost on the worst case (`samples/ptex_quads.usda`, two

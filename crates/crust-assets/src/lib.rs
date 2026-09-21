@@ -33,10 +33,11 @@ mod uv_texture;
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
-    MICRO_SLOTS as PTEX_MICRO_SLOTS, PtexStream, StreamStats as PtexStreamStats,
-    cache_budget_from_env as ptex_cache_budget_from_env, micro_reserve as ptex_micro_reserve,
-    micro_retained_bytes as ptex_micro_retained_bytes, micro_slot_max as ptex_micro_slot_max,
-    micro_threads as ptex_micro_threads, stream_enabled as ptex_stream_enabled,
+    MICRO_SLOTS as PTEX_MICRO_SLOTS, MipSpace as PtexMipSpace, PtexStream,
+    StreamStats as PtexStreamStats, cache_budget_from_env as ptex_cache_budget_from_env,
+    micro_reserve as ptex_micro_reserve, micro_retained_bytes as ptex_micro_retained_bytes,
+    micro_slot_max as ptex_micro_slot_max, micro_threads as ptex_micro_threads,
+    mip_space_from_env as ptex_mip_space_from_env, stream_enabled as ptex_stream_enabled,
     stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
 };
 pub use ptex_texture::{
@@ -120,6 +121,12 @@ pub struct FileAssets {
     /// pyramid, which is the whole reason Ptex was the format waiting on a
     /// reader-side cache rather than on a conversion step.
     ptex_streaming: bool,
+    /// Which mip chain a streamed Ptex may read, from
+    /// `CRUST_PTEX_STREAM_MIPSPACE`. Read once for the same reason
+    /// `ptex_streaming` is: it decides admission for every texture in the
+    /// render, and a value that changed mid-import would give one stage
+    /// chunk's textures a different backend from the next's.
+    ptex_mip_space: ptex_stream::MipSpace,
     /// Every Ptex texture opened, so the render can be reported on and — for
     /// the streamed ones — re-budgeted as more arrive. See [`PtexHandle`].
     ptex: std::sync::Mutex<Vec<PtexHandle>>,
@@ -175,6 +182,12 @@ enum PreloadReason {
     TooSmall,
     /// The budget has no room for another reader — see [`MIN_PTEX_SHARE`].
     BudgetFull,
+    /// Streaming it would have read a mip chain reduced in the file's own
+    /// encoding, which `PtexColor` builds in linear light — see
+    /// [`ptex_stream::MipSpace`]. A correctness refusal rather than an
+    /// efficiency one, and under the default policy the reason *most*
+    /// mipmapped textures preload, so it is reported on its own line.
+    MipSpace,
     StreamFailed,
 }
 
@@ -195,16 +208,33 @@ impl FileAssets {
             );
         }
         let ptex_streaming = ptex_stream::stream_enabled();
+        let ptex_mip_space = ptex_stream::mip_space_from_env();
         if ptex_streaming {
             info!(
                 "Streaming Ptex with a {:.0} MiB cache",
                 ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0)
             );
+            // Said at construction rather than per texture, because under
+            // the default policy it is the line that explains a render where
+            // streaming was asked for and nothing streamed.
+            match ptex_mip_space {
+                ptex_stream::MipSpace::Linear => info!(
+                    "Ptex mip chains must be reduced in linear light, so a mipmapped .ptx \
+                     preloads — CRUST_PTEX_STREAM_MIPSPACE=file takes the file's own chain \
+                     instead (darker minified texture; see docs/ptex_streaming.md)"
+                ),
+                ptex_stream::MipSpace::File => info!(
+                    "CRUST_PTEX_STREAM_MIPSPACE=file: streaming the .ptx's own mip chain, \
+                     which is reduced in the file's encoding and so darker under \
+                     minification than the preloaded pyramid"
+                ),
+            }
         }
         FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
             ptex_streaming,
+            ptex_mip_space,
             ptex: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -310,6 +340,7 @@ impl FileAssets {
                     match why {
                         PreloadReason::TooSmall => out.below_threshold += 1,
                         PreloadReason::BudgetFull => out.budget_full += 1,
+                        PreloadReason::MipSpace => out.mip_space += 1,
                         PreloadReason::StreamFailed => out.open_failed += 1,
                         PreloadReason::NotStreaming => {}
                     }
@@ -534,6 +565,32 @@ impl AssetLoader for FileAssets {
                             path.display(),
                             would as f64 / (1024.0 * 1024.0),
                             floor as f64 / (1024.0 * 1024.0),
+                        );
+                    } else if self.ptex_mip_space == ptex_stream::MipSpace::Linear
+                        && !tex.chain_is_exact()
+                    {
+                        // **The correctness gate, and the project's own
+                        // standard for it.** A `.tx` whose levels were
+                        // reduced in the wrong colour space is refused
+                        // (`crust:mipspace`) rather than described, because
+                        // the failure is invisible: level 0 stays right and
+                        // every coarser level is wrong, which by eye is a
+                        // filtering bug. A `.ptx`'s stored chain is reduced
+                        // in the file's encoding while crust decodes Ptex by
+                        // 2.2, so it is that same mismatch every time — and
+                        // gets the same answer. Preloading rebuilds the
+                        // pyramid in linear light from the decoded base.
+                        //
+                        // Checked after the size test on purpose: on a
+                        // production stage the size rule accounts for 95% of
+                        // preloads and is the boring reason, so leaving it
+                        // first keeps this line meaning what it says.
+                        why = PreloadReason::MipSpace;
+                        debug!(
+                            "Ptex {} has a mip chain reduced in the file's own encoding — \
+                             preloading it so the pyramid is built in linear light \
+                             (CRUST_PTEX_STREAM_MIPSPACE=file to stream it anyway)",
+                            path.display(),
                         );
                     } else {
                         let tex = std::sync::Arc::new(tex);
