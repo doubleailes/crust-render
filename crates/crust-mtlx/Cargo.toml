@@ -18,4 +18,4 @@ glam.workspace = true
 # not streamed. `roxmltree` is pure safe Rust (`forbid(unsafe_code)`) with no
 # transitive dependencies, which keeps this crate's "safe Rust only" claim —
 # and crust's — intact.
-roxmltree = "0.20"
+roxmltree = "0.21"
