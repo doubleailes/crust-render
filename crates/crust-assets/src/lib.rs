@@ -123,17 +123,27 @@ pub struct FileAssets {
     ptex: std::sync::Mutex<Vec<PtexHandle>>,
 }
 
-/// Floor on a streamed Ptex texture's share of the budget: 1 MiB.
+/// The smallest share of the budget worth giving a streamed reader: 1 MiB.
 ///
-/// A zero budget in `ptex::CacheOptions` disables caching outright — every
-/// texel fetch back to a seek and an inflate — so overshooting the total beats
-/// silently turning the cache off, and the report shows the overshoot.
+/// **This bounds the reader count; it is not a floor on the share.** Those are
+/// opposite designs and the difference is the whole bug this replaced. A floor
+/// — `max(budget / n, 1 MiB)` — silently multiplies: at a `CRUST_PTEX_CACHE_MB`
+/// of 8 with 39 admitted readers it hands out 39 MiB against a budget of 8,
+/// and the setting that exists to bound residency stops bounding it. The
+/// smaller the budget, the worse the overshoot, which is exactly backwards.
 ///
-/// **It is a backstop and must not be the policy**, which is the lesson the
-/// island taught: at 3 618 admitted readers a 4 MiB floor asked for 14.1 GiB,
-/// worse than the 5.98 GiB preload it replaced. Admission
-/// (`DEFAULT_STREAM_MIN_MB`) is what keeps the count small enough that this
-/// rarely fires at all — raising it is treating the symptom.
+/// So this is read as a *capacity*: at most `budget / MIN_PTEX_SHARE` readers
+/// may stream, and the budget is then divided **exactly** among them. Both
+/// properties hold by construction — every admitted reader gets at least
+/// 1 MiB, and `n * (budget / n) <= budget` because integer division floors.
+/// A texture arriving past that cap is preloaded
+/// ([`PreloadReason::BudgetFull`]), which is the honest answer: there is no
+/// cache left to give it, and a reader with a share too small to hold one
+/// block caches nothing anyway (upstream returns such a read `oversized`).
+///
+/// It costs the default path nothing: 1 GiB admits 1 024 readers and the
+/// island wants 39. It only engages when the budget is genuinely small, which
+/// is precisely when honouring it matters.
 const MIN_PTEX_SHARE: usize = 1024 * 1024;
 
 /// One opened Ptex texture, as `FileAssets` remembers it.
@@ -161,6 +171,8 @@ enum PtexHandle {
 enum PreloadReason {
     NotStreaming,
     TooSmall,
+    /// The budget has no room for another reader — see [`MIN_PTEX_SHARE`].
+    BudgetFull,
     StreamFailed,
 }
 
@@ -215,6 +227,12 @@ impl FileAssets {
     /// way. Re-dividing on each open rather than once at the end because the
     /// count is only known when the import is done, and a texture must be
     /// usable the moment it is opened.
+    ///
+    /// **The division is exact, with no floor under the share.** A floor is
+    /// what breaks the bound — see [`MIN_PTEX_SHARE`], which caps how many
+    /// readers may stream instead, so that dividing exactly still leaves each
+    /// one something usable. `max_streams` enforces that cap at admission, so
+    /// by the time this runs `streams.len()` is already small enough.
     fn rebudget_ptex(&self, opened: &[PtexHandle]) {
         let streams: Vec<_> = opened
             .iter()
@@ -226,16 +244,31 @@ impl FileAssets {
         if streams.is_empty() {
             return;
         }
-        // A backstop, not the policy. Admission (`DEFAULT_STREAM_MIN_MB`) is
-        // what keeps this count small enough for the shares to be usable —
-        // 39 readers on the island rather than 3 618. The floor only catches
-        // a stage that still manages to admit more readers than the budget
-        // has megabytes, where a share of zero would disable caching outright
-        // and re-read every texel.
-        let share = (ptex_stream::cache_budget_from_env() / streams.len()).max(MIN_PTEX_SHARE);
+        // Exact. `n * (budget / n) <= budget` because integer division
+        // floors, so the total can only come in at or under what was asked
+        // for — never over it, whatever the count.
+        let share = ptex_stream::cache_budget_from_env() / streams.len();
         for s in &streams {
             s.set_budget(share);
         }
+    }
+
+    /// How many textures may stream at once, given the budget.
+    ///
+    /// `budget / MIN_PTEX_SHARE`, and at least one — a single reader holding
+    /// the whole budget is still within it, and refusing to stream anything
+    /// at all would make a small budget mean "no streaming" rather than "a
+    /// small cache".
+    fn max_streams() -> usize {
+        (ptex_stream::cache_budget_from_env() / MIN_PTEX_SHARE).max(1)
+    }
+
+    /// Streamed textures opened so far. Callers hold the lock.
+    fn streamed_count(opened: &[PtexHandle]) -> usize {
+        opened
+            .iter()
+            .filter(|h| matches!(h, PtexHandle::Streamed(_)))
+            .count()
     }
 
     /// Ptex residency and cache counters, in the shape `--stats` reports.
@@ -254,6 +287,7 @@ impl FileAssets {
                     out.preloaded_bytes += *bytes as u64;
                     match why {
                         PreloadReason::TooSmall => out.below_threshold += 1,
+                        PreloadReason::BudgetFull => out.budget_full += 1,
                         PreloadReason::StreamFailed => out.open_failed += 1,
                         PreloadReason::NotStreaming => {}
                     }
@@ -440,7 +474,27 @@ impl AssetLoader for FileAssets {
         // `.tx` path's does: turning residency on can make a render slower
         // but must never break one, so a `.ptx` this cannot open tile-wise
         // still renders — just resident.
-        if self.ptex_streaming {
+        // Is there budget left for another reader? Checked before the open,
+        // because it needs no file I/O at all — and because a reader admitted
+        // past the cap would either push the total over the budget (the old
+        // floor's bug) or get a share too small to hold one block, which
+        // caches nothing. Preloading is the honest answer to both.
+        let room = {
+            let opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
+            Self::streamed_count(&opened) < Self::max_streams()
+        };
+        if self.ptex_streaming && !room {
+            why = PreloadReason::BudgetFull;
+            debug!(
+                "Ptex {}: the {:.0} MiB budget already has {} readers, its most \
+                 at {:.0} MiB each — preloading this one instead",
+                path.display(),
+                ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
+                Self::max_streams(),
+                MIN_PTEX_SHARE as f64 / (1024.0 * 1024.0),
+            );
+        }
+        if self.ptex_streaming && room {
             match PtexStream::open(path) {
                 Ok(tex) => {
                     // Admission. Opening read headers only, so this costs a

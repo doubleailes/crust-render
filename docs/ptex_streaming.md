@@ -147,11 +147,39 @@ they arrive, re-dividing on each open (the count is only final when the import
 is, and a texture has to be usable the moment it is opened). An even split
 rather than the demand-driven pool OIIO would use — that would need a second
 cache here, which is the design ruled out above — but the property that matters
-holds: **the total is what was asked for.** `MIN_PTEX_SHARE` (1 MiB) floors each
-share, because a zero budget in `ptex::CacheOptions` disables caching outright
-and overshooting the total beats silently turning the cache off — but it is a
-backstop, not the policy; see the next section for what actually bounds the
-reader count.
+holds: **the total is what was asked for.**
+
+**The division is exact, and that matters more than it looks.** The obvious
+guard — never hand a reader less than some useful minimum, `max(budget / n,
+1 MiB)` — reads as prudence and is the one thing that breaks the bound. With a
+`CRUST_PTEX_CACHE_MB` of 8 and 39 admitted readers it hands out 39 MiB, and the
+setting whose entire job is to bound residency stops bounding it. Worse, the
+overshoot grows as the budget *shrinks*, so the guard fails hardest exactly
+where the budget is being taken most seriously.
+
+So `MIN_PTEX_SHARE` (1 MiB) is read as a **capacity**, not a floor: at most
+`budget / MIN_PTEX_SHARE` readers may stream, and the budget then divides
+exactly among them. Both properties hold by construction — every admitted
+reader gets at least 1 MiB, and `n * (budget / n) <= budget` because integer
+division floors. A texture arriving past the cap is preloaded and counted as
+`budget_full`, which `--stats` reports with the one hint that fixes it. That
+is the honest answer rather than a compromise: there is no cache left to give
+it, and a reader with a share too small to hold one block caches nothing
+anyway (upstream returns such a read `oversized`).
+
+| `CRUST_PTEX_CACHE_MB` | readers admitted | share each | total |
+| --- | --- | --- | --- |
+| 1 | 1 | 1.00 MiB | 1.00 MiB |
+| 2 | 2 | 1.00 MiB | 2.00 MiB |
+| 8 | 4 | 2.00 MiB | 8.00 MiB |
+| 64 | 4 | 16.00 MiB | 64.00 MiB |
+| 1024 (default) | up to 1 024 | 26 MiB on the island | <= 1 GiB |
+
+It costs the default path nothing — 1 GiB seats 1 024 readers and the island
+wants 39 — and engages only when the budget is genuinely small. Pinned by
+`the_total_budget_holds_when_readers_outnumber_megabytes`, which sweeps budgets
+far below the reader count and checks both the sum and that each admitted
+reader still reads correctly.
 
 Pinned by `one_budget_is_shared_across_textures_not_repeated_per_file`, which
 first asserts the naive total *does* multiply — so the sharing is testing
