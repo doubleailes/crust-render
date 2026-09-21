@@ -630,3 +630,71 @@ fn the_island_distribution_stays_bounded_under_admission() {
         total_mib / total
     );
 }
+
+/// **The budget holds even when there are more readers than megabytes.**
+///
+/// The case a per-reader *floor* gets wrong, and the reason there is no floor.
+/// `max(budget / n, 1 MiB)` reads as prudence — never hand a reader a share
+/// too small to be useful — but it multiplies: at a budget of 8 MiB with 39
+/// readers it hands out 39 MiB, and the setting whose entire job is to bound
+/// residency stops bounding it. The overshoot grows as the budget *shrinks*,
+/// which is exactly backwards.
+///
+/// The fix reads the same 1 MiB as a capacity instead: at most
+/// `budget / MIN_PTEX_SHARE` readers stream and the budget divides exactly
+/// among them, so both properties hold at once — nobody gets a useless share,
+/// and the total never exceeds what was asked for. Everything past the cap
+/// preloads.
+///
+/// This checks the arithmetic directly across budgets far smaller than the
+/// reader count, including the degenerate one-reader case.
+#[test]
+fn the_total_budget_holds_when_readers_outnumber_megabytes() {
+    const MIN_SHARE: usize = 1024 * 1024;
+    let names = ["quad_tiled", "quad_u8", "tri_u16", "quad_f32"];
+
+    for budget_mb in [1usize, 2, 3, 4, 8, 64] {
+        let total = budget_mb * 1024 * 1024;
+        // What `FileAssets::max_streams` computes, and what admission caps at.
+        let admitted = (total / MIN_SHARE).max(1).min(names.len());
+        let share = total / admitted;
+
+        // Capped alike on both sides, so the equality below is about the
+        // budget and not about two different resolutions.
+        const CAP: i8 = 4;
+        let streams: Vec<_> = names
+            .iter()
+            .take(admitted)
+            .map(|n| PtexStream::open_with(&fixture(n), share, Some(CAP), true).expect(n))
+            .collect();
+
+        let sum: usize = streams.iter().map(|s| s.stats().cache.bytes_budget).sum();
+        assert!(
+            sum <= total,
+            "{admitted} readers at a {budget_mb} MiB budget hold {sum} bytes, over the \
+             {total} asked for — a per-reader floor is back"
+        );
+        assert!(
+            share >= MIN_SHARE || admitted == 1,
+            "an admitted reader got {share} bytes, under the minimum useful share"
+        );
+
+        // And the textures still work at whatever share they were given: a
+        // bounded budget must cost detail-per-second, never correctness.
+        for (n, s) in names.iter().take(admitted).zip(&streams) {
+            let pre = PtexColor::open_with(&fixture(n), true, CAP).expect(n);
+            for &(u, v) in grid().iter().take(48) {
+                assert_eq!(
+                    bits(s.eval(0, u, v, 0.0)),
+                    bits(pre.eval(0, u, v, 0.0)),
+                    "{n} at a {budget_mb} MiB budget"
+                );
+            }
+        }
+        eprintln!(
+            "budget {budget_mb:>3} MiB: {admitted} reader(s) x {:.2} MiB = {:.2} MiB",
+            share as f64 / (1024.0 * 1024.0),
+            sum as f64 / (1024.0 * 1024.0)
+        );
+    }
+}

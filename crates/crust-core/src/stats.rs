@@ -255,6 +255,11 @@ pub struct PtexCacheStats {
     pub below_threshold: u32,
     /// Preloaded because streaming them **failed** — the fallback firing.
     pub open_failed: u32,
+    /// Preloaded because the budget had no room for another reader. Also a
+    /// policy decision, but a different one from `below_threshold`: these
+    /// textures were big enough to want streaming and the budget could not
+    /// seat them, so it is the line that says "raise CRUST_PTEX_CACHE_MB".
+    pub budget_full: u32,
     pub faces: u64,
     /// Resident bytes held by the **preloaded** textures. Fixed for the
     /// render, and the number streaming exists to replace.
@@ -748,7 +753,11 @@ impl fmt::Display for RenderStats {
             // the first says the admission rule worked, the second says a
             // file is broken, and calling both a fallback (as this line once
             // did) reads as 3 579 errors.
-            let backend = if p.streamed == 0 && p.below_threshold == 0 && p.open_failed == 0 {
+            let backend = if p.streamed == 0
+                && p.below_threshold == 0
+                && p.budget_full == 0
+                && p.open_failed == 0
+            {
                 // Nothing streamed and nothing considered: streaming is off.
                 "preloaded".to_string()
             } else if p.streamed == p.textures {
@@ -768,6 +777,12 @@ impl fmt::Display for RenderStats {
                     parts.push(format!(
                         "{} preloaded under the size threshold",
                         thousands(p.below_threshold as usize)
+                    ));
+                }
+                if p.budget_full > 0 {
+                    parts.push(format!(
+                        "{} preloaded for want of budget (raise CRUST_PTEX_CACHE_MB)",
+                        thousands(p.budget_full as usize)
                     ));
                 }
                 if p.open_failed > 0 {

@@ -1048,9 +1048,17 @@ Schema mapping:
     so N textures opened at the full budget would hold N times it — on a stage binding
     Ptex per element, like the island, the default 1 GiB would become tens of GiB and
     the feature would be unbounded in the texture count. `FileAssets::rebudget_ptex`
-    divides one budget over the streamed textures as they arrive, floored at
-    `MIN_PTEX_SHARE` (4 MiB, since a zero budget disables caching outright). The `.tx`
-    path gets this for free — every streaming texture there shares one `TileCache`.
+    divides one budget over the streamed textures as they arrive, **exactly** — with no
+    floor under the share, because a floor is what breaks the bound: `max(budget / n,
+    1 MiB)` hands out 39 MiB against a budget of 8, and overshoots *more* the smaller
+    the budget gets. `MIN_PTEX_SHARE` (1 MiB) is read as a capacity instead — at most
+    `budget / MIN_PTEX_SHARE` readers may stream and anything past that preloads
+    (`budget_full`, which `--stats` names with a "raise CRUST_PTEX_CACHE_MB" hint) — so
+    every admitted reader gets a usable share *and* `n * (budget / n) <= budget` holds
+    by construction. It costs the default path nothing (1 GiB seats 1 024 readers, the
+    island wants 39) and engages only when the budget is genuinely small, which is when
+    honouring it matters. The `.tx` path gets all of this for free — every streaming
+    texture there shares one `TileCache`.
   - **`--stats` prints a `Ptex` block**, and unlike the `Texture Cache` one it reports
     for *both* backends, because the first question it has to answer is which ran:
     `backend`, textures and faces, preloaded resident bytes, and for a streamed run the
