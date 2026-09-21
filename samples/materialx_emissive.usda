@@ -1,0 +1,148 @@
+#usda 1.0
+(
+    doc = """MaterialX emission, and an HDR texture that finally has somewhere
+    to put its range.
+
+    crust's only textured shading input used to be base colour, and an albedo
+    above 1 creates energy — the diffuse lobe clamps it, correctly. Radiance
+    does not work that way, so emission is the input for which a value above
+    1.0 is meaningful rather than an authoring error, and reading MaterialX's
+    `edf` is what connects the two.
+
+    Two emissive quads face a neutral diffuse backdrop, so the frame shows both
+    the emitters themselves and the bounce light they throw — the second is
+    what proves the radiance is transported rather than merely displayed.
+
+      left   `mtlx_emitter_constant`  — multiply(uniform_edf, 12), no texture.
+      right  `mtlx_emitter_textured`  — a pure emitter driven by
+                                        textures/mtlx_emission.hdr, whose
+                                        bright cells sit at (16, 9, 3).
+
+    The textured panel is the A/B. Rendered as-is the texture preloads and
+    clips to 1.0 at 8 bits; converted with `examples/maketx` and rendered under
+    CRUST_TEX_STREAM=1 it pages through an EXR-backed `.tx` and the 16.0
+    arrives. The two renders must differ, and only in the bright cells:
+
+      cargo run --release -p crust-render --example maketx -- \\
+          samples/textures/mtlx_emission.hdr raw
+      cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr
+      CRUST_TEX_STREAM=1 cargo run --release -- \\
+          -i samples/materialx_emissive.usda -o hdr.exr
+      cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
+
+    Note the emitters are NOT light-list entries — a MaterialX surface has no
+    `AreaLight` — so they are found by BSDF/bounce sampling only, exactly as
+    emissive curves, instances and volumes already are. That is why the sample
+    spends 256 spp on a frame this small.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "EmitterConstant" (
+            prepend references = @materialx_emissive.mtlx@</MaterialX/Materials/mtlx_emitter_constant>
+        )
+        {
+        }
+
+        def Material "EmitterTextured" (
+            prepend references = @materialx_emissive.mtlx@</MaterialX/Materials/mtlx_emitter_textured>
+        )
+        {
+        }
+
+        # A plain grey diffuse for the backdrop, authored natively so the scene
+        # has exactly one variable in it: the emission.
+        def Material "Floor"
+        {
+            token outputs:surface.connect = </World/Looks/Floor/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.55, 0.55, 0.55)
+                float inputs:specularWeight = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    # The constant emitter, on the left.
+    def Mesh "LampPanel" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2.2, -0.9, 0), (-0.2, -0.9, 0), (-0.2, 1.1, 0), (-2.2, 1.1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/EmitterConstant>
+    }
+
+    # The HDR-textured emitter, on the right. One chart over one tile, so the
+    # 4x4 checker of the fixture maps corner to corner.
+    def Mesh "HdrPanel" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.2, -0.9, 0), (2.2, -0.9, 0), (2.2, 1.1, 0), (0.2, 1.1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/EmitterTextured>
+    }
+
+    # A neutral diffuse backdrop behind and below the panels: what the bounce
+    # light lands on, and the only place the transported radiance shows.
+    def Mesh "Backdrop" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, -3, -2.5), (6, -3, -2.5), (6, 5, -2.5), (-6, 5, -2.5)]
+        rel material:binding = </World/Looks/Floor>
+    }
+
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, -3, -2.5), (6, -3, -2.5), (6, -3, 6), (-6, -3, 6)]
+        rel material:binding = </World/Looks/Floor>
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 50
+        float horizontalAperture = 36
+        float focusDistance = 8.5
+        float fStop = 0
+        double3 xformOp:translate = (0, 0.1, 8.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (480, 270)
+        # The emitters are not light-list entries, so every path to them is a
+        # BSDF-sampled one. That is the honest cost of the feature, not a
+        # property of the scene.
+        int crust:samplesPerPixel = 256
+        int crust:maxDepth = 8
+    }
+}

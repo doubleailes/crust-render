@@ -17,12 +17,12 @@
 //!
 //! With no coordinates it sweeps a few points across the first UDIM tile.
 
-use crust_assets::UvTexture;
+use crust_assets::FileAssets;
+use crust_core::AssetLoader;
 use crust_core::ColorSpace;
 use crust_core::materialx;
 use crust_core::{HitRecord, Ray, Vec3A};
 use std::path::Path;
-use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,13 +55,23 @@ fn main() {
         vec![(0.1, 0.1), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.9, 0.9)]
     };
 
-    // The renderer's own decoder, so the numbers printed are the ones a
-    // render would shade with: bilinear, every UDIM tile, `CRUST_TEX_MAX`
-    // honoured, the colour space resolved by the same spelling table.
+    // The renderer's own asset seam, not just its decoder, so the numbers
+    // printed are the ones a render would shade with: bilinear, every UDIM
+    // tile, `CRUST_TEX_MAX` honoured, the colour space resolved by the same
+    // spelling table — and `CRUST_TEX_STREAM` obeyed.
+    //
+    // That last one is why this goes through `FileAssets` rather than calling
+    // `UvTexture::open` directly, as it used to. The preloaded decoder narrows
+    // to 8 bits at `to_rgb8()`, so an HDR emission texture probed through it
+    // reads 1.0 whatever the file holds — and this probe is the tool the
+    // project uses to settle a MaterialX question in numbers. A probe that
+    // cannot see the range is worse than no probe, because it answers
+    // confidently.
     let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let assets = FileAssets::new();
     let loader = |asset: &str, space: Option<&str>| -> Option<crust_core::TextureRef> {
-        let tex = UvTexture::open(&dir.join(asset), ColorSpace::from_mtlx(space))?;
-        Some(crust_core::TextureRef(Arc::new(tex)))
+        let tex = assets.load_texture(&dir.join(asset), ColorSpace::from_mtlx(space))?;
+        Some(crust_core::TextureRef(tex))
     };
 
     let loaded = match materialx::load(file, node.as_deref(), &loader) {
@@ -82,8 +92,20 @@ fn main() {
     // direction matters (these graphs compute a view-dependent glaze path
     // length), so it is stated rather than left at a default.
     println!(
-        "{:>6} {:>6}   {:>22} {:>6} {:>6} {:>6} {:>6} {:>10}",
-        "u", "v", "base_color", "metal", "rough", "spec", "coat", "coat_rough"
+        "{:>6} {:>6}   {:>22} {:>6} {:>6} {:>6} {:>6} {:>10}   {:>22}",
+        "u",
+        "v",
+        "base_color",
+        "metal",
+        "rough",
+        "spec",
+        "coat",
+        "coat_rough",
+        // The product, not the two fields: OpenPBR only ever multiplies them
+        // back together, so the split is a presentation choice and either
+        // field alone would mislead. A value above 1.0 here is the point --
+        // radiance has no ceiling, unlike the albedo two columns left.
+        "emission"
     );
     for (u, v) in points {
         let rec = HitRecord {
@@ -103,8 +125,10 @@ fn main() {
         };
         let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
         let m = loaded.material.probe(&r, &rec);
+        let emission = m.emission_color * m.emission_luminance;
         println!(
-            "{u:>6.3} {v:>6.3}   ({:>6.4} {:>6.4} {:>6.4}) {:>6.3} {:>6.4} {:>6.3} {:>6.3} {:>10.4}",
+            "{u:>6.3} {v:>6.3}   ({:>6.4} {:>6.4} {:>6.4}) {:>6.3} {:>6.4} {:>6.3} {:>6.3} {:>10.4}   \
+             ({:>6.3} {:>6.3} {:>6.3})",
             m.base_color.x,
             m.base_color.y,
             m.base_color.z,
@@ -112,7 +136,10 @@ fn main() {
             m.specular_roughness,
             m.specular_weight,
             m.coat_weight,
-            m.coat_roughness
+            m.coat_roughness,
+            emission.x,
+            emission.y,
+            emission.z
         );
     }
 }

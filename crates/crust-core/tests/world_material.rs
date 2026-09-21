@@ -1056,3 +1056,139 @@ fn face_density_is_zero_for_an_unmappable_slice() {
     assert_eq!(m.density(0), 0.0);
     assert!(approx(m.density(1), 1.0, 1e-6));
 }
+
+// ---------------------------------------------------------------------------
+// MaterialX emission, and the HDR range that reaches it
+// ---------------------------------------------------------------------------
+
+/// A texture whose every texel is above 1.0 — the range a streaming `.tx`
+/// with an EXR backing carries and a preloaded 8-bit one cannot.
+struct HdrTexture(Vec3A);
+
+impl crust_core::Texture2D for HdrTexture {
+    fn eval(&self, _u: f32, _v: f32, _width: f32) -> [f32; 4] {
+        [self.0.x, self.0.y, self.0.z, 1.0]
+    }
+}
+
+fn emissive_mtlx(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    let path = dir.join("emissive.mtlx");
+    std::fs::write(
+        &path,
+        format!(
+            r#"<?xml version="1.0"?>
+               <materialx version="1.38">
+                 {body}
+                 <surfacematerial name="emitter" type="material">
+                   <input name="surfaceshader" type="surfaceshader" nodename="s" />
+                 </surfacematerial>
+               </materialx>"#
+        ),
+    )
+    .expect("write mtlx");
+    path
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(name);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+/// **The claim the whole EDF path exists for.** A texture value of 16.0
+/// reaches emitted radiance as 16.0 — not clamped, not normalised, not lost
+/// in the colour/luminance split. crust's only other textured input is
+/// `base_color`, where an albedo above 1 creates energy and `eon_diffuse`
+/// clamps it correctly; emission is the input for which the range is
+/// meaningful, and this is it arriving.
+#[test]
+fn an_hdr_texture_drives_emission_above_one() {
+    let dir = scratch("crust_mtlx_emissive");
+    let path = emissive_mtlx(
+        &dir,
+        r#"<image name="tex" type="color3">
+             <input name="file" type="filename" value="emit.exr" />
+           </image>
+           <uniform_edf name="e" type="EDF">
+             <input name="color" type="color3" nodename="tex" />
+           </uniform_edf>
+           <surface name="s" type="surfaceshader">
+             <input name="edf" type="EDF" nodename="e" />
+           </surface>"#,
+    );
+    let hdr = Vec3A::new(16.0, 8.0, 4.0);
+    let loaded = materialx::load(&path, Some("emitter"), &|_, _| {
+        Some(crust_core::TextureRef(Arc::new(HdrTexture(hdr))))
+    })
+    .expect("loads");
+    assert_eq!(loaded.textures, 1);
+    assert!(loaded.unsupported.is_empty(), "{:?}", loaded.unsupported);
+
+    let (r_in, rec) = upward_hit();
+    let e = loaded.material.emitted_at(&r_in, &rec, 1.0);
+    assert!(
+        (e - hdr).length() < 1e-3,
+        "an HDR texel must reach emission unclamped, got {e:?}"
+    );
+
+    // And the split is a presentation detail: the product is the contract.
+    let params = loaded.material.probe(&r_in, &rec);
+    assert!(params.emission_color.max_element() <= 1.0 + 1e-6);
+    assert!((params.emission_luminance - 16.0).abs() < 1e-3);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `emitted()` stays hit-free and stays zero: it is what the **light list**
+/// reads, and a MaterialX emitter is deliberately not a light-list entry. If
+/// it were, NEE would sample it at zero radiance while the bounce side saw
+/// the real value, and the MIS pair would stop describing one emitter.
+#[test]
+fn a_materialx_emitter_is_not_a_light_list_radiance() {
+    let dir = scratch("crust_mtlx_emissive_lightlist");
+    let path = emissive_mtlx(
+        &dir,
+        r#"<uniform_edf name="e" type="EDF">
+             <input name="color" type="color3" value="5, 5, 5" />
+           </uniform_edf>
+           <surface name="s" type="surfaceshader">
+             <input name="edf" type="EDF" nodename="e" />
+           </surface>"#,
+    );
+    let loaded = materialx::load(&path, Some("emitter"), &|_, _| None).expect("loads");
+    let (r_in, rec) = upward_hit();
+    assert_eq!(loaded.material.emitted(), Vec3A::ZERO);
+    assert!((loaded.material.emitted_at(&r_in, &rec, 1.0) - Vec3A::splat(5.0)).length() < 1e-5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fast path: a MaterialX material with no EDF must answer zero without
+/// running its graph. Checked by behaviour rather than by instrumentation —
+/// the sample ceramic is ~50 ops and would otherwise be evaluated once per
+/// surface hit, on every render, to be told the answer is nothing.
+#[test]
+fn a_non_emissive_mtlx_material_emits_nothing_at_a_hit() {
+    let loaded =
+        materialx::load(&sample_mtlx(), Some("mtlx_ceramic"), &|_, _| None).expect("loads");
+    let (r_in, rec) = upward_hit();
+    assert_eq!(loaded.material.emitted_at(&r_in, &rec, 1.0), Vec3A::ZERO);
+    assert!(loaded.summary.contains("0 emission"));
+}
+
+/// Every other material takes the trait default, so `emitted_at` must be
+/// exactly `emitted_directional` for them — this is what makes the change
+/// pixel-identical on every scene that authors no MaterialX emission.
+#[test]
+fn emitted_at_defaults_to_the_directional_emission() {
+    let (r_in, rec) = upward_hit();
+    for cos in [0.05f32, 0.5, 1.0] {
+        let e = Emissive::new(Vec3A::new(1.0, 2.0, 3.0));
+        assert_eq!(e.emitted_at(&r_in, &rec, cos), e.emitted_directional(cos));
+
+        let mut m = OpenPBR::diffuse(Vec3A::splat(0.5));
+        m.emission_color = Vec3A::new(0.2, 0.4, 0.6);
+        m.emission_luminance = 7.0;
+        m.coat_weight = 0.8;
+        assert_eq!(m.emitted_at(&r_in, &rec, cos), m.emitted_directional(cos));
+    }
+}

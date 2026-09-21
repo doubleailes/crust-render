@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!--
+  MaterialX emission (EDF), and the one shading input for which an HDR
+  texture's range is meaningful.
+
+  crust's only other textured input is base colour, and an albedo above 1
+  creates energy — the diffuse lobe clamps it, correctly. Radiance does not
+  work that way: a value of 16 is just a bright light. So a `.tx` with an EXR
+  backing carrying values above 1.0 had nowhere to put them until an `edf`
+  could be read, which is what this document exercises.
+
+  Two materials, and the split is deliberate:
+
+    mtlx_emitter_constant  — `multiply(uniform_edf, 12)`. No texture, no
+                             conversion step, no environment variable: proves
+                             the above-1 weight on its own.
+    mtlx_emitter_textured  — a pure emitter (an `edf` and no `bsdf`) driven by
+                             a Radiance `.hdr` whose bright cells sit at
+                             (16, 9, 3). Radiance rather than EXR on purpose:
+                             it is the one float format *both* residency paths
+                             can read, so rendering it preloaded and streamed
+                             is an A/B about range rather than about two
+                             unrelated readers.
+
+  No `colorspace` attribute on the emission image, and that is the correct
+  authoring rather than an omission: MaterialX reads an absent tag as raw, and
+  a Radiance file is already scene-linear radiance. Tagging it `srgb_texture`
+  would put a transfer curve on light.
+-->
+<materialx version="1.38">
+
+  <!-- A constant emitter over a dark diffuse base, at 12x. -->
+
+  <oren_nayar_diffuse_bsdf name="lamp_body" type="BSDF">
+    <input name="color" type="color3" value="0.04, 0.04, 0.045" />
+    <input name="roughness" type="float" value="0.4" />
+  </oren_nayar_diffuse_bsdf>
+
+  <uniform_edf name="lamp_edf" type="EDF">
+    <input name="color" type="color3" value="1.0, 0.72, 0.4" />
+  </uniform_edf>
+
+  <multiply name="lamp_edf_scaled" type="EDF">
+    <input name="in1" type="EDF" nodename="lamp_edf" />
+    <input name="in2" type="float" value="12" />
+  </multiply>
+
+  <surface name="emitter_constant" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="lamp_body" />
+    <input name="edf" type="EDF" nodename="lamp_edf_scaled" />
+  </surface>
+
+  <surfacematerial name="mtlx_emitter_constant" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="emitter_constant" />
+  </surfacematerial>
+
+  <!-- A pure emitter driven by the HDR fixture. -->
+
+  <image name="emission_tex" type="color3">
+    <input name="file" type="filename" value="textures/mtlx_emission.hdr" />
+  </image>
+
+  <uniform_edf name="panel_edf" type="EDF">
+    <input name="color" type="color3" nodename="emission_tex" />
+  </uniform_edf>
+
+  <surface name="emitter_textured" type="surfaceshader">
+    <input name="edf" type="EDF" nodename="panel_edf" />
+  </surface>
+
+  <surfacematerial name="mtlx_emitter_textured" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="emitter_textured" />
+  </surfacematerial>
+
+</materialx>

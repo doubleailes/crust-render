@@ -137,4 +137,29 @@ pub trait Material: Send + Sync {
         let _ = cos_theta_o;
         self.emitted()
     }
+
+    /// Emitted radiance at a *specific hit*, toward a direction making angle
+    /// `θ` with the normal. This is the emission entry point the integrator
+    /// calls at a surface hit.
+    ///
+    /// The default forwards to [`Material::emitted_directional`], so a
+    /// material whose emission is a constant of the material — every one here
+    /// but the MaterialX adapter — needs no opinion. It exists for the one
+    /// that cannot answer without a shading point: a MaterialX graph's
+    /// emission can come out of an `image` node, making it a function of
+    /// `rec.uv`, which neither `emitted()` nor `emitted_directional()` can
+    /// see. Keeping those two hit-free is deliberate — it is what lets the
+    /// coat's angular emission factor stay unit-testable against a bare
+    /// cosine instead of a manufactured hit.
+    ///
+    /// [`Material::emitted()`] remains the hit-free radiance the **light
+    /// list** reads, and the two must agree for any material paired with an
+    /// `AreaLight`. A material that emits only through this method must
+    /// therefore never become a light-list entry: NEE would sample it at zero
+    /// radiance while the bounce side saw the real value, and the MIS pair
+    /// would no longer describe the same emitter.
+    fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
+        let _ = (r_in, rec);
+        self.emitted_directional(cos_theta_o)
+    }
 }

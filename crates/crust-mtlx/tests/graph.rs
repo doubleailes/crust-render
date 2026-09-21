@@ -4,8 +4,8 @@
 //! sample document.
 
 use crust_mtlx::{
-    BinOp, Compiler, Doc, LobeKind, MtlxError, Op, Program, ShadeCtx, Source, Texture, TextureRef,
-    Val, compile, flatten, reflectivity_from_ior,
+    BinOp, Compiler, Doc, Flattened, LobeKind, MtlxError, Op, Program, ShadeCtx, Source, Texture,
+    TextureRef, Val, compile, flatten, reflectivity_from_ior,
 };
 use glam::Vec3A;
 use std::path::PathBuf;
@@ -77,11 +77,12 @@ fn lobes_of(doc: &str, root: &str) -> Vec<(LobeKind, f32, Vec3A, f32)> {
     let mut c = Compiler::new(&d, &decline);
     let one = c.constant(Val::ONE);
     let root = d.find("", root).expect("root node").clone();
-    let mut out = Vec::new();
-    flatten(&mut c, &root, one, 0, &mut out);
+    let mut flat = Flattened::default();
+    flatten(&mut c, &root, one, 0, &mut flat);
     let mut slots = Vec::new();
     c.program.eval(&ctx(), &mut slots);
-    out.iter()
+    flat.lobes
+        .iter()
         .map(|l| {
             (
                 l.kind,
@@ -91,6 +92,37 @@ fn lobes_of(doc: &str, root: &str) -> Vec<(LobeKind, f32, Vec3A, f32)> {
             )
         })
         .collect()
+}
+
+/// Emission terms of a compiled material — `(weight, radiance)` at `ctx` —
+/// alongside the lobe kinds, so a test can assert that reading the `edf` left
+/// the BSDF side alone.
+fn emission_of(doc: &str, root: &str) -> (Vec<(f32, Vec3A)>, Vec<LobeKind>) {
+    let d = Doc::parse(doc).unwrap();
+    let mut c = Compiler::new(&d, &decline);
+    let one = c.constant(Val::ONE);
+    let root = d.find("", root).expect("root node").clone();
+    let mut flat = Flattened::default();
+    flatten(&mut c, &root, one, 0, &mut flat);
+    let mut slots = Vec::new();
+    c.program.eval(&ctx(), &mut slots);
+    let terms = flat
+        .emission
+        .iter()
+        .map(|e| (slots[e.weight as usize].x(), slots[e.color as usize].rgb()))
+        .collect();
+    (terms, flat.lobes.iter().map(|l| l.kind).collect())
+}
+
+/// Node categories the compiler had nothing for, for the EDF tests.
+fn unsupported_of(doc: &str, root: &str) -> Vec<String> {
+    let d = Doc::parse(doc).unwrap();
+    let mut c = Compiler::new(&d, &decline);
+    let one = c.constant(Val::ONE);
+    let root = d.find("", root).expect("root node").clone();
+    let mut flat = Flattened::default();
+    flatten(&mut c, &root, one, 0, &mut flat);
+    c.unsupported.iter().cloned().collect()
 }
 
 fn sample_mtlx() -> PathBuf {
@@ -1376,12 +1408,18 @@ fn a_lobe_authoring_a_normal_records_it() {
     .unwrap();
     let mut c = Compiler::new(&d, &decline);
     let one = c.constant(Val::ONE);
-    let mut out = Vec::new();
-    flatten(&mut c, &d.find("", "d").unwrap().clone(), one, 0, &mut out);
-    assert!(out[0].normal.is_some());
-    let mut out2 = Vec::new();
-    flatten(&mut c, &d.find("", "e").unwrap().clone(), one, 0, &mut out2);
-    assert!(out2[0].normal.is_none());
+    let mut flat = Flattened::default();
+    flatten(&mut c, &d.find("", "d").unwrap().clone(), one, 0, &mut flat);
+    assert!(flat.lobes[0].normal.is_some());
+    let mut flat2 = Flattened::default();
+    flatten(
+        &mut c,
+        &d.find("", "e").unwrap().clone(),
+        one,
+        0,
+        &mut flat2,
+    );
+    assert!(flat2.lobes[0].normal.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,4 +1529,237 @@ fn sample_textures_are_requested_with_their_colorspace() {
             .iter()
             .any(|(f, cs)| f.contains("mtlx_normal.<UDIM>.png") && cs.is_none())
     );
+}
+
+// ---------------------------------------------------------------------------
+// EDF: emission
+// ---------------------------------------------------------------------------
+
+/// A `<surface>` carries a `bsdf` *and* an `edf`, and the arm that reads it
+/// used to follow only the first. The emission was not merely unsupported —
+/// it was invisible, with nothing in `unsupported` to say so, because that set
+/// is filled when an unmatched *category* is reached and the input was never
+/// followed to its node. This is the regression that pins the fix.
+#[test]
+fn a_uniform_edf_under_a_surface_reaches_the_emission_list() {
+    let doc = r#"<materialx>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+        <input name="color" type="color3" value="0.1, 0.1, 0.1" />
+      </oren_nayar_diffuse_bsdf>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="2, 3, 4" />
+      </uniform_edf>
+      <surface name="s" type="surfaceshader">
+        <input name="bsdf" type="BSDF" nodename="d" />
+        <input name="edf" type="EDF" nodename="e" />
+      </surface>
+    </materialx>"#;
+    let (terms, kinds) = emission_of(doc, "s");
+    assert_eq!(kinds, vec![LobeKind::Diffuse], "the BSDF side is untouched");
+    assert_eq!(terms.len(), 1);
+    assert_eq!(terms[0].0, 1.0);
+    assert_eq!(terms[0].1, Vec3A::new(2.0, 3.0, 4.0));
+}
+
+/// The domain flag is not plumbing. `closure_input` gates a branch on its
+/// declared type, and an EDF-typed `mix` declares `type="EDF"` on `fg`/`bg` —
+/// so walking the emission tree while still asking "is this a BSDF?" resolves
+/// both branches to `None` and the emission silently vanishes.
+#[test]
+fn an_edf_typed_mix_is_not_mistaken_for_a_non_closure() {
+    let doc = r#"<materialx>
+      <uniform_edf name="a" type="EDF">
+        <input name="color" type="color3" value="1, 0, 0" />
+      </uniform_edf>
+      <uniform_edf name="b" type="EDF">
+        <input name="color" type="color3" value="0, 1, 0" />
+      </uniform_edf>
+      <mix name="m" type="EDF">
+        <input name="fg" type="EDF" nodename="a" />
+        <input name="bg" type="EDF" nodename="b" />
+        <input name="mix" type="float" value="0.25" />
+      </mix>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="m" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(terms.len(), 2, "both mix branches must survive");
+    // `bg` is flattened first, as on the BSDF side.
+    assert!((terms[0].0 - 0.75).abs() < 1e-6, "bg weight {}", terms[0].0);
+    assert!((terms[1].0 - 0.25).abs() < 1e-6, "fg weight {}", terms[1].0);
+}
+
+/// `multiply(uniform_edf, 8)` is how MaterialX authors a bright emitter, and
+/// the weight it produces must not be bounded by 1. This is the HDR claim
+/// stated at the crate seam, upstream of any texture.
+#[test]
+fn a_multiply_scales_an_edf_above_one() {
+    let doc = r#"<materialx>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="1, 1, 1" />
+      </uniform_edf>
+      <multiply name="m" type="EDF">
+        <input name="in1" type="EDF" nodename="e" />
+        <input name="in2" type="float" value="8" />
+      </multiply>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="m" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(terms.len(), 1);
+    assert!(
+        terms[0].0 > 1.0,
+        "weight {} must not be clamped",
+        terms[0].0
+    );
+    assert!((terms[0].0 - 8.0).abs() < 1e-6);
+}
+
+/// `add` over EDFs is two emitters, each at full weight — the reduction sums
+/// them rather than sharing one surface between them.
+#[test]
+fn an_edf_add_keeps_both_emitters_at_full_weight() {
+    let doc = r#"<materialx>
+      <uniform_edf name="a" type="EDF">
+        <input name="color" type="color3" value="1, 0, 0" />
+      </uniform_edf>
+      <uniform_edf name="b" type="EDF">
+        <input name="color" type="color3" value="0, 0, 1" />
+      </uniform_edf>
+      <add name="s2" type="EDF">
+        <input name="in1" type="EDF" nodename="a" />
+        <input name="in2" type="EDF" nodename="b" />
+      </add>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="s2" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(terms.len(), 2);
+    assert_eq!(terms[0].0, 1.0);
+    assert_eq!(terms[1].0, 1.0);
+}
+
+/// The same rule the BSDF side applies: an omitted `type` attribute parses as
+/// `float`, so the *target node's* declaration has to count too.
+#[test]
+fn an_untyped_edge_to_an_edf_node_is_still_an_edf() {
+    let doc = r#"<materialx>
+      <uniform_edf name="a" type="EDF">
+        <input name="color" type="color3" value="5, 5, 5" />
+      </uniform_edf>
+      <uniform_edf name="b" type="EDF">
+        <input name="color" type="color3" value="1, 1, 1" />
+      </uniform_edf>
+      <mix name="m" type="EDF">
+        <input name="fg" nodename="a" />
+        <input name="bg" nodename="b" />
+        <input name="mix" type="float" value="0.5" />
+      </mix>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" nodename="m" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(terms.len(), 2);
+}
+
+/// Every EDF but `uniform_edf` is a *directional* distribution, and the
+/// consumer's emitter is uniform — so a cone, an IES profile or a Schlick
+/// falloff has nowhere to go. Pooling one onto a uniform emitter would be a
+/// plausible glow at the wrong intensity, so they are refused; what matters is
+/// that the refusal is *reported* rather than silent, which is precisely what
+/// the unread `edf` input was not.
+#[test]
+fn a_directional_edf_is_reported_rather_than_dropped() {
+    for category in ["conical_edf", "measured_edf", "generalized_schlick_edf"] {
+        let doc = format!(
+            r#"<materialx>
+              <{category} name="e" type="EDF">
+                <input name="color" type="color3" value="1, 1, 1" />
+              </{category}>
+              <surface name="s" type="surfaceshader">
+                <input name="edf" type="EDF" nodename="e" />
+              </surface>
+            </materialx>"#
+        );
+        let (terms, _) = emission_of(&doc, "s");
+        assert!(terms.is_empty(), "{category} must not emit");
+        assert!(
+            unsupported_of(&doc, "s").contains(&category.to_string()),
+            "{category} must be reported"
+        );
+    }
+}
+
+/// A literal black EDF is a dummy branch exactly as a literal `weight = 0`
+/// dielectric is, and dropping it keeps the emission list *empty* — which is
+/// what the consumer's "do not evaluate the graph" fast path keys on.
+#[test]
+fn a_literal_black_edf_is_pruned() {
+    let doc = r#"<materialx>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="0, 0, 0" />
+      </uniform_edf>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="e" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert!(terms.is_empty());
+}
+
+/// The coat promotion asks which lobes the `layer`'s base produced. Emission
+/// lives in a list of its own, so that scan is structurally unable to see an
+/// emitter — this is the test that would catch a future refactor merging the
+/// two into one vector of kinds.
+#[test]
+fn an_edf_does_not_disturb_the_coat_promotion() {
+    let doc = r#"<materialx>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+      <dielectric_bsdf name="satin" type="BSDF">
+        <input name="roughness" type="float" value="0.4" />
+      </dielectric_bsdf>
+      <dielectric_bsdf name="clear" type="BSDF">
+        <input name="roughness" type="float" value="0.01" />
+      </dielectric_bsdf>
+      <layer name="l1" type="BSDF">
+        <input name="top" type="BSDF" nodename="satin" />
+        <input name="base" type="BSDF" nodename="d" />
+      </layer>
+      <layer name="l2" type="BSDF">
+        <input name="top" type="BSDF" nodename="clear" />
+        <input name="base" type="BSDF" nodename="l1" />
+      </layer>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="3, 3, 3" />
+      </uniform_edf>
+      <surface name="s" type="surfaceshader">
+        <input name="bsdf" type="BSDF" nodename="l2" />
+        <input name="edf" type="EDF" nodename="e" />
+      </surface>
+    </materialx>"#;
+    let (terms, kinds) = emission_of(doc, "s");
+    assert_eq!(
+        kinds,
+        vec![LobeKind::Diffuse, LobeKind::Dielectric, LobeKind::Coat],
+        "the glaze over a base specular is still the coat"
+    );
+    assert_eq!(terms.len(), 1);
+}
+
+/// The negative control, and the one the fast path depends on: a document
+/// that authors no `edf` must produce no emission terms at all.
+#[test]
+fn a_surface_with_no_edf_has_no_emission() {
+    let doc = r#"<materialx>
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+      <surface name="s" type="surfaceshader">
+        <input name="bsdf" type="BSDF" nodename="d" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert!(terms.is_empty());
 }

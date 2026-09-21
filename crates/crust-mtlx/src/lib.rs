@@ -30,7 +30,7 @@ pub mod parse;
 mod texture;
 pub mod value;
 
-pub use bsdf::{Lobe, LobeKind, flatten};
+pub use bsdf::{Emission, Flattened, Lobe, LobeKind, flatten};
 pub use eval::{BinOp, Compiler, Op, Program, ShadeCtx, UnOp, reflectivity_from_ior};
 pub use parse::{Doc, Input, MtlxError, Node, Source};
 pub use texture::{Texture, TextureRef};
@@ -47,6 +47,10 @@ pub struct Compiled {
     pub program: Program,
     /// The BSDF tree, flattened. Slots index into `program`'s output.
     pub lobes: Vec<Lobe>,
+    /// The EDF tree, flattened. Empty for a material that authors no `edf`,
+    /// which is the overwhelming majority — a consumer can key a "do not
+    /// evaluate the graph at all" fast path on that, and crust does.
+    pub emission: Vec<Emission>,
     /// The material node's own `name`.
     pub root_name: String,
     /// Node categories the compiler had no operator for, sorted, for one
@@ -86,8 +90,8 @@ pub fn compile(
 
     let mut c = Compiler::new(&doc, load_texture);
     let one = c.constant(Val::ONE);
-    let mut lobes = Vec::new();
-    flatten(&mut c, &root, one, 0, &mut lobes);
+    let mut flat = Flattened::default();
+    flatten(&mut c, &root, one, 0, &mut flat);
     // Counted off the compiled program rather than inside the loader
     // closure: the compiler memoises, so a texture feeding three nodes is
     // loaded once, and the program is the record of what actually resolved.
@@ -101,7 +105,8 @@ pub fn compile(
 
     Ok(Compiled {
         program: c.program,
-        lobes,
+        lobes: flat.lobes,
+        emission: flat.emission,
         root_name: root.name.clone(),
         unsupported,
         textures,
