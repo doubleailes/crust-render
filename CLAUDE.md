@@ -1059,6 +1059,15 @@ Schema mapping:
     island wants 39) and engages only when the budget is genuinely small, which is when
     honouring it matters. The `.tx` path gets all of this for free — every streaming
     texture there shares one `TileCache`.
+    **The microcache is inside that budget too.** Its slots hold decoded `PixelData` the
+    reader cannot count, so a slot has a 256 KiB ceiling (`MICRO_SLOT_MAX`, above any
+    real tile and below the whole-face reads upstream refuses as `oversized`), the
+    allowance `threads * MICRO_SLOTS * MICRO_SLOT_MAX` — capped at half the budget — is
+    subtracted before the readers divide the rest, and `--stats` prints
+    `thread tiles / reserve`. Without the ceiling a refused tile was retained anyway,
+    four slots deep on every worker thread and invisible to both the budget and the
+    report. At a 1 MiB budget a slot is 32 KiB against a 512 KiB face read, so retention
+    is zero and every tap goes to the reader — slower, still correct.
   - **`--stats` prints a `Ptex` block**, and unlike the `Texture Cache` one it reports
     for *both* backends, because the first question it has to answer is which ran:
     `backend`, textures and faces, preloaded resident bytes, and for a streamed run the

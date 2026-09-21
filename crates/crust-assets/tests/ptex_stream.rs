@@ -18,7 +18,15 @@
 //! chain, reduced in linear light when preloaded and in the file's encoding
 //! when streamed — rather than asserting the difference away.
 
-use crust_assets::{PtexColor, PtexStream};
+use crust_assets::{PtexColor, PtexStream, ptex_micro_retained_bytes, ptex_micro_slot_max};
+
+/// The per-slot microcache ceiling a render would derive from `budget`.
+///
+/// Every test opens through this rather than hard-coding a number, so the
+/// retention rule under test is the one a render actually applies.
+fn micro_max(budget: usize) -> usize {
+    ptex_micro_slot_max(budget)
+}
 use crust_core::{PtexTexture, Vec3A};
 use std::path::{Path, PathBuf};
 
@@ -85,7 +93,8 @@ fn streamed_and_preloaded_agree_texel_for_texel() {
     for &(name, cap) in FIXTURES {
         let path = fixture(name);
         let pre = PtexColor::open_with(&path, true, cap).expect(name);
-        let stream = PtexStream::open_with(&path, 8 << 20, Some(cap), true).expect(name);
+        let stream =
+            PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(cap), true).expect(name);
 
         assert_eq!(
             PtexTexture::num_faces(&pre),
@@ -125,7 +134,8 @@ fn a_capped_reduction_agrees_too() {
         let path = fixture(name);
         for cap in [0i8, 1, 2, 3] {
             let pre = PtexColor::open_with(&path, true, cap).expect(name);
-            let stream = PtexStream::open_with(&path, 8 << 20, Some(cap), true).expect(name);
+            let stream = PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(cap), true)
+                .expect(name);
             for face in 0..PtexTexture::num_faces(&pre) as u32 {
                 for &(u, v) in &grid() {
                     let a = pre.eval(face, u, v, 0.0);
@@ -157,7 +167,8 @@ fn bilinear_taps_cross_tile_boundaries() {
     let path = fixture("quad_tiled");
     let cap = 10;
     let pre = PtexColor::open_with(&path, true, cap).expect("preload");
-    let stream = PtexStream::open_with(&path, 8 << 20, Some(cap), true).expect("stream");
+    let stream =
+        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(cap), true).expect("stream");
 
     // Face 0 is 1024x512. Its tile edges are at multiples of the tile
     // resolution; the exact tiling is the file's business, so rather than
@@ -216,7 +227,8 @@ fn the_microcache_absorbs_most_taps() {
 
     // Inside a tile: a small magnified neighbourhood, so the four taps of
     // each lookup and the successive lookups all share one tile.
-    let interior = PtexStream::open_with(&path, 8 << 20, Some(10), true).expect("stream");
+    let interior =
+        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(10), true).expect("stream");
     for i in 0..400 {
         let t = i as f32 / 400.0;
         interior.eval(0, 0.3 + 0.0005 * t, 0.7 + 0.0005 * t, 0.0);
@@ -232,7 +244,8 @@ fn the_microcache_absorbs_most_taps() {
     // On a four-tile corner. Face 0 is 1024x512, so (0.5, 0.5) puts the u
     // taps either side of texel 511/512 and the v taps either side of
     // 255/256 — four tiles for four taps, two slots.
-    let corner = PtexStream::open_with(&path, 8 << 20, Some(10), true).expect("stream");
+    let corner =
+        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(10), true).expect("stream");
     for i in 0..400 {
         let t = i as f32 / 400.0;
         corner.eval(0, 0.5 + 0.000_001 * t, 0.5 + 0.000_001 * t, 0.0);
@@ -267,8 +280,8 @@ fn two_open_textures_do_not_share_microcache_entries() {
     let b_path = fixture("quad_tiled");
     let a_pre = PtexColor::open_with(&a_path, true, 4).expect("a");
     let b_pre = PtexColor::open_with(&b_path, true, 4).expect("b");
-    let a = PtexStream::open_with(&a_path, 8 << 20, Some(4), true).expect("a");
-    let b = PtexStream::open_with(&b_path, 8 << 20, Some(4), true).expect("b");
+    let a = PtexStream::open_with(&a_path, 8 << 20, micro_max(8 << 20), Some(4), true).expect("a");
+    let b = PtexStream::open_with(&b_path, 8 << 20, micro_max(8 << 20), Some(4), true).expect("b");
 
     for &(u, v) in &grid() {
         // Interleaved on purpose: alternating keeps both textures' entries
@@ -284,7 +297,8 @@ fn two_open_textures_do_not_share_microcache_entries() {
 #[test]
 fn without_mips_the_footprint_is_ignored() {
     let path = fixture("quad_tiled");
-    let stream = PtexStream::open_with(&path, 8 << 20, Some(10), false).expect("stream");
+    let stream =
+        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(10), false).expect("stream");
     for &(u, v) in &grid() {
         let point = stream.eval(0, u, v, 0.0);
         for width in [0.01f32, 0.25, 1.0, 4.0] {
@@ -305,7 +319,8 @@ fn without_mips_the_footprint_is_ignored() {
 fn residency_is_bounded_by_the_budget() {
     let path = fixture("quad_tiled");
     let budget = 256 * 1024;
-    let stream = PtexStream::open_with(&path, budget, None, true).expect("stream");
+    let stream =
+        PtexStream::open_with(&path, budget, micro_max(budget), None, true).expect("stream");
 
     // Walk the whole face at full resolution, which touches every tile.
     for i in 0..=256 {
@@ -352,7 +367,8 @@ fn the_mip_chains_differ_only_in_the_documented_direction() {
     let path = fixture("quad_tiled");
     let cap = 10;
     let pre = PtexColor::open_with(&path, true, cap).expect("preload");
-    let stream = PtexStream::open_with(&path, 8 << 20, Some(cap), true).expect("stream");
+    let stream =
+        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(cap), true).expect("stream");
 
     // Base level: identical, as the first test already says. Restated here so
     // the comparison below has a zero to be measured against.
@@ -406,7 +422,14 @@ fn the_mip_chains_differ_only_in_the_documented_direction() {
 /// the same states through a reader that returns `Err`.
 #[test]
 fn a_bad_lookup_falls_back_instead_of_panicking() {
-    let stream = PtexStream::open_with(&fixture("quad_u8"), 8 << 20, Some(4), true).expect("open");
+    let stream = PtexStream::open_with(
+        &fixture("quad_u8"),
+        8 << 20,
+        micro_max(8 << 20),
+        Some(4),
+        true,
+    )
+    .expect("open");
     let n = PtexTexture::num_faces(&stream) as u32;
     for face in [n, n + 1, u32::MAX] {
         let c = stream.eval(face, 0.5, 0.5, 0.0);
@@ -435,8 +458,10 @@ fn concurrent_lookups_agree_with_the_oracle() {
     let path = fixture("quad_tiled");
     let cap = 10;
     let pre = std::sync::Arc::new(PtexColor::open_with(&path, true, cap).expect("preload"));
-    let stream =
-        std::sync::Arc::new(PtexStream::open_with(&path, 512 * 1024, Some(cap), true).expect("s"));
+    let stream = std::sync::Arc::new(
+        PtexStream::open_with(&path, 512 * 1024, micro_max(512 * 1024), Some(cap), true)
+            .expect("s"),
+    );
 
     std::thread::scope(|scope| {
         for t in 0..8 {
@@ -477,7 +502,7 @@ fn one_budget_is_shared_across_textures_not_repeated_per_file() {
 
     let streams: Vec<_> = names
         .iter()
-        .map(|n| PtexStream::open_with(&fixture(n), total, None, true).expect(n))
+        .map(|n| PtexStream::open_with(&fixture(n), total, micro_max(total), None, true).expect(n))
         .collect();
 
     // Opened at the full budget each, which is the bug: four textures, four
@@ -504,7 +529,8 @@ fn one_budget_is_shared_across_textures_not_repeated_per_file() {
     // And the textures still work at their reduced budget.
     for (n, s) in names.iter().zip(&streams) {
         let pre = PtexColor::open_with(&fixture(n), true, 4).expect(n);
-        let capped = PtexStream::open_with(&fixture(n), share, Some(4), true).expect(n);
+        let capped =
+            PtexStream::open_with(&fixture(n), share, micro_max(share), Some(4), true).expect(n);
         for &(u, v) in grid().iter().take(64) {
             assert_eq!(
                 bits(capped.eval(0, u, v, 0.0)),
@@ -538,7 +564,8 @@ fn admission_prices_a_texture_against_preloading_it() {
     for &(name, _) in FIXTURES {
         let path = fixture(name);
         for cap in [2i8, 4, 5] {
-            let stream = PtexStream::open_with(&path, 8 << 20, None, true).expect(name);
+            let stream =
+                PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), None, true).expect(name);
             let predicted = stream.preload_bytes(cap);
             let actual = PtexColor::open_with(&path, true, cap).expect(name).bytes();
 
@@ -665,7 +692,10 @@ fn the_total_budget_holds_when_readers_outnumber_megabytes() {
         let streams: Vec<_> = names
             .iter()
             .take(admitted)
-            .map(|n| PtexStream::open_with(&fixture(n), share, Some(CAP), true).expect(n))
+            .map(|n| {
+                PtexStream::open_with(&fixture(n), share, micro_max(share), Some(CAP), true)
+                    .expect(n)
+            })
             .collect();
 
         let sum: usize = streams.iter().map(|s| s.stats().cache.bytes_budget).sum();
@@ -695,6 +725,89 @@ fn the_total_budget_holds_when_readers_outnumber_megabytes() {
             "budget {budget_mb:>3} MiB: {admitted} reader(s) x {:.2} MiB = {:.2} MiB",
             share as f64 / (1024.0 * 1024.0),
             sum as f64 / (1024.0 * 1024.0)
+        );
+    }
+}
+
+/// **A tile too big for a slot must not be retained.**
+///
+/// The microcache holds `ptex::PixelData`, which is memory the reader's byte
+/// budget does not know about — so without a rule it is an unbounded second
+/// cache wearing the word "micro". The case that bites is not an ordinary
+/// tile (128x128 at four channels is 64 KiB, and four per thread is nothing)
+/// but a block upstream has *refused*: a face too large for the budget comes
+/// back `oversized`, deliberately uncached, and retaining it here put it
+/// straight back into residency — four slots deep, on every worker thread,
+/// entirely off the books. Reader eviction and re-budgeting could not release
+/// it, and `--stats` could not see it.
+///
+/// So this drives exactly that: a budget small enough that a whole-face read
+/// of the 1024x512 fixture dwarfs it, and a sample grid that walks the face.
+/// The assertion is on the *global* retained total, which is what the budget
+/// is actually about.
+#[test]
+fn a_tile_larger_than_a_slot_is_never_retained() {
+    let path = fixture("quad_tiled");
+    // Uncapped, so face 0 is read at its authored 1024x512 — far past what a
+    // slot of this budget may keep.
+    let budget = 1024 * 1024;
+    let slot = micro_max(budget);
+    let before = ptex_micro_retained_bytes();
+
+    let stream = PtexStream::open_with(&path, budget, slot, None, true).expect("stream");
+    for i in 0..=64 {
+        for j in 0..=64 {
+            stream.eval(0, i as f32 / 64.0, j as f32 / 64.0, 0.0);
+        }
+    }
+
+    let retained = ptex_micro_retained_bytes();
+    // Whatever this thread kept, no single slot may exceed the ceiling, so
+    // four of them cannot exceed four times it. Other tests in the binary
+    // share the process, hence the `before` baseline.
+    let grew = retained.saturating_sub(before);
+    assert!(
+        grew <= (slot * crust_assets::PTEX_MICRO_SLOTS) as u64,
+        "microcache grew by {grew} bytes against a ceiling of {slot} x \
+         {} slots — an oversized tile is being retained",
+        crust_assets::PTEX_MICRO_SLOTS
+    );
+
+    // And the lookups still answered correctly while retaining nothing: a
+    // bounded microcache costs re-reads, never texels.
+    let pre = PtexColor::open_with(&path, true, 10).expect("preload");
+    for &(u, v) in grid().iter().take(64) {
+        assert_eq!(
+            bits(stream.eval(0, u, v, 0.0)),
+            bits(pre.eval(0, u, v, 0.0)),
+            "a refused tile must still read correctly"
+        );
+    }
+}
+
+/// The reserve and the reader budget together are the configured total.
+///
+/// The microcache's allowance is real residency, so it comes *out of*
+/// `CRUST_PTEX_CACHE_MB` rather than sitting beside it. This pins the
+/// arithmetic across budgets, including the small ones where the reserve is
+/// clamped to half rather than to the per-thread ideal.
+#[test]
+fn the_microcache_allowance_comes_out_of_the_budget() {
+    for mb in [1usize, 8, 64, 1024] {
+        let total = mb * 1024 * 1024;
+        let reserve = crust_assets::ptex_micro_reserve(total);
+        assert!(
+            reserve <= total / 2,
+            "a {mb} MiB budget reserved {reserve} bytes for thread tiles — over half"
+        );
+        // The per-slot ceiling times every slot is exactly what was reserved
+        // (modulo integer division), so the reserve is a real bound rather
+        // than a label.
+        let slots = crust_assets::PTEX_MICRO_SLOTS * crust_assets::ptex_micro_threads();
+        assert!(
+            micro_max(total) * slots <= reserve,
+            "{mb} MiB: {slots} slots at {} bytes exceed the {reserve}-byte reserve",
+            micro_max(total)
         );
     }
 }

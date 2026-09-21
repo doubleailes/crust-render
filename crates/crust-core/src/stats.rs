@@ -274,6 +274,16 @@ pub struct PtexCacheStats {
     /// `budget_bytes`, not a peak.
     pub resident_bytes: u64,
     pub budget_bytes: u64,
+    /// Bytes the per-thread tile microcaches hold right now, process-wide.
+    ///
+    /// Reported because it is **real residency the reader's own counters
+    /// cannot see**: those slots hold decoded tiles outside its cache. It is
+    /// bounded by `micro_reserve_bytes`, which is taken out of
+    /// `CRUST_PTEX_CACHE_MB` before the readers divide the rest — so this
+    /// line and `resident_bytes` together are what the budget actually buys.
+    pub micro_retained_bytes: u64,
+    /// The allowance reserved for those slots. See `micro_retained_bytes`.
+    pub micro_reserve_bytes: u64,
 }
 
 impl PtexCacheStats {
@@ -821,6 +831,18 @@ impl fmt::Display for RenderStats {
                     human_bytes(p.resident_bytes),
                     human_bytes(p.budget_bytes),
                     thousands(p.streamed as usize)
+                )?;
+                // The slots are process-wide, not per texture, and they hold
+                // the half of residency the reader cannot count — decoded
+                // tiles outside its cache. So they get their own line against
+                // their own allowance rather than being folded into the
+                // figure above, which is the reader's alone.
+                writeln!(
+                    f,
+                    "  {:<28} {} / {}",
+                    "thread tiles / reserve",
+                    human_bytes(p.micro_retained_bytes),
+                    human_bytes(p.micro_reserve_bytes)
                 )?;
                 writeln!(
                     f,
