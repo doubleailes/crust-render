@@ -20,14 +20,23 @@
              feeds channel 0 to all three, which is the rule both backends
              apply.
 
-             Renders the same either way, which is the point. Note the
-             CRUST_PTEX_STREAM_MIN_MB=0: these textures are kilobytes, and by
-             default a texture smaller than the cache slot it would occupy is
-             preloaded instead of streamed (see DEFAULT_STREAM_MIN_MB), so
-             without it the streamed run quietly preloads and the A/B compares
-             nothing. `--stats` says `backend` either way.
+             Renders the same either way, which is the point. Two variables
+             beyond the switch are needed to make the streamed run actually
+             stream, and leaving either out makes the A/B compare a preloaded
+             render against itself and agree for the wrong reason:
+               CRUST_PTEX_STREAM_MIN_MB=0 -- these textures are kilobytes, and
+                 by default a texture smaller than the cache slot it would
+                 occupy is preloaded instead (see DEFAULT_STREAM_MIN_MB).
+               CRUST_PTEX_STREAM_MIPSPACE=file -- a mipmapped .ptx is
+                 preloaded by default, because its stored levels were reduced
+                 in the file's own encoding while the preloaded pyramid is
+                 reduced in linear light (see MipSpace). This takes the file's
+                 chain, which is what the streamed path reads.
+             `--stats` says `backend` either way, and names the variable that
+             declined.
                  cargo run --release -- -i samples/ptex_quads.usda -o a.exr
                  CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
+                     CRUST_PTEX_STREAM_MIPSPACE=file \
                      cargo run --release -- -i samples/ptex_quads.usda -o b.exr
                  cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
              With CRUST_PTEX_MAX_LOG2 set so both backends hold the same

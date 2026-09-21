@@ -76,7 +76,7 @@ because it is the one where `is_tiled` is false and a "tile" is the whole face
 **The budget moves residency, not the image.** A 4 MiB-budget render of the
 sample scene is bit-identical to a 1 GiB one.
 
-## Where the two legitimately differ
+## The mip chain, and why it is refused rather than described
 
 Above the base level, and in one direction.
 
@@ -88,22 +88,68 @@ writer (or recomputed by the reader) in the file's own encoding, and decoded to
 linear only once it arrives.
 
 `x^2.2` is convex, so the mean of the decoded texels is never below the decode
-of their mean: **the streamed chain is the darker one.** Measured on
+of their mean: **the file's chain is the darker one.** Measured on
 `quad_tiled.ptx` across six footprint widths and the full sample grid:
 
 ```
-mip-chain divergence: streamed darker by up to 0.1474, brighter by at most 0.0
+mip-chain divergence: the file's chain is darker by up to 0.1474, brighter by at most 0.0
 ```
-
-This is the same defect `crust:mipspace` guards against for `.tx`. It is
-accepted here rather than fixed because the fix — reducing in linear light from
-streamed base tiles — means a second pyramid cache of crust's own, which is
-precisely the design ruled out above. It is also what every production Ptex
-cache does.
 
 In a render it shows up only under minification. On the sample scene uncapped,
 8 898 of 57 600 pixels differ from the uncapped preload (rmse 0.023), all of
 them in the minified tiled panel.
+
+**This is the same defect `crust:mipspace` guards against for `.tx`, and there
+the answer is refusal, not a footnote.** That is the right standard and it is
+worth restating why: a mismatched chain is *perfectly correct at level 0* and
+wrong only as the footprint grows, so it never presents as a colour bug. It
+presents as a filtering bug — a surface that goes slightly dark and muddy with
+distance — which is indistinguishable by eye from a mip level chosen one step
+too coarse. Describing a defect nobody can see is not a control.
+
+So the default policy is `MipSpace::Linear`: a texture whose lookups could
+reach a level the file reduced is **declined and preloaded**, where the pyramid
+is rebuilt in linear light from the decoded base. `--stats` names it:
+
+```
+  backend    39 preloaded for a linear mip chain (CRUST_PTEX_STREAM_MIPSPACE=file to stream them)
+```
+
+The gate is a question about the texture, not a flat refusal
+(`PtexStream::chain_is_exact`). Two configurations have no chain to get wrong
+and stream under the default:
+
+- `CRUST_PTEX_MIP=0`, which pins every lookup to the base level. This is the
+  streaming configuration that is both **exact and uncapped** — the base level
+  is bit-identical to a preloaded one, which is the invariant the whole
+  feature rests on — at the cost of the pyramid's anti-aliasing.
+- A texture whose every face is one texel once the cap is applied. Degenerate,
+  but the face table is already parsed at open, so it costs nothing to say so.
+
+### The opt-in, and what it costs to decline
+
+`CRUST_PTEX_STREAM_MIPSPACE=file` takes the file's own chain instead. It is a
+real mode rather than a debug switch: it is what the C++ `PtexCache` and every
+production Ptex renderer do, and it is what **every measurement in this
+document was taken with**, the island's included. The trade is the 0.147 above
+against the residency below.
+
+The cost of the default is worth stating plainly rather than discovering:
+
+> With the mip pyramid on — which it is unless `CRUST_PTEX_MIP=0` —
+> `CRUST_PTEX_STREAM=1` **alone now streams nothing** on a normal render.
+
+That is a deliberate choice of correctness over residency at the default, and
+it is reversible in one environment variable. It is not the end state. The fix
+that would need neither refusal nor opt-in is to build the linear chain from
+streamed base tiles, and the reason it is not here is structural rather than
+hard: it needs a pyramid cache of crust's own, which is exactly the design
+"Known incomplete work" ruled out, and it would read level 0 to answer a
+coarse-level lookup — defeating streaming precisely where the island uses it.
+The honest place for it is upstream, beside the tile cache: a reader that
+reduces in a declared working space would let both backends share one chain,
+and neither the refusal nor the opt-in would need to exist. Until then the
+refusal is the conservative half and the opt-in is the measured one.
 
 ## Four microcache slots, not two
 
@@ -302,8 +348,18 @@ Ptex
   preloaded resident           38.06 KiB
 ```
 
-`backend` can also read `N streamed, M preloaded (fell back)`, which is not a
-bug — streaming falls back per file — but is exactly when you want to be told.
+`backend` is a list of reasons rather than a word whenever a run is mixed,
+which on a production stage is the normal case. Each reason means something
+different to whoever reads it:
+
+| reason | what it says |
+| --- | --- |
+| `N streamed` | admitted |
+| `N preloaded under the size threshold` | the admission rule working — see above |
+| `N preloaded for want of budget` | raise `CRUST_PTEX_CACHE_MB` |
+| `N preloaded for a linear mip chain` | the default policy; `CRUST_PTEX_STREAM_MIPSPACE=file` streams them |
+| `N PRELOADED BECAUSE STREAMING FAILED` | a file is broken — the one to look at |
+
 `evictions` running with the misses is the line that says the budget is under
 the working set, the one thing raising it fixes.
 
@@ -316,6 +372,12 @@ preloaded one differ by the Ptex residency buried inside a much larger figure.
 Everything above is fixtures and a synthetic scene. This is the asset the
 feature was built for: `island.usda` at 640x360, 8 spp, `CRUST_PTEX_STREAM=1`
 with a 2 GiB budget, against the same build preloading.
+
+**These numbers are the `CRUST_PTEX_STREAM_MIPSPACE=file` ones**, which is
+what the default now declines — the island's `.ptx` files are all mipmapped,
+so `CRUST_PTEX_STREAM=1` on its own reproduces the preloaded column exactly.
+The table is therefore what the opt-in buys, and the 0.147 mip-chain bias
+above is what it costs. Reading them together is the point of recording both.
 
 | | preloaded | streamed | |
 | --- | --- | --- | --- |
@@ -388,16 +450,29 @@ shape — residency bounded by a number you choose, paid for in fetch cost.
 
 ## Testing it yourself
 
+Note the `CRUST_PTEX_STREAM_MIPSPACE=file` on every line that expects
+something to stream: under the default policy a mipmapped `.ptx` preloads, so
+without it these compare a preloaded render against a preloaded render and
+agree for the wrong reason. `--stats` says which backend ran, and the
+`backend` line names this variable when it is the one that declined.
+
 ```bash
-# The equality.
+# The equality. `file` here so the streamed side really streams; at a cap both
+# backends hold, the two images are bit-identical.
 CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
-CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 \
+CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
+    CRUST_PTEX_STREAM_MIPSPACE=file \
     cargo run --release -- -i samples/ptex_quads.usda -o b.exr
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
 
-# The point: uncapped, under a budget, with the counters.
-CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 \
+# The configuration that streams under the *default* policy: no pyramid, so
+# no chain to be reduced in the wrong space. Exact, uncapped, and aliasing.
+CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 CRUST_PTEX_MIP=0 \
     cargo run --release -- -i samples/ptex_quads.usda --stats -o c.exr
+
+# The point: uncapped, under a budget, with the counters.
+CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
+    cargo run --release -- -i samples/ptex_quads.usda --stats -o d.exr
 
 # The unit invariants.
 cargo test -p crust-assets --test ptex_stream -- --nocapture
@@ -411,10 +486,14 @@ and the rendered one cannot be checked against different bytes.
 
 ## Known gaps
 
-- **Not the default**, and should not become one until it has been run against
-  a real asset. Everything above is measured on fixtures and a synthetic scene;
-  the island is the test that matters and needs the DPEL download.
-- **The mip chain divergence** above. Bounded and one-directional, but real.
+- **Not the default**, on two levels. `CRUST_PTEX_STREAM=1` is opt-in, and
+  under it a mipmapped `.ptx` still preloads unless
+  `CRUST_PTEX_STREAM_MIPSPACE=file` is also set. `PtexColor` stays the oracle.
+- **The mip chain cannot be built in linear light from streamed tiles**, which
+  is what makes that second gate necessary rather than tidy. The fix is a
+  reader that reduces in a declared working space, upstream beside the tile
+  cache — see the section above for why building it here would mean a second
+  pyramid cache and a level-0 read per coarse lookup.
 - **Ptex is 8-bit through both backends** (`PtexColor` and `PtexStream` both
   decode to `f32` but the island's files are `u8`), so an HDR `.ptx` gains
   nothing here — the same gap the `.tx` EXR backing closed for UV textures.

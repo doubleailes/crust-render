@@ -14,9 +14,11 @@
 //! resolution both backends hold, a streamed lookup equals a preloaded one
 //! bit for bit.** That is what makes streaming a residency change rather than
 //! an appearance change, and it is the same invariant the `.tx` path states.
-//! The second group measures where the two are *supposed* to differ — the mip
-//! chain, reduced in linear light when preloaded and in the file's encoding
-//! when streamed — rather than asserting the difference away.
+//! The one place they cannot agree is the mip chain: a preloaded pyramid is
+//! reduced in linear light, a `.ptx`'s stored levels in the file's own
+//! encoding. That is refused rather than described — `MipSpace::Linear`, the
+//! default, declines to stream such a texture at all — so the tests here both
+//! pin the refusal and measure what the `file` opt-in accepts instead.
 
 use crust_assets::{PtexColor, PtexStream, ptex_micro_retained_bytes, ptex_micro_slot_max};
 
@@ -350,20 +352,23 @@ fn residency_is_bounded_by_the_budget() {
     );
 }
 
-/// Where the two backends are *supposed* to disagree, measured.
+/// What `CRUST_PTEX_STREAM_MIPSPACE=file` accepts, measured — and therefore
+/// why the default refuses it.
 ///
-/// A preloaded pyramid is reduced in linear light; a streamed one comes off
-/// disk reduced in the file's own display encoding and is decoded afterwards.
-/// `x^2.2` is convex, so the streamed chain is the darker of the two at every
-/// level above the base, and this test states that as a direction and a
-/// magnitude rather than leaving it to be found in a render.
+/// A preloaded pyramid is reduced in linear light; the file's own chain was
+/// reduced in its display encoding and is decoded afterwards. `x^2.2` is
+/// convex, so the file's chain is the darker of the two at every level above
+/// the base. This states that as a direction and a magnitude rather than
+/// leaving it to be found in a render — and the magnitude is the number the
+/// opt-in is priced against, since by eye the difference is a filtering bug
+/// and nothing else.
 ///
 /// It is deliberately not an equality: pinning the numbers would make it a
 /// change detector for the fixture. What is pinned is the *shape* — zero at
-/// the base, one-directional above it, and bounded — which is what a reader
-/// deciding whether to turn streaming on needs to know.
+/// the base, one-directional above it, and bounded — which is what an
+/// operator weighing the opt-in needs to know.
 #[test]
-fn the_mip_chains_differ_only_in_the_documented_direction() {
+fn the_file_mip_chain_is_darker_which_is_what_the_default_refuses() {
     let path = fixture("quad_tiled");
     let cap = 10;
     let pre = PtexColor::open_with(&path, true, cap).expect("preload");
@@ -408,8 +413,8 @@ fn the_mip_chains_differ_only_in_the_documented_direction() {
          has no encoded range left to differ over or the chains were confused"
     );
     eprintln!(
-        "mip-chain divergence on quad_tiled: streamed darker by up to {worst_under:.4}, \
-         brighter by at most {worst_over:.2e}"
+        "mip-chain divergence on quad_tiled: the file's chain is darker by up to \
+         {worst_under:.4}, brighter by at most {worst_over:.2e}"
     );
 }
 
@@ -810,4 +815,91 @@ fn the_microcache_allowance_comes_out_of_the_budget() {
             micro_max(total)
         );
     }
+}
+
+/// Every mipmapped fixture is declined by the default policy, and the same
+/// file is admitted the moment there is no chain to get wrong.
+///
+/// **This is the refusal itself, and it is the project's standing rule rather
+/// than a new one.** A `.tx` records the space its levels were reduced in
+/// (`crust:mipspace`) and a mismatch is refused outright, because the failure
+/// mode is invisible: level 0 stays perfectly correct and every coarser level
+/// is wrong, which under minification looks exactly like a filtering bug. A
+/// `.ptx` carries no such marker and needs none — crust decodes Ptex by 2.2
+/// and the file reduced its levels before that, so the mismatch is
+/// unconditional. `chain_is_exact` is the question `FileAssets` asks, and it
+/// has to answer *no* for a real texture or the gate is decorative.
+///
+/// The second half is what keeps it a question rather than a flat refusal:
+/// with `CRUST_PTEX_MIP=0` there is no chain, so the same file streams — and
+/// that configuration is exact at every footprint, which the last loop
+/// checks rather than assumes.
+#[test]
+fn a_curve_decoded_mip_chain_is_declined_and_an_absent_one_is_not() {
+    const BUDGET: usize = 8 << 20;
+
+    for &(name, cap) in FIXTURES {
+        let path = fixture(name);
+
+        let mipped = PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), Some(cap), true)
+            .expect("stream");
+        assert!(
+            !mipped.chain_is_exact(),
+            "{name} has faces above one texel, so its chain comes off disk \
+             curve-decoded and the default must decline it"
+        );
+
+        let flat = PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), Some(cap), false)
+            .expect("stream");
+        assert!(
+            flat.chain_is_exact(),
+            "{name} with no pyramid reads level 0 only, so there is nothing to refuse"
+        );
+
+        // And that admitted configuration really is exact: no footprint the
+        // integrator can hand it reaches a level the file reduced.
+        let pre = PtexColor::open_with(&path, false, cap).expect("preload");
+        let faces = PtexTexture::num_faces(&pre) as u32;
+        for face in 0..faces {
+            for &width in &[0.0f32, 0.02, 0.1, 0.5, 1.0, 4.0] {
+                for &(u, v) in &grid() {
+                    assert_eq!(
+                        bits(pre.eval(face, u, v, width)),
+                        bits(flat.eval(face, u, v, width)),
+                        "{name} face {face} at ({u}, {v}) width {width} diverged \
+                         with the pyramid off, where the two read the same level"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A texture whose every face is a single texel has no chain either, so the
+/// gate admits it.
+///
+/// The degenerate half of `chain_is_exact`, and the reason the predicate
+/// looks at the faces instead of just at the `mip` flag: with a cap of 0 the
+/// base resolution is 1x1 throughout, `level_count` is 1, and no lookup can
+/// reach a reduced level whatever footprint it carries. Cheap to establish —
+/// the face table is parsed at open — and it keeps the refusal narrow enough
+/// to be a statement about the texture rather than about the switch.
+#[test]
+fn a_texture_with_no_levels_below_the_base_is_admitted() {
+    const BUDGET: usize = 8 << 20;
+    let path = fixture("quad_tiled");
+
+    let capped =
+        PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), Some(0), true).expect("stream");
+    assert!(
+        capped.chain_is_exact(),
+        "capped to one texel a face has no levels below its base, so nothing \
+         is read curve-decoded"
+    );
+
+    // Uncapped, the same file is the one the previous test declines — so the
+    // predicate is answering about resolution and not about the file.
+    let uncapped =
+        PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), None, true).expect("stream");
+    assert!(!uncapped.chain_is_exact());
 }

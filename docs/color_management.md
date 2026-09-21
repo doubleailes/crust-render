@@ -181,7 +181,8 @@ plausible-looking bug rather than an obvious one.
 | --- | --- | --- | --- |
 | **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture.rs`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
 | **Mip levels** | `uv_texture.rs`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
-| **Ptex mip levels** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since Ptex texels are stored linear `f32`. |
+| **Ptex mip levels (preloaded)** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since the base is decoded to linear `f32` at load and reduced from there. |
+| **Ptex mip levels (`.ptx` on disk)** | the file's writer, read back by `ptex_stream.rs` | the file's own encoding | Not crust's choice — the levels were reduced before crust ever saw the file, and crust decodes Ptex by 2.2 afterwards. So it is the mismatch the row below refuses, and streaming such a texture is declined by default (`CRUST_PTEX_STREAM_MIPSPACE`). |
 | **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
 | **`.tx` mip levels (EXR backing)** | `crust-assets/src/tiled/exr_write.rs` | **linear**, not re-encoded | The samples are already light: a float file has no transfer curve, so the decode happened once at conversion and the reduction is a plain average (`reduce_half_linear`, written next to `reduce_half` so the two cannot drift on anything but the curve). |
 
@@ -202,6 +203,17 @@ only under minification and looks exactly like a filtering bug. An EXR-backed
 `.tx` gets there from the other side: its texels were decoded once, at
 conversion, so binding it under a different space would apply a curve to data
 that has already had one removed.
+
+**Ptex arrives at the same rule from the other end, and gets the same answer.**
+A `.ptx` carries no marker and needs none: crust binds Ptex colour as
+display-encoded and decodes it by 2.2, while the file's stored levels were
+reduced before that decode. The mismatch is therefore unconditional rather than
+a property of a particular file, and it is refused the same way — a texture
+whose lookups could reach one of those levels is not streamed at all, but
+preloaded, where the pyramid is rebuilt in linear light from the decoded base
+(`MipSpace::Linear`, the default). `CRUST_PTEX_STREAM_MIPSPACE=file` accepts the
+file's chain instead, at a measured 0.147 of darkening on the tiled fixture;
+`docs/ptex_streaming.md` prices that trade against the residency it buys.
 
 So the space is written into the file — `crust:mipspace=` in
 `ImageDescription` for TIFF (following OIIO's own `oiio:SHA-1=` convention) and
