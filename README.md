@@ -44,7 +44,9 @@ feature-by-feature comparison against Embree's intersection kernels.
   - Rust-side presets: `OpenPBR::diffuse / metal / glass / glossy`
 - 🧩 **MaterialX** (`.mtlx`) look-dev graphs, read directly — standalone BSDF
   nodes composed with `layer`/`mix`, textured through UV/**UDIM** image sets
-  and tangent-space normal maps, reduced onto OpenPBR at every shading point
+  and tangent-space normal maps, reduced onto OpenPBR at every shading point,
+  plus `uniform_edf` emission an image can drive (the one input that uses an
+  HDR texture's range, since an albedo above 1 creates energy and is clamped)
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
 - 🧭 **Path Guiding** (opt-in)
@@ -440,12 +442,20 @@ the full, per-feature detail and workarounds:
   Moana section above). Retiring the gate needs the reduction to happen in the reader
   against a declared working space; doing it here would mean a second pyramid cache *and*
   a full-resolution read to answer a coarse lookup.
-- **An HDR texture's range stops at the shader.** A streamed `.tx` with an EXR backing
-  carries values above 1.0 intact, but the only textured input crust has is base colour,
-  and an albedo above 1 creates energy — the diffuse lobe clamps it, correctly. The
-  input that *would* use the range is emission, and no MaterialX EDF node is implemented,
-  so a graph cannot drive it from an image. That, rather than the file format, is what
-  HDR textures are waiting on.
+- **An HDR texture's range now reaches the film, through emission.** MaterialX's `edf`
+  is read, so a `uniform_edf` driven by an image drives `emissionColor`, and nothing
+  between the texture and the film clamps it. On `samples/materialx_emissive.usda` the
+  same frame preloaded and streamed differs by exactly **15.0** at most — the fixture's
+  authored 16.0 against the 8-bit path's clamp at 1.0. What remains: base colour above 1
+  is still clamped, correctly (an albedo above 1 creates energy; a radiance above 1 is
+  just a bright light), the preloaded decoder still narrows to 8 bits so HDR needs
+  `CRUST_TEX_STREAM=1` and a converted `.tx`, and an emissive MaterialX surface is not a
+  light-list entry — it is found by BSDF sampling only, like emissive curves and volumes.
+  Dome lights were never affected: that path is `f32` end to end.
+- **Only `uniform_edf` among MaterialX's EDFs.** `conical_edf`, `measured_edf` and
+  `generalized_schlick_edf` are directional distributions and crust's emitter is uniform,
+  so they are refused and reported rather than approximated into a plausible glow at the
+  wrong intensity.
 - **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
   layer is averaged into the coat rather than kept distinct, and MaterialX transmission
   nodes have no glass lobe equivalent yet.

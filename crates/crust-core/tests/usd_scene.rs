@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crust_core::Scene;
+use crust_core::{Ray, Scene, Vec3A};
 use openusd::sdf;
 use openusd::usd::{PrimPredicate, Stage};
 use openusd_schemas::shade::{Material as UsdMaterial, MaterialBindingAPI, TerminalSource};
@@ -1661,4 +1661,71 @@ fn untextured_geometry_carries_no_uv_table() {
         !hit.rec.has_uv,
         "an untextured mesh built a UV table it will never read"
     );
+}
+
+/// The emissive MaterialX sample imports, and its emitters actually emit.
+///
+/// Both halves matter. The document authors an `edf`, which the importer used
+/// to drop on the floor — not as an unsupported node, but invisibly, because
+/// the `surface` arm followed only `bsdf` and never reached the EDF's category
+/// to report it. And the textured panel is the only place in the renderer
+/// where an HDR texture's range has a consumer: `base_color` above 1 creates
+/// energy and is clamped, correctly, while radiance above 1 is just a bright
+/// light.
+#[test]
+fn the_emissive_materialx_sample_imports_and_emits() {
+    let scene =
+        Scene::from_usd(&sample("materialx_emissive.usda")).expect("failed to open the sample");
+
+    // Two emissive panels plus the backdrop and the floor.
+    assert_eq!(scene.world.count(), 4, "four quads");
+
+    // Nothing in this document should be unsupported: `uniform_edf`,
+    // `multiply` over an EDF and an `image` are all read.
+    let hit = |p: Vec3A, dir: Vec3A| {
+        let ray = Ray::new(p, dir.normalize());
+        scene.world.intersect(&ray, 0.001, f32::INFINITY)
+    };
+
+    // Straight at the constant emitter's panel, from in front.
+    let h = hit(Vec3A::new(-1.2, 0.1, 4.0), -Vec3A::Z).expect("hits the lamp panel");
+    let e = h.mat.emitted_at(
+        &Ray::new(Vec3A::new(-1.2, 0.1, 4.0), -Vec3A::Z),
+        &h.rec,
+        1.0,
+    );
+    assert!(
+        e.max_element() > 1.0,
+        "multiply(uniform_edf, 12) must exceed 1.0, got {e:?}"
+    );
+    // 12 x (1.0, 0.72, 0.4).
+    assert!((e - Vec3A::new(12.0, 8.64, 4.8)).length() < 1e-3, "{e:?}");
+
+    // And the textured panel emits too. Its value depends on the residency
+    // path — preloaded clips to 1.0, streamed carries 16.0 — so this asserts
+    // only that emission arrives at all; `mtlx_shade` is what prints the
+    // number, and `world_material.rs` pins the unclipped range at the seam.
+    let h = hit(Vec3A::new(1.2, 0.1, 4.0), -Vec3A::Z).expect("hits the HDR panel");
+    let e = h
+        .mat
+        .emitted_at(&Ray::new(Vec3A::new(1.2, 0.1, 4.0), -Vec3A::Z), &h.rec, 1.0);
+    assert!(e.max_element() > 0.0, "the textured panel emits nothing");
+}
+
+/// The backdrop is a plain `crust:openpbr` diffuse, so any radiance reaching
+/// it came off an emitter through the integrator rather than out of a material
+/// — which is what makes the sample a transport test and not a display one.
+#[test]
+fn the_emissive_sample_backdrop_does_not_emit() {
+    let scene =
+        Scene::from_usd(&sample("materialx_emissive.usda")).expect("failed to open the sample");
+    let ray = Ray::new(
+        Vec3A::new(4.0, 3.0, 4.0),
+        Vec3A::new(-0.4, -0.3, -1.0).normalize(),
+    );
+    let h = scene
+        .world
+        .intersect(&ray, 0.001, f32::INFINITY)
+        .expect("hits the backdrop");
+    assert_eq!(h.mat.emitted_at(&ray, &h.rec, 1.0), Vec3A::ZERO);
 }

@@ -55,6 +55,22 @@ cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 
 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
 
+# It goes through `FileAssets`, not just `UvTexture`, so `CRUST_TEX_STREAM` is
+# honoured and the `emission` column shows the range an HDR texture actually
+# carries -- a preloaded texel clips to 1.0 and a streamed one does not. This
+# is the A/B for MaterialX emission (see "Known incomplete work"):
+cargo run --release -p crust-render --example maketx -- \
+    samples/textures/mtlx_emission.hdr raw
+cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_emissive.mtlx mtlx_emitter_textured 0.37 0.12   # (1 1 1)
+CRUST_TEX_STREAM=1 cargo run --release -p crust-render --example mtlx_shade -- \
+    samples/materialx_emissive.mtlx mtlx_emitter_textured 0.37 0.12   # (16 9 3)
+
+# ...and the same thing end to end, where the difference is 15.0 exactly.
+cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr -s 32
+CRUST_TEX_STREAM=1 cargo run --release -- -i samples/materialx_emissive.usda -o hdr.exr -s 32
+cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
+
 # Is a Ptex file actually being addressed correctly? Neither check renders
 # anything -- a wrong Ptex lookup still produces a plausible-looking surface,
 # so both answer in numbers instead. See "Ptex" under USD import.
@@ -235,8 +251,8 @@ Six crates under `crates/`:
   factored out the same way as `crust-rt`: a standalone library with **no crust
   dependency** (roxmltree + glam only) behind a seam crust-core consumes.
   `parse` (XML → name-addressed graph), `value` (the one runtime value), `eval`
-  (the graph compiled to a slot-indexed `Program`), `bsdf` (the `layer`/`mix`
-  tree flattened to weighted `Lobe`s), and `compile()` running all three for one
+  (the graph compiled to a slot-indexed `Program`), `bsdf` (the closure tree —
+  `layer`/`mix` flattened to weighted `Lobe`s, and `edf` to `Emission` terms), and `compile()` running all three for one
   material node. It names the one thing it asks of its host — `Texture`, a
   `(u, v) → RGBA` sampler — and crust-core re-exports that trait as its own
   `Texture2D`, exactly as it adopts `crust_rt::Geometry`. What a renderer does
@@ -441,7 +457,14 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   `eval(r_in, rec, wi) -> Option<(value, pdf)>` (evaluate the *continuous* component
   toward a given direction — what NEE and guided MIS need; `None` = no continuous
   component at all, and per its contract that decision must never depend on `wi`),
-  and `emitted()`. Three implementations: **`OpenPBR`**,
+  `emitted()`, and `emitted_at(r_in, rec, cos_theta_o)` — the hit-aware emission the
+  integrator calls at a surface hit, defaulting to `emitted_directional` so only a
+  material whose emission is textured need override it. Keeping `emitted()` and
+  `emitted_directional()` hit-free is deliberate: the **light list** reads the first,
+  and the coat's angular emission factor stays unit-testable against a bare cosine.
+  A material that emits only through `emitted_at` must therefore never become a
+  light-list entry, or NEE would sample it at zero radiance while the bounce side saw
+  the real value. Three implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**
@@ -727,6 +750,30 @@ Schema mapping:
     no base `dielectric_bsdf` at all — the lion, whose glazes are both coats, and
     the teapot's metal — now reduces to `specular_weight = 0`, which is correct:
     it has no base specular, and it used to be given one.
+  - **The EDF half is a second list, not a seventh lobe kind.** MaterialX's
+    `<surface>` has an `edf` input beside its `bsdf`, and the flatten now walks
+    both — the same `layer`/`mix`/`multiply`/`add` algebra, since a mix
+    partitions radiance exactly as it partitions reflectance. Three things are
+    load-bearing. The walk carries a **closure domain**, because
+    `closure_input` gates a branch on its declared type and an EDF-typed `mix`
+    declares `type="EDF"`: asking "is this a BSDF?" in the emission tree
+    resolves both branches to `None` and the emission vanishes silently. The
+    terms land in `Flattened::emission` rather than as a `LobeKind`, which
+    makes the `layer` arm's `base_has_specular` scan *structurally* unable to
+    see an emitter — the strongest form of "emission does not disturb the coat
+    promotion" — and keeps the two algebras apart: BSDF pools take a weighted
+    **mean** (two diffuse leaves are one surface shared between them) while
+    emission **sums** (two emitters are twice the light). And neither the
+    weight nor the colour is clamped: `multiply(uniform_edf, 100)` is how a
+    document authors a bright emitter, and this is the one shading input for
+    which a value above 1.0 is meaningful rather than an authoring error.
+    `reduce()` factors the summed radiance by its **peak channel**, so
+    `emission_color` is always a chromaticity in `[0,1]³` and the range lives
+    in `emission_luminance`; factoring by Rec.709 luminance instead — what
+    OpenPBR's spec means by nits — would send a saturated emitter's *colour*
+    above one, since (0, 0, 8) has luminance 0.43 and would store (0, 0, 18.6).
+    A `surface` with an `edf` and no `bsdf` also has its `base_weight` zeroed,
+    or a pure emitter would keep OpenPBR's default grey diffuse underneath it.
   - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
     set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
     which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
@@ -740,10 +787,23 @@ Schema mapping:
     (0.005, 0.024, 0.074) on the body against light ribs — so the fault was the
     sample scene's exposure, not the material. A mis-decoded albedo is a
     plausible pastel and a mask read at the wrong colour space is a plausible
-    blend; comparing renders settles nothing.
+    blend; comparing renders settles nothing. It prints an `emission` column
+    too — the *product* `emission_color * emission_luminance`, since OpenPBR
+    only ever multiplies the two back together and either field alone would
+    mislead — and it reaches its textures through `FileAssets` rather than
+    `UvTexture` directly, so `CRUST_TEX_STREAM` is honoured. That last part is
+    not tidying: the preloaded decoder narrows to 8 bits, so an HDR emission
+    texture probed through it reads 1.0 whatever the file holds, and a probe
+    that cannot see the range is worse than no probe because it answers
+    confidently.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
     KiB of textures, what `tests/usd_scene.rs` runs against; its `mtlx_lacquer`
-    is the two-dielectric stack that must reduce to base specular + coat), and the two shot
+    is the two-dielectric stack that must reduce to base specular + coat),
+    `samples/materialx_emissive.usda` + `.mtlx` (the EDF fixture: a constant
+    `multiply(uniform_edf, 12)` and a pure emitter driven by
+    `textures/mtlx_emission.hdr`, whose bright cells sit at (16, 9, 3) —
+    deliberately a **separate** document, because three assertions pin
+    `materialx_basic` at exactly three materials and three textures), and the two shot
     layers for the DPEL assets, which are gitignored and must be downloaded:
     `samples/materialx_teapot.usda` and `samples/materialx_lion.usda`, plus
     `samples/materialx_showcase.usda` composing both after the `overview.png`
@@ -1470,6 +1530,22 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
   come from USD.
+  On the **emission** side: `uniform_edf` is read exactly, and it is the only EDF
+  that is. `conical_edf`, `measured_edf` and `generalized_schlick_edf` are all
+  *directional* distributions, and crust's OpenPBR emitter is uniform —
+  `emitted_directional` varies with angle only through the coat, which is a slab
+  above the emitter and not the emitter's own lobe shape — so a cone, an IES profile
+  or a Schlick falloff has nowhere to go. Pooling one onto a uniform emitter would be
+  a plausible glow at the wrong intensity, so they are refused and reported rather
+  than approximated, the same standard `crust:mipspace` applies. A `surface`'s
+  `opacity` input is still dropped. And an **emissive MaterialX surface is not a
+  light-list entry**: `AreaLight` pairs a `LightShape` with an `Arc<Emissive>`, whose
+  radiance is a constant, and a graph's emission is a function of the shading point.
+  So such a surface is found by BSDF/bounce sampling only, at full weight — exactly
+  how emissive curves, instances and volumes already behave — which means no NEE and
+  a firefly risk near a small bright emitter. That is also why `MtlxMaterial` leaves
+  `emitted()` at zero and answers through `emitted_at` instead: the light list reads
+  the hit-free one, and the two must agree for anything it samples.
 - **Texture residency caveats.** Ptex streams now (`CRUST_PTEX_STREAM=1`, above and in
   `docs/ptex_streaming.md`), so what is left is the shape of it rather than its absence.
   The cache is the reader's, which is what this section used to ask for and is still the
@@ -1500,19 +1576,31 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   channel) and ignores alpha, refuses ripmaps, multi-layer and deep files, and requires
   square tiles; the TIFF writer still emits 8-bit RGB only, so an HDR conversion is an
   EXR conversion.
-- **An HDR texture's range reaches the shader and then meets a clamp.** The streaming
-  path now carries values above 1.0 all the way to `Texture2D::eval`, but the only
-  textured input crust has is `base_color`, and an albedo above 1 creates energy —
-  `eon_diffuse` clamps ρ to 1, correctly. So today the range survives the *texture*
-  and not the *image*: rendering a checkerboard whose white checks are at 8.0 differs
-  from the 8-bit version mostly where bilinear and mip averaging mix an over-bright
-  texel with a dark one before the clamp, which measures the clamp rather than the
-  texture. The input that would use the range is **emission**, and there is no path to
-  it: `crust-mtlx` implements no EDF node (`uniform_edf` and friends), so a MaterialX
-  graph cannot drive `emission_color` from an image at all. That — not the file format
-  — is what an HDR texture is waiting on, and it is why the range claim is verified at
-  the seam (`hdr_survives_streaming_and_does_not_survive_preloading`) rather than by a
-  sample scene.
+- **An HDR texture's range now has a consumer, and the remaining limits are
+  elsewhere.** The input that uses the range is **emission**, and MaterialX's `edf`
+  is read: `uniform_edf` flattens to an `Emission` term beside the BSDF lobes, and
+  `reduce()` pools those onto `emission_color`/`emission_luminance` with nothing
+  clamping either. The path is unbroken — file → `.tx` → `Texture2D::eval` →
+  `Op::Texture` → `Emission.color` → `emitted_at` → `next_emit` → film — so the claim
+  is a sample scene now (`samples/materialx_emissive.usda`) rather than only a seam
+  test. Measured on it at 32 spp: the same frame preloaded and streamed differs on
+  72.6% of pixels with a **max absolute difference of exactly 15.0**, which is the
+  bright cell's authored 16.0 against the 8-bit path's clamp at 1.0; `mtlx_shade`
+  prints the two side by side as `(1.000 1.000 1.000)` and `(16.000 9.000 3.000)`.
+  What is still true: `base_color` above 1 is **still** clamped by `eon_diffuse`, and
+  correctly — an albedo above 1 creates energy where a radiance above 1 is just a
+  bright light. The preloaded `UvTexture` still narrows to 8 bits at `to_rgb8()`, so
+  an HDR emission texture needs `CRUST_TEX_STREAM=1` and a converted `.tx`; without
+  them it renders, clipped, rather than failing. And an **emissive MaterialX surface
+  is not a light-list entry** — see the MaterialX caveats below.
+  The **dome-light / HDRI path was never affected by any of this**, which is worth
+  stating so the next reader does not go looking for a clamp that is not there:
+  `load_exr_environment` and `load_image_environment` decode to `Vec<Vec3A>` through
+  `to_rgb32f` (never `to_rgb8`), `EnvironmentMap` stores `f32`, and
+  `exr_environment_round_trips` pins that a value above 20 survives. The workspace's
+  one `to_rgb8()` is on the preloaded UV-texture path, which an environment map
+  never takes. So the Moana island's domes carry whatever range their files hold;
+  that `islandsunVIS.png` is an 8-bit PNG is a property of the asset, not of crust.
 - **Texture filtering caveats.** Minification is filtered now (ray cones plus
   trilinear mip pyramids, above), so what remains is the shape of that filter
   rather than its absence. It is **isotropic**: a chart stretched in one axis is

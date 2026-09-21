@@ -100,6 +100,7 @@ genuine bug in the table (see the Verdict column).
 | `UsdPreviewSurface.emissiveColor` | `usd_import.rs:2665` | **none** | ⚠️ **bug** — same |
 | `PxrDisneyBsdf.baseColor` | `usd_import.rs:2740` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
 | `crust:openpbr` — all 7 colour fields[^1] | `usd_import.rs:2886` | **none** | ✅ intentional — native format is linear-authored |
+| MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_leaf` | whatever the feeding node declares | ✅ correct per MaterialX |
 
 [^1]: `baseColor`, `specularColor`, `transmissionColor`, `subsurfaceColor`,
 `fuzzColor`, `coatColor`, `emissionColor` — all via the `c` closure at
@@ -109,6 +110,23 @@ genuine bug in the table (see the Verdict column).
 values are authored in the renderer's working space by definition. That makes
 "no conversion" correct — but note it is achieved by *not calling anything*,
 not by a stated decision.
+
+**MaterialX emission is a radiance, and the reduction is colour-space neutral.**
+An `edf`'s colour is light leaving the surface, not a reflectance swatch, so the
+curve question is answered entirely by whatever feeds it: a literal is authored
+in the working space, and an `image` node carries its own `colorspace`
+attribute through `ColorSpace::from_mtlx` exactly as `base_color`'s does — with
+an absent tag meaning **raw**, which is the right answer for the scene-linear
+float file an emission texture usually is. `samples/materialx_emissive.mtlx`
+leaves it absent on purpose; tagging a Radiance `.hdr` `srgb_texture` would put
+a transfer curve on light. The reduction itself adds nothing: `reduce()` sums
+the weighted terms and then factors the result by its peak channel into
+`emission_color × emission_luminance`, and a scalar times a colour in one space
+is the same radiance whichever way it is factored, so the split cannot
+introduce a colour error. Note this is also the **first input whose range is
+used rather than merely carried** — the `.tx` EXR backing's values above 1.0
+reach the film here, where on `base_color` they meet `eon_diffuse`'s ρ ≤ 1
+clamp, correctly.
 
 ### Lights
 
@@ -155,6 +173,7 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture.rs` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture.rs` | flat 1.8 | ✅ correct per MaterialX |
 | UV texture, any other tag or none | `crust-assets/src/uv_texture.rs` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
+| MaterialX emission `image`, untagged | `crust-assets/src/uv_texture.rs` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |

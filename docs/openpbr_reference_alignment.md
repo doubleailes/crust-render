@@ -111,6 +111,16 @@ toward grazing; at normal incidence the round trip recovers exactly
 (matching `openpbr_compute_emission`), replacing the earlier MaterialX
 `generalized_schlick_edf` approximation.
 
+A note on the two emission fields, since the MaterialX path now writes them.
+`emission_luminance` is used as a **raw linear multiplier**, not as photometric
+nits: the only thing done with the pair is `emission_color × emission_luminance`
+(`OpenPBR::emitted`), so their *product* is the contract and either field alone
+is a presentation choice. The MaterialX reduction factors by peak channel, which
+keeps `emission_color` a chromaticity; the importer's `UsdPreviewSurface` path
+puts the whole value in the colour and 1.0 in the scalar. Both are exact, and
+code reading one field without the other is reading a convention that is not
+guaranteed.
+
 The darkening term is the spec's `Δ = (1 − K̄)/(1 − K̄·E_base)` with
 `K̄ = 1 − (1 − F0)/η²` (the coat underside's hemispherical reflectance, TIR
 included — ≈0.57 at η = 1.5), faded as `1 + coat_weight·coat_darkening·(Δ − 1)`.

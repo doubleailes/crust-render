@@ -51,7 +51,9 @@ use crate::hittable::HitRecord;
 use crate::material::brdf::alpha_to_roughness;
 use crate::material::{Material, OpenPBR, ScatterSample};
 use crate::ray::Ray;
-use crust_mtlx::{Lobe, LobeKind, Program, ShadeCtx, TextureLoader, Val, reflectivity_from_ior};
+use crust_mtlx::{
+    Flattened, LobeKind, Program, ShadeCtx, TextureLoader, Val, reflectivity_from_ior,
+};
 use glam::Vec3A;
 
 pub use crust_mtlx::MtlxError;
@@ -59,17 +61,28 @@ pub use crust_mtlx::MtlxError;
 /// A surface whose parameters come from a MaterialX graph, re-evaluated at
 /// every shading point.
 ///
-/// Holds the compiled pattern [`Program`] and the flattened [`Lobe`] list, and
-/// implements [`Material`] by running both and delegating the actual BSDF to
-/// the [`OpenPBR`] they reduce to. Delegating rather than reimplementing is
-/// the whole point: sampling, evaluation, MIS densities, the coat and fuzz
-/// layering and the energy compensation all stay in one place, and a MaterialX
-/// surface is unbiased by exactly the same argument as an authored one.
+/// Holds the compiled pattern [`Program`] and the flattened closure tree —
+/// BSDF lobes and EDF emission terms — and implements [`Material`] by running
+/// both and delegating the actual BSDF to the [`OpenPBR`] they reduce to.
+/// Delegating rather than reimplementing is the whole point: sampling,
+/// evaluation, MIS densities, the coat and fuzz layering and the energy
+/// compensation all stay in one place, and a MaterialX surface is unbiased by
+/// exactly the same argument as an authored one.
+///
+/// Emission reaches the integrator through [`Material::emitted_at`] and
+/// **not** through `emitted()`, which stays at the trait default of zero. That
+/// is deliberate rather than an omission: a graph's emission is a function of
+/// the shading point, `emitted()` is the hit-free radiance the *light list*
+/// reads, and the two must agree for anything the light list samples. So a
+/// MaterialX emitter is never an `AreaLight` — it is found by BSDF/bounce
+/// sampling only, at full weight, exactly as emissive curves, instances and
+/// volumes already are.
 pub struct MtlxMaterial {
     program: Program,
-    lobes: Vec<Lobe>,
-    /// Defaults for everything no lobe speaks to, and the fallback when the
-    /// graph yields nothing at all.
+    /// The BSDF lobes and the EDF emission terms the graph flattened to.
+    flat: Flattened,
+    /// Defaults for everything neither a lobe nor an emission term speaks to,
+    /// and the fallback when the graph yields nothing at all.
     base: OpenPBR,
     /// Name of the material node, for diagnostics.
     pub name: String,
@@ -79,10 +92,11 @@ impl std::fmt::Debug for MtlxMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MtlxMaterial({}, {} ops, {} lobes)",
+            "MtlxMaterial({}, {} ops, {} lobes, {} emission)",
             self.name,
             self.program.ops.len(),
-            self.lobes.len()
+            self.flat.lobes.len(),
+            self.flat.emission.len()
         )
     }
 }
@@ -123,7 +137,7 @@ impl MtlxMaterial {
         SLOTS.with(|cell| {
             let mut slots = cell.borrow_mut();
             self.program.eval(&ctx, &mut slots);
-            let (params, normal) = reduce(&self.lobes, &slots, &self.base);
+            let (params, normal) = reduce(&self.flat, &slots, &self.base);
             // A shading normal from the graph replaces the geometric one for
             // the BSDF, but must not flip the surface: a normal map can push
             // the frame past the horizon on a silhouette, and shading with a
@@ -164,6 +178,26 @@ impl Material for MtlxMaterial {
         // textured surface at (0, 0) everywhere is not obviously wrong on
         // screen, which is the failure worth avoiding.
         true
+    }
+
+    fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
+        // The integrator asks this of *every* surface hit, so the non-emissive
+        // case — which is every MaterialX material shipped today, the two DPEL
+        // assets included — must not evaluate the graph. Without this early
+        // out the teapot would run its ~50-op program, and the lion its
+        // 140-op one, an extra time per path vertex to be told the answer is
+        // zero. Whether the graph has an EDF at all is known at compile time,
+        // so this is the same kind of structural gate as `uses_uv`.
+        if self.flat.emission.is_empty() && self.base.emission_luminance <= 0.0 {
+            return Vec3A::ZERO;
+        }
+        // `cos_theta_o` is used as the tracer measured it, against the
+        // ray-facing geometric normal, rather than recomputed against any
+        // normal the graph produces: the coat slab emission passes through
+        // belongs to the geometric interface, and letting a normal map
+        // perturb its Fresnel falloff would make emission flicker at pixel
+        // scale for nothing.
+        self.shade(r_in, rec, |m, _| m.emitted_directional(cos_theta_o))
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
@@ -212,7 +246,10 @@ pub fn load(
     let c = crust_mtlx::compile(path, material_node, load_texture)?;
     let material = MtlxMaterial {
         program: c.program,
-        lobes: c.lobes,
+        flat: Flattened {
+            lobes: c.lobes,
+            emission: c.emission,
+        },
         // `coat_darkening` is the one default a MaterialX material must *not*
         // inherit. OpenPBR's coat darkening is the bounce series between the
         // coat's underside and the substrate: a fraction `K̄` of what the base
@@ -312,13 +349,15 @@ impl Pool {
 
 /// Folds the evaluated lobes into an OpenPBR parameter set.
 ///
-/// `base` is the material's authored defaults, so anything no lobe speaks to
-/// (emission, transmission, thin-film) keeps a sensible value instead of zero.
+/// `base` is the material's authored defaults, so anything neither a lobe nor
+/// an emission term speaks to (transmission, thin-film) keeps a sensible value
+/// instead of zero.
 /// `coat_darkening` is one of those — no lobe speaks to it — and `load()`
 /// supplies it as 0 rather than OpenPBR's 1.0, because MaterialX's `layer` is
 /// single-scattering and models no coat-underside bounce series. See the
 /// comment there before re-deriving it here.
-pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option<Vec3A>) {
+pub fn reduce(flat: &Flattened, slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option<Vec3A>) {
+    let lobes = &flat.lobes;
     let get = |i: u32| slots.get(i as usize).copied().unwrap_or(Val::ZERO);
     let (mut diffuse, mut spec, mut coat, mut metal, mut sheen, mut sss) = (
         Pool::default(),
@@ -479,6 +518,59 @@ pub fn reduce(lobes: &[Lobe], slots: &[Val], base: &OpenPBR) -> (OpenPBR, Option
         m.subsurface_color = sss.mean_color(Vec3A::ONE);
     }
 
+    // Emission, and this is the one pool that **adds** rather than averages.
+    // MaterialX's `add` sums two EDFs, `mix` partitions one between two
+    // branches and `multiply` scales one — so the flattened terms are already
+    // a partition of one radiance and summing them reconstructs it. The BSDF
+    // pools take a weighted *mean* because two diffuse leaves describe one
+    // surface shared between them; two emitters are twice the light.
+    //
+    // Neither the weight nor the colour is clamped, which is deliberate and
+    // is the whole point of reading an EDF at all. `multiply(uniform_edf, 100)`
+    // is how a MaterialX document authors a bright emitter, and the colour can
+    // come straight off an `image` node reading an HDR file. Clamping either
+    // would put back the very ceiling this path exists to remove — emission is
+    // the one shading input for which a value above 1.0 is meaningful rather
+    // than an authoring error (an albedo above 1 creates energy; radiance
+    // above 1 is just a bright light). Only NaN and negatives are refused,
+    // matching what the lobe loop does to a weight above.
+    let mut radiance = Vec3A::ZERO;
+    for t in &flat.emission {
+        let w = get(t.weight).x();
+        if !w.is_finite() || w <= 0.0 {
+            continue;
+        }
+        let c = get(t.color).rgb();
+        if !c.is_finite() {
+            continue;
+        }
+        radiance += c.max(Vec3A::ZERO) * w;
+    }
+    let peak = radiance.max_element();
+    if peak > 0.0 {
+        // OpenPBR splits emission into a scalar and a colour and `emitted()`
+        // multiplies them straight back, so the split is a presentation choice
+        // and any factorisation is exact. Factor by the **peak channel**:
+        // `emission_color` then always lands in [0,1]³ with one channel at
+        // exactly 1 — a chromaticity, which is what anything reading that
+        // field on its own will assume — and the whole HDR range lives in the
+        // scalar. Factoring by Rec.709 luminance instead, which is what
+        // OpenPBR's spec means by nits, sends a saturated emitter's *colour*
+        // above one: (0, 0, 8) has luminance 0.43 and would store a colour of
+        // (0, 0, 18.6).
+        m.emission_luminance = peak;
+        m.emission_color = radiance / peak;
+
+        // A `surface` with an `edf` and no `bsdf` flattens to no lobes at all,
+        // and the branches above would then leave `base_weight` at the base's
+        // 1.0 over OpenPBR's default grey — a pure emitter that is also a grey
+        // diffuse reflector. `specular_weight` and `coat_weight` already land
+        // on 0 through their own empty pools.
+        if base_total <= 1e-5 && spec.w <= 1e-5 && coat.w <= 1e-5 {
+            m.base_weight = 0.0;
+        }
+    }
+
     let normal = (normal_w > 1e-5).then(|| normal_sum / normal_w);
     (m, normal)
 }
@@ -498,14 +590,14 @@ mod tests {
     }
 
     /// Compiles a document and evaluates it at one flat, upward-facing point.
-    fn evaluate(text: &str, root: &str) -> (Vec<Lobe>, Vec<Val>) {
+    fn evaluate(text: &str, root: &str) -> (Flattened, Vec<Val>) {
         let doc = Doc::parse(text).unwrap();
         let loader = |_: &str, _: Option<&str>| None;
         let mut c = Compiler::new(&doc, &loader);
         let one = c.constant(Val::ONE);
         let node = doc.find("", root).unwrap().clone();
-        let mut lobes = Vec::new();
-        flatten(&mut c, &node, one, 0, &mut lobes);
+        let mut flat = Flattened::default();
+        flatten(&mut c, &node, one, 0, &mut flat);
         let mut slots = Vec::new();
         c.program.eval(
             &ShadeCtx {
@@ -518,7 +610,7 @@ mod tests {
             },
             &mut slots,
         );
-        (lobes, slots)
+        (flat, slots)
     }
 
     #[test]
@@ -536,8 +628,8 @@ mod tests {
             <input name="mix" type="float" value="0.5" />
           </mix>
         </materialx>"#;
-        let (lobes, slots) = evaluate(text, "m");
-        let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
+        let (flat, slots) = evaluate(text, "m");
+        let (m, _) = reduce(&flat, &slots, &OpenPBR::default());
         assert_eq!(
             m.specular_weight, 0.0,
             "a weight=0 dielectric coated the surface"
@@ -559,8 +651,8 @@ mod tests {
             <input name="mix" type="float" value="0.25" />
           </mix>
         </materialx>"#;
-        let (lobes, slots) = evaluate(text, "m");
-        let (m, _) = reduce(&lobes, &slots, &OpenPBR::default());
+        let (flat, slots) = evaluate(text, "m");
+        let (m, _) = reduce(&flat, &slots, &OpenPBR::default());
         assert!(
             (m.base_metalness - 0.75).abs() < 1e-4,
             "{}",
@@ -592,8 +684,177 @@ mod tests {
     }
 
     fn reduced(text: &str, root: &str) -> OpenPBR {
-        let (lobes, slots) = evaluate(text, root);
-        reduce(&lobes, &slots, &OpenPBR::default()).0
+        let (flat, slots) = evaluate(text, root);
+        reduce(&flat, &slots, &OpenPBR::default()).0
+    }
+
+    /// A `<surface>` with the given `edf` expression and no `bsdf`, reduced.
+    fn emissive(body: &str, edf_node: &str) -> OpenPBR {
+        let text = format!(
+            r#"<materialx>
+                 {body}
+                 <surface name="s" type="surfaceshader">
+                   <input name="edf" type="EDF" nodename="{edf_node}" />
+                 </surface>
+               </materialx>"#
+        );
+        reduced(&text, "s")
+    }
+
+    /// What the integrator actually sees: the two OpenPBR emission fields are
+    /// only ever multiplied back together, so their product is the contract
+    /// and either field alone is a presentation detail.
+    fn radiance_of(m: &OpenPBR) -> Vec3A {
+        m.emission_color * m.emission_luminance
+    }
+
+    #[test]
+    fn an_emission_term_reaches_openpbr_emission() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="0.5, 0.25, 0.125" />
+               </uniform_edf>"#,
+            "e",
+        );
+        let r = radiance_of(&m);
+        assert!(
+            (r - Vec3A::new(0.5, 0.25, 0.125)).length() < 1e-5,
+            "emission reduced to {r:?}"
+        );
+    }
+
+    /// The test this whole path exists for. An albedo above 1 creates energy
+    /// and `eon_diffuse` clamps it, correctly — radiance above 1 is just a
+    /// bright light, and nothing between the graph and the film may bound it.
+    #[test]
+    fn an_emission_above_one_is_not_clamped() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="1, 1, 1" />
+               </uniform_edf>
+               <multiply name="mul" type="EDF">
+                 <input name="in1" type="EDF" nodename="e" />
+                 <input name="in2" type="float" value="8" />
+               </multiply>"#,
+            "mul",
+        );
+        let r = radiance_of(&m);
+        assert!(r.x > 1.0, "emission was clamped to {r:?}");
+        assert!((r - Vec3A::splat(8.0)).length() < 1e-4, "{r:?}");
+    }
+
+    /// Emission is the one pool that **sums**. The BSDF pools take a weighted
+    /// mean because two diffuse leaves describe one surface shared between
+    /// them; two emitters are twice the light. This is the assertion that
+    /// catches someone "fixing" the emission pool to match its neighbours.
+    #[test]
+    fn emission_terms_add_rather_than_average() {
+        let m = emissive(
+            r#"<uniform_edf name="a" type="EDF">
+                 <input name="color" type="color3" value="1, 1, 1" />
+               </uniform_edf>
+               <uniform_edf name="b" type="EDF">
+                 <input name="color" type="color3" value="1, 1, 1" />
+               </uniform_edf>
+               <add name="sum" type="EDF">
+                 <input name="in1" type="EDF" nodename="a" />
+                 <input name="in2" type="EDF" nodename="b" />
+               </add>"#,
+            "sum",
+        );
+        assert!((radiance_of(&m) - Vec3A::splat(2.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_mixed_edf_partitions_between_its_branches() {
+        let m = emissive(
+            r#"<uniform_edf name="a" type="EDF">
+                 <input name="color" type="color3" value="4, 0, 0" />
+               </uniform_edf>
+               <uniform_edf name="b" type="EDF">
+                 <input name="color" type="color3" value="0, 0, 8" />
+               </uniform_edf>
+               <mix name="m" type="EDF">
+                 <input name="fg" type="EDF" nodename="a" />
+                 <input name="bg" type="EDF" nodename="b" />
+                 <input name="mix" type="float" value="0.25" />
+               </mix>"#,
+            "m",
+        );
+        // 0.25·(4,0,0) + 0.75·(0,0,8)
+        let r = radiance_of(&m);
+        assert!((r - Vec3A::new(1.0, 0.0, 6.0)).length() < 1e-4, "{r:?}");
+    }
+
+    /// The factorisation is by peak channel, so `emission_color` is always a
+    /// chromaticity and the range lives in the scalar. Factoring by Rec.709
+    /// luminance instead would send a saturated emitter's *colour* above one —
+    /// (0, 0, 8) has luminance 0.43 and would store (0, 0, 18.6).
+    #[test]
+    fn the_split_puts_the_range_in_the_scalar() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="0, 0, 8" />
+               </uniform_edf>"#,
+            "e",
+        );
+        assert!(near(m.emission_luminance, 8.0), "{}", m.emission_luminance);
+        assert!(near(m.emission_color.max_element(), 1.0));
+        assert!(m.emission_color.max_element() <= 1.0);
+        assert!((radiance_of(&m) - Vec3A::new(0.0, 0.0, 8.0)).length() < 1e-4);
+    }
+
+    /// A `surface` with an `edf` and no `bsdf` flattens to no lobes, and the
+    /// base-colour branches would otherwise leave it at OpenPBR's default grey
+    /// at full weight: a pure emitter that is also a diffuse reflector.
+    #[test]
+    fn a_pure_edf_surface_does_not_also_reflect() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="2, 2, 2" />
+               </uniform_edf>"#,
+            "e",
+        );
+        assert!(near(m.base_weight, 0.0), "base_weight {}", m.base_weight);
+        assert!(near(m.specular_weight, 0.0));
+        assert!(near(m.coat_weight, 0.0));
+    }
+
+    /// An emitter that *does* carry a BSDF keeps it — the arm above must not
+    /// fire whenever emission exists.
+    #[test]
+    fn an_emitter_with_a_bsdf_keeps_its_base() {
+        let text = r#"<materialx>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF">
+            <input name="color" type="color3" value="0.8, 0.2, 0.2" />
+          </oren_nayar_diffuse_bsdf>
+          <uniform_edf name="e" type="EDF">
+            <input name="color" type="color3" value="2, 2, 2" />
+          </uniform_edf>
+          <surface name="s" type="surfaceshader">
+            <input name="bsdf" type="BSDF" nodename="d" />
+            <input name="edf" type="EDF" nodename="e" />
+          </surface>
+        </materialx>"#;
+        let m = reduced(text, "s");
+        assert!(near(m.base_weight, 1.0));
+        assert!((m.base_color - Vec3A::new(0.8, 0.2, 0.2)).length() < 1e-5);
+        assert!((radiance_of(&m) - Vec3A::splat(2.0)).length() < 1e-5);
+    }
+
+    /// Guards the claim that every existing MaterialX render is untouched:
+    /// with no EDF, emission comes through from `base` exactly as before.
+    #[test]
+    fn a_graph_with_no_edf_leaves_emission_at_the_base() {
+        let text = r#"<materialx>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+          <surface name="s" type="surfaceshader">
+            <input name="bsdf" type="BSDF" nodename="d" />
+          </surface>
+        </materialx>"#;
+        let m = reduced(text, "s");
+        assert_eq!(m.emission_luminance, OpenPBR::default().emission_luminance);
+        assert_eq!(m.emission_color, OpenPBR::default().emission_color);
     }
 
     fn near(a: f32, b: f32) -> bool {

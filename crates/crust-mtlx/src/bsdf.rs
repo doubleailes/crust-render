@@ -78,34 +78,80 @@ pub struct Lobe {
     pub normal: Option<u32>,
 }
 
-/// How far a BSDF tree may nest before flattening gives up.
+/// One flattened EDF leaf: the weight reaching it and the program slot its
+/// emitted radiance is computed in.
+///
+/// Kept in a list of its own rather than as a [`LobeKind`], for two structural
+/// reasons. The `layer` arm decides a dielectric's identity by asking which
+/// lobes its base produced, and an emitter is not a specular interface — it
+/// must be invisible to that question. And emission *sums* where the BSDF
+/// pools *normalise*: two EDFs added are twice the light, whereas two diffuse
+/// leaves added are one surface shared between them.
+pub struct Emission {
+    /// Slot holding the emitted radiance — `uniform_edf`'s `color`.
+    ///
+    /// Deliberately not clamped anywhere downstream: radiance has no upper
+    /// bound, and this is the one shading input in the renderer for which a
+    /// value above 1.0 is meaningful rather than an authoring error.
+    pub color: u32,
+    /// Slot holding the scalar weight reaching this leaf — every `mix` factor
+    /// along its path multiplied together.
+    pub weight: u32,
+}
+
+/// What [`flatten`] produces: the BSDF tree and the EDF tree, each already
+/// reduced to leaves carrying program slots.
+#[derive(Default)]
+pub struct Flattened {
+    pub lobes: Vec<Lobe>,
+    pub emission: Vec<Emission>,
+}
+
+/// Which closure tree is being walked.
+///
+/// Not cosmetic: [`closure_input`] gates a branch on its declared type, and
+/// an EDF-typed `mix` declares `type="EDF"` on its `fg`/`bg`. Walking the
+/// emission tree while still asking "is this a BSDF?" resolves every branch
+/// to `None` and the emission vanishes — silently, which is the failure this
+/// whole module is being extended to stop making.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Closure {
+    Bsdf,
+    Edf,
+}
+
+/// How far a closure tree may nest before flattening gives up.
 ///
 /// MaterialX has no depth limit, but a hand-edited document can describe a
 /// cycle through `layer`/`mix` that the pattern compiler's own cycle guard
-/// does not see (it guards *pattern* recursion, and BSDF inputs are walked
-/// separately). Six is comfortably past the four-deep stacks these assets use.
+/// does not see (it guards *pattern* recursion, and closure inputs are walked
+/// separately). Sixteen is comfortably past the four-deep stacks these assets
+/// use. The BSDF and EDF walks get independent budgets, each counting from
+/// the `surface` node they branch at — they are sibling trees, not one.
 const MAX_BSDF_DEPTH: usize = 16;
 
-/// Flattens the BSDF tree rooted at `node` into `out`.
+/// Flattens the closure tree rooted at `node` into `out` — BSDF lobes and EDF
+/// emission terms both, since a `<surface>` carries one of each.
 ///
-/// `weight` is the slot holding the accumulated weight reaching this subtree;
-/// `normal` the enclosing shading normal, which a leaf inherits unless it
-/// authors its own.
-pub fn flatten(c: &mut Compiler<'_>, node: &Node, weight: u32, depth: usize, out: &mut Vec<Lobe>) {
-    flatten_inner(c, node, weight, depth, false, out);
+/// `weight` is the slot holding the accumulated weight reaching this subtree.
+pub fn flatten(c: &mut Compiler<'_>, node: &Node, weight: u32, depth: usize, out: &mut Flattened) {
+    flatten_inner(c, node, weight, depth, Closure::Bsdf, false, out);
 }
 
-/// [`flatten`] with the one piece of tree context a leaf needs:
-/// `over_specular` is true while inside the `top` of a `layer` whose base
-/// carries a specular interface, and it is what turns a dielectric leaf into a
-/// [`LobeKind::Coat`].
+/// [`flatten`] with the two pieces of tree context a leaf needs. `closure` is
+/// which tree this is — it decides both the type a branch must declare and
+/// which list a leaf lands in. `over_specular` is true while inside the `top`
+/// of a `layer` whose base carries a specular interface, and it is what turns
+/// a dielectric leaf into a [`LobeKind::Coat`]; it is meaningless in the EDF
+/// tree and is reset on entry there.
 fn flatten_inner(
     c: &mut Compiler<'_>,
     node: &Node,
     weight: u32,
     depth: usize,
+    closure: Closure,
     over_specular: bool,
-    out: &mut Vec<Lobe>,
+    out: &mut Flattened,
 ) {
     if depth > MAX_BSDF_DEPTH {
         return;
@@ -116,15 +162,31 @@ fn flatten_inner(
             // connection — there is nothing to disambiguate, so this follows
             // whatever it points at.
             if let Some(n) = connected_node(c, node, "surfaceshader") {
-                flatten_inner(c, &n, weight, depth + 1, over_specular, out);
+                flatten_inner(c, &n, weight, depth + 1, closure, over_specular, out);
             }
         }
         "surface" => {
+            // The two closure inputs are each the only connection of their
+            // type on this node, so neither needs the type disambiguation
+            // `closure_input` does — `connected_node` follows whatever they
+            // point at.
             if let Some(n) = connected_node(c, node, "bsdf") {
-                flatten_inner(c, &n, weight, depth + 1, over_specular, out);
+                flatten_inner(c, &n, weight, depth + 1, Closure::Bsdf, over_specular, out);
+            }
+            // The BSDF runs first so lobe order — which several tests pin
+            // exactly — is untouched by emission existing. `over_specular` is
+            // reset rather than forwarded: it answers "which of OpenPBR's two
+            // specular interfaces is this dielectric", a question emission
+            // does not participate in, and letting it leak across would be a
+            // trap for whoever next reads this arm.
+            if let Some(n) = connected_node(c, node, "edf") {
+                flatten_inner(c, &n, weight, depth + 1, Closure::Edf, false, out);
             }
         }
-        "layer" => {
+        // A `layer` is BSDF-only in MaterialX — its `top` and `base` are
+        // declared `BSDF`. One reached in the emission tree is a malformed
+        // document, and falls through to `edf_leaf`, which reports it.
+        "layer" if closure == Closure::Bsdf => {
             // A layer does not split energy the way a mix does: the top sits
             // *over* the base and both are present. OpenPBR's own stack is
             // layered the same way, so both branches keep the full weight.
@@ -143,22 +205,27 @@ fn flatten_inner(
             // The flag is inherited by everything beneath the top — a nested
             // layer's base included — because everything above the outermost
             // base specular is coat: OpenPBR has two specular lobes, not N.
-            let before = out.len();
-            if let Some(n) = bsdf_input(c, node, "base") {
-                flatten_inner(c, &n, weight, depth + 1, over_specular, out);
+            let before = out.lobes.len();
+            if let Some(n) = closure_input(c, node, "base", closure) {
+                flatten_inner(c, &n, weight, depth + 1, closure, over_specular, out);
             }
-            let base_has_specular = out[before..].iter().any(|l| {
+            // Emission is in a list of its own, so this scan is *structurally*
+            // unable to see an emitter — which is the strongest form of "an
+            // EDF does not disturb the coat promotion", and the main reason
+            // the two are not one vector of kinds.
+            let base_has_specular = out.lobes[before..].iter().any(|l| {
                 matches!(
                     l.kind,
                     LobeKind::Dielectric | LobeKind::Conductor | LobeKind::Coat
                 )
             });
-            if let Some(n) = bsdf_input(c, node, "top") {
+            if let Some(n) = closure_input(c, node, "top", closure) {
                 flatten_inner(
                     c,
                     &n,
                     weight,
                     depth + 1,
+                    closure,
                     over_specular || base_has_specular,
                     out,
                 );
@@ -178,17 +245,17 @@ fn flatten_inner(
                 a: weight,
                 b: inv,
             });
-            if let Some(n) = bsdf_input(c, node, "bg") {
-                flatten_inner(c, &n, w_bg, depth + 1, over_specular, out);
+            if let Some(n) = closure_input(c, node, "bg", closure) {
+                flatten_inner(c, &n, w_bg, depth + 1, closure, over_specular, out);
             }
-            if let Some(n) = bsdf_input(c, node, "fg") {
-                flatten_inner(c, &n, w_fg, depth + 1, over_specular, out);
+            if let Some(n) = closure_input(c, node, "fg", closure) {
+                flatten_inner(c, &n, w_fg, depth + 1, closure, over_specular, out);
             }
         }
         "add" => {
             for name in ["in1", "in2"] {
-                if let Some(n) = bsdf_input(c, node, name) {
-                    flatten_inner(c, &n, weight, depth + 1, over_specular, out);
+                if let Some(n) = closure_input(c, node, name, closure) {
+                    flatten_inner(c, &n, weight, depth + 1, closure, over_specular, out);
                 }
             }
         }
@@ -200,9 +267,9 @@ fn flatten_inner(
             // first *connected* input would make that scalar the BSDF. The
             // real branch would then be compiled as the attenuation value and
             // every lobe under it silently lost.
-            let (bsdf, scalar) = match bsdf_input(c, node, "in1") {
+            let (bsdf, scalar) = match closure_input(c, node, "in1", closure) {
                 Some(n) => (Some(n), "in2"),
-                None => (bsdf_input(c, node, "in2"), "in1"),
+                None => (closure_input(c, node, "in2", closure), "in1"),
             };
             //
             // A literal-zero scalar prunes the branch outright, for exactly
@@ -222,14 +289,21 @@ fn flatten_inner(
                     a: weight,
                     b: s,
                 });
-                flatten_inner(c, &n, w, depth + 1, over_specular, out);
+                flatten_inner(c, &n, w, depth + 1, closure, over_specular, out);
             }
         }
-        _ => {
-            if let Some(lobe) = leaf(c, node, weight, over_specular) {
-                out.push(lobe);
+        _ => match closure {
+            Closure::Bsdf => {
+                if let Some(lobe) = leaf(c, node, weight, over_specular) {
+                    out.lobes.push(lobe);
+                }
             }
-        }
+            Closure::Edf => {
+                if let Some(term) = edf_leaf(c, node, weight) {
+                    out.emission.push(term);
+                }
+            }
+        },
     }
 }
 
@@ -331,6 +405,44 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, weight: u32, over_specular: bool) -> 
     })
 }
 
+/// Builds an emission term, or `None` for an EDF node this reduction has no
+/// faithful mapping for — reported, never silently dropped.
+///
+/// Only `uniform_edf` is mapped, and the refusal of the others is the point
+/// rather than an omission. A renderer consuming these terms has, in crust's
+/// case, a **uniform** emitter: its `emitted_directional` varies with angle
+/// only through a coat, which is a slab above the emitter and not the
+/// emitter's own lobe shape. So
+/// `conical_edf`'s cone, `measured_edf`'s IES profile and
+/// `generalized_schlick_edf`'s view-dependent falloff all have nowhere to go,
+/// and pooling them onto a uniform emitter would be a silent lie about where
+/// the light goes — a plausible glow at the wrong intensity, which is exactly
+/// the class of error this codebase refuses rather than documents (see
+/// `crust:mipspace`). They land in `unsupported` and the importer warns once.
+fn edf_leaf(c: &mut Compiler<'_>, node: &Node, weight: u32) -> Option<Emission> {
+    match node.category.as_str() {
+        "uniform_edf" => {}
+        other => {
+            c.unsupported.insert(other.to_string());
+            return None;
+        }
+    }
+
+    // A literal black EDF is a dummy branch exactly as a literal `weight = 0`
+    // dielectric is, and dropping it here keeps the emission list *empty* for
+    // a graph that only looks emissive — which is what the consumer's
+    // "evaluate nothing when there is no emission" fast path keys on.
+    if literal_zero(node, "color") {
+        return None;
+    }
+
+    // MaterialX's `uniform_edf` defaults `color` to 1, and has no `weight`
+    // input of its own — the weight reaching it is the whole story, and a
+    // `multiply(uniform_edf, 100)` is how a bright emitter is authored.
+    let color = c.input_or(node, "color", Val::ONE);
+    Some(Emission { color, weight })
+}
+
 /// Follows an input to the node feeding it, whatever that node's type.
 ///
 /// For inputs that cannot be confused with an operand of another type — a
@@ -348,11 +460,11 @@ fn connected_node(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
     }
 }
 
-/// Follows a **BSDF-typed** input to the node feeding it, and `None` for one
-/// carrying anything else.
+/// Follows a **closure-typed** input to the node feeding it, and `None` for
+/// one carrying anything else.
 ///
-/// The type is what separates a BSDF branch from an operand beside it, and it
-/// has to be checked rather than inferred from position: `multiply`'s two
+/// The type is what separates a closure branch from an operand beside it, and
+/// it has to be checked rather than inferred from position: `multiply`'s two
 /// inputs are both ordinary connections, and only the declared type says
 /// which of them is the lobe and which the attenuation.
 ///
@@ -361,16 +473,25 @@ fn connected_node(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
 /// input parses as `float` (its schema default), and dropping a branch over
 /// that would trade this bug for a quieter one: a node declared
 /// `type="BSDF"` is a BSDF whatever the edge to it says.
-fn bsdf_input(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
-    let declared = node.input(name).is_some_and(|i| is_bsdf_type(&i.type_name));
+///
+/// The `closure` argument is what makes this work for emission at all: the
+/// same `mix` node declares `type="EDF"` on its branches in an emission tree,
+/// and asking for a BSDF there answers `None` for both.
+fn closure_input(c: &Compiler<'_>, node: &Node, name: &str, closure: Closure) -> Option<Node> {
+    let declared = node
+        .input(name)
+        .is_some_and(|i| is_closure_type(&i.type_name, closure));
     let target = connected_node(c, node, name)?;
-    (declared || is_bsdf_type(&target.type_name)).then_some(target)
+    (declared || is_closure_type(&target.type_name, closure)).then_some(target)
 }
 
-/// MaterialX's type name for a BSDF, as authored (`BSDF`, upper case in every
-/// document the specification's own examples ship).
-fn is_bsdf_type(type_name: &str) -> bool {
-    type_name.eq_ignore_ascii_case("bsdf")
+/// MaterialX's type name for a closure, as authored (`BSDF` / `EDF`, upper
+/// case in every document the specification's own examples ship).
+fn is_closure_type(type_name: &str, closure: Closure) -> bool {
+    match closure {
+        Closure::Bsdf => type_name.eq_ignore_ascii_case("bsdf"),
+        Closure::Edf => type_name.eq_ignore_ascii_case("edf"),
+    }
 }
 
 #[cfg(test)]
@@ -386,9 +507,9 @@ mod tests {
         let mut c = Compiler::new(&doc, &loader);
         let one = c.constant(Val::ONE);
         let node = doc.find("", root).unwrap().clone();
-        let mut lobes = Vec::new();
-        flatten(&mut c, &node, one, 0, &mut lobes);
-        (c.program, lobes)
+        let mut flat = Flattened::default();
+        flatten(&mut c, &node, one, 0, &mut flat);
+        (c.program, flat.lobes)
     }
 
     fn weights(text: &str, root: &str) -> Vec<(LobeKind, f32)> {

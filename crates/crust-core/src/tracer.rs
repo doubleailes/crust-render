@@ -1146,7 +1146,7 @@ fn trace_path(
                 stats.closest_hit += 1;
                 if let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
-                    let mut emitted = hit.mat.emitted_directional(cos_o);
+                    let mut emitted = hit.mat.emitted_at(&ray, &hit.rec, cos_o);
                     if emitted.length_squared() > 0.0 {
                         if let Some(m) = ray.medium() {
                             emitted *= m.transmittance(hit.rec.t);
@@ -1413,7 +1413,7 @@ fn trace_path(
         // way the emission pays the arriving segment's attenuation (an
         // emitter seen through tinted glass or smoke must dim).
         let cos_o = ray.direction().normalize().dot(rec.normal).abs();
-        let emitted = mat.emitted_directional(cos_o);
+        let emitted = mat.emitted_at(&ray, &rec, cos_o);
         let mut emit_here = Vec3A::ZERO;
         match &prev {
             Some(p) => {
