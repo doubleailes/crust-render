@@ -1255,9 +1255,26 @@ Measured per element (Ptex declined, so geometry only): **~57.7 M top-level tria
 across the 20 elements, the largest being `osOcean` (15.6 M), `isCoral` (14.5 M),
 `isMountainA` (6.7 M) and `isMountainB` (6.4 M). Worst single-element openusd composition
 peak is ~12.9 GiB (`isCoral`), which streaming keeps as a transient rather than a sum.
-Ptex over the whole island is 2 576 238 faces: **4.58 GiB** at the default 32x32 cap,
-1.84 GiB at 16x16, 736 MiB at 8x8 — and **494 GiB** at full resolution, which is why the
-cap is not an optimisation but the thing that makes the island possible.
+Ptex over the whole island is **3 618 textures / 2 564 203 faces**, and preloading them
+costs **5.98 GiB** — the often-quoted 4.58 GiB is the 32x32 base *without* the mip
+pyramid, which adds the expected 4/3. (1.84 GiB at a 16x16 base, 736 MiB at 8x8, and
+**494 GiB** at full resolution, which is why the cap was not an optimisation but the
+thing that made the island possible.)
+
+**Streaming replaces that cap** (`CRUST_PTEX_STREAM=1`, `docs/ptex_streaming.md`).
+Measured at 640x360 / 8 spp against the same build preloading: Ptex residency **5.98 ->
+0.61 GiB** (39 textures streamed, 3 579 preloaded under the size threshold), Ptex decode
+**84.8 s -> 14.0 s** so `Load assets` falls 01:40.7 -> 27.3 s, `Traverse prims` RSS
+**47.34 -> 41.48 GiB**, peak RSS **51.28 -> 47.08 GiB**, and `Render` costs **+1.2%** —
+nothing like the 2.8x the deliberately texture-bound sample scene shows, because the
+island is traversal-bound. The whole run finished 69 s sooner. Peak falls by less than
+residency does because peak lands at `Commit acceleration structure`, the SBVH build
+transient; the figure this feature moves is the traverse RSS.
+The cache held **3.28 MiB of a 2 GiB budget with zero evictions**: at this framing the
+ray cone asks for coarse levels, and a coarse level of a face is a few texels — reading
+only the resolution the frame resolves is exactly what preloading cannot do. The budget
+is a ceiling, not an allocation, so do not lower it on that number; a closer camera or a
+4K frame walks the same faces at finer levels.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust
 has no per-light camera-visibility, so both light the scene (the sky is doubled) and both

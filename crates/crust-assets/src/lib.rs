@@ -145,8 +145,23 @@ const MIN_PTEX_SHARE: usize = 1024 * 1024;
 /// remembered because its budget has to be revised downward as siblings
 /// arrive; see [`FileAssets::rebudget_ptex`].
 enum PtexHandle {
-    Preloaded { faces: usize, bytes: usize },
+    Preloaded {
+        faces: usize,
+        bytes: usize,
+        why: PreloadReason,
+    },
     Streamed(std::sync::Arc<PtexStream>),
+}
+
+/// Why a texture ended up preloaded. Reported separately because the three
+/// mean different things: the default is that streaming is off, `TooSmall` is
+/// the admission rule working as designed on 95% of a production stage's
+/// files, and `StreamFailed` is the one that wants looking at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreloadReason {
+    NotStreaming,
+    TooSmall,
+    StreamFailed,
 }
 
 impl Default for FileAssets {
@@ -234,9 +249,14 @@ impl FileAssets {
         for h in opened.iter() {
             out.textures += 1;
             match h {
-                PtexHandle::Preloaded { faces, bytes } => {
+                PtexHandle::Preloaded { faces, bytes, why } => {
                     out.faces += *faces as u64;
                     out.preloaded_bytes += *bytes as u64;
+                    match why {
+                        PreloadReason::TooSmall => out.below_threshold += 1,
+                        PreloadReason::StreamFailed => out.open_failed += 1,
+                        PreloadReason::NotStreaming => {}
+                    }
                 }
                 PtexHandle::Streamed(s) => {
                     let st = s.stats();
@@ -411,6 +431,10 @@ impl AssetLoader for FileAssets {
             return None;
         }
         let started = Instant::now();
+        // Why this texture ends up preloaded, if it does — reported apart,
+        // since "declined by policy" and "streaming broke" read very
+        // differently in the stats block.
+        let mut why = PreloadReason::NotStreaming;
         // Streaming first when it is on, preloading when it is not or when
         // the file declines it. The fallback matters for the same reason the
         // `.tx` path's does: turning residency on can make a render slower
@@ -428,6 +452,7 @@ impl AssetLoader for FileAssets {
                     let would = tex.preload_bytes(max_log2_from_env());
                     let floor = ptex_stream::stream_min_bytes_from_env();
                     if would < floor {
+                        why = PreloadReason::TooSmall;
                         debug!(
                             "Ptex {} would preload in {:.2} MiB, under the {:.0} MiB                              streaming floor — preloading it instead",
                             path.display(),
@@ -455,6 +480,7 @@ impl AssetLoader for FileAssets {
                     }
                 }
                 Err(e) => {
+                    why = PreloadReason::StreamFailed;
                     error!(
                         "Could not stream Ptex {}: {e} — preloading instead",
                         path.display()
@@ -477,6 +503,7 @@ impl AssetLoader for FileAssets {
                     .push(PtexHandle::Preloaded {
                         faces: PtexTexture::num_faces(&tex),
                         bytes: tex.bytes(),
+                        why,
                     });
                 Some(std::sync::Arc::new(tex))
             }
