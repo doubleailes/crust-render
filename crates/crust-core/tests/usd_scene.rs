@@ -1729,3 +1729,108 @@ fn the_emissive_sample_backdrop_does_not_emit() {
         .expect("hits the backdrop");
     assert_eq!(h.mat.emitted_at(&ray, &h.rec, 1.0), Vec3A::ZERO);
 }
+
+/// `--frame`: `samples/animation.usda` time-samples a sphere's translate
+/// (x = -2 at frame 1 to x = +2 at frame 10) and a card's points (y = 2 to
+/// y = 1), with the sphere's *default* translate parked off-screen at
+/// y = 20. Each attribute must resolve at the requested frame, linearly
+/// interpolated between samples, and held past either end.
+#[test]
+fn animated_stage_is_evaluated_at_the_requested_frame() {
+    let load = |frame: Option<f64>| {
+        Scene::from_usd_at_frame(&sample("animation.usda"), &crust_core::NoAssets, frame)
+            .expect("failed to open animation.usda")
+    };
+    // A ray straight down -z at height 0.6 through x; `None` if it misses
+    // everything in front of the floor's far edge.
+    let sphere_at = |scene: &Scene, x: f32| {
+        let ray = Ray::new(Vec3A::new(x, 0.6, 6.0), -Vec3A::Z);
+        scene.world.intersect(&ray, 0.001, 20.0).map(|h| h.rec.t)
+    };
+    // A ray straight down -y through the card's centre: the card's height
+    // is 5 - t (the floor is at t = 5).
+    let card_height = |scene: &Scene| {
+        let ray = Ray::new(Vec3A::new(2.0, 5.0, -1.0), -Vec3A::Y);
+        let t = scene
+            .world
+            .intersect(&ray, 0.001, 20.0)
+            .expect("card or floor")
+            .rec
+            .t;
+        5.0 - t
+    };
+
+    let first = load(Some(1.0));
+    assert!(
+        sphere_at(&first, -2.0).is_some(),
+        "frame 1: sphere at x = -2"
+    );
+    assert!(sphere_at(&first, 2.0).is_none());
+    assert!((card_height(&first) - 2.0).abs() < 1e-4);
+
+    let last = load(Some(10.0));
+    assert!(
+        sphere_at(&last, 2.0).is_some(),
+        "frame 10: sphere at x = +2"
+    );
+    assert!(sphere_at(&last, -2.0).is_none());
+    assert!((card_height(&last) - 1.0).abs() < 1e-4);
+
+    // Halfway: sphere centred at x = 0 (its front at z = 0.6, so t = 5.4),
+    // card halfway down.
+    let mid = load(Some(5.5));
+    let t = sphere_at(&mid, 0.0).expect("frame 5.5: sphere at x = 0");
+    assert!((t - 5.4).abs() < 1e-3, "sphere front at t = 5.4, got {t}");
+    assert!((card_height(&mid) - 1.5).abs() < 1e-4);
+
+    // Past the end: USD holds the last sample.
+    let after = load(Some(25.0));
+    assert!(sphere_at(&after, 2.0).is_some());
+
+    // No frame: every attribute reads its default, which is the historical
+    // behaviour — the sphere sits at its off-screen default translate.
+    let default = load(None);
+    for x in [-2.0, 0.0, 2.0] {
+        assert!(
+            sphere_at(&default, x).is_none(),
+            "default time: no sphere at x = {x}"
+        );
+    }
+}
+
+/// The frame drives the sampler's frame seed too, so an image sequence gets
+/// independent noise per frame; without a frame the stage's `crust:frame`
+/// (here unauthored, so 0) stands.
+#[test]
+fn frame_sets_the_sampler_seed() {
+    let seed = |frame: Option<f64>| {
+        Scene::from_usd_at_frame(&sample("animation.usda"), &crust_core::NoAssets, frame)
+            .expect("failed to open animation.usda")
+            .settings
+            .frame()
+    };
+    assert_eq!(seed(None), 0);
+    assert_eq!(seed(Some(7.0)), 7);
+    assert_eq!(seed(Some(7.75)), 7, "a subframe shares its frame's seed");
+    assert_eq!(seed(Some(-3.0)), -3);
+}
+
+/// Evaluating at a frame must not move anything that is not animated: the
+/// cornell box authors no time samples, so any frame imports the same scene.
+#[test]
+fn static_stage_is_unchanged_by_a_frame() {
+    let a = Scene::from_usd(&sample("cornellbox.usda")).expect("cornellbox");
+    let b = Scene::from_usd_at_frame(
+        &sample("cornellbox.usda"),
+        &crust_core::NoAssets,
+        Some(42.0),
+    )
+    .expect("cornellbox at frame 42");
+    assert_eq!(a.world.count(), b.world.count());
+    for (x, y) in [(0.0, 0.5), (-0.3, 0.2), (0.25, 0.8)] {
+        let ray = Ray::new(Vec3A::new(x, y, 3.0), -Vec3A::Z);
+        let ta = a.world.intersect(&ray, 0.001, 100.0).map(|h| h.rec.t);
+        let tb = b.world.intersect(&ray, 0.001, 100.0).map(|h| h.rec.t);
+        assert_eq!(ta, tb, "ray through ({x}, {y}) sees the same surface");
+    }
+}
