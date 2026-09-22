@@ -15,8 +15,13 @@ use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{Level, debug, error, info};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 enum LoggerLevel {
@@ -41,6 +46,13 @@ struct Cli {
     /// Verbose level
     #[arg(short, long, default_value = "info")]
     level: LoggerLevel,
+    /// Also write the log to a file named for the time the run started
+    /// (`crust-render-<UTC timestamp>.log`). Bare, it writes into the
+    /// current directory; given a directory, it writes there and creates it
+    /// if needed. The file receives the same events as the terminal, so
+    /// `-l debug --log-file` is how a full record of a render is kept.
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+    log_file: Option<std::path::PathBuf>,
     /// Bucket rendering
     #[arg(short, long, default_value_t = false)]
     bucket: bool,
@@ -160,12 +172,92 @@ fn write_png(
     img.save(path)
 }
 
+/// A filename-safe UTC timestamp, `YYYYMMDDTHHMMSSZ`.
+///
+/// Hand-rolled rather than pulled from `chrono` or `time`: neither is in the
+/// dependency graph, and adding one to name a file would be the largest
+/// dependency in this binary. `tracing-subscriber` formats its own line
+/// timestamps the same way and for the same reason, so the `Z` suffix here
+/// matches what the log lines themselves carry.
+///
+/// The civil-from-days conversion is Howard Hinnant's, shifting the era to
+/// start on 0000-03-01 so a leap day lands at the end of a 400-year cycle and
+/// the month arithmetic needs no table. Valid for any date this can be handed.
+fn utc_stamp(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        // A clock before 1970 is not worth a failure path; it only names a file.
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // Days since 1970-01-01 -> civil date.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    // `mp` counts from March; roll it back to a calendar month, and with it
+    // the year, which only advances once January is reached.
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + i64::from(month <= 2);
+
+    format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z")
+}
+
+/// Opens the run's log file, creating any missing directories in `dir`.
+///
+/// Fails the process rather than warning: nothing has been rendered yet when
+/// this runs, so exiting costs no work, and a `--log-file` that quietly
+/// produced no file would be discovered only after the render it was meant to
+/// record.
+fn open_log_file(dir: &Path) -> std::fs::File {
+    let path = dir.join(format!("crust-render-{}.log", utc_stamp(SystemTime::now())));
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "error: could not create log directory {}: {e}",
+            parent.display()
+        );
+        std::process::exit(1);
+    }
+    match std::fs::File::create(&path) {
+        Ok(f) => {
+            // Said on stderr rather than through `tracing`: the subscriber
+            // this file belongs to does not exist yet.
+            eprintln!("Logging to {}", path.display());
+            f
+        }
+        Err(e) => {
+            eprintln!("error: could not create log file {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     // CLI
     let cli = Cli::parse();
-    // Add tracing
-    tracing_subscriber::fmt()
-        .with_max_level(get_logger_level(cli.level))
+    // Add tracing. Two layers rather than one writer teed into both, because
+    // ANSI is a per-layer setting: a single writer would either colour the
+    // file with escape codes or strip the colour from the terminal. The
+    // registry that composes them costs no new dependency — `sharded-slab`
+    // and `thread_local` are already in the graph via the `fmt` feature.
+    //
+    // The file is written unbuffered, deliberately: several error paths here
+    // end in `std::process::exit`, which runs no destructors, so a
+    // `BufWriter` would drop exactly the lines explaining why the run
+    // stopped. A log at these volumes is not worth a flush-on-exit guard.
+    let log_file = cli.log_file.as_deref().map(open_log_file);
+    tracing_subscriber::registry()
+        .with(LevelFilter::from_level(get_logger_level(cli.level)))
+        .with(fmt::layer())
+        .with(log_file.map(|f| fmt::layer().with_ansi(false).with_writer(Mutex::new(f))))
         .init();
     let input = cli.input;
     let output = cli.output;
@@ -347,6 +439,75 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SystemTime` at a given Unix second, for pinning `utc_stamp` against
+    /// dates whose answers are known independently.
+    fn at(unix_secs: u64) -> SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs)
+    }
+
+    #[test]
+    fn utc_stamp_names_known_instants() {
+        assert_eq!(utc_stamp(at(0)), "19700101T000000Z");
+        assert_eq!(utc_stamp(at(1_774_267_884)), "20260323T121124Z");
+        // Last second of a year, and the first of the next.
+        assert_eq!(utc_stamp(at(1_767_225_599)), "20251231T235959Z");
+        assert_eq!(utc_stamp(at(1_767_225_600)), "20260101T000000Z");
+    }
+
+    #[test]
+    fn utc_stamp_handles_leap_years() {
+        // 2024 is a leap year: Feb 29 exists.
+        assert_eq!(utc_stamp(at(1_709_164_800)), "20240229T000000Z");
+        // 2000 is a leap year (divisible by 400) — the case a naive
+        // "divisible by 4, except by 100" rule gets wrong.
+        assert_eq!(utc_stamp(at(951_782_400)), "20000229T000000Z");
+        // 1900 was NOT a leap year, but it predates the epoch, so check the
+        // other end of the same rule: 2100 is not one either, and March 1
+        // must follow February 28.
+        assert_eq!(utc_stamp(at(4_107_456_000)), "21000228T000000Z");
+        assert_eq!(utc_stamp(at(4_107_542_400)), "21000301T000000Z");
+    }
+
+    #[test]
+    fn utc_stamp_is_filename_safe_and_sorts_chronologically() {
+        let mut prev = utc_stamp(at(0));
+        for day in 1..4000u64 {
+            // Every 37 days, so the walk crosses month and year boundaries
+            // at varied offsets rather than landing on the same day each time.
+            let t = utc_stamp(at(day * 37 * 86_400 + 3661));
+            assert!(
+                t.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{t} is not filename-safe"
+            );
+            assert_eq!(t.len(), 16, "{t} is not a fixed-width stamp");
+            // Fixed width and zero-padded, so lexical order is chronological
+            // — which is the whole reason for this format over a locale one.
+            assert!(t > prev, "{t} does not sort after {prev}");
+            prev = t;
+        }
+    }
+
+    #[test]
+    fn log_file_flag_is_optional_and_takes_an_optional_directory() {
+        // Absent: no file.
+        let c = Cli::try_parse_from(["crust-render"]).unwrap();
+        assert_eq!(c.log_file, None);
+        // Bare: the current directory.
+        let c = Cli::try_parse_from(["crust-render", "--log-file"]).unwrap();
+        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
+        // With a directory.
+        let c = Cli::try_parse_from(["crust-render", "--log-file", "renders/logs"]).unwrap();
+        assert_eq!(
+            c.log_file.as_deref(),
+            Some(std::path::Path::new("renders/logs"))
+        );
+        // Bare, followed by another flag: the flag must not be eaten as the
+        // directory, which is what `num_args = 0..=1` is there to guarantee.
+        let c = Cli::try_parse_from(["crust-render", "--log-file", "--bucket"]).unwrap();
+        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
+        assert!(c.bucket);
+    }
 
     #[test]
     fn tone_map_anchors_black_and_white() {
