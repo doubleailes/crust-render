@@ -23,9 +23,15 @@ cargo run --release                 # no -i → hard-coded procedural fallback (
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# -b/--bucket, -s/--samples (override spp), --strategy (power|balance|light|bsdf),
+# --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), -b/--bucket,
+# -s/--samples (override spp), --strategy (power|balance|light|bsdf),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --stats (per-phase profile + scene statistics)
+
+# Keep a full record of a render. The file gets the same events as the terminal
+# at the same -l level, so DEBUG has to be asked for; bare --log-file writes
+# into the working directory, and a directory argument is created if missing.
+cargo run --release -- -i samples/cornellbox.usda -l debug --log-file renders/logs
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- -i samples/curves.usda --stats
@@ -169,6 +175,20 @@ The practical consequence when adding a log: if you can write a stage that makes
 line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per
 sample — the finest granularity in the engine is per *pass* (`render_pass`), which is one
 line on an ordinary render and a handful on a guided one.
+
+`--log-file` tees the same stream to `crust-render-<YYYYMMDDTHHMMSSZ>.log`. Three
+details are load-bearing. It is **two `fmt` layers over a registry**, not one writer
+teed into both sinks, because ANSI is a per-layer setting — a single writer would
+either fill the file with escape codes or strip the colour from the terminal; the
+registry costs no new dependency, since `fmt` already pulls `sharded-slab` and
+`thread_local`. The file is **unbuffered**, because several error paths end in
+`std::process::exit`, which runs no destructors — a `BufWriter` would drop exactly the
+lines explaining why the run stopped. And `utc_stamp` **hand-rolls** the civil-from-days
+conversion (Hinnant's, era-shifted to March so leap days land at the end of a 400-year
+cycle) rather than taking `chrono` or `time`, neither of which is in the graph and
+either of which would be the largest dependency in this binary for the sake of naming a
+file. The format is fixed-width and zero-padded so lexical order is chronological;
+`utc_stamp_*` in `main.rs` pins that, plus the 2000-vs-2100 leap rule.
 
 Environment overrides, all of which exist to A/B an optimization against the behaviour it
 replaced: `CRUST_STREAM_IMPORT=0` forces the single-stage USD import; `CRUST_MESH_BAKE=0`
