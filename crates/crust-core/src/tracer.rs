@@ -12,7 +12,7 @@ use crate::{LightList, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
 // (per-pixel, per-sample) sampler; each per-event sub-domain hangs off the
@@ -149,7 +149,12 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
-        info!("world holds {} geometries", world.count());
+        debug!(
+            "Renderer over {} geometries, {} light(s), {} rayon thread(s)",
+            world.count(),
+            lights.count(),
+            rayon::current_num_threads()
+        );
         Renderer {
             camera,
             world,
@@ -160,6 +165,12 @@ impl Renderer {
     }
 
     pub fn with_volumes(mut self, regions: Vec<crate::volume::VolumeRegion>) -> Self {
+        if !regions.is_empty() {
+            // Only when there are any: `volumes.is_empty()` short-circuits
+            // every volume code path, and a line saying "0 regions" on every
+            // ordinary render would say nothing.
+            debug!("{} volume region(s) attached", regions.len());
+        }
         self.volumes = Volumes::new(regions);
         self
     }
@@ -277,7 +288,7 @@ impl Renderer {
             let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
             rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
-            info!(
+            debug!(
                 "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
                 k + 1,
                 cfg.train_iterations,
@@ -292,6 +303,12 @@ impl Renderer {
                 eff_guided = Some((stats.var_map, secs));
             }
             field.update(&samples, k + 1);
+            debug!(
+                "path guiding: field now holds {} spatial leaf/leaves after pass {}/{}",
+                field.leaf_count(),
+                k + 1,
+                cfg.train_iterations
+            );
             passes.push((buffer, stats.variance));
         }
 
@@ -326,7 +343,7 @@ impl Renderer {
             _ => true,
         };
 
-        info!(
+        debug!(
             "path guiding: final pass at {} spp ({})",
             self.settings.samples_per_pixel,
             if guide_final { "guided" } else { "unguided" }
@@ -362,7 +379,7 @@ impl Renderer {
         if total <= 0.0 {
             return passes.pop().expect("at least the final pass exists").0;
         }
-        info!(
+        debug!(
             "path guiding: blending {} passes, weight shares {:?}",
             passes.len(),
             weights
@@ -401,6 +418,32 @@ impl Renderer {
         let pixel_count = (self.settings.width * self.settings.height) as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
+        // Per *pass*, never per pixel or per ray: a guided render runs a
+        // handful of these and an ordinary one exactly one, so the whole
+        // block costs nothing an integrator would notice.
+        let pass_start = std::time::Instant::now();
+        debug!(
+            "pass: {} spp, seed {}, {}, adaptive {} (min {} spp, variance threshold {}), \
+             filter {} radius {}, strategy {:?}, guiding {}",
+            cfg.spp,
+            cfg.seed,
+            if cfg.tiled {
+                "16x16 tiles"
+            } else {
+                "scanlines"
+            },
+            cfg.adaptive,
+            self.settings.min_samples_per_pixel,
+            self.settings.variance_threshold,
+            self.settings.pixel_filter.name(),
+            self.settings.pixel_filter.radius(),
+            self.settings.sampling_strategy,
+            match gctx {
+                Some(g) if g.training => "training",
+                Some(_) => "guided",
+                None => "off",
+            },
+        );
 
         if cfg.tiled {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
@@ -483,6 +526,27 @@ impl Renderer {
             }
         }
 
+        let elapsed = pass_start.elapsed();
+        debug!(
+            "pass done in {:?}: {} camera rays, {} closest-hit, {} shadow, {} vertices, \
+             {:.2} rays/camera ray, roulette killed {}/{}, ended {} escaped / {} at depth, \
+             mean variance {:.3e}",
+            elapsed,
+            rays.camera_rays,
+            rays.closest_hit,
+            rays.shadow_rays,
+            rays.vertices,
+            if rays.camera_rays > 0 {
+                rays.total_rays() as f64 / rays.camera_rays as f64
+            } else {
+                0.0
+            },
+            rays.rr_killed,
+            rays.rr_tested,
+            rays.ended_escaped,
+            rays.ended_depth,
+            variance_sum / pixel_count,
+        );
         (
             buffer,
             all_samples,

@@ -148,6 +148,28 @@ cargo test --workspace --no-fail-fast
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
 
+**The level is decided by whether the line scales with the scene, not by how interesting
+it is.** A default render prints four `INFO` lines — what is being rendered, how long it
+took, and the two images written — and that count does not change between a cornell box
+and the Moana island. So:
+
+- **`INFO`** is for facts about *this render*, emitted a bounded number of times whatever
+  the stage holds: the resolution/spp/depth banner, the elapsed time, each output path,
+  the once-per-process residency policy (`FileAssets::new`'s streaming notices, including
+  the one explaining why `CRUST_PTEX_STREAM=1` alone streams nothing), and the path
+  guiding ΔEff verdict, which announces that the final pass will render unguided.
+- **`DEBUG`** is for anything whose line count grows with the input — per prim, per
+  material, per texture, per prototype, per chunk, per pass. The island binds 3 618 Ptex
+  textures and composes 20 subtrees; one line each is a debugging tool, not a progress
+  report. `--stats` is where the *totals* belong.
+- **`WARN`** keeps its own meaning and was not touched: something authored was refused,
+  approximated or skipped, and the image differs from what the stage asked for.
+
+The practical consequence when adding a log: if you can write a stage that makes your new
+line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel or per
+sample — the finest granularity in the engine is per *pass* (`render_pass`), which is one
+line on an ordinary render and a handful on a guided one.
+
 Environment overrides, all of which exist to A/B an optimization against the behaviour it
 replaced: `CRUST_STREAM_IMPORT=0` forces the single-stage USD import; `CRUST_MESH_BAKE=0`
 forces every mesh to be instanced instead of baking single-placement geometry flat (output
