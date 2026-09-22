@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{Level, debug, error, info};
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -128,6 +128,25 @@ impl From<Filter> for PixelFilter {
         })
         .expect("CLI filter names mirror PixelFilter::from_name")
     }
+}
+
+/// Target the `--stats` report is emitted under.
+///
+/// It exists so the report can be exempted from `-l`: `--stats` is an
+/// explicit request for the report, and honouring it only at `-l info` or
+/// below would mean `--stats -l warn` silently produced nothing. The filter
+/// in `main` admits this target at any level and applies `-l` to everything
+/// else, which is what keeps the report a log event — reaching `--log-file`
+/// like any other — without letting the log level decide whether it appears.
+const STATS_TARGET: &str = "crust_render::stats";
+
+/// Whether an event at `level` on `target` survives a `-l max` filter.
+///
+/// Named rather than inlined into the closure so it can be tested: the whole
+/// point of it is the one case that is easy to regress into silence —
+/// [`STATS_TARGET`] passing at a level that rejects everything else.
+fn event_enabled(target: &str, level: &Level, max: Level) -> bool {
+    target == STATS_TARGET || *level <= max
 }
 
 fn get_logger_level(level: LoggerLevel) -> Level {
@@ -254,8 +273,14 @@ fn main() {
     // `BufWriter` would drop exactly the lines explaining why the run
     // stopped. A log at these volumes is not worth a flush-on-exit guard.
     let log_file = cli.log_file.as_deref().map(open_log_file);
+    let level = get_logger_level(cli.level);
     tracing_subscriber::registry()
-        .with(LevelFilter::from_level(get_logger_level(cli.level)))
+        // `-l` for everything except the `--stats` report, which the user
+        // asked for by flag and which therefore is not the log level's to
+        // suppress. See `STATS_TARGET`.
+        .with(filter_fn(move |meta| {
+            event_enabled(meta.target(), meta.level(), level)
+        }))
         .with(fmt::layer())
         .with(log_file.map(|f| fmt::layer().with_ansi(false).with_writer(Mutex::new(f))))
         .init();
@@ -406,19 +431,27 @@ fn main() {
     // only exist in a feature-on build.
     #[cfg(feature = "traversal-stats")]
     if cli.stats {
+        // Accumulated into one string and emitted as a single event, for the
+        // reason the report below is: a `println!` per row would leave these
+        // lines out of `--log-file`, and one event per row would stamp each
+        // of them with a timestamp the table has no column for.
         use crust_core::rt::traversal_stats as ts;
+        use std::fmt::Write as _;
         let rays = ray_stats.camera_rays.max(1) as f64;
         let per = |n: u64| n as f64 / rays;
-        println!("{}", "-".repeat(84));
-        println!("BVH Traversal (per camera ray)");
-        println!("{}", "-".repeat(84));
+        let rule = "-".repeat(84);
+        let mut out = String::new();
+        // Infallible: `write!` into a String only fails if the formatter
+        // does, and none of these arguments can.
+        let _ = write!(out, "\n{rule}\nBVH Traversal (per camera ray)\n{rule}");
         for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
             let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
             if q == 0 {
                 continue;
             }
-            println!(
-                "  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
+            let _ = write!(
+                out,
+                "\n  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
                 per(q),
                 per(nodes),
                 per(leaves),
@@ -426,13 +459,21 @@ fn main() {
                 per(scalars),
             );
         }
+        info!(target: STATS_TARGET, "{out}");
     }
 
     if cli.stats {
-        // Straight to stdout, not through `tracing`: this is a report to
-        // read, not a log line, and it should not be filtered out by the
-        // log level or interleaved with per-prim messages.
-        println!("{stats}");
+        // Through `tracing` rather than `println!`, so the report reaches
+        // every sink the run configured — `--log-file` above all, which is
+        // where a record of a render is least useful without its profile.
+        // The level cannot suppress it (see `STATS_TARGET`), so the two
+        // reasons it used to bypass the logger are both answered.
+        //
+        // One event rather than one per line, and opened with a newline: a
+        // per-line emit would stamp all 40 rows, and without the newline the
+        // event prefix would indent the first rule and only that one, so the
+        // table's top edge would not line up with the rest of it.
+        info!(target: STATS_TARGET, "\n{stats}");
     }
 }
 
@@ -507,6 +548,49 @@ mod tests {
         let c = Cli::try_parse_from(["crust-render", "--log-file", "--bucket"]).unwrap();
         assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
         assert!(c.bucket);
+    }
+
+    #[test]
+    fn the_stats_report_survives_every_log_level() {
+        // `--stats` is an explicit request, so no `-l` may suppress it —
+        // including the quietest, which is the regression this guards.
+        for max in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            assert!(
+                event_enabled(STATS_TARGET, &Level::INFO, max),
+                "the stats report was filtered out at -l {max}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_other_target_still_obeys_the_level() {
+        // The exemption is for one target, not a hole in the filter.
+        assert!(!event_enabled("crust_render", &Level::INFO, Level::ERROR));
+        assert!(!event_enabled(
+            "crust_core::scene::usd_import",
+            &Level::DEBUG,
+            Level::INFO
+        ));
+        assert!(event_enabled("crust_render", &Level::ERROR, Level::ERROR));
+        assert!(event_enabled(
+            "crust_core::tracer",
+            &Level::DEBUG,
+            Level::DEBUG
+        ));
+        assert!(event_enabled("crust_assets", &Level::WARN, Level::INFO));
+        // A near-miss on the target name is not the stats target.
+        assert!(!event_enabled("stats", &Level::INFO, Level::ERROR));
+        assert!(!event_enabled(
+            "crust_render::stats_extra",
+            &Level::INFO,
+            Level::ERROR
+        ));
     }
 
     #[test]
