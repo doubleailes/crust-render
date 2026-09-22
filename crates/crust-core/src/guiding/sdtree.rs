@@ -160,8 +160,10 @@ impl SDTree {
         }
     }
 
-    /// Number of spatial leaves (test/diagnostics helper).
-    #[allow(dead_code)]
+    /// Number of spatial leaves — one guiding distribution each.
+    ///
+    /// Surfaced through [`crate::guiding::GuidingField::leaf_count`], which
+    /// is what `render_guided` logs per training pass.
     pub fn leaf_count(&self) -> usize {
         self.nodes
             .iter()

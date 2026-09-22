@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::Mat4 as GMat4;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::camera::Camera;
 use crate::filter::PixelFilter;
@@ -250,7 +250,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             if ctx.camera.is_none() {
                 match build_camera(stage, &prim, &ctx.settings) {
                     Some(c) => {
-                        info!("Imported USD camera at {}", prim.path());
+                        debug!("Imported USD camera at {}", prim.path());
                         ctx.camera = Some(c);
                     }
                     None => warn!("Failed to build camera from {}", prim.path()),
@@ -288,6 +288,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
 
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
 fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
+    let started = Instant::now();
+    let masked = mask.as_ref().map(|p| p.to_string());
     let mut builder = Stage::builder().load(InitialLoadSet::LoadAll);
     if let Some(p) = mask {
         // Fallible since openusd 0.7: a mask path must be an absolute prim
@@ -301,10 +303,19 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
         })?;
         builder = builder.mask(mask);
     }
-    builder.open(path_str).map_err(|e| crate::Error::UsdOpen {
+    let stage = builder.open(path_str).map_err(|e| crate::Error::UsdOpen {
         path: path.to_path_buf(),
         message: e.to_string(),
-    })
+    })?;
+    match &masked {
+        Some(m) => debug!(
+            "Composed {} masked to {m} in {:?}",
+            path.display(),
+            started.elapsed()
+        ),
+        None => debug!("Composed {} in {:?}", path.display(), started.elapsed()),
+    }
+    Ok(stage)
 }
 
 pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
@@ -327,6 +338,11 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
+    debug!(
+        "Opened index stage (payloads unloaded) for {} in {:?}",
+        path.display(),
+        open_start.elapsed()
+    );
     // Render settings come first — the camera importer needs the aspect ratio.
     let settings = import_render_settings(&index);
     let chunks = stream_roots(&index);
@@ -353,6 +369,10 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     let traverse_start = Instant::now();
     if chunks.is_empty() {
         // Small or flat stage: one pass, exactly as before.
+        debug!(
+            "Single-stage import (fewer than {MIN_STREAM_CHUNKS} subtrees, or \
+             CRUST_STREAM_IMPORT=0)"
+        );
         let stage = open_stage(path, path_str, None)?;
         traverse_into(
             &stage,
@@ -362,7 +382,12 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         );
     } else {
         debug!("Streaming import over {} subtrees", chunks.len());
-        for chunk in &chunks {
+        for (n, chunk) in chunks.iter().enumerate() {
+            // Per chunk rather than per prim: this is the loop whose memory
+            // high-water mark the streaming import exists to bound, so the
+            // running totals are what say whether it is doing its job.
+            let chunk_start = Instant::now();
+            debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
             let stage = open_stage(path, path_str, Some(chunk.clone()))?;
             // Traverse from the root, not from `chunk`: a mask keeps the
             // masked path's *ancestors* populated, so starting at the
@@ -380,6 +405,17 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
             // be freed while it is live.
             ctx.caches.epoch += 1;
             ctx.caches.materials.epoch = ctx.caches.epoch;
+            debug!(
+                "Chunk {}/{} done in {:?} — running totals: {} geometries, {} light(s), \
+                 {} volume region(s), {} mesh placement(s) pending",
+                n + 1,
+                chunks.len(),
+                chunk_start.elapsed(),
+                ctx.world.count(),
+                ctx.lights.count(),
+                ctx.volumes.len(),
+                ctx.pending_meshes.len()
+            );
         }
     }
 
@@ -391,6 +427,15 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     let asset_time = ctx.caches.asset_time;
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
     let traverse_mem = MemorySample::now();
+    debug!(
+        "Traversal done in {:?} ({:?} of it host asset decoding): {} geometries, \
+         {} light(s), {} volume region(s)",
+        traverse_elapsed,
+        asset_time,
+        ctx.world.count(),
+        ctx.lights.count(),
+        ctx.volumes.len()
+    );
 
     let camera = ctx.camera.unwrap_or_else(|| {
         warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
@@ -406,6 +451,7 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     let commit_start = Instant::now();
     let committed = ctx.world.commit();
     let commit_elapsed = commit_start.elapsed();
+    debug!("Top-level acceleration structure committed in {commit_elapsed:?}");
     let commit_mem = MemorySample::now();
 
     // Memory is sampled where each phase actually ended, not here — the
@@ -518,7 +564,7 @@ fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
     let density_scale = custom_f32(prim, "crust:volume:densityScale").unwrap_or(1.0);
     let half = custom_f32(prim, "size").map_or(0.5, |s| s * 0.5);
 
-    info!(
+    debug!(
         "Imported {} volume at {} (densityScale={})",
         ty,
         prim.path(),
@@ -2183,7 +2229,7 @@ fn nested_instancer_parts(
         }
     }
 
-    info!(
+    debug!(
         "Expanded nested PointInstancer at {} ({} instances -> {} part(s))",
         prim.path(),
         layout.placements.len(),
@@ -2409,12 +2455,27 @@ fn prototype_parts(
 ) -> Arc<Vec<ProtoPart>> {
     let key = (caches.epoch, proto_path.to_string());
     if let Some(parts) = caches.protos.get(&key) {
+        debug!(
+            "Prototype {} (epoch {}): reusing {} cached part(s)",
+            key.1,
+            key.0,
+            parts.len()
+        );
         return parts.clone();
     }
+    let started = Instant::now();
     let root = prim_at(stage, proto_path.clone());
     let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
     if parts.is_empty() {
         warn!("Prototype {} contributed no geometry", key.1);
+    } else {
+        debug!(
+            "Prototype {} (epoch {}, nesting depth {depth}): built {} part(s) in {:?}",
+            key.1,
+            key.0,
+            parts.len(),
+            started.elapsed()
+        );
     }
     caches.protos.insert(key, parts.clone());
     parts
@@ -2456,7 +2517,7 @@ fn emit_point_instancer(
         );
     }
 
-    info!(
+    debug!(
         "Imported PointInstancer at {} ({} instances of {} prototype(s), {} geometries attached{})",
         prim.path(),
         layout.placements.len(),
@@ -2707,7 +2768,7 @@ fn curve_segments(
         debug!("BasisCurves at {} produced no segments", prim.path());
         return None;
     }
-    info!(
+    debug!(
         "Imported BasisCurves at {} ({} {} curves, {} segments, {} cubic spans)",
         prim.path(),
         counts.len(),
@@ -3035,7 +3096,7 @@ fn emit_dome_light(
         Vec3A::new(m[2][0], m[2][1], m[2][2]).normalize_or(Vec3A::Z),
     );
 
-    info!(
+    debug!(
         "Imported DomeLight at {} (tint={:?}, {})",
         prim.path(),
         tint,
@@ -3153,6 +3214,10 @@ fn resolve_material(
         .and_then(|b| b.direct_binding("").ok().flatten());
 
     let Some(mat_path) = mat_path else {
+        debug!(
+            "{} has no material binding — using default grey OpenPBR",
+            prim.path()
+        );
         return caches.materials.default_material();
     };
 
@@ -3160,6 +3225,11 @@ fn resolve_material(
     if let Some(hit) = caches.materials.by_path.get(&key) {
         return hit.clone();
     }
+    // Per *distinct* material, not per binding: a stage binding one material
+    // to 10 000 prims logs this once. The key carries the cache epoch, which
+    // is what keeps one streamed chunk's `/__Prototype_N` apart from the
+    // next's — see `MaterialCache::key`.
+    debug!("Resolving material {mat_path} (epoch {})", key.0);
     let resolved = resolve_material_uncached(stage, &mat_path, caches);
     caches.materials.by_path.insert(key, resolved.clone());
     resolved
@@ -3195,6 +3265,10 @@ fn resolve_material_uncached(
             if let Some((file, node)) = mtlx_reference(stage, mat_path)
                 && let Some(m) = load_mtlx_material(&file, &node, caches)
             {
+                debug!(
+                    "Material {mat_path} resolved through the MaterialX reference {}</{node}>",
+                    file.display()
+                );
                 return m;
             }
         };
@@ -3222,6 +3296,9 @@ fn resolve_material_uncached(
     // Decoding that gives a material with every parameter at its default: the
     // island rendered uniformly pale and glossy instead of matte dark rock.
     if has_shader_id(stage, mat_path, "PxrDisneyBsdf") {
+        debug!(
+            "Material {mat_path}: PxrDisneyBsdf child shader — decoding it off the Material prim"
+        );
         return Arc::new(disney_to_openpbr(stage, mat_path, caches));
     }
 
@@ -3597,7 +3674,14 @@ fn load_uv_texture(
     }
     let started = Instant::now();
     let loaded = caches.assets.load_texture(path, space);
-    caches.asset_time += started.elapsed();
+    let elapsed = started.elapsed();
+    caches.asset_time += elapsed;
+    if loaded.is_none() {
+        debug!(
+            "Texture {} ({space:?}) not loadable by the host",
+            path.display()
+        );
+    }
     caches.materials.textures.insert(key, loaded.clone());
     loaded
 }
@@ -3888,6 +3972,22 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         filter = filter.with_radius(radius);
     }
 
+    // What the stage asked for, before the CLI's own overrides. Every field
+    // here silently falls back to a default when unauthored, so this is the
+    // line that separates "the scene set it" from "nobody did".
+    debug!(
+        "RenderSettings at {}: {w}x{h}, {spp} spp (min {min_spp}, variance threshold \
+         {variance}), max depth {max_depth}, frame {frame}, strategy {strategy:?}, \
+         filter {} radius {}, guiding {}",
+        prim.path(),
+        filter.name(),
+        filter.radius(),
+        if guiding {
+            format!("on ({guiding_iters} training iterations, guide probability {guiding_prob})")
+        } else {
+            "off".to_string()
+        }
+    );
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
         .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)

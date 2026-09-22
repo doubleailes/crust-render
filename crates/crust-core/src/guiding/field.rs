@@ -78,6 +78,17 @@ impl GuidingField {
         &self.cfg
     }
 
+    /// Spatial leaves the tree currently holds — one distribution each.
+    ///
+    /// The one number that says whether a training pass learned any
+    /// structure: the field starts at a single leaf covering the whole scene
+    /// and subdivides where flux concentrates, so a count that stays at 1 is
+    /// a field that is guiding nothing. Reported per training pass at
+    /// `DEBUG` by `render_guided`.
+    pub fn leaf_count(&self) -> usize {
+        self.tree.leaf_count()
+    }
+
     /// Whether the distribution at `pos` has been trained. The integrator
     /// must use the mixture pdf iff this holds, regardless of which strategy
     /// the α-coin picks.

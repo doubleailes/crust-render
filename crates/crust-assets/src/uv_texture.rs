@@ -196,6 +196,22 @@ pub struct UvTexture {
 /// It is a *cap*, not a resize: a smaller tile is kept as authored.
 pub const DEFAULT_MAX_EDGE: usize = 1024;
 
+/// The edge cap actually in effect, `CRUST_TEX_MAX` included.
+///
+/// Public and named for the same reason [`max_log2_from_env`] is on the Ptex
+/// side: the cap is what answers "why is this texture only 1024 wide", so the
+/// probes and the residency log read it from here rather than each re-parsing
+/// the variable.
+///
+/// [`max_log2_from_env`]: crate::max_log2_from_env
+pub fn max_edge_from_env() -> usize {
+    std::env::var("CRUST_TEX_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(DEFAULT_MAX_EDGE)
+}
+
 /// Are mip pyramids built? `CRUST_TEX_MIP=0` keeps each tile at its single
 /// capped level, which is the pre-pyramid behaviour bit for bit — a one-level
 /// tile has nothing to select between — and costs a third less memory. The
@@ -223,11 +239,7 @@ impl UvTexture {
     /// probe — does not have to mutate a process-global the rest of the
     /// program is reading.
     pub fn open_with(path: &Path, space: ColorSpace, mip: bool) -> Option<UvTexture> {
-        let max_edge = std::env::var("CRUST_TEX_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v >= 1)
-            .unwrap_or(DEFAULT_MAX_EDGE);
+        let max_edge = max_edge_from_env();
 
         let name = path.to_string_lossy().into_owned();
         let token = TileToken::detect(&name);

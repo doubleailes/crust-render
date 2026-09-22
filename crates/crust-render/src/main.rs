@@ -173,9 +173,10 @@ fn main() {
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
     let assets = FileAssets::new();
+    let load_start = Instant::now();
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
-        debug!("Scene loaded at path: {:?}", input_path);
+        debug!("Loading USD scene from {}", input_path.display());
         match Scene::from_usd_with_assets(input_path, &assets) {
             Ok(scene) => scene,
             Err(e) => {
@@ -184,10 +185,12 @@ fn main() {
             }
         }
     } else {
+        debug!("No -i/--input given: building the procedural fallback scene");
         let (world, lights) = simple_scene();
         let (camera, settings) = get_settings();
         Scene::new(camera, world, lights, settings)
     };
+    debug!("Scene built in {:?}", load_start.elapsed());
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
@@ -196,19 +199,25 @@ fn main() {
     // output are timed here.
     let mut stats = scene.stats;
     let mut settings = match cli.samples {
-        Some(spp) => scene.settings.with_samples_per_pixel(spp),
+        Some(spp) => {
+            debug!("--samples {spp} overrides the scene's crust:samplesPerPixel");
+            scene.settings.with_samples_per_pixel(spp)
+        }
         None => scene.settings,
     };
     if let Some(strategy) = cli.strategy {
+        debug!("--strategy {strategy:?} overrides the scene's crust:samplingStrategy");
         settings = settings.with_sampling_strategy(strategy.into());
     }
     // --filter replaces the scene's filter (at the filter's default radius);
     // --filter-radius then resizes whichever filter is in effect, so it also
     // works alone to widen the scene-authored one.
     if let Some(filter) = cli.filter {
+        debug!("--filter {filter:?} overrides the scene's crust:pixelFilter");
         settings = settings.with_pixel_filter(filter.into());
     }
     if let Some(radius) = cli.filter_radius {
+        debug!("--filter-radius {radius} overrides the filter's own radius");
         settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
     }
     // A BVH can only cull primitives whose bounds are small against the
@@ -217,7 +226,7 @@ fn main() {
     {
         let (n, scene_diag, mean_diag, max_diag) = world.primitive_extents();
         if n > 0 && scene_diag > 0.0 {
-            info!(
+            debug!(
                 "top-level extents: {n} prims, scene diagonal {scene_diag:.1}, \
                  mean prim {mean_diag:.1} ({:.4} of scene), max prim {max_diag:.1} ({:.4})",
                 mean_diag / scene_diag,
@@ -234,16 +243,17 @@ fn main() {
     let start = Instant::now();
     // World
 
-    debug!("World loaded with {} objects", world.count());
-    debug!("Lights loaded with {} objects", lights.count());
     // Camera
+    let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
-    info!("Let's start rendering...");
-    if cli.bucket {
-        info!("Bucket rendering is enabled");
-    } else {
-        info!("Bucket rendering is disabled");
-    }
+    info!(
+        "Rendering {}x{} at {} spp, max depth {} ({} order)",
+        img_width,
+        img_height,
+        settings.samples_per_pixel(),
+        settings.max_depth(),
+        if cli.bucket { "bucket" } else { "scanline" }
+    );
     // Progress bar over the engine's (completed, total) callback — the
     // total (rows vs. tiles) is only known once the pass starts.
     let bar = ProgressBar::new(0);
@@ -272,10 +282,13 @@ fn main() {
     // once the last one has stopped.
     stats.textures = assets.texture_cache_stats();
     stats.ptex = assets.ptex_stats();
-    info!("Time elapsed in rendering() is: {:?}", duration);
+    info!("Render finished in {duration:?}");
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
-    let (img_width, img_height) = settings.get_dimensions();
+    debug!(
+        "Writing {}x{} linear EXR to {}",
+        img_width, img_height, output
+    );
     match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
@@ -284,6 +297,7 @@ fn main() {
         }
     }
     let png_path = Path::new(&output).with_extension("png");
+    debug!("Tone mapping to sRGB PNG at {}", png_path.display());
     match write_png(&buffer, img_width, img_height, &png_path) {
         Ok(_) => info!("Image written to: {:?}", png_path),
         Err(e) => {
@@ -291,7 +305,9 @@ fn main() {
             std::process::exit(1);
         }
     }
-    stats.record("Write output", 0, output_start.elapsed());
+    let output_elapsed = output_start.elapsed();
+    stats.record("Write output", 0, output_elapsed);
+    debug!("Output written in {output_elapsed:?}");
 
     // Traversal counts, when built with the diagnostic feature. Printed
     // separately from RenderStats because they come from the kernel and

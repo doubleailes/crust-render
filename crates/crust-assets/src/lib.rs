@@ -230,6 +230,20 @@ impl FileAssets {
                 ),
             }
         }
+        // The residency policy in one line, both switches off included:
+        // "why is this texture only 32x32" is a question the caps answer and
+        // nothing else records.
+        debug!(
+            "Texture residency: UV {} (CRUST_TEX_MAX={}), Ptex {} (CRUST_PTEX_MAX_LOG2={})",
+            if streaming { "streaming" } else { "preloaded" },
+            uv_texture::max_edge_from_env(),
+            if ptex_streaming {
+                "streaming"
+            } else {
+                "preloaded"
+            },
+            max_log2_from_env(),
+        );
         FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
@@ -426,10 +440,14 @@ impl FileAssets {
                     uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
                 })
             else {
+                debug!(
+                    "No streamable backing at {} — trying the next candidate",
+                    candidate.display()
+                );
                 continue;
             };
             let (w, h) = tex.size();
-            info!(
+            debug!(
                 "Streaming texture {} ({} chart(s), {}x{} level 0, {} level(s), {} tiles, {:?}) \
                  in {:?}",
                 candidate.display(),
@@ -460,7 +478,7 @@ impl AssetLoader for FileAssets {
             _ => load_image_environment(path),
         };
         match &loaded {
-            Some(map) => info!(
+            Some(map) => debug!(
                 "Loaded environment {} ({}x{}) in {:?}",
                 path.display(),
                 map.width(),
@@ -493,9 +511,15 @@ impl AssetLoader for FileAssets {
         {
             return Some(streamed);
         }
+        if self.streaming {
+            debug!(
+                "No .tx backing for {} — preloading it instead",
+                path.display()
+            );
+        }
         let started = Instant::now();
         let loaded = UvTexture::open(path, space)?;
-        info!(
+        debug!(
             "Loaded texture {} ({} tile(s), {}x{} each, {:.1} MiB resident, {:?}) in {:?}",
             path.display(),
             loaded.tile_count(),
@@ -600,7 +624,7 @@ impl AssetLoader for FileAssets {
                         // total stays what was asked for rather than growing with
                         // the texture count.
                         self.rebudget_ptex(&opened);
-                        info!(
+                        debug!(
                             "Streaming Ptex {} ({} faces) opened in {:?} — {} textures now sharing \
                          {:.0} MiB",
                             path.display(),
@@ -623,7 +647,7 @@ impl AssetLoader for FileAssets {
         }
         match PtexColor::open(path) {
             Ok(tex) => {
-                info!(
+                debug!(
                     "Loaded Ptex {} ({} faces, {:.1} MiB resident) in {:?}",
                     path.display(),
                     PtexTexture::num_faces(&tex),
