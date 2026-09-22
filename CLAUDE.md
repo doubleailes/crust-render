@@ -764,9 +764,26 @@ Schema mapping:
     promotion" — and keeps the two algebras apart: BSDF pools take a weighted
     **mean** (two diffuse leaves are one surface shared between them) while
     emission **sums** (two emitters are twice the light). And neither the
-    weight nor the colour is clamped: `multiply(uniform_edf, 100)` is how a
-    document authors a bright emitter, and this is the one shading input for
+    weight nor the colour is clamped above: `multiply(uniform_edf, 100)` is how
+    a document authors a bright emitter, and this is the one shading input for
     which a value above 1.0 is meaningful rather than an authoring error.
+    **The weight is not a scalar**, and reading it as one is a quiet, severe
+    bug: MaterialX declares `ND_multiply_edfC`, a `multiply` on an EDF by a
+    `color3`, so a tinted emitter is ordinary authoring and `Mul` promotes arity
+    into the weight slot per channel. Taking lane 0 alone turned a weight of
+    `(0, 0.6, 0.9)` into a **black** emitter and `(1, 0.5, 0.2)` into a neutral
+    one at full strength. `reduce()` reads both factors with `Val::rgb`, which
+    broadcasts an arity-1 value so the `float` case is unchanged, and sanitises
+    each factor *before* the product — clamping the product instead would let
+    two negative channels multiply into positive light. Non-finite is refused
+    per channel here where the lobe loop drops the whole lobe, and that
+    asymmetry is structural: emission sums, so a zeroed channel contaminates
+    nothing, while a lobe's weight is a *divisor* (`Pool::w` normalises every
+    colour in its pool). The **BSDF** lobe weight still reads lane 0, and
+    deliberately: `ND_multiply_bsdfC` exists too, but every OpenPBR coverage
+    field it feeds (`base_weight`, `specular_weight`, `coat_weight`,
+    `fuzz_weight`, `subsurface_weight`) is an `f32`, so a colour there has
+    nowhere to go short of folding the tint into the lobe's own colour.
     `reduce()` factors the summed radiance by its **peak channel**, so
     `emission_color` is always a chromaticity in `[0,1]³` and the range lives
     in `emission_luminance`; factoring by Rec.709 luminance instead — what

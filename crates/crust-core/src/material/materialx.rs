@@ -525,26 +525,37 @@ pub fn reduce(flat: &Flattened, slots: &[Val], base: &OpenPBR) -> (OpenPBR, Opti
     // pools take a weighted *mean* because two diffuse leaves describe one
     // surface shared between them; two emitters are twice the light.
     //
-    // Neither the weight nor the colour is clamped, which is deliberate and
-    // is the whole point of reading an EDF at all. `multiply(uniform_edf, 100)`
-    // is how a MaterialX document authors a bright emitter, and the colour can
-    // come straight off an `image` node reading an HDR file. Clamping either
-    // would put back the very ceiling this path exists to remove — emission is
-    // the one shading input for which a value above 1.0 is meaningful rather
-    // than an authoring error (an albedo above 1 creates energy; radiance
-    // above 1 is just a bright light). Only NaN and negatives are refused,
-    // matching what the lobe loop does to a weight above.
+    // Neither the weight nor the colour is clamped *above*, which is deliberate
+    // and is the whole point of reading an EDF at all. `multiply(uniform_edf,
+    // 100)` is how a MaterialX document authors a bright emitter, and the
+    // colour can come straight off an `image` node reading an HDR file.
+    // Clamping either would put back the very ceiling this path exists to
+    // remove — emission is the one shading input for which a value above 1.0 is
+    // meaningful rather than an authoring error (an albedo above 1 creates
+    // energy; radiance above 1 is just a bright light).
+    //
+    // **Both factors are read as RGB**, and the weight is not a scalar. MaterialX
+    // declares `ND_multiply_edfC` — `multiply` on an EDF by a `color3` — so a
+    // tinted emitter is ordinary authoring, and `Op::Binary { Mul }` promotes
+    // arity through `Val::zip`, landing the tint in the weight slot per channel.
+    // Reading lane 0 alone turned a weight of `(0, 0.6, 0.9)` into a *black*
+    // emitter and `(1, 0.5, 0.2)` into a neutral one at full strength. `rgb()`
+    // broadcasts an arity-1 `Val`, so a `float` weight still scales all three
+    // channels and the scalar path is unchanged.
+    //
+    // Each factor is sanitised *before* the product rather than after, which is
+    // what stops two negative channels multiplying into positive light.
+    //
+    // Non-finite is refused per channel, where the lobe loop above drops the
+    // whole lobe — and the difference is structural, not stylistic. Emission
+    // **sums**, so a zeroed channel contaminates nothing; a lobe's weight is a
+    // *divisor* (`Pool::w` normalises every colour in its pool), so a NaN there
+    // has to take the lobe with it. Keeping `radiance` finite and non-negative
+    // is also what the `peak` factorisation below relies on.
+    let sane = |v: Vec3A| Vec3A::select(v.is_finite_mask(), v, Vec3A::ZERO).max(Vec3A::ZERO);
     let mut radiance = Vec3A::ZERO;
     for t in &flat.emission {
-        let w = get(t.weight).x();
-        if !w.is_finite() || w <= 0.0 {
-            continue;
-        }
-        let c = get(t.color).rgb();
-        if !c.is_finite() {
-            continue;
-        }
-        radiance += c.max(Vec3A::ZERO) * w;
+        radiance += sane(get(t.weight).rgb()) * sane(get(t.color).rgb());
     }
     let peak = radiance.max_element();
     if peak > 0.0 {
@@ -855,6 +866,118 @@ mod tests {
         let m = reduced(text, "s");
         assert_eq!(m.emission_luminance, OpenPBR::default().emission_luminance);
         assert_eq!(m.emission_color, OpenPBR::default().emission_color);
+    }
+
+    /// MaterialX declares `ND_multiply_edfC` — a `color3` weight on an EDF —
+    /// so the weight slot is not a scalar and must be applied per channel.
+    #[test]
+    fn a_colour_weight_multiplies_emission_per_channel() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="1, 1, 1" />
+               </uniform_edf>
+               <multiply name="mul" type="EDF">
+                 <input name="in1" type="EDF" nodename="e" />
+                 <input name="in2" type="color3" value="0.25, 0.5, 1.0" />
+               </multiply>"#,
+            "mul",
+        );
+        // Three distinct channels, so a broadcast cannot pass by accident.
+        let r = radiance_of(&m);
+        assert!(
+            (r - Vec3A::new(0.25, 0.5, 1.0)).length() < 1e-5,
+            "a colour weight reduced to {r:?}"
+        );
+    }
+
+    /// The regression test. Reading the weight as lane 0 saw `0.0` here and
+    /// dropped the term, so a green-blue emitter rendered **black** — and a
+    /// weight of `(1, 0.5, 0.2)` would have rendered neutral at full strength.
+    /// It also exercises `literal_zero`'s every-lane rule, which is what lets
+    /// the branch survive flattening to be reduced at all.
+    #[test]
+    fn a_zero_red_weight_keeps_green_and_blue() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="1, 1, 1" />
+               </uniform_edf>
+               <multiply name="mul" type="EDF">
+                 <input name="in1" type="EDF" nodename="e" />
+                 <input name="in2" type="color3" value="0, 0.6, 0.9" />
+               </multiply>"#,
+            "mul",
+        );
+        let r = radiance_of(&m);
+        assert!(r.y > 0.0 && r.z > 0.0, "the emitter went black: {r:?}");
+        assert!(
+            (r - Vec3A::new(0.0, 0.6, 0.9)).length() < 1e-5,
+            "reduced to {r:?}"
+        );
+    }
+
+    /// Both factors are colours, so neither may be broadcast over the other.
+    #[test]
+    fn a_colour_weight_and_a_colour_edf_multiply_componentwise() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="0.5, 1, 0.25" />
+               </uniform_edf>
+               <multiply name="mul" type="EDF">
+                 <input name="in1" type="EDF" nodename="e" />
+                 <input name="in2" type="color3" value="2, 0, 4" />
+               </multiply>"#,
+            "mul",
+        );
+        let r = radiance_of(&m);
+        assert!((r - Vec3A::new(1.0, 0.0, 1.0)).length() < 1e-5, "{r:?}");
+    }
+
+    /// The broadcast guard: `Val::rgb` widens an arity-1 value, so a `float`
+    /// weight still scales every channel and the scalar path is unchanged.
+    #[test]
+    fn a_float_weight_still_scales_every_channel() {
+        let m = emissive(
+            r#"<uniform_edf name="e" type="EDF">
+                 <input name="color" type="color3" value="1, 0.5, 0.25" />
+               </uniform_edf>
+               <multiply name="mul" type="EDF">
+                 <input name="in1" type="EDF" nodename="e" />
+                 <input name="in2" type="float" value="4" />
+               </multiply>"#,
+            "mul",
+        );
+        let r = radiance_of(&m);
+        assert!((r - Vec3A::new(4.0, 2.0, 1.0)).length() < 1e-5, "{r:?}");
+    }
+
+    /// Non-finite and negative channels are refused **per channel**, where the
+    /// lobe loop drops the whole lobe. The difference is structural: emission
+    /// sums, so a zeroed channel contaminates nothing, whereas a lobe's weight
+    /// is a divisor. Sanitising each factor *before* the product is also what
+    /// stops two negative channels multiplying into positive light.
+    #[test]
+    fn a_bad_channel_does_not_cost_the_others() {
+        let (flat, mut slots) = evaluate(
+            r#"<materialx>
+                 <uniform_edf name="e" type="EDF">
+                   <input name="color" type="color3" value="1, 1, 1" />
+                 </uniform_edf>
+                 <surface name="s" type="surfaceshader">
+                   <input name="edf" type="EDF" nodename="e" />
+                 </surface>
+               </materialx>"#,
+            "s",
+        );
+        // Poison the evaluated colour directly: no MaterialX node reliably
+        // produces a NaN, and the guard is about what reaches `reduce`.
+        let slot = flat.emission[0].color as usize;
+        slots[slot] = Val::vec3(f32::NAN, 0.5, -2.0);
+        let (m, _) = reduce(&flat, &slots, &OpenPBR::default());
+        let r = radiance_of(&m);
+        assert!(r.is_finite(), "a NaN channel escaped into radiance: {r:?}");
+        assert_eq!(r.x, 0.0, "the NaN channel must contribute nothing");
+        assert_eq!(r.z, 0.0, "the negative channel must contribute nothing");
+        assert!((r.y - 0.5).abs() < 1e-5, "the good channel was lost: {r:?}");
     }
 
     fn near(a: f32, b: f32) -> bool {

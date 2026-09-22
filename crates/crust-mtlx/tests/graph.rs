@@ -97,7 +97,12 @@ fn lobes_of(doc: &str, root: &str) -> Vec<(LobeKind, f32, Vec3A, f32)> {
 /// Emission terms of a compiled material — `(weight, radiance)` at `ctx` —
 /// alongside the lobe kinds, so a test can assert that reading the `edf` left
 /// the BSDF side alone.
-fn emission_of(doc: &str, root: &str) -> (Vec<(f32, Vec3A)>, Vec<LobeKind>) {
+///
+/// The weight is a `Vec3A` rather than an `f32` because the slot genuinely is
+/// not a scalar: MaterialX's `ND_multiply_edfC` tints an EDF by a `color3`, and
+/// `Mul` promotes arity. `Val::rgb` broadcasts an arity-1 value, so a `float`
+/// weight still reads as three equal channels.
+fn emission_of(doc: &str, root: &str) -> (Vec<(Vec3A, Vec3A)>, Vec<LobeKind>) {
     let d = Doc::parse(doc).unwrap();
     let mut c = Compiler::new(&d, &decline);
     let one = c.constant(Val::ONE);
@@ -109,7 +114,12 @@ fn emission_of(doc: &str, root: &str) -> (Vec<(f32, Vec3A)>, Vec<LobeKind>) {
     let terms = flat
         .emission
         .iter()
-        .map(|e| (slots[e.weight as usize].x(), slots[e.color as usize].rgb()))
+        .map(|e| {
+            (
+                slots[e.weight as usize].rgb(),
+                slots[e.color as usize].rgb(),
+            )
+        })
         .collect();
     (terms, flat.lobes.iter().map(|l| l.kind).collect())
 }
@@ -1557,7 +1567,7 @@ fn a_uniform_edf_under_a_surface_reaches_the_emission_list() {
     let (terms, kinds) = emission_of(doc, "s");
     assert_eq!(kinds, vec![LobeKind::Diffuse], "the BSDF side is untouched");
     assert_eq!(terms.len(), 1);
-    assert_eq!(terms[0].0, 1.0);
+    assert_eq!(terms[0].0.x, 1.0);
     assert_eq!(terms[0].1, Vec3A::new(2.0, 3.0, 4.0));
 }
 
@@ -1586,8 +1596,16 @@ fn an_edf_typed_mix_is_not_mistaken_for_a_non_closure() {
     let (terms, _) = emission_of(doc, "s");
     assert_eq!(terms.len(), 2, "both mix branches must survive");
     // `bg` is flattened first, as on the BSDF side.
-    assert!((terms[0].0 - 0.75).abs() < 1e-6, "bg weight {}", terms[0].0);
-    assert!((terms[1].0 - 0.25).abs() < 1e-6, "fg weight {}", terms[1].0);
+    assert!(
+        (terms[0].0.x - 0.75).abs() < 1e-6,
+        "bg weight {}",
+        terms[0].0.x
+    );
+    assert!(
+        (terms[1].0.x - 0.25).abs() < 1e-6,
+        "fg weight {}",
+        terms[1].0.x
+    );
 }
 
 /// `multiply(uniform_edf, 8)` is how MaterialX authors a bright emitter, and
@@ -1610,11 +1628,11 @@ fn a_multiply_scales_an_edf_above_one() {
     let (terms, _) = emission_of(doc, "s");
     assert_eq!(terms.len(), 1);
     assert!(
-        terms[0].0 > 1.0,
+        terms[0].0.x > 1.0,
         "weight {} must not be clamped",
-        terms[0].0
+        terms[0].0.x
     );
-    assert!((terms[0].0 - 8.0).abs() < 1e-6);
+    assert!((terms[0].0.x - 8.0).abs() < 1e-6);
 }
 
 /// `add` over EDFs is two emitters, each at full weight — the reduction sums
@@ -1638,8 +1656,8 @@ fn an_edf_add_keeps_both_emitters_at_full_weight() {
     </materialx>"#;
     let (terms, _) = emission_of(doc, "s");
     assert_eq!(terms.len(), 2);
-    assert_eq!(terms[0].0, 1.0);
-    assert_eq!(terms[1].0, 1.0);
+    assert_eq!(terms[0].0.x, 1.0);
+    assert_eq!(terms[1].0.x, 1.0);
 }
 
 /// The same rule the BSDF side applies: an omitted `type` attribute parses as
@@ -1762,4 +1780,62 @@ fn a_surface_with_no_edf_has_no_emission() {
     </materialx>"#;
     let (terms, _) = emission_of(doc, "s");
     assert!(terms.is_empty());
+}
+
+/// MaterialX declares `ND_multiply_edfC` — `multiply` on an EDF by a `color3`
+/// — so tinting an emitter is ordinary authoring, and the tint must reach the
+/// weight slot **per channel**. `Mul` promotes arity through `Val::zip`, so the
+/// producer already does this; the test exists because a consumer reading lane
+/// 0 alone would see `0.0` here and drop the emitter entirely.
+#[test]
+fn a_colour_multiply_on_an_edf_reaches_the_weight_per_channel() {
+    let doc = r#"<materialx>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="1, 1, 1" />
+      </uniform_edf>
+      <multiply name="m" type="EDF">
+        <input name="in1" type="EDF" nodename="e" />
+        <input name="in2" type="color3" value="0, 0.6, 0.9" />
+      </multiply>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="m" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(
+        terms.len(),
+        1,
+        "a partly-zero colour is not a pruned branch"
+    );
+    assert!(
+        (terms[0].0 - Vec3A::new(0.0, 0.6, 0.9)).length() < 1e-6,
+        "the tint reached the weight as {:?}",
+        terms[0].0
+    );
+}
+
+/// The `float` case must keep costing nothing: `Val::rgb` broadcasts an arity-1
+/// value, so a scalar weight still scales all three channels. This is what
+/// would break if that broadcast were ever removed from `Val::rgb`.
+#[test]
+fn a_float_edf_weight_still_reads_as_three_equal_channels() {
+    let doc = r#"<materialx>
+      <uniform_edf name="e" type="EDF">
+        <input name="color" type="color3" value="1, 1, 1" />
+      </uniform_edf>
+      <multiply name="m" type="EDF">
+        <input name="in1" type="EDF" nodename="e" />
+        <input name="in2" type="float" value="4" />
+      </multiply>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="m" />
+      </surface>
+    </materialx>"#;
+    let (terms, _) = emission_of(doc, "s");
+    assert_eq!(terms.len(), 1);
+    assert!(
+        (terms[0].0 - Vec3A::splat(4.0)).length() < 1e-6,
+        "{:?}",
+        terms[0].0
+    );
 }

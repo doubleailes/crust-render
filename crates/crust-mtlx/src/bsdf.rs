@@ -94,8 +94,17 @@ pub struct Emission {
     /// bound, and this is the one shading input in the renderer for which a
     /// value above 1.0 is meaningful rather than an authoring error.
     pub color: u32,
-    /// Slot holding the scalar weight reaching this leaf — every `mix` factor
-    /// along its path multiplied together.
+    /// Slot holding the weight reaching this leaf — every `mix` factor along
+    /// its path multiplied together.
+    ///
+    /// **Not necessarily a scalar.** MaterialX declares `ND_multiply_edfC`, a
+    /// `multiply` on an EDF by a `color3`, and `Op::Binary { Mul }` promotes
+    /// arity through `Val::zip` — so a tinted emitter arrives here as an
+    /// arity-3 value with three distinct channels. A consumer reading lane 0
+    /// alone (`Val::x`) silently replaces green and blue with red, which turns
+    /// a weight of `(0, 0.6, 0.9)` into a black emitter and `(1, 0.5, 0.2)`
+    /// into a neutral one. Read it with `Val::rgb`, which broadcasts an
+    /// arity-1 value and so costs the `float` case nothing.
     pub weight: u32,
 }
 
@@ -280,6 +289,11 @@ fn flatten_inner(
             // top dielectric into the coat. Numerically this changes nothing;
             // structurally it is the difference between a base specular and a
             // clearcoat, which attenuate the substrate very differently.
+            //
+            // The `color3` case `literal_zero` handles here reaches the weight
+            // slot too: `Mul` promotes arity, so the scalar operand's three
+            // channels survive into the weight. `Emission::weight` says what a
+            // consumer owes that — read it as RGB, not as lane 0.
             if let Some(n) = bsdf
                 && !literal_zero(node, scalar)
             {
