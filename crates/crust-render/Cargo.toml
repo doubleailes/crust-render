@@ -27,7 +27,7 @@ exr.workspace = true
 [dev-dependencies]
 openusd = { version = "0.7", default-features = false }
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom"] }
-ptex-rs.workspace = true
+ptex.workspace = true
 
 [dependencies.tracing-subscriber]
 version = "0.3.20"

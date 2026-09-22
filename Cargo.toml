@@ -18,13 +18,25 @@ rand = "0.9.2"
 # `hdr`/`jpeg` features are the decoder's and reach crust-render through
 # feature unification whether stated here or not.
 image = { version = "0.25.6", default-features = false, features = ["png", "hdr", "jpeg"] }
-# Pure-Rust Ptex reader (lib name `ptex`). Pinned by `rev` because the crate is
-# not published and `Cargo.lock` is not checked in — without it a fresh clone
-# silently takes whatever `main` points at. Hoisted so the decoder crate and
-# the probe examples that read `.ptx` directly can never disagree on the pin:
-# two crates naming a git dependency must match URL and rev byte for byte, or
-# Cargo sees two packages with the same lib name.
-ptex-rs = { git = "https://github.com/doubleailes/ptex-rs", rev = "36212f65dbd4caf7fb8786b34da5c041cc59d7f1" }
+# Pure-Rust Ptex reader (package `ptex-rust`, lib name `ptex`). Pinned by `rev`
+# because the crate is not published and `Cargo.lock` is not checked in —
+# without it a fresh clone silently takes whatever `main` points at. Hoisted so
+# the decoder crate and the probe examples that read `.ptx` directly can never
+# disagree on the pin: two crates naming a git dependency must match URL and rev
+# byte for byte, or Cargo sees two packages with the same lib name.
+#
+# The `cache` feature is the one this bump was for: it brings `SharedReader`,
+# a `&self` reader over a byte-budgeted cache of decoded pixels, which is the
+# `PtexCache` equivalent "Known incomplete work" said streaming Ptex was
+# waiting on. It is the crate's default feature and is named here anyway, so
+# the dependency states what crust actually needs rather than inheriting it.
+#
+# The upstream package was renamed `ptex-rs` -> `ptex-rust` in the same range,
+# so the dependency needs `package = `. The key is then what names the extern
+# crate — a renamed dependency is addressed by its key, not by its lib target
+# — so the key is `ptex`, which is both the lib name and what every `use` in
+# the workspace already says.
+ptex = { package = "ptex-rust", git = "https://github.com/doubleailes/ptex-rs", rev = "884007d872a014a1d7056564ae718e589d35e65f", features = ["cache"] }
 # Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
 # tile at a time. Deliberately NOT routed through `image`'s `tiff` feature:
 # that pins 0.9, which predates the chunk API this needs (`read_chunk`,
