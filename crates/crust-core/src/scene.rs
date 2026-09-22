@@ -76,7 +76,27 @@ impl Scene {
         path: &std::path::Path,
         assets: &dyn AssetLoader,
     ) -> Result<Scene, crate::Error> {
-        usd_import::load_scene(path, assets)
+        usd_import::load_scene(path, assets, None)
+    }
+
+    /// [`Scene::from_usd_with_assets`], evaluated at USD time code `frame`.
+    ///
+    /// Every attribute the importer reads — transforms, points, camera,
+    /// lights, instancer arrays, render settings — resolves its time
+    /// samples at `frame` (interpolated per the stage's interpolation
+    /// mode), and an attribute with no samples reads its default value. The
+    /// sampler's frame seed is set to `frame`'s integer part, overriding
+    /// `crust:frame`, so an image sequence gets independent noise per frame.
+    ///
+    /// `None` reads every attribute's *default* value, exactly as
+    /// [`Scene::from_usd_with_assets`] does — which on a stage that authors
+    /// only `timeSamples` is not frame 0 but the schema fallback.
+    pub fn from_usd_at_frame(
+        path: &std::path::Path,
+        assets: &dyn AssetLoader,
+        frame: Option<f64>,
+    ) -> Result<Scene, crate::Error> {
+        usd_import::load_scene(path, assets, frame)
     }
 }
 

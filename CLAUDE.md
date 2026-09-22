@@ -24,7 +24,8 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), -b/--bucket,
-# -s/--samples (override spp), --strategy (power|balance|light|bsdf),
+# -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
+# --strategy (power|balance|light|bsdf),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --stats (per-phase profile + scene statistics)
 
@@ -32,6 +33,11 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # at the same -l level, so DEBUG has to be asked for; bare --log-file writes
 # into the working directory, and a directory argument is created if missing.
 cargo run --release -- -i samples/cornellbox.usda -l debug --log-file renders/logs
+
+# Render one frame of an animated stage (time samples resolve at that code,
+# interpolated; unanimated attributes read their default). Without -f every
+# attribute reads its *default* value -- not frame 0.
+cargo run --release -- -i samples/animation.usda -f 5 -o frame.0005.exr
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- -i samples/curves.usda --stats
@@ -1385,6 +1391,25 @@ Schema mapping:
   `gridDims` int[3] + `gridData` float[] (x-fastest, length must equal nx·ny·nz — warns
   and skips otherwise). Sample scenes: `samples/fog.usda` (homogeneous god rays),
   `samples/smoke.usda` (noise plume + emissive ember + tiny explicit grid).
+- **Frame / time code** (`-f/--frame`, `Scene::from_usd_at_frame`). Every attribute read in
+  the importer goes through `eval_time()` — `Attribute::get_at` at the requested code —
+  so transforms, points, camera, lights, instancer arrays and render settings all move
+  together; an attribute with no time samples reads its default either way, and only
+  animated ones change. The time lives in a scoped **thread-local** (`EvalTimeScope`)
+  rather than a parameter, because ~40 read sites in helpers handed only a `Prim` would
+  otherwise all carry a value none of them decide; that is sound only because the import
+  is single-threaded — parallelising it means threading the time explicitly. **No
+  frame means the attribute *default*, not frame 0**: a stage that authors only
+  `timeSamples` reads its schema fallback, which is exactly the pre-`--frame` behaviour
+  (pinned pixel-identical on the samples). openusd's own xformable composition (the
+  `compose_xform_ops` fallback) has no default arm and keeps its historical 0.0. A frame
+  also sets the sampler's frame seed (its integer part, over `crust:frame`), so a
+  sequence gets independent noise per frame, and a frame outside an authored
+  `startTimeCode..endTimeCode` warns (USD holds the end samples; it is usually a typo).
+  Not time-aware: `UsdPreviewSurface` inputs (read by openusd-schemas'
+  `read_preview_surface`, default only), and `crust:motion:translate` motion blur, which
+  is still an authored offset rather than derived from the samples across the shutter.
+  Sample: `samples/animation.usda`.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
