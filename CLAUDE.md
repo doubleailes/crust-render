@@ -176,7 +176,7 @@ line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel
 sample — the finest granularity in the engine is per *pass* (`render_pass`), which is one
 line on an ordinary render and a handful on a guided one.
 
-`--log-file` tees the same stream to `crust-render-<YYYYMMDDTHHMMSSZ>.log`. Three
+`--log-file` tees the same stream to `crust-render-<YYYYMMDDTHHMMSSZ>.log`. Four
 details are load-bearing. It is **two `fmt` layers over a registry**, not one writer
 teed into both sinks, because ANSI is a per-layer setting — a single writer would
 either fill the file with escape codes or strip the colour from the terminal; the
@@ -189,6 +189,19 @@ cycle) rather than taking `chrono` or `time`, neither of which is in the graph a
 either of which would be the largest dependency in this binary for the sake of naming a
 file. The format is fixed-width and zero-padded so lexical order is chronological;
 `utc_stamp_*` in `main.rs` pins that, plus the 2000-vs-2100 leap rule.
+
+Fourth, **the `--stats` report is a log event too, on a target `-l` cannot silence.**
+It used to go straight to stdout on the grounds that it is a report to read rather
+than a log line — which was right about the formatting and wrong about the
+destination, since it left the profile out of exactly the file kept to record a
+render. It now emits under `STATS_TARGET` (`crust_render::stats`), and the subscriber's
+filter admits that target at any level while applying `-l` to everything else: `--stats`
+is an explicit request, so `--stats -l warn` must not silently produce nothing.
+`event_enabled` is a named function rather than an inline closure so that case is
+unit-tested. Two formatting consequences follow from it being one event: the report is
+accumulated and emitted whole (a per-row emit would stamp all forty rows), and it opens
+with a newline, or the event prefix would indent the first rule and only that one. It
+still goes to **stdout**, so `--stats > report.txt` is unaffected.
 
 Environment overrides, all of which exist to A/B an optimization against the behaviour it
 replaced: `CRUST_STREAM_IMPORT=0` forces the single-stage USD import; `CRUST_MESH_BAKE=0`
