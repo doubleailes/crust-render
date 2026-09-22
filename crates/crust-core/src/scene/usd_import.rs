@@ -428,8 +428,8 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
     let traverse_elapsed = traverse_start.elapsed().saturating_sub(asset_time);
     let traverse_mem = MemorySample::now();
     debug!(
-        "Traversal done in {:?} ({:?} of it host asset decoding): {} geometries, \
-         {} light(s), {} volume region(s)",
+        "Traversal done in {:?}, plus {:?} of host asset decoding taken out of it and \
+         reported as its own phase: {} geometries, {} light(s), {} volume region(s)",
         traverse_elapsed,
         asset_time,
         ctx.world.count(),

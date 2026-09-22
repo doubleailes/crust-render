@@ -440,10 +440,6 @@ impl FileAssets {
                     uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
                 })
             else {
-                debug!(
-                    "No streamable backing at {} — trying the next candidate",
-                    candidate.display()
-                );
                 continue;
             };
             let (w, h) = tex.size();
