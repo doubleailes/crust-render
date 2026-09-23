@@ -2,7 +2,7 @@
 (
     doc = """Every UsdLux light crust imports, in the spec's units.
 
-    A grey room lit by five lights, each exercising one part of the LightAPI /
+    A grey room lit by six lights, each exercising one part of the LightAPI /
     ShapingAPI contract:
       - DiskLight   : one-sided disk, `normalize`, a 3000 K colour temperature.
       - CylinderLight: open tube emitting sideways (no end caps), 9000 K.
@@ -10,6 +10,8 @@
       - SphereLight : an IES profile (samples/ies/spot30.ies), `ies:normalize`.
       - SphereLight : squashed by a non-uniform scale into an ellipsoid - the
                       instanced path, still normalised by its true world area.
+      - RectLight   : a camera-visible window card, `inputs:texture:file`
+                      (an HDR EXR, textures/window_card.exr).
     A faint DomeLight keeps the shadows from going pure black.
 
     Every area light has `normalize` on, so `intensity` is proportional to the
@@ -137,6 +139,22 @@ def Xform "World"
         float3 xformOp:scale = (3, 0.4, 0.4)
         double3 xformOp:translate = (0, 6.2, -3.3)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # A textured card on the back wall, facing the camera (local -Z turned
+    # onto +Z) and left visible so its map shows: the image's top row is the
+    # light's +Y edge.
+    def RectLight "WindowCard"
+    {
+        float inputs:width = 2.4
+        float inputs:height = 1.6
+        bool inputs:normalize = 1
+        float inputs:intensity = 1.5
+        asset inputs:texture:file = @textures/window_card.exr@
+        custom bool crust:light:cameraVisible = 1
+        double3 xformOp:translate = (-6, 4.2, -3.95)
+        float xformOp:rotateY = 180
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
     }
 
     def DomeLight "Fill"

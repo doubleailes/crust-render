@@ -2048,6 +2048,8 @@ struct ImportCaches<'a> {
     /// Resolved `.ies` path → the decoded profile (`None`: the host declined).
     /// A light rig commonly points dozens of fixtures at one profile.
     ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
+    /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
+    light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
 }
 
 impl<'a> ImportCaches<'a> {
@@ -2061,6 +2063,7 @@ impl<'a> ImportCaches<'a> {
             stage_path,
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
+            light_textures: HashMap::new(),
         }
     }
 }
@@ -3354,8 +3357,44 @@ fn emit_cylinder_light(
     );
 }
 
+/// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
+/// resolved path: a rig commonly reuses one card texture on many lights.
+fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crate::LightTexture>> {
+    let value = prim
+        .attribute("inputs:texture:file")
+        .get_at::<sdf::Value>(eval_time())
+        .ok()
+        .flatten()?;
+    let path = asset_value_path(&value, caches.stage_path)?;
+    if let Some(cached) = caches.light_textures.get(&path) {
+        return cached.clone();
+    }
+    let started = Instant::now();
+    let loaded = caches.assets.load_light_texture(&path);
+    caches.asset_time += started.elapsed();
+    match &loaded {
+        Some(t) => debug!(
+            "RectLight {}: texture {} ({}x{})",
+            prim.path(),
+            path.display(),
+            t.width(),
+            t.height()
+        ),
+        None => warn!(
+            "RectLight at {}: could not load inputs:texture:file {} — the light \
+             emits its uniform colour",
+            prim.path(),
+            path.display()
+        ),
+    }
+    caches.light_textures.insert(path, loaded.clone());
+    loaded
+}
+
 /// `UsdLuxRectLight`: a `width × height` rectangle (1 × 1) in the local XY
-/// plane, centred on the origin, emitting from one side, along local −Z.
+/// plane, centred on the origin, emitting from one side, along local −Z, and
+/// multiplied by `inputs:texture:file` when one is authored (image top row
+/// at the light's +Y edge, left column at −X).
 fn emit_rect_light(
     stage: &Stage,
     ctx: &mut ImportCtx,
@@ -3367,19 +3406,7 @@ fn emit_rect_light(
     let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    if prim
-        .attribute("inputs:texture:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn!(
-            "RectLight at {}: inputs:texture:file is not supported — the light \
-             emits its uniform colour",
-            prim.path()
-        );
-    }
+    let texture = rect_light_texture(prim, &mut ctx.caches);
 
     let corner = world_xf.transform_point3(Vec3::new(-0.5 * width, -0.5 * height, 0.0));
     let origin = Vec3A::new(corner.x, corner.y, corner.z);
@@ -3419,7 +3446,13 @@ fn emit_rect_light(
     // the geometry id. The triangles are wound so their geometric normal is
     // the *emitting* one, because a light's surface is one-sided and
     // `front_face` is how a bounce hit knows which side it arrived on.
-    let material = Arc::new(Emissive::light(radiance, shaping));
+    let mut emitter = Emissive::light(radiance, shaping);
+    if let Some(image) = texture
+        && let Some(map) = crate::RectTexture::new(image, origin, edge_u, edge_v)
+    {
+        emitter = emitter.with_texture(map);
+    }
+    let material = Arc::new(emitter);
     let (c00, c10, c11, c01) = (
         origin,
         origin + edge_u,

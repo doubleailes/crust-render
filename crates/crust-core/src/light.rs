@@ -387,7 +387,9 @@ impl Light for AreaLight {
         Some(LightSample {
             direction,
             distance,
-            radiance: self.material.radiance_toward(-dir_to_light, front),
+            radiance: self
+                .material
+                .radiance_toward(light_point, -dir_to_light, front),
             pdf: self.pdf_toward(to_light, dir_to_light, light_normal, light_point),
         })
     }

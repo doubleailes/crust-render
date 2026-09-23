@@ -1391,7 +1391,8 @@ Schema mapping:
   intensity (the spec's formula says multiply; every implementation divides), and
   `ies:angleScale` is the spec's bimodal remap. Sample: `samples/usdlux.usda` (every
   light type, `normalize`, colour temperature, a shaped spot, an IES fixture from
-  `samples/ies/spot30.ies`, and a squashed sphere light).
+  `samples/ies/spot30.ies`, a squashed sphere light, and a textured window card from
+  `samples/textures/window_card.exr`).
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
@@ -1436,7 +1437,15 @@ Schema mapping:
     emitting along −Z). The emitting normal is −Z under the *normal* transform
     (`±edge_u × edge_v`), not the transformed −Z, which stops being perpendicular to the
     rectangle under a shear; the transformed axis is kept whenever it is perpendicular,
-    so ordinary lights render as before. `inputs:texture:file` warns and is ignored.
+    so ordinary lights render as before. **`inputs:texture:file`** multiplies the
+    emission per point (`lux::RectTexture` on the light's `Emissive`, read by both MIS
+    halves through `radiance_toward(p, …)`): image top row at the light's +Y edge,
+    left column at −X, **nearest-texel** — all three hdEmbree's `_SampleLightTexture`
+    conventions — and `normalize` still divides by the area. The map crosses the seam
+    as `AssetLoader::load_light_texture` → `LightTexture`, linear **float** RGB decoded
+    by `crust_assets::read_rgb_image` (the dome's decoder, EXR / `.hdr` kept as
+    authored, LDR un-gamma'd), *not* the UV-texture path, which narrows to 8 bits when
+    preloading. The light is still sampled uniformly by area, not by the map.
     Sample: `samples/rectlight.usda`.
   - `UsdLuxSphereLight`, `UsdLuxDiskLight` (local XY plane, emitting along −Z) and
     `UsdLuxCylinderLight` (along local X, emitting from its side and **not** its end caps)
@@ -1820,9 +1829,11 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   one it is a *resize* averaged in the file's own encoding, so fixing it would
   move every render of a texture above the cap. Worth doing, not urgent.
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
-  light filters, light/shadow linking and `ShadowAPI` are not read, and `RectLight`'s
-  `inputs:texture:file` is ignored. `inputs:diffuse` / `inputs:specular` warn and are
-  ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
+  light filters, light/shadow linking and `ShadowAPI` are not read. A textured
+  `RectLight` is sampled uniformly by area rather than by its map's luminance (a card
+  with a small bright region is noisier than it need be), its lookup is nearest-texel
+  as the reference's is, and a `.tex` (RenderMan) map is not decoded.
+  `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
   is still sampled uniformly by area: a narrow spotlight wastes the NEE samples its cone
   cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the

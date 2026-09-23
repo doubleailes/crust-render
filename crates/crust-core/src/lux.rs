@@ -15,6 +15,7 @@
 //!   for a `DistantLight`, and what its nits mean in lux (area lights divide
 //!   by their world-space surface area, which their shapes own).
 //! - [`Shaping`] — `ShapingAPI`: focus, focus tint, cone, IES.
+//! - [`LightTexture`] — `RectLight`'s `inputs:texture:file`, decoded.
 //! - [`IesProfile`] — the IES photometric web the shaping samples. Parsing the
 //!   LM-63 text is a file-format concern and lives in `crust-assets`; this is
 //!   the decoded table and its evaluation.
@@ -302,6 +303,97 @@ fn smoothstep(t: f32, lo: f32, hi: f32) -> f32 {
 }
 
 // -----------------------------------------------------------------------
+// Light textures
+// -----------------------------------------------------------------------
+
+/// A light's colour map (`RectLight`'s `inputs:texture:file`): linear float
+/// RGB, row-major, row 0 at the top of the image. The host decodes it
+/// through [`crate::AssetLoader::load_light_texture`]; float rather than
+/// the UV-texture path's 8-bit tiles because a light's map is exactly where
+/// a value above 1.0 is meaningful.
+///
+/// It multiplies the light's emission, which `normalize` then divides by the
+/// area as usual — the map shapes the light and scales it, as hdEmbree does;
+/// the spec says only "a color texture to use on the rectangle".
+#[derive(Debug, Clone)]
+pub struct LightTexture {
+    width: usize,
+    height: usize,
+    pixels: Vec<Vec3A>,
+}
+
+impl LightTexture {
+    /// `None` for an empty or mis-sized buffer.
+    pub fn new(width: usize, height: usize, pixels: Vec<Vec3A>) -> Option<Self> {
+        (width > 0 && height > 0 && pixels.len() == width * height).then_some(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// The texel at image coordinates `(s, t)` in `[0, 1]²`, `t = 0` the top
+    /// row. **Nearest**, as hdEmbree's `_SampleLightTexture` is: the lookup is
+    /// part of what a conformance image checks, and a light seen directly
+    /// shows its filtering. Out-of-range coordinates clamp to the edge.
+    pub fn texel(&self, s: f32, t: f32) -> Vec3A {
+        let index = |c: f32, n: usize| ((c * n as f32) as isize).clamp(0, n as isize - 1) as usize;
+        self.pixels[index(t, self.height) * self.width + index(s, self.width)]
+    }
+}
+
+/// A [`LightTexture`] laid onto a rectangle light's surface: the map from a
+/// world point on the parallelogram `origin + u·edge_u + v·edge_v` to the
+/// image. `u` runs along the light's local +X and the image's `s`; `v` along
+/// local +Y and *up* the image, so `t = 1 − v` — hdEmbree's orientation,
+/// which puts the image's top row at the light's +Y edge.
+#[derive(Debug, Clone)]
+pub struct RectTexture {
+    image: Arc<LightTexture>,
+    origin: Vec3A,
+    /// Dual basis of the edges: `(p − origin)·dual_u = u`.
+    dual_u: Vec3A,
+    dual_v: Vec3A,
+}
+
+impl RectTexture {
+    /// `None` for a degenerate rectangle (parallel or zero edges).
+    pub fn new(
+        image: Arc<LightTexture>,
+        origin: Vec3A,
+        edge_u: Vec3A,
+        edge_v: Vec3A,
+    ) -> Option<Self> {
+        let n = edge_u.cross(edge_v);
+        let n2 = n.length_squared();
+        if n2 <= 0.0 || !n2.is_finite() {
+            return None;
+        }
+        Some(Self {
+            image,
+            origin,
+            dual_u: edge_v.cross(n) / n2,
+            dual_v: n.cross(edge_u) / n2,
+        })
+    }
+
+    /// The map's colour at a world point on the rectangle.
+    pub fn at(&self, p: Vec3A) -> Vec3A {
+        let d = p - self.origin;
+        self.image
+            .texel(d.dot(self.dual_u), 1.0 - d.dot(self.dual_v))
+    }
+}
+
+// -----------------------------------------------------------------------
 // IES profiles
 // -----------------------------------------------------------------------
 
@@ -557,6 +649,45 @@ mod tests {
         assert!(
             s.factor(Vec3A::new(r.sin(), 0.0, r.cos()))
                 .abs_diff_eq(f, 1e-5)
+        );
+    }
+
+    #[test]
+    fn light_texture_is_nearest_and_clamps() {
+        let red = Vec3A::new(8.0, 0.0, 0.0);
+        let green = Vec3A::new(0.0, 1.0, 0.0);
+        let img = LightTexture::new(2, 1, vec![red, green]).unwrap();
+        assert_eq!(img.texel(0.49, 0.5), red);
+        assert_eq!(img.texel(0.51, 0.5), green);
+        assert_eq!(img.texel(-3.0, 9.0), red, "clamped, not wrapped");
+        assert_eq!(img.texel(1.0, 0.0), green, "s = 1 is the last column");
+        assert!(LightTexture::new(2, 2, vec![red]).is_none());
+    }
+
+    /// The image's top row lands on the rectangle's +Y edge and its left
+    /// column on the −X edge, under any placement of the parallelogram.
+    #[test]
+    fn rect_texture_orientation() {
+        let (tl, tr, bl, br) = (Vec3A::X, Vec3A::Y, Vec3A::Z, Vec3A::ONE);
+        let img = Arc::new(LightTexture::new(2, 2, vec![tl, tr, bl, br]).unwrap());
+        // A 4×2 rectangle in a tilted plane.
+        let eu = Vec3A::new(4.0, 0.0, 0.0);
+        let ev = Vec3A::new(0.0, 1.0, 1.0).normalize() * 2.0;
+        let o = Vec3A::new(-2.0, 0.0, 0.0);
+        let map = RectTexture::new(img, o, eu, ev).unwrap();
+        let at = |u: f32, v: f32| map.at(o + u * eu + v * ev);
+        assert_eq!(at(0.25, 0.75), tl);
+        assert_eq!(at(0.75, 0.75), tr);
+        assert_eq!(at(0.25, 0.25), bl);
+        assert_eq!(at(0.75, 0.25), br);
+        assert!(
+            RectTexture::new(
+                Arc::new(LightTexture::new(1, 1, vec![tl]).unwrap()),
+                o,
+                eu,
+                eu
+            )
+            .is_none()
         );
     }
 

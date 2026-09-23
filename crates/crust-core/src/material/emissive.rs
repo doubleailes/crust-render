@@ -1,6 +1,6 @@
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::lux::Shaping;
+use crate::lux::{RectTexture, Shaping};
 use crate::material::{Material, ScatterSample};
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -26,6 +26,8 @@ pub struct Emissive {
     one_sided: bool,
     /// Directional falloff; `None` is uniform.
     shaping: Option<Arc<Shaping>>,
+    /// Positional colour map (`RectLight`'s `inputs:texture:file`).
+    texture: Option<Arc<RectTexture>>,
 }
 
 impl Emissive {
@@ -34,6 +36,7 @@ impl Emissive {
             color,
             one_sided: false,
             shaping: None,
+            texture: None,
         }
     }
 
@@ -45,24 +48,41 @@ impl Emissive {
             color,
             one_sided: true,
             shaping: shaping.filter(|s| !s.is_neutral()).map(Arc::new),
+            texture: None,
         }
+    }
+
+    /// Multiplies the emission by a colour map over the light's surface.
+    pub fn with_texture(mut self, texture: RectTexture) -> Self {
+        self.texture = Some(Arc::new(texture));
+        self
+    }
+
+    /// Whether emission is the same everywhere and in every direction — the
+    /// case `emitted_at` answers without evaluating anything.
+    fn is_uniform(&self) -> bool {
+        !self.one_sided && self.shaping.is_none() && self.texture.is_none()
     }
 
     pub fn color(&self) -> Vec3A {
         self.color
     }
 
-    /// Radiance leaving the surface along the unit world direction
-    /// `emission_dir`. `front` says whether that direction is on the
-    /// surface's emitting side; a one-sided emitter is dark from behind.
-    pub fn radiance_toward(&self, emission_dir: Vec3A, front: bool) -> Vec3A {
+    /// Radiance leaving the surface at world point `p` along the unit world
+    /// direction `emission_dir`. `front` says whether that direction is on
+    /// the surface's emitting side; a one-sided emitter is dark from behind.
+    pub fn radiance_toward(&self, p: Vec3A, emission_dir: Vec3A, front: bool) -> Vec3A {
         if self.one_sided && !front {
             return Vec3A::ZERO;
         }
-        match &self.shaping {
-            None => self.color,
-            Some(s) => self.color * s.factor(emission_dir),
+        let mut radiance = self.color;
+        if let Some(t) = &self.texture {
+            radiance *= t.at(p);
         }
+        if let Some(s) = &self.shaping {
+            radiance *= s.factor(emission_dir);
+        }
+        radiance
     }
 }
 
@@ -76,10 +96,10 @@ impl Material for Emissive {
     /// emission it collects leaves along the reverse of its direction, and
     /// `front_face` is the kernel's word for "arrived on the outward side".
     fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, _cos_theta_o: f32) -> Vec3A {
-        if !self.one_sided && self.shaping.is_none() {
+        if self.is_uniform() {
             return self.color;
         }
-        self.radiance_toward(-r_in.direction().normalize(), rec.front_face)
+        self.radiance_toward(rec.p, -r_in.direction().normalize(), rec.front_face)
     }
 
     // Emissive surfaces do not scatter.
