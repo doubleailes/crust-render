@@ -169,6 +169,128 @@ impl Prim for SpherePrim {
 }
 
 // ---------------------------------------------------------------------
+// Disk (one flat circle)
+// ---------------------------------------------------------------------
+
+/// A flat circular disk. `normal` is unit length and names the disk's
+/// *front*: it is reported as the outward normal, so a hit's `front_face`
+/// says which side the ray arrived from — which is how a one-sided emitter
+/// (UsdLux `DiskLight`) tells its emitting side from its back.
+pub(crate) struct DiskPrim {
+    pub center: Vec3A,
+    pub normal: Vec3A,
+    pub radius: f32,
+    pub geom_id: u32,
+    pub mask: u32,
+}
+
+impl Prim for DiskPrim {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        if masked_out(ray, self.mask) {
+            return None;
+        }
+        let denom = self.normal.dot(ray.dir);
+        if denom == 0.0 {
+            return None; // parallel to the plane: a disk has no thickness
+        }
+        let t = self.normal.dot(self.center - ray.origin) / denom;
+        if t <= t_min || t >= t_max {
+            return None;
+        }
+        if (ray.at(t) - self.center).length_squared() > self.radius * self.radius {
+            return None;
+        }
+        Some(PrimHit {
+            t,
+            outward: self.normal,
+            u: 0.0,
+            v: 0.0,
+            geom_id: self.geom_id,
+            prim_id: 0,
+        })
+    }
+
+    /// Exact: a circle of radius `r` with unit normal `n` extends
+    /// `r·√(1 − nᵢ²)` along axis `i`. Padded like a triangle on the axis it
+    /// has no thickness along, which the slab test would otherwise reject.
+    fn bbox(&self) -> AABB {
+        let n2 = self.normal * self.normal;
+        let half = self.radius * (Vec3A::ONE - n2).max(Vec3A::ZERO).sqrt();
+        let (lo, hi) = (self.center - half, self.center + half);
+        triangle_aabb(lo, hi, lo)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Cylinder (open tube)
+// ---------------------------------------------------------------------
+
+/// The side wall of a circular cylinder from `p0` along the unit `axis` for
+/// `length` — **no caps**, which is UsdLux `CylinderLight`'s shape ("does not
+/// emit light from the flat end-caps"). The outward normal is radial, so a
+/// ray reaching the wall from inside the tube reports a back face.
+pub(crate) struct CylinderPrim {
+    pub p0: Vec3A,
+    pub axis: Vec3A,
+    pub length: f32,
+    pub radius: f32,
+    pub geom_id: u32,
+    pub mask: u32,
+}
+
+impl Prim for CylinderPrim {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        if masked_out(ray, self.mask) {
+            return None;
+        }
+        // Project the ray onto the plane perpendicular to the axis, where
+        // the wall is a circle; the axial coordinate then bounds the tube.
+        let oc = ray.origin - self.p0;
+        let d_perp = ray.dir - ray.dir.dot(self.axis) * self.axis;
+        let oc_perp = oc - oc.dot(self.axis) * self.axis;
+        let a = d_perp.length_squared();
+        if a == 0.0 {
+            return None; // parallel to the axis: never meets the wall
+        }
+        let half_b = oc_perp.dot(d_perp);
+        let c = oc_perp.length_squared() - self.radius * self.radius;
+        let discriminant = half_b * half_b - a * c;
+        if discriminant < 0.0 {
+            return None;
+        }
+        let sqrt_d = discriminant.sqrt();
+        for t in [(-half_b - sqrt_d) / a, (-half_b + sqrt_d) / a] {
+            if t <= t_min || t >= t_max {
+                continue;
+            }
+            let rel = oc + t * ray.dir;
+            let s = rel.dot(self.axis);
+            if !(0.0..=self.length).contains(&s) {
+                continue;
+            }
+            return Some(PrimHit {
+                t,
+                outward: (rel - s * self.axis) / self.radius,
+                u: 0.0,
+                v: 0.0,
+                geom_id: self.geom_id,
+                prim_id: 0,
+            });
+        }
+        None
+    }
+
+    /// Exact: the two end circles' extents, `r·√(1 − aᵢ²)` about each end.
+    fn bbox(&self) -> AABB {
+        let p1 = self.p0 + self.length * self.axis;
+        let a2 = self.axis * self.axis;
+        let half = self.radius * (Vec3A::ONE - a2).max(Vec3A::ZERO).sqrt();
+        let (lo, hi) = (self.p0.min(p1) - half, self.p0.max(p1) + half);
+        triangle_aabb(lo, hi, lo)
+    }
+}
+
+// ---------------------------------------------------------------------
 // Round curve segment (sphere-swept cone)
 // ---------------------------------------------------------------------
 
@@ -399,7 +521,7 @@ impl Prim for InstancePrim {
 }
 
 // ---------------------------------------------------------------------
-// PrimNode: a closed, unboxed sum of the four prim kinds.
+// PrimNode: a closed, unboxed sum of the prim kinds.
 // ---------------------------------------------------------------------
 
 /// The BVH's actual primitive storage. A trait object (`Box<dyn Prim>`)
@@ -420,6 +542,8 @@ impl Prim for InstancePrim {
 pub(crate) enum PrimNode {
     Triangle(TrianglePrim),
     Sphere(SpherePrim),
+    Disk(DiskPrim),
+    Cylinder(CylinderPrim),
     Curve(CurvePrim),
     /// Boxed for the same reason as `Instance`: at 4 `Vec3A` control
     /// points, this is bigger than every other variant, and an enum's
@@ -436,6 +560,8 @@ impl PrimNode {
         match self {
             PrimNode::Triangle(p) => p.hit(ray, t_min, t_max),
             PrimNode::Sphere(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Disk(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Cylinder(p) => p.hit(ray, t_min, t_max),
             PrimNode::Curve(p) => p.hit(ray, t_min, t_max),
             PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max),
             PrimNode::Instance(p) => p.hit(ray, t_min, t_max),
@@ -447,6 +573,8 @@ impl PrimNode {
         match self {
             PrimNode::Triangle(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::Disk(p) => p.hit_any(ray, t_min, t_max),
+            PrimNode::Cylinder(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Curve(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::CubicCurve(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Instance(p) => p.hit_any(ray, t_min, t_max),
@@ -458,6 +586,8 @@ impl PrimNode {
         match self {
             PrimNode::Triangle(p) => p.bbox(),
             PrimNode::Sphere(p) => p.bbox(),
+            PrimNode::Disk(p) => p.bbox(),
+            PrimNode::Cylinder(p) => p.bbox(),
             PrimNode::Curve(p) => p.bbox(),
             PrimNode::CubicCurve(p) => p.bbox(),
             PrimNode::Instance(p) => p.bbox(),
@@ -478,6 +608,8 @@ impl PrimNode {
         match self {
             PrimNode::Triangle(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Sphere(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::Disk(p) => p.clipped_aabb(axis, min, max),
+            PrimNode::Cylinder(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Curve(p) => p.clipped_aabb(axis, min, max),
             PrimNode::CubicCurve(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Instance(p) => p.clipped_aabb(axis, min, max),

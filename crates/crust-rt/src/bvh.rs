@@ -350,6 +350,8 @@ impl Bvh {
             match p {
                 PrimNode::Triangle(_) => b.triangles += 1,
                 PrimNode::Sphere(_) => b.spheres += 1,
+                PrimNode::Disk(_) => b.disks += 1,
+                PrimNode::Cylinder(_) => b.cylinders += 1,
                 PrimNode::Curve(_) => b.curve_segments += 1,
                 PrimNode::CubicCurve(_) => b.cubic_curve_spans += 1,
                 PrimNode::Instance(_) => b.instances += 1,
@@ -403,6 +405,8 @@ impl Bvh {
             match p {
                 PrimNode::Triangle(_) => acc.triangles += 1,
                 PrimNode::Sphere(_) => acc.spheres += 1,
+                PrimNode::Disk(_) => acc.disks += 1,
+                PrimNode::Cylinder(_) => acc.cylinders += 1,
                 PrimNode::Curve(_) => acc.curve_segments += 1,
                 PrimNode::CubicCurve(_) => acc.cubic_curve_spans += 1,
                 PrimNode::Instance(i) => {

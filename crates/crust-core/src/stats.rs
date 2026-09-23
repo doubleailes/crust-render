@@ -57,6 +57,10 @@ impl MemorySample {
 pub struct PrimitiveCounts {
     pub triangles: usize,
     pub spheres: usize,
+    /// Analytic disks (UsdLux `DiskLight` surfaces).
+    pub disks: usize,
+    /// Analytic open cylinders (UsdLux `CylinderLight` surfaces).
+    pub cylinders: usize,
     /// Straight (linear / pre-flattened) round curve segments.
     pub curve_segments: usize,
     /// Analytically intersected cubic curve spans.
@@ -68,6 +72,8 @@ impl PrimitiveCounts {
     pub fn total(&self) -> usize {
         self.triangles
             + self.spheres
+            + self.disks
+            + self.cylinders
             + self.curve_segments
             + self.cubic_curve_spans
             + self.instances
@@ -83,6 +89,8 @@ impl From<crate::rt::PrimitiveBreakdown> for PrimitiveCounts {
         PrimitiveCounts {
             triangles: b.triangles,
             spheres: b.spheres,
+            disks: b.disks,
+            cylinders: b.cylinders,
             curve_segments: b.curve_segments,
             cubic_curve_spans: b.cubic_curve_spans,
             instances: b.instances,
@@ -528,6 +536,8 @@ impl fmt::Display for RenderStats {
             for (label, count) in [
                 ("triangles", c.triangles),
                 ("spheres", c.spheres),
+                ("disks", c.disks),
+                ("cylinders", c.cylinders),
                 ("curve segments", c.curve_segments),
                 ("cubic curve spans", c.cubic_curve_spans),
                 ("instances", c.instances),
@@ -1064,11 +1074,13 @@ mod tests {
         let c = PrimitiveCounts {
             triangles: 1,
             spheres: 2,
+            disks: 6,
+            cylinders: 7,
             curve_segments: 3,
             cubic_curve_spans: 4,
             instances: 5,
         };
-        assert_eq!(c.total(), 15);
+        assert_eq!(c.total(), 28);
     }
 
     #[test]

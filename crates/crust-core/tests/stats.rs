@@ -127,6 +127,8 @@ fn primitive_counts_convert_from_the_kernel_breakdown() {
     let br = PrimitiveBreakdown {
         triangles: 10,
         spheres: 2,
+        disks: 6,
+        cylinders: 7,
         curve_segments: 3,
         cubic_curve_spans: 4,
         instances: 5,
@@ -137,7 +139,8 @@ fn primitive_counts_convert_from_the_kernel_breakdown() {
     assert_eq!(pc.curve_segments, 3);
     assert_eq!(pc.cubic_curve_spans, 4);
     assert_eq!(pc.instances, 5);
-    assert_eq!(pc.total(), 24);
+    assert_eq!((pc.disks, pc.cylinders), (6, 7));
+    assert_eq!(pc.total(), 37);
     assert_eq!(PrimitiveCounts::default().total(), 0);
 }
 

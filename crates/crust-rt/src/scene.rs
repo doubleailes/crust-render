@@ -5,8 +5,8 @@
 use crate::aabb::AABB;
 use crate::bvh::Bvh;
 use crate::prim::{
-    CubicCurvePrim, CurvePrim, InstancePrim, PrimHit, PrimNode, SpherePrim, TrianglePrim,
-    transformed_aabb,
+    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, PrimHit, PrimNode, SpherePrim,
+    TrianglePrim, transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray};
 use glam::{Affine3A, Vec3A};
@@ -62,6 +62,8 @@ impl MemoryFootprint {
 pub struct PrimitiveBreakdown {
     pub triangles: usize,
     pub spheres: usize,
+    pub disks: usize,
+    pub cylinders: usize,
     pub curve_segments: usize,
     pub cubic_curve_spans: usize,
     pub instances: usize,
@@ -81,7 +83,8 @@ pub struct CubicCurveSegment {
 
 /// A geometry to attach to a scene. The variants mirror Embree's geometry
 /// types (the subset crust needs): triangle meshes, analytic spheres,
-/// round curves, and instances of another committed scene. Instances nest:
+/// disks and open cylinders, round curves, and instances of another
+/// committed scene. Instances nest:
 /// an instanced scene may itself contain instances, and transforms,
 /// normals and ray masks compose correctly through every level.
 pub enum Geometry {
@@ -94,6 +97,21 @@ pub enum Geometry {
     },
     Sphere {
         center: Vec3A,
+        radius: f32,
+    },
+    /// A flat circular disk. `normal` names its front: hits report it as
+    /// the outward normal, so `RayHit::front_face` tells the two sides apart.
+    /// Need not be unit length; it is normalised at commit.
+    Disk {
+        center: Vec3A,
+        normal: Vec3A,
+        radius: f32,
+    },
+    /// The side wall of a circular cylinder from `p0` to `p1` — open, with no
+    /// end caps. Hits report the radial outward normal.
+    Cylinder {
+        p0: Vec3A,
+        p1: Vec3A,
         radius: f32,
     },
     RoundCurves {
@@ -218,7 +236,10 @@ impl SceneBuilder {
             Geometry::TriangleMesh { indices, .. } => indices.len(),
             Geometry::RoundCurves { segments } => segments.len(),
             Geometry::CubicCurves { segments } => segments.len(),
-            Geometry::Sphere { .. } | Geometry::Instance { .. } => 1,
+            Geometry::Sphere { .. }
+            | Geometry::Disk { .. }
+            | Geometry::Cylinder { .. }
+            | Geometry::Instance { .. } => 1,
         }
     }
 
@@ -273,6 +294,36 @@ impl SceneBuilder {
                 Geometry::Sphere { center, radius } => {
                     prims.push(PrimNode::Sphere(SpherePrim {
                         center,
+                        radius,
+                        geom_id,
+                        mask,
+                    }));
+                }
+                Geometry::Disk {
+                    center,
+                    normal,
+                    radius,
+                } => {
+                    if normal.length_squared() == 0.0 || radius.is_nan() || radius <= 0.0 {
+                        continue; // degenerate: no front, or no extent
+                    }
+                    prims.push(PrimNode::Disk(DiskPrim {
+                        center,
+                        normal: normal.normalize(),
+                        radius,
+                        geom_id,
+                        mask,
+                    }));
+                }
+                Geometry::Cylinder { p0, p1, radius } => {
+                    let length = (p1 - p0).length();
+                    if length.is_nan() || length <= 0.0 || radius.is_nan() || radius <= 0.0 {
+                        continue;
+                    }
+                    prims.push(PrimNode::Cylinder(CylinderPrim {
+                        p0,
+                        axis: (p1 - p0) / length,
+                        length,
                         radius,
                         geom_id,
                         mask,
@@ -499,6 +550,155 @@ mod tests {
             radius: 1.0,
         });
         Arc::new(b.commit())
+    }
+
+    /// A disk is hit inside its radius and nowhere else, from either side,
+    /// and `front_face` names the side its `normal` points to.
+    #[test]
+    fn disk_is_flat_round_and_knows_its_front() {
+        let mut b = SceneBuilder::new();
+        let id = b.attach(Geometry::Disk {
+            center: Vec3A::new(0.0, 0.0, 2.0),
+            normal: Vec3A::new(0.0, 0.0, -3.0), // unnormalised on purpose
+            radius: 1.0,
+        });
+        let s = b.commit();
+
+        let from_front = s
+            .intersect(
+                &Ray::new(Vec3A::new(0.5, 0.5, 0.0), Vec3A::Z),
+                0.0,
+                f32::INFINITY,
+            )
+            .expect("inside the radius");
+        assert_eq!(from_front.geom_id, id);
+        assert!((from_front.t - 2.0).abs() < 1e-6);
+        assert!(
+            from_front.front_face,
+            "the ray arrives on the -Z (front) side"
+        );
+        assert!(from_front.normal.abs_diff_eq(-Vec3A::Z, 1e-6));
+
+        let from_back = s
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z),
+                0.0,
+                f32::INFINITY,
+            )
+            .expect("a disk is visible from behind too");
+        assert!(!from_back.front_face);
+
+        // Just outside the radius (0.72² + 0.72² > 1) misses; parallel misses.
+        assert!(
+            s.intersect(
+                &Ray::new(Vec3A::new(0.72, 0.72, 0.0), Vec3A::Z),
+                0.0,
+                f32::INFINITY
+            )
+            .is_none()
+        );
+        assert!(
+            s.intersect(
+                &Ray::new(Vec3A::new(-3.0, 0.0, 2.0), Vec3A::X),
+                0.0,
+                f32::INFINITY
+            )
+            .is_none()
+        );
+
+        // Bounds are exact in the plane and padded across it.
+        let bb = s.bounds().unwrap();
+        assert!((bb.maximum.x - 1.0).abs() < 1e-6 && (bb.minimum.y + 1.0).abs() < 1e-6);
+        assert!(bb.maximum.z > bb.minimum.z);
+    }
+
+    /// An open tube: the wall is hit from outside with an outward normal,
+    /// from inside as a back face, and the ends are open.
+    #[test]
+    fn cylinder_is_an_open_tube() {
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Cylinder {
+            p0: Vec3A::new(-1.0, 0.0, 0.0),
+            p1: Vec3A::new(1.0, 0.0, 0.0),
+            radius: 0.5,
+        });
+        let s = b.commit();
+
+        let outside = s
+            .intersect(
+                &Ray::new(Vec3A::new(0.3, 0.0, -4.0), Vec3A::Z),
+                0.0,
+                f32::INFINITY,
+            )
+            .expect("the wall");
+        assert!((outside.t - 3.5).abs() < 1e-5);
+        assert!(outside.front_face);
+        assert!(outside.normal.abs_diff_eq(-Vec3A::Z, 1e-5));
+
+        let inside = s
+            .intersect(
+                &Ray::new(Vec3A::new(0.3, 0.0, 0.0), Vec3A::Y),
+                0.0,
+                f32::INFINITY,
+            )
+            .expect("the wall, from within");
+        assert!((inside.t - 0.5).abs() < 1e-5);
+        assert!(!inside.front_face, "the inside of a tube is its back face");
+
+        // Down the axis there are no caps to hit; past the end, no wall.
+        assert!(
+            s.intersect(
+                &Ray::new(Vec3A::new(-5.0, 0.1, 0.0), Vec3A::X),
+                0.0,
+                f32::INFINITY
+            )
+            .is_none()
+        );
+        assert!(
+            s.intersect(
+                &Ray::new(Vec3A::new(1.2, 0.0, -4.0), Vec3A::Z),
+                0.0,
+                f32::INFINITY
+            )
+            .is_none()
+        );
+        // An oblique ray entering past the end exits through the wall.
+        let oblique = s
+            .intersect(
+                &Ray::new(Vec3A::new(1.5, 0.0, 0.0), Vec3A::new(-1.0, 0.0, 1.0)),
+                0.0,
+                f32::INFINITY,
+            )
+            .expect("exits through the wall");
+        assert!(!oblique.front_face);
+
+        let bb = s.bounds().unwrap();
+        assert!(bb.minimum.abs_diff_eq(Vec3A::new(-1.0, -0.5, -0.5), 1e-6));
+        assert!(bb.maximum.abs_diff_eq(Vec3A::new(1.0, 0.5, 0.5), 1e-6));
+        assert_eq!(s.primitive_breakdown().cylinders, 1);
+    }
+
+    /// Placed through an instance, a disk under a non-uniform scale is an
+    /// ellipse — the path the importer takes for a squashed `DiskLight`.
+    #[test]
+    fn instanced_disk_becomes_an_ellipse() {
+        let mut inner = SceneBuilder::new();
+        inner.attach(Geometry::Disk {
+            center: Vec3A::ZERO,
+            normal: -Vec3A::Z,
+            radius: 1.0,
+        });
+        let inner = Arc::new(inner.commit());
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Instance {
+            scene: inner,
+            transform: Affine3A::from_scale(glam::Vec3::new(3.0, 1.0, 1.0)),
+            transform_end: None,
+        });
+        let s = b.commit();
+        let hit = |x: f32| s.intersect(&Ray::new(Vec3A::new(x, 0.0, -1.0), Vec3A::Z), 0.0, 10.0);
+        assert!(hit(2.9).is_some_and(|h| h.front_face));
+        assert!(hit(3.1).is_none());
     }
 
     /// A reserved slot must keep its `geom_id` (so ids stay dense and every
