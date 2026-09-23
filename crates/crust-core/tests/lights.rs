@@ -4,7 +4,7 @@
 
 use crust_core::{
     AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList, LightShape,
-    RectShape, SphereShape, Vec3A,
+    RectShape, SphereShape, Vec3A, projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;
@@ -266,19 +266,41 @@ fn distant_light_pdf_is_the_inverse_cone_solid_angle() {
 }
 
 #[test]
-fn distant_light_intensity_is_irradiance_not_radiance() {
-    // radiance × solid angle == the authored irradiance, so widening the
-    // cone dims the source without changing what lands on a surface.
+fn distant_light_new_takes_irradiance_with_radiance_takes_nits() {
+    // `new`: radiance × the cone's cosine-weighted solid angle (π sin²θ) is
+    // the authored irradiance, so widening the cone dims the source without
+    // changing what lands on a surface facing it.
     let e = Vec3A::new(2.0, 1.0, 0.5);
     for angle in [0.5f32, 5.0, 30.0] {
         let light = DistantLight::new(-Vec3A::Y, e, angle);
         let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
-        let back = s.radiance / s.pdf;
+        let half = 0.5 * angle.to_radians();
+        let back = s.radiance * projected_cone_solid_angle(half);
         assert!(
             back.abs_diff_eq(e, 1e-3 * e.max_element()),
             "angle {angle}: {back}"
         );
     }
+    // Measured from the sampler's own cone rather than the helper: the pdf is
+    // 1/Ω, Ω = 2π(1 − c) names the cone's cosine c, and uniform-in-cosine
+    // directions average (1 + c)/2 against a facing surface. What the light
+    // delivers must be the authored irradiance to f32 precision — including
+    // at the sun's size, where rounding the cone's cosine is 2.4e-4 of Ω.
+    for angle in [0.0f32, 0.53, 1.5, 30.0] {
+        let light = DistantLight::new(-Vec3A::Y, e, angle);
+        let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
+        let omega = 1.0 / s.pdf as f64;
+        let c = 1.0 - omega / (2.0 * std::f64::consts::PI);
+        let delivered = s.radiance.x as f64 * omega * (1.0 + c) / 2.0;
+        assert!(
+            (delivered / e.x as f64 - 1.0).abs() < 2e-5,
+            "angle {angle}: delivers {delivered}, authored {}",
+            e.x
+        );
+    }
+    // `with_radiance`: the argument is the radiance itself, at any angle.
+    let l = DistantLight::with_radiance(-Vec3A::Y, e, 5.0);
+    assert_eq!(l.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap().radiance, e);
 }
 
 #[test]

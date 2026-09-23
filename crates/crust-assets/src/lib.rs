@@ -25,12 +25,14 @@
 #![forbid(unsafe_code)]
 
 mod environment;
+mod ies;
 mod ptex_stream;
 mod ptex_texture;
 pub mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb};
+pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
     MICRO_SLOTS as PTEX_MICRO_SLOTS, MipSpace as PtexMipSpace, PtexStream,
@@ -45,7 +47,7 @@ pub use ptex_texture::{
 };
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
 
-use crust_core::{AssetLoader, ColorSpace, EnvironmentMap, PtexTexture, Texture2D};
+use crust_core::{AssetLoader, ColorSpace, EnvironmentMap, IesProfile, PtexTexture, Texture2D};
 use std::path::Path;
 use std::time::Instant;
 use tracing::{debug, error, info};
@@ -526,6 +528,19 @@ impl AssetLoader for FileAssets {
             started.elapsed()
         );
         Some(std::sync::Arc::new(loaded))
+    }
+
+    fn load_ies(&self, path: &Path) -> Option<std::sync::Arc<IesProfile>> {
+        let loaded = load_ies(path);
+        match &loaded {
+            Some(p) => debug!(
+                "Loaded IES profile {} (power {:.3})",
+                path.display(),
+                p.power()
+            ),
+            None => error!("Could not load IES profile {}", path.display()),
+        }
+        loaded.map(std::sync::Arc::new)
     }
 
     fn load_ptex(&self, path: &Path) -> Option<std::sync::Arc<dyn PtexTexture>> {

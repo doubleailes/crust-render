@@ -56,8 +56,11 @@ impl Scene {
     /// * `UsdGeomMesh` → triangulated BVH with world-baked vertices. Bound
     ///   material resolved via `MaterialBindingAPI`.
     /// * `UsdGeomSphere` → analytic `crust::Sphere`.
-    /// * `UsdLuxSphereLight` → an `Emissive` sphere that acts as both
-    ///   geometry and light. Other lux schemas warn and are skipped.
+    /// * `UsdLuxSphereLight` / `RectLight` / `DiskLight` / `CylinderLight`
+    ///   → one-sided emissive geometry that acts as both surface and light;
+    ///   `DistantLight` and `DomeLight` → lights at infinity. All in the
+    ///   UsdLux spec's units (nits; `normalize`; colour temperature), with
+    ///   `ShapingAPI` on the area lights.
     /// * `UsdRenderSettings` (plus `crust:*` custom attrs for spp / depth
     ///   / etc.) → `RenderSettings`. Falls back to sensible defaults.
     pub fn from_usd(path: &std::path::Path) -> Result<Scene, crate::Error> {
@@ -71,7 +74,8 @@ impl Scene {
     /// `inputs:texture:file`, the importer resolves the asset path against
     /// the USD layer and asks `assets` for the pixels. A host that cannot
     /// (or will not) decode returns `None` and the dome falls back to its
-    /// uniform colour.
+    /// uniform colour. IES profiles (`inputs:shaping:ies:file`) cross the
+    /// same seam.
     pub fn from_usd_with_assets(
         path: &std::path::Path,
         assets: &dyn AssetLoader,
@@ -161,6 +165,20 @@ pub trait AssetLoader: Send + Sync {
         tracing::warn!(
             "Asset loader does not decode Ptex: {} ignored — the surface falls \
              back to its constant baseColor.",
+            path.display()
+        );
+        None
+    }
+
+    /// Decodes an IES photometric profile (`inputs:shaping:ies:file`).
+    ///
+    /// `path` is resolved as for the other loaders. `None` drops the IES term
+    /// from the light's shaping — the rest of it (focus, cone) still applies —
+    /// so the light renders unshaped by the profile rather than not at all.
+    fn load_ies(&self, path: &std::path::Path) -> Option<std::sync::Arc<crate::IesProfile>> {
+        tracing::warn!(
+            "Asset loader does not decode IES profiles: {} ignored — the light \
+             renders without it.",
             path.display()
         );
         None

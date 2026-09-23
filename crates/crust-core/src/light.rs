@@ -1,6 +1,7 @@
 use crate::environment::EnvironmentMap;
-use crate::material::{Emissive, Material};
-use glam::{Mat3A, Vec3A};
+use crate::material::Emissive;
+use glam::{Affine3A, Mat3A, Vec3A};
+use std::f32::consts::PI;
 use std::sync::Arc;
 
 /// The emitting surface of an area light, decoupled from any material: pure
@@ -13,8 +14,18 @@ pub trait LightShape: Send + Sync {
     /// Outward surface normal at a point known to lie on the shape.
     fn normal_at(&self, p: Vec3A) -> Vec3A;
 
-    /// Total surface area.
+    /// Total world-space surface area — what `inputs:normalize` divides by.
     fn area(&self) -> f32;
+
+    /// The reciprocal of [`LightShape::sample_point`]'s area density at a
+    /// point on the surface. For a shape sampled uniformly by area that is the
+    /// area itself, the default. A shape whose sampling is *not* uniform in
+    /// world area — a unit sphere mapped through a non-uniform scale is denser
+    /// where it is squashed — overrides it. Both halves of MIS read this, so
+    /// the density need only be the one actually sampled, not uniform.
+    fn inv_pdf_area(&self, _p: Vec3A) -> f32 {
+        self.area()
+    }
 }
 
 /// Spherical light surface (UsdLux `SphereLight`).
@@ -73,6 +84,169 @@ impl LightShape for RectShape {
 
     fn area(&self) -> f32 {
         self.edge_u.cross(self.edge_v).length()
+    }
+}
+
+/// The canonical local-space shapes UsdLux defines its round lights on,
+/// before the light's radius, length and transform are applied: a unit
+/// sphere; a unit disk in the XY plane emitting along −Z (`DiskLight`); and
+/// a unit-radius, unit-length open tube along X, centred on the origin
+/// (`CylinderLight`, which "does not emit light from the flat end-caps").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitShape {
+    Sphere,
+    Disk,
+    Cylinder,
+}
+
+impl UnitShape {
+    /// Surface area in local space.
+    fn local_area(self) -> f32 {
+        match self {
+            UnitShape::Sphere => 4.0 * PI,
+            UnitShape::Disk => PI,
+            UnitShape::Cylinder => 2.0 * PI,
+        }
+    }
+
+    /// A point uniform by *local* area.
+    fn sample(self, u: f32, v: f32) -> Vec3A {
+        let phi = 2.0 * PI * v;
+        match self {
+            UnitShape::Sphere => {
+                let z = 1.0 - 2.0 * u;
+                let r = (1.0 - z * z).max(0.0).sqrt();
+                Vec3A::new(r * phi.cos(), r * phi.sin(), z)
+            }
+            UnitShape::Disk => {
+                let r = u.sqrt();
+                Vec3A::new(r * phi.cos(), r * phi.sin(), 0.0)
+            }
+            UnitShape::Cylinder => Vec3A::new(u - 0.5, phi.cos(), phi.sin()),
+        }
+    }
+
+    /// The local emitting normal at a local point.
+    fn normal(self, p: Vec3A) -> Vec3A {
+        match self {
+            UnitShape::Sphere => p.normalize_or(Vec3A::Z),
+            UnitShape::Disk => -Vec3A::Z,
+            UnitShape::Cylinder => Vec3A::new(0.0, p.y, p.z).normalize_or(Vec3A::Y),
+        }
+    }
+}
+
+/// A [`UnitShape`] under an arbitrary invertible affine placement — which is
+/// what the spec's "world-space surface area … including any scaling applied
+/// to the light by its transform stack" requires of a squashed sphere, an
+/// elliptical disk or an elliptical tube.
+///
+/// Sampling is uniform in the shape's *local* area and mapped through the
+/// placement, so in world space it is denser where the placement compresses
+/// the surface. That is fine — MIS needs a density both sides agree on, not a
+/// uniform one — and [`LightShape::inv_pdf_area`] reports it exactly: an
+/// affine map `M` scales the area element at a point with unit local normal
+/// `n` by `|det M| · |M⁻ᵀ n|`. For a disk that factor is constant, so the
+/// sampling is uniform after all.
+pub struct AffineShape {
+    unit: UnitShape,
+    light_to_world: Affine3A,
+    world_to_light: Affine3A,
+    /// `M⁻ᵀ`, the normal transform.
+    normal_mat: Mat3A,
+    abs_det: f32,
+    area: f32,
+}
+
+impl AffineShape {
+    /// `None` for a transform that collapses the shape (not invertible).
+    pub fn new(unit: UnitShape, light_to_world: Affine3A) -> Option<Self> {
+        let det = light_to_world.matrix3.determinant();
+        if !det.is_finite() || det.abs() < 1e-30 {
+            return None;
+        }
+        let world_to_light = light_to_world.inverse();
+        let mut shape = Self {
+            unit,
+            light_to_world,
+            world_to_light,
+            normal_mat: world_to_light.matrix3.transpose(),
+            abs_det: det.abs(),
+            area: 0.0,
+        };
+        shape.area = shape.integrate_area();
+        Some(shape)
+    }
+
+    pub fn unit(&self) -> UnitShape {
+        self.unit
+    }
+
+    /// How much the placement scales local area at a point with unit local
+    /// normal `n`.
+    fn area_scale(&self, n: Vec3A) -> f32 {
+        self.abs_det * (self.normal_mat * n).length()
+    }
+
+    /// World-space area, integrating the area scale over the local surface.
+    /// Exact for the disk (the scale is constant) and for any similarity;
+    /// under a non-uniform scale the sphere's and tube's scale varies over
+    /// the surface and a midpoint rule over a fine grid is well inside f32
+    /// precision — done once, at import. Replaces hdEmbree's closed-form
+    /// approximations (Knud Thomsen's ellipsoid, Ramanujan's ellipse
+    /// perimeter), which are close but not what the spec asks for.
+    fn integrate_area(&self) -> f32 {
+        let local = self.unit.local_area();
+        let mean = match self.unit {
+            UnitShape::Disk => self.area_scale(-Vec3A::Z) as f64,
+            UnitShape::Cylinder => {
+                const N: usize = 4096;
+                (0..N)
+                    .map(|i| {
+                        let phi = 2.0 * PI * (i as f32 + 0.5) / N as f32;
+                        self.area_scale(Vec3A::new(0.0, phi.cos(), phi.sin())) as f64
+                    })
+                    .sum::<f64>()
+                    / N as f64
+            }
+            UnitShape::Sphere => {
+                // Uniform-area grid: z and φ both uniform.
+                const NZ: usize = 256;
+                const NP: usize = 512;
+                let mut sum = 0.0f64;
+                for i in 0..NZ {
+                    let z = 1.0 - 2.0 * (i as f32 + 0.5) / NZ as f32;
+                    let r = (1.0 - z * z).max(0.0).sqrt();
+                    for j in 0..NP {
+                        let phi = 2.0 * PI * (j as f32 + 0.5) / NP as f32;
+                        sum += self.area_scale(Vec3A::new(r * phi.cos(), r * phi.sin(), z)) as f64;
+                    }
+                }
+                sum / (NZ * NP) as f64
+            }
+        };
+        (local as f64 * mean) as f32
+    }
+}
+
+impl LightShape for AffineShape {
+    fn sample_point(&self, u: f32, v: f32) -> Vec3A {
+        self.light_to_world
+            .transform_point3a(self.unit.sample(u, v))
+    }
+
+    fn normal_at(&self, p: Vec3A) -> Vec3A {
+        let local = self.world_to_light.transform_point3a(p);
+        (self.normal_mat * self.unit.normal(local)).normalize_or(Vec3A::Z)
+    }
+
+    fn area(&self) -> f32 {
+        self.area
+    }
+
+    fn inv_pdf_area(&self, p: Vec3A) -> f32 {
+        let local = self.world_to_light.transform_point3a(p);
+        self.unit.local_area() * self.area_scale(self.unit.normal(local))
     }
 }
 
@@ -175,11 +349,22 @@ impl AreaLight {
     /// one-sided.
     fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> f32 {
         let direction = light_point - from;
-        let distance_squared = direction.length_squared();
         let dir_to_light = direction.normalize();
         let light_normal = self.shape.normal_at(light_point);
+        self.pdf_toward(direction, dir_to_light, light_normal, light_point)
+    }
+
+    /// [`AreaLight::solid_angle_pdf`] with the normal already in hand.
+    fn pdf_toward(
+        &self,
+        direction: Vec3A,
+        dir_to_light: Vec3A,
+        light_normal: Vec3A,
+        light_point: Vec3A,
+    ) -> f32 {
+        let distance_squared = direction.length_squared();
         let cosine = f32::max(light_normal.dot(-dir_to_light), 0.0);
-        distance_squared / (cosine * self.shape.area() + 1e-4)
+        distance_squared / (cosine * self.shape.inv_pdf_area(light_point) + 1e-4)
     }
 }
 
@@ -191,11 +376,19 @@ impl Light for AreaLight {
         if distance < 1e-6 {
             return None;
         }
+        let direction = to_light / distance;
+        // `normalize` rather than `direction`, so the pdf is bit-for-bit what
+        // `pdf_at_point` computes for the same point on the bounce side.
+        let dir_to_light = to_light.normalize();
+        let light_normal = self.shape.normal_at(light_point);
+        // Emission leaves the light back toward `from`; whether that is the
+        // emitting side is the same cosine the pdf clamps.
+        let front = light_normal.dot(-dir_to_light) > 0.0;
         Some(LightSample {
-            direction: to_light / distance,
+            direction,
             distance,
-            radiance: self.material.emitted(),
-            pdf: self.solid_angle_pdf(from, light_point),
+            radiance: self.material.radiance_toward(-dir_to_light, front),
+            pdf: self.pdf_toward(to_light, dir_to_light, light_normal, light_point),
         })
     }
 
@@ -222,17 +415,20 @@ impl Light for AreaLight {
 /// bounce ray happens into the tiny cone the light pdf is enormous, so the
 /// bounce side's weight collapses to nothing and no firefly survives.
 ///
-/// **`intensity × color` is irradiance, not radiance.** The radiance the
-/// light emits is derived as `E / Ω` over the cone's solid angle, so
-/// widening the angle softens shadows without changing exposure — the
-/// behaviour Hydra and most production renderers normalize to. Treating the
-/// input as radiance instead would make a sun-sized source almost black.
+/// **The light stores radiance, and there are two ways to ask for it.**
+/// UsdLux says `intensity` is the source's *luminance* in nits
+/// ([`DistantLight::with_radiance`]); with `inputs:normalize` it divides by
+/// `π·sin²θ`, which makes `intensity` the *illuminance* on a surface facing
+/// the light ([`DistantLight::new`]). The importer decides which — see
+/// `emit_distant_light` — and also owns what widening a zero angle means for
+/// each: a zero-angle light is a delta, whose `intensity` the spec and
+/// hdEmbree both deliver as irradiance, so it goes through `new` too.
 pub struct DistantLight {
     /// Unit direction the light travels *toward* (the direction photons
     /// move), so a shading point is lit from `-direction`.
     direction: Vec3A,
-    /// Irradiance on a surface facing the light.
-    irradiance: Vec3A,
+    /// Radiance inside the cone.
+    radiance: Vec3A,
     /// Half-angle of the source cone, in radians.
     cos_half_angle: f32,
     /// Solid angle of the cone, `2π(1 − cos θ)`.
@@ -245,24 +441,46 @@ pub struct DistantLight {
 pub const MIN_DISTANT_ANGLE_DEG: f32 = 0.05;
 
 impl DistantLight {
-    /// `direction` is the direction the light travels toward (UsdLux's
-    /// convention: a distant light points down its local -Z). `angle_deg`
-    /// is the source's angular *diameter*, as `inputs:angle` gives it.
+    /// A distant light delivering `irradiance` to a surface facing it,
+    /// however wide the cone. `direction` is the direction the light travels
+    /// toward (UsdLux's convention: a distant light points down its local
+    /// -Z). `angle_deg` is the source's angular *diameter*, as `inputs:angle`
+    /// gives it.
+    ///
+    /// The radiance is `E / (π·sin²θ)` — the *cosine-weighted* solid angle,
+    /// which is what makes `E` exact on the facing surface — not `E / Ω`,
+    /// which undershoots by `cos²(θ/2)`: 1.7% at a 30° diameter, nothing at
+    /// the sun's.
     pub fn new(direction: Vec3A, irradiance: Vec3A, angle_deg: f32) -> Self {
-        let diameter = angle_deg.clamp(MIN_DISTANT_ANGLE_DEG, 179.0);
-        let half_angle = 0.5 * diameter.to_radians();
+        let half = 0.5 * Self::clamp_diameter(angle_deg).to_radians();
+        Self::with_radiance(
+            direction,
+            irradiance / projected_cone_solid_angle(half).max(1e-12),
+            angle_deg,
+        )
+    }
+
+    /// A distant light of the given radiance (nits) inside its cone.
+    pub fn with_radiance(direction: Vec3A, radiance: Vec3A, angle_deg: f32) -> Self {
+        let half_angle = 0.5 * Self::clamp_diameter(angle_deg).to_radians();
         let cos_half_angle = half_angle.cos();
         Self {
             direction: direction.normalize(),
-            irradiance,
+            radiance,
             cos_half_angle,
             solid_angle: 2.0 * std::f32::consts::PI * (1.0 - cos_half_angle),
         }
     }
 
-    /// Radiance within the cone: irradiance spread over its solid angle.
+    /// The angular diameter actually used: the widening floor and a ceiling
+    /// short of a full hemisphere.
+    pub fn clamp_diameter(angle_deg: f32) -> f32 {
+        angle_deg.clamp(MIN_DISTANT_ANGLE_DEG, 179.0)
+    }
+
+    /// Radiance within the cone.
     fn radiance(&self) -> Vec3A {
-        self.irradiance / self.solid_angle.max(1e-12)
+        self.radiance
     }
 
     /// Uniform-cone pdf, constant inside the cone.
@@ -297,6 +515,24 @@ impl Light for DistantLight {
         self.covers(direction)
             .then(|| (self.radiance(), self.cone_pdf()))
     }
+}
+
+/// The cosine-weighted solid angle of a cone of half-angle `half` (≤ π/2)
+/// seen along its axis, `π·sin²θ`: the irradiance unit radiance inside it
+/// delivers to a surface facing it.
+///
+/// Evaluated as `π·(1 − c)(1 + c)` from the f32 cosine `c` — the same
+/// cosine [`DistantLight`] bounds its cone with — rather than from `sin θ`.
+/// The two agree mathematically, but the cone crust actually samples and
+/// tests against is the one the *rounded* cosine bounds, and for a sun-sized
+/// cone that rounding is 2.4e-4 of the solid angle: dividing by `π·sin²θ`
+/// would deliver the authored illuminance to that accuracy, dividing by this
+/// delivers it exactly. (`1 − c` is itself exact — Sterbenz — so this is
+/// also free of the cancellation that made `2π(1 − cos θ)` computed the
+/// obvious way in f32 wrong by the same 2.4e-4.)
+pub fn projected_cone_solid_angle(half: f32) -> f32 {
+    let c = half.clamp(0.0, 0.5 * PI).cos();
+    PI * (1.0 - c) * (1.0 + c)
 }
 
 /// A `UsdLuxDomeLight`: an infinite environment surrounding the scene.
@@ -559,14 +795,12 @@ mod tests {
         );
     }
 
-    /// The energy convention: `intensity × color` is the *irradiance* on a
-    /// surface facing the light, and radiance is derived over the cone. So
-    /// widening the angle must soften shadows without changing exposure —
-    /// `L · Ω` stays put.
-    ///
-    /// This is the assumption most easily got backwards; treating the input
-    /// as radiance instead would make a sun-sized source ~5 orders of
-    /// magnitude too dark.
+    /// `DistantLight::new`'s energy convention: its argument is the
+    /// *irradiance* on a surface facing the light, and radiance is derived
+    /// over the cone. So widening the angle must soften shadows without
+    /// changing exposure — `L · π sin²θ` stays put. (Whether an authored
+    /// `intensity` means that or a radiance is the importer's decision:
+    /// `inputs:normalize`.)
     #[test]
     fn distant_light_irradiance_is_angle_invariant() {
         let dir = -Vec3A::Y;
@@ -574,9 +808,10 @@ mod tests {
         for angle in [0.0f32, 0.53, 5.0, 30.0] {
             let light = DistantLight::new(dir, e, angle);
             let s = light.sample_li(Vec3A::ZERO, 0.4, 0.6).expect("reachable");
-            // Radiance integrated over the cone's solid angle (1/pdf)
-            // returns the authored irradiance, whatever the angle.
-            let recovered = s.radiance / s.pdf;
+            // Radiance integrated against the facing surface's cosine over
+            // the cone returns the authored irradiance, whatever the angle.
+            let half = 0.5 * DistantLight::clamp_diameter(angle).to_radians();
+            let recovered = s.radiance * projected_cone_solid_angle(half);
             assert!(
                 (recovered - e).length() < 1e-3 * e.length(),
                 "angle {angle}°: irradiance {recovered:?} != authored {e:?}"
