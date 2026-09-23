@@ -1843,6 +1843,51 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   than `latlong` are refused rather than mapped wrongly; and light-list picking stays
   uniform, so a dim dome costs as many shadow rays as a bright sun. Neither infinite light
   is visible to the guiding field's spatial structure (they have no position).
+- **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
+  Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
+  (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
+  imports and animates under `-f`: 14 893 geometries, 12.9 M triangles plus 9.4 M cubic
+  fur spans, 37 lights, ~3:07 to parse, ~30.5 GiB peak, ~38 s to render 1280x720 at
+  64 spp. Two download facts come first. The **Asset Structure** package ships every
+  geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte
+  placeholder layer. Without **techvar assets** merged *over* that tree, the stage
+  composes to just the fur, at its rig origin. Nothing fails; every placeholder
+  prototype just logs "contributed no geometry" (~1 250 of them), and there is no set,
+  body, light or shot camera. The techvar zip extracts to `techvar_assets/fragment/…`,
+  which nothing references. It has to be merged into `fragment/` (`cp -rlf
+  techvar_assets/fragment/. fragment/` hard-links it at no disk cost; the 2 111
+  replaced placeholders are in `placeholders_backup.tgz`). What crust still lacks,
+  most visible first:
+  - **Purpose-specific material bindings are ignored, so the whole set renders
+    grey.** ALab binds through `material:binding:full` (338×) and
+    `material:binding:preview` (677×), with a plain `material:binding` only twice.
+    `resolve_material` asks only for `direct_binding("")`, so 7 256 prims log "no
+    material binding" and fall back to default grey. That is only at `DEBUG`, so a
+    default run gives no sign. The fix is to resolve the `full` purpose (the one meant
+    for final renders), then the all-purpose binding. Collection-based bindings are
+    not read either, though ALab does not need them.
+  - **`UsdPreviewSurface` inputs driven by `UsdUVTexture` are not decoded.** Once
+    bound, every `usd_full` material connects `diffuseColor`, `metallic`, `roughness`,
+    `ior`, `normal` and `occlusion` to `UsdUVTexture` nodes. Each reads a UDIM EXR set
+    (`…_surfaceColor.<UDIM>.exr`) through a `UsdPrimvarReader_float2`.
+    `preview_surface_openpbr` takes constant values only; for `diffuseColor` it warns
+    "textures are not supported yet" and leaves every other connected input at its
+    OpenPBR default. The sampler already exists: `UvTexture` handles UDIM sets for
+    MaterialX, and `UvMap` carries `primvars:st`. What is missing is the
+    `UsdUVTexture` → `Texture2D` wiring and a material that evaluates it per hit, as
+    `MtlxMaterial` does. The `usd_preview` materials are flat proxies and not worth
+    decoding.
+  - **The shot camera is not selected.** The importer takes the *first*
+    `UsdGeomCamera` it traverses. On `entry.usda` that is trailer camera
+    `/root/cameras/camera_mk020_0280`, not the shot's `/root/camera01/…/renderCam`.
+    The trailer cameras have to be deactivated in a wrapper layer (`over "cameras" (
+    active = false )`). Neither a `RenderSettings.camera` relationship nor a CLI
+    camera flag is read. Each trailer camera also carries a `projectionPlane_M_geo`
+    mesh, which renders as grey geometry if its camera is left active.
+  - **13 `CylinderLight`s and one `DiskLight`** in the rig are skipped (the
+    oscilloscope and ham-radio button lights, and the oscilloscope screen), per the
+    lighting caveats above. The rig uses no `ShapingAPI` cones or IES, so nothing is
+    lost there.
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
   (no chromatic distributions). Thick transmission — dispersive or not — is a
   continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable
