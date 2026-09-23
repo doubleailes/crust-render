@@ -35,16 +35,54 @@
 //! converting on lookup through a 256-entry table costs one indexed load per
 //! channel and is 4x smaller than `f32`, which at this scale is the difference
 //! between fitting in cache and not.
+//!
+//! **Except EXR, which is `f32`.** An `.exr` holds float samples, and they
+//! are the reason the file is an EXR: a linear albedo quantised to 8 bits
+//! bands in the shadows, and anything above 1.0 would clip. So an EXR tile is
+//! decoded through the workspace's one EXR reader ([`crate::read_exr_rgb`])
+//! and kept as linear `f32` RGB, 12 bytes a texel, with no decode table at
+//! all. The two storages share every addressing and filtering decision; only
+//! the texel fetch differs, and it is chosen once per `eval` by monomorphising
+//! over [`Texel`] rather than matched per texel. The streaming path measured
+//! what a per-texel match costs (`CLAUDE.md`, "the second backing must cost
+//! the first one nothing").
 
 use crust_core::{ColorSpace, Texture2D};
 use std::path::Path;
 use tracing::error;
 
-/// One resolution of one tile: row-major RGB, 3 bytes a texel.
-struct Level {
-    pixels: Vec<u8>,
+/// One resolution of one tile: row-major RGB, three samples a texel —
+/// display-encoded bytes (`u8`) or linear floats (`f32`).
+struct Level<T> {
+    pixels: Vec<T>,
     width: usize,
     height: usize,
+}
+
+/// A stored sample type, and how three of them become linear RGB.
+///
+/// The `u8` arm is the table lookup the preload path has always done; the
+/// `f32` arm is the identity, because an `f32` tile is linear by construction.
+trait Texel: Copy {
+    fn linear(pixels: &[Self], o: usize, to_linear: &[f32; 256]) -> [f32; 3];
+}
+
+impl Texel for u8 {
+    #[inline(always)]
+    fn linear(pixels: &[u8], o: usize, to_linear: &[f32; 256]) -> [f32; 3] {
+        [
+            to_linear[pixels[o] as usize],
+            to_linear[pixels[o + 1] as usize],
+            to_linear[pixels[o + 2] as usize],
+        ]
+    }
+}
+
+impl Texel for f32 {
+    #[inline(always)]
+    fn linear(pixels: &[f32], o: usize, _: &[f32; 256]) -> [f32; 3] {
+        [pixels[o], pixels[o + 1], pixels[o + 2]]
+    }
 }
 
 /// One decoded UDIM tile, as a mip pyramid.
@@ -54,15 +92,15 @@ struct Level {
 /// one texel. A tile with a single level is the pre-pyramid behaviour exactly:
 /// no level to select between, so `width` is ignored structurally rather than
 /// by a branch, which is what `CRUST_TEX_MIP=0` relies on.
-struct Tile {
+struct Tile<T> {
     /// UDIM number, `1001 + u + 10·v`.
     number: u32,
-    levels: Vec<Level>,
+    levels: Vec<Level<T>>,
 }
 
-impl Tile {
+impl<T> Tile<T> {
     /// The tile as authored, with no coarser levels.
-    fn unmipped(number: u32, pixels: Vec<u8>, width: usize, height: usize) -> Tile {
+    fn unmipped(number: u32, pixels: Vec<T>, width: usize, height: usize) -> Tile<T> {
         Tile {
             number,
             levels: vec![Level {
@@ -72,7 +110,30 @@ impl Tile {
             }],
         }
     }
+}
 
+impl Tile<f32> {
+    /// [`Tile::build_pyramid`] for a linear tile: the same area-weighted
+    /// reduction ([`reduce_half_linear`] shares `axis_taps` with
+    /// [`reduce_half`]) with no decode or re-encode, since there is no
+    /// encoding.
+    fn build_pyramid_linear(&mut self) {
+        loop {
+            let src = self.levels.last().expect("a tile always has level 0");
+            if src.width <= 1 && src.height <= 1 {
+                break;
+            }
+            let (pixels, width, height) = reduce_half_linear(&src.pixels, src.width, src.height);
+            self.levels.push(Level {
+                pixels,
+                width,
+                height,
+            });
+        }
+    }
+}
+
+impl Tile<u8> {
     /// Appends halved levels until both axes reach one texel.
     ///
     /// Each level is a box average of its parent over each new texel's own
@@ -172,14 +233,25 @@ fn udim_number(u: u32, v: u32) -> u32 {
     1001 + u + 10 * v
 }
 
+/// The decoded tiles, in whichever sample type the file warranted.
+enum Storage {
+    /// Display-encoded bytes, decoded through [`UvTexture::to_linear`].
+    U8(Vec<Tile<u8>>),
+    /// Linear floats — an EXR source.
+    F32(Vec<Tile<f32>>),
+}
+
 /// A UV-addressed texture: one image, or a tile set.
 pub struct UvTexture {
-    tiles: Vec<Tile>,
+    storage: Storage,
     /// Per-channel decode table, `u8` → linear `f32`. Holds the inverse sRGB
     /// EOTF for a display-encoded file and a plain `/255` otherwise, so the
     /// colour-space decision is made once at load and the lookup does not
-    /// branch on it.
+    /// branch on it. Unused by an `f32` tile.
     to_linear: [f32; 256],
+    /// The colour space the texels were decoded under, with
+    /// [`ColorSpace::Auto`] already resolved against the file.
+    space: ColorSpace,
     /// Representative tile size, for the load message.
     width: usize,
     height: usize,
@@ -243,7 +315,25 @@ impl UvTexture {
 
         let name = path.to_string_lossy().into_owned();
         let token = TileToken::detect(&name);
+        // Decided by the name, not per tile: a UDIM set is one format, and
+        // letting each tile pick would need a storage per tile.
+        let is_exr = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("exr"));
+        if is_exr {
+            return UvTexture::open_exr(path, token, space, mip, max_edge);
+        }
         let mut tiles = Vec::new();
+        // `Auto` is resolved from the first tile that decodes: the pixel
+        // format is what the UsdUVTexture rule asks about, and `decode_tile`
+        // is the last place that still knows it.
+        let mut resolved = None;
+        let mut decode = |p: &Path, number: u32| {
+            let (tile, format) = decode_tile(p, number, max_edge)?;
+            resolved.get_or_insert_with(|| space.resolve_auto(format.0, format.1));
+            Some(tile)
+        };
         if let Some(token) = token {
             // Only tiles that exist on disk are opened, so a chart with holes
             // costs nothing for the tiles it does not use. 10x10 covers the
@@ -256,7 +346,7 @@ impl UvTexture {
                     if !p.exists() {
                         continue;
                     }
-                    if let Some(t) = decode_tile(p, udim_number(u, v), max_edge) {
+                    if let Some(t) = decode(p, udim_number(u, v)) {
                         tiles.push(t);
                     }
                 }
@@ -270,8 +360,9 @@ impl UvTexture {
                 return None;
             }
         } else {
-            tiles.push(decode_tile(path, udim_number(0, 0), max_edge)?);
+            tiles.push(decode(path, udim_number(0, 0))?);
         }
+        let space = resolved.unwrap_or(space);
 
         let to_linear = to_linear_table(space);
         if mip {
@@ -282,8 +373,67 @@ impl UvTexture {
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
         Some(UvTexture {
-            tiles,
+            storage: Storage::U8(tiles),
             to_linear,
+            space,
+            width,
+            height,
+            tiled: token.is_some(),
+        })
+    }
+
+    /// The EXR half of [`UvTexture::open_with`]: the same sweep, into `f32`
+    /// tiles.
+    ///
+    /// `Auto` resolves to raw — an EXR is float, and the UsdUVTexture rule
+    /// marks only 8-bit images as sRGB. An *explicit* curve is still honoured
+    /// (a float file of display-encoded values is unusual, not invalid), and
+    /// applied here in `f32`, so a stored tile is linear whatever was asked
+    /// for and the lookup needs no table.
+    fn open_exr(
+        path: &Path,
+        token: Option<TileToken>,
+        space: ColorSpace,
+        mip: bool,
+        max_edge: usize,
+    ) -> Option<UvTexture> {
+        let space = space.resolve_auto(false, 3);
+        let mut tiles = Vec::new();
+        if let Some(token) = token {
+            let name = path.to_string_lossy().into_owned();
+            for v in 0..10u32 {
+                for u in 0..10u32 {
+                    let candidate = token.expand(&name, u, v);
+                    let p = Path::new(&candidate);
+                    if !p.exists() {
+                        continue;
+                    }
+                    if let Some(t) = decode_exr_tile(p, udim_number(u, v), max_edge, space) {
+                        tiles.push(t);
+                    }
+                }
+            }
+            if tiles.is_empty() {
+                error!(
+                    "No tiles found for {} ({} expanded over the 10x10 grid)",
+                    path.display(),
+                    token.as_str()
+                );
+                return None;
+            }
+        } else {
+            tiles.push(decode_exr_tile(path, udim_number(0, 0), max_edge, space)?);
+        }
+        if mip {
+            for t in &mut tiles {
+                t.build_pyramid_linear();
+            }
+        }
+        let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
+        Some(UvTexture {
+            storage: Storage::F32(tiles),
+            to_linear: to_linear_table(ColorSpace::Raw),
+            space,
             width,
             height,
             tiled: token.is_some(),
@@ -293,21 +443,44 @@ impl UvTexture {
     /// Bytes held, for the load-time report. Counts every mip level, so a
     /// full pyramid reports 4/3 of its base.
     pub fn bytes(&self) -> usize {
-        self.tiles
-            .iter()
-            .flat_map(|t| t.levels.iter())
-            .map(|l| l.pixels.len())
-            .sum()
+        fn sum<T>(tiles: &[Tile<T>]) -> usize {
+            tiles
+                .iter()
+                .flat_map(|t| t.levels.iter())
+                .map(|l| l.pixels.len() * std::mem::size_of::<T>())
+                .sum()
+        }
+        match &self.storage {
+            Storage::U8(t) => sum(t),
+            Storage::F32(t) => sum(t),
+        }
     }
 
     /// Mip levels the first tile holds — 1 when no pyramid was built.
     pub fn level_count(&self) -> usize {
-        self.tiles.first().map_or(0, |t| t.levels.len())
+        match &self.storage {
+            Storage::U8(t) => t.first().map_or(0, |t| t.levels.len()),
+            Storage::F32(t) => t.first().map_or(0, |t| t.levels.len()),
+        }
     }
 
     /// Tiles decoded — 1 for a single image.
     pub fn tile_count(&self) -> usize {
-        self.tiles.len()
+        match &self.storage {
+            Storage::U8(t) => t.len(),
+            Storage::F32(t) => t.len(),
+        }
+    }
+
+    /// Whether the texels are held as linear `f32` (an EXR source) rather
+    /// than as decoded-on-lookup bytes.
+    pub fn is_float(&self) -> bool {
+        matches!(self.storage, Storage::F32(_))
+    }
+
+    /// The colour space the texels were decoded under, `Auto` resolved.
+    pub fn color_space(&self) -> ColorSpace {
+        self.space
     }
 
     /// Size of the first tile, representative of the set.
@@ -328,7 +501,7 @@ impl UvTexture {
     /// and a tile with no pyramid both short-circuit to a single bilinear tap
     /// on level 0, which is bit-identical to what this did before it had
     /// levels at all.
-    fn sample_tile(&self, t: &Tile, u: f32, v: f32, width: f32) -> [f32; 4] {
+    fn sample_tile<T: Texel>(&self, t: &Tile<T>, u: f32, v: f32, width: f32) -> [f32; 4] {
         if t.levels.len() == 1 || width <= 0.0 {
             return self.sample_level(&t.levels[0], u, v);
         }
@@ -372,7 +545,7 @@ impl UvTexture {
     /// texel grid is plainly visible under point sampling — the artefact the
     /// dome light's own nearest-texel sampling is still criticised for in
     /// `CLAUDE.md`.
-    fn sample_level(&self, t: &Level, u: f32, v: f32) -> [f32; 4] {
+    fn sample_level<T: Texel>(&self, t: &Level<T>, u: f32, v: f32) -> [f32; 4] {
         // Image rows run top-down while `v` grows upward, the same flip the
         // rest of the graphics world applies between UV and raster space.
         let x = u * t.width as f32 - 0.5;
@@ -385,11 +558,7 @@ impl UvTexture {
         let (x1i, y1i) = (clampi(x0 + 1.0, t.width), clampi(y0 + 1.0, t.height));
         let texel = |xi: usize, yi: usize| {
             let o = (yi * t.width + xi) * 3;
-            [
-                self.to_linear[t.pixels[o] as usize],
-                self.to_linear[t.pixels[o + 1] as usize],
-                self.to_linear[t.pixels[o + 2] as usize],
-            ]
+            T::linear(&t.pixels, o, &self.to_linear)
         };
         let (a, b, c, d) = (
             texel(x0i, y0i),
@@ -408,14 +577,11 @@ impl UvTexture {
     }
 }
 
-impl Texture2D for UvTexture {
-    fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
-        if !u.is_finite() || !v.is_finite() {
-            return [0.0, 0.0, 0.0, 1.0];
-        }
-        // A non-finite width is the caller's bug; point-sample rather than
-        // propagate a NaN into a level index.
-        let width = if width.is_finite() { width } else { 0.0 };
+impl UvTexture {
+    /// [`Texture2D::eval`] over one storage's tiles, monomorphised per
+    /// sample type so the storage is matched once per lookup, not per texel.
+    #[inline(always)]
+    fn eval_tiles<T: Texel>(&self, tiles: &[Tile<T>], u: f32, v: f32, width: f32) -> [f32; 4] {
         if self.tiled {
             let (tu, tv) = (u.floor(), v.floor());
             // Outside the 10x10 tile grid there is no tile by definition;
@@ -425,14 +591,29 @@ impl Texture2D for UvTexture {
                 return [0.0, 0.0, 0.0, 1.0];
             }
             let number = udim_number(tu as u32, tv as u32);
-            match self.tiles.iter().find(|t| t.number == number) {
+            match tiles.iter().find(|t| t.number == number) {
                 Some(t) => self.sample_tile(t, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],
             }
         } else {
             // MaterialX's default address mode is `periodic`.
             let wrap = |x: f32| x - x.floor();
-            self.sample_tile(&self.tiles[0], wrap(u), wrap(v), width)
+            self.sample_tile(&tiles[0], wrap(u), wrap(v), width)
+        }
+    }
+}
+
+impl Texture2D for UvTexture {
+    fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+        if !u.is_finite() || !v.is_finite() {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
+        // A non-finite width is the caller's bug; point-sample rather than
+        // propagate a NaN into a level index.
+        let width = if width.is_finite() { width } else { 0.0 };
+        match &self.storage {
+            Storage::U8(tiles) => self.eval_tiles(tiles, u, v, width),
+            Storage::F32(tiles) => self.eval_tiles(tiles, u, v, width),
         }
     }
 }
@@ -445,7 +626,10 @@ impl Texture2D for UvTexture {
 /// exactly once — a straight box average, not a subsample. Point-decimating
 /// a 4K albedo to 1024 would alias its high-frequency detail into the render
 /// as fixed-pattern noise that no amount of spp removes.
-fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
+///
+/// Also returns the source's pixel format as `(eight_bit, channels)` — what
+/// [`ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
+fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<(Tile<u8>, (bool, u8))> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|e| error!("Texture decode failed for {}: {e}", path.display()))
         .ok()?
@@ -455,18 +639,23 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
     // Same reasoning as the environment decoder: these are trusted, locally
     // authored assets and an 8K texture exceeds the default allocation limit.
     reader.no_limits();
-    let img = reader
+    let decoded = reader
         .decode()
         .map_err(|e| error!("Texture decode failed for {}: {e}", path.display()))
-        .ok()?
-        .to_rgb8();
+        .ok()?;
+    let color = decoded.color();
+    let format = (
+        color.bytes_per_pixel() == color.channel_count(),
+        color.channel_count(),
+    );
+    let img = decoded.to_rgb8();
     let (sw, sh) = (img.width() as usize, img.height() as usize);
     if sw == 0 || sh == 0 {
         return None;
     }
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
-        return Some(Tile::unmipped(number, img.into_raw(), sw, sh));
+        return Some((Tile::unmipped(number, img.into_raw(), sw, sh), format));
     }
     let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
     let src = img.as_raw();
@@ -499,6 +688,64 @@ fn decode_tile(path: &Path, number: u32, max_edge: usize) -> Option<Tile> {
             // preview of the same file.
             for k in 0..3 {
                 pixels[o + k] = (acc[k] / n.max(1)) as u8;
+            }
+        }
+    }
+    Some((Tile::unmipped(number, pixels, w, h), format))
+}
+
+/// [`decode_tile`] for an EXR: linear `f32` RGB, box-filtered under the same
+/// `max_edge` cap by the same integer factor.
+///
+/// The reduction averages in the file's own encoding exactly as the `u8` one
+/// does — which for a float file *is* linear light, so here the resize and the
+/// mip chain agree. An explicit non-raw `space` is applied once, before the
+/// reduction, leaving every stored value linear.
+fn decode_exr_tile(
+    path: &Path,
+    number: u32,
+    max_edge: usize,
+    space: ColorSpace,
+) -> Option<Tile<f32>> {
+    let (mut src, sw, sh) = crate::read_exr_rgb(path)?;
+    if sw == 0 || sh == 0 {
+        return None;
+    }
+    if space != ColorSpace::Raw {
+        for c in &mut src {
+            *c = crate::to_linear(space, *c);
+        }
+    }
+    let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
+    if factor == 1 {
+        return Some(Tile::unmipped(number, src, sw, sh));
+    }
+    let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
+    let mut pixels = vec![0.0f32; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            let mut n = 0u32;
+            for dy in 0..factor {
+                let sy = y * factor + dy;
+                if sy >= sh {
+                    break;
+                }
+                for dx in 0..factor {
+                    let sx = x * factor + dx;
+                    if sx >= sw {
+                        break;
+                    }
+                    let o = (sy * sw + sx) * 3;
+                    for k in 0..3 {
+                        acc[k] += src[o + k];
+                    }
+                    n += 1;
+                }
+            }
+            let o = (y * w + x) * 3;
+            for k in 0..3 {
+                pixels[o + k] = acc[k] / n.max(1) as f32;
             }
         }
     }
@@ -714,7 +961,8 @@ pub(crate) fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
         ColorSpace::Srgb => crate::linear_to_srgb,
         ColorSpace::Gamma22 => |c: f32| c.max(0.0).powf(1.0 / 2.2),
         ColorSpace::Gamma18 => |c: f32| c.max(0.0).powf(1.0 / 1.8),
-        ColorSpace::Raw => |c: f32| c,
+        // `Auto` is resolved before a pyramid is built; unresolved, it is raw.
+        ColorSpace::Raw | ColorSpace::Auto => |c: f32| c,
     }
 }
 
@@ -1081,5 +1329,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Writes an EXR of `w x h` texels from a per-texel colour.
+    fn write_exr(
+        path: &Path,
+        w: usize,
+        h: usize,
+        f: impl Fn(usize, usize) -> (f32, f32, f32) + Sync,
+    ) {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("temp dir");
+        exr::prelude::write_rgb_file(path, w, h, f).expect("write exr");
+    }
+
+    #[test]
+    fn an_exr_preloads_at_full_float_precision_and_range() {
+        let dir = scratch("exr_f32");
+        let p = dir.join("hdr.exr");
+        // A dark value 8-bit linear would round away and a bright one it
+        // would clip: both have to come back exactly.
+        write_exr(&p, 2, 1, |x, _| {
+            if x == 0 {
+                (0.02, 0.003, 0.5)
+            } else {
+                (4.0, 1.5, 0.25)
+            }
+        });
+        let tex = UvTexture::open_with(&p, ColorSpace::Auto, false).expect("loads");
+        assert!(tex.is_float());
+        assert_eq!(
+            tex.color_space(),
+            ColorSpace::Raw,
+            "auto on a float file is raw"
+        );
+        assert_eq!(tex.bytes(), 2 * 3 * 4);
+        // Texel centres: x = u * 2 - 0.5 lands exactly on 0 and 1.
+        assert_eq!(tex.eval(0.25, 0.5, 0.0), [0.02, 0.003, 0.5, 1.0]);
+        assert_eq!(tex.eval(0.75, 0.5, 0.0), [4.0, 1.5, 0.25, 1.0]);
+    }
+
+    #[test]
+    fn an_explicit_curve_on_an_exr_is_applied_once_at_load() {
+        let dir = scratch("exr_srgb");
+        let p = dir.join("enc.exr");
+        write_exr(&p, 1, 1, |_, _| (0.5, 0.5, 0.5));
+        let tex = UvTexture::open_with(&p, ColorSpace::Srgb, false).expect("loads");
+        let want = crate::srgb_to_linear(0.5);
+        assert!((tex.eval(0.5, 0.5, 0.0)[0] - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_exr_udim_set_addresses_by_tile() {
+        let dir = scratch("exr_udim");
+        write_exr(&dir.join("a.1001.exr"), 1, 1, |_, _| (1.0, 0.0, 0.0));
+        write_exr(&dir.join("a.1002.exr"), 1, 1, |_, _| (0.0, 2.0, 0.0));
+        let tex = UvTexture::open(&dir.join("a.<UDIM>.exr"), ColorSpace::Raw).expect("loads");
+        assert_eq!(tex.tile_count(), 2);
+        assert_eq!(tex.eval(0.5, 0.5, 0.0)[..3], [1.0, 0.0, 0.0]);
+        assert_eq!(tex.eval(1.5, 0.5, 0.0)[..3], [0.0, 2.0, 0.0]);
+        assert_eq!(
+            tex.eval(2.5, 0.5, 0.0)[..3],
+            [0.0, 0.0, 0.0],
+            "no tile 1003"
+        );
+    }
+
+    #[test]
+    fn an_exr_pyramid_preserves_the_mean_on_an_odd_axis() {
+        let dir = scratch("exr_mip");
+        let p = dir.join("row.exr");
+        let src = [2.5f32, 2.0, 1.5, 1.0, 0.5];
+        write_exr(&p, 5, 1, |x, _| (src[x], src[x], src[x]));
+        let tex = UvTexture::open_with(&p, ColorSpace::Raw, true).expect("loads");
+        let Storage::F32(tiles) = &tex.storage else {
+            panic!("an EXR is f32");
+        };
+        let l1 = &tiles[0].levels[1];
+        assert_eq!(l1.width, 3);
+        let mean = l1.pixels.iter().step_by(3).sum::<f32>() / 3.0;
+        assert!(
+            (mean - 1.5).abs() < 1e-5,
+            "level-1 mean {mean}, source mean 1.5"
+        );
+        // The chain reaches one texel, and that texel is the source mean.
+        let top = tiles[0].levels.last().unwrap();
+        assert_eq!((top.width, top.height), (1, 1));
+        assert!((top.pixels[0] - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
+        let dir = scratch("auto_png");
+        let rgb = dir.join("rgb.png");
+        write_tile(&rgb, [128, 128, 128]);
+        let grey = dir.join("grey.png");
+        image::GrayImage::from_pixel(1, 1, image::Luma([128]))
+            .save(&grey)
+            .expect("write png");
+
+        let t = UvTexture::open(&rgb, ColorSpace::Auto).expect("loads");
+        assert_eq!(t.color_space(), ColorSpace::Srgb);
+        assert!((t.eval(0.5, 0.5, 0.0)[0] - crate::srgb_to_linear(128.0 / 255.0)).abs() < 1e-6);
+
+        let t = UvTexture::open(&grey, ColorSpace::Auto).expect("loads");
+        assert_eq!(t.color_space(), ColorSpace::Raw);
+        assert_eq!(t.eval(0.5, 0.5, 0.0)[0], 128.0 / 255.0);
     }
 }

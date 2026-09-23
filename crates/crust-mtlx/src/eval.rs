@@ -360,21 +360,34 @@ impl Program {
 /// geometric normal is the right degradation: a normal map's *mean* is the
 /// surface normal, so the flat surface is the map's own zero.
 fn normal_map(encoded: Val, scale: f32, ctx: &ShadeCtx) -> Vec3A {
-    if ctx.tangent.length_squared() < 1e-20 {
-        return ctx.normal;
+    let v = encoded.rgb() * 2.0 - Vec3A::ONE;
+    let scale = if scale.is_finite() { scale } else { 1.0 };
+    let local = Vec3A::new(v.x * scale, v.y * scale, v.z.max(1e-4));
+    perturb_normal(local, ctx.normal, ctx.tangent)
+}
+
+/// Rotates a **decoded** tangent-space normal (`z` along `normal`) into world
+/// space, against `tangent` re-orthogonalised to `normal`.
+///
+/// The half of [`normal_map`] that knows nothing about MaterialX's `[0,1]`
+/// encoding, public so a host with its own decode — UsdPreviewSurface's
+/// `normal` input arrives already in `[-1,1]`, its UsdUVTexture's
+/// `scale`/`bias` having done the decode — rotates it identically. Returns
+/// `normal` unchanged when `tangent` is zero (no chart frame) or parallel to
+/// it, for the reason [`normal_map`] gives.
+pub fn perturb_normal(local: Vec3A, normal: Vec3A, tangent: Vec3A) -> Vec3A {
+    if tangent.length_squared() < 1e-20 {
+        return normal;
     }
-    let n = ctx.normal;
+    let n = normal;
     // Re-orthogonalise: the stored tangent is the triangle's, while `n` may
     // already carry interpolated shading curvature, so the two need not be
     // perpendicular.
-    let t = (ctx.tangent - n * n.dot(ctx.tangent)).normalize_or_zero();
+    let t = (tangent - n * n.dot(tangent)).normalize_or_zero();
     if t.length_squared() < 1e-20 {
         return n;
     }
     let b = n.cross(t);
-    let v = encoded.rgb() * 2.0 - Vec3A::ONE;
-    let scale = if scale.is_finite() { scale } else { 1.0 };
-    let local = Vec3A::new(v.x * scale, v.y * scale, v.z.max(1e-4));
     let world = t * local.x + b * local.y + n * local.z;
     if world.length_squared() > 1e-20 {
         world.normalize()

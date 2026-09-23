@@ -20,6 +20,7 @@ cargo run --release -- -i samples/materialx_teapot.usda    # MaterialX + UDIM (n
 cargo run --release -- -i samples/materialx_lion.usda      # the other DPEL asset: 140-op graph, sheen, 1.06 M tris
 cargo run --release -- -i samples/materialx_showcase.usda  # both, framed after the assets' overview.png (1080p)
 cargo run --release -- -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
+cargo run --release -- -i samples/usdpreview_textured.usda # UsdPreviewSurface + UsdUVTexture (UDIM, EXR, auto)
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
 
@@ -712,7 +713,38 @@ Schema mapping:
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
 - Materials resolve via `MaterialBindingAPI`, dispatched on the bound shader's `info:id`:
   - `UsdPreviewSurface` → mapped into `OpenPBR` (portable; `diffuseColor→baseColor`,
-    `metallic→baseMetalness`, `roughness→specularRoughness`, etc.).
+    `metallic→baseMetalness`, `roughness→specularRoughness`, etc.). Constant inputs
+    are still read **undecoded** (the openspec `add-material-color-management` change
+    owns that). An input connected to a **`UsdUVTexture`** makes the material a
+    `PreviewSurface` (`material/preview_surface.rs`), which samples the network per
+    hit and writes each result over its `OpenPBR` field before delegating the BSDF, as
+    `MtlxMaterial` does. With no texture connection the surface stays the plain
+    `OpenPBR` it always was, with no chart and no per-hit cost, and every sample golden
+    is unchanged. `preview_uv_input` resolves the whole node through
+    `value_producing_attributes`, so interface-connected inputs work: `file` (layer-anchored,
+    `<UDIM>` intact), `sourceColorSpace`, `wrapS`/`wrapT`, `scale`/`bias`, `fallback`,
+    and which output (`r`/`g`/`b`/`a`/`rgb`) is connected. Four details:
+    - **`sourceColorSpace` defaults to `auto`, not raw**, which is the opposite of
+      MaterialX's default and why `ColorSpace::from_usd` is separate from
+      `from_mtlx`. `ColorSpace::Auto` crosses the seam unresolved, and the host settles it
+      against the file (`resolve_auto`). By the UsdUVTexture rule, 8-bit RGB/RGBA is sRGB
+      and anything else is raw. So a greyscale roughness PNG stays raw and an EXR is
+      linear.
+    - **A texture that does not load reads the node's `fallback`, unscaled** (the spec),
+      and with none authored the *surface input's* constant. So `CRUST_TEX=0` still
+      means "render on constants". ALab authors a deliberate green `fallback`, which
+      therefore shows up only when a file genuinely fails.
+    - **Wrap modes apply only to a single image.** A `<UDIM>` set's addressing is the
+      host's, and wrapping would fold every tile onto the first. `repeat` and
+      `useMetadata` are the identity (the host already wraps periodically).
+    - **`normal` is decoded by the texture's own `scale = 2, bias = -1`**, which is the node
+      set's convention and not a hard-coded `*2-1`, then rotated by
+      `crust_mtlx::perturb_normal`, the half of MaterialX's `normalmap` split out for
+      this. It is under the same no-flip guard.
+    `UsdPrimvarReader_float2` naming a primvar other than `st` (or the `mesh_uvs`
+    fallbacks) warns and shades from the one chart crust reads. `UsdTransform2d` warns,
+    and the identity chart is used. Textured emission answers through `emitted_at` only,
+    like MaterialX's.
   - `crust:openpbr` → decoded 1:1 into `OpenPBR`; every input is the camelCase mirror of the
     Rust field name (lossless but non-portable). Reference scene: `samples/openpbr_showcase.usda`.
   - `PxrDisneyBsdf` → mapped into `OpenPBR` (both descend from Burley's model). Checked
@@ -943,6 +975,17 @@ Schema mapping:
     `CRUST_TEX_MAX` (default 1024) box-filters each tile down at load; tiles are
     kept as `u8` and converted through a 256-entry table on lookup, since the
     files are 8-bit PNGs and nothing recovers precision that was never there.
+    **An `.exr` is the exception: it preloads as linear `f32`** (12 B/texel,
+    through `read_exr_rgb`, the workspace's one EXR reader), because a linear
+    albedo quantised to 8 bits bands in the shadows and anything above 1.0
+    would clip — and ALab's thousands of UDIM EXRs otherwise loaded as nothing
+    (`image` has no EXR decoder). The storage is chosen once per `eval` by a
+    `match` on the texture, then `sample_tile::<T: Texel>` is monomorphised, so
+    the `u8` path is unchanged to the instruction (`sample_level::<u8>`
+    279,025,964 before and after on `materialx_basic -s 2`; the match costs
+    `eval` +4.7%, whole-render +0.15%). An explicit curve on an EXR is applied
+    once, at load. `.hdr` still takes the `u8` path, which keeps the
+    streamed-versus-preloaded emission A/B below as documented.
   - **Each tile carries a mip pyramid** below that cap, read trilinearly at the
     hit's footprint (see "Texture filtering" below). Two details that are easy
     to re-break. Levels average in **linear light** and re-encode through the
@@ -1773,9 +1816,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   prints the two side by side as `(1.000 1.000 1.000)` and `(16.000 9.000 3.000)`.
   What is still true: `base_color` above 1 is **still** clamped by `eon_diffuse`, and
   correctly — an albedo above 1 creates energy where a radiance above 1 is just a
-  bright light. The preloaded `UvTexture` still narrows to 8 bits at `to_rgb8()`, so
-  an HDR emission texture needs `CRUST_TEX_STREAM=1` and a converted `.tx`; without
-  them it renders, clipped, rather than failing. And an **emissive MaterialX surface
+  bright light. The preloaded `UvTexture` still narrows a non-EXR source to 8 bits at
+  `to_rgb8()`, so an HDR `.hdr` emission texture needs `CRUST_TEX_STREAM=1` and a
+  converted `.tx`; without them it renders, clipped, rather than failing. An `.exr`
+  preloads at `f32` and keeps its range. And an **emissive MaterialX surface
   is not a light-list entry** — see the MaterialX caveats below.
   The **dome-light / HDRI path was never affected by any of this**, which is worth
   stating so the next reader does not go looking for a clamp that is not there:
@@ -1813,7 +1857,12 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   never picked a lobe; that costs sharpness only on guided secondary bounces,
   where the cone is near-saturated anyway.
 - **UV texture caveats.** Normal maps need a tangent,
-  which only baked single-placement geometry has (above). A **subdivided** mesh
+  which only baked single-placement geometry has (above). On the
+  `UsdPreviewSurface` side: texture **alpha** is not carried (both samplers return
+  opaque RGB, so `outputs:a` reads 1.0 before `scale`/`bias`), `UsdTransform2d` is
+  not evaluated, `occlusion`/`displacement`/`specularColor` are not read, and a
+  texture's `fallback` default when unauthored is the surface input's constant
+  rather than the spec's opaque black (deliberately — see above). A **subdivided** mesh
   carries no chart at all: refining a face-varying UV channel is a second
   synthetic hierarchy through the refiner, and carrying the cage's UVs onto
   refined triangles would stretch every texture across the patch it came from —
@@ -1866,17 +1915,11 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
     default run gives no sign. The fix is to resolve the `full` purpose (the one meant
     for final renders), then the all-purpose binding. Collection-based bindings are
     not read either, though ALab does not need them.
-  - **`UsdPreviewSurface` inputs driven by `UsdUVTexture` are not decoded.** Once
-    bound, every `usd_full` material connects `diffuseColor`, `metallic`, `roughness`,
-    `ior`, `normal` and `occlusion` to `UsdUVTexture` nodes. Each reads a UDIM EXR set
-    (`…_surfaceColor.<UDIM>.exr`) through a `UsdPrimvarReader_float2`.
-    `preview_surface_openpbr` takes constant values only; for `diffuseColor` it warns
-    "textures are not supported yet" and leaves every other connected input at its
-    OpenPBR default. The sampler already exists: `UvTexture` handles UDIM sets for
-    MaterialX, and `UvMap` carries `primvars:st`. What is missing is the
-    `UsdUVTexture` → `Texture2D` wiring and a material that evaluates it per hit, as
-    `MtlxMaterial` does. The `usd_preview` materials are flat proxies and not worth
-    decoding.
+  - **`UsdPreviewSurface` textures are decoded now** (`PreviewSurface`, above), and the
+    UDIM EXRs preload at `f32`. What is left of this item is the binding gap before it:
+    until `material:binding:full` resolves, those networks are never reached.
+    `occlusion` is still not read (it has no counterpart in the integrator). The
+    `usd_preview` materials are flat proxies and not worth decoding.
   - **The shot camera is not selected.** The importer takes the *first*
     `UsdGeomCamera` it traverses. On `entry.usda` that is trailer camera
     `/root/cameras/camera_mk020_0280`, not the shot's `/root/camera01/…/renderCam`.

@@ -54,6 +54,28 @@ pub struct StreamingTexture {
     fallback: [f32; 4],
 }
 
+/// What UsdUVTexture's `sourceColorSpace = "auto"` means for one `.tx`.
+///
+/// A recorded `crust:mipspace` marker wins: it names the space the file was
+/// converted under, which is the decision `auto` would have made about the
+/// *source* — the `.tx` itself is always 8-bit RGB or half, so its own format
+/// no longer says whether the source was a greyscale mask. Without a marker
+/// (an OIIO `maketx` file) the format decides, by the same rule the preload
+/// path applies: half is linear, 8-bit RGB is sRGB.
+fn resolve_auto_space(f: &TiledFile) -> ColorSpace {
+    let named = f.mip_space().and_then(|m| {
+        [
+            ColorSpace::Srgb,
+            ColorSpace::Gamma22,
+            ColorSpace::Gamma18,
+            ColorSpace::Raw,
+        ]
+        .into_iter()
+        .find(|s| crate::tiled::space_name(*s) == m)
+    });
+    named.unwrap_or_else(|| ColorSpace::Auto.resolve_auto(!f.is_linear(), 3))
+}
+
 impl StreamingTexture {
     /// Opens a `.tx` (or a `<UDIM>` / `<UVTILE>` set of them) against `cache`.
     ///
@@ -67,7 +89,11 @@ impl StreamingTexture {
     ) -> Option<StreamingTexture> {
         let name = path.to_string_lossy().into_owned();
         let tiled = name.contains("<UDIM>") || name.contains("<UVTILE>");
-        let want_space = crate::tiled::space_name(space);
+        // `Auto` is settled by the first file that opens (see
+        // `resolve_auto_space`); every later tile must then match that answer,
+        // exactly as it must match an explicit space.
+        let mut space = space;
+        let mut want_space = crate::tiled::space_name(space);
 
         let mut charts = Vec::new();
         if tiled {
@@ -80,7 +106,13 @@ impl StreamingTexture {
                     if !p.exists() {
                         continue;
                     }
-                    match TiledFile::open(&p) {
+                    let opened = TiledFile::open(&p).inspect(|f| {
+                        if space == ColorSpace::Auto {
+                            space = resolve_auto_space(f);
+                            want_space = crate::tiled::space_name(space);
+                        }
+                    });
+                    match opened {
                         Ok(f) if !f.mip_space_matches(want_space) => {
                             tracing::warn!(
                                 "{}: mip chain was reduced in {:?}, not {want_space} — \
@@ -104,7 +136,13 @@ impl StreamingTexture {
                 }
             }
         } else {
-            match TiledFile::open(path) {
+            let opened = TiledFile::open(path).inspect(|f| {
+                if space == ColorSpace::Auto {
+                    space = resolve_auto_space(f);
+                    want_space = crate::tiled::space_name(space);
+                }
+            });
+            match opened {
                 Ok(f) if !f.mip_space_matches(want_space) => {
                     tracing::warn!(
                         "{}: mip chain was reduced in {:?}, not {want_space} — \

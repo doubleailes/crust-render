@@ -90,7 +90,9 @@ order of magnitude wrong in near-black albedo. Do not "simplify" them into one.
 The authoritative list of every colour-valued input the renderer reads, and its
 current treatment. Note that "no curve applied" is the *majority* case and is
 correct almost everywhere — the two `UsdPreviewSurface` rows are the only
-genuine bug in the table (see the Verdict column).
+genuine bug in the table (see the Verdict column). Those rows are the
+*constant* inputs; a `UsdPreviewSurface` input driven by a `UsdUVTexture`
+takes the texture's `sourceColorSpace` instead (see the textures table).
 
 ### Material shader inputs
 
@@ -173,6 +175,10 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture.rs` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture.rs` | flat 1.8 | ✅ correct per MaterialX |
 | UV texture, any other tag or none | `crust-assets/src/uv_texture.rs` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
+| `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import.rs` (`preview_uv_input`) → `uv_texture.rs` | piecewise sRGB | ✅ correct per the node set |
+| `UsdUVTexture`, `sourceColorSpace = "raw"` | same | none (pass-through) | ✅ correct per the node set |
+| `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for 8-bit RGB/RGBA, none otherwise | ✅ the UsdUVTexture rule (Hydra's) — note the default is `auto`, **not** raw as in MaterialX |
+| Preloaded `.exr` UV texture | `crust-assets/src/uv_texture.rs` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
 | MaterialX emission `image`, untagged | `crust-assets/src/uv_texture.rs` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |

@@ -519,14 +519,18 @@ impl AssetLoader for FileAssets {
         }
         let started = Instant::now();
         let loaded = UvTexture::open(path, space)?;
+        // The space *resolved* against the file, not the one asked for: under
+        // UsdUVTexture's `auto` the two differ, and the resolved one is what
+        // answers "why is this map darker than expected".
         debug!(
-            "Loaded texture {} ({} tile(s), {}x{} each, {:.1} MiB resident, {:?}) in {:?}",
+            "Loaded texture {} ({} tile(s), {}x{} each, {}, {:.1} MiB resident, {:?}) in {:?}",
             path.display(),
             loaded.tile_count(),
             loaded.tile_size().0,
             loaded.tile_size().1,
+            if loaded.is_float() { "f32" } else { "8-bit" },
             loaded.bytes() as f64 / (1024.0 * 1024.0),
-            space,
+            loaded.color_space(),
             started.elapsed()
         );
         Some(std::sync::Arc::new(loaded))

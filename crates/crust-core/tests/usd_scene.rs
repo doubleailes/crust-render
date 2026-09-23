@@ -1851,3 +1851,171 @@ fn non_finite_frames_are_rejected() {
         }
     }
 }
+
+/// UsdUVTexture requests reach the host anchored, with `<UDIM>` intact, and
+/// with the colour space `sourceColorSpace` asks for — where, unlike
+/// MaterialX, an unauthored attribute means `auto` (decided by the host
+/// against the file) rather than raw.
+#[test]
+fn preview_textures_reach_the_host_with_their_source_color_space() {
+    use crust_core::ColorSpace;
+
+    let assets = FakeAssets::default();
+    let scene = Scene::from_usd_with_assets(&sample("usdpreview_textured.usda"), &assets)
+        .expect("failed to open usdpreview_textured");
+
+    let mut got: Vec<(String, ColorSpace)> = assets
+        .textures
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, s)| (p.file_name().unwrap().to_string_lossy().into_owned(), *s))
+        .collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        got,
+        vec![
+            ("mtlx_base.<UDIM>.png".to_owned(), ColorSpace::Srgb),
+            ("mtlx_mask.png".to_owned(), ColorSpace::Raw),
+            ("mtlx_normal.<UDIM>.png".to_owned(), ColorSpace::Raw),
+            // Unauthored and `"auto"` alike.
+            ("usdpreview_albedo.exr".to_owned(), ColorSpace::Auto),
+            ("usdpreview_rough.png".to_owned(), ColorSpace::Auto),
+        ]
+    );
+    for (path, _) in assets.textures.lock().unwrap().iter() {
+        let dir = path.parent().expect("a directory");
+        assert!(dir.is_dir(), "not anchored: {}", path.display());
+    }
+
+    // Every quad's surface is texture-driven, so every one reads the chart.
+    let textured = (0..scene.world.count() as u32)
+        .filter(|&g| scene.world.material(g).uses_uv())
+        .count();
+    assert_eq!(textured, 4, "expected four textured preview surfaces");
+}
+
+/// A texture that does not load reads the UsdUVTexture's own `fallback`, and
+/// with none authored the surface input's constant — so declining every
+/// texture (`CRUST_TEX=0`, or a host that decodes nothing) renders the
+/// surface on its constants rather than black. And a preview surface with no
+/// texture connection is still the plain OpenPBR it always was: no chart, no
+/// per-hit evaluation.
+#[test]
+fn a_declined_preview_texture_falls_back_to_its_fallback_then_the_constant() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_preview_fallback");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let quad = |name: &str, x: f32, mat: &str| {
+        format!(
+            r#"
+    def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </W/Looks/{mat}>
+    }}"#,
+            x0 = x,
+            x1 = x + 1.0
+        )
+    };
+    let material = |name: &str, constant: &str, fallback: &str| {
+        format!(
+            r#"
+    def Material "{name}"
+    {{
+        token outputs:surface.connect = </W/Looks/{name}/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            {constant}
+            color3f inputs:diffuseColor.connect = </W/Looks/{name}/T.outputs:rgb>
+            float inputs:roughness = 1
+            token outputs:surface
+        }}
+        def Shader "T"
+        {{
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @missing.png@
+            {fallback}
+            vector3f outputs:rgb
+        }}
+    }}"#
+        )
+    };
+    // Two top-level children, not six: at `MIN_STREAM_CHUNKS` the importer
+    // streams each subtree under its own mask, and a material that is a
+    // sibling chunk of the mesh binding it is not composed while that mesh
+    // is traversed.
+    let plain = r#"
+    def Material "Plain"
+    {
+        token outputs:surface.connect = </W/Looks/Plain/S.outputs:surface>
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+            token outputs:surface
+        }
+    }"#;
+    let stage = format!(
+        "#usda 1.0\n(\n    defaultPrim = \"W\"\n)\ndef Xform \"W\"\n{{\ndef Scope \"Looks\"\n{{{}{}{}\n}}\ndef Xform \"Geo\"\n{{{}{}{}\n}}\n}}\n",
+        material(
+            "WithFallback",
+            "color3f inputs:diffuseColor = (0.1, 0.8, 0.1)",
+            "float4 inputs:fallback = (1, 0, 1, 1)"
+        ),
+        material(
+            "WithConstant",
+            "color3f inputs:diffuseColor = (0.1, 0.8, 0.1)",
+            ""
+        ),
+        plain,
+        quad("A", -3.0, "WithFallback"),
+        quad("B", -1.0, "WithConstant"),
+        quad("C", 1.0, "Plain"),
+    );
+    let path = dir.join("fallback.usda");
+    std::fs::write(&path, stage).expect("write stage");
+
+    let assets = FakeAssets::default();
+    let scene = Scene::from_usd_with_assets(&path, &assets).expect("stage opens");
+    assert_eq!(
+        assets.textures.lock().unwrap().len(),
+        1,
+        "one file, memoized"
+    );
+
+    // Diffuse reflectance toward the normal, from straight above.
+    let reflectance = |x: f32| -> (Vec3A, bool) {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        let (f, _) = hit
+            .mat
+            .eval(&r, &hit.rec, Vec3A::Z)
+            .expect("a continuous lobe");
+        (f, hit.mat.uses_uv())
+    };
+    let (a, a_uv) = reflectance(-2.5);
+    assert!(a_uv);
+    assert!(
+        a.x > 3.0 * a.y && a.z > 3.0 * a.y,
+        "authored fallback is magenta: {a}"
+    );
+    let (b, b_uv) = reflectance(-0.5);
+    assert!(b_uv);
+    assert!(
+        b.y > 3.0 * b.x && b.y > 3.0 * b.z,
+        "no fallback: the constant, green: {b}"
+    );
+    let (c, c_uv) = reflectance(1.5);
+    assert!(!c_uv, "an untextured preview surface builds no chart");
+    assert!((c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6, "{c}");
+}
