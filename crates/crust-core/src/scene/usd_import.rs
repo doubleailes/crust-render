@@ -3078,15 +3078,49 @@ fn lux_shaping(
         .ok()
         .flatten()
         .is_some();
+    // A non-finite authored value survives every formula below and turns the
+    // light's radiance — both MIS halves of it — into NaN. Such a value is
+    // refused and replaced by the input's fallback, with a warning.
+    let finite = |name: &str, v: Option<f32>| match v {
+        Some(x) if !x.is_finite() => {
+            warn!(
+                "{}: {name} = {x} is not finite — using its fallback",
+                prim.path()
+            );
+            None
+        }
+        v => v,
+    };
     let mut shaping = Shaping::new(light_to_world);
-    shaping.focus = custom_f32(prim, "inputs:shaping:focus").unwrap_or(0.0);
-    shaping.focus_tint = custom_color3(prim, "inputs:shaping:focusTint").unwrap_or(Vec3A::ZERO);
-    shaping.cone_angle_deg = custom_f32(prim, "inputs:shaping:cone:angle").unwrap_or(if applied {
+    shaping.focus = finite(
+        "inputs:shaping:focus",
+        custom_f32(prim, "inputs:shaping:focus"),
+    )
+    .unwrap_or(0.0);
+    shaping.focus_tint = match custom_color3(prim, "inputs:shaping:focusTint") {
+        Some(c) if !c.is_finite() => {
+            warn!(
+                "{}: inputs:shaping:focusTint = {c} is not finite — using its fallback",
+                prim.path()
+            );
+            Vec3A::ZERO
+        }
+        c => c.unwrap_or(Vec3A::ZERO),
+    };
+    shaping.cone_angle_deg = finite(
+        "inputs:shaping:cone:angle",
+        custom_f32(prim, "inputs:shaping:cone:angle"),
+    )
+    .unwrap_or(if applied {
         Shaping::SCHEMA_CONE_ANGLE_DEG
     } else {
         180.0
     });
-    shaping.cone_softness = custom_f32(prim, "inputs:shaping:cone:softness").unwrap_or(0.0);
+    shaping.cone_softness = finite(
+        "inputs:shaping:cone:softness",
+        custom_f32(prim, "inputs:shaping:cone:softness"),
+    )
+    .unwrap_or(0.0);
 
     let ies_file = prim
         .attribute("inputs:shaping:ies:file")
@@ -3115,7 +3149,11 @@ fn lux_shaping(
         };
         shaping.ies = profile.map(|profile| IesShaping {
             profile,
-            angle_scale: custom_f32(prim, "inputs:shaping:ies:angleScale").unwrap_or(0.0),
+            angle_scale: finite(
+                "inputs:shaping:ies:angleScale",
+                custom_f32(prim, "inputs:shaping:ies:angleScale"),
+            )
+            .unwrap_or(0.0),
             normalize: custom_bool(prim, "inputs:shaping:ies:normalize").unwrap_or(false),
         });
     }
@@ -3184,6 +3222,24 @@ fn emit_round_light(
     params: LuxParams,
     shaping: Option<Shaping>,
 ) {
+    // A negative or zero radius (or length) would pass the affine check —
+    // a negative scale is a reflection, still invertible — while the kernel
+    // refuses the matching primitive, leaving a light NEE samples on a
+    // surface no ray can hit. Refuse it here, once, for both.
+    let valid = |x: f32| x.is_finite() && x > 0.0;
+    if !valid(radius) || (unit == UnitShape::Cylinder && !valid(length)) {
+        warn!(
+            "{}: {:?} light radius {radius}{} must be finite and positive — skipped",
+            prim.path(),
+            unit,
+            if unit == UnitShape::Cylinder {
+                format!(", length {length}")
+            } else {
+                String::new()
+            }
+        );
+        return;
+    }
     let local = match unit {
         UnitShape::Sphere => Vec3::splat(radius),
         UnitShape::Disk => Vec3::new(radius, radius, 1.0),
@@ -3404,6 +3460,14 @@ fn emit_rect_light(
 ) {
     let width = attr_f32(&light.width_attr()).unwrap_or(1.0);
     let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        warn!(
+            "RectLight at {}: width {width} × height {height} must be finite and \
+             positive — skipped",
+            prim.path()
+        );
+        return;
+    }
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     let texture = rect_light_texture(prim, &mut ctx.caches);

@@ -49,7 +49,11 @@ pub fn parse_ies(text: &str) -> Option<IesProfile> {
         Some(after) => (after, true),
         None => (&rest[rest.find('\n')?..], false),
     };
-    let mut tok = numbers.split_whitespace().map(|t| t.parse::<f64>().ok());
+    // `f64::from_str` accepts `inf` and `NaN`; neither is a photometric
+    // value, and either would reach every radiance the light emits.
+    let mut tok = numbers
+        .split_whitespace()
+        .map(|t| t.parse::<f64>().ok().filter(|x| x.is_finite()));
     let mut next = || tok.next().flatten();
 
     if include {
@@ -81,7 +85,16 @@ pub fn parse_ies(text: &str) -> Option<IesProfile> {
     // No candela → watt conversion: UsdLux is photometric, and hdEmbree
     // builds its reader with that conversion compiled out.
 
-    if n_v == 0 || n_h == 0 || n_v > 100_000 || n_h > 100_000 {
+    // Each axis is bounded, and so is their product: the table is allocated
+    // before a single value is read, so a header declaring 100 000 × 100 000
+    // would ask for 40 GB. Real profiles are at most a few hundred angles on
+    // each axis (181 × 361 = 65 341 at one-degree spacing over the sphere).
+    if n_v == 0
+        || n_h == 0
+        || n_v > MAX_IES_ANGLES
+        || n_h > MAX_IES_ANGLES
+        || n_v.checked_mul(n_h).is_none_or(|n| n > MAX_IES_SAMPLES)
+    {
         return None;
     }
     let mut v: Vec<f32> = (0..n_v)
@@ -106,6 +119,11 @@ pub fn parse_ies(text: &str) -> Option<IesProfile> {
     let rad = |a: Vec<f32>| a.into_iter().map(f32::to_radians).collect();
     IesProfile::new(rad(v), rad(h), intensity)
 }
+
+/// Most angles either axis of an IES table may declare.
+const MAX_IES_ANGLES: usize = 100_000;
+/// Most candela samples a table may declare — ~15× a one-degree full sphere.
+const MAX_IES_SAMPLES: usize = 1_000_000;
 
 fn angle_close(a: f32, b: f32) -> bool {
     (a - b).abs() < 1e-4
@@ -300,5 +318,15 @@ mod tests {
             parse_ies("TILT=NONE\n1 1000 1 4 1 1 2 0 0 0\n1 1 50\n0 30\n").is_none(),
             "truncated"
         );
+        // Each axis within bounds, their product not: refused from the header.
+        assert!(
+            parse_ies("TILT=NONE\n1 1000 1 90000 90000 1 2 0 0 0\n1 1 50\n").is_none(),
+            "oversized"
+        );
+        // A non-finite multiplier or candela value.
+        assert!(parse_ies("TILT=NONE\n1 1000 inf 2 1 1 2 0 0 0\n1 1 50\n0 90\n0\n1 1\n").is_none());
+        assert!(parse_ies("TILT=NONE\n1 1000 1 2 1 1 2 0 0 0\n1 1 50\n0 90\n0\n1 NaN\n").is_none());
+        // …while the same file with finite values parses.
+        assert!(parse_ies("TILT=NONE\n1 1000 1 2 1 1 2 0 0 0\n1 1 50\n0 90\n0\n1 1\n").is_some());
     }
 }

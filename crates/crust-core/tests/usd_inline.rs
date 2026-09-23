@@ -1667,3 +1667,46 @@ def RectLight "Card"
     assert!(assert_mis_sides_agree(&scene, from) > 0);
     assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.7, -0.4, -1.0)) > 0);
 }
+
+/// A light whose size is not finite and positive is skipped whole: no light
+/// without the surface a bounce ray would need to find it.
+#[test]
+fn invalid_light_dimensions_skip_the_light() {
+    let scene = load(
+        "invalid_light_sizes",
+        r#"
+    def DiskLight "NegativeDisk" { float inputs:radius = -1 }
+    def CylinderLight "ZeroTube" { float inputs:length = 0 }
+    def SphereLight "ZeroSphere" { float inputs:radius = 0 }
+    def RectLight "FlatRect" { float inputs:width = 0 }
+    def DiskLight "Fine" { float inputs:radius = 1 }"#,
+    );
+    assert_eq!(scene.lights.count(), 1, "only the valid light survives");
+    assert_eq!(scene.world.count(), 1);
+    assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.0, 0.0, -3.0)) > 0);
+}
+
+/// A non-finite shaping input falls back rather than turning the light's
+/// radiance into NaN on both MIS halves.
+#[test]
+fn non_finite_shaping_inputs_fall_back() {
+    let scene = load(
+        "nan_shaping",
+        r#"
+    def RectLight "Spot" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:shaping:cone:angle = inf
+        float inputs:shaping:cone:softness = nan
+        float inputs:shaping:focus = nan
+        double3 xformOp:translate = (0, 0, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+    );
+    // The cone falls back to the applied schema's 90°: straight below is lit
+    // at exactly the authored radiance.
+    let r = radiance_toward(&scene, Vec3A::ZERO);
+    assert_eq!(r, Vec3A::ONE);
+    assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.3, 0.2, 0.0)) > 0);
+}
