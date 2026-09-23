@@ -407,6 +407,7 @@ without special-casing it.
 cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
     -o out.exr                         # output EXR (+ tone-mapped PNG next to it)
     -s 256                             # override samples per pixel
+    -f 1012                            # USD time code (frame) to render
     --strategy power                   # power | balance | light | bsdf
     --filter gaussian                  # box | triangle | gaussian | blackman | mitchell
     --filter-radius 1.5                # filter radius in pixels

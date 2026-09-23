@@ -17,7 +17,7 @@ use indicatif::ProgressBar;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{Level, debug, error, info};
+use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -59,6 +59,13 @@ struct Cli {
     /// Samples per pixel. Overrides the scene / default value when set.
     #[arg(short, long)]
     samples: Option<u32>,
+    /// USD time code (frame) to render. Every animated attribute resolves
+    /// its time samples here; unanimated ones read their default. Fractional
+    /// values render a subframe. Also sets the sampler's frame seed,
+    /// overriding the scene's `crust:frame`. When absent, attributes read
+    /// their default (non-time-sampled) value.
+    #[arg(short, long, allow_negative_numbers = true, value_parser = parse_frame)]
+    frame: Option<f64>,
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
     /// strategy alone to visualize what MIS balances between.
@@ -77,6 +84,19 @@ struct Cli {
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
     stats: bool,
+}
+
+/// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
+/// `nan`, `inf` and `infinity`, none of which is a time code; crust-core
+/// refuses them too, but rejecting them here reports it as a usage error
+/// before any scene is opened.
+fn parse_frame(s: &str) -> std::result::Result<f64, String> {
+    let frame: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if frame.is_finite() {
+        Ok(frame)
+    } else {
+        Err(format!("{s} is not a finite time code"))
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -294,7 +314,7 @@ fn main() {
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
-        match Scene::from_usd_with_assets(input_path, &assets) {
+        match Scene::from_usd_at_frame(input_path, &assets, cli.frame) {
             Ok(scene) => scene,
             Err(e) => {
                 error!("Failed to load USD scene: {}", e);
@@ -303,6 +323,11 @@ fn main() {
         }
     } else {
         debug!("No -i/--input given: building the procedural fallback scene");
+        if let Some(frame) = cli.frame {
+            warn!(
+                "--frame {frame} has no effect without -i/--input: the procedural scene is static"
+            );
+        }
         let (world, lights) = simple_scene();
         let (camera, settings) = get_settings();
         Scene::new(camera, world, lights, settings)
@@ -364,12 +389,16 @@ fn main() {
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!(
-        "Rendering {}x{} at {} spp, max depth {} ({} order)",
+        "Rendering {}x{} at {} spp, max depth {} ({} order){}",
         img_width,
         img_height,
         settings.samples_per_pixel(),
         settings.max_depth(),
-        if cli.bucket { "bucket" } else { "scanline" }
+        if cli.bucket { "bucket" } else { "scanline" },
+        match cli.frame {
+            Some(frame) => format!(", frame {frame}"),
+            None => String::new(),
+        }
     );
     // Progress bar over the engine's (completed, total) callback — the
     // total (rows vs. tiles) is only known once the pass starts.
@@ -714,8 +743,11 @@ mod tests {
             "--stats",
             "-l",
             "debug",
+            "--frame",
+            "1012.5",
         ])
         .expect("valid flags");
+        assert_eq!(cli.frame, Some(1012.5));
         assert_eq!(cli.input.as_deref(), Some("scene.usda"));
         assert_eq!(cli.output, "out.exr");
         assert!(cli.bucket);
@@ -737,8 +769,28 @@ mod tests {
         assert!(cli.strategy.is_none());
         assert!(cli.filter.is_none());
         assert!(cli.filter_radius.is_none());
+        assert!(cli.frame.is_none());
         assert!(!cli.stats);
         assert!(matches!(cli.level, LoggerLevel::Info));
+    }
+
+    #[test]
+    fn cli_accepts_a_negative_frame() {
+        // Shots routinely start before 0 (handles, pre-roll), and clap
+        // would otherwise read `-5` as an unknown short flag.
+        let cli = Cli::try_parse_from(["crust-render", "-f", "-5"]).expect("negative frame");
+        assert_eq!(cli.frame, Some(-5.0));
+    }
+
+    #[test]
+    fn cli_rejects_a_non_finite_frame() {
+        for bad in ["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"] {
+            assert!(
+                Cli::try_parse_from(["crust-render", "--frame", bad]).is_err(),
+                "--frame {bad} must be rejected"
+            );
+        }
+        assert!(Cli::try_parse_from(["crust-render", "--frame", "twelve"]).is_err());
     }
 
     #[test]

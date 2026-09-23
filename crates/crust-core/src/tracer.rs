@@ -755,6 +755,17 @@ impl RenderSettings {
         self
     }
 
+    /// Override the sampler's frame seed (`crust:frame`) — the frame index
+    /// OpenQMC decorrelates a render's sample patterns by.
+    pub fn with_frame(mut self, frame: isize) -> Self {
+        self.frame = frame;
+        self
+    }
+
+    pub fn frame(&self) -> isize {
+        self.frame
+    }
+
     /// Enable (or disable) path guiding with the given number of training
     /// iterations and guide-sampling probability α.
     pub fn with_guiding(mut self, enabled: bool, train_iterations: u32, guide_prob: f32) -> Self {

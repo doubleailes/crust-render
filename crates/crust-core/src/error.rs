@@ -9,6 +9,11 @@ pub enum Error {
     NonUtf8Path(PathBuf),
     /// Opening or parsing the USD stage failed.
     UsdOpen { path: PathBuf, message: String },
+    /// The requested frame is not a finite time code (`NaN` or `±inf`).
+    /// Refused rather than passed on: `NaN` compares false against the
+    /// stage's time range, so it would slip past the range check and reach
+    /// time-sample interpolation and the sampler seed as garbage.
+    InvalidFrame(f64),
 }
 
 impl fmt::Display for Error {
@@ -23,6 +28,12 @@ impl fmt::Display for Error {
                     "failed to open USD stage {}: {}",
                     path.display(),
                     message
+                )
+            }
+            Error::InvalidFrame(frame) => {
+                write!(
+                    f,
+                    "invalid frame {frame}: a time code must be a finite number"
                 )
             }
         }

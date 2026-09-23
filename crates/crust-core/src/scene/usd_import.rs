@@ -33,7 +33,7 @@ use glam::{Affine3A, Mat3A, Vec3, Vec3A};
 use super::subdiv;
 use openusd::gf::{Matrix4d, Vec3f};
 use openusd::sdf;
-use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask};
+use openusd::usd::{InitialLoadSet, Prim, Stage, StagePopulationMask, TimeCode};
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Camera as UsdCamera, Curves as UsdCurves, InterpolateBoundary,
     Mesh as UsdMesh, PointBased, PointInstancer, Sphere as UsdSphere, SubdivisionScheme, Xform,
@@ -60,6 +60,57 @@ fn prim_at(stage: &Stage, path: sdf::Path) -> Prim {
     stage
         .prim(path)
         .expect("an already-parsed sdf::Path cannot fail to parse")
+}
+
+// -----------------------------------------------------------------------
+// Evaluation time
+// -----------------------------------------------------------------------
+
+thread_local! {
+    /// The USD time code every attribute read in this import resolves at —
+    /// `None` for the attribute's *default* value, which is what the importer
+    /// read before a frame could be asked for.
+    ///
+    /// A thread-local rather than a parameter because the answer is the
+    /// same for every one of the ~40 read sites and several of them sit in
+    /// helpers that are handed only a `Prim` or an `Attribute`; threading a
+    /// time through all of them would change every signature in this file
+    /// to carry a value none of them decide. It is sound only because the
+    /// import is single-threaded — nothing here hands work to rayon — and
+    /// it is scoped by [`EvalTimeScope`], so a second import on the same
+    /// thread (the tests) never sees a stale time.
+    static EVAL_TIME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets [`EVAL_TIME`] for the lifetime of one `load_scene` call and restores
+/// whatever was there before, including on an early `?` return.
+struct EvalTimeScope(Option<f64>);
+
+impl EvalTimeScope {
+    fn enter(time: Option<f64>) -> Self {
+        EvalTimeScope(EVAL_TIME.with(|t| t.replace(time)))
+    }
+}
+
+impl Drop for EvalTimeScope {
+    fn drop(&mut self) {
+        EVAL_TIME.with(|t| t.set(self.0));
+    }
+}
+
+/// The time an attribute read resolves at: `None` reads the default value
+/// (`Attribute::get`), `Some` resolves time samples at that code, falling
+/// back to the default when the attribute has none — so a static attribute
+/// reads the same either way and only animated ones move.
+fn eval_time() -> Option<TimeCode> {
+    EVAL_TIME.with(|t| t.get()).map(TimeCode::new)
+}
+
+/// The time openusd's own xformable composition is asked for. That API has
+/// no "default" arm and was always called at 0.0, so without a frame this
+/// keeps exactly that.
+fn xform_time() -> TimeCode {
+    eval_time().unwrap_or(TimeCode::new(0.0))
 }
 
 const DEFAULT_SPP: u32 = 128;
@@ -321,7 +372,19 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
     Ok(stage)
 }
 
-pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene, crate::Error> {
+pub(crate) fn load_scene(
+    path: &Path,
+    assets: &dyn AssetLoader,
+    time: Option<f64>,
+) -> Result<Scene, crate::Error> {
+    // The authoritative check: every host reaches the importer through here,
+    // and nothing past this point expects a non-finite time.
+    if let Some(t) = time
+        && !t.is_finite()
+    {
+        return Err(crate::Error::InvalidFrame(t));
+    }
+    let _time_scope = EvalTimeScope::enter(time);
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
 
@@ -346,8 +409,20 @@ pub(crate) fn load_scene(path: &Path, assets: &dyn AssetLoader) -> Result<Scene,
         path.display(),
         open_start.elapsed()
     );
+    if let Some(t) = time {
+        check_time_range(&index, t);
+    }
     // Render settings come first — the camera importer needs the aspect ratio.
-    let settings = import_render_settings(&index);
+    let mut settings = import_render_settings(&index);
+    if let Some(t) = time {
+        // The sampler's frame seed follows the frame being rendered, so an
+        // image sequence gets independent noise per frame instead of one
+        // pattern swimming over moving geometry. Integer part only: the
+        // seed is an integer, and a subframe shares its frame's seed.
+        let seed = t.floor() as isize;
+        debug!("Frame {t} sets the sampler frame seed to {seed} (over crust:frame)");
+        settings = settings.with_frame(seed);
+    }
     let chunks = stream_roots(&index);
     drop(index);
     let open_elapsed = open_start.elapsed();
@@ -653,7 +728,10 @@ fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
 ///
 /// Returns `None` if any op token or value cannot be decoded.
 fn compose_xform_ops(prim: &Prim) -> Option<GMat4> {
-    let order = match prim.attribute("xformOpOrder").get::<sdf::Value>() {
+    let order = match prim
+        .attribute("xformOpOrder")
+        .get_at::<sdf::Value>(eval_time())
+    {
         Ok(Some(sdf::Value::TokenVec(order))) => order,
         Ok(Some(_)) => return None,
         // No order authored: authored xformOp attrs (if any) do not apply.
@@ -687,7 +765,11 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
     // Suffixes name op instances (`xformOp:translate:pivot`); the kind is
     // the first segment.
     let kind = kind.split(':').next().unwrap_or(kind);
-    let value = prim.attribute(name).get::<sdf::Value>().ok().flatten()?;
+    let value = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()
+        .flatten()?;
 
     match kind {
         "translate" => Some(GMat4::from_translation(value_as_vec3(&value)?)),
@@ -752,32 +834,32 @@ fn value_as_f32(value: &sdf::Value) -> Option<f32> {
 /// the wrong order (see `local_matrix_at`).
 fn local_matrix_via_openusd(stage: &Stage, prim: &Prim) -> GMat4 {
     if let Ok(Some(x)) = Xform::get(stage, prim.path().clone())
-        && let Ok(m) = x.local_to_parent_transform(0.0)
+        && let Ok(m) = x.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(m);
     }
     if let Ok(Some(m)) = UsdMesh::get(stage, prim.path().clone())
-        && let Ok(mat) = m.local_to_parent_transform(0.0)
+        && let Ok(mat) = m.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(mat);
     }
     if let Ok(Some(s)) = UsdSphere::get(stage, prim.path().clone())
-        && let Ok(mat) = s.local_to_parent_transform(0.0)
+        && let Ok(mat) = s.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(mat);
     }
     if let Ok(Some(c)) = UsdCamera::get(stage, prim.path().clone())
-        && let Ok(mat) = c.local_to_parent_transform(0.0)
+        && let Ok(mat) = c.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(mat);
     }
     if let Ok(Some(l)) = SphereLight::get(stage, prim.path().clone())
-        && let Ok(mat) = l.local_to_parent_transform(0.0)
+        && let Ok(mat) = l.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(mat);
     }
     if let Ok(Some(l)) = RectLight::get(stage, prim.path().clone())
-        && let Ok(mat) = l.local_to_parent_transform(0.0)
+        && let Ok(mat) = l.local_to_parent_transform(xform_time())
     {
         return usd_mat_to_glam(mat);
     }
@@ -1396,19 +1478,24 @@ fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
         sdf::Value::IntVec(v) => Some(v),
         _ => None,
     };
-    let points = match mesh.points_attr().get::<sdf::Value>().ok().flatten()? {
+    let points = match mesh
+        .points_attr()
+        .get_at::<sdf::Value>(eval_time())
+        .ok()
+        .flatten()?
+    {
         sdf::Value::Vec3fVec(v) => v,
         _ => return None,
     };
     let counts = int_vec(
         mesh.face_vertex_counts_attr()
-            .get::<sdf::Value>()
+            .get_at::<sdf::Value>(eval_time())
             .ok()
             .flatten()?,
     )?;
     let indices = int_vec(
         mesh.face_vertex_indices_attr()
-            .get::<sdf::Value>()
+            .get_at::<sdf::Value>(eval_time())
             .ok()
             .flatten()?,
     )?;
@@ -1459,7 +1546,11 @@ fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
         "primvars:st0",
         "primvars:UVMap",
     ] {
-        let value = prim.attribute(name).get::<sdf::Value>().ok().flatten();
+        let value = prim
+            .attribute(name)
+            .get_at::<sdf::Value>(eval_time())
+            .ok()
+            .flatten();
         let values = match value {
             // `texCoord2f[]` and `float2[]` are the same bits; which one an
             // exporter writes is a matter of taste.
@@ -1471,7 +1562,7 @@ fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
         }
         let indices = match prim
             .attribute(format!("{name}:indices"))
-            .get::<sdf::Value>()
+            .get_at::<sdf::Value>(eval_time())
             .ok()
             .flatten()
         {
@@ -1565,7 +1656,7 @@ fn mesh_source(
 
     let usd_scheme = mesh
         .subdivision_scheme_attr()
-        .get::<SubdivisionScheme>()
+        .get_at::<SubdivisionScheme>(eval_time())
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -1595,7 +1686,7 @@ fn mesh_source(
 
     let boundary = match mesh
         .interpolate_boundary_attr()
-        .get::<InterpolateBoundary>()
+        .get_at::<InterpolateBoundary>(eval_time())
         .ok()
         .flatten()
         .unwrap_or_default()
@@ -1607,15 +1698,18 @@ fn mesh_source(
         }
     };
 
-    let int_array = |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten() {
-        Some(sdf::Value::IntVec(v)) => v,
-        _ => Vec::new(),
-    };
-    let float_array = |attr: openusd::usd::Attribute| match attr.get::<sdf::Value>().ok().flatten()
-    {
-        Some(sdf::Value::FloatVec(v)) => v,
-        _ => Vec::new(),
-    };
+    let int_array =
+        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
+        {
+            Some(sdf::Value::IntVec(v)) => v,
+            _ => Vec::new(),
+        };
+    let float_array =
+        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
+        {
+            Some(sdf::Value::FloatVec(v)) => v,
+            _ => Vec::new(),
+        };
     let crease_indices = int_array(mesh.crease_indices_attr());
     let crease_lengths = int_array(mesh.crease_lengths_attr());
     let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());
@@ -1842,7 +1936,7 @@ fn triangulate(
 fn sphere_radius(sphere: &UsdSphere) -> f32 {
     sphere
         .radius_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -2361,8 +2455,9 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
         }
     };
 
-    let Ok(Some(sdf::Value::IntVec(proto_indices))) =
-        instancer.proto_indices_attr().get::<sdf::Value>()
+    let Ok(Some(sdf::Value::IntVec(proto_indices))) = instancer
+        .proto_indices_attr()
+        .get_at::<sdf::Value>(eval_time())
     else {
         warn!(
             "PointInstancer at {} has no `protoIndices` — skipped",
@@ -2374,15 +2469,17 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
     let positions = value_vec3f_array(&instancer.positions_attr()).unwrap_or_default();
     let scales = value_vec3f_array(&instancer.scales_attr());
     let orientations = instance_orientations(instancer);
-    let ids = match instancer.ids_attr().get::<sdf::Value>() {
+    let ids = match instancer.ids_attr().get_at::<sdf::Value>(eval_time()) {
         Ok(Some(sdf::Value::Int64Vec(v))) => Some(v),
         _ => None,
     };
-    let invisible: std::collections::HashSet<i64> =
-        match instancer.invisible_ids_attr().get::<sdf::Value>() {
-            Ok(Some(sdf::Value::Int64Vec(v))) => v.into_iter().collect(),
-            _ => Default::default(),
-        };
+    let invisible: std::collections::HashSet<i64> = match instancer
+        .invisible_ids_attr()
+        .get_at::<sdf::Value>(eval_time())
+    {
+        Ok(Some(sdf::Value::Int64Vec(v))) => v.into_iter().collect(),
+        _ => Default::default(),
+    };
 
     if positions.len() < proto_indices.len() {
         warn!(
@@ -2540,7 +2637,7 @@ fn emit_point_instancer(
 
 /// A `point3f[]` / `float3[]` attribute as a plain vector.
 fn value_vec3f_array(attr: &openusd::usd::Attribute) -> Option<Vec<Vec3f>> {
-    match attr.get::<sdf::Value>() {
+    match attr.get_at::<sdf::Value>(eval_time()) {
         Ok(Some(sdf::Value::Vec3fVec(v))) => Some(v),
         _ => None,
     }
@@ -2550,10 +2647,16 @@ fn value_vec3f_array(attr: &openusd::usd::Attribute) -> Option<Vec<Vec3f>> {
 /// over half-precision `orientations` as USD specifies.
 fn instance_orientations(instancer: &PointInstancer) -> Option<Vec<glam::Quat>> {
     let quat = |w: f32, x: f32, y: f32, z: f32| glam::Quat::from_xyzw(x, y, z, w).normalize();
-    if let Ok(Some(sdf::Value::QuatfVec(v))) = instancer.orientationsf_attr().get::<sdf::Value>() {
+    if let Ok(Some(sdf::Value::QuatfVec(v))) = instancer
+        .orientationsf_attr()
+        .get_at::<sdf::Value>(eval_time())
+    {
         return Some(v.iter().map(|q| quat(q.w, q.x, q.y, q.z)).collect());
     }
-    match instancer.orientations_attr().get::<sdf::Value>() {
+    match instancer
+        .orientations_attr()
+        .get_at::<sdf::Value>(eval_time())
+    {
         Ok(Some(sdf::Value::QuathVec(v))) => Some(
             v.iter()
                 .map(|q| quat(q.w.to_f32(), q.x.to_f32(), q.y.to_f32(), q.z.to_f32()))
@@ -2653,7 +2756,7 @@ fn curve_segments(
 ) -> Option<(Vec<CurveSegment>, Vec<CubicCurveSegment>)> {
     let points: Option<Vec<Vec3f>> = curves
         .points_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -2662,7 +2765,7 @@ fn curve_segments(
         });
     let counts: Option<Vec<i32>> = curves
         .curve_vertex_counts_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -2683,7 +2786,7 @@ fn curve_segments(
 
     let widths: Vec<f32> = curves
         .widths_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -3436,7 +3539,7 @@ fn emit_dome_light(
 
     let format = light
         .texture_format_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -3505,7 +3608,7 @@ fn emit_dome_light(
 fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
     let value = light
         .texture_file_attr()
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()?;
     asset_value_path(&value, stage_path)
@@ -3733,7 +3836,7 @@ fn shader_info_id(shader: &Shader) -> Option<String> {
     // via a raw attribute rather than the schema helper.
     shader
         .attribute("info:id")
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -3800,13 +3903,13 @@ fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
     let Ok(children) = prim_at(stage, mat_path.clone()).children() else {
         return false;
     };
-    children
-        .iter()
-        .any(|c| match c.attribute("info:id").get::<sdf::Value>() {
+    children.iter().any(
+        |c| match c.attribute("info:id").get_at::<sdf::Value>(eval_time()) {
             Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
             Ok(Some(sdf::Value::String(t))) => t == id,
             _ => false,
-        })
+        },
+    )
 }
 
 /// Maps RenderMan's `PxrDisneyBsdf` onto [`OpenPBR`].
@@ -4063,7 +4166,7 @@ fn material_ptex(
     let prim = prim_at(stage, mat_path.clone());
     let value = prim
         .attribute("inputs:surfaceMap")
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()?;
     let path = asset_value_path(&value, caches.stage_path)?;
@@ -4132,7 +4235,10 @@ fn srgb_to_linear(c: Vec3A) -> Vec3A {
 }
 
 fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
         sdf::Value::Vec3d(p) => Some(Vec3A::new(p.x as f32, p.y as f32, p.z as f32)),
@@ -4225,7 +4331,10 @@ fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
 
 fn shader_input_f32(shader: &Shader, name: &str) -> Option<f32> {
     let attr_name = format!("inputs:{}", name);
-    let v = shader.attribute(&attr_name).get::<sdf::Value>().ok()??;
+    let v = shader
+        .attribute(&attr_name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Float(f) => Some(f),
         sdf::Value::Double(d) => Some(d as f32),
@@ -4235,7 +4344,10 @@ fn shader_input_f32(shader: &Shader, name: &str) -> Option<f32> {
 
 fn shader_input_bool(shader: &Shader, name: &str) -> Option<bool> {
     let attr_name = format!("inputs:{}", name);
-    let v = shader.attribute(&attr_name).get::<sdf::Value>().ok()??;
+    let v = shader
+        .attribute(&attr_name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Bool(b) => Some(b),
         _ => None,
@@ -4244,7 +4356,10 @@ fn shader_input_bool(shader: &Shader, name: &str) -> Option<bool> {
 
 fn shader_input_vec3(shader: &Shader, name: &str) -> Option<Vec3A> {
     let attr_name = format!("inputs:{}", name);
-    let v = shader.attribute(&attr_name).get::<sdf::Value>().ok()??;
+    let v = shader
+        .attribute(&attr_name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
         // USD encodes color3f as an sdf::Value::Vec3f — no dedicated variant.
@@ -4280,7 +4395,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     };
 
     let (mut w, mut h) = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    if let Ok(Some(v)) = s.resolution_attr().get::<sdf::Value>()
+    if let Ok(Some(v)) = s.resolution_attr().get_at::<sdf::Value>(eval_time())
         && let Some(v2) = v.try_as_vec_2i()
     {
         w = v2.x as usize;
@@ -4357,6 +4472,27 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_pixel_filter(filter)
 }
 
+/// Warns when `time` lies outside the stage's authored
+/// `startTimeCode`..`endTimeCode`. Not an error — USD holds the first or last
+/// sample past either end, so the render is well defined — but a frame off
+/// the end of the shot is far more often a typo than a request, and it would
+/// otherwise render a plausible, frozen image without a word.
+fn check_time_range(stage: &Stage, time: f64) {
+    if !stage.has_authored_time_code_range() {
+        debug!("Rendering at time code {time}; the stage authors no startTimeCode/endTimeCode");
+        return;
+    }
+    let (start, end) = (stage.start_time_code(), stage.end_time_code());
+    if time < start || time > end {
+        warn!(
+            "Frame {time} is outside the stage's time range [{start}, {end}]; \
+             animated attributes hold their nearest time sample"
+        );
+    } else {
+        debug!("Rendering at time code {time} of [{start}, {end}]");
+    }
+}
+
 fn default_settings() -> RenderSettings {
     RenderSettings::new(
         DEFAULT_SPP,
@@ -4370,7 +4506,10 @@ fn default_settings() -> RenderSettings {
 }
 
 fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Int(i) => Some(i),
         _ => None,
@@ -4378,7 +4517,10 @@ fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
 }
 
 fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Float(f) => Some(f),
         sdf::Value::Double(d) => Some(d as f32),
@@ -4387,7 +4529,10 @@ fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
 }
 
 fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Bool(b) => Some(b),
         // Authoring tools sometimes write bools as ints.
@@ -4397,7 +4542,10 @@ fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
 }
 
 fn custom_token(prim: &Prim, name: &str) -> Option<String> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Token(t) => Some(t.as_str().to_owned()),
         sdf::Value::String(s) => Some(s),
@@ -4406,7 +4554,10 @@ fn custom_token(prim: &Prim, name: &str) -> Option<String> {
 }
 
 fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::Vec3f(c) => Some(Vec3A::new(c.x, c.y, c.z)),
         sdf::Value::Vec3d(c) => Some(Vec3A::new(c.x as f32, c.y as f32, c.z as f32)),
@@ -4415,7 +4566,10 @@ fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
 }
 
 fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::FloatVec(v) => Some(v),
         sdf::Value::DoubleVec(v) => Some(v.into_iter().map(|d| d as f32).collect()),
@@ -4424,7 +4578,10 @@ fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
 }
 
 fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
-    let v = prim.attribute(name).get::<sdf::Value>().ok()??;
+    let v = prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
     match v {
         sdf::Value::IntVec(v) => Some(v),
         _ => None,
@@ -4436,7 +4593,7 @@ fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
 // -----------------------------------------------------------------------
 
 fn attr_f32(attr: &openusd::usd::Attribute) -> Option<f32> {
-    match attr.get::<sdf::Value>().ok()?? {
+    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
         sdf::Value::Float(f) => Some(f),
         sdf::Value::Double(d) => Some(d as f32),
         _ => None,
@@ -4453,7 +4610,7 @@ fn attr_bool(attr: &openusd::usd::Attribute) -> Option<bool> {
 }
 
 fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
-    match attr.get::<sdf::Value>().ok()?? {
+    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
         // color3f is stored as Vec3f in sdf::Value
         sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
         _ => None,

@@ -1,0 +1,76 @@
+#usda 1.0
+(
+    doc = "Time-sampled animation, for --frame: a sphere crossing the frame left to right over frames 1-10, a card whose points drop towards the floor, and a key light that brightens. Render a frame with `-i samples/animation.usda --frame 5`; without --frame every attribute reads its default value, which parks the sphere above the frame."
+    defaultPrim = "World"
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 10
+    timeCodesPerSecond = 24
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.5, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Linear from x = -2 at frame 1 to x = +2 at frame 10. The default value
+    # is deliberately off-screen, so a render that ignores the frame shows it.
+    def Sphere "Mover"
+    {
+        double radius = 0.6
+        double3 xformOp:translate = (0, 20, 0)
+        double3 xformOp:translate.timeSamples = {
+            1: (-2, 0.6, 0),
+            10: (2, 0.6, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Animated *points*, not a transform: the card falls from y = 2 to y = 1.
+    def Mesh "Card"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points.timeSamples = {
+            1: [(1.5, 2, -1.5), (2.5, 2, -1.5), (2.5, 2, -0.5), (1.5, 2, -0.5)],
+            10: [(1.5, 1, -1.5), (2.5, 1, -1.5), (2.5, 1, -0.5), (1.5, 1, -0.5)],
+        }
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-8, 0, -8), (8, 0, -8), (8, 0, 8), (-8, 0, 8)]
+    }
+
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 3
+        float inputs:height = 2
+        color3f inputs:color = (10, 10, 10)
+        float inputs:intensity = 1.0
+        float inputs:intensity.timeSamples = {
+            1: 0.5,
+            10: 1.5,
+        }
+        double3 xformOp:translate = (0, 4.5, 3)
+        float xformOp:rotateX = -50
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (96, 54)
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+    }
+}
