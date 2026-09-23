@@ -304,8 +304,15 @@ impl SceneBuilder {
                     normal,
                     radius,
                 } => {
-                    if normal.length_squared() == 0.0 || radius.is_nan() || radius <= 0.0 {
-                        continue; // degenerate: no front, or no extent
+                    // Degenerate or non-finite: no front, no extent, or a
+                    // position that would poison the bounds.
+                    if !center.is_finite()
+                        || !normal.is_finite()
+                        || normal.length_squared() == 0.0
+                        || !radius.is_finite()
+                        || radius <= 0.0
+                    {
+                        continue;
                     }
                     prims.push(PrimNode::Disk(DiskPrim {
                         center,
@@ -317,7 +324,13 @@ impl SceneBuilder {
                 }
                 Geometry::Cylinder { p0, p1, radius } => {
                     let length = (p1 - p0).length();
-                    if length.is_nan() || length <= 0.0 || radius.is_nan() || radius <= 0.0 {
+                    if !p0.is_finite()
+                        || !p1.is_finite()
+                        || !length.is_finite()
+                        || length <= 0.0
+                        || !radius.is_finite()
+                        || radius <= 0.0
+                    {
                         continue;
                     }
                     prims.push(PrimNode::Cylinder(CylinderPrim {
@@ -610,6 +623,59 @@ mod tests {
         let bb = s.bounds().unwrap();
         assert!((bb.maximum.x - 1.0).abs() < 1e-6 && (bb.minimum.y + 1.0).abs() < 1e-6);
         assert!(bb.maximum.z > bb.minimum.z);
+    }
+
+    /// Degenerate or non-finite disks and cylinders are skipped at commit
+    /// rather than handed to the BVH, where one infinite bound would poison
+    /// every box above it.
+    #[test]
+    fn invalid_disks_and_cylinders_are_skipped() {
+        let mut b = SceneBuilder::new();
+        for g in [
+            Geometry::Disk {
+                center: Vec3A::ZERO,
+                normal: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            Geometry::Disk {
+                center: Vec3A::ZERO,
+                normal: Vec3A::Z,
+                radius: -1.0,
+            },
+            Geometry::Disk {
+                center: Vec3A::ZERO,
+                normal: Vec3A::Z,
+                radius: f32::INFINITY,
+            },
+            Geometry::Disk {
+                center: Vec3A::splat(f32::NAN),
+                normal: Vec3A::Z,
+                radius: 1.0,
+            },
+            Geometry::Cylinder {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            Geometry::Cylinder {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::X,
+                radius: 0.0,
+            },
+            Geometry::Cylinder {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::splat(f32::INFINITY),
+                radius: 1.0,
+            },
+        ] {
+            b.attach(g);
+        }
+        let s = b.commit();
+        assert_eq!(
+            s.primitive_breakdown().disks + s.primitive_breakdown().cylinders,
+            0
+        );
+        assert!(s.bounds().is_none());
     }
 
     /// An open tube: the wall is hit from outside with an outward normal,

@@ -413,8 +413,10 @@ pub struct IesProfile {
 
 impl IesProfile {
     /// Wraps a decoded table. `None` for one the evaluator could not read:
-    /// fewer than two angles on either axis, a ragged table, or angles that
-    /// do not ascend.
+    /// fewer than two angles on either axis, a ragged table, angles that do
+    /// not ascend, or any non-finite angle or intensity — which would
+    /// otherwise reach the power integral and every radiance the light
+    /// emits.
     pub fn new(v_angles: Vec<f32>, h_angles: Vec<f32>, intensity: Vec<Vec<f32>>) -> Option<Self> {
         let ascending = |a: &[f32]| a.windows(2).all(|w| w[0] <= w[1]);
         if v_angles.len() < 2
@@ -423,6 +425,8 @@ impl IesProfile {
             || intensity.iter().any(|row| row.len() != v_angles.len())
             || !ascending(&v_angles)
             || !ascending(&h_angles)
+            || !v_angles.iter().chain(&h_angles).all(|a| a.is_finite())
+            || !intensity.iter().flatten().all(|i| i.is_finite())
         {
             return None;
         }
@@ -458,10 +462,21 @@ impl IesProfile {
         } else {
             theta
         };
+        let last = self.v_angles[self.v_angles.len() - 1];
         let (vi, dv) = if theta < 0.0 {
             return 0.0;
-        } else if theta >= PI {
-            (self.v_angles.len() - 2, 1.0)
+        } else if theta >= last {
+            // The table's own upper endpoint, which the half-open bracket
+            // below cannot reach — and, for a table that runs to the pole,
+            // anything an angle scale pushes past π. hdEmbree takes the last
+            // sample for every θ ≥ π whatever the table covers, so a
+            // hemisphere-only downlight would light its own back pole with
+            // its 90° value; that is not followed here.
+            if theta == last || last >= PI - 1e-4 {
+                (self.v_angles.len() - 2, 1.0)
+            } else {
+                return 0.0;
+            }
         } else {
             match bracket(&self.v_angles, theta) {
                 Some(b) => b,
@@ -710,6 +725,32 @@ mod tests {
         assert_eq!(p.eval(60f32.to_radians(), 0.0, 0.5), 0.0);
         assert!(IesProfile::new(vec![0.0], vec![0.0, 1.0], vec![vec![1.0], vec![1.0]]).is_none());
         assert!(IesProfile::new(vec![0.0, 1.0], vec![0.0, 1.0], vec![vec![1.0]]).is_none());
+        let nan = vec![vec![1.0, f32::NAN], vec![1.0, 1.0]];
+        assert!(IesProfile::new(vec![0.0, 1.0], vec![0.0, 1.0], nan).is_none());
+        let inf = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+        assert!(IesProfile::new(vec![0.0, f32::INFINITY], vec![0.0, 1.0], inf).is_none());
+    }
+
+    /// A hemisphere-only table covers nothing past its last angle, and an
+    /// angle scale that pushes θ past π must not wrap round to that angle's
+    /// value; a table that does reach the pole keeps its endpoint.
+    #[test]
+    fn ies_profile_is_dark_outside_its_vertical_range() {
+        let deg = |a: [f32; 3]| a.map(f32::to_radians).to_vec();
+        let h = [0.0f32, 360.0].map(f32::to_radians).to_vec();
+        let half =
+            IesProfile::new(deg([0.0, 45.0, 90.0]), h.clone(), vec![vec![5.0; 3]; 2]).unwrap();
+        assert_eq!(half.eval(0.5 * PI, 0.0, 0.0), 5.0, "its own endpoint");
+        assert_eq!(half.eval(2.0, 0.0, 0.0), 0.0);
+        assert_eq!(half.eval(PI, 0.0, 0.0), 0.0, "the back pole");
+        assert_eq!(half.eval(3.0, 0.0, 0.5), 0.0, "scaled past π");
+        let full = IesProfile::new(deg([0.0, 90.0, 180.0]), h, vec![vec![5.0; 3]; 2]).unwrap();
+        assert_eq!(full.eval(PI, 0.0, 0.0), 5.0);
+        assert_eq!(
+            full.eval(3.0, 0.0, 0.5),
+            5.0,
+            "scaled past π on a full table"
+        );
     }
 
     /// The power integral of a constant profile over the whole sphere is the
