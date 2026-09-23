@@ -91,6 +91,9 @@ impl Scene {
     /// `None` reads every attribute's *default* value, exactly as
     /// [`Scene::from_usd_with_assets`] does — which on a stage that authors
     /// only `timeSamples` is not frame 0 but the schema fallback.
+    ///
+    /// A non-finite `frame` (`NaN`, `±inf`) is refused with
+    /// [`crate::Error::InvalidFrame`] before the stage is opened.
     pub fn from_usd_at_frame(
         path: &std::path::Path,
         assets: &dyn AssetLoader,

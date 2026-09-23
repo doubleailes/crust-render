@@ -1406,6 +1406,9 @@ Schema mapping:
   also sets the sampler's frame seed (its integer part, over `crust:frame`), so a
   sequence gets independent noise per frame, and a frame outside an authored
   `startTimeCode..endTimeCode` warns (USD holds the end samples; it is usually a typo).
+  A non-finite frame is refused in `load_scene` with `Error::InvalidFrame` (and earlier
+  by the CLI's `parse_frame`): `NaN` compares false against the range, so it would
+  otherwise pass the check silently.
   Not time-aware: `UsdPreviewSurface` inputs (read by openusd-schemas'
   `read_preview_surface`, default only), and `crust:motion:translate` motion blur, which
   is still an authored offset rather than derived from the samples across the shutter.

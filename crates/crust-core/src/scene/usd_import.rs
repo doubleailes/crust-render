@@ -374,6 +374,13 @@ pub(crate) fn load_scene(
     assets: &dyn AssetLoader,
     time: Option<f64>,
 ) -> Result<Scene, crate::Error> {
+    // The authoritative check: every host reaches the importer through here,
+    // and nothing past this point expects a non-finite time.
+    if let Some(t) = time
+        && !t.is_finite()
+    {
+        return Err(crate::Error::InvalidFrame(t));
+    }
     let _time_scope = EvalTimeScope::enter(time);
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
