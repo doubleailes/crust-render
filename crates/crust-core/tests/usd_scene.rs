@@ -1834,3 +1834,20 @@ fn static_stage_is_unchanged_by_a_frame() {
         assert_eq!(ta, tb, "ray through ({x}, {y}) sees the same surface");
     }
 }
+
+/// A non-finite frame is not a time code. `NaN` in particular compares false
+/// against the stage's time range, so without an explicit check it would
+/// slip past the range warning into interpolation and the sampler seed.
+#[test]
+fn non_finite_frames_are_rejected() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        match Scene::from_usd_at_frame(&sample("animation.usda"), &crust_core::NoAssets, Some(bad))
+        {
+            Err(crust_core::Error::InvalidFrame(f)) => {
+                assert!(f.is_nan() == bad.is_nan() && (f.is_nan() || f == bad));
+            }
+            Err(e) => panic!("frame {bad}: expected InvalidFrame, got {e}"),
+            Ok(_) => panic!("frame {bad} must be rejected"),
+        }
+    }
+}

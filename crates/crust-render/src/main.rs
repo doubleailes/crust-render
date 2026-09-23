@@ -64,7 +64,7 @@ struct Cli {
     /// values render a subframe. Also sets the sampler's frame seed,
     /// overriding the scene's `crust:frame`. When absent, attributes read
     /// their default (non-time-sampled) value.
-    #[arg(short, long, allow_negative_numbers = true)]
+    #[arg(short, long, allow_negative_numbers = true, value_parser = parse_frame)]
     frame: Option<f64>,
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
@@ -84,6 +84,19 @@ struct Cli {
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
     stats: bool,
+}
+
+/// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
+/// `nan`, `inf` and `infinity`, none of which is a time code; crust-core
+/// refuses them too, but rejecting them here reports it as a usage error
+/// before any scene is opened.
+fn parse_frame(s: &str) -> std::result::Result<f64, String> {
+    let frame: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if frame.is_finite() {
+        Ok(frame)
+    } else {
+        Err(format!("{s} is not a finite time code"))
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
@@ -767,6 +780,17 @@ mod tests {
         // would otherwise read `-5` as an unknown short flag.
         let cli = Cli::try_parse_from(["crust-render", "-f", "-5"]).expect("negative frame");
         assert_eq!(cli.frame, Some(-5.0));
+    }
+
+    #[test]
+    fn cli_rejects_a_non_finite_frame() {
+        for bad in ["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"] {
+            assert!(
+                Cli::try_parse_from(["crust-render", "--frame", bad]).is_err(),
+                "--frame {bad} must be rejected"
+            );
+        }
+        assert!(Cli::try_parse_from(["crust-render", "--frame", "twelve"]).is_err());
     }
 
     #[test]
