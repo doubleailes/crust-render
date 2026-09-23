@@ -31,7 +31,9 @@ mod texture;
 pub mod value;
 
 pub use bsdf::{Emission, Flattened, Lobe, LobeKind, flatten};
-pub use eval::{BinOp, Compiler, Op, Program, ShadeCtx, UnOp, reflectivity_from_ior};
+pub use eval::{
+    BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
+};
 pub use parse::{Doc, Input, MtlxError, Node, Source};
 pub use texture::{Texture, TextureRef};
 pub use value::Val;

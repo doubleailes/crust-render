@@ -1,0 +1,258 @@
+#usda 1.0
+(
+    doc = """UsdPreviewSurface driven by UsdUVTexture + UsdPrimvarReader_float2.
+
+    Four quads, one per thing the importer has to get right about the
+    standard preview network:
+
+    - top left: diffuseColor from a UDIM set (`<UDIM>`, tiles 1001 and 1002
+      across one quad) with `sourceColorSpace = "sRGB"` -- the explicit decode.
+    - top right: diffuseColor from a linear EXR under `auto` (float -> raw,
+      preloaded at f32) and roughness from a greyscale PNG under `auto`
+      (single channel -> raw), a left-to-right ramp from 0.05 to 0.95.
+    - bottom left: metallic from one channel (`outputs:r`) of an RGB mask,
+      inverted through `scale = -1`, `bias = 1`, and mirrored by `wrapS`.
+    - bottom right: a tangent-space normal map decoded by the texture's own
+      `scale = 2`, `bias = -1` (the node set's convention), under a clearcoat.
+
+    Every texture here authors a loud magenta `fallback`, so a file that fails
+    to load is obvious rather than plausibly untextured.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "UdimSrgb"
+        {
+            token outputs:surface.connect = </World/Looks/UdimSrgb/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                color3f inputs:diffuseColor.connect = </World/Looks/UdimSrgb/Albedo.outputs:rgb>
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/mtlx_base.<UDIM>.png@
+                token inputs:sourceColorSpace = "sRGB"
+                float4 inputs:fallback = (1, 0, 1, 1)
+                float2 inputs:st.connect = </World/Looks/UdimSrgb/Reader.outputs:result>
+                vector3f outputs:rgb
+            }
+
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
+        def Material "ExrAuto"
+        {
+            token outputs:surface.connect = </World/Looks/ExrAuto/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/ExrAuto/Albedo.outputs:rgb>
+                float inputs:roughness.connect = </World/Looks/ExrAuto/Rough.outputs:r>
+                float inputs:metallic = 0
+                token outputs:surface
+            }
+
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/usdpreview_albedo.exr@
+                float4 inputs:fallback = (1, 0, 1, 1)
+                float2 inputs:st.connect = </World/Looks/ExrAuto/Reader.outputs:result>
+                vector3f outputs:rgb
+            }
+
+            def Shader "Rough"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/usdpreview_rough.png@
+                token inputs:sourceColorSpace = "auto"
+                float2 inputs:st.connect = </World/Looks/ExrAuto/Reader.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
+        def Material "MaskedMetal"
+        {
+            token outputs:surface.connect = </World/Looks/MaskedMetal/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.62, 0.35)
+                float inputs:metallic.connect = </World/Looks/MaskedMetal/Mask.outputs:r>
+                float inputs:roughness = 0.3
+                token outputs:surface
+            }
+
+            def Shader "Mask"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/mtlx_mask.png@
+                token inputs:sourceColorSpace = "raw"
+                token inputs:wrapS = "mirror"
+                float4 inputs:scale = (-1, -1, -1, 1)
+                float4 inputs:bias = (1, 1, 1, 0)
+                float4 inputs:fallback = (1, 0, 1, 1)
+                float2 inputs:st.connect = </World/Looks/MaskedMetal/Reader.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
+        def Material "NormalMapped"
+        {
+            token outputs:surface.connect = </World/Looks/NormalMapped/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.08, 0.06)
+                float inputs:roughness = 0.45
+                float inputs:clearcoat = 1
+                float inputs:clearcoatRoughness = 0.05
+                normal3f inputs:normal.connect = </World/Looks/NormalMapped/Normal.outputs:rgb>
+                token outputs:surface
+            }
+
+            def Shader "Normal"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/mtlx_normal.<UDIM>.png@
+                token inputs:sourceColorSpace = "raw"
+                float4 inputs:scale = (2, 2, 2, 1)
+                float4 inputs:bias = (-1, -1, -1, 0)
+                float2 inputs:st.connect = </World/Looks/NormalMapped/Reader.outputs:result>
+                vector3f outputs:rgb
+            }
+
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+
+    # u runs 0..2: UDIM tiles 1001 and 1002 across one quad.
+    def Mesh "UdimQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2.1, 0, 0), (-0.1, 0, 0), (-0.1, 1, 0), (-2.1, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (2, 0), (2, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/UdimSrgb>
+    }
+
+    def Mesh "ExrQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.1, 0, 0), (2.1, 0, 0), (2.1, 1, 0), (0.1, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/ExrAuto>
+    }
+
+    # u runs 0..2 under `wrapS = "mirror"`: the mask reads forwards then back.
+    def Mesh "MetalQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-2.1, -1.2, 0), (-0.1, -1.2, 0), (-0.1, -0.2, 0), (-2.1, -0.2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (2, 0), (2, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/MaskedMetal>
+    }
+
+    def Mesh "NormalQuad" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.1, -1.2, 0), (2.1, -1.2, 0), (2.1, -0.2, 0), (0.1, -0.2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </World/Looks/NormalMapped>
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.6, 0.65, 0.75)
+        float inputs:intensity = 0.4
+    }
+
+    def RectLight "Key"
+    {
+        color3f inputs:color = (1, 0.97, 0.92)
+        float inputs:intensity = 12
+        float inputs:width = 4
+        float inputs:height = 4
+        matrix4d xformOp:transform = ( (0.8, 0, -0.6, 0), (-0.3, 0.87, -0.4, 0), (0.52, 0.5, 0.69, 0), (3, 3, 4, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 50
+        float horizontalAperture = 36
+        float focusDistance = 7
+        float fStop = 0
+        double3 xformOp:translate = (0, -0.1, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 360)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+    }
+}

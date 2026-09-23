@@ -94,6 +94,13 @@ pub enum ColorSpace {
     Gamma18,
     /// Already linear, or not a colour at all (normals, roughness, masks).
     Raw,
+    /// "Decide from the file" — UsdUVTexture's `sourceColorSpace = "auto"`,
+    /// which is also its fallback. The answer depends on the pixel format, so
+    /// only the host can give it: it is resolved at open through
+    /// [`ColorSpace::resolve_auto`] and **never reaches a lookup**. Anything
+    /// that meets it unresolved treats it as `Raw`, the spec's own answer for
+    /// every format it does not name.
+    Auto,
 }
 
 impl ColorSpace {
@@ -124,6 +131,39 @@ impl ColorSpace {
         }
     }
 
+    /// Maps a UsdUVTexture `sourceColorSpace` token onto a decode.
+    ///
+    /// The schema allows three values: `raw`, `sRGB` and `auto`, the last of
+    /// which is also the fallback, so an unauthored attribute means `Auto`
+    /// rather than raw — the opposite default to MaterialX's, and the reason
+    /// this is a separate function from [`ColorSpace::from_mtlx`]. An
+    /// unrecognised token falls back to `Auto` too, as the schema's fallback
+    /// would.
+    pub fn from_usd(token: Option<&str>) -> ColorSpace {
+        match token.map(str::to_ascii_lowercase).as_deref() {
+            Some("srgb") => ColorSpace::Srgb,
+            Some("raw") => ColorSpace::Raw,
+            _ => ColorSpace::Auto,
+        }
+    }
+
+    /// Resolves [`ColorSpace::Auto`] against the file's pixel format; every
+    /// other space is returned unchanged.
+    ///
+    /// The UsdUVTexture rule, which Hydra implements: absent colour metadata
+    /// in the file, an **8-bit image with three or four channels** is sRGB and
+    /// everything else — single-channel, 16-bit, float — is used as read. So a
+    /// greyscale roughness PNG stays raw while an RGB albedo PNG decodes, and
+    /// an EXR is linear. crust reads no in-file colour metadata, which the
+    /// rule permits (it is consulted first "if present").
+    pub fn resolve_auto(self, eight_bit: bool, channels: u8) -> ColorSpace {
+        match self {
+            ColorSpace::Auto if eight_bit && (channels == 3 || channels == 4) => ColorSpace::Srgb,
+            ColorSpace::Auto => ColorSpace::Raw,
+            other => other,
+        }
+    }
+
     /// The exponent of this space's power law, for the two spaces that are
     /// one. `None` for the piecewise sRGB curve and for raw data, neither of
     /// which is a plain `powf`.
@@ -131,7 +171,7 @@ impl ColorSpace {
         match self {
             ColorSpace::Gamma22 => Some(2.2),
             ColorSpace::Gamma18 => Some(1.8),
-            ColorSpace::Srgb | ColorSpace::Raw => None,
+            ColorSpace::Srgb | ColorSpace::Raw | ColorSpace::Auto => None,
         }
     }
 }
@@ -187,5 +227,27 @@ mod color_space_tests {
         assert_eq!(ColorSpace::Gamma18.gamma(), Some(1.8));
         assert_eq!(ColorSpace::Srgb.gamma(), None);
         assert_eq!(ColorSpace::Raw.gamma(), None);
+    }
+
+    #[test]
+    fn usd_source_color_space_defaults_to_auto_not_raw() {
+        assert_eq!(ColorSpace::from_usd(Some("sRGB")), ColorSpace::Srgb);
+        assert_eq!(ColorSpace::from_usd(Some("raw")), ColorSpace::Raw);
+        for s in [None, Some("auto"), Some("bogus")] {
+            assert_eq!(ColorSpace::from_usd(s), ColorSpace::Auto, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn auto_resolves_by_pixel_format() {
+        let a = ColorSpace::Auto;
+        assert_eq!(a.resolve_auto(true, 3), ColorSpace::Srgb);
+        assert_eq!(a.resolve_auto(true, 4), ColorSpace::Srgb);
+        assert_eq!(a.resolve_auto(true, 1), ColorSpace::Raw);
+        assert_eq!(a.resolve_auto(true, 2), ColorSpace::Raw);
+        assert_eq!(a.resolve_auto(false, 3), ColorSpace::Raw);
+        // An explicit space is never second-guessed by the file.
+        assert_eq!(ColorSpace::Raw.resolve_auto(true, 3), ColorSpace::Raw);
+        assert_eq!(ColorSpace::Srgb.resolve_auto(false, 1), ColorSpace::Srgb);
     }
 }

@@ -114,6 +114,9 @@ pub(crate) fn space_name(space: ColorSpace) -> &'static str {
         ColorSpace::Gamma22 => "g22_rec709",
         ColorSpace::Gamma18 => "g18_rec709",
         ColorSpace::Raw => "raw",
+        // Never written: a conversion resolves `Auto` against its source
+        // first. Spelled distinctly so an unresolved one matches no file.
+        ColorSpace::Auto => "auto",
     }
 }
 

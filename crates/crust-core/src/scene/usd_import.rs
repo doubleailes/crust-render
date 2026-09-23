@@ -45,7 +45,8 @@ use openusd_schemas::lux::{
 };
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use openusd_schemas::shade::{
-    self, Material as UsdMaterial, MaterialBindingAPI, Shader, TerminalSource,
+    self, Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter,
+    ReadPreviewSurface, Shader, ShadingAttribute, TerminalSource,
 };
 
 /// `Stage::prim` for a path that is already an `sdf::Path`.
@@ -3897,9 +3898,7 @@ fn resolve_material_uncached(
             // The preview surface may still be the Ptex-driven one — the Moana
             // island wires its `diffuseColor` to a Ptex node — so consult the
             // material's own interface input either way.
-            let mut o = preview_surface_openpbr(stage, mat_path);
-            o.base_color_ptex = material_ptex(stage, mat_path, caches);
-            Arc::new(o)
+            preview_surface_material(stage, mat_path, shader, caches)
         }
         Some("PxrDisneyBsdf") => Arc::new(disney_to_openpbr(stage, mat_path, caches)),
         Some(other) => {
@@ -3945,21 +3944,231 @@ fn shader_info_id(shader: &Shader) -> Option<String> {
         })
 }
 
-fn preview_surface_openpbr(stage: &Stage, mat_path: &sdf::Path) -> OpenPBR {
-    let ps = match shade::read_preview_surface(stage, mat_path) {
-        Ok(Some(ps)) => ps,
-        _ => return OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)),
+/// A `UsdPreviewSurface` material: its constants as an [`OpenPBR`], wrapped in
+/// a [`crate::PreviewSurface`] when any input is driven by a `UsdUVTexture`.
+///
+/// An untextured surface — and one whose every texture connection turned out
+/// unusable — stays the plain `OpenPBR` it always was, so it neither builds a
+/// UV table nor pays a per-hit evaluation.
+fn preview_surface_material(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    shader: &Shader,
+    caches: &mut ImportCaches<'_>,
+) -> Arc<dyn Material> {
+    use crate::material::preview_surface::Target;
+
+    let ps = shade::read_preview_surface(stage, mat_path).ok().flatten();
+    let mut base = match &ps {
+        Some(ps) => preview_surface_openpbr(ps),
+        None => OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)),
+    };
+    base.base_color_ptex = material_ptex(stage, mat_path, caches);
+    let Some(ps) = ps else {
+        return Arc::new(base);
     };
 
+    // `read_preview_surface` reports `Texture` exactly when an input resolves
+    // to a `UsdUVTexture` output, which is the question; the walk below then
+    // reads the whole node rather than just its file.
+    let textured = [
+        (Target::DiffuseColor, ps.diffuse_color.texture().is_some()),
+        (Target::EmissiveColor, ps.emissive_color.texture().is_some()),
+        (Target::Metallic, ps.metallic.texture().is_some()),
+        (Target::Roughness, ps.roughness.texture().is_some()),
+        (Target::Opacity, ps.opacity.texture().is_some()),
+        (Target::Ior, ps.ior.texture().is_some()),
+        (Target::Clearcoat, ps.clearcoat.texture().is_some()),
+        (
+            Target::ClearcoatRoughness,
+            ps.clearcoat_roughness.texture().is_some(),
+        ),
+    ];
+    let mut inputs = Vec::new();
+    for (target, is_textured) in textured {
+        if is_textured
+            && let Some(input) =
+                preview_uv_input(stage, mat_path, shader, target.input_name(), caches)
+        {
+            inputs.push((target, input));
+        }
+    }
+    let normal = if ps.normal.texture().is_some() {
+        preview_uv_input(stage, mat_path, shader, "normal", caches)
+    } else {
+        None
+    };
+    for (name, set) in [
+        ("occlusion", ps.occlusion.is_set()),
+        ("specularColor", ps.specular_color.is_set()),
+        ("opacityThreshold", ps.opacity_threshold.is_set()),
+    ] {
+        if set {
+            debug!("UsdPreviewSurface at {mat_path}: {name} is not read");
+        }
+    }
+
+    if inputs.is_empty() && normal.is_none() {
+        return Arc::new(base);
+    }
+    let m = crate::PreviewSurface::new(mat_path.to_string(), base, inputs, normal);
+    debug!("Material {mat_path}: {m:?}");
+    Arc::new(m)
+}
+
+/// Follows one `UsdPreviewSurface` input to the `UsdUVTexture` producing it
+/// and reads that node whole: file, colour space, wrap modes, scale, bias,
+/// fallback, and the primvar reader behind its `st`.
+///
+/// Every value is read through `value_producing_attributes(Any)`, so an input
+/// wired to the Material's interface — how a published look exposes its
+/// file paths — resolves the same as one authored on the node. `None` when the
+/// input does not resolve to a texture output crust can use; the surface then
+/// keeps that input's constant.
+fn preview_uv_input(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    shader: &Shader,
+    name: &str,
+    caches: &mut ImportCaches<'_>,
+) -> Option<crate::material::preview_surface::UvInput> {
+    use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
+    use shade::tokens as tk;
+
+    let surface_input = shader.input(name);
+    let produced = surface_input
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+        .ok()?;
+    let source = produced.first()?;
+    let output = match source {
+        ShadingAttribute::Output(o) => TexOutput::from_name(o.base_name()),
+        ShadingAttribute::Input(_) => None,
+    };
+    let Some(output) = output else {
+        warn!(
+            "UsdPreviewSurface at {mat_path}: {name} connects to {}, not a UsdUVTexture \
+             r/g/b/a/rgb output — using its constant",
+            source.path()
+        );
+        return None;
+    };
+    let tex = Shader::get(stage, source.path().prim_path())
+        .ok()
+        .flatten()?;
+    if shader_info_id(&tex).as_deref() != Some(tk::SHADER_ID_UV_TEXTURE) {
+        return None;
+    }
+
+    // The value an input carries, connection followed.
+    let value = |input: &shade::Input| -> Option<sdf::Value> {
+        let produced = input.value_producing_attributes(ProducerFilter::Any).ok()?;
+        produced
+            .first()?
+            .attribute()
+            .get_at::<sdf::Value>(eval_time())
+            .ok()
+            .flatten()
+    };
+    let token = |input: &str| value(&tex.input(input)).and_then(|v| v.as_str().map(str::to_owned));
+    let float4 = |input: &str| value(&tex.input(input)).and_then(|v| sdf_float4(&v));
+
+    let file =
+        value(&tex.input(tk::TEX_FILE)).and_then(|v| asset_value_path(&v, caches.stage_path));
+    let Some(file) = file else {
+        warn!(
+            "UsdUVTexture {}: no inputs:file — {name} keeps its constant",
+            tex.path()
+        );
+        return None;
+    };
+    let space = crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref());
+
+    // Which chart the texture reads. crust carries one per mesh (see
+    // `mesh_uvs`), so a reader naming another primvar is approximated by it.
+    let st = tex.input(tk::TEX_ST);
+    if let Some(reader) = st
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+        .ok()
+        .and_then(|p| p.into_iter().next())
+    {
+        let reader = Shader::get(stage, reader.path().prim_path()).ok().flatten();
+        let id = reader.as_ref().and_then(shader_info_id);
+        match (&reader, id.as_deref()) {
+            (Some(reader), Some(tk::SHADER_ID_PRIMVAR_READER_FLOAT2)) => {
+                let varname = value(&reader.input(tk::PVR_VARNAME))
+                    .and_then(|v| v.as_str().map(str::to_owned));
+                if let Some(v) = varname
+                    && !matches!(v.as_str(), "st" | "uv" | "st0" | "UVMap")
+                {
+                    warn!(
+                        "UsdPrimvarReader {} reads primvar '{v}'; crust reads one chart \
+                         (primvars:st and its fallbacks) — using that",
+                        reader.path()
+                    );
+                }
+            }
+            _ => warn!(
+                "UsdUVTexture {}: st is driven by {id:?}, which is not read — using the \
+                 mesh chart unchanged",
+                tex.path()
+            ),
+        }
+    }
+
+    let file_name = file.to_string_lossy();
+    let tiled = file_name.contains("<UDIM>") || file_name.contains("<UVTILE>");
+    // The node's own fallback, else the surface input's constant (so a
+    // declined texture renders on the surface's constants), else the node
+    // set's default of opaque black.
+    let fallback = float4(tk::TEX_FALLBACK)
+        .or_else(|| {
+            surface_input
+                .attribute()
+                .get_at::<sdf::Value>(eval_time())
+                .ok()
+                .flatten()
+                .and_then(|v| sdf_float4(&v))
+        })
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let loaded = load_uv_texture(&file, space, caches).map(crate::TextureRef);
+    Some(UvInput {
+        tex: loaded,
+        output,
+        scale: float4(tk::TEX_SCALE).unwrap_or([1.0; 4]),
+        bias: float4(tk::TEX_BIAS).unwrap_or([0.0; 4]),
+        fallback,
+        wrap: [
+            Wrap::from_token(token(tk::TEX_WRAP_S).as_deref()),
+            Wrap::from_token(token(tk::TEX_WRAP_T).as_deref()),
+        ],
+        tiled,
+    })
+}
+
+/// A shading value widened to four channels, the shape `UsdUVTexture`'s
+/// `scale`/`bias`/`fallback` have: a `float4` as authored, a colour with
+/// alpha 1, a scalar in every channel.
+fn sdf_float4(v: &sdf::Value) -> Option<[f32; 4]> {
+    Some(match v {
+        sdf::Value::Vec4f(v) => [v.x, v.y, v.z, v.w],
+        sdf::Value::Vec4d(v) => [v.x as f32, v.y as f32, v.z as f32, v.w as f32],
+        sdf::Value::Vec4h(v) => [v.x.to_f32(), v.y.to_f32(), v.z.to_f32(), v.w.to_f32()],
+        sdf::Value::Vec3f(v) => [v.x, v.y, v.z, 1.0],
+        sdf::Value::Vec3d(v) => [v.x as f32, v.y as f32, v.z as f32, 1.0],
+        sdf::Value::Float(f) => [*f; 4],
+        sdf::Value::Double(d) => [*d as f32; 4],
+        _ => return None,
+    })
+}
+
+/// A `UsdPreviewSurface`'s constant inputs as an [`OpenPBR`]. A
+/// texture-connected input leaves its field at the default here;
+/// [`preview_surface_material`] is what drives it.
+fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
     let mut o = OpenPBR::default();
 
     if let Some(rgb) = ps.diffuse_color.value() {
         o.base_color = Vec3A::new(rgb[0], rgb[1], rgb[2]);
-    } else if ps.diffuse_color.texture().is_some() {
-        warn!(
-            "UsdPreviewSurface at {}: diffuseColor is a texture — textures are not supported yet",
-            mat_path
-        );
     }
     if let Some(m) = ps.metallic.value() {
         o.base_metalness = *m;
@@ -4180,7 +4389,12 @@ fn load_mtlx_material(
     let cell = std::cell::RefCell::new(&mut *caches);
     let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
         let mut c = cell.borrow_mut();
-        load_uv_texture(&dir.join(asset), space, &mut c).map(crate::TextureRef)
+        load_uv_texture(
+            &dir.join(asset),
+            crate::ColorSpace::from_mtlx(space),
+            &mut c,
+        )
+        .map(crate::TextureRef)
     };
     // Billed as (total) minus (what the texture loads already billed): the
     // loader closure runs *inside* this call and adds its own decode time to
@@ -4223,14 +4437,15 @@ fn load_mtlx_material(
 }
 
 /// Opens a UV texture through the host, memoized by resolved path and colour
-/// space. The colour space comes from MaterialX's own `colorspace` attribute
-/// via [`crate::ColorSpace::from_mtlx`].
+/// space. The caller maps its own vocabulary onto the space — MaterialX's
+/// `colorspace` through [`crate::ColorSpace::from_mtlx`], UsdUVTexture's
+/// `sourceColorSpace` through [`crate::ColorSpace::from_usd`] — since the two
+/// disagree on what an absent attribute means.
 fn load_uv_texture(
     path: &std::path::Path,
-    space: Option<&str>,
+    space: crate::ColorSpace,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn crate::Texture2D>> {
-    let space = crate::ColorSpace::from_mtlx(space);
     let key = (path.to_string_lossy().into_owned(), space);
     if let Some(hit) = caches.materials.textures.get(&key) {
         return hit.clone();

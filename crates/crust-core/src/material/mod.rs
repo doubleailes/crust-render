@@ -10,3 +10,5 @@ mod openpbr;
 pub use openpbr::OpenPBR;
 pub mod materialx;
 pub use materialx::MtlxMaterial;
+pub mod preview_surface;
+pub use preview_surface::PreviewSurface;
