@@ -3,18 +3,31 @@
 //! means guessing at the unit scale.
 //!
 //! ```sh
-//! cargo run --release -p crust-render --example scene_bounds -- scene.usda
+//! cargo run --release -p crust-render --example scene_bounds -- scene.usda [frame]
 //! ```
+//!
+//! Without a frame every attribute reads its default, exactly as the renderer
+//! does without `-f` -- so an animated stage that authors only time samples
+//! (value-clipped caches included) must be asked at a frame to be bounded
+//! where it actually is.
 
 use std::path::PathBuf;
 
 fn main() {
     let Some(path) = std::env::args().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: scene_bounds <scene.usd[a]>");
+        eprintln!("usage: scene_bounds <scene.usd[a]> [frame]");
         std::process::exit(2);
     };
+    let frame = match std::env::args().nth(2).map(|f| f.parse::<f64>()) {
+        None => None,
+        Some(Ok(f)) if f.is_finite() => Some(f),
+        Some(_) => {
+            eprintln!("frame must be a finite number");
+            std::process::exit(2);
+        }
+    };
 
-    let scene = match crust_core::Scene::from_usd(&path) {
+    let scene = match crust_core::Scene::from_usd_at_frame(&path, &crust_core::NoAssets, frame) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("failed to load {}: {e}", path.display());
