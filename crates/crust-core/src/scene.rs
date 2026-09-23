@@ -170,6 +170,22 @@ pub trait AssetLoader: Send + Sync {
         None
     }
 
+    /// Decodes a light's colour map (`RectLight`'s `inputs:texture:file`) to
+    /// linear float RGB — the decode [`Self::load_environment`] does, without
+    /// the lat-long importance sampling. `None` means the light emits its
+    /// uniform colour.
+    fn load_light_texture(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<std::sync::Arc<crate::LightTexture>> {
+        tracing::warn!(
+            "Asset loader does not decode light textures: {} ignored — the light \
+             emits its uniform colour.",
+            path.display()
+        );
+        None
+    }
+
     /// Decodes an IES photometric profile (`inputs:shaping:ies:file`).
     ///
     /// `path` is resolved as for the other loaders. `None` drops the IES term

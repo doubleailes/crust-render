@@ -1599,3 +1599,71 @@ fn loading_the_same_stage_twice_is_identical() {
     assert_eq!(ha.rec.t.to_bits(), hb.rec.t.to_bits());
     assert_eq!(ha.geom_id, hb.geom_id);
 }
+
+/// `RectLight`'s `inputs:texture:file` multiplies the emission per point:
+/// the image's top row at the light's local +Y edge, its left column at −X,
+/// the same texel for NEE and for a bounce ray that hits the light, and
+/// `normalize` still dividing by the area.
+#[test]
+fn rect_light_texture_maps_onto_the_light() {
+    struct Card;
+    impl crust_core::AssetLoader for Card {
+        fn load_environment(&self, _: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+            None
+        }
+        fn load_light_texture(
+            &self,
+            path: &std::path::Path,
+        ) -> Option<std::sync::Arc<crust_core::LightTexture>> {
+            assert!(path.ends_with("card.exr"), "{}", path.display());
+            // top-left, top-right / bottom-left, bottom-right — HDR on purpose.
+            let px = vec![
+                Vec3A::new(16.0, 0.0, 0.0),
+                Vec3A::new(0.0, 1.0, 0.0),
+                Vec3A::new(0.0, 0.0, 1.0),
+                Vec3A::new(1.0, 1.0, 1.0),
+            ];
+            crust_core::LightTexture::new(2, 2, px).map(std::sync::Arc::new)
+        }
+    }
+    let path = write_stage(
+        "rect_texture",
+        r#"#usda 1.0
+def RectLight "Card"
+{
+    float inputs:width = 2
+    float inputs:height = 2
+    float inputs:intensity = 3
+    bool inputs:normalize = 1
+    asset inputs:texture:file = @card.exr@
+    double3 xformOp:translate = (0, 0, 2)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+"#,
+    );
+    let scene = Scene::from_usd_with_assets(&path, &Card).unwrap();
+    let light = &scene.lights.lights[0];
+    // Aim NEE at each quadrant's centre through (u, v): the rect's sample
+    // parameters run along local +X and +Y from its (−X, −Y) corner.
+    let from = Vec3A::ZERO;
+    let at = |u: f32, v: f32| light.sample_li(from, u, v).unwrap().radiance;
+    let scale = 3.0 / 4.0; // intensity over the 2×2 area
+    assert_eq!(
+        at(0.25, 0.75),
+        Vec3A::new(16.0, 0.0, 0.0) * scale,
+        "top-left"
+    );
+    assert_eq!(
+        at(0.75, 0.75),
+        Vec3A::new(0.0, 1.0, 0.0) * scale,
+        "top-right"
+    );
+    assert_eq!(
+        at(0.25, 0.25),
+        Vec3A::new(0.0, 0.0, 1.0) * scale,
+        "bottom-left"
+    );
+    assert_eq!(at(0.75, 0.25), Vec3A::ONE * scale, "bottom-right");
+    assert!(assert_mis_sides_agree(&scene, from) > 0);
+    assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.7, -0.4, -1.0)) > 0);
+}

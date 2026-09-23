@@ -1,11 +1,37 @@
-//! Lat-long environment maps: OpenEXR, Radiance `.hdr`, and LDR images.
+//! Lat-long environment maps and light textures: OpenEXR, Radiance `.hdr`,
+//! and LDR images, all decoded to linear float RGB by [`read_rgb_image`].
 
 use crust_core::{EnvironmentMap, Vec3A};
 use exr::prelude::*;
 use std::path::Path;
 use tracing::error;
 
+/// A light's image as linear float RGB, row-major with row 0 at the top:
+/// `(width, height, pixels)`. EXR by extension, everything else through
+/// `image` (`.hdr` kept as authored, integer formats un-gamma'd from sRGB).
+///
+/// This is the decode dome lights have always had, shared with
+/// `RectLight`'s `inputs:texture:file`. It is deliberately *not* the
+/// UV-texture path: that one narrows to 8 bits when preloading, and a
+/// light's texture is exactly where the range above 1.0 matters.
+pub fn read_rgb_image(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
+    let is_exr = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("exr"));
+    if is_exr {
+        decode_exr_pixels(path)
+    } else {
+        decode_image_pixels(path)
+    }
+}
+
 pub fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
+    let (w, h, pixels) = decode_exr_pixels(path)?;
+    EnvironmentMap::new(w, h, pixels)
+}
+
+fn decode_exr_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
     let image = read_first_rgba_layer_from_file(
         path,
         |resolution, _| {
@@ -20,8 +46,7 @@ pub fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
     )
     .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
     .ok()?;
-    let (w, h, pixels) = image.layer_data.channel_data.pixels;
-    EnvironmentMap::new(w, h, pixels)
+    Some(image.layer_data.channel_data.pixels)
 }
 
 /// An EXR's RGB samples, interleaved, row-major, linear — nothing else.
@@ -54,6 +79,11 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
 }
 
 pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
+    let (w, h, pixels) = decode_image_pixels(path)?;
+    EnvironmentMap::new(w, h, pixels)
+}
+
+fn decode_image_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
     // `image::open`'s default 512MiB decode-allocation limit is well below a
     // production-scale panorama (e.g. a 16k HDRI): lift it for this trusted,
     // locally-authored asset rather than have large dome lights fail to load.
@@ -85,7 +115,7 @@ pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
         .pixels()
         .map(|p| Vec3A::new(to_linear(p[0]), to_linear(p[1]), to_linear(p[2])))
         .collect();
-    EnvironmentMap::new(w, h, pixels)
+    Some((w, h, pixels))
 }
 
 #[cfg(test)]
@@ -151,5 +181,36 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A light texture keeps an EXR's range and linearises an 8-bit PNG —
+    /// the two ways a `RectLight` card is commonly authored.
+    #[test]
+    fn rgb_image_keeps_hdr_range_and_linearises_ldr() {
+        let dir = std::env::temp_dir().join("crust_rgb_image");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let exr_path = dir.join("card.exr");
+        exr::prelude::write_rgb_file(&exr_path, 2, 1, |x, _| (8.0 * (x + 1) as f32, 0.5, 0.0))
+            .expect("write exr");
+        let (w, h, px) = read_rgb_image(&exr_path).expect("exr decodes");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(px[1], Vec3A::new(16.0, 0.5, 0.0), "no clamp above 1.0");
+
+        let png_path = dir.join("card.png");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([255, 128, 0]))
+            .save(&png_path)
+            .expect("write png");
+        let (_, _, px) = read_rgb_image(&png_path).expect("png decodes");
+        assert!((px[0].x - 1.0).abs() < 1e-6);
+        let mid = crate::srgb_to_linear(128.0 / 255.0);
+        assert!(
+            (px[0].y - mid).abs() < 1e-6 && mid < 0.25,
+            "sRGB-decoded: {}",
+            px[0].y
+        );
+
+        let _ = std::fs::remove_file(&exr_path);
+        let _ = std::fs::remove_file(&png_path);
     }
 }

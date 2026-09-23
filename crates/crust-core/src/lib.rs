@@ -60,7 +60,8 @@ pub use light::{
     RectShape, SphereShape, UnitShape, projected_cone_solid_angle,
 };
 pub use lux::{
-    IesProfile, IesShaping, Shaping, blackbody_rgb, distant_illuminance, distant_size_factor,
+    IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb, distant_illuminance,
+    distant_size_factor,
 };
 pub use material::*;
 pub use medium::Medium;
