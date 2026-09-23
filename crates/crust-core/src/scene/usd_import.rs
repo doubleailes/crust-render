@@ -13,9 +13,10 @@ use tracing::{debug, warn};
 use crate::camera::Camera;
 use crate::filter::PixelFilter;
 use crate::light::{
-    AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight, LightList, RectShape,
-    SphereShape,
+    AffineShape, AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight,
+    LightList, LightShape, RectShape, SphereShape, UnitShape,
 };
+use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::{Emissive, Material, OpenPBR};
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
 use crate::rt_world::{FaceMap, FanSlice, UvMap, WorldBuilder};
@@ -40,7 +41,7 @@ use openusd_schemas::geom::{
 };
 use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
-    RectLight, SphereLight,
+    RectLight, ShapingAPI, SphereLight,
 };
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use openusd_schemas::shade::{
@@ -257,11 +258,15 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 }
             }
         } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
-            emit_sphere_light(&mut ctx.world, &mut ctx.lights, &prim, &light, this_world);
+            emit_sphere_light(stage, ctx, &prim, &light, this_world);
         } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
-            emit_rect_light(&mut ctx.world, &mut ctx.lights, &prim, &light, this_world);
+            emit_rect_light(stage, ctx, &prim, &light, this_world);
+        } else if let Ok(Some(light)) = DiskLight::get(stage, prim.path().clone()) {
+            emit_disk_light(stage, ctx, &prim, &light, this_world);
+        } else if let Ok(Some(light)) = CylinderLight::get(stage, prim.path().clone()) {
+            emit_cylinder_light(stage, ctx, &prim, &light, this_world);
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
-            emit_distant_light(&mut ctx.lights, &light, this_world);
+            emit_distant_light(&mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
             emit_dome_light(
                 &mut ctx.lights,
@@ -272,8 +277,6 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 ctx.assets,
                 &mut ctx.caches.asset_time,
             );
-        } else {
-            warn_unsupported_light(stage, &prim);
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -1948,6 +1951,9 @@ struct ImportCaches<'a> {
     /// traversal. That is exactly what a separate `ptex_time` did, and on a
     /// Ptex-heavy stage the host's decode can dominate the import.
     asset_time: Duration,
+    /// Resolved `.ies` path → the decoded profile (`None`: the host declined).
+    /// A light rig commonly points dozens of fixtures at one profile.
+    ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
 }
 
 impl<'a> ImportCaches<'a> {
@@ -1960,6 +1966,7 @@ impl<'a> ImportCaches<'a> {
             assets,
             stage_path,
             asset_time: Duration::ZERO,
+            ies: HashMap::new(),
         }
     }
 }
@@ -2895,105 +2902,449 @@ fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
 // Lights
 // -----------------------------------------------------------------------
 
-/// Effective emitted radiance of a lux light: color scaled by intensity and
-/// exposure gain.
-fn lux_emission(light: &impl UsdLight) -> Vec3A {
+/// The `LightAPI` quantities every UsdLux light shares.
+struct LuxParams {
+    /// `L_Color` in the spec's notation, in nits:
+    /// `intensity · 2^exposure · color`, times the colour temperature's
+    /// blackbody when `enableColorTemperature` is on. Before `normalize`.
+    emission: Vec3A,
+    /// `inputs:normalize` — divide by the light's size (see each light).
+    normalize: bool,
+}
+
+/// Reads the shared `LightAPI` inputs. Warns about the ones crust reads but
+/// cannot honour, since each makes the image differ from what was authored:
+/// `diffuse` / `specular` are per-lobe multipliers, and crust's light
+/// transport does not split a light's contribution by lobe.
+fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
     let intensity = attr_f32(&light.intensity_attr()).unwrap_or(1.0);
     let exposure = attr_f32(&light.exposure_attr()).unwrap_or(0.0);
     let color = attr_color3f(&light.color_attr()).unwrap_or([1.0, 1.0, 1.0]);
     let gain = intensity * 2f32.powf(exposure);
-    Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain)
+    let mut emission = Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain);
+
+    if attr_bool(&light.enable_color_temperature_attr()).unwrap_or(false) {
+        let kelvin = attr_f32(&light.color_temperature_attr()).unwrap_or(6500.0);
+        // The blackbody leaves the Rec.709 gamut below ~1900 K; clamp the
+        // product, not the factor, so a negative channel cannot flip sign
+        // against a negative `color`.
+        emission = (emission * crate::blackbody_rgb(kelvin)).max(Vec3A::ZERO);
+    }
+
+    for (name, attr) in [
+        ("diffuse", light.diffuse_attr()),
+        ("specular", light.specular_attr()),
+    ] {
+        if let Some(v) = attr_f32(&attr)
+            && v != 1.0
+        {
+            warn!(
+                "{}: inputs:{name} = {v} is a per-lobe multiplier crust does not \
+                 support — ignored (the light contributes at 1.0)",
+                prim.path()
+            );
+        }
+    }
+
+    LuxParams {
+        emission,
+        normalize: attr_bool(&light.normalize_attr()).unwrap_or(false),
+    }
 }
 
-fn emit_sphere_light(
+/// The light's `ShapingAPI`, or `None` when nothing about it shapes.
+///
+/// Read off the prim directly rather than through `ShapingAPI::get`, since
+/// shaping attributes authored without the API applied are common in
+/// exported stages and hdEmbree honours them. What the API's presence
+/// changes is the *fallback* of an unauthored input: with `ShapingAPI`
+/// applied the schema's `cone:angle = 90` is in force (Hydra hands the
+/// delegate the schema fallback), without it there is no such attribute and
+/// the cone is open (hdEmbree's own default, 180°). openusd does not report
+/// schema fallbacks for applied API schemas, so that rule is applied here.
+fn lux_shaping(
+    stage: &Stage,
+    prim: &Prim,
+    light_to_world: Mat3A,
+    caches: &mut ImportCaches,
+) -> Option<Shaping> {
+    let applied = ShapingAPI::get(stage, prim.path().clone())
+        .ok()
+        .flatten()
+        .is_some();
+    let mut shaping = Shaping::new(light_to_world);
+    shaping.focus = custom_f32(prim, "inputs:shaping:focus").unwrap_or(0.0);
+    shaping.focus_tint = custom_color3(prim, "inputs:shaping:focusTint").unwrap_or(Vec3A::ZERO);
+    shaping.cone_angle_deg = custom_f32(prim, "inputs:shaping:cone:angle").unwrap_or(if applied {
+        Shaping::SCHEMA_CONE_ANGLE_DEG
+    } else {
+        180.0
+    });
+    shaping.cone_softness = custom_f32(prim, "inputs:shaping:cone:softness").unwrap_or(0.0);
+
+    let ies_file = prim
+        .attribute("inputs:shaping:ies:file")
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .and_then(|v| asset_value_path(&v, caches.stage_path));
+    if let Some(path) = ies_file {
+        let profile = match caches.ies.get(&path) {
+            Some(cached) => cached.clone(),
+            None => {
+                let started = Instant::now();
+                let loaded = caches.assets.load_ies(&path);
+                caches.asset_time += started.elapsed();
+                if loaded.is_none() {
+                    warn!(
+                        "{}: could not load IES profile {} — the light renders \
+                         without it",
+                        prim.path(),
+                        path.display()
+                    );
+                }
+                caches.ies.insert(path, loaded.clone());
+                loaded
+            }
+        };
+        shaping.ies = profile.map(|profile| IesShaping {
+            profile,
+            angle_scale: custom_f32(prim, "inputs:shaping:ies:angleScale").unwrap_or(0.0),
+            normalize: custom_bool(prim, "inputs:shaping:ies:normalize").unwrap_or(false),
+        });
+    }
+
+    (!shaping.is_neutral()).then_some(shaping)
+}
+
+/// The linear part of a matrix, for direction-only uses.
+fn linear_part(m: GMat4) -> Mat3A {
+    Mat3A::from_mat4(m)
+}
+
+/// Uniform scale of `m` along the named local axes, if it is a similarity
+/// there — equal lengths, mutually perpendicular — and snapped to exactly 1
+/// when within rounding of it, so an unscaled light keeps its authored
+/// radius to the bit.
+fn similarity_scale(m: Mat3A, axes: &[usize]) -> Option<f32> {
+    let cols = [m.x_axis, m.y_axis, m.z_axis];
+    let s = cols[axes[0]].length();
+    if s.is_nan() || s <= 0.0 {
+        return None;
+    }
+    if axes
+        .iter()
+        .any(|&a| (cols[a].length() - s).abs() > 1e-5 * s)
+    {
+        return None;
+    }
+    for (i, &a) in axes.iter().enumerate() {
+        if axes[i + 1..]
+            .iter()
+            .any(|&b| !perpendicular(cols[a], cols[b]))
+        {
+            return None;
+        }
+    }
+    Some(if (s - 1.0).abs() < 1e-6 { 1.0 } else { s })
+}
+
+fn perpendicular(a: Vec3A, b: Vec3A) -> bool {
+    a.dot(b).abs() <= 1e-5 * a.length() * b.length()
+}
+
+/// Attaches a sphere, disk or cylinder light — the three UsdLux lights
+/// defined on a round [`UnitShape`] — of the given `radius` (and, for the
+/// cylinder, `length`) under the prim transform `world_xf`.
+///
+/// Where `world_xf` is a similarity over the axes the shape is round in, the
+/// geometry is the kernel's world-space analytic primitive, as a sphere light
+/// always was, with the authored radius times that scale. Otherwise — a
+/// non-uniform scale squashing it into an ellipsoid, an ellipse or an
+/// elliptical tube — it is the unit primitive placed by an instance, which
+/// the kernel intersects exactly under any affine map. Either way the light
+/// samples the same [`AffineShape`] (or, for the round sphere, the historical
+/// [`SphereShape`], so existing scenes render exactly as before), and
+/// `normalize` divides by its world-space area.
+#[allow(clippy::too_many_arguments)]
+fn emit_round_light(
     world: &mut WorldBuilder,
     lights: &mut LightList,
+    prim: &Prim,
+    unit: UnitShape,
+    world_xf: GMat4,
+    radius: f32,
+    length: f32,
+    params: LuxParams,
+    shaping: Option<Shaping>,
+) {
+    let local = match unit {
+        UnitShape::Sphere => Vec3::splat(radius),
+        UnitShape::Disk => Vec3::new(radius, radius, 1.0),
+        UnitShape::Cylinder => Vec3::new(length, radius, radius),
+    };
+    let l2w = Affine3A::from_mat4(world_xf * GMat4::from_scale(local));
+    let Some(affine) = AffineShape::new(unit, l2w) else {
+        warn!(
+            "{}: light transform collapses its shape (zero size or scale) — skipped",
+            prim.path()
+        );
+        return;
+    };
+    let area = affine.area();
+    let radiance = if params.normalize {
+        params.emission / area.max(1e-30)
+    } else {
+        params.emission
+    };
+    let material = Arc::new(Emissive::light(radiance, shaping));
+    let m = linear_part(world_xf);
+    let origin = l2w.translation;
+
+    let direct = match unit {
+        UnitShape::Sphere => similarity_scale(m, &[0, 1, 2]).map(|s| Geometry::Sphere {
+            center: origin,
+            radius: radius * s,
+        }),
+        UnitShape::Disk => similarity_scale(m, &[0, 1]).map(|s| Geometry::Disk {
+            center: origin,
+            // Local −Z under the normal transform: the emitting side, which
+            // the kernel reports as the disk's front.
+            normal: m.inverse().transpose() * -Vec3A::Z,
+            radius: radius * s,
+        }),
+        UnitShape::Cylinder => similarity_scale(m, &[1, 2])
+            .filter(|_| perpendicular(m.x_axis, m.y_axis) && perpendicular(m.x_axis, m.z_axis))
+            .map(|s| Geometry::Cylinder {
+                p0: l2w.transform_point3a(Vec3A::new(-0.5, 0.0, 0.0)),
+                p1: l2w.transform_point3a(Vec3A::new(0.5, 0.0, 0.0)),
+                radius: radius * s,
+            }),
+    };
+    let analytic = direct.is_some();
+    let round_sphere = match &direct {
+        Some(Geometry::Sphere { center, radius }) => Some(SphereShape {
+            center: *center,
+            radius: *radius,
+        }),
+        _ => None,
+    };
+    let geometry = direct.unwrap_or_else(|| {
+        let mut b = crust_rt::SceneBuilder::new();
+        b.attach(match unit {
+            UnitShape::Sphere => Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            UnitShape::Disk => Geometry::Disk {
+                center: Vec3A::ZERO,
+                normal: -Vec3A::Z,
+                radius: 1.0,
+            },
+            UnitShape::Cylinder => Geometry::Cylinder {
+                p0: Vec3A::new(-0.5, 0.0, 0.0),
+                p1: Vec3A::new(0.5, 0.0, 0.0),
+                radius: 1.0,
+            },
+        });
+        Geometry::Instance {
+            scene: Arc::new(b.commit()),
+            transform: l2w,
+            transform_end: None,
+        }
+    });
+    let geom_id = world.attach_masked(geometry, material.clone(), light_ray_mask(prim));
+
+    let shape: Box<dyn LightShape> = match round_sphere {
+        Some(sphere) => Box::new(sphere),
+        None => Box::new(affine),
+    };
+    lights.add(Arc::new(AreaLight::new(shape, material, geom_id)));
+    debug!(
+        "{:?} light {}: area={} normalize={} radiance={:?} ({})",
+        unit,
+        prim.path(),
+        area,
+        params.normalize,
+        radiance,
+        if analytic { "analytic" } else { "instanced" }
+    );
+}
+
+/// `UsdLuxSphereLight`: radius `inputs:radius` (0.5), scaled by the prim
+/// transform — a non-uniform scale makes an ellipsoid. `treatAsPoint` is a
+/// hint for renderers without area lights and is ignored, as the schema
+/// permits.
+fn emit_sphere_light(
+    stage: &Stage,
+    ctx: &mut ImportCtx,
     prim: &Prim,
     light: &SphereLight,
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let effective = lux_emission(light);
-    let pos_v = world_xf.transform_point3(Vec3::ZERO);
-    let position = Vec3A::new(pos_v.x, pos_v.y, pos_v.z);
-
-    // The sphere geometry and the AreaLight share one surface; the
-    // integrator attributes a bounce hit to the light by the geometry id
-    // the attach returns. The mask hides the surface from camera rays
-    // unless the prim opts in (see light_ray_mask).
-    let material = Arc::new(Emissive::new(effective));
-    let geom_id = world.attach_masked(
-        Geometry::Sphere {
-            center: position,
-            radius,
-        },
-        material.clone(),
-        light_ray_mask(prim),
-    );
-    lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape {
-            center: position,
-            radius,
-        }),
-        material,
-        geom_id,
-    )));
-    debug!(
-        "SphereLight: pos={:?} radius={} effective_color={:?}",
-        position, radius, effective
+    let params = lux_params(prim, light);
+    let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
+    emit_round_light(
+        &mut ctx.world,
+        &mut ctx.lights,
+        prim,
+        UnitShape::Sphere,
+        world_xf,
+        radius,
+        0.0,
+        params,
+        shaping,
     );
 }
 
+/// `UsdLuxDiskLight`: a disk of `inputs:radius` (0.5) in the local XY
+/// plane, emitting from one side, along local −Z.
+fn emit_disk_light(
+    stage: &Stage,
+    ctx: &mut ImportCtx,
+    prim: &Prim,
+    light: &DiskLight,
+    world_xf: GMat4,
+) {
+    let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
+    let params = lux_params(prim, light);
+    let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
+    emit_round_light(
+        &mut ctx.world,
+        &mut ctx.lights,
+        prim,
+        UnitShape::Disk,
+        world_xf,
+        radius,
+        0.0,
+        params,
+        shaping,
+    );
+}
+
+/// `UsdLuxCylinderLight`: a tube of `inputs:radius` (0.5) and
+/// `inputs:length` (1) along local X, centred on the origin, emitting
+/// outward from its side and not from its end caps. `treatAsLine` is
+/// ignored, as `treatAsPoint` is.
+fn emit_cylinder_light(
+    stage: &Stage,
+    ctx: &mut ImportCtx,
+    prim: &Prim,
+    light: &CylinderLight,
+    world_xf: GMat4,
+) {
+    let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
+    let length = attr_f32(&light.length_attr()).unwrap_or(1.0);
+    let params = lux_params(prim, light);
+    let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
+    emit_round_light(
+        &mut ctx.world,
+        &mut ctx.lights,
+        prim,
+        UnitShape::Cylinder,
+        world_xf,
+        radius,
+        length,
+        params,
+        shaping,
+    );
+}
+
+/// `UsdLuxRectLight`: a `width × height` rectangle (1 × 1) in the local XY
+/// plane, centred on the origin, emitting from one side, along local −Z.
 fn emit_rect_light(
-    world: &mut WorldBuilder,
-    lights: &mut LightList,
+    stage: &Stage,
+    ctx: &mut ImportCtx,
     prim: &Prim,
     light: &RectLight,
     world_xf: GMat4,
 ) {
     let width = attr_f32(&light.width_attr()).unwrap_or(1.0);
     let height = attr_f32(&light.height_attr()).unwrap_or(1.0);
-    let effective = lux_emission(light);
+    let params = lux_params(prim, light);
+    let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
+    if prim
+        .attribute("inputs:texture:file")
+        .get::<sdf::Value>()
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        warn!(
+            "RectLight at {}: inputs:texture:file is not supported — the light \
+             emits its uniform colour",
+            prim.path()
+        );
+    }
 
-    // UsdLux RectLight: a rectangle in the local XY plane, centered at the
-    // origin, emitting along local -Z.
     let corner = world_xf.transform_point3(Vec3::new(-0.5 * width, -0.5 * height, 0.0));
     let origin = Vec3A::new(corner.x, corner.y, corner.z);
     let eu = world_xf.transform_vector3(Vec3::new(width, 0.0, 0.0));
     let ev = world_xf.transform_vector3(Vec3::new(0.0, height, 0.0));
-    let nz = world_xf.transform_vector3(Vec3::NEG_Z);
     let edge_u = Vec3A::new(eu.x, eu.y, eu.z);
     let edge_v = Vec3A::new(ev.x, ev.y, ev.z);
-    let normal = Vec3A::new(nz.x, nz.y, nz.z);
 
-    // The geometry (one mesh: two triangles spanning the rectangle) and
-    // the AreaLight share one surface; bounce hits are attributed to the
-    // light by the geometry id. The mask hides the surface from camera
-    // rays unless the prim opts in (see light_ray_mask).
-    let material = Arc::new(Emissive::new(effective));
+    // The emitting normal is local −Z under the *normal* transform, which is
+    // ±(edge_u × edge_v): the plain transformed −Z is only perpendicular to
+    // the rectangle while the transform is a similarity, and under a
+    // sheared or non-uniformly scaled rotation it is not. The transformed
+    // axis is kept when it is (every ordinary light), so those render as
+    // they always have.
+    let nz = world_xf.transform_vector3(Vec3::NEG_Z);
+    let nz = Vec3A::new(nz.x, nz.y, nz.z);
+    let cross = edge_u.cross(edge_v);
+    let det = linear_part(world_xf).determinant();
+    let exact = -cross * det.signum();
+    let normal = if nz.dot(edge_u).abs() <= 1e-5 * nz.length() * edge_u.length()
+        && nz.dot(edge_v).abs() <= 1e-5 * nz.length() * edge_v.length()
+    {
+        nz
+    } else {
+        exact
+    };
+
+    let area = cross.length();
+    let radiance = if params.normalize {
+        params.emission / area.max(1e-30)
+    } else {
+        params.emission
+    };
+
+    // The geometry (one mesh: two triangles spanning the rectangle) and the
+    // AreaLight share one surface; bounce hits are attributed to the light by
+    // the geometry id. The triangles are wound so their geometric normal is
+    // the *emitting* one, because a light's surface is one-sided and
+    // `front_face` is how a bounce hit knows which side it arrived on.
+    let material = Arc::new(Emissive::light(radiance, shaping));
     let (c00, c10, c11, c01) = (
         origin,
         origin + edge_u,
         origin + edge_u + edge_v,
         origin + edge_v,
     );
-    let geom_id = world.attach_masked(
+    let indices = if cross.dot(normal) > 0.0 {
+        vec![[0, 1, 2], [0, 2, 3]]
+    } else {
+        vec![[0, 2, 1], [0, 3, 2]]
+    };
+    let geom_id = ctx.world.attach_masked(
         Geometry::TriangleMesh {
             vertices: vec![c00, c10, c11, c01],
-            indices: vec![[0, 1, 2], [0, 2, 3]],
+            indices,
             normals: None,
         },
         material.clone(),
         light_ray_mask(prim),
     );
-    lights.add(Arc::new(AreaLight::new(
+    ctx.lights.add(Arc::new(AreaLight::new(
         Box::new(RectShape::new(origin, edge_u, edge_v, normal)),
         material,
         geom_id,
     )));
     debug!(
-        "RectLight: origin={:?} edge_u={:?} edge_v={:?} effective_color={:?}",
-        origin, edge_u, edge_v, effective
+        "RectLight: origin={:?} edge_u={:?} edge_v={:?} normalize={} radiance={:?}",
+        origin, edge_u, edge_v, params.normalize, radiance
     );
 }
 
@@ -3002,27 +3353,60 @@ fn emit_rect_light(
 /// transform. `inputs:angle` is the source's angular *diameter* in degrees
 /// (default 0.53 — the sun's).
 ///
-/// `intensity × color × 2^exposure` is taken as the irradiance on a surface
-/// facing the light; [`DistantLight`] derives the radiance over the cone.
-/// The light has no scene geometry, so it is light-list-only: bounce rays
-/// find it by escaping along a direction inside its cone.
-fn emit_distant_light(lights: &mut LightList, light: &UsdDistantLight, world_xf: GMat4) {
+/// Units follow the spec. `intensity × color × 2^exposure` is the source's
+/// **luminance** in nits; with `inputs:normalize` it is divided by
+/// [`distant_size_factor`] (`π·sin²θmax`), which makes it the
+/// **illuminance** in lux on a surface facing the light. A zero angle is a
+/// delta light, whose `intensity` both the spec (`sizeFactor = 1`) and
+/// hdEmbree deliver as that illuminance.
+///
+/// crust widens a cone narrower than [`MIN_DISTANT_ANGLE_DEG`] rather than
+/// carrying a delta light, and the widening preserves the *illuminance* the
+/// authored cone would have delivered — so it moves the penumbra and nothing
+/// else. The light has no scene geometry, so it is light-list-only: bounce
+/// rays find it by escaping along a direction inside its cone.
+fn emit_distant_light(
+    lights: &mut LightList,
+    prim: &Prim,
+    light: &UsdDistantLight,
+    world_xf: GMat4,
+) {
     let direction = world_xf.transform_vector3(Vec3::NEG_Z);
     if direction.length_squared() < 1e-12 {
         warn!("DistantLight has a degenerate orientation — skipped");
         return;
     }
-    let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53);
-    let irradiance = lux_emission(light);
+    let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53).max(0.0);
+    let params = lux_params(prim, light);
+    let direction = Vec3A::new(direction.x, direction.y, direction.z);
+
+    // Everything becomes the illuminance the *authored* cone delivers to a
+    // facing surface, computed in f64, and `DistantLight::new` spreads it
+    // over the cone crust actually samples. That one quantity covers all
+    // four cases exactly: nits (`L·π·sin²θ`), lux (`normalize`), a delta
+    // light (its intensity *is* lux), and a cone narrower than the widening
+    // floor — or so narrow its f32 cosine rounds to 1 — whose illuminance
+    // the widened cone keeps.
+    let illuminance = if angle == 0.0 {
+        params.emission
+    } else {
+        let per_nit = distant_illuminance(1.0, angle);
+        let luminance = if params.normalize {
+            params.emission / distant_size_factor(angle)
+        } else {
+            params.emission
+        };
+        luminance * per_nit
+    };
+    let light = CoreDistantLight::new(direction, illuminance, angle);
     debug!(
-        "DistantLight: direction={:?} angle={}° irradiance={:?}",
-        direction, angle, irradiance
-    );
-    lights.add(Arc::new(CoreDistantLight::new(
-        Vec3A::new(direction.x, direction.y, direction.z),
-        irradiance,
+        "DistantLight {}: direction={:?} angle={}° normalize={}",
+        prim.path(),
+        direction,
         angle,
-    )));
+        params.normalize
+    );
+    lights.add(Arc::new(light));
 }
 
 /// Imports a `UsdLuxDomeLight` as an infinite environment.
@@ -3030,7 +3414,8 @@ fn emit_distant_light(lights: &mut LightList, light: &UsdDistantLight, world_xf:
 /// `inputs:texture:file` is resolved against the USD layer's directory and
 /// handed to the host's [`AssetLoader`] — crust-core decodes nothing
 /// itself. Without a file, or when the host declines, the dome is its
-/// uniform `intensity × color × 2^exposure`.
+/// uniform `intensity × color × 2^exposure` (× the colour temperature's
+/// blackbody, when enabled).
 ///
 /// Only `latlong` is supported; `inputs:texture:format` values that mean
 /// anything else warn and fall back to the uniform colour rather than
@@ -3046,7 +3431,8 @@ fn emit_dome_light(
     // separate "decoding a 14k HDRI" from the rest of the traversal.
     asset_time: &mut Duration,
 ) {
-    let tint = lux_emission(light);
+    // `normalize` does not apply to a dome (its sizeFactor is 1).
+    let tint = lux_params(prim, light).emission;
 
     let format = light
         .texture_format_attr()
@@ -3123,29 +3509,6 @@ fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::
         .ok()
         .flatten()?;
     asset_value_path(&value, stage_path)
-}
-
-fn warn_unsupported_light(stage: &Stage, prim: &Prim) {
-    let warn_type = |name: &str| {
-        warn!(
-            "USD light type '{}' at {} is not yet supported — skipped",
-            name,
-            prim.path()
-        );
-    };
-    if DiskLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("DiskLight");
-    } else if CylinderLight::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        warn_type("CylinderLight");
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -4076,6 +4439,15 @@ fn attr_f32(attr: &openusd::usd::Attribute) -> Option<f32> {
     match attr.get::<sdf::Value>().ok()?? {
         sdf::Value::Float(f) => Some(f),
         sdf::Value::Double(d) => Some(d as f32),
+        _ => None,
+    }
+}
+
+fn attr_bool(attr: &openusd::usd::Attribute) -> Option<bool> {
+    match attr.get::<sdf::Value>().ok()?? {
+        sdf::Value::Bool(b) => Some(b),
+        // Authoring tools sometimes write bools as ints.
+        sdf::Value::Int(i) => Some(i != 0),
         _ => None,
     }
 }

@@ -28,10 +28,14 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:rotateY"]
     }
 
-    # The key. `inputs:angle` is the source's angular diameter, so widening
-    # it softens the shadow without changing exposure.
+    # The key. `inputs:angle` is the source's angular diameter; with
+    # `inputs:normalize` on, `intensity` is the illuminance (lux) on a surface
+    # facing the sun, so widening the angle softens the shadow without
+    # changing exposure. Without it, `intensity` would be the sun disk's
+    # *luminance* in nits (UsdLux) and 2.2 nits over a 1.5° disk is black.
     def DistantLight "Sun"
     {
+        bool inputs:normalize = 1
         float inputs:intensity = 2.2
         float inputs:angle = 1.5
         color3f inputs:color = (1.0, 0.94, 0.82)

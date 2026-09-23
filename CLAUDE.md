@@ -15,6 +15,7 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 # Build / render (single binary in the workspace, so bare cargo run works)
 cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
 cargo run --release -- -i samples/cornellbox.usda
+cargo run --release -- -i samples/usdlux.usda    # every UsdLux light: normalize, colour temperature, shaping, IES
 cargo run --release -- -i samples/materialx_teapot.usda    # MaterialX + UDIM (needs the DPEL download)
 cargo run --release -- -i samples/materialx_lion.usda      # the other DPEL asset: 140-op graph, sheen, 1.06 M tris
 cargo run --release -- -i samples/materialx_showcase.usda  # both, framed after the assets' overview.png (1080p)
@@ -292,8 +293,9 @@ Six crates under `crates/`:
 
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
-  (triangle meshes with optional per-vertex shading normals, analytic spheres, round
-  curve segments, `Instance`s — which nest — with transform motion blur) attach to a
+  (triangle meshes with optional per-vertex shading normals, analytic spheres, disks
+  and open cylinders — the last two exist for UsdLux's `DiskLight` / `CylinderLight` —
+  round curve segments, `Instance`s — which nest — with transform motion blur) attach to a
   `SceneBuilder` with per-geometry visibility masks; `commit()` builds the acceleration
   structure; `Scene::intersect`/`Scene::occluded` mirror `rtcIntersect1`/`rtcOccluded1`.
   Hits are plain `Copy` `RayHit`s carrying `geom_id`/`prim_id` — the kernel never sees
@@ -335,6 +337,7 @@ Six crates under `crates/`:
   `crust_core::AssetLoader` for a program that reads files: `FileAssets`
   implements the trait over `exr`, `image` and `ptex-rs`, and the decoders
   behind it are public — `load_exr_environment` / `load_image_environment`,
+  `parse_ies` / `load_ies` (IES LM-63 → `crust_core::IesProfile`),
   `PtexColor` (+ `read_channel`, `max_log2_from_env`), `PtexStream` (the
   tile-paging backend behind `CRUST_PTEX_STREAM`), `UvTexture` (UDIM sets,
   the `CRUST_TEX_MAX` cap) and one `srgb_to_linear`. Everything that knows a
@@ -535,7 +538,19 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   SSS entry) is `docs/openpbr_reference_alignment.md`.
 - **`Light`** (`light.rs`) — `sample_point`/`pdf`/`emission`/`material`. The one
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
-  `SphereShape`, `RectShape`) paired with the `Arc<Emissive>` its scene geometry carries.
+  `SphereShape`, `RectShape`, and `AffineShape`, a unit sphere / disk / tube under any
+  invertible affine) paired with the `Arc<Emissive>` its scene geometry carries.
+  A light's `Emissive` is built by `Emissive::light`: **one-sided** (emission only
+  toward the geometry's front, which is why the rect light's triangles are wound with
+  their normal along local −Z) and optionally **shaped** (`lux::Shaping`). Both MIS
+  halves ask it the same question — `Emissive::radiance_toward(dir, front)` — NEE from
+  `AreaLight::sample_li`, the bounce side through `Material::emitted_at`; route any new
+  directional emission through that one function or the two strategies see different
+  lights. `LightShape::inv_pdf_area` is the reciprocal of the shape's *own* sampling
+  density (default: its area, i.e. uniform); `AffineShape` samples uniformly in local
+  area, so its world density varies under a non-uniform scale and it reports
+  `local_area · |det M| · |M⁻ᵀ n|` — both MIS halves read it, so it need only be the
+  density actually sampled.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
@@ -1344,17 +1359,59 @@ Schema mapping:
     ~1.7% of render on a magnified textured sample and ~19% on that plane, which is
     the honest worst case (one textured plane, depth 2, so nearly every shading call
     is a trilinear fetch).
+- **UsdLux units follow the spec** (`LightAPI` in OpenUSD's `usdLux/schema.usda`), and
+  where the spec's prose and OpenUSD's reference implementation — hdEmbree's
+  `lightSamplers.cpp`, the delegate that grew the UsdLux reference — disagree, crust
+  follows the implementation and says so in `lux.rs`. Every light shares
+  `lux_params`: `intensity · 2^exposure · color` is the emitted **luminance in nits**,
+  times `blackbody_rgb(colorTemperature)` when `enableColorTemperature` is on
+  (hdEmbree's Krystek-locus → Rec.709 conversion, luminance-normalised, so 6500 K is
+  (1.044, 0.983, 1.036) and not quite white — the spec text claims white, the older
+  table-driven `blackbody.cpp` admits it is not). **`inputs:normalize`** divides by the
+  light's `sizeFactor`: its **world-space surface area** for rect / disk / sphere /
+  cylinder (transform scale included — `AffineShape::area` integrates it, exact for a
+  disk and any similarity), `π·sin²θmax` for a distant light (`distant_size_factor`),
+  and nothing for a dome. `inputs:diffuse` / `inputs:specular` ≠ 1 warn and are ignored
+  (per-lobe multipliers crust's transport does not split). **`ShapingAPI`**
+  (`lux::Shaping`) — focus, focus tint, cone angle + softness, IES — is a per-direction
+  factor on area lights' radiance, measured off the light's −Z. It is read off the prim
+  whether or not the API is applied, but an unauthored `cone:angle` falls back to the
+  schema's **90° only when `ShapingAPI` is applied** and to 180° otherwise: that is what
+  Hydra hands hdEmbree (the attribute does not exist without the API), and applying 90°
+  unconditionally would cut the back off every sphere light ever authored. IES profiles
+  cross the `AssetLoader` seam (`load_ies` → `Arc<IesProfile>`); `crust-assets::ies` is
+  a port of the Cycles LM-63 reader hdEmbree vendors, minus its type-A infinite loop.
+  The profile's 0° is the light's −Z, `ies:normalize` *divides* by the profile's mean
+  intensity (the spec's formula says multiply; every implementation divides), and
+  `ies:angleScale` is the spec's bimodal remap. Sample: `samples/usdlux.usda` (every
+  light type, `normalize`, colour temperature, a shaped spot, an IES fixture from
+  `samples/ies/spot30.ies`, and a squashed sphere light).
 - `UsdLuxDistantLight` → a `DistantLight` in the light list only (no scene geometry). It
   points down its local -Z; `inputs:angle` is the source's angular *diameter* (default
   0.53°, the sun's) and a zero angle is widened to `MIN_DISTANT_ANGLE_DEG` rather than
   made singular, so the integrator keeps one MIS path instead of a delta special case.
-  `intensity × color × 2^exposure` is the **irradiance** on a surface facing the light and
-  the radiance is derived as `E / Ω` — widening the angle softens shadows without changing
-  exposure (Hydra's normalized convention). Bounce rays find it by *escaping* along a
-  direction inside its cone, which is the `Light::escaped` half of MIS.
+  **`intensity` is the sun disk's luminance in nits** — so an un-normalised 0.53° sun
+  needs an intensity in the tens of thousands to light anything, exactly as in Hydra.
+  With **`inputs:normalize`** it is the **illuminance in lux** on a surface facing the
+  light, and widening the angle softens shadows without changing exposure. A zero angle
+  is a delta light whose intensity the spec and hdEmbree both deliver as illuminance.
+  All four cases reduce in `emit_distant_light` to one number — the illuminance the
+  *authored* cone delivers (`distant_illuminance`, f64) — handed to
+  `DistantLight::new`, which spreads it as radiance over the cone crust actually
+  samples, dividing by `projected_cone_solid_angle` evaluated from the **same f32
+  cosine** that bounds the cone. That is what makes the delivered lux exact: at the
+  sun's size the f32 cosine is a few ulps from 1, so the cone crust samples differs
+  from the authored one by up to 0.5% of its solid angle, and at 0.01° its cosine is
+  exactly one. Widening to `MIN_DISTANT_ANGLE_DEG` therefore preserves the illuminance
+  and moves only the penumbra. *History:* crust used to treat `intensity` as irradiance
+  unconditionally and spread it as `E / Ω` with `Ω = 2π(1 − cos θ)` computed in f32 —
+  whose cancellation made a 1.5° sun 2e-4 too bright — so `samples/domelight.usda` now
+  authors `normalize = 1` to keep the look it was lit with. Bounce rays find it by *escaping*
+  along a direction inside its cone, which is the `Light::escaped` half of MIS.
 - `UsdLuxDomeLight` → a `DomeLight`: an infinite environment covering every direction, so
   once one exists it **replaces the built-in sky gradient** (`Light::escaped` answers for
-  every escaping ray). Radiance is `intensity × color × 2^exposure` times an optional
+  every escaping ray). Radiance is `intensity × color × 2^exposure` (× the colour
+  temperature's blackbody; `normalize` does not apply to a dome) times an optional
   lat-long `EnvironmentMap`; only `latlong`/`automatic` `texture:format` is supported and
   anything else warns and falls back to the uniform colour. The prim's *rotation* orients
   the sky (a dome is at infinity, so its translation and scale are meaningless). The map
@@ -1367,12 +1424,30 @@ Schema mapping:
     falls back to the uniform colour. `crust-assets` implements it with `exr` (OpenEXR)
     and `image` (`.hdr` and LDR, the latter un-gamma'd to linear). This is the seam
     general texture support should grow through.
-- `UsdLuxSphereLight` → emissive `Sphere` geometry + `AreaLight(SphereShape)`;
-  `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
-  emitting along -Z per UsdLux; effectively one-sided). Sample scene: `samples/rectlight.usda`.
+- The four **area lights** are one-sided `Emissive::light` surfaces paired with an
+  `AreaLight`:
+  - `UsdLuxRectLight` → two emissive `Triangle`s + `AreaLight(RectShape)` (local XY plane,
+    emitting along −Z). The emitting normal is −Z under the *normal* transform
+    (`±edge_u × edge_v`), not the transformed −Z, which stops being perpendicular to the
+    rectangle under a shear; the transformed axis is kept whenever it is perpendicular,
+    so ordinary lights render as before. `inputs:texture:file` warns and is ignored.
+    Sample: `samples/rectlight.usda`.
+  - `UsdLuxSphereLight`, `UsdLuxDiskLight` (local XY plane, emitting along −Z) and
+    `UsdLuxCylinderLight` (along local X, emitting from its side and **not** its end caps)
+    share `emit_round_light`: the light's radius / length are folded into the transform
+    of a `UnitShape`, and where that is a similarity over the axes the shape is round in
+    the geometry is the kernel's world-space analytic `Sphere` / `Disk` / `Cylinder`;
+    under a non-uniform scale (an ellipsoid, an ellipse, an elliptical tube) it is the
+    unit primitive placed by an `Instance`, which the kernel intersects exactly under
+    any affine map, sampled by an `AffineShape`. The uniformly scaled sphere keeps the
+    historical `SphereShape` so existing scenes stay bit-identical — but its radius
+    **now includes the transform's scale**, which it used to ignore. `treatAsPoint` /
+    `treatAsLine` are ignored (hints for renderers without area lights, which the schema
+    lets an area-light renderer ignore).
   The source geometry is camera-invisible by default (`light_ray_mask`) — see the
   `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
-  Other lux types (`DiskLight`, `CylinderLight`) warn once and are skipped.
+  `PortalLight`, `GeometryLight` / `MeshLightAPI`, `VolumeLightAPI`, light filters and
+  light linking are not read.
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
   *first* in the dispatch, so it never becomes geometry — its bounds must not occlude
   shadow rays). The local box is `[-size/2, size/2]³` when the prim authors `size` (a
@@ -1716,8 +1791,15 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   texel, against the full mis-weighted one the mip chain had — and unlike that
   one it is a *resize* averaged in the file's own encoding, so fixing it would
   move every render of a texture above the cap. Worth doing, not urgent.
-- **Lighting caveats.** `DiskLight` (needs a disk primitive) and `CylinderLight` are still
-  skipped. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
+- **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
+  light filters, light/shadow linking and `ShadowAPI` are not read, and `RectLight`'s
+  `inputs:texture:file` is ignored. `inputs:diffuse` / `inputs:specular` warn and are
+  ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
+  is still sampled uniformly by area: a narrow spotlight wastes the NEE samples its cone
+  cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
+  to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
+  reference's is. A squashed sphere or tube light samples non-uniformly in world area
+  (correct, not optimal). `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
   than `latlong` are refused rather than mapped wrongly; and light-list picking stays
   uniform, so a dim dome costs as many shadow rays as a bright sun. Neither infinite light

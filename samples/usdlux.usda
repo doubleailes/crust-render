@@ -1,0 +1,159 @@
+#usda 1.0
+(
+    doc = """Every UsdLux light crust imports, in the spec's units.
+
+    A grey room lit by five lights, each exercising one part of the LightAPI /
+    ShapingAPI contract:
+      - DiskLight   : one-sided disk, `normalize`, a 3000 K colour temperature.
+      - CylinderLight: open tube emitting sideways (no end caps), 9000 K.
+      - RectLight   : a spotlight - ShapingAPI cone with softness, and focus.
+      - SphereLight : an IES profile (samples/ies/spot30.ies), `ies:normalize`.
+      - SphereLight : squashed by a non-uniform scale into an ellipsoid - the
+                      instanced path, still normalised by its true world area.
+    A faint DomeLight keeps the shadows from going pure black.
+
+    Every area light has `normalize` on, so `intensity` is proportional to the
+    light's power and resizing a light does not change the exposure."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 2.4, 9.5)
+        float xformOp:rotateX = -8
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-9, 0, -4), (-9, 0, 9), (9, 0, 9), (9, 0, -4)]
+    }
+
+    def Mesh "BackWall"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-9, 0, -4), (9, 0, -4), (9, 7, -4), (-9, 7, -4)]
+    }
+
+    def Sphere "BallLeft"
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (-3.4, 0.7, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallCenter"
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 0.7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallRight"
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (3.6, 0.7, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Warm disk overhead-left, facing down (local -Z rotated onto -Y).
+    def DiskLight "WarmDisk"
+    {
+        float inputs:radius = 0.6
+        bool inputs:normalize = 1
+        float inputs:intensity = 60
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 3000
+        double3 xformOp:translate = (-3.4, 4.2, 0.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # A cool fluorescent tube lying along the foot of the back wall. It
+    # emits from its side only; the ends are open.
+    def CylinderLight "CoolTube"
+    {
+        float inputs:radius = 0.06
+        float inputs:length = 10
+        bool inputs:normalize = 1
+        float inputs:intensity = 40
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 9000
+        double3 xformOp:translate = (0, 0.2, -3.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # A spotlight: a rect light with an 18° cone, softened over its outer
+    # 40%, and focus pulling light toward the axis.
+    def RectLight "Spot" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:width = 0.5
+        float inputs:height = 0.5
+        bool inputs:normalize = 1
+        float inputs:intensity = 160
+        float inputs:shaping:cone:angle = 18
+        float inputs:shaping:cone:softness = 0.4
+        float inputs:shaping:focus = 2
+        double3 xformOp:translate = (0, 5, 0)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # A small sphere shaped by an IES downlight profile. The profile's 0° is
+    # the light's -Z, rotated here to point down.
+    def SphereLight "IesFixture" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.08
+        bool inputs:normalize = 1
+        float inputs:intensity = 14
+        asset inputs:shaping:ies:file = @ies/spot30.ies@
+        bool inputs:shaping:ies:normalize = 1
+        float inputs:shaping:cone:angle = 180
+        double3 xformOp:translate = (3.6, 4.2, 0.5)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    # Squashed into an ellipsoid by a non-uniform scale: placed through an
+    # instance, and still normalised by its true world-space area.
+    def SphereLight "Ellipsoid"
+    {
+        float inputs:radius = 0.25
+        bool inputs:normalize = 1
+        float inputs:intensity = 12
+        color3f inputs:color = (1, 0.35, 0.6)
+        float3 xformOp:scale = (3, 0.4, 0.4)
+        double3 xformOp:translate = (0, 6.2, -3.3)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def DomeLight "Fill"
+    {
+        float inputs:intensity = 0.03
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 360)
+        int crust:samplesPerPixel = 256
+        int crust:maxDepth = 6
+        int crust:minSamplesPerPixel = 32
+        float crust:varianceThreshold = 0.02
+        int crust:frame = 0
+    }
+}

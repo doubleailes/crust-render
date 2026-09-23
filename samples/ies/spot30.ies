@@ -1,0 +1,12 @@
+IESNA:LM-63-2002
+[TEST] crust-render sample
+[MANUFAC] none
+[LUMCAT] spot30
+[LUMINAIRE] 30 deg downlight, rotationally symmetric
+[_NOTE] authored for samples/usdlux.usda
+TILT=NONE
+1 -1 1 20 1 1 2 0.05 0.05 0.0
+1.0 1.0 35
+0 5 10 15 20 25 30 35 40 45 50 55 60 65 70 75 80 85 90 180
+0
+1200.00 1200.00 1200.00 1200.00 1083.20 793.60 446.40 156.80 40.00 36.00 32.00 28.00 24.00 20.00 16.00 12.00 8.00 4.00 0.00 0.00

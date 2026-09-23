@@ -19,6 +19,7 @@ mod filter;
 mod guiding;
 mod hittable;
 mod light;
+mod lux;
 mod material;
 mod medium;
 mod ray;
@@ -55,8 +56,11 @@ pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::HitRecord;
 pub use light::{
-    AreaLight, DistantLight, DomeLight, Light, LightList, LightSample, LightShape, RectShape,
-    SphereShape,
+    AffineShape, AreaLight, DistantLight, DomeLight, Light, LightList, LightSample, LightShape,
+    RectShape, SphereShape, UnitShape, projected_cone_solid_angle,
+};
+pub use lux::{
+    IesProfile, IesShaping, Shaping, blackbody_rgb, distant_illuminance, distant_size_factor,
 };
 pub use material::*;
 pub use medium::Medium;

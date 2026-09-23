@@ -872,17 +872,420 @@ fn infinite_lights_add_no_geometry() {
     assert!(sun.escaped(Vec3A::ZERO, -Vec3A::Y).is_none());
 }
 
+// ---------------------------------------------------------------------------
+// UsdLux: every light type, normalize, colour temperature, shaping
+// ---------------------------------------------------------------------------
+
+/// Both halves of MIS must see the same light: for each NEE sample, a ray
+/// aimed along it must hit the light's geometry, the emission that hit
+/// reports must equal the sampled radiance, and the bounce-side pdf must
+/// equal the sampled one. Returns how many samples carried radiance.
+fn assert_mis_sides_agree(scene: &Scene, from: Vec3A) -> usize {
+    assert_eq!(scene.lights.count(), 1);
+    let light = &scene.lights.lights[0];
+    let mut lit = 0;
+    let mut rng = openqmc::pcg::Rng::new(11);
+    for _ in 0..64 {
+        let Some(s) = light.sample_li(from, rng.next_f32(), rng.next_f32()) else {
+            continue;
+        };
+        let ray = Ray::new(from, s.direction);
+        let hit = scene
+            .world
+            .intersect(&ray, 1e-4, s.distance * 1.001 + 1e-3)
+            .expect("an NEE sample must land on the light's geometry");
+        assert_eq!(Some(hit.geom_id), light.geom_id());
+        if hit.rec.t < s.distance * 0.999 {
+            // A far-side point of a closed shape: its shadow ray stops at
+            // the near side, so NEE never delivers it. Nothing to compare.
+            continue;
+        }
+        let cos = ray.direction().normalize().dot(hit.rec.normal).abs();
+        let emitted = hit.mat.emitted_at(&ray, &hit.rec, cos);
+        let tol = 1e-3 * s.radiance.max_element().max(1e-6);
+        assert!(
+            emitted.abs_diff_eq(s.radiance, tol),
+            "bounce sees {emitted}, NEE sampled {}",
+            s.radiance
+        );
+        if s.radiance.max_element() > 0.0 {
+            lit += 1;
+            let pdf = light.pdf_at_point(from, hit.rec.p);
+            assert!(
+                (pdf - s.pdf).abs() <= 2e-3 * s.pdf,
+                "bounce pdf {pdf} vs NEE pdf {}",
+                s.pdf
+            );
+        }
+    }
+    lit
+}
+
+/// The radiance a light sends toward `from`, averaged over NEE samples that
+/// carry any (a uniform, unshaped light's radiance is a constant).
+fn radiance_toward(scene: &Scene, from: Vec3A) -> Vec3A {
+    let light = &scene.lights.lights[0];
+    (0..64)
+        .filter_map(|i| {
+            let (u, v) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
+            light.sample_li(from, u / 8.0, v / 8.0)
+        })
+        .map(|s| s.radiance)
+        .find(|r| r.max_element() > 0.0)
+        .unwrap_or(Vec3A::ZERO)
+}
+
 #[test]
-fn unsupported_light_types_are_skipped() {
+fn disk_light_is_a_one_sided_analytic_disk() {
     let scene = load(
         "disk_light",
         r#"
-    def DiskLight "D" { float inputs:radius = 1 }
-    def CylinderLight "C" {}
-    def Sphere "Ball" {}"#,
+    def DiskLight "D"
+    {
+        float inputs:radius = 1
+        float inputs:intensity = 3
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
     );
-    assert_eq!(scene.lights.count(), 0);
-    assert_eq!(scene.world.count(), 1);
+    assert_eq!(scene.lights.count(), 1);
+    assert_eq!(scene.world.primitive_breakdown().disks, 1);
+    // It faces local −Z: the origin, below it, is lit at the authored nits…
+    assert_eq!(radiance_toward(&scene, Vec3A::ZERO), Vec3A::splat(3.0));
+    assert!(assert_mis_sides_agree(&scene, Vec3A::ZERO) > 0);
+    // …and a point above it, behind the emitting side, sees nothing — from
+    // either strategy.
+    let behind = Vec3A::new(0.2, 0.1, 5.0);
+    assert_eq!(radiance_toward(&scene, behind), Vec3A::ZERO);
+    assert_eq!(assert_mis_sides_agree(&scene, behind), 0);
+}
+
+#[test]
+fn cylinder_light_is_an_open_tube_emitting_outward() {
+    let scene = load(
+        "cylinder_light",
+        r#"
+    def CylinderLight "C"
+    {
+        float inputs:radius = 0.25
+        float inputs:length = 4
+        float inputs:intensity = 2
+    }"#,
+    );
+    assert_eq!(scene.world.primitive_breakdown().cylinders, 1);
+    let bb = scene.world.bounds().unwrap();
+    assert!((bb.maximum.x - 2.0).abs() < 1e-4 && (bb.maximum.y - 0.25).abs() < 1e-4);
+    // Lit from the side, either side of the axis.
+    for from in [Vec3A::new(0.3, 3.0, 0.0), Vec3A::new(-0.5, 0.0, -2.0)] {
+        assert_eq!(radiance_toward(&scene, from), Vec3A::splat(2.0));
+        assert!(assert_mis_sides_agree(&scene, from) > 0);
+    }
+}
+
+/// `inputs:normalize` divides by the *world-space* area, transform scale
+/// included, so the same power spreads over a bigger surface.
+#[test]
+fn normalize_divides_area_lights_by_their_world_area() {
+    let pi = std::f32::consts::PI;
+    for (name, prim, area) in [
+        (
+            "rect",
+            "def RectLight \"L\" { float inputs:width = 2\n float inputs:height = 1\n \
+             float3 xformOp:scale = (3, 3, 3)\n uniform token[] xformOpOrder = [\"xformOp:scale\"] }",
+            18.0,
+        ),
+        (
+            "sphere",
+            "def SphereLight \"L\" { float inputs:radius = 1 }",
+            4.0 * pi,
+        ),
+        (
+            "disk",
+            "def DiskLight \"L\" { float inputs:radius = 0.5\n \
+             float3 xformOp:scale = (2, 2, 2)\n uniform token[] xformOpOrder = [\"xformOp:scale\"] }",
+            pi,
+        ),
+        (
+            "cylinder",
+            "def CylinderLight \"L\" { float inputs:radius = 0.5\n float inputs:length = 2 }",
+            2.0 * pi,
+        ),
+    ] {
+        let prim_n = prim.replacen(
+            '{',
+            "{ bool inputs:normalize = 1\n float inputs:intensity = 100\n",
+            1,
+        );
+        let plain = load(&format!("norm_off_{name}"), prim);
+        let norm = load(&format!("norm_on_{name}"), &prim_n);
+        // A point every shape emits toward: below, off to the side.
+        let from = Vec3A::new(0.1, -0.4, -5.0);
+        assert_eq!(
+            radiance_toward(&plain, from),
+            Vec3A::ONE,
+            "{name} un-normalized"
+        );
+        let r = radiance_toward(&norm, from);
+        assert!(
+            (r.x - 100.0 / area).abs() < 1e-3 * (100.0 / area),
+            "{name}: {} vs 100/{area}",
+            r.x
+        );
+    }
+}
+
+/// Squashed round lights — an ellipsoid, an ellipse, an elliptical tube —
+/// are placed through instances and sampled non-uniformly in world area;
+/// the pdf both MIS sides compute must still be the same density, and
+/// `normalize` must still divide by the true world area.
+#[test]
+fn squashed_round_lights_stay_consistent() {
+    let pi = std::f32::consts::PI;
+    // An ellipse with semi-axes 1.5 and 0.5 has area π·0.75 exactly.
+    let disk = load(
+        "squashed_disk",
+        r#"
+    def DiskLight "D"
+    {
+        float inputs:radius = 0.5
+        bool inputs:normalize = 1
+        float3 xformOp:scale = (3, 1, 1)
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }"#,
+    );
+    assert_eq!(
+        disk.world.primitive_breakdown().instances,
+        1,
+        "placed by an instance"
+    );
+    let r = radiance_toward(&disk, Vec3A::ZERO);
+    assert!((r.x - 1.0 / (0.75 * pi)).abs() < 1e-4, "{}", r.x);
+    assert!(assert_mis_sides_agree(&disk, Vec3A::new(0.3, 0.2, 0.0)) > 0);
+
+    let sphere = load(
+        "squashed_sphere",
+        r#"
+    def SphereLight "S"
+    {
+        float inputs:radius = 1
+        float3 xformOp:scale = (1, 2, 0.5)
+        double3 xformOp:rotateXYZ = (20, 35, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ", "xformOp:scale"]
+    }"#,
+    );
+    assert!(assert_mis_sides_agree(&sphere, Vec3A::new(0.5, -4.0, 1.0)) > 0);
+
+    let tube = load(
+        "squashed_cylinder",
+        r#"
+    def CylinderLight "C"
+    {
+        float inputs:radius = 0.5
+        float inputs:length = 2
+        float3 xformOp:scale = (1, 1, 3)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+    }"#,
+    );
+    assert!(assert_mis_sides_agree(&tube, Vec3A::new(0.2, -3.0, 0.4)) > 0);
+}
+
+#[test]
+fn a_uniformly_scaled_sphere_light_scales_its_radius() {
+    let scene = load(
+        "scaled_sphere_light",
+        r#"
+    def SphereLight "S"
+    {
+        float inputs:radius = 0.5
+        float3 xformOp:scale = (4, 4, 4)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+    }"#,
+    );
+    let bb = scene.world.bounds().unwrap();
+    assert!((bb.maximum.x - 2.0).abs() < 1e-5, "{bb:?}");
+    assert_eq!(
+        scene.world.primitive_breakdown().spheres,
+        1,
+        "still analytic"
+    );
+}
+
+#[test]
+fn color_temperature_tints_the_emission() {
+    let warm = load(
+        "color_temperature",
+        r#"
+    def SphereLight "S"
+    {
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 0.5, 1)
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 3000
+    }"#,
+    );
+    let off = load(
+        "color_temperature_off",
+        r#"
+    def SphereLight "S"
+    {
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 0.5, 1)
+        float inputs:colorTemperature = 3000
+    }"#,
+    );
+    let from = Vec3A::new(0.0, -3.0, 0.0);
+    let bb = crust_core::blackbody_rgb(3000.0);
+    let expect = Vec3A::new(2.0, 1.0, 2.0) * bb;
+    assert!(radiance_toward(&warm, from).abs_diff_eq(expect, 1e-5));
+    assert_eq!(
+        radiance_toward(&off, from),
+        Vec3A::new(2.0, 1.0, 2.0),
+        "the temperature is ignored unless enabled"
+    );
+}
+
+/// UsdLux distant-light units: `intensity` is the source's luminance in
+/// nits; `normalize` makes it the illuminance on a facing surface; a zero
+/// angle is a delta whose `intensity` is that illuminance.
+#[test]
+fn distant_light_units_follow_the_spec() {
+    let sun = |name: &str, extra: &str, angle: f32| {
+        let s = load(
+            name,
+            &format!(
+                "def DistantLight \"Sun\" {{ float inputs:intensity = 2\n \
+                 float inputs:angle = {angle}\n {extra} }}"
+            ),
+        );
+        let l = &s.lights.lights[0];
+        let smp = l.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
+        let half = 0.5 * crust_core::DistantLight::clamp_diameter(angle).to_radians();
+        (
+            smp.radiance.x,
+            smp.radiance.x * crust_core::projected_cone_solid_angle(half),
+        )
+    };
+    // Un-normalised, the luminance is the authored nits (to the f32 rounding
+    // of a 0.5° cone), and what reaches a facing surface is L·π·sin²θ exactly.
+    let exact = |nits: f64, diameter: f64| {
+        nits * std::f64::consts::PI * (0.5 * diameter.to_radians()).sin().powi(2)
+    };
+    let (radiance, irradiance) = sun("sun_nits", "", 1.0);
+    assert!(
+        (radiance - 2.0).abs() < 2e-2,
+        "luminance in nits: {radiance}"
+    );
+    let want = exact(2.0, 1.0) as f32;
+    assert!(
+        (irradiance / want - 1.0).abs() < 1e-5,
+        "{irradiance} vs {want}"
+    );
+    let (_, irradiance) = sun("sun_lux", "bool inputs:normalize = 1", 1.0);
+    assert!(
+        (irradiance - 2.0).abs() < 1e-5,
+        "illuminance in lux: {irradiance}"
+    );
+    let (_, delta) = sun("sun_delta", "", 0.0);
+    assert!(
+        (delta - 2.0).abs() < 1e-5,
+        "a delta light's intensity is lux: {delta}"
+    );
+    // Narrower than the widening floor — so narrow the f32 cosine is 1 — the
+    // widened cone still delivers what the authored one did.
+    let (_, narrow) = sun("sun_narrow", "", 0.01);
+    let want = exact(2.0, 0.01) as f32;
+    assert!(
+        want > 0.0 && (narrow / want - 1.0).abs() < 1e-5,
+        "{narrow} vs {want}"
+    );
+}
+
+/// A spotlight: `ShapingAPI`'s cone cuts emission off outside its angle, on
+/// the NEE side and on the bounce side alike.
+#[test]
+fn shaping_cone_reaches_both_mis_sides() {
+    let scene = load(
+        "shaped_rect",
+        r#"
+    def RectLight "Spot" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:intensity = 5
+        float inputs:shaping:cone:angle = 30
+        double3 xformOp:translate = (0, 0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+    );
+    // Straight below: inside the cone.
+    assert_eq!(radiance_toward(&scene, Vec3A::ZERO), Vec3A::splat(5.0));
+    assert!(assert_mis_sides_agree(&scene, Vec3A::ZERO) > 0);
+    // 60° off the axis: outside it, from either strategy.
+    let oblique = Vec3A::new(4.0 * 3f32.sqrt(), 0.0, 0.0);
+    assert_eq!(radiance_toward(&scene, oblique), Vec3A::ZERO);
+    assert_eq!(assert_mis_sides_agree(&scene, oblique), 0);
+}
+
+/// With `ShapingAPI` applied and no cone authored, the schema's 90° fallback
+/// is in force; without the API there is no cone at all.
+#[test]
+fn shaping_api_fallback_cone_only_applies_when_the_api_is() {
+    let body =
+        |api: &str| format!("def SphereLight \"S\" ( {api} ) {{ float inputs:radius = 0.5 }}");
+    let with = load(
+        "shaping_applied",
+        &body("prepend apiSchemas = [\"ShapingAPI\"]"),
+    );
+    let without = load("shaping_absent", &body(""));
+    // Behind the light's −Z axis, i.e. on its +Z side.
+    let behind = Vec3A::new(0.0, 0.0, 5.0);
+    assert_eq!(radiance_toward(&with, behind), Vec3A::ZERO);
+    assert_eq!(radiance_toward(&without, behind), Vec3A::ONE);
+    assert_eq!(radiance_toward(&with, -behind), Vec3A::ONE);
+}
+
+/// An IES profile arrives through the host's loader and scales the light by
+/// direction, relative to its −Z axis.
+#[test]
+fn ies_profile_shapes_the_light() {
+    struct Ies;
+    impl crust_core::AssetLoader for Ies {
+        fn load_environment(&self, _: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+            None
+        }
+        fn load_ies(
+            &self,
+            path: &std::path::Path,
+        ) -> Option<std::sync::Arc<crust_core::IesProfile>> {
+            assert!(path.ends_with("spot.ies"), "{}", path.display());
+            // 4 cd within 45° of the axis, nothing past 50°.
+            let v = [0.0f32, 45.0, 50.0, 180.0].map(f32::to_radians).to_vec();
+            let h = [0.0f32, 360.0].map(f32::to_radians).to_vec();
+            let row = vec![4.0, 4.0, 0.0, 0.0];
+            crust_core::IesProfile::new(v, h, vec![row.clone(), row]).map(std::sync::Arc::new)
+        }
+    }
+    let path = write_stage(
+        "ies_light",
+        r#"#usda 1.0
+def DiskLight "Spot" (
+    prepend apiSchemas = ["ShapingAPI"]
+)
+{
+    float inputs:shaping:cone:angle = 180
+    asset inputs:shaping:ies:file = @spot.ies@
+    double3 xformOp:translate = (0, 0, 3)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+"#,
+    );
+    let scene = Scene::from_usd_with_assets(&path, &Ies).unwrap();
+    assert_eq!(radiance_toward(&scene, Vec3A::ZERO), Vec3A::splat(4.0));
+    assert!(assert_mis_sides_agree(&scene, Vec3A::ZERO) > 0);
+    // 70° off the axis: past the profile's beam.
+    let off = Vec3A::new(3.0 * 70f32.to_radians().tan(), 0.0, 0.0);
+    assert_eq!(radiance_toward(&scene, off), Vec3A::ZERO);
 }
 
 // ---------------------------------------------------------------------------
