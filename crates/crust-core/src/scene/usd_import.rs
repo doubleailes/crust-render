@@ -3087,7 +3087,7 @@ fn lux_shaping(
 
     let ies_file = prim
         .attribute("inputs:shaping:ies:file")
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .and_then(|v| asset_value_path(&v, caches.stage_path));
@@ -3369,7 +3369,7 @@ fn emit_rect_light(
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     if prim
         .attribute("inputs:texture:file")
-        .get::<sdf::Value>()
+        .get_at::<sdf::Value>(eval_time())
         .ok()
         .flatten()
         .is_some()
@@ -4601,7 +4601,7 @@ fn attr_f32(attr: &openusd::usd::Attribute) -> Option<f32> {
 }
 
 fn attr_bool(attr: &openusd::usd::Attribute) -> Option<bool> {
-    match attr.get::<sdf::Value>().ok()?? {
+    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
         sdf::Value::Bool(b) => Some(b),
         // Authoring tools sometimes write bools as ints.
         sdf::Value::Int(i) => Some(i != 0),
