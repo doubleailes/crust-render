@@ -300,6 +300,12 @@ struct FileSlot {
 
 /// The cache. One per render, shared by every streaming texture in it.
 pub struct TileCache {
+    /// Process-unique identity, part of every microcache key. A [`TileId`]'s
+    /// file index is only unique *within* one cache, while the microcache is
+    /// per thread and outlives any one cache — so without this, a second
+    /// cache in the same process (a second `FileAssets`: a test, a host
+    /// rendering twice) was handed the first one's tiles on the same thread.
+    id: u32,
     shards: Vec<Mutex<HashMap<TileId, Entry>>>,
     files: Mutex<Vec<Arc<FileSlot>>>,
     resident: AtomicU64,
@@ -313,7 +319,9 @@ pub struct TileCache {
 
 impl TileCache {
     pub fn new(budget_bytes: u64) -> TileCache {
+        static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         TileCache {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             files: Mutex::new(Vec::new()),
             resident: AtomicU64::new(0),
@@ -590,8 +598,9 @@ fn lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// The per-thread microcache's slots: the two most recent `(key, tile)` pairs.
-type MicroSlots = [Option<(TileId, Arc<Tile>)>; 2];
+/// The per-thread microcache's slots: the two most recent `(key, tile)` pairs,
+/// keyed by the owning cache's [`TileCache::id`] as well as the tile.
+type MicroSlots = [Option<((u32, TileId), Arc<Tile>)>; 2];
 
 thread_local! {
     /// The two most recently used tiles, per thread.
@@ -630,11 +639,12 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     // Fast path: this thread already holds the tile. No lock, no refcount.
     // The index is found first so the closure is called exactly once, which
     // is what lets this stay `FnOnce` and stay safe.
+    let key = (cache.id, id);
     let hit = MICRO.with(|m| {
         let slots = m.borrow();
         let idx = slots
             .iter()
-            .position(|s| matches!(s, Some((k, _)) if *k == id))?;
+            .position(|s| matches!(s, Some((k, _)) if *k == key))?;
         let (_, tile) = slots[idx].as_ref()?;
         Some(f.take()?(tile))
     });
@@ -651,7 +661,7 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
         // Newest in front; the displaced entry becomes the second slot. Two
         // entries make this a swap rather than a policy.
         slots[1] = slots[0].take();
-        slots[0] = Some((id, tile));
+        slots[0] = Some((key, tile));
     });
     Some(r)
 }

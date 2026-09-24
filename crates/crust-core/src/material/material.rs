@@ -119,6 +119,19 @@ pub trait Material: Send + Sync {
         false
     }
 
+    /// The primvar holding the chart this material reads, when it names one
+    /// other than the conventional `st`.
+    ///
+    /// A `UsdPrimvarReader_float2`'s `varname` is how a USD network says which
+    /// UV set a texture uses, and exporters do not all say `st`: ALab's
+    /// published assets read `perfuv`. The importer tries this primvar before
+    /// its built-in list (`st`, `uv`, `st0`, `UVMap`), so a mesh whose only
+    /// chart has another name is still textured. `None` — every material but
+    /// a preview surface naming its reader — keeps that list unchanged.
+    fn uv_primvar(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

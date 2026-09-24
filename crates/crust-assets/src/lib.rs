@@ -52,7 +52,7 @@ use crust_core::{
 };
 use std::path::Path;
 use std::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The piecewise sRGB EOTF: display-encoded `[0, 1]` to linear.
 ///
@@ -114,10 +114,21 @@ pub struct FileAssets {
     /// streaming is on, so the counters can be reported either way — an empty
     /// one costs 64 empty maps.
     cache: std::sync::Arc<tiled::TileCache>,
-    /// Read once at construction, not per `load_texture`: the switch decides
-    /// which backend every texture in the render uses, and reading the
-    /// environment per call would let it change mid-import.
+    /// Whether a `.tx` beside a texture is looked for and streamed. On by
+    /// default — a `.tx` exists only because someone converted the texture
+    /// for streaming — with `CRUST_TEX_STREAM=0` to force every texture onto
+    /// the preload path for an A/B. Read once at construction, not per
+    /// `load_texture`: it decides the backend of every texture in the render,
+    /// and reading the environment per call would let it change mid-import.
     streaming: bool,
+    /// `--auto-tx`: convert a texture whose `.tx` is missing or older than
+    /// its source before looking for it. See [`FileAssets::with_auto_tx`].
+    auto_tx: bool,
+    /// Conversions `--auto-tx` performed and failed, and the time they took,
+    /// for the one summary line the CLI prints (see [`FileAssets::tx_report`]).
+    tx_converted: std::sync::atomic::AtomicUsize,
+    tx_failed: std::sync::atomic::AtomicUsize,
+    tx_nanos: std::sync::atomic::AtomicU64,
     /// The same, for Ptex. A separate switch rather than a shared one because
     /// the two answer different questions: `CRUST_TEX_STREAM` needs a `.tx`
     /// converted beside the asset and silently declines without one, while
@@ -134,6 +145,16 @@ pub struct FileAssets {
     /// Every Ptex texture opened, so the render can be reported on and — for
     /// the streamed ones — re-budgeted as more arrive. See [`PtexHandle`].
     ptex: std::sync::Mutex<Vec<PtexHandle>>,
+}
+
+/// Which streaming candidate [`FileAssets::open_streaming`] may open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Candidates {
+    /// The texture's own path — a `.tx`, or a source that is already a tiled
+    /// mip file.
+    Source,
+    /// The `.tx` sibling, once `prepare_tx` has found (or made) it complete.
+    Sibling,
 }
 
 /// The smallest share of the budget worth giving a streamed reader: 1 MiB.
@@ -203,11 +224,14 @@ impl Default for FileAssets {
 
 impl FileAssets {
     pub fn new() -> FileAssets {
-        let streaming = std::env::var("CRUST_TEX_STREAM").as_deref() == Ok("1");
+        let streaming = std::env::var("CRUST_TEX_STREAM").as_deref() != Ok("0");
         let budget = tiled::TileCache::budget_from_env();
+        // DEBUG, not INFO: this is the default now, and a default render's
+        // INFO lines are the four that do not scale with anything.
         if streaming {
-            info!(
-                "Streaming textures from .tx with a {:.0} MiB tile cache",
+            debug!(
+                "Textures stream from a .tx beside them when one exists, through a {:.0} MiB \
+                 tile cache (CRUST_TEX_STREAM=0 preloads everything)",
                 budget as f64 / (1024.0 * 1024.0)
             );
         }
@@ -251,10 +275,161 @@ impl FileAssets {
         FileAssets {
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
+            auto_tx: false,
+            tx_converted: std::sync::atomic::AtomicUsize::new(0),
+            tx_failed: std::sync::atomic::AtomicUsize::new(0),
+            tx_nanos: std::sync::atomic::AtomicU64::new(0),
             ptex_streaming,
             ptex_mip_space,
             ptex: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Converts textures on first use: before a UV texture is opened, every
+    /// tile whose `.tx` sibling is missing or older than its source is
+    /// converted beside it (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's
+    /// `autotx` does. The next render finds them current and converts nothing.
+    ///
+    /// The conversion is [`tiled::make_tx_atomic`] with
+    /// [`tiled::TxFormat::FromSampleType`]: float sources keep `half` tiles,
+    /// 8-bit ones take `u8`, and the colour space recorded is the one the
+    /// material binds with (`auto` resolved against the file). A tile that
+    /// fails to convert — a read-only asset library, a full disk — sends that
+    /// texture down the preload path rather than streaming a set with a hole
+    /// in it.
+    pub fn with_auto_tx(mut self, on: bool) -> FileAssets {
+        if on && !self.streaming {
+            warn!("--auto-tx has no effect with CRUST_TEX_STREAM=0: no .tx is ever read");
+        } else if on {
+            info!("--auto-tx: converting textures to .tx beside their sources on first use");
+        }
+        self.auto_tx = on && self.streaming;
+        self
+    }
+
+    /// `(converted, failed, seconds)` for the `--auto-tx` conversions so far.
+    pub fn tx_report(&self) -> (usize, usize, f64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.tx_converted.load(Relaxed),
+            self.tx_failed.load(Relaxed),
+            self.tx_nanos.load(Relaxed) as f64 * 1e-9,
+        )
+    }
+
+    /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
+    /// disk, or the one image.
+    fn tile_sources(path: &Path) -> Vec<std::path::PathBuf> {
+        let name = path.to_string_lossy();
+        if name.contains("<UDIM>") || name.contains("<UVTILE>") {
+            let mut tiles = Vec::new();
+            for v in 0..10u32 {
+                for u in 0..10u32 {
+                    if let Some(p) =
+                        uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
+                        && p.exists()
+                    {
+                        tiles.push(p);
+                    }
+                }
+            }
+            tiles
+        } else if path.exists() {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether a complete set of `.tx` siblings stands beside `path`'s tiles,
+    /// converting the missing and stale ones first under `--auto-tx`.
+    ///
+    /// **Complete** is the point: the streaming texture opens whichever tiles
+    /// have a `.tx` and knows nothing of the ones that do not, so a half-
+    /// converted UDIM set would stream with black holes where the missing
+    /// tiles are. Such a set preloads instead. Without `--auto-tx` a `.tx`
+    /// older than its source is still used — it is what was converted — but
+    /// warned about, since the image then shows the old texture.
+    fn prepare_tx(&self, path: &Path, space: ColorSpace) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let is_tx = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("tx"));
+        if is_tx {
+            return true;
+        }
+        let sources = Self::tile_sources(path);
+        if sources.is_empty() {
+            return false;
+        }
+        let stale: Vec<_> = sources
+            .iter()
+            .filter(|s| tiled::tx_is_stale(s, &tiled::tx_sibling(s)))
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return true;
+        }
+        if !self.auto_tx {
+            let missing = stale
+                .iter()
+                .filter(|s| !tiled::tx_sibling(s).exists())
+                .count();
+            if missing > 0 {
+                if missing < sources.len() {
+                    debug!(
+                        "{}: {missing} of {} tile(s) have no .tx — preloading the set \
+                         (--auto-tx converts the rest)",
+                        path.display(),
+                        sources.len()
+                    );
+                }
+                return false;
+            }
+            warn!(
+                "{}: {} .tx tile(s) older than their source, used anyway — rerun with \
+                 --auto-tx to reconvert",
+                path.display(),
+                stale.len()
+            );
+            return true;
+        }
+
+        let started = Instant::now();
+        let workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(stale.len());
+        let chunk = stale.len().div_ceil(workers.max(1));
+        let failed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for part in stale.chunks(chunk.max(1)) {
+                let failed = &failed;
+                scope.spawn(move || {
+                    for src in part {
+                        match tiled::make_tx_atomic(src, space, tiled::TxFormat::FromSampleType) {
+                            Ok(m) => debug!(
+                                "--auto-tx: {} -> {} [{}, {:?}]",
+                                src.display(),
+                                m.dst.display(),
+                                m.kind,
+                                m.space
+                            ),
+                            Err(e) => {
+                                warn!("--auto-tx: could not convert {}: {e}", src.display());
+                                failed.fetch_add(1, Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let failed = failed.into_inner();
+        self.tx_converted.fetch_add(stale.len() - failed, Relaxed);
+        self.tx_failed.fetch_add(failed, Relaxed);
+        self.tx_nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        failed == 0
     }
 
     /// Splits the Ptex budget evenly over every streamed texture opened so far.
@@ -435,8 +610,12 @@ impl FileAssets {
         &self,
         path: &Path,
         space: ColorSpace,
+        which: Candidates,
     ) -> Option<std::sync::Arc<dyn Texture2D>> {
-        for candidate in Self::stream_candidates(path) {
+        let candidates = Self::stream_candidates(path)
+            .into_iter()
+            .filter(|c| (c.as_path() == path) == (which == Candidates::Source));
+        for candidate in candidates {
             let started = Instant::now();
             let Some(tex) =
                 tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
@@ -456,7 +635,7 @@ impl FileAssets {
                 h,
                 tex.level_count(),
                 if tex.is_linear() { "half" } else { "8-bit" },
-                space,
+                tex.color_space(),
                 started.elapsed()
             );
             return Some(std::sync::Arc::new(tex));
@@ -506,10 +685,21 @@ impl AssetLoader for FileAssets {
         // path declines — no `.tx` beside the asset, a mip chain reduced in
         // another colour space, a file it cannot read — lands here, so turning
         // the switch on can make a render slower but never break it.
-        if self.streaming
-            && let Some(streamed) = self.open_streaming(path, space)
-        {
-            return Some(streamed);
+        // Ptex never takes the `.tx` route, even when one arrives here as a
+        // UV texture: it is already a tiled mip pyramid, so there is nothing to
+        // convert, and a `foo.tx` beside it is not its converted form.
+        if self.streaming && !tiled::is_ptex(path) {
+            // The source first: a file that is itself tiled and mip-mapped (an
+            // OIIO `.tx`, or a tiled mip EXR — every ALab texture is one)
+            // streams as it is, and converting it would only write a copy.
+            if let Some(streamed) = self.open_streaming(path, space, Candidates::Source) {
+                return Some(streamed);
+            }
+            if self.prepare_tx(path, space)
+                && let Some(streamed) = self.open_streaming(path, space, Candidates::Sibling)
+            {
+                return Some(streamed);
+            }
         }
         if self.streaming {
             debug!(

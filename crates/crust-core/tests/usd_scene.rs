@@ -2019,3 +2019,345 @@ fn a_declined_preview_texture_falls_back_to_its_fallback_then_the_constant() {
     assert!(!c_uv, "an untextured preview surface builds no chart");
     assert!((c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6, "{c}");
 }
+
+/// Bindings are inherited from ancestors and resolved for the `full` purpose,
+/// falling back to all-purpose — `ComputeBoundMaterial` semantics. ALab binds
+/// every asset through `material:binding:full` on its `GEO` scope, never on
+/// the meshes, so a direct all-purpose lookup on the mesh left all of it grey.
+#[test]
+fn bindings_inherit_from_ancestors_and_prefer_the_full_purpose() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_binding_purpose");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let material = |name: &str, rgb: &str| {
+        format!(
+            r#"
+        def Material "{name}"
+        {{
+            token outputs:surface.connect = </W/Looks/{name}/S.outputs:surface>
+            def Shader "S"
+            {{
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = ({rgb})
+                float inputs:roughness = 1
+                token outputs:surface
+            }}
+        }}"#
+        )
+    };
+    // No API and no binding on the mesh itself: everything is inherited.
+    let quad = |name: &str, x: f32| {
+        format!(
+            r#"
+            def Mesh "{name}"
+            {{
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
+            }}"#,
+            x0 = x,
+            x1 = x + 1.0
+        )
+    };
+    let stage = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "W"
+)
+def Xform "W"
+{{
+    def Scope "Looks"
+    {{{full}{preview}{all}
+    }}
+    def Xform "Geo"
+    {{
+        def Xform "Purposed" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {{
+            rel material:binding = </W/Looks/All>
+            rel material:binding:full = </W/Looks/Full>
+            rel material:binding:preview = </W/Looks/Preview>
+            def Scope "Nested"
+            {{{a}
+            }}
+        }}
+        def Xform "AllPurpose" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {{
+            rel material:binding = </W/Looks/All>
+            rel material:binding:preview = </W/Looks/Preview>{b}
+        }}
+    }}
+}}
+"#,
+        full = material("Full", "0.1, 0.8, 0.1"),
+        preview = material("Preview", "0.8, 0.1, 0.1"),
+        all = material("All", "0.1, 0.1, 0.8"),
+        a = quad("A", -2.0),
+        b = quad("B", 1.0),
+    );
+    let path = dir.join("binding.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("stage opens");
+
+    let colour = |x: f32| -> Vec3A {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        hit.mat
+            .eval(&r, &hit.rec, Vec3A::Z)
+            .expect("a continuous lobe")
+            .0
+    };
+    let a = colour(-1.5);
+    assert!(
+        a.y > 3.0 * a.x && a.y > 3.0 * a.z,
+        "two levels down, `full` beats all-purpose and preview: {a}"
+    );
+    let b = colour(1.5);
+    assert!(
+        b.z > 3.0 * b.x && b.z > 3.0 * b.y,
+        "no `full` binding: all-purpose, never preview: {b}"
+    );
+}
+
+/// A render draws `default` and `render` purpose only: a `proxy` or `guide`
+/// subtree is pruned whole, whatever its descendants author. ALab publishes
+/// every asset with a `purpose = "proxy"` `GEO_PROXY` beside its `GEO`, and
+/// the proxies rendered as grey duplicates of the real geometry.
+#[test]
+fn proxy_and_guide_purpose_subtrees_are_not_rendered() {
+    let dir = std::env::temp_dir().join("crust_purpose_prune");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let quad = |name: &str| {
+        format!(
+            r#"
+        def Mesh "{name}"
+        {{
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        }}"#
+        )
+    };
+    let stage = format!(
+        r#"#usda 1.0
+def Xform "W"
+{{
+    def Xform "GEO"
+    {{
+        token purpose = "render"{render}
+    }}
+    def Xform "GEO_PROXY"
+    {{
+        token purpose = "proxy"
+        def Xform "Inner"
+        {{
+            token purpose = "render"{proxy}
+        }}
+    }}
+    def Xform "Guides"
+    {{
+        token purpose = "guide"{guide}
+    }}
+    def Xform "Plain"
+    {{{plain}
+    }}
+}}
+"#,
+        render = quad("R"),
+        proxy = quad("P"),
+        guide = quad("G"),
+        plain = quad("D"),
+    );
+    let path = dir.join("purpose.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let scene = Scene::from_usd(&path).expect("stage opens");
+    assert_eq!(
+        scene.world.count(),
+        2,
+        "only the render- and default-purpose quads, not the proxy (even with \
+         `render` authored beneath it) or the guide"
+    );
+}
+
+/// A relative texture path that openusd cannot resolve — every `<UDIM>` path,
+/// since it names a set rather than a file — is anchored on the layer that
+/// authored it, not on the root layer. ALab authors its textures five
+/// directories below `entry.usda`, and 1 718 sets failed to load. And a
+/// network whose primvar reader names `perfuv` reads that primvar: the only
+/// chart ALab's published assets carry.
+#[test]
+fn preview_textures_anchor_on_their_layer_and_read_the_named_primvar() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_preview_anchor");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("look/deep")).expect("temp dir");
+    std::fs::create_dir_all(dir.join("look/tex")).expect("temp dir");
+    std::fs::write(
+        dir.join("look/deep/look.usda"),
+        r#"#usda 1.0
+over "W"
+{
+    def Scope "Looks"
+    {
+        def Material "M"
+        {
+            token outputs:surface.connect = </W/Looks/M/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </W/Looks/M/T.outputs:rgb>
+                token outputs:surface
+            }
+            def Shader "T"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../tex/albedo.<UDIM>.png@
+                float2 inputs:st.connect = </W/Looks/M/R.outputs:result>
+                vector3f outputs:rgb
+            }
+            def Shader "R"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "perfuv"
+                float2 outputs:result
+            }
+        }
+    }
+}
+"#,
+    )
+    .expect("write look layer");
+    std::fs::write(
+        dir.join("root.usda"),
+        r#"#usda 1.0
+(
+    subLayers = [@look/deep/look.usda@]
+)
+def Xform "W"
+{
+    def Xform "Geo"
+    {
+        def Mesh "Q" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+            texCoord2f[] primvars:perfuv = [(1, 0), (2, 0), (2, 1), (1, 1)] (
+                interpolation = "faceVarying"
+            )
+            rel material:binding = </W/Looks/M>
+        }
+    }
+}
+"#,
+    )
+    .expect("write root layer");
+
+    let assets = FakeAssets::default();
+    let scene = Scene::from_usd_with_assets(&dir.join("root.usda"), &assets).expect("stage opens");
+    let requested = assets.textures.lock().unwrap().clone();
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    // `look/deep/../tex`, not `<root dir>/../tex`: compare real directories.
+    let got = &requested[0].0;
+    assert_eq!(
+        got.file_name().and_then(|n| n.to_str()),
+        Some("albedo.<UDIM>.png")
+    );
+    assert_eq!(
+        got.parent().and_then(|p| p.canonicalize().ok()),
+        dir.join("look/tex").canonicalize().ok(),
+        "anchored against the look layer's directory: {}",
+        got.display()
+    );
+
+    let r = Ray::new(Vec3A::new(0.5, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+    let hit = scene
+        .world
+        .intersect(&r, 0.001, f32::INFINITY)
+        .expect("hits the quad");
+    assert!(hit.rec.has_uv, "the perfuv chart was not read");
+    assert!(
+        (hit.rec.uv.0 - 1.5).abs() < 0.01,
+        "u = {}, expected ~1.5 from primvars:perfuv",
+        hit.rec.uv.0
+    );
+}
+
+/// A texture that fails with no `fallback` and no authored constant reads the
+/// input's `UsdPreviewSurface` schema default, not the node set's opaque
+/// black. ALab's wrench connects `roughness` to a map the dataset does not
+/// ship and authors nothing else; black made it a mirror.
+#[test]
+fn a_missing_texture_with_nothing_authored_reads_the_schema_default() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_preview_schema_default");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("s.usda"),
+        r#"#usda 1.0
+def Xform "W"
+{
+    def Scope "Looks"
+    {
+        def Material "M"
+        {
+            token outputs:surface.connect = </W/Looks/M/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </W/Looks/M/T.outputs:rgb>
+                float inputs:roughness = 1
+                token outputs:surface
+            }
+            def Shader "T"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @not_shipped.<UDIM>.exr@
+                vector3f outputs:rgb
+            }
+        }
+    }
+    def Xform "Geo"
+    {
+        def Mesh "Q" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+            rel material:binding = </W/Looks/M>
+        }
+    }
+}
+"#,
+    )
+    .expect("write stage");
+    let scene = Scene::from_usd(&dir.join("s.usda")).expect("stage opens");
+    let r = Ray::new(Vec3A::new(0.5, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+    let hit = scene
+        .world
+        .intersect(&r, 0.001, f32::INFINITY)
+        .expect("hits the quad");
+    let (f, _) = hit
+        .mat
+        .eval(&r, &hit.rec, Vec3A::Z)
+        .expect("a continuous lobe");
+    assert!(f.x > 0.01, "not black: {f}");
+    assert!(
+        (f.x - f.y).abs() < 1e-6 && (f.y - f.z).abs() < 1e-6,
+        "neutral grey: {f}"
+    );
+}

@@ -1435,4 +1435,59 @@ mod tests {
         assert_eq!(t.color_space(), ColorSpace::Raw);
         assert_eq!(t.eval(0.5, 0.5, 0.0)[0], 128.0 / 255.0);
     }
+
+    /// Writes a scanline EXR whose channels are `names`, each flat `values`.
+    fn write_exr_channels(path: &Path, w: usize, h: usize, names: &[(&str, Vec<f32>)]) {
+        use exr::prelude::{
+            AnyChannel, AnyChannels, Encoding, FlatSamples, Image, Layer, LayerAttributes,
+            WritableImage,
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).expect("temp dir");
+        let channels = AnyChannels::sort(
+            names
+                .iter()
+                .map(|(n, v)| AnyChannel::new(*n, FlatSamples::F32(v.clone())))
+                .collect(),
+        );
+        let layer = Layer::new(
+            (w, h),
+            LayerAttributes::default(),
+            Encoding::UNCOMPRESSED,
+            channels,
+        );
+        Image::from_layer(layer)
+            .write()
+            .to_file(path)
+            .expect("write exr");
+    }
+
+    #[test]
+    fn a_single_prefixed_channel_exr_replicates_into_rgb() {
+        // ALab's roughness / metallic / ior maps: one channel named `rgb.R`,
+        // which the RGBA convenience reader refused outright.
+        let dir = scratch("exr_mono");
+        let p = dir.join("rough.1001.exr");
+        write_exr_channels(&p, 2, 1, &[("rgb.R", vec![0.25, 0.75])]);
+        let tex = UvTexture::open(&dir.join("rough.<UDIM>.exr"), ColorSpace::Auto).expect("loads");
+        assert_eq!(tex.eval(0.25, 0.5, 0.0), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(tex.eval(0.75, 0.5, 0.0), [0.75, 0.75, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn prefixed_rgb_channels_are_matched_by_base_name() {
+        let dir = scratch("exr_prefixed");
+        let p = dir.join("c.exr");
+        write_exr_channels(
+            &p,
+            1,
+            1,
+            &[
+                ("rgb.B", vec![0.3]),
+                ("rgb.G", vec![0.2]),
+                ("rgb.R", vec![0.1]),
+            ],
+        );
+        let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+        assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
+    }
 }
