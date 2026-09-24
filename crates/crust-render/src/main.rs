@@ -84,6 +84,12 @@ struct Cli {
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
     stats: bool,
+    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
+    /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
+    /// older than its source. A `.tx` beside a texture is always streamed when
+    /// present; this only creates the missing ones.
+    #[arg(long, default_value_t = false)]
+    auto_tx: bool,
 }
 
 /// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
@@ -309,7 +315,7 @@ fn main() {
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
-    let assets = FileAssets::new();
+    let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
@@ -333,6 +339,15 @@ fn main() {
         Scene::new(camera, world, lights, settings)
     };
     debug!("Scene built in {:?}", load_start.elapsed());
+    // One line however many textures were converted — the per-file lines are
+    // DEBUG, since their count grows with the stage.
+    let (converted, failed, secs) = assets.tx_report();
+    if converted + failed > 0 {
+        info!("--auto-tx: converted {converted} texture tile(s) to .tx in {secs:.1}s");
+        if failed > 0 {
+            warn!("--auto-tx: {failed} tile(s) failed to convert; their textures were preloaded");
+        }
+    }
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;

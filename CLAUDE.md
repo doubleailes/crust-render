@@ -29,7 +29,8 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
-# --stats (per-phase profile + scene statistics)
+# --stats (per-phase profile + scene statistics),
+# --auto-tx (convert UV textures to a .tx beside the original on first use)
 
 # Keep a full record of a render. The file gets the same events as the terminal
 # at the same -l level, so DEBUG has to be asked for; bare --log-file writes
@@ -75,14 +76,16 @@ cargo run --release -p crust-render --example mtlx_shade -- \
 # is the A/B for MaterialX emission (see "Known incomplete work"):
 cargo run --release -p crust-render --example maketx -- \
     samples/textures/mtlx_emission.hdr raw
-cargo run --release -p crust-render --example mtlx_shade -- \
+# Once the .tx exists it is streamed by default, so the preloaded side of the
+# A/B has to ask for preloading with CRUST_TEX_STREAM=0.
+CRUST_TEX_STREAM=0 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_emissive.mtlx mtlx_emitter_textured 0.37 0.12   # (1 1 1)
-CRUST_TEX_STREAM=1 cargo run --release -p crust-render --example mtlx_shade -- \
+cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_emissive.mtlx mtlx_emitter_textured 0.37 0.12   # (16 9 3)
 
 # ...and the same thing end to end, where the difference is 15.0 exactly.
-cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr -s 32
-CRUST_TEX_STREAM=1 cargo run --release -- -i samples/materialx_emissive.usda -o hdr.exr -s 32
+CRUST_TEX_STREAM=0 cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr -s 32
+cargo run --release -- -i samples/materialx_emissive.usda -o hdr.exr -s 32
 cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
 
 # Is a Ptex file actually being addressed correctly? Neither check renders
@@ -113,14 +116,19 @@ scripts/test_simd_matrix.sh -p crust-rt
 # filtered against unfiltered would measure bias, not error).
 python3 scripts/gen_texture_alias_scene.py /tmp/alias --measure
 
-# Streaming textures. Convert once (the mip chain is reduced in linear light,
+# Streaming textures. A `.tx` beside a texture (same path, `.tx` extension) is
+# always looked for and streamed when present -- `CRUST_TEX_STREAM=0` preloads
+# everything instead. Convert by hand (the mip chain is reduced in linear light,
 # the same `reduce_half` the in-memory pyramid uses, so a streamed render and a
-# preloaded one agree texel for texel), then render with the cache on. A float
-# source takes the EXR backing and keeps its range; `--format` overrides.
+# preloaded one agree texel for texel; a float source whose values exceed 1.0
+# takes the EXR backing, `--format` overrides)...
 cargo run --release -p crust-render --example maketx -- 'albedo.<UDIM>.png' srgb_texture
 cargo run --release -p crust-render --example maketx -- sky.exr raw            # half tiles
 cargo run --release -p crust-render --example maketx -- albedo.png srgb_texture --format=exr
-CRUST_TEX_STREAM=1 CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
+# ...or let the renderer convert on first use (missing or stale .tx only; any
+# float source keeps half tiles). The next render converts nothing.
+cargo run --release -- -i scene.usda --auto-tx
+CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
 
 # Streaming Ptex. No conversion step -- a .ptx is already a tiled per-face mip
 # pyramid, so this just turns the reader's cache on. Capping both backends
@@ -170,7 +178,8 @@ and the Moana island. So:
 - **`INFO`** is for facts about *this render*, emitted a bounded number of times whatever
   the stage holds: the resolution/spp/depth banner, the elapsed time, each output path,
   the once-per-process residency policy (`FileAssets::new`'s streaming notices, including
-  the one explaining why `CRUST_PTEX_STREAM=1` alone streams nothing), and the path
+  the one explaining why `CRUST_PTEX_STREAM=1` alone streams nothing, and `--auto-tx`'s
+  one notice and one conversion summary — the per-file lines are `DEBUG`), and the path
   guiding ΔEff verdict, which announces that the final pass will render unguided.
 - **`DEBUG`** is for anything whose line count grows with the input — per prim, per
   material, per texture, per prototype, per chunk, per pass. The island binds 3 618 Ptex
@@ -230,12 +239,26 @@ resident. Either side alone is bit-identical to the pre-filtering renderer, and 
 produce the same image as each other — which is what makes them an honest A/B of the two
 halves: the pyramid, and the footprint that selects from it.
 
-Texture *residency* has two more. `CRUST_TEX_STREAM=1` swaps the preloaded `UvTexture`
-for a streaming one that pages 64x64 tiles out of a `.tx` under a byte budget set by
-`CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own). It is opt-in, and it falls back
-to preloading for any texture it declines — no converted sibling beside the asset, a mip
-chain reduced in a different colour space, a file it cannot read — so turning it on can
-make a render slower but never break it. A `.tx` is backed by either a tiled TIFF (`u8`
+Texture *residency* has two more. A texture with a `.tx` beside it (same path, extension
+swapped: `foo.1001.exr` → `foo.1001.tx`) is streamed instead of preloaded, paging 64x64
+tiles under a byte budget set by `CRUST_TEX_CACHE_MB` (default 1024, matching OIIO's own).
+That lookup is **always on**: a `.tx` exists only because someone converted the texture
+for streaming. `CRUST_TEX_STREAM=0` turns it off and preloads everything, which is the A/B
+(`=1` is accepted and changes nothing). It falls back to preloading for any texture it
+declines — no `.tx`, a UDIM set only partly converted (it would stream with black holes),
+a mip chain reduced in a different colour space, a file it cannot read — so a stray `.tx`
+can make a render slower but never break it. **`--auto-tx`** creates the missing ones:
+before a texture opens, every tile whose `.tx` is missing or older than its source is
+converted beside it (`tiled::make_tx_atomic`, in parallel, written to a temporary and
+renamed so an interrupted run leaves no truncated `.tx` to trust). A float source keeps
+`half` tiles even when its values fit in `[0, 1]` (`TxFormat::FromSampleType` —
+`maketx`'s by-range default would band linear data), and the colour space recorded is
+the one the material binds with, `auto` resolved. A tile that fails to convert preloads
+its texture. Without the flag a stale `.tx` is still used, with a warning. **Ptex is
+excluded from all of it** (`tiled::is_ptex`): a `.ptx` is already a tiled per-face mip
+pyramid that streams as it is (`CRUST_PTEX_STREAM`), so it is never converted — `make_tx`
+refuses one outright — and a `foo.tx` beside a `foo.ptx` is never read in its place, even
+when the `.ptx` reaches `load_texture` as a UV texture. A `.tx` is backed by either a tiled TIFF (`u8`
 tiles) or a tiled mip EXR (`half` tiles), picked by magic number rather than extension.
 
 Ptex has the same pair. `CRUST_PTEX_STREAM=1` swaps `PtexColor` for a `PtexStream` that
@@ -711,7 +734,14 @@ Schema mapping:
   (float3, world-space) to streak through that translation over the shutter (transform
   motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
-- Materials resolve via `MaterialBindingAPI`, dispatched on the bound shader's `info:id`:
+- Materials resolve via `MaterialBindingAPI::compute_bound_material("full")`
+  (`bound_material`), which uses the `full` purpose falling back to all-purpose, with
+  bindings inherited from ancestors, binding strength honoured, and collection bindings
+  read. The walk starts at the nearest ancestor that *carries* the API, because
+  `MaterialBindingAPI::get` refuses any other prim — which is every mesh under a bound
+  group. `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
+  pruned with their subtree, like `active = false`. Then dispatch is on the bound
+  shader's `info:id`:
   - `UsdPreviewSurface` → mapped into `OpenPBR` (portable; `diffuseColor→baseColor`,
     `metallic→baseMetalness`, `roughness→specularRoughness`, etc.). Constant inputs
     are still read **undecoded** (the openspec `add-material-color-management` change
@@ -731,8 +761,10 @@ Schema mapping:
       and anything else is raw. So a greyscale roughness PNG stays raw and an EXR is
       linear.
     - **A texture that does not load reads the node's `fallback`, unscaled** (the spec),
-      and with none authored the *surface input's* constant. So `CRUST_TEX=0` still
-      means "render on constants". ALab authors a deliberate green `fallback`, which
+      and with none authored the *surface input's* constant, and with none of that the
+      input's **`UsdPreviewSurface` schema default** (`preview_surface_default`:
+      roughness 0.5, diffuse 0.18, ior 1.5, …) — not the node set's opaque black, which
+      is not neutral. So `CRUST_TEX=0` still means "render on constants". ALab authors a deliberate green `fallback`, which
       therefore shows up only when a file genuinely fails.
     - **Wrap modes apply only to a single image.** A `<UDIM>` set's addressing is the
       host's, and wrapping would fold every tile onto the first. `repeat` and
@@ -1022,9 +1054,10 @@ Schema mapping:
     gitignored artefacts `maketx` regenerates, so this is a note rather than a
     migration.
 - **Streaming textures** (`crust-assets/src/tiled/`) — the residency half of the
-  texture problem, as opposed to the filtering half above. Opt-in via
-  `CRUST_TEX_STREAM=1`; the preloaded `UvTexture` remains the default and the
-  correctness oracle.
+  texture problem, as opposed to the filtering half above. Used whenever a `.tx`
+  stands beside the texture (see the environment overrides above, and
+  `--auto-tx`); the preloaded `UvTexture` remains the correctness oracle and the
+  path for any texture without one.
   - **Why.** Preloading makes memory scale with the scene's total texture
     footprint, which is the only reason `CRUST_TEX_MAX` exists — and a cap is a
     poor residency policy, because it discards authored detail permanently and
@@ -1164,10 +1197,18 @@ Schema mapping:
     and at exactly 1.0 preloaded (`to_rgb8()` clips it), while below 1.0 the
     two agree to within the 8 bits the preload path keeps — so the divergence
     is the range and not a different lookup.
-  - **Conversion is explicit**, via `examples/maketx`. Auto-converting on first
-    use (Arnold's `autotx`) is a deliberate follow-up: a renderer that silently
-    writes multi-gigabyte files next to a read-only asset library is a surprise
-    nobody asked for.
+  - **Conversion is explicit, or opt-in automatic.** `examples/maketx` converts by
+    hand, and `--auto-tx` converts on first use (Arnold's `autotx`). Both run one
+    conversion, `crust_assets::tiled::make_tx`. Automatic conversion stays behind a flag
+    because a renderer that silently writes multi-gigabyte files next to a read-only
+    asset library is a surprise nobody asked for.
+  - **The microcache is keyed by cache as well as tile.** A `TileId`'s file index is
+    unique only within one `TileCache`, while the per-thread microcache outlives any one
+    cache. So a second `FileAssets` in one process (tests, a host rendering twice) was
+    handed the first one's tiles on the same thread; the `clear_microcache()` calls in
+    the cache tests were working around exactly that. Each cache now carries a
+    process-unique `id` in the key. Measured free: `texel::<false>` is 446,589,173
+    instructions before and after.
 - **Ptex** (`texture.rs`, plus the decoder in `crust-assets/src/ptex_texture.rs`) — per-face colour textures via
   the pure-Rust [`ptex-rs`](https://github.com/doubleailes/ptex-rs) reader, driving
   `OpenPBR::base_color`. A material's `inputs:surfaceMap` asset is the hook (both of the
@@ -1793,8 +1834,8 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   path does not change that. Cost on the worst case (`samples/ptex_quads.usda`, two
   textured planes filling frame): ~2.8x the preloaded render, against ~2x for the UV
   path's.
-  On the UV side: conversion is explicit rather than
-  automatic, 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
+  On the UV side: automatic conversion needs `--auto-tx` and writes beside the asset
+  (a read-only library preloads, with a warning per failed tile), 16-bit integer sources are still narrowed to 8 on page-in (deliberately —
   the renderer decodes `u8` through a 256-entry table, and two more bits of an LDR
   texture is not worth halving what the byte budget holds), there is no
   single-flight on a miss so two workers can decode the same tile at once (counted as
@@ -1861,8 +1902,8 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   `UsdPreviewSurface` side: texture **alpha** is not carried (both samplers return
   opaque RGB, so `outputs:a` reads 1.0 before `scale`/`bias`), `UsdTransform2d` is
   not evaluated, `occlusion`/`displacement`/`specularColor` are not read, and a
-  texture's `fallback` default when unauthored is the surface input's constant
-  rather than the spec's opaque black (deliberately — see above). A **subdivided** mesh
+  texture's `fallback` default when unauthored is the surface input's constant, then
+  its schema default, rather than the spec's opaque black (deliberately — see above). A **subdivided** mesh
   carries no chart at all: refining a face-varying UV channel is a second
   synthetic hierarchy through the refiner, and carrying the cage's UVs onto
   refined triangles would stretch every texture across the patch it came from —
@@ -1907,19 +1948,32 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   techvar_assets/fragment/. fragment/` hard-links it at no disk cost; the 2 111
   replaced placeholders are in `placeholders_backup.tgz`). What crust still lacks,
   most visible first:
-  - **Purpose-specific material bindings are ignored, so the whole set renders
-    grey.** ALab binds through `material:binding:full` (338×) and
-    `material:binding:preview` (677×), with a plain `material:binding` only twice.
-    `resolve_material` asks only for `direct_binding("")`, so 7 256 prims log "no
-    material binding" and fall back to default grey. That is only at `DEBUG`, so a
-    default run gives no sign. The fix is to resolve the `full` purpose (the one meant
-    for final renders), then the all-purpose binding. Collection-based bindings are
-    not read either, though ALab does not need them.
-  - **`UsdPreviewSurface` textures are decoded now** (`PreviewSurface`, above), and the
-    UDIM EXRs preload at `f32`. What is left of this item is the binding gap before it:
-    until `material:binding:full` resolves, those networks are never reached.
-    `occlusion` is still not read (it has no counterpart in the integrator). The
-    `usd_preview` materials are flat proxies and not worth decoding.
+  - **Materials now render, and texture memory is the limit.** Four fixes made
+    frame 1004 shade (1 752 `usd_full` preview surfaces, 1 738 of 1 739 UDIM
+    sets loaded). With all four in place, only 29 prims are still unbound, all
+    camera projection planes and a few set pieces:
+    - bindings resolve for the `full` purpose, inherited from ancestors (`bound_material`);
+    - `proxy`/`guide` subtrees are pruned (`non_render_purpose`, 1 459 `GEO_PROXY`
+      duplicates);
+    - unresolvable `<UDIM>` paths anchor on their authoring layer
+      (`attribute_asset_path`);
+    - single-channel `rgb.R` EXRs decode (`read_exr_rgb`).
+    **Every ALab texture is already a `.tx` in all but name**: all 6 832 EXRs are
+    64x64-tiled and mip-mapped (OIIO `maketx` output), so they stream straight from
+    the source with no conversion — `--auto-tx` tries the source first and leaves such
+    a file alone. What stopped that was the streaming reader's channel check
+    (`resolve_rgb`), which matched `R`/`G`/`B` by full name and refused the 661
+    three-channel sets written as `rgb.R`/`rgb.G`/`rgb.B`; they fell back to
+    preloading at `f32`, 34 GiB on one frame. It matches by base name now, as the
+    preload reader does. (Preloading everything at the default cap would be ~92 GiB
+    against a ~35 GiB import on a 61 GiB machine, which is why this matters.) `occlusion` is
+    not read, and the `usd_preview` materials are flat proxies and not worth decoding.
+    **One map is missing from the dataset itself**, not mis-resolved:
+    `tool_wrench_boxend03`'s `usd_full` connects `roughness` to
+    `tool_wrench_boxend03_roughness.<UDIM>.exr`, which ALab does not ship (its folder
+    has `ao`, `ior`, `metallic`, `ntu`, `surfaceColor`). The host logs one
+    `No tiles found` ERROR for it every render, and the wrench shades at the schema's
+    roughness 0.5.
   - **The shot camera is not selected.** The importer takes the *first*
     `UsdGeomCamera` it traverses. On `entry.usda` that is trailer camera
     `/root/cameras/camera_mk020_0280`, not the shot's `/root/camera01/…/renderCam`.
@@ -1927,10 +1981,8 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
     active = false )`). Neither a `RenderSettings.camera` relationship nor a CLI
     camera flag is read. Each trailer camera also carries a `projectionPlane_M_geo`
     mesh, which renders as grey geometry if its camera is left active.
-  - **13 `CylinderLight`s and one `DiskLight`** in the rig are skipped (the
-    oscilloscope and ham-radio button lights, and the oscilloscope screen), per the
-    lighting caveats above. The rig uses no `ShapingAPI` cones or IES, so nothing is
-    lost there.
+  - The rig's **13 `CylinderLight`s** (oscilloscope and ham-radio button lights) now
+    import as analytic cylinder lights; this used to be a gap.
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
   (no chromatic distributions). Thick transmission — dispersive or not — is a
   continuous Walter et al. 2007 microfacet BTDF — sampled via VNDF + Snell, evaluable

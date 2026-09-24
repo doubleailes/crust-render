@@ -50,6 +50,8 @@ pub struct StreamingTexture {
     /// *file*, read once at open, which is what lets the texel fetch pick its
     /// decode from a loop-invariant field instead of from every tile.
     linear: bool,
+    /// The space the texels decode under, `Auto` resolved against the file.
+    space: ColorSpace,
     tiled: bool,
     fallback: [f32; 4],
 }
@@ -173,6 +175,7 @@ impl StreamingTexture {
             cache,
             to_linear: to_linear_table(space),
             linear,
+            space,
             tiled,
             // Mid-grey, not black: a tile that fails to page in should read as
             // an obviously wrong surface rather than as a shadow, which is
@@ -200,6 +203,11 @@ impl StreamingTexture {
     /// since it is the difference between a tile costing 12 KiB and 24 KiB.
     pub fn is_linear(&self) -> bool {
         self.linear
+    }
+
+    /// The colour space the texels decode under, with `Auto` resolved.
+    pub fn color_space(&self) -> ColorSpace {
+        self.space
     }
 
     /// One texel of one level, through the cache.

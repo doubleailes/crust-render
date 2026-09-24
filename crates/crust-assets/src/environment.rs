@@ -53,28 +53,58 @@ fn decode_exr_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
 ///
 /// The same decode [`load_exr_environment`] does, without the importance-
 /// sampling structure an [`EnvironmentMap`] builds on top. It exists for the
-/// `.tx` converter, which needs the pixels and none of the rest, and it lives
-/// here so there is still exactly one place in the workspace that knows how to
-/// read an EXR.
+/// `.tx` converter and the preloaded UV texture path, which need the pixels
+/// and none of the rest, and it lives here so there is still exactly one place
+/// in the workspace that knows how to read an EXR.
+///
+/// **Any channel layout, not just RGBA.** Texture EXRs are routinely single
+/// channel — a roughness or metallic map — and name their channels with a
+/// layer prefix: ALab writes `rgb.R` alone for 3 584 of its 6 832 maps, and
+/// `rgb.R`/`rgb.G`/`rgb.B` for most of the rest. The RGBA convenience reader
+/// refuses both ("no layer in the image matched"), so this reads the first
+/// layer's channels as they are and picks `R`, `G`, `B` by *base* name (the
+/// part after the last `.`). A layer with none of them but exactly one channel
+/// — or a `Y` luminance channel — is replicated into all three, which is what
+/// the streaming EXR reader already does; a missing colour channel otherwise
+/// reads 0.
 pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
-    let image = read_first_rgba_layer_from_file(
-        path,
-        |resolution, _| {
-            let (w, h) = (resolution.width(), resolution.height());
-            (w, h, vec![0.0f32; w * h * 3])
-        },
-        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
-         pos,
-         (r, g, b, _a): (f32, f32, f32, f32)| {
-            let o = (pos.y() * *w + pos.x()) * 3;
-            pixels[o] = r;
-            pixels[o + 1] = g;
-            pixels[o + 2] = b;
-        },
-    )
-    .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
-    .ok()?;
-    let (w, h, pixels) = image.layer_data.channel_data.pixels;
+    let image = read_first_flat_layer_from_file(path)
+        .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
+        .ok()?;
+    let layer = &image.layer_data;
+    let (w, h) = (layer.size.width(), layer.size.height());
+    let channels = &layer.channel_data.list;
+    let base = |c: &AnyChannel<FlatSamples>| {
+        let name = c.name.to_string();
+        name.rsplit('.').next().unwrap_or_default().to_owned()
+    };
+    let find = |want: &str| channels.iter().position(|c| base(c) == want);
+    let mono = find("Y").or_else(|| (channels.len() == 1).then_some(0));
+    let pick = |want: &str| find(want).or(mono);
+    let rgb = [pick("R"), pick("G"), pick("B")];
+    if rgb.iter().all(Option::is_none) {
+        error!(
+            "EXR decode failed for {}: no R, G, B or Y channel among {:?}",
+            path.display(),
+            channels
+                .iter()
+                .map(|c| c.name.to_string())
+                .collect::<Vec<_>>()
+        );
+        return None;
+    }
+    let mut pixels = vec![0.0f32; w * h * 3];
+    for (k, channel) in rgb.iter().enumerate() {
+        let Some(i) = channel else { continue };
+        for (t, v) in channels[*i]
+            .sample_data
+            .values_as_f32()
+            .enumerate()
+            .take(w * h)
+        {
+            pixels[t * 3 + k] = v;
+        }
+    }
     Some((pixels, w, h))
 }
 

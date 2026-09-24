@@ -246,6 +246,9 @@ pub struct PreviewSurface {
     /// Whether emission varies per point. Decides whether the hit-free
     /// `emitted()` can still answer.
     emission_textured: bool,
+    /// The primvar the network's `UsdPrimvarReader_float2` names, when it is
+    /// not `st` (see [`Material::uv_primvar`]).
+    uv_primvar: Option<String>,
     pub name: String,
 }
 
@@ -284,8 +287,15 @@ impl PreviewSurface {
             inputs,
             normal,
             emission_textured,
+            uv_primvar: None,
             name,
         }
+    }
+
+    /// Names the primvar the textures read, when it is not `st`.
+    pub fn with_uv_primvar(mut self, primvar: Option<String>) -> PreviewSurface {
+        self.uv_primvar = primvar.filter(|p| p != "st");
+        self
     }
 
     /// The `OpenPBR` this surface reduces to at a hit, and the shading normal
@@ -357,6 +367,10 @@ impl Material for PreviewSurface {
 
     fn uses_uv(&self) -> bool {
         true
+    }
+
+    fn uv_primvar(&self) -> Option<&str> {
+        self.uv_primvar.as_deref()
     }
 
     fn emitted(&self) -> Vec3A {

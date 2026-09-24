@@ -228,6 +228,10 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             debug!("Skipping inactive prim {}", prim.path());
             continue;
         }
+        if let Some(purpose) = non_render_purpose(&prim) {
+            debug!("Skipping {purpose}-purpose prim {}", prim.path());
+            continue;
+        }
 
         let local = local_matrix_at(stage, &prim);
         let resets = resets_xform_stack_at(stage, &prim);
@@ -1193,7 +1197,7 @@ fn emit_mesh(
 ) {
     let want_faces = material.face_texture().is_some();
     let want_uvs = material.uses_uv();
-    let Some(src) = mesh_source(prim, mesh, want_faces, want_uvs) else {
+    let Some(src) = mesh_source(prim, mesh, want_faces, want_uvs, material.uv_primvar()) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
@@ -1539,14 +1543,17 @@ impl UvSource {
 /// `st` is USD's conventional name and what `UsdPreviewSurface` and MaterialX
 /// both assume; `uv` and `st0` are read as fallbacks because exporters differ
 /// and an asset with the chart under another name is otherwise silently
-/// untextured. The first one that yields values wins.
-fn mesh_uvs(prim: &Prim) -> Option<UvSource> {
-    for name in [
+/// untextured. The first one that yields values wins. `preferred` — the
+/// primvar the bound material's network names ([`Material::uv_primvar`]) — is
+/// tried before all of them.
+fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource> {
+    let preferred = preferred.map(|p| format!("primvars:{p}"));
+    for name in preferred.as_deref().into_iter().chain([
         "primvars:st",
         "primvars:uv",
         "primvars:st0",
         "primvars:UVMap",
-    ] {
+    ]) {
         let value = prim
             .attribute(name)
             .get_at::<sdf::Value>(eval_time())
@@ -1628,10 +1635,11 @@ fn mesh_source(
     mesh: &UsdMesh,
     want_faces: bool,
     want_uvs: bool,
+    uv_primvar: Option<&str>,
 ) -> Option<MeshSource> {
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
-    let uvs = want_uvs.then(|| mesh_uvs(prim)).flatten();
+    let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
     let cage = |points, counts, indices, uvs| MeshSource {
         points,
         counts,
@@ -2104,6 +2112,30 @@ struct ProtoPart {
 /// Abstract (`class`) prims are *not* skipped here, unlike in the main
 /// traversal: naming a class as a prototype is exactly how one authors
 /// "geometry that exists only to be instanced".
+/// `Some("proxy")` / `Some("guide")` when `prim` authors a purpose a final
+/// render does not draw.
+///
+/// A render draws `default` and `render` purpose only (UsdGeomImageable).
+/// Purpose is inherited, and a non-default purpose on an ancestor wins over
+/// whatever its descendants author, so pruning the subtree where the purpose
+/// is authored is exactly `ComputePurpose` for a traversal that descends from
+/// the root — the same shape as the `active = false` pruning beside it.
+/// Without it a production asset renders twice: ALab publishes every asset
+/// with a `GEO_PROXY` scope (`purpose = "proxy"`, bound only for `preview`)
+/// next to its `GEO`, and the proxies drew as grey duplicates of 1 505 meshes.
+fn non_render_purpose(prim: &Prim) -> Option<&'static str> {
+    let value = prim
+        .attribute("purpose")
+        .get_at::<sdf::Value>(eval_time())
+        .ok()
+        .flatten()?;
+    match value.as_str()? {
+        "proxy" => Some("proxy"),
+        "guide" => Some("guide"),
+        _ => None,
+    }
+}
+
 fn collect_proto_parts(
     stage: &Stage,
     root: &Prim,
@@ -2126,6 +2158,14 @@ fn collect_proto_parts(
         if !prim.is_active().unwrap_or(true) {
             debug!(
                 "Skipping inactive prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
+            continue;
+        }
+        if let Some(purpose) = non_render_purpose(&prim) {
+            debug!(
+                "Skipping {purpose}-purpose prim {} (prototype {})",
                 prim.path(),
                 root.path()
             );
@@ -2185,6 +2225,7 @@ fn collect_proto_parts(
                 &mesh,
                 material.face_texture().is_some(),
                 material.uses_uv(),
+                material.uv_primvar(),
             ) && let Some(slot) = caches.meshes.intern(&prim, &src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
@@ -3767,15 +3808,51 @@ impl MaterialCache {
     }
 }
 
+/// The binding purpose a final render resolves: USD's `full`, falling back to
+/// the all-purpose binding (`compute_bound_material` does the fallback).
+/// `preview` is for interactive proxies and is never consulted.
+const RENDER_BINDING_PURPOSE: &str = "full";
+
+/// The material bound to `prim` for a final render, resolved the way
+/// `UsdShadeMaterialBindingAPI::ComputeBoundMaterial` does.
+///
+/// Two things this has to get right that a direct lookup on the prim does not:
+///
+/// - **Inheritance.** A binding on an ancestor applies to every prim beneath
+///   it, and production assets bind on the group: ALab binds each asset's
+///   `GEO` scope, never its meshes. openusd-schemas' `compute_bound_material`
+///   walks the ancestors (binding strength and collection bindings included),
+///   but only from a prim that *carries* `MaterialBindingAPI`, and
+///   `MaterialBindingAPI::get` returns `None` for any other — which is every
+///   mesh under a bound group. So the walk starts at the nearest ancestor
+///   that has the API. Skipping the API-less prims in between loses nothing:
+///   USD disregards a binding on a prim without the API applied.
+/// - **Purpose.** ALab authors `material:binding:full` and
+///   `material:binding:preview` and almost never the all-purpose relationship,
+///   so asking for `""` alone found nothing on 7 256 prims.
+fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
+    let mut path = Some(prim.path().clone());
+    while let Some(p) = path {
+        if p.is_abs_root() {
+            return None;
+        }
+        if let Ok(Some(api)) = MaterialBindingAPI::get(stage, p.clone()) {
+            return api
+                .compute_bound_material(RENDER_BINDING_PURPOSE)
+                .ok()
+                .flatten();
+        }
+        path = p.parent();
+    }
+    None
+}
+
 fn resolve_material(
     stage: &Stage,
     prim: &Prim,
     caches: &mut ImportCaches<'_>,
 ) -> Arc<dyn Material> {
-    let mat_path = MaterialBindingAPI::get(stage, prim.path().clone())
-        .ok()
-        .flatten()
-        .and_then(|b| b.direct_binding("").ok().flatten());
+    let mat_path = bound_material(stage, prim);
 
     let Some(mat_path) = mat_path else {
         debug!(
@@ -3985,19 +4062,40 @@ fn preview_surface_material(
         ),
     ];
     let mut inputs = Vec::new();
+    let mut varnames: Vec<String> = Vec::new();
+    let mut note = |v: Option<String>| {
+        if let Some(v) = v
+            && !varnames.contains(&v)
+        {
+            varnames.push(v);
+        }
+    };
     for (target, is_textured) in textured {
         if is_textured
-            && let Some(input) =
+            && let Some((input, varname)) =
                 preview_uv_input(stage, mat_path, shader, target.input_name(), caches)
         {
+            note(varname);
             inputs.push((target, input));
         }
     }
     let normal = if ps.normal.texture().is_some() {
-        preview_uv_input(stage, mat_path, shader, "normal", caches)
+        preview_uv_input(stage, mat_path, shader, "normal", caches).map(|(input, varname)| {
+            note(varname);
+            input
+        })
     } else {
         None
     };
+    // One chart per mesh: a network whose readers name two primvars shades
+    // every texture from the first.
+    if varnames.len() > 1 {
+        warn!(
+            "UsdPreviewSurface at {mat_path}: textures read primvars {varnames:?}; crust \
+             carries one chart per mesh and reads '{}' for all of them",
+            varnames[0]
+        );
+    }
     for (name, set) in [
         ("occlusion", ps.occlusion.is_set()),
         ("specularColor", ps.specular_color.is_set()),
@@ -4011,7 +4109,8 @@ fn preview_surface_material(
     if inputs.is_empty() && normal.is_none() {
         return Arc::new(base);
     }
-    let m = crate::PreviewSurface::new(mat_path.to_string(), base, inputs, normal);
+    let m = crate::PreviewSurface::new(mat_path.to_string(), base, inputs, normal)
+        .with_uv_primvar(varnames.into_iter().next());
     debug!("Material {mat_path}: {m:?}");
     Arc::new(m)
 }
@@ -4031,7 +4130,7 @@ fn preview_uv_input(
     shader: &Shader,
     name: &str,
     caches: &mut ImportCaches<'_>,
-) -> Option<crate::material::preview_surface::UvInput> {
+) -> Option<(crate::material::preview_surface::UvInput, Option<String>)> {
     use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
     use shade::tokens as tk;
 
@@ -4072,8 +4171,12 @@ fn preview_uv_input(
     let token = |input: &str| value(&tex.input(input)).and_then(|v| v.as_str().map(str::to_owned));
     let float4 = |input: &str| value(&tex.input(input)).and_then(|v| sdf_float4(&v));
 
-    let file =
-        value(&tex.input(tk::TEX_FILE)).and_then(|v| asset_value_path(&v, caches.stage_path));
+    let file = tex
+        .input(tk::TEX_FILE)
+        .value_producing_attributes(ProducerFilter::Any)
+        .ok()
+        .and_then(|p| p.into_iter().next())
+        .and_then(|a| attribute_asset_path(a.attribute(), caches.stage_path));
     let Some(file) = file else {
         warn!(
             "UsdUVTexture {}: no inputs:file — {name} keeps its constant",
@@ -4086,6 +4189,7 @@ fn preview_uv_input(
     // Which chart the texture reads. crust carries one per mesh (see
     // `mesh_uvs`), so a reader naming another primvar is approximated by it.
     let st = tex.input(tk::TEX_ST);
+    let mut varname = None;
     if let Some(reader) = st
         .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
         .ok()
@@ -4095,17 +4199,8 @@ fn preview_uv_input(
         let id = reader.as_ref().and_then(shader_info_id);
         match (&reader, id.as_deref()) {
             (Some(reader), Some(tk::SHADER_ID_PRIMVAR_READER_FLOAT2)) => {
-                let varname = value(&reader.input(tk::PVR_VARNAME))
+                varname = value(&reader.input(tk::PVR_VARNAME))
                     .and_then(|v| v.as_str().map(str::to_owned));
-                if let Some(v) = varname
-                    && !matches!(v.as_str(), "st" | "uv" | "st0" | "UVMap")
-                {
-                    warn!(
-                        "UsdPrimvarReader {} reads primvar '{v}'; crust reads one chart \
-                         (primvars:st and its fallbacks) — using that",
-                        reader.path()
-                    );
-                }
             }
             _ => warn!(
                 "UsdUVTexture {}: st is driven by {id:?}, which is not read — using the \
@@ -4117,9 +4212,14 @@ fn preview_uv_input(
 
     let file_name = file.to_string_lossy();
     let tiled = file_name.contains("<UDIM>") || file_name.contains("<UVTILE>");
-    // The node's own fallback, else the surface input's constant (so a
-    // declined texture renders on the surface's constants), else the node
-    // set's default of opaque black.
+    // The node's own fallback, else the surface input's authored constant (so
+    // a declined texture renders on the surface's constants), else that
+    // input's `UsdPreviewSurface` schema default. The node set's own default,
+    // opaque black, is the last resort only for an input the schema does not
+    // know: a published look routinely connects an input without authoring a
+    // constant, and black there is not neutral — ALab's wrench references a
+    // roughness map the dataset does not ship, and roughness 0 turned it into
+    // a mirror where the schema's 0.5 is an ordinary surface.
     let fallback = float4(tk::TEX_FALLBACK)
         .or_else(|| {
             surface_input
@@ -4129,9 +4229,20 @@ fn preview_uv_input(
                 .flatten()
                 .and_then(|v| sdf_float4(&v))
         })
+        .or_else(|| preview_surface_default(name))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
     let loaded = load_uv_texture(&file, space, caches).map(crate::TextureRef);
-    Some(UvInput {
+    if loaded.is_none() {
+        // DEBUG: the host has already reported *why* at its own level (a
+        // missing file is an ERROR there), and `CRUST_TEX=0` declines every
+        // texture on purpose — a WARN here would repeat per texture.
+        debug!(
+            "UsdPreviewSurface at {mat_path}: {name} texture {} not loaded — shading with \
+             {fallback:?}",
+            file.display()
+        );
+    }
+    let input = UvInput {
         tex: loaded,
         output,
         scale: float4(tk::TEX_SCALE).unwrap_or([1.0; 4]),
@@ -4142,6 +4253,30 @@ fn preview_uv_input(
             Wrap::from_token(token(tk::TEX_WRAP_T).as_deref()),
         ],
         tiled,
+    };
+    Some((input, varname))
+}
+
+/// A `UsdPreviewSurface` input's schema default, widened to four channels the
+/// way [`sdf_float4`] widens an authored value — what the input reads when a
+/// texture drives it, the texture fails, and nothing else was authored.
+/// Values from the UsdPreviewSurface specification.
+fn preview_surface_default(input: &str) -> Option<[f32; 4]> {
+    let v = |x: f32| [x; 4];
+    let c = |r: f32, g: f32, b: f32| [r, g, b, 1.0];
+    Some(match input {
+        "diffuseColor" => c(0.18, 0.18, 0.18),
+        "emissiveColor" => c(0.0, 0.0, 0.0),
+        "specularColor" => c(0.0, 0.0, 0.0),
+        "normal" => c(0.0, 0.0, 1.0),
+        "metallic" => v(0.0),
+        "roughness" => v(0.5),
+        "clearcoat" => v(0.0),
+        "clearcoatRoughness" => v(0.01),
+        "opacity" => v(1.0),
+        "ior" => v(1.5),
+        "occlusion" => v(1.0),
+        _ => return None,
     })
 }
 
@@ -4530,6 +4665,40 @@ fn asset_value_path(value: &sdf::Value, stage_path: &Path) -> Option<std::path::
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(candidate),
     )
+}
+
+/// [`asset_value_path`] for an attribute, anchoring an **unresolved** relative
+/// path against the layer that authored it rather than against the root layer.
+///
+/// openusd anchors every asset value against its authoring layer, but reports
+/// the anchored path only when it names a file that exists — and a
+/// `<UDIM>`-tokened texture path never does, since it names a set. So such a
+/// value arrives with no `resolved_path` at all, and anchoring it against the
+/// root layer was wrong for any texture authored in a sublayer or reference:
+/// ALab's look layers sit five directories below `entry.usda` and author
+/// `@../../texture/…<UDIM>.exr@`, and 1 718 texture sets failed to load. The
+/// strongest spec in the attribute's property stack is the layer whose opinion
+/// supplies the value, which is exactly what USD anchors against.
+fn attribute_asset_path(
+    attr: &openusd::usd::Attribute,
+    stage_path: &Path,
+) -> Option<std::path::PathBuf> {
+    let value = attr.get_at::<sdf::Value>(eval_time()).ok().flatten()?;
+    let resolved = matches!(&value, sdf::Value::AssetPath(p)
+        if p.resolved_path().is_some_and(|r| !r.is_empty()));
+    let authored = value.as_str().map(str::to_owned);
+    if !resolved
+        && let Some(authored) = authored.filter(|a| !a.is_empty() && Path::new(a).is_relative())
+        && let Some(layer_dir) = attr
+            .property_stack()
+            .ok()
+            .and_then(|stack| stack.into_iter().next())
+            .and_then(|site| Path::new(&site.layer).parent().map(Path::to_path_buf))
+            .filter(|d| !d.as_os_str().is_empty())
+    {
+        return Some(layer_dir.join(authored));
+    }
+    asset_value_path(&value, stage_path)
 }
 
 /// sRGB transfer function, decoding a display-referred colour to linear.

@@ -312,31 +312,37 @@ pub(crate) const MIP_SPACE_KEY: &str = "crust:mipspace";
 
 /// Which entries of the channel list carry R, G and B.
 ///
-/// A single-channel file (a mask, a displacement) replicates its one channel,
-/// matching what the TIFF backing does with greyscale.
+/// Matched on the channel's **base name**, the part after the last `.`: a
+/// layer-prefixed `rgb.R` / `rgb.G` / `rgb.B` is still red, green and blue.
+/// OIIO's `maketx` writes exactly that, and every one of ALab's 6 832 textures
+/// is such a file — already 64x64-tiled and mip-mapped, so they stream as they
+/// are. Matching the full name refused the 661 three-channel sets among them,
+/// which fell back to preloading at `f32`: 34 GiB on one frame. The preload
+/// reader (`crate::read_exr_rgb`) matches the same way, so the two paths
+/// agree on which channel is which.
+///
+/// A file with no colour channel but a `Y`, or with exactly one channel (a
+/// mask, a roughness), replicates it, matching what the TIFF backing does with
+/// greyscale.
 fn resolve_rgb(header: &Header) -> io::Result<[usize; 3]> {
+    let list = &header.channels.list;
     let find = |want: &str| {
-        header
-            .channels
-            .list
-            .iter()
-            .position(|c| c.name.to_string().eq_ignore_ascii_case(want))
+        list.iter().position(|c| {
+            let name = c.name.to_string();
+            name.rsplit('.')
+                .next()
+                .is_some_and(|base| base.eq_ignore_ascii_case(want))
+        })
     };
     match (find("R"), find("G"), find("B")) {
         (Some(r), Some(g), Some(b)) => Ok([r, g, b]),
-        _ => {
-            if header.channels.list.len() == 1 {
-                Ok([0, 0, 0])
-            } else {
-                let names: Vec<String> = header
-                    .channels
-                    .list
-                    .iter()
-                    .map(|c| c.name.to_string())
-                    .collect();
+        _ => match find("Y").or_else(|| (list.len() == 1).then_some(0)) {
+            Some(y) => Ok([y, y, y]),
+            None => {
+                let names: Vec<String> = list.iter().map(|c| c.name.to_string()).collect();
                 Err(invalid(format!("no R/G/B channels, found {names:?}")))
             }
-        }
+        },
     }
 }
 
@@ -471,6 +477,63 @@ mod tests {
         let junk = dir.join("junk.exr");
         std::fs::write(&junk, b"not an exr either").expect("write");
         assert!(ExrFile::open(&junk).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// OIIO-style layer-prefixed channels (`rgb.R`, `rgb.G`, `rgb.B`) — how
+    /// every ALab texture is written — stream, each channel where it belongs.
+    #[test]
+    fn layer_prefixed_channels_are_matched_by_base_name() {
+        let dir = std::env::temp_dir().join("crust_exrread_prefixed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("rgb.exr");
+        use exr::prelude::{
+            AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,
+            LayerAttributes, Levels, LineOrder, Vec2, WritableImage,
+        };
+        let channel = |name: &str, v: f32| {
+            AnyChannel::new(
+                name,
+                Levels::Mip {
+                    rounding_mode: exr::math::RoundingMode::Down,
+                    level_data: vec![
+                        FlatSamples::F16(vec![f16::from_f32(v); 4]),
+                        FlatSamples::F16(vec![f16::from_f32(v)]),
+                    ],
+                },
+            )
+        };
+        let channels = AnyChannels::sort(
+            [
+                channel("rgb.B", 0.75),
+                channel("rgb.G", 0.5),
+                channel("rgb.R", 0.25),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let layer = Layer::new(
+            (2usize, 2usize),
+            LayerAttributes::default(),
+            Encoding {
+                compression: Compression::Uncompressed,
+                blocks: Blocks::Tiles(Vec2(super::super::TILE_EDGE, super::super::TILE_EDGE)),
+                line_order: LineOrder::Increasing,
+            },
+            channels,
+        );
+        Image::from_layer(layer)
+            .write()
+            .to_file(&path)
+            .expect("write");
+
+        let f = ExrFile::open(&path).expect("prefixed channels open");
+        let mut r = f.reader().expect("reader");
+        let got = f.read_tile(&mut r, 0, 0).expect("tile").expect_half();
+        let [r0, g0, b0] = [got[0], got[1], got[2]].map(f16::to_f32);
+        assert_eq!((r0, g0, b0), (0.25, 0.5, 0.75));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

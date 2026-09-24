@@ -37,26 +37,18 @@
 //! A `<UDIM>` / `<UVTILE>` token converts the whole set, one `.tx` per tile,
 //! which is how the renderer expects to find them.
 
+use crust_assets::tiled::TxFormat;
 use crust_core::ColorSpace;
 use std::path::{Path, PathBuf};
-
-/// Which backing to write, if the source's range is not to decide.
-#[derive(Clone, Copy, PartialEq)]
-enum Format {
-    Tiff,
-    Exr,
-    /// 8-bit sources take TIFF, float ones take EXR.
-    FromSource,
-}
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut args: Vec<String> = Vec::new();
-    let mut format = Format::FromSource;
+    let mut format = TxFormat::FromRange;
     for a in &argv {
         match a.split_once('=') {
-            Some(("--format", "tiff" | "tif" | "tx")) => format = Format::Tiff,
-            Some(("--format", "exr")) => format = Format::Exr,
+            Some(("--format", "tiff" | "tif" | "tx")) => format = TxFormat::Tiff,
+            Some(("--format", "exr")) => format = TxFormat::Exr,
             Some(("--format", other)) => {
                 eprintln!("unknown --format {other} — expected tiff or exr");
                 std::process::exit(2);
@@ -159,127 +151,20 @@ fn main() {
     }
 }
 
-/// The source as it was authored: either 8-bit samples in its own encoding, or
-/// floats that are already light.
-enum Source {
-    Bytes(Vec<u8>),
-    Floats(Vec<f32>),
-}
-
-fn decode(src: &Path) -> Result<(Source, usize, usize), String> {
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    // EXR goes through crust's own reader: the workspace's `image` has no `exr`
-    // feature, and crust-assets is where every format decoder lives anyway.
-    if ext == "exr" {
-        let (pixels, w, h) =
-            crust_assets::read_exr_rgb(src).ok_or_else(|| "could not decode".to_string())?;
-        return Ok((Source::Floats(pixels), w, h));
-    }
-
-    let mut reader = image::ImageReader::open(src)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    // Same reasoning as the decoder: these are trusted, locally authored
-    // assets, and an 8K texture exceeds the default allocation limit — which
-    // is exactly the size this tool exists for.
-    reader.no_limits();
-    let img = reader.decode().map_err(|e| e.to_string())?;
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    // A Radiance `.hdr` (and any float or 16-bit source `image` hands back)
-    // keeps its range; everything else is genuinely 8-bit and narrowing it
-    // would be inventing precision to throw away.
-    let float = ext == "hdr"
-        || matches!(
-            img.color(),
-            image::ColorType::Rgb32F | image::ColorType::Rgba32F
-        );
-    if float {
-        Ok((Source::Floats(img.to_rgb32f().into_raw()), w, h))
-    } else {
-        Ok((Source::Bytes(img.to_rgb8().into_raw()), w, h))
-    }
-}
-
+/// One tile, through the same conversion `crust-render --auto-tx` runs
+/// (`crust_assets::tiled::make_tx`), written beside the source.
 fn convert(
     src: &Path,
     space: ColorSpace,
-    format: Format,
+    format: TxFormat,
 ) -> Result<(PathBuf, &'static str, u64, u64), String> {
-    let (source, w, h) = decode(src)?;
-    if w == 0 || h == 0 {
-        return Err("zero-sized image".into());
-    }
-
-    let dst = src.with_extension("tx");
-    if dst == src {
-        return Err("input is already a .tx".into());
-    }
-
-    // The default: a source that carries light beyond what 8 bits can express
-    // takes the backing that can hold it. Deciding on *content* rather than on
-    // the extension is what keeps a `.hdr` of an overcast sky — nothing above
-    // 1.0 in it — from paying double for a range it never uses.
-    let hdr = match &source {
-        Source::Bytes(_) => false,
-        Source::Floats(v) => v.iter().any(|&s| s > 1.0),
-    };
-    let exr = match format {
-        Format::Tiff => false,
-        Format::Exr => true,
-        Format::FromSource => hdr,
-    };
-
-    let (kind, levels) = if exr {
-        // EXR has no transfer curve, so the decode happens once, here, and the
-        // space is recorded as the one the file is to be bound with.
-        let linear: Vec<f32> = match &source {
-            Source::Floats(v) => v
-                .iter()
-                .map(|&s| crust_assets::to_linear(space, s))
-                .collect(),
-            Source::Bytes(v) => v
-                .iter()
-                .map(|&b| crust_assets::to_linear(space, b as f32 / 255.0))
-                .collect(),
-        };
-        (
-            "half, exr",
-            crust_assets::tiled::write_tx_exr(&dst, &linear, w, h, space)
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        let bytes: Vec<u8> = match &source {
-            Source::Bytes(v) => v.clone(),
-            // Clamping is the honest report of what the TIFF backing can hold;
-            // the default only lands here for a float source whose range fits,
-            // and `--format=tiff` on a real HDR is the caller's choice.
-            Source::Floats(v) => v
-                .iter()
-                .map(|&s| (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-                .collect(),
-        };
-        (
-            "8-bit, tiff",
-            crust_assets::tiled::write_tx(&dst, &bytes, w, h, space).map_err(|e| e.to_string())?,
-        )
-    };
-    if !exr && hdr {
+    let made = crust_assets::tiled::make_tx_atomic(src, space, format)?;
+    if made.clipped {
         eprintln!(
             "warning: {} holds values above 1.0 that a TIFF backing clips — \
              drop --format=tiff to keep them",
             src.display()
         );
     }
-
-    let bytes_in = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
-    let bytes_out = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
-    // Worth printing: a reader that sees fewer levels than it expects is
-    // looking at a truncated file, and the count is the cheapest way to notice.
-    debug_assert!(!levels.is_empty());
-    Ok((dst, kind, bytes_in, bytes_out))
+    Ok((made.dst, made.kind, made.bytes_in, made.bytes_out))
 }
