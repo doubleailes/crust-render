@@ -244,32 +244,44 @@ const MIN_SPHERICAL_RECT_SR: f64 = 1e-4;
 const MAX_SPHERICAL_RECT_SR: f64 = 6.22;
 
 /// How far from perpendicular a rectangle's edges may be, as the cosine of
-/// the angle between them, before it is treated as a sheared parallelogram.
-/// The same tolerance the importer uses to decide whether a light's
-/// transformed −Z is still perpendicular to it.
-const RECT_ORTHOGONALITY: f32 = 1e-5;
+/// the angle between them in f64, before it is treated as a sheared
+/// parallelogram and area-sampled.
+///
+/// The spherical-rectangle map samples an exact rectangle, and the point it
+/// returns is placed through the light's own edges, so any shear it lets
+/// through is a mismatch between the shape sampled and the density reported —
+/// a bias of the order of this cosine. It is therefore set at the level f32
+/// itself leaves on an unsheared light: the edges of a rotated rectangle come
+/// out of an f32 transform perpendicular to a few parts in 10⁷, and an
+/// authored shear is orders of magnitude above it.
+const RECT_ORTHOGONALITY: f64 = 1e-6;
 
 impl RectShape {
     pub fn new(origin: Vec3A, edge_u: Vec3A, edge_v: Vec3A, normal: Vec3A) -> Self {
         let normal = normal.normalize();
-        let (lu, lv) = (edge_u.length(), edge_v.length());
+        let u = DVec3::from(Vec3::from(edge_u));
+        let v = DVec3::from(Vec3::from(edge_v));
+        let (lu, lv) = (u.length(), v.length());
         let rectangle = lu > 0.0
             && lv > 0.0
             && (lu * lv).is_finite()
-            && edge_u.dot(edge_v).abs() <= RECT_ORTHOGONALITY * lu * lv;
+            && u.dot(v).abs() <= RECT_ORTHOGONALITY * lu * lv;
         let frame = rectangle.then(|| {
-            let x = DVec3::from(Vec3::from(edge_u)).normalize();
+            let x = u / lu;
             // Gram-Schmidt, so the frame is orthonormal to f64 precision even
-            // though the edges are only perpendicular to f32's.
-            let v = DVec3::from(Vec3::from(edge_v));
-            let y = (v - v.dot(x) * x).normalize();
+            // though the edges are only perpendicular to f32's. The height is
+            // the edge's component *across* `edge_u`, which makes the sampled
+            // rectangle's area the parallelogram's exactly; what shear is left
+            // is below `RECT_ORTHOGONALITY`.
+            let across = v - v.dot(x) * x;
+            let height = across.length();
             RectFrame {
                 origin: DVec3::from(Vec3::from(origin)),
                 x,
-                y,
-                z: x.cross(y),
-                width: lu as f64,
-                height: lv as f64,
+                y: across / height,
+                z: x.cross(across / height),
+                width: lu,
+                height,
                 normal: DVec3::from(Vec3::from(normal)),
             }
         });

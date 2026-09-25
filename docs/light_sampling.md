@@ -427,7 +427,9 @@ solid angle the rectangle subtends, pdf `1/Ω`, area-preserving from `[0,1]²`.
   light exactly as an area sample does: on the triangles a bounce ray hits, and
   at the texel a textured card reads.
 - **Area sampling stays, on both hooks alike** (`RectShape::spherical_rect`):
-  - for a sheared parallelogram (edges more than 1e-5 from perpendicular);
+  - for a sheared parallelogram (edges more than 1e-6 from perpendicular, in
+    f64: the map samples an exact rectangle placed through the light's own
+    edges, so any shear it let through would be a bias of that order);
   - from behind the one-sided light or on its plane;
   - outside `[1e-4, 6.22]` sr, pbrt-v4's `BilinearPatch` bounds.
 - **Textured cards use it too.** pbrt-v4 gives the map up for an image quad

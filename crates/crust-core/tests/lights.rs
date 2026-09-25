@@ -427,6 +427,32 @@ fn rect_light_estimates_the_irradiance() {
     );
 }
 
+/// The map samples an exact rectangle and places the point through the
+/// light's own edges, so a shear it accepts is a bias. One far below the
+/// tolerance — what f32 leaves on a rotated light — still takes the map and
+/// reports the solid angle of the parallelogram actually sampled; one just
+/// above it is area-sampled on both hooks.
+#[test]
+fn rect_light_takes_the_map_only_when_the_edges_are_perpendicular() {
+    let (origin, eu, ev, from) = near_rect();
+    let slight = ev + 2e-7 * eu;
+    let light = AreaLight::new(
+        Box::new(RectShape::new(origin, eu, slight, Vec3A::Z)),
+        Arc::new(Emissive::new(Vec3A::ONE)),
+        1,
+    );
+    let omega = rect_solid_angle(from, origin, eu, slight, (0.0, 1.0), (0.0, 1.0));
+    let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+    assert!(
+        ((pdf as f64) * omega - 1.0).abs() < 1e-5,
+        "{pdf} vs {omega}"
+    );
+
+    let sheared = RectShape::new(origin, eu, ev + 2e-6 * eu, Vec3A::Z);
+    assert!(sheared.sample_solid_angle(from, 0.3, 0.6).is_none());
+    assert!(sheared.solid_angle_pdf(from, Vec3A::ZERO).is_none());
+}
+
 /// Area sampling stays wherever the map does not apply or does not pay: a
 /// sheared parallelogram, a shading point behind the one-sided light or on
 /// its plane, and a light too small to be worth it. Both MIS sides fall back
