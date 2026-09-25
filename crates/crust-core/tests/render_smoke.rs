@@ -579,7 +579,7 @@ fn power_light_selection_agrees_with_uniform_in_expectation() {
     let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
 
     let mut by_power = LightList::new();
-    for l in &lights.lights {
+    for l in lights.lights() {
         by_power.add(l.clone());
     }
     by_power.select_by(LightSelection::Power);

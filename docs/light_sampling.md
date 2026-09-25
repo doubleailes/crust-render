@@ -477,7 +477,11 @@ of directions.
 - pdf `1/(2π(1 − cos θ_max))`, constant. No sample is wasted on the back.
 - pbrt-v4 (`Sphere::Sample(ctx, u)`) falls back to area sampling inside the
   sphere, and switches to a Taylor expansion below `sin² θ_max < sin² 1.5°`,
-  where `1 − cos θ_max` cancels catastrophically in f32.
+  where `1 − cos θ_max` cancels catastrophically in f32. Its expansion draws
+  `sin² θ = u·sin² θ_max`, whose solid-angle density goes as `cos θ` rather than
+  being the constant it reports — a bias of at most `sin² θ_max / 4`, 1.7e-4.
+  crust keeps the threshold and replaces the expansion with the exact
+  `t = u·sin² θ_max/(1 + cos θ_max)`, `sin² θ = t(2 − t)`.
 - Cycles does the same (`kernel/light/point.h`).
 - **Everyone does this.** Next step up is **projected** solid angle, which
   samples proportionally to `cos θ_x` as well and is ideal for diffuse. See
@@ -948,7 +952,9 @@ estimator unbiased.
   - Items (e), (g) and (h) plug into the same hook.
 - `SphereShape` implements it as pbrt-v4 does:
   - area fallback inside the sphere;
-  - the Taylor branch below `sin² θ_max < 6.85e-4` (`SMALL_CONE_SIN2`).
+  - a cancellation-free branch below `sin² θ_max < 6.85e-4` (`SMALL_CONE_SIN2`),
+    exact where pbrt's Taylor expansion is not (§5.2);
+  - no cone at all, on both hooks, when its pdf would overflow f32.
 - `AffineShape` spheres (non-uniform scale) sample the unit sphere's cone in local
   space, with the direction map's Jacobian `|Mω|³ / |det M|` on the pdf (§3.7).
   Disks and tubes remain area-sampled. §5.2 lists what would replace that:
