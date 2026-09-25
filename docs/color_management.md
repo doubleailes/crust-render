@@ -183,6 +183,8 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
+| LDR `RectLight` `texture:file` (PNG/JPG/…) | `crust-assets/src/lib.rs` (`load_light_texture` → `read_rgb_image`) | piecewise sRGB | ✅ same decoder as an LDR env image |
+| `.hdr` / `.exr` `RectLight` `texture:file` | same | none (pass-through) | ✅ correct — kept as authored, never narrowed to 8 bits |
 | Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
 | Streamed `.tx`, EXR backing (`half` tiles) | — | none (decoded once at conversion) | ✅ correct — the file stores linear samples and records which space they came from |
 

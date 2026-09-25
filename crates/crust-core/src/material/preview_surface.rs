@@ -98,7 +98,7 @@ impl Wrap {
                 let t = x.rem_euclid(2.0);
                 Some(if t > 1.0 { 2.0 - t } else { t }.min(TOP))
             }
-            Wrap::Black => (0.0..=1.0).contains(&x).then_some(x),
+            Wrap::Black => (0.0..=1.0).contains(&x).then_some(x.min(TOP)),
         }
     }
 }
@@ -314,9 +314,15 @@ impl PreviewSurface {
     /// under the same guard as the MaterialX adapter: a normal map may not
     /// flip the surface, or silhouettes shade black.
     fn shading_normal(&self, rec: &HitRecord) -> Vec3A {
-        let Some(input) = self.normal.as_ref().filter(|i| i.tex.is_some()) else {
+        let Some(input) = self.normal.as_ref() else {
             return rec.normal;
         };
+        // A texture that did not load reads its fallback, as every other
+        // input does. The schema's (0, 0, 1) is the unperturbed normal, so
+        // that case skips the frame rotation.
+        if input.tex.is_none() && input.color(input.fallback) == Vec3A::Z {
+            return rec.normal;
+        }
         let v = input.color(input.sample(rec));
         if !v.is_finite() {
             return rec.normal;
@@ -484,6 +490,10 @@ mod tests {
         i.wrap[0] = Wrap::Black;
         assert_eq!(at(&i, 1.5), 0.0);
         assert_eq!(at(&i, 0.5), 0.5);
+        assert_eq!(at(&i, 0.0), 0.0);
+        // The host wraps 1.0 to 0.0, so the inclusive edge must be pulled
+        // inside the domain or it samples the opposite side.
+        assert!(at(&i, 1.0) < 1.0 && at(&i, 1.0) > 0.999);
     }
 
     #[test]
@@ -537,6 +547,19 @@ mod tests {
         let n = m.probe(&hit(0.5)).1;
         assert!(n.x > 0.5 && n.z > 0.5, "tilts toward +tangent: {n}");
         assert!((n.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_normal_map_that_did_not_load_reads_its_fallback() {
+        let mut nm = input(None, TexOutput::Rgb);
+        nm.fallback = [0.0, 0.0, 1.0, 1.0];
+        let m = PreviewSurface::new("n".into(), OpenPBR::default(), vec![], Some(nm.clone()));
+        assert_eq!(m.probe(&hit(0.5)).1, Vec3A::Z, "neutral fallback");
+
+        nm.fallback = [0.6, 0.0, 0.8, 1.0];
+        let m = PreviewSurface::new("n".into(), OpenPBR::default(), vec![], Some(nm));
+        let n = m.probe(&hit(0.5)).1;
+        assert!(n.x > 0.5 && n.z > 0.5, "authored fallback tilts: {n}");
     }
 
     #[test]

@@ -74,11 +74,26 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
     let layer = &image.layer_data;
     let (w, h) = (layer.size.width(), layer.size.height());
     let channels = &layer.channel_data.list;
-    let base = |c: &AnyChannel<FlatSamples>| {
-        let name = c.name.to_string();
-        name.rsplit('.').next().unwrap_or_default().to_owned()
+    // Sub-sampled channels hold one sample per `sampling` block, not per
+    // pixel, so reading them in raster order would pack them into the top of
+    // the image. Refused, as the streaming reader refuses them.
+    if channels.iter().any(|c| c.sampling != exr::math::Vec2(1, 1)) {
+        error!(
+            "EXR decode failed for {}: sub-sampled channels are not supported",
+            path.display()
+        );
+        return None;
+    }
+    // Base names compare case-insensitively, exactly as the streaming
+    // reader's `resolve_rgb` does, so both paths pick the same channels.
+    let find = |want: &str| {
+        channels.iter().position(|c| {
+            let name = c.name.to_string();
+            name.rsplit('.')
+                .next()
+                .is_some_and(|base| base.eq_ignore_ascii_case(want))
+        })
     };
-    let find = |want: &str| channels.iter().position(|c| base(c) == want);
     let mono = find("Y").or_else(|| (channels.len() == 1).then_some(0));
     let pick = |want: &str| find(want).or(mono);
     let rgb = [pick("R"), pick("G"), pick("B")];

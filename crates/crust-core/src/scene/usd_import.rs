@@ -3128,9 +3128,30 @@ struct LuxParams {
 /// `diffuse` / `specular` are per-lobe multipliers, and crust's light
 /// transport does not split a light's contribution by lobe.
 fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
-    let intensity = attr_f32(&light.intensity_attr()).unwrap_or(1.0);
-    let exposure = attr_f32(&light.exposure_attr()).unwrap_or(0.0);
-    let color = attr_color3f(&light.color_attr()).unwrap_or([1.0, 1.0, 1.0]);
+    // A non-finite value would reach both MIS halves as NaN radiance, so it
+    // falls back to the schema default like the shaping inputs do.
+    let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
+        Some(x) if !x.is_finite() => {
+            warn!(
+                "{}: inputs:{name} = {x} is not finite — using its fallback {fallback}",
+                prim.path()
+            );
+            fallback
+        }
+        v => v.unwrap_or(fallback),
+    };
+    let intensity = finite("intensity", attr_f32(&light.intensity_attr()), 1.0);
+    let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
+    let color = match attr_color3f(&light.color_attr()) {
+        Some(c) if c.iter().any(|x| !x.is_finite()) => {
+            warn!(
+                "{}: inputs:color = {c:?} is not finite — using its fallback (1, 1, 1)",
+                prim.path()
+            );
+            [1.0; 3]
+        }
+        c => c.unwrap_or([1.0; 3]),
+    };
     let gain = intensity * 2f32.powf(exposure);
     let mut emission = Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain);
 
@@ -3202,6 +3223,9 @@ fn lux_shaping(
         custom_f32(prim, "inputs:shaping:focus"),
     )
     .unwrap_or(0.0);
+    // The schema's fallback is black, not white ("The default tint is
+    // black", usdLux/schema.usda): unauthored, focus darkens off-axis
+    // emission rather than leaving it neutral, exactly as in hdEmbree.
     shaping.focus_tint = match custom_color3(prim, "inputs:shaping:focusTint") {
         Some(c) if !c.is_finite() => {
             warn!(
@@ -4214,6 +4238,14 @@ fn preview_uv_input(
         );
         return None;
     };
+    if matches!(output, TexOutput::A) {
+        // The host samplers return opaque RGB, so the alpha channel reads 1.0
+        // whatever the file holds — an approximation worth saying out loud.
+        warn!(
+            "UsdPreviewSurface at {mat_path}: {name} reads texture alpha ({}), which crust              does not decode — it reads 1.0 before scale/bias",
+            source.path()
+        );
+    }
     let tex = Shader::get(stage, source.path().prim_path())
         .ok()
         .flatten()?;

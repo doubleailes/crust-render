@@ -1490,4 +1490,25 @@ mod tests {
         let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
         assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
     }
+
+    /// The streaming reader matches base names case-insensitively, so the
+    /// preload reader must too, or the same file decodes differently
+    /// depending on whether a `.tx` stands beside it.
+    #[test]
+    fn channel_base_names_match_case_insensitively() {
+        let dir = scratch("exr_lowercase");
+        let p = dir.join("c.exr");
+        write_exr_channels(
+            &p,
+            1,
+            1,
+            &[
+                ("rgb.b", vec![0.3]),
+                ("rgb.g", vec![0.2]),
+                ("rgb.r", vec![0.1]),
+            ],
+        );
+        let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+        assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
+    }
 }
