@@ -630,6 +630,29 @@ Callgrind, whole process (import included, so the render share is larger),
   which is within this machine's noise (§8, and CLAUDE.md's "Measuring a
   change").
 
+**Revised for textured materials.** The trade above assumed `eval` is cheap,
+and none of the scenes measured is heavy enough to show where it is not. A
+`PreviewSurface` or `MtlxMaterial` samples its whole texture network on every
+`eval` call, and ALab (mk020_0281 frame 1004, 640x360, 32 spp) binds 4–5 streamed
+UDIM EXRs plus a normal map per surface in an interior where most shadow rays
+are blocked. There, the shipped order was **slower than the one it replaced**,
+because every occluded sample now paid for a texture fetch. The order is
+therefore per material: `Material::eval_reads_textures()` (true for
+`PreviewSurface`, `MtlxMaterial`, and an `OpenPBR` with Ptex) puts the shadow
+ray before `eval`, and every other material keeps radiance → eval → shadow.
+Both orders are bit-identical. Interleaved runs, same machine:
+
+| ALab | render | shadow rays |
+|---|---|---|
+| eval before the shadow ray, for every material | 87.0 s, 96.7 s | 10 331 289 |
+| **shadow ray before a textured eval (shipped)** | **67.0 s, 65.9 s** | 14 986 721 |
+
+The two images have 0 differing pixels. The five samples re-checked at 16 spp
+(`usdpreview_textured`, `materialx_basic`, `ptex_quads`, `cornellbox`,
+`usdlux`) are also bit-identical to the previous build. Callgrind has not
+been re-run on the table above, so its three textured rows describe the
+previous order.
+
 ---
 
 ## 4. The anatomy of the direct-lighting estimator

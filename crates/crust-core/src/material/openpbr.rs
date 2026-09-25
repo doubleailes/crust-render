@@ -1275,6 +1275,10 @@ impl Material for OpenPBR {
         self.base_color_ptex.as_ref().map(|t| &*t.0)
     }
 
+    fn eval_reads_textures(&self) -> bool {
+        self.base_color_ptex.is_some()
+    }
+
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         // Mirror the ray construction of `scatter_importance` for an
         // externally chosen direction (e.g. from the guiding field), so a

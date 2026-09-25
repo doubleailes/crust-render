@@ -375,6 +375,10 @@ impl Material for PreviewSurface {
         true
     }
 
+    fn eval_reads_textures(&self) -> bool {
+        true
+    }
+
     fn uv_primvar(&self) -> Option<&str> {
         self.uv_primvar.as_deref()
     }
