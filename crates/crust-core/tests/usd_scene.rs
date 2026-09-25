@@ -924,7 +924,7 @@ fn infinite_lights_are_found_by_escaping_rays() {
 
     let mut dome_like = 0;
     let mut cone_like = 0;
-    for light in &scene.lights.lights {
+    for light in scene.lights.lights() {
         assert_eq!(
             light.geom_id(),
             None,

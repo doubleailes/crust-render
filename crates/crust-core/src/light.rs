@@ -54,9 +54,10 @@ pub trait LightShape: Send + Sync {
     }
 }
 
-/// `sin² 1.5°`. Below it a cone's `1 − cos θ_max` is taken from its Taylor
-/// expansion instead of the subtraction, which in f32 cancels to nothing for a
-/// small, distant sphere — pbrt-v4's threshold and remedy.
+/// `sin² 1.5°`, pbrt-v4's threshold. Below it a cone's `1 − cos θ_max` is
+/// taken as `sin² θ_max / (1 + cos θ_max)` instead of by the subtraction, which
+/// in f32 cancels to nothing for a small, distant sphere, and a direction in it
+/// is drawn the same cancellation-free way (see [`SubtendedCone::sample`]).
 const SMALL_CONE_SIN2: f32 = 0.000_685_23;
 
 /// The cone a sphere subtends from a point outside it.
@@ -72,8 +73,10 @@ struct SubtendedCone {
 impl SubtendedCone {
     /// `None` from inside the sphere (or on it), where there is no cone and
     /// every direction reaches the surface — and for a cone too thin to
-    /// represent (a zero radius, or `r²/d²` underflowing), which would
-    /// otherwise divide zero by zero below.
+    /// represent: a zero radius, `r²/d²` underflowing, or a solid angle so
+    /// small that its pdf overflows. Those fall back to area sampling, and
+    /// since both [`LightShape`] hooks construct the cone here, they fall back
+    /// together.
     fn new(center: Vec3A, radius: f32, from: Vec3A) -> Option<Self> {
         let d2 = (center - from).length_squared();
         let r2 = radius * radius;
@@ -86,20 +89,39 @@ impl SubtendedCone {
         }
         let cos_max = (1.0 - sin2_max).max(0.0).sqrt();
         let one_minus_cos_max = if sin2_max < SMALL_CONE_SIN2 {
-            0.5 * sin2_max
+            sin2_max / (1.0 + cos_max)
         } else {
             1.0 - cos_max
         };
-        Some(Self {
+        let cone = Self {
             sin2_max,
             cos_max,
             one_minus_cos_max,
-        })
+        };
+        let pdf = cone.pdf();
+        (pdf.is_finite() && pdf > 0.0).then_some(cone)
     }
 
     /// Uniform over the cone: `1 / (2π (1 − cos θ_max))`.
     fn pdf(&self) -> f32 {
         1.0 / (2.0 * PI * self.one_minus_cos_max)
+    }
+
+    /// A direction uniform over the cone, as `(sin² θ, cos θ)` of its angle θ
+    /// off the axis: `1 − cos θ = u (1 − cos θ_max)`, which is what makes it
+    /// uniform in solid angle. The small-cone branch keeps that exact rather
+    /// than approximating it — pbrt-v4 draws `sin² θ = u sin² θ_max` there,
+    /// whose density is proportional to `cos θ` and so disagrees with
+    /// [`SubtendedCone::pdf`] by up to `sin² θ_max / 4` — and takes `sin² θ` as
+    /// `t (2 − t)` rather than `1 − cos² θ`, which would cancel.
+    fn sample(&self, u: f32) -> (f32, f32) {
+        if self.sin2_max < SMALL_CONE_SIN2 {
+            let t = u * self.one_minus_cos_max;
+            (t * (2.0 - t), 1.0 - t)
+        } else {
+            let cos = (self.cos_max - 1.0) * u + 1.0;
+            (1.0 - cos * cos, cos)
+        }
     }
 }
 
@@ -155,13 +177,7 @@ fn sample_sphere_cone(
     let cone = SubtendedCone::new(center, radius, from)?;
     // A direction uniform in the cone, as its angle θ off the axis toward the
     // centre...
-    let (sin2_theta, cos_theta) = if cone.sin2_max < SMALL_CONE_SIN2 {
-        let sin2 = cone.sin2_max * u;
-        (sin2, (1.0 - sin2).sqrt())
-    } else {
-        let cos = (cone.cos_max - 1.0) * u + 1.0;
-        (1.0 - cos * cos, cos)
-    };
+    let (sin2_theta, cos_theta) = cone.sample(u);
     // ...then the point it meets on the sphere in closed form, as the angle α
     // at the centre between the axis and that point (the law of
     // sines/cosines), rather than by intersecting a ray. `sin² θ / sin θ_max`
@@ -891,9 +907,12 @@ pub const DEFENSIVE_SHARE: f64 = 0.5;
 /// side weights emission it found by chance with it, and the two sides must
 /// describe one strategy or emission is double-counted.
 pub struct LightList {
-    /// The lights. Add them through [`LightList::add`], which keeps the
-    /// geometry index and the selection in step with this vector.
-    pub lights: Vec<Arc<dyn Light>>,
+    /// The lights. Private, so that [`LightList::add`] is the only way in:
+    /// it keeps the geometry index and the selection in step with this
+    /// vector, and a light pushed past it would be sampled by NEE yet
+    /// unattributed on the bounce side. Read it through
+    /// [`LightList::lights`].
+    lights: Vec<Arc<dyn Light>>,
     /// Per-light selection probability, empty while the selection is
     /// uniform — [`LightList::select_by`] fills it.
     pmf: Vec<f32>,
@@ -1079,6 +1098,11 @@ impl LightList {
             .map(|(index, light)| (light, self.pmf(index)))
     }
 
+    /// The lights, in the order they were added.
+    pub fn lights(&self) -> &[Arc<dyn Light>] {
+        &self.lights
+    }
+
     /// Returns the number of lights in the `LightList`.
     pub fn count(&self) -> usize {
         self.lights.len()
@@ -1088,6 +1112,50 @@ impl LightList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The small-cone branch must draw `1 − cos θ = u (1 − cos θ_max)` — what
+    /// its constant pdf claims — and not pbrt-v4's `sin² θ = u sin² θ_max`,
+    /// which is off by up to `sin² θ_max / 4`: 7.5e-5 at `u = ½` just under
+    /// the threshold, far above f32's resolution here.
+    #[test]
+    fn small_cone_samples_are_uniform_in_solid_angle() {
+        // sin² θ_max = 6e-4, just under `SMALL_CONE_SIN2`.
+        let cone = SubtendedCone::new(Vec3A::ZERO, 6e-4f32.sqrt(), Vec3A::new(0.0, 0.0, 1.0))
+            .expect("outside the sphere");
+        assert!(cone.sin2_max < SMALL_CONE_SIN2);
+        for u in [0.1f32, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            let (sin2, cos) = cone.sample(u);
+            // `sin² / (1 + cos)` is `1 − cos θ` without the cancellation.
+            let ratio = (sin2 / (1.0 + cos)) / (u * cone.one_minus_cos_max);
+            assert!((ratio - 1.0).abs() < 1e-5, "u = {u}: ratio {ratio}");
+            assert!((sin2 + cos * cos - 1.0).abs() < 1e-6);
+        }
+        // Both branches agree on `1 − cos θ_max` across the threshold.
+        let exact = 1.0 - (1.0 - 6e-4f64).sqrt();
+        assert!(((cone.one_minus_cos_max as f64) / exact - 1.0).abs() < 1e-6);
+    }
+
+    /// A cone too thin for its pdf to be finite is no cone: both hooks fall
+    /// back to area sampling rather than hand MIS an infinite density, whose
+    /// square is `inf / inf = NaN` in the power heuristic.
+    #[test]
+    fn a_cone_whose_pdf_overflows_is_refused() {
+        let shape = SphereShape {
+            center: Vec3A::new(0.0, 0.0, 10.0),
+            radius: 1e-20,
+        };
+        assert!(shape.sample_solid_angle(Vec3A::ZERO, 0.5, 0.5).is_none());
+        assert!(shape.solid_angle_pdf(Vec3A::ZERO, shape.center).is_none());
+        // ...while an ordinary tiny, distant sphere still samples its cone,
+        // at a finite density.
+        let small = SphereShape {
+            center: Vec3A::new(0.0, 0.0, 1e3),
+            radius: 1e-3,
+        };
+        let (_, pdf) = small.sample_solid_angle(Vec3A::ZERO, 0.5, 0.5).unwrap();
+        assert!(pdf.is_finite() && pdf > 0.0);
+        assert_eq!(small.solid_angle_pdf(Vec3A::ZERO, small.center), Some(pdf));
+    }
 
     #[test]
     fn sphere_shape_samples_lie_on_surface() {

@@ -697,7 +697,7 @@ fn a_sphere_light_is_geometry_plus_a_light_hidden_from_the_camera() {
             .emitted()
             .abs_diff_eq(Vec3A::new(2.0, 1.0, 0.5), 1e-5)
     );
-    assert_eq!(scene.lights.lights[0].geom_id(), Some(0));
+    assert_eq!(scene.lights.lights()[0].geom_id(), Some(0));
     let ray = Ray::new(Vec3A::new(0.0, 5.0, 10.0), -Vec3A::Z);
     assert!(
         scene
@@ -815,7 +815,7 @@ fn a_rect_light_is_two_triangles_and_one_light() {
         "{bb:?}"
     );
     // It emits along local -Z: a point below it on -Z is lit.
-    let s = scene.lights.lights[0]
+    let s = scene.lights.lights()[0]
         .sample_li(Vec3A::new(0.0, 0.0, 0.0), 0.5, 0.5)
         .expect("reachable");
     assert!(s.direction.z > 0.99);
@@ -844,13 +844,13 @@ fn infinite_lights_add_no_geometry() {
     );
     assert_eq!(scene.world.count(), 0);
     assert_eq!(scene.lights.count(), 2);
-    for l in &scene.lights.lights {
+    for l in scene.lights.lights() {
         assert!(l.geom_id().is_none());
     }
     // The dome answers every escaping ray with its colour.
     let dome = scene
         .lights
-        .lights
+        .lights()
         .iter()
         .find(|l| l.escaped(Vec3A::ZERO, Vec3A::X).is_some())
         .expect("dome");
@@ -862,7 +862,7 @@ fn infinite_lights_add_no_geometry() {
     // a ray escaping straight up finds it.
     let sun = scene
         .lights
-        .lights
+        .lights()
         .iter()
         .find(|l| {
             l.escaped(Vec3A::ZERO, Vec3A::Y)
@@ -882,7 +882,7 @@ fn infinite_lights_add_no_geometry() {
 /// equal the sampled one. Returns how many samples carried radiance.
 fn assert_mis_sides_agree(scene: &Scene, from: Vec3A) -> usize {
     assert_eq!(scene.lights.count(), 1);
-    let light = &scene.lights.lights[0];
+    let light = &scene.lights.lights()[0];
     let mut lit = 0;
     let mut rng = openqmc::pcg::Rng::new(11);
     for _ in 0..64 {
@@ -924,7 +924,7 @@ fn assert_mis_sides_agree(scene: &Scene, from: Vec3A) -> usize {
 /// The radiance a light sends toward `from`, averaged over NEE samples that
 /// carry any (a uniform, unshaped light's radiance is a constant).
 fn radiance_toward(scene: &Scene, from: Vec3A) -> Vec3A {
-    let light = &scene.lights.lights[0];
+    let light = &scene.lights.lights()[0];
     (0..64)
         .filter_map(|i| {
             let (u, v) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
@@ -1158,7 +1158,7 @@ fn distant_light_units_follow_the_spec() {
                  float inputs:angle = {angle}\n {extra} }}"
             ),
         );
-        let l = &s.lights.lights[0];
+        let l = &s.lights.lights()[0];
         let smp = l.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
         let half = 0.5 * crust_core::DistantLight::clamp_diameter(angle).to_radians();
         (
@@ -1642,7 +1642,7 @@ def RectLight "Card"
 "#,
     );
     let scene = Scene::from_usd_with_assets(&path, &Card).unwrap();
-    let light = &scene.lights.lights[0];
+    let light = &scene.lights.lights()[0];
     // Aim NEE at each quadrant's centre through (u, v): the rect's sample
     // parameters run along local +X and +Y from its (−X, −Y) corner.
     let from = Vec3A::ZERO;

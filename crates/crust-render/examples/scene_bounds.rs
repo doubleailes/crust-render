@@ -57,5 +57,5 @@ fn main() {
         }
         None => println!("scene has no bounded geometry"),
     }
-    println!("lights = {}", scene.lights.lights.len());
+    println!("lights = {}", scene.lights.lights().len());
 }

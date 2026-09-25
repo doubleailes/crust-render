@@ -593,9 +593,14 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   must depend on `from` alone, never on `u`/`v`, and the two methods must answer for
   exactly the same `from`s with the same density. **`SphereShape` samples the cone it
   subtends** (Shirley et al. 1996, pbrt-v4's `Sphere::Sample`): uniform over the
-  visible cap, pdf `1/(2π(1 − cos θ_max))`, with pbrt's small-angle branch below
-  `sin² θ_max < sin² 1.5°` (`SMALL_CONE_SIN2`, where `1 − cos θ_max` cancels in f32),
-  and area sampling only from inside the sphere. Area sampling spent at least half its
+  visible cap, pdf `1/(2π(1 − cos θ_max))`, with pbrt's small-angle threshold
+  `sin² θ_max < sin² 1.5°` (`SMALL_CONE_SIN2`, where `1 − cos θ_max` cancels in f32)
+  but **not its approximation below it**: pbrt draws `sin² θ = u·sin² θ_max` there,
+  whose density goes as `cos θ` against a constant pdf, so crust takes
+  `1 − cos θ_max = sin² θ_max/(1 + cos θ_max)` and draws `t = u(1 − cos θ_max)`,
+  `sin² θ = t(2 − t)` — exact and cancellation-free (`SubtendedCone::sample`). A cone
+  whose pdf would overflow f32 is refused on both hooks, and area sampling only from
+  inside the sphere. Area sampling spent at least half its
   shadow rays on the hemisphere facing away. An **`AffineShape` sphere** (non-uniform
   scale) samples the *unit* sphere's cone in local space and maps the point through the
   placement — exact, because an affine map preserves which points of a convex surface
@@ -1665,8 +1670,8 @@ Schema mapping:
   `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power`,
   `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float). Missing attrs
-  fall back to defaults (128 spp, depth 32, 640×360, power MIS, triangle filter at
-  radius 1.0) defined as consts at the top of the file.
+  fall back to defaults (128 spp, depth 32, 640×360, power MIS, power light selection,
+  triangle filter at radius 1.0) defined as consts at the top of the file.
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.

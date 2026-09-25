@@ -1015,6 +1015,6 @@ fn light_list_finds_lights_by_geometry_id() {
 fn light_list_exposes_its_vector() {
     let mut l = LightList::new();
     l.add(Arc::new(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY)));
-    assert_eq!(l.lights.len(), 1);
-    assert!(l.lights[0].geom_id().is_none());
+    assert_eq!(l.lights().len(), 1);
+    assert!(l.lights()[0].geom_id().is_none());
 }
