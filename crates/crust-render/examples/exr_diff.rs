@@ -6,7 +6,8 @@
 //! ```
 //!
 //! Prints the number of differing pixels, the largest absolute and
-//! relative channel difference, and the mean absolute difference. A pure
+//! relative channel difference, the mean absolute difference, the RMSE and
+//! the relative MSE (against `a`, so pass the reference first). A pure
 //! performance change should report either zero differing pixels or a
 //! handful at the float epsilon (exact-tie ordering inside a BVH leaf),
 //! never a structural difference.
@@ -49,6 +50,7 @@ fn main() {
     let mut max_rel = 0.0f32;
     let mut sum_abs = 0.0f64;
     let mut sum_sq = 0.0f64;
+    let mut sum_rel_sq = 0.0f64;
     for p in 0..aw * ah {
         let mut pixel_differs = false;
         for c in 0..3 {
@@ -56,6 +58,7 @@ fn main() {
             let d = (x - y).abs();
             sum_abs += d as f64;
             sum_sq += (d as f64) * (d as f64);
+            sum_rel_sq += (d as f64) * (d as f64) / ((x as f64) * (x as f64) + 1e-2);
             if d != 0.0 {
                 pixel_differs = true;
                 max_abs = max_abs.max(d);
@@ -92,4 +95,10 @@ fn main() {
     // weights the outliers — which is what aliasing is. A filtered render
     // improves the RMSE against its own reference far more than the mean.
     println!("rmse: {:e}", (sum_sq / (total * 3) as f64).sqrt());
+    // Relative MSE against the *first* image, `(a − b)² / (a² + 0.01)`: the
+    // noise metric of the sampling literature, and the one to use when `a` is
+    // a high-spp reference. Unlike the RMSE it is not dominated by the few
+    // pixels that see a light directly, so it measures the lit surfaces a
+    // light-sampling change is actually meant to clean up.
+    println!("relmse: {:e}", sum_rel_sq / (total * 3) as f64);
 }
