@@ -2039,8 +2039,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
   ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
   rather than solid angle; the built-in sky
-  gradient is not a light, so NEE never samples it; and the shadow ray is traced before
-  the BSDF and emission are known to be non-zero. Measure changes with
+  gradient is not a light, so NEE never samples it. (The shadow ray is traced *last*,
+  after the light's radiance and `mat.eval`, and only for a non-zero product —
+  bit-identical, since it draws from its own `K_NEE_SHADOW` domain, §3.11 there.)
+  Measure changes with
   `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
   light filters, light/shadow linking and `ShadowAPI` are not read. A textured

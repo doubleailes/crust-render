@@ -1182,6 +1182,13 @@ fn volume_nee(
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
         return Vec3A::ZERO;
     };
+    // As at a surface vertex: no shadow ray for a connection already known
+    // to carry nothing (a one-sided light seen from behind). Bit-identical,
+    // since the ray's own draws come from `K_NEE_SHADOW`.
+    let phase_val = phase.pdf(wi.dot(s.direction));
+    if s.radiance * phase_val == Vec3A::ZERO {
+        return Vec3A::ZERO;
+    }
     let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
         .with_mask(crate::ray::MASK_SHADOW);
@@ -1190,7 +1197,6 @@ fn volume_nee(
         return Vec3A::ZERO;
     }
     let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
-    let phase_val = phase.pdf(wi.dot(s.direction));
     let weight = strategy.light_weight(light_pdf, phase_val);
     s.radiance * phase_val * tr * weight / light_pdf
 }
@@ -1556,20 +1562,27 @@ fn trace_path(
         {
             let light_dir_unit = ls.direction;
 
-            let shadow_ray = Ray::new(rec.p, light_dir_unit)
-                .with_time(ray.time())
-                .with_mask(crate::ray::MASK_SHADOW);
-
-            let shadow_tr =
-                shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
-            if shadow_tr != Vec3A::ZERO {
-                let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
-
-                // Evaluate the BSDF toward the light direction. Delta and
-                // transmissive materials return None — they cannot see a
-                // light-sampled direction and pick up emission via BSDF
-                // sampling instead.
-                if let Some((brdf_value, brdf_pdf)) = mat.eval(&ray, &rec, light_dir_unit) {
+            // Everything but visibility first, cheapest first, and the
+            // shadow ray only for a connection that could still carry light:
+            // the light's radiance (free — a shaped light outside its cone
+            // carries zero), then the BSDF (delta and transmissive materials
+            // return None from `eval` — they cannot see a light-sampled
+            // direction and pick up emission via BSDF sampling instead — and
+            // a light below the surface's horizon gets a zero value). Skipping
+            // the ray there is bit-identical: its contribution would be
+            // exactly zero, and the shadow ray's own draws come from
+            // `K_NEE_SHADOW`, which nothing else reads.
+            if ls.radiance != Vec3A::ZERO
+                && let Some((brdf_value, brdf_pdf)) = mat.eval(&ray, &rec, light_dir_unit)
+                && ls.radiance * brdf_value != Vec3A::ZERO
+            {
+                let shadow_ray = Ray::new(rec.p, light_dir_unit)
+                    .with_time(ray.time())
+                    .with_mask(crate::ray::MASK_SHADOW);
+                let shadow_tr =
+                    shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
+                if shadow_tr != Vec3A::ZERO {
+                    let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
                     // The competing strategy for this MIS weight is the
                     // bounce sampler, whose density toward the light is the
                     // guide/BSDF mixture whenever guiding is available at
