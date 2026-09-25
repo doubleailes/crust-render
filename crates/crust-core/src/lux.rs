@@ -258,6 +258,37 @@ impl Shaping {
         }
         f
     }
+
+    /// `∫ factor(ω) · weight(ω) dω` over the sphere of emission directions,
+    /// where `weight` is the emitter's projected area toward ω — which makes
+    /// the result the emitter's flux per unit radiance. It is what
+    /// power-proportional light selection weighs a shaped light by, so it need
+    /// be proportionate rather than exact.
+    ///
+    /// The quadrature is in rings about the axis, and it stops at the cone
+    /// angle, beyond which the factor is exactly zero. So a narrow spot is
+    /// resolved as finely as a wide one: a 2° cone gets the same 64 rings a
+    /// hemisphere does, where a fixed direction grid would step over it and
+    /// report no power at all.
+    pub fn integrate(&self, weight: impl Fn(Vec3A) -> f32) -> Vec3A {
+        const RINGS: usize = 64;
+        const AZIMUTHS: usize = 32;
+        let theta_max = self.cone_angle_deg.clamp(0.0, 180.0).to_radians();
+        let d_theta = theta_max / RINGS as f32;
+        let d_phi = 2.0 * PI / AZIMUTHS as f32;
+        let mut sum = Vec3A::ZERO;
+        for i in 0..RINGS {
+            let theta = (i as f32 + 0.5) * d_theta;
+            let (sin_t, cos_t) = theta.sin_cos();
+            for j in 0..AZIMUTHS {
+                let phi = (j as f32 + 0.5) * d_phi;
+                let local = Vec3A::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                let w = utils::align_to_normal(local, self.axis).normalize();
+                sum += self.factor(w) * weight(w) * (sin_t * d_theta * d_phi);
+            }
+        }
+        sum
+    }
 }
 
 impl IesShaping {
@@ -348,6 +379,12 @@ impl LightTexture {
         let index = |c: f32, n: usize| ((c * n as f32) as isize).clamp(0, n as isize - 1) as usize;
         self.pixels[index(t, self.height) * self.width + index(s, self.width)]
     }
+
+    /// The mean texel. Under the nearest lookup every texel covers the same
+    /// share of the light's surface, so this is the map's area average.
+    pub fn mean(&self) -> Vec3A {
+        self.pixels.iter().copied().sum::<Vec3A>() / self.pixels.len() as f32
+    }
 }
 
 /// A [`LightTexture`] laid onto a rectangle light's surface: the map from a
@@ -383,6 +420,11 @@ impl RectTexture {
             dual_u: edge_v.cross(n) / n2,
             dual_v: n.cross(edge_u) / n2,
         })
+    }
+
+    /// The map's average over the rectangle.
+    pub fn mean(&self) -> Vec3A {
+        self.image.mean()
     }
 
     /// The map's colour at a world point on the rectangle.

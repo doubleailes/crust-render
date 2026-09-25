@@ -7,6 +7,7 @@
 use clap::Parser;
 use crust_assets::FileAssets;
 use crust_core::Buffer;
+use crust_core::LightSelection;
 use crust_core::PixelFilter;
 use crust_core::Renderer;
 use crust_core::SamplingStrategy;
@@ -77,6 +78,10 @@ struct Cli {
     /// strategy alone to visualize what MIS balances between.
     #[arg(long, value_enum)]
     strategy: Option<Strategy>,
+    /// How NEE picks the light it samples at each vertex. Overrides the
+    /// scene's `crust:lightSelection` when set.
+    #[arg(long, value_enum)]
+    light_selection: Option<Selection>,
     /// Pixel reconstruction filter. Overrides the scene's
     /// `crust:pixelFilter` when set.
     #[arg(long, value_enum)]
@@ -130,6 +135,23 @@ impl From<Strategy> for SamplingStrategy {
             Strategy::Balance => SamplingStrategy::BalanceMis,
             Strategy::Light => SamplingStrategy::LightOnly,
             Strategy::Bsdf => SamplingStrategy::BsdfOnly,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, Copy)]
+enum Selection {
+    /// By power, defensively: lights at infinity keep their uniform share (default)
+    Power,
+    /// One light in N, whatever it emits (the renderer before selection, bit for bit)
+    Uniform,
+}
+
+impl From<Selection> for LightSelection {
+    fn from(s: Selection) -> Self {
+        match s {
+            Selection::Uniform => LightSelection::Uniform,
+            Selection::Power => LightSelection::Power,
         }
     }
 }
@@ -378,6 +400,10 @@ fn main() {
     if let Some(strategy) = cli.strategy {
         debug!("--strategy {strategy:?} overrides the scene's crust:samplingStrategy");
         settings = settings.with_sampling_strategy(strategy.into());
+    }
+    if let Some(selection) = cli.light_selection {
+        debug!("--light-selection {selection:?} overrides the scene's crust:lightSelection");
+        settings = settings.with_light_selection(selection.into());
     }
     // --filter replaces the scene's filter (at the filter's default radius);
     // --filter-radius then resizes whichever filter is in effect, so it also
@@ -700,6 +726,22 @@ mod tests {
     }
 
     #[test]
+    fn cli_light_selection_names_map_onto_the_engine_enum() {
+        assert_eq!(
+            LightSelection::from(Selection::Uniform),
+            LightSelection::Uniform
+        );
+        assert_eq!(
+            LightSelection::from(Selection::Power),
+            LightSelection::Power
+        );
+        let cli = Cli::try_parse_from(["crust-render", "--light-selection", "power"]).unwrap();
+        assert!(matches!(cli.light_selection, Some(Selection::Power)));
+        let cli = Cli::try_parse_from(["crust-render"]).unwrap();
+        assert!(cli.light_selection.is_none());
+    }
+
+    #[test]
     fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
         assert_eq!(
             PixelFilter::from(Filter::Box),
@@ -825,6 +867,7 @@ mod tests {
     fn cli_rejects_unknown_enum_values() {
         assert!(Cli::try_parse_from(["crust-render", "--strategy", "random"]).is_err());
         assert!(Cli::try_parse_from(["crust-render", "--filter", "lanczos"]).is_err());
+        assert!(Cli::try_parse_from(["crust-render", "--light-selection", "bvh"]).is_err());
         assert!(Cli::try_parse_from(["crust-render", "-l", "loud"]).is_err());
         assert!(Cli::try_parse_from(["crust-render", "-s", "many"]).is_err());
     }

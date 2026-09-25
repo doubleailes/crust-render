@@ -17,7 +17,9 @@ of each other, and a few are cheap.
 
 What crust's direct lighting does today, per path vertex:
 
-1. pick **one** light, **uniformly** (`LightList::pick`, `light.rs`);
+1. pick **one** light, **uniformly** (`LightList::pick`, `light.rs`). Since
+   §9.3 (j) the pick is by power, defensively, and uniform is `--light-selection
+   uniform`;
 2. sample a point on it **uniformly by area**. Sphere lights are the exception
    since §9.2 (d): they now sample their visible cone. They used to sample the
    whole sphere, including the half that faces away;
@@ -39,7 +41,7 @@ has the detail and §8 the measurement protocol.
 |---|---|---|---|---|---|
 | 1 | ✅ **Done.** Sample sphere lights by the **visible cone** (Shirley et al. 1996) | per-light pdf | ~60 lines | **measured 1.3–12.9× lower relMSE** on the five sphere-lit samples, for about 8% more time per sample (§3.7) | noise only |
 | 2 | **Spherical-rectangle** sampling for rect lights (Ureña et al. 2013) + a bilinear cosine warp (Hart et al. 2020) | per-light pdf | ~200 lines | large on near/large panels | noise only |
-| 3 | **Power-proportional light pick** (alias table), with the dome/sun given a deliberate share | selection | ~80 lines | large as soon as lights differ in power | noise only |
+| 3 | ✅ **Done, defensively.** Power-proportional light pick, with the dome/sun given a fixed share and half the rays spread evenly | selection | ~250 lines | **measured 4.6×** on a key among dim fills, 2.6% on `usdlux`, **−6%** on `veach_mis` (§3.8) | noise only |
 | 4 | **More than one light sample at the camera vertex** (RenderMan `numLightSamples`, Arnold per-light `samples`) | sample count | ~50 lines | ≈ k× less first-bounce direct variance | noise only |
 | 5 | Make the **built-in sky** an importance-sampled light rather than an escape-only background | coverage | ~40 lines | small on the open `cornellbox` (measured 0.0125 relMSE today), large in enclosed dome-less scenes | noise only |
 | 6 | Remove the `+1e-4` in `AreaLight::pdf_toward` | correctness | ~10 lines | none: it is a **bias** fix | yes, slightly |
@@ -91,6 +93,9 @@ Read from `crates/crust-core/src/light.rs` and `tracer.rs` at the time of
 writing.
 
 ### 3.1 Light selection: uniform
+
+*(As audited. Selection is now by power, defensively; §3.8 has what changed and
+why the pure form was not shipped.)*
 
 ```rust
 // light.rs, LightList::pick
@@ -309,6 +314,96 @@ follow-up change.
     fails it.
   - Disks and tubes still take the area path, pinned by
     `affine_shapes_without_a_cone_fall_back_to_area_sampling`.
+
+### 3.8 Picking lights by power (§9.3 j)
+
+What was built, what was measured on the way, and why the default is not the
+textbook version.
+
+**The textbook version made things worse.** The first implementation was
+pbrt-v4's `PowerLightSampler`:
+- every light's pmf proportional to its flux;
+- a dome's flux counted as `π L̄ · 4π r²` over the scene's bounding sphere;
+- a sun's as `E · π r²`.
+
+relMSE at 16 spp against 1024 spp references under their own seed:
+
+| Scene | uniform | pure power | + ½ even | + fixed infinite share | both (shipped) |
+|---|---|---|---|---|---|
+| `domelight` (dome + sun) | **1.011** | 1.435 | 1.263 | 1.435 | **1.011** |
+| `usdlux` (6 local + dome) | 0.0967 | 0.1426 | 0.0995 | 0.1201 | **0.0938** |
+| `veach_mis` (4 tinted spheres) | **0.0105** | 0.0111 | 0.0111 | 0.0111 | 0.0111 |
+| `ellipsoids` (3 squashed spheres) | **0.00430** | 0.00446 | 0.00434 | 0.00446 | 0.00434 |
+| `materialx_basic` (dome + rect) | 0.00252 | 0.00248 | 0.00270 | 0.00252 | 0.00252 |
+
+Two causes, both documented weaknesses of power selection (§6.1):
+
+- **Visibility.** On `domelight` the sun is 7× the dome by that measure, so it
+  took 88% of the shadow rays. But in the sun's own shadows the dome is the
+  only light, and there its estimate was ~4× noisier in variance than under a
+  50/50 split. A relative metric weighs those dim pixels as heavily as lit ones.
+- **Comparability.** A light at infinity has no power that means the same thing
+  as a lamp's: its "flux into the bounding sphere" depends on the scene's
+  extent and says nothing about whether the scene is enclosed. pbrt-v4's own BVH
+  sampler and Karma both sidestep this with a fixed share, so crust does too.
+
+**What ships (`LightSelection::Power`, the default):**
+- lights at infinity keep their uniform share;
+- the finite lights split the rest half evenly (`DEFENSIVE_SHARE`, Hesterberg's
+  defensive mixture) and half by power;
+- a black light gets zero.
+
+The even half bounds the damage wherever power is the wrong guide: no light
+falls below half its uniform share, so no light's variance more than doubles.
+
+**Four seeds each** (`-f 2..5`), which is what separates a real difference from
+the realisation of the noise:
+
+| Scene | uniform | power (shipped) | |
+|---|---|---|---|
+| `keyfill` (scratch: 1 rect key + 7 dim spheres) | 0.00626–0.00633 | 0.00134–0.00138 | **4.6× lower**, every seed |
+| `usdlux` | 0.0955–0.0961 | 0.0930–0.0935 | 2.6% lower, every seed |
+| `openpbr_showcase` | — | — | within 0.1% |
+| `ellipsoids` | — | — | 0.8% higher, every seed |
+| `veach_mis` | 0.0098–0.0186 | 0.0105–0.0191 | **5–8% higher**, every seed |
+| `domelight`, `materialx_basic`, `light_visibility` | — | — | unchanged (infinite or equal-power lights) |
+
+Notes on the table:
+
+- **`veach_mis` is the honest cost.**
+  - Its lights carry equal *radiometric* power but different tints, so their
+    luminance powers differ by ±10% (pmf 0.228, 0.274, 0.275, 0.223).
+  - Each lights its own band of the glossy plates.
+  - Moving rays from the red and blue lights to the green costs exactly the
+    pixels the red and blue own.
+  - That is the spatial blindness again, in miniature. No global pmf can
+    serve a scene whose lights each own a region; a per-shading-point one can
+    (§6.3).
+- **Time.** `bench_ab` found no cost: `usdlux` −0.4% / −1.0%, `veach_mis`
+  +1.5% / +2.2%, and `keyfill` at 256 spp −5.6% / −1.0% (min / mean).
+- **The A/B is exact.** `--light-selection uniform` renders all 22 checked-in
+  samples bit-identically to the renderer before (0 differing pixels at 16 spp).
+  The density is the historical division `pdf / n`, not `pdf · (1/n)`.
+
+**Power is a flux** (`Light::power`, `Emissive::flux`):
+- `π A L` for an unshaped emitter of any shape, twice that two-sided.
+- A textured card takes its texture's mean texel.
+- A shaped light integrates its shaping over directions in rings about the axis,
+  out to the cone angle only, so a 2° spot is resolved as well as a hemisphere
+  (pinned against `π A L sin² θ`).
+
+**The table is inverted by CDF, not an alias table**, so the map from the pick
+dimension to a light stays monotone. The samples that pick a light are one
+contiguous slice of that dimension, as under uniform picking.
+
+**Tests.**
+- Probabilities and pick frequencies match the rule, with a dark light never
+  picked.
+- `find_by_geom`, `iter` and `pick` agree.
+- The uniform density is the historical division.
+- End to end, a bright and a dim sphere, a sun and a dome estimate the same
+  radiance under power and uniform selection, with MIS and with light sampling
+  alone. Reverting one MIS side to `1/n` fails it by 18%.
 
 ---
 
@@ -529,15 +624,11 @@ radius. The production answers differ:
 - Karma always samples dome and directional lights outside its tree;
 - Cycles folds distant lights into its importance measure.
 
-For crust, a power table over the finite lights plus a **configurable fixed
-fraction** for the infinite ones (defaulting to their share of an estimated
-irradiance at the scene centre) is the pragmatic middle.
-
-Two things are required:
-- `LightList` stores the pmf, and exposes `pmf(index)`;
-- `find_by_geom` returns the index. It is also a linear scan today, called on
-  every bounce that hits an emitter, and should become a `geom_id`-indexed
-  table.
+What crust does, having measured pbrt's convention and seen it fail (§3.8), is
+a power table over the finite lights with a fixed uniform share for the
+infinite ones, like Karma, plus a defensive even half. Pure power selection
+made the dome-and-sun sample 1.4× noisier, because the sun took the dome's
+rays even in the sun's own shadows.
 
 ### 6.2 Spatial selection before trees
 
@@ -889,11 +980,13 @@ tracking.
 
 ### 9.3 Selection
 
-**(j) Power pick.**
-- An alias table in `LightList`.
-- `pmf(i)` replaces `1 / n_lights` at all four sites.
-- `find_by_geom` becomes an O(1) `geom_id → index` table.
-- Infinite lights get a separate, documented share.
+**(j) Power pick. ✅ Done, defensively; measured in §3.8.**
+- `LightList::select_by` builds a CDF (not an alias table, to keep the pick
+  dimension's stratification) over `Light::power`.
+- `LightList::density(pdf, pmf)` replaces `pdf / n_lights` at all four sites.
+- `find_by_geom` is an O(1) `geom_id → index` map.
+- Infinite lights get their uniform share, and half the finite lights' rays are
+  spread evenly, because the pure form measured worse (§3.8).
 
 **(k) Camera-vertex splitting.** `crust:lightSamples` (int, default 1) as a render
 setting, applied at depth 0 only, MIS'd as in §7.4.
@@ -939,7 +1032,7 @@ marked, and not guessed.
 | **V-Ray** | "Adaptive Lights": learned from the light cache; light-tree fallback | — | — |
 | **Iray** | a light hierarchy over per-triangle flux (Keller et al., arXiv 2017) | — | details not verified |
 | **Manuka** | not verified | — | — |
-| **crust** | uniform | sphere: visible cone; everything else uniform area | power MIS; piecewise-constant dome |
+| **crust** | power, defensive (infinite lights fixed, ½ even); uniform as the A/B | sphere: visible cone; everything else uniform area | power MIS; piecewise-constant dome |
 
 ---
 

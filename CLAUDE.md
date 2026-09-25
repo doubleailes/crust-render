@@ -27,7 +27,7 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
 # --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), -b/--bucket,
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
-# --strategy (power|balance|light|bsdf),
+# --strategy (power|balance|light|bsdf), --light-selection (uniform|power),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
 #   else the first camera found -- a wrong path errors and lists the stage's cameras),
@@ -609,11 +609,57 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   an authored `crust:rayMask` wins outright, and shadow/indirect rays always see it) —
   the `AreaLight` records the geometry's `geom_id`, which is how the integrator
   attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
-  **NEE samples one light per vertex** (uniform pick), so the light strategy's MIS
-  density is `light.pdf / n_lights` — the bounce side evaluates the exact same
-  expression for the light it hit; keep the two sides identical or emission is
-  double-counted. Emissive geometry with no light-list entry is handled: the bounce
-  keeps its emission at full weight.
+  **NEE samples one light per vertex**, picked by the `LightList`'s selection,
+  `crust:lightSelection` / `--light-selection`, built in `Renderer::new` from the
+  settings.
+  - **`power` (the default)** is defensive:
+    - lights at infinity keep their uniform share;
+    - the finite lights split the rest `DEFENSIVE_SHARE` (½) evenly and ½ in
+      proportion to `Light::power`;
+    - a black light gets zero.
+  - **`uniform`** is one in N, the renderer before this was a choice, reproduced
+    **bit for bit**: 0 differing pixels on all 22 checked-in samples at 16 spp.
+
+  **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
+  §3.8):
+  - **The fixed infinite share.** Pure power selection, pbrt-v4's `PowerLightSampler`
+    with a dome's power taken against the scene radius, made `domelight` 1.42× and
+    `usdlux` 1.47× noisier at 16 spp. The sun took 88% of the rays, yet in its own
+    shadows the dome is the only light.
+  - **The even half.** Power is blind to distance and visibility, and the even half
+    bounds what that blindness costs.
+  - **Result, over four seeds:**
+    - a key among seven dim fills: 4.6× lower relMSE;
+    - `usdlux`: 2.6% lower;
+    - `veach_mis`: 6% higher. Its equal-radiometric-power lights are tinted, so their
+      *luminance* powers differ by ±10%, and each lights its own band of the plates,
+      so the rays moved away from the red and blue lights cost exactly the pixels
+      those lights own;
+    - everything else within 1%;
+    - time within noise.
+
+  The light strategy's MIS density is `light.pdf · pmf`, computed by
+  `LightList::density` on **both** sides. `pick`, `find_by_geom` and `iter` all hand
+  back the same `pmf` for the same light. Under uniform, `density` is the historical
+  division `pdf / n`, not `pdf · (1/n)`, which rounds differently when n is not a power
+  of two; that is what keeps the A/B exact. A light with `pmf = 0` keeps its bounce
+  emission at full weight, since NEE never samples it.
+
+  `Light::power` is a *flux* — a sampling weight, never shading — and `None` at
+  infinity:
+  - `AreaLight` uses `Emissive::flux`: `π A L` unshaped whatever the shape, times the
+    texture's mean texel for a textured card.
+  - A shaped light uses `Shaping::integrate`, taken in rings about the axis *out to
+    the cone angle only*, so a 2° spot is resolved as well as a hemisphere.
+  - The table is inverted by **CDF, not an alias table**. The map from the pick
+    dimension to a light stays monotone, so the samples that pick light *k* remain one
+    contiguous slice, as under uniform.
+  - A `LightList` that never passes through `select_by` (a bare `ray_color`, or a list
+    with a light `add`ed since) picks uniformly, consistently on both sides.
+  - A per-light `DEBUG` line gives each light's power and pick probability.
+
+  Emissive geometry with no light-list entry is handled: the bounce keeps its emission
+  at full weight.
 
 Sampling goes through the **`openqmc`** crate's native domain-tree API (see the workspace
 layout above). The integrator (`tracer.rs`) threads the sampler *by value* — no stateful
@@ -1616,7 +1662,8 @@ Schema mapping:
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
-  `balance` | `light` | `bsdf`, `crust:pixelFilter` token = `box` | `triangle` |
+  `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power`,
+  `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float). Missing attrs
   fall back to defaults (128 spp, depth 32, 640×360, power MIS, triangle filter at
   radius 1.0) defined as consts at the top of the file.
@@ -1953,7 +2000,9 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
 - **Light sampling is the main source of 16 spp noise**, and `docs/light_sampling.md`
   is the survey of the state of the art (SIGGRAPH/EGSR/HPG, pbrt-v4, Cycles,
   RenderMan, Arnold, Hyperion) with a ranked roadmap and a measured baseline. In
-  short: the light pick is uniform; sphere lights now sample their visible cone
+  short: the light pick is by power, defensively (4.6× lower relMSE on a key among dim
+  fills, 6% higher on `veach_mis`, §3.8 there; `--light-selection uniform` is the
+  bit-identical A/B); sphere lights now sample their visible cone
   (1.3–12.9× lower relMSE at 16 spp on the five sphere-lit samples for ~8% more time
   per sample, §3.7 there),
   but rect/disk/tube lights still sample by area rather than solid angle; the built-in sky
@@ -1973,8 +2022,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   reference's is. A tube light samples non-uniformly in world area (correct, not
   optimal); a squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
-  than `latlong` are refused rather than mapped wrongly; and light-list picking stays
-  uniform, so a dim dome costs as many shadow rays as a bright sun. Neither infinite light
+  than `latlong` are refused rather than mapped wrongly; and light-list picking by
+  power is blind to position, orientation and visibility, so a far light gets as many
+  shadow rays as an equally powerful near one, and a dome or sun only its uniform share
+  however much it lights (a light BVH, `docs/light_sampling.md` §6.3, is the fix). Neither infinite light
   is visible to the guiding field's spatial structure (they have no position).
 - **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals

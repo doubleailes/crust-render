@@ -14,7 +14,7 @@ use crate::camera::Camera;
 use crate::filter::PixelFilter;
 use crate::light::{
     AffineShape, AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight,
-    LightList, LightShape, RectShape, SphereShape, UnitShape,
+    LightList, LightSelection, LightShape, RectShape, SphereShape, UnitShape,
 };
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::{Emissive, Material, OpenPBR};
@@ -5049,6 +5049,19 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     };
 
+    // Light selection: `power` (default) | `uniform`.
+    let light_selection = match custom_token(&prim, "crust:lightSelection").as_deref() {
+        None | Some("power") => LightSelection::Power,
+        Some("uniform") => LightSelection::Uniform,
+        Some(other) => {
+            warn!(
+                "Unknown crust:lightSelection \"{}\" (expected power | uniform) — picking lights by power",
+                other
+            );
+            LightSelection::Power
+        }
+    };
+
     // Pixel reconstruction filter: `box` | `triangle` (default) | `gaussian`
     // | `blackman` | `mitchell`, each at its conventional radius unless
     // `crust:pixelFilterRadius` overrides it (in pixels, from the center).
@@ -5072,7 +5085,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     debug!(
         "RenderSettings at {}: {w}x{h}, {spp} spp (min {min_spp}, variance threshold \
          {variance}), max depth {max_depth}, frame {frame}, strategy {strategy:?}, \
-         filter {} radius {}, guiding {}",
+         light selection {light_selection:?}, filter {} radius {}, guiding {}",
         prim.path(),
         filter.name(),
         filter.radius(),
@@ -5085,6 +5098,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
         .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)
+        .with_light_selection(light_selection)
         .with_pixel_filter(filter)
 }
 

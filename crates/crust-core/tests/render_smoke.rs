@@ -4,9 +4,9 @@
 
 use crust_core::rt::Geometry;
 use crust_core::{
-    AreaLight, Buffer, Camera, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR,
-    PathSampler, PixelFilter, Ray, RenderSettings, Renderer, SamplingStrategy, Scene, SphereShape,
-    Vec3A, Volumes, WorldBuilder, ray_color,
+    AreaLight, Buffer, Camera, DistantLight, DomeLight, Emissive, LightList, LightSelection,
+    MASK_INDIRECT, MASK_SHADOW, OpenPBR, PathSampler, PixelFilter, Ray, RenderSettings, Renderer,
+    SamplingStrategy, Scene, SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,6 +66,7 @@ fn render_settings_report_what_they_were_given() {
     assert_eq!(s.max_depth(), 7);
     assert_eq!(s.sampling_strategy(), SamplingStrategy::PowerMis);
     assert_eq!(s.pixel_filter(), PixelFilter::Triangle { radius: 1.0 });
+    assert_eq!(s.light_selection(), LightSelection::Power);
 }
 
 #[test]
@@ -520,6 +521,101 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
         assert!(
             (m - reference).abs() < tol * reference,
             "{s:?}: {m} vs {reference}"
+        );
+    }
+}
+
+/// Picking lights by power changes which light each shadow ray goes to, and
+/// the pick's probability enters both MIS halves (NEE divides by it, the
+/// bounce side weighs found emission with it), so a pmf routed wrongly on
+/// either side shows up as a wrong mean. A bright and a dim sphere, a sun and
+/// a dome — lights at infinity take the `escaped` path — under power and
+/// uniform selection must agree, with MIS and with light sampling alone.
+#[test]
+fn power_light_selection_agrees_with_uniform_in_expectation() {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::TriangleMesh {
+            vertices: vec![
+                Vec3A::new(-50.0, 0.0, -50.0),
+                Vec3A::new(50.0, 0.0, -50.0),
+                Vec3A::new(50.0, 0.0, 50.0),
+                Vec3A::new(-50.0, 0.0, 50.0),
+            ],
+            indices: vec![[0, 2, 1], [0, 3, 2]],
+            normals: None,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+    );
+    let mut lights = LightList::new();
+    for (center, radius, radiance) in [
+        (Vec3A::new(0.0, 3.0, 0.0), 0.5, 40.0),
+        (Vec3A::new(2.0, 1.0, 1.0), 0.3, 0.5),
+    ] {
+        let emitter = Arc::new(Emissive::new(Vec3A::splat(radiance)));
+        let id = world.attach_masked(
+            Geometry::Sphere { center, radius },
+            emitter.clone(),
+            MASK_SHADOW | MASK_INDIRECT,
+        );
+        lights.add(Arc::new(AreaLight::new(
+            Box::new(SphereShape { center, radius }),
+            emitter,
+            id,
+        )));
+    }
+    lights.add(Arc::new(DistantLight::new(
+        Vec3A::new(0.3, -1.0, 0.2),
+        Vec3A::splat(2.0),
+        5.0,
+    )));
+    lights.add(Arc::new(DomeLight::new(
+        Vec3A::splat(0.2),
+        None,
+        glam::Mat3A::IDENTITY,
+    )));
+    let world = world.commit();
+    let volumes = Volumes::default();
+    let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
+
+    let mut by_power = LightList::new();
+    for l in &lights.lights {
+        by_power.add(l.clone());
+    }
+    by_power.select_by(LightSelection::Power);
+    assert_eq!(by_power.selection(), LightSelection::Power);
+    assert!(
+        by_power.pmf(0) > 2.0 * by_power.pmf(1),
+        "the bright sphere should take more rays than the dim one"
+    );
+    // The sun and the dome keep their uniform share.
+    assert_eq!(by_power.pmf(2), 0.25);
+    assert_eq!(by_power.pmf(3), 0.25);
+
+    let mean_for = |list: &LightList, s: SamplingStrategy, n: i32| {
+        (0..n)
+            .map(|i| {
+                ray_color(
+                    &ray,
+                    &world,
+                    list,
+                    &volumes,
+                    3,
+                    s,
+                    PathSampler::new(1, 2, 0, i),
+                )
+                .x as f64
+            })
+            .sum::<f64>()
+            / n as f64
+    };
+    for s in [SamplingStrategy::PowerMis, SamplingStrategy::LightOnly] {
+        let uniform = mean_for(&lights, s, 32_768);
+        let power = mean_for(&by_power, s, 32_768);
+        assert!(uniform > 0.0);
+        assert!(
+            (power - uniform).abs() < 0.03 * uniform,
+            "{s:?}: power selection {power} vs uniform {uniform}"
         );
     }
 }
