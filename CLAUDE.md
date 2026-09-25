@@ -596,8 +596,13 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   visible cap, pdf `1/(2π(1 − cos θ_max))`, with pbrt's small-angle branch below
   `sin² θ_max < sin² 1.5°` (`SMALL_CONE_SIN2`, where `1 − cos θ_max` cancels in f32),
   and area sampling only from inside the sphere. Area sampling spent at least half its
-  shadow rays on the hemisphere facing away. `AffineShape` spheres (non-uniform scale)
-  are still area-sampled.
+  shadow rays on the hemisphere facing away. An **`AffineShape` sphere** (non-uniform
+  scale) samples the *unit* sphere's cone in local space and maps the point through the
+  placement — exact, because an affine map preserves which points of a convex surface
+  face a given point — with the direction map's solid-angle Jacobian
+  `|Mω|³ / |det M|` on the pdf (`world_solid_angle_pdf`), so its density varies over
+  the cap and both MIS sides evaluate it at the point. `AffineShape` disks and tubes are
+  still area-sampled.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
@@ -1965,8 +1970,8 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   is still sampled uniformly by area: a narrow spotlight wastes the NEE samples its cone
   cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
-  reference's is. A squashed sphere or tube light samples non-uniformly in world area
-  (correct, not optimal). `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
+  reference's is. A tube light samples non-uniformly in world area (correct, not
+  optimal); a squashed sphere samples its visible cone. `DomeLight` sampling is nearest-texel with no bilinear filtering, so a
   low-resolution HDRI shows texel edges in a mirror; `inputs:texture:format` values other
   than `latlong` are refused rather than mapped wrongly; and light-list picking stays
   uniform, so a dim dome costs as many shadow rays as a bright sun. Neither infinite light

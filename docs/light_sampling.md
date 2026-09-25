@@ -115,7 +115,8 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 |---|---|---|
 | `SphereLight` (similarity transform) | **Fixed (§9.2 d):** `SphereShape` now samples the visible cone. It used to sample uniformly over the **whole** sphere. | What area sampling lost: everything outside the visible cap, at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one was a traced shadow ray that returned zero. |
 | `RectLight` | `RectShape`: uniform in `(u, v)` | For a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. |
-| `DiskLight`, `CylinderLight`, squashed sphere | `AffineShape`: uniform in local area | Same as the rect. The tube also samples its far side. |
+| `DiskLight`, `CylinderLight` | `AffineShape`: uniform in local area | Same as the rect. The tube also samples its far side. |
+| Squashed sphere (non-uniform scale) | **Fixed (§9.2 d):** `AffineShape` samples the unit sphere's visible cone in local space. It used to sample uniform in local area. | The same as the round sphere's. |
 | Shaped rect/disk (`ShapingAPI`, IES) | uniform by area, shaping applied as a factor | Every sample the cone rejects. A 30° spot wastes most of them. |
 | Textured `RectLight` | uniform by area | A card with a small bright region is sampled like a flat one. |
 | `DistantLight` | uniform in its cone | Nothing. This is correct. |
@@ -250,21 +251,27 @@ The five samples with a uniformly scaled `SphereLight`, relMSE at 16 spp:
     reach the threshold sooner: **−27.7% min, −27.2% mean render time**, and
     lower noise too.
   - `light_visibility` renders in 5 ms, too little to time.
-- **It is unbiased, and checked two ways.**
-  - The references from before and after the change differ by relMSE 8e-5
-    (`veach_mis`), 1.7e-4 (`openpbr_showcase`) and 3.3e-4 (`usdlux`). That is
-    what two independent 1024 spp renders of the same image differ by, about
-    the sum of their 16 spp relMSEs over 64.
-  - Rendering `openpbr_showcase` at 16, 64 and 256 spp, each binary measured
-    against the *other* binary's reference, falls as about 1/N for both, and the
-    cone sampler stays ahead at every count: 1.27×, 1.15×, 1.10×. The gain
-    narrows only toward the references' own noise floor. A bias would plateau
-    instead.
-  - Measuring each binary against its *own* reference is misleading here and
-    worth knowing about. Both use the same sampler seeds, so a 256 spp render
-    shares its first 256 samples with its 1024 spp reference and looks closer
-    than it is. Always compare against a reference from a different binary, or
-    from a different frame seed.
+- **It is unbiased**, checked with **independent sampler seeds**. `-f N` on a
+  stage with no time samples renders the same image under frame seed N.
+  - A 1024 spp `veach_mis` from the area-sampling binary (`-f 1`) and one from
+    the cone binary (`-f 2`) differ by relMSE 1.9e-4. That is under what two
+    independent renders of one image should differ by, roughly the sum of their
+    16 spp relMSEs over 64, or 4.7e-4.
+  - Rendering at 16, 64 and 256 spp (`-f 3`), each binary measured against the
+    *other* binary's reference, both converge toward it with no plateau:
+    - cone: 0.0103, 0.00163, 0.00045;
+    - area: 0.0186, 0.00296, 0.00060.
+
+    Each flattens only at the reference's own noise floor. A bias would stall
+    above it.
+- **Seeds are the trap in measuring this.** Every binary uses the same seeds
+  per pixel and sample index. So a render shares its first N samples with a
+  1024 spp reference from the same seed, however much the light sampling
+  differs, and the two look closer than they are.
+  - An earlier version of this check fell into it: same-seed references
+    differing by 8e-5 to 3.3e-4 were read as proof of independence, when they
+    were partly correlation.
+  - Always give the reference its own `-f`.
 - **Unit-tested** in `crates/crust-core/tests/lights.rs`:
   - samples lie on the cap facing the shading point and inside the subtended
     cone, near, far and in the small-angle branch;
@@ -272,6 +279,36 @@ The five samples with a uniformly scaled `SphereLight`, relMSE at 16 spp:
     mapping is perturbed;
   - a unit-radiance sphere integrates to the analytic irradiance `π sin² θ_max`;
   - inside the sphere, both MIS sides fall back to area sampling together.
+
+**Squashed spheres.** A `SphereLight` under a non-uniform scale is an
+`AffineShape`, not a `SphereShape`, and it sampled the whole surface until the
+follow-up change.
+
+- **How it works.** It now samples the *unit* sphere's cone in local space and
+  maps the point through the placement.
+  - That is exact because an affine map preserves visibility on a convex
+    surface. With normals carried by `M⁻ᵀ`,
+    `n_w · (x − p) = n_l · (x_l − p_l) / |M⁻ᵀ n_l|`, so a point faces the
+    shading point in world space exactly when it does in local space.
+  - The world density is the local cone's times the solid-angle Jacobian of the
+    direction map `ω ↦ Mω/|Mω|`, which is `|Mω|³ / |det M|`.
+  - Unlike the round sphere's, that density varies across the cap, and both MIS
+    sides evaluate it at the point.
+- **Result.** On a scratch scene of three squashed sphere lights near a floor
+  and a wall (320×180, adaptive stopping off; not checked in), relMSE at 16 spp
+  went **0.00618 → 0.00430 (1.44×)**.
+- **Cost.** `bench_ab` measured **+11.4% min, +12.6% mean** per sample, about
+  1.3× the efficiency. The extra transforms and the Jacobian are paid on both
+  MIS sides.
+- **On `usdlux`**, whose ellipsoid is one dim light of seven, the whole image
+  moved 0.0997 → 0.0959 (4%) at no measurable cost (+1.6% min, +0.3% mean).
+- **Tests.**
+  - `ellipsoid_light_cone_matches_area_quadrature` integrates the subtended
+    solid angle and a tilted receiver's irradiance both through the cone and by
+    plain area quadrature over the facing side. Dropping one power of `|Mω|`
+    fails it.
+  - Disks and tubes still take the area path, pinned by
+    `affine_shapes_without_a_cone_fall_back_to_area_sampling`.
 
 ---
 
@@ -821,8 +858,10 @@ estimator unbiased.
 - `SphereShape` implements it as pbrt-v4 does:
   - area fallback inside the sphere;
   - the Taylor branch below `sin² θ_max < 6.85e-4` (`SMALL_CONE_SIN2`).
-- `AffineShape` spheres (non-uniform scale) still use area sampling. Sampling the
-  visible half is the cheap intermediate there.
+- `AffineShape` spheres (non-uniform scale) sample the unit sphere's cone in local
+  space, with the direction map's Jacobian `|Mω|³ / |det M|` on the pdf (§3.7).
+  Disks and tubes remain area-sampled. §5.2 lists what would replace that:
+  Gamito 2016, Guillén et al. 2017, or Peters' line lights.
 
 **(e) Spherical rectangles + bilinear cosine warp.**
 - Port Cycles' `area.h` (Apache-2.0) or pbrt-v4's `SampleSphericalRectangle` and
