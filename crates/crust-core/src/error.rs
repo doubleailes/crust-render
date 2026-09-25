@@ -14,6 +14,18 @@ pub enum Error {
     /// stage's time range, so it would slip past the range check and reach
     /// time-sample interpolation and the sampler seed as garbage.
     InvalidFrame(f64),
+    /// The requested camera is not an absolute prim path (`/root/cam`).
+    /// Refused before the stage is opened, like a bad frame.
+    InvalidCameraPath(String),
+    /// The requested camera path names no `UsdGeomCamera` on the stage.
+    /// An error rather than a fallback: rendering a sequence through the
+    /// wrong camera is worse than not rendering it. Carries every camera the
+    /// stage does have, since a production camera's path is usually buried
+    /// in a referenced cache and cannot be guessed.
+    CameraNotFound {
+        path: String,
+        available: Vec<String>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -35,6 +47,24 @@ impl fmt::Display for Error {
                     f,
                     "invalid frame {frame}: a time code must be a finite number"
                 )
+            }
+            Error::InvalidCameraPath(path) => {
+                write!(
+                    f,
+                    "invalid camera path '{path}': expected an absolute prim path such as /root/cam"
+                )
+            }
+            Error::CameraNotFound { path, available } => {
+                write!(f, "no UsdGeomCamera at {path} on this stage")?;
+                if available.is_empty() {
+                    write!(f, " (it has no cameras)")
+                } else {
+                    write!(f, "; its cameras are:")?;
+                    for c in available {
+                        write!(f, "\n  {c}")?;
+                    }
+                    Ok(())
+                }
             }
         }
     }

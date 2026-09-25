@@ -80,7 +80,7 @@ impl Scene {
         path: &std::path::Path,
         assets: &dyn AssetLoader,
     ) -> Result<Scene, crate::Error> {
-        usd_import::load_scene(path, assets, None)
+        usd_import::load_scene(path, assets, &UsdImportOptions::default())
     }
 
     /// [`Scene::from_usd_with_assets`], evaluated at USD time code `frame`.
@@ -103,8 +103,43 @@ impl Scene {
         assets: &dyn AssetLoader,
         frame: Option<f64>,
     ) -> Result<Scene, crate::Error> {
-        usd_import::load_scene(path, assets, frame)
+        Scene::from_usd_with_options(
+            path,
+            assets,
+            &UsdImportOptions {
+                frame,
+                ..UsdImportOptions::default()
+            },
+        )
     }
+
+    /// [`Scene::from_usd_with_assets`] with every import choice spelled out
+    /// — see [`UsdImportOptions`].
+    pub fn from_usd_with_options(
+        path: &std::path::Path,
+        assets: &dyn AssetLoader,
+        options: &UsdImportOptions,
+    ) -> Result<Scene, crate::Error> {
+        usd_import::load_scene(path, assets, options)
+    }
+}
+
+/// Choices a host makes about how a USD stage is imported.
+#[derive(Clone, Debug, Default)]
+pub struct UsdImportOptions {
+    /// USD time code to evaluate the stage at; see
+    /// [`Scene::from_usd_at_frame`]. `None` reads attribute defaults.
+    pub frame: Option<f64>,
+    /// The camera to render through, as an absolute prim path.
+    ///
+    /// Chosen in this order: this path, then the stage's
+    /// `RenderSettings.camera` relationship, then the first `UsdGeomCamera`
+    /// the traversal meets (whose order is unspecified, so a stage with
+    /// several cameras — ALab carries one trailer camera per shot beside its
+    /// shot camera — needs one of the first two). A path given here that is not a
+    /// camera on the stage is an error ([`crate::Error::CameraNotFound`]); a
+    /// dangling `RenderSettings.camera` only warns and falls back.
+    pub camera: Option<String>,
 }
 
 /// How the engine asks its host to decode an image.
