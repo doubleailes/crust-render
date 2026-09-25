@@ -184,25 +184,46 @@ fn sheared_rect_light_pdf_is_distance_squared_over_cosine_area() {
 
 #[test]
 fn rect_light_is_effectively_one_sided() {
-    let rect = RectShape::new(
-        Vec3A::new(-0.5, -0.5, 0.0),
-        Vec3A::new(1.0, 0.0, 0.0),
-        Vec3A::new(0.0, 1.0, 0.0),
-        Vec3A::Z,
+    let rect = || {
+        RectShape::new(
+            Vec3A::new(-0.5, -0.5, 0.0),
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(0.0, 1.0, 0.0),
+            Vec3A::Z,
+        )
+    };
+    let behind = Vec3A::new(0.0, 0.0, -1.0);
+    // From behind the spherical-rectangle map is refused and the rect is
+    // area-sampled, with the cosine taken unsigned: the centre sample is at
+    // distance 1, face-on, on a unit-area light, so its density is exactly
+    // d² / (|cos θ| · A) = 1, and both MIS sides agree on it. Being
+    // one-sided is the emitter's business: `Emissive::light` gives zero
+    // radiance from the back, which NEE skips without a shadow ray.
+    let one_sided = AreaLight::new(
+        Box::new(rect()),
+        Arc::new(Emissive::light(Vec3A::ONE, None)),
+        1,
     );
-    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
-    let front = light
+    let front = one_sided
         .sample_li(Vec3A::new(0.0, 0.0, 1.0), 0.5, 0.5)
         .unwrap();
+    let back = one_sided.sample_li(behind, 0.5, 0.5).unwrap();
     assert!(front.pdf.is_finite() && front.pdf > 0.0);
-    // Behind the emitting side the area density is infinite. NEE refuses
-    // the sample rather than give it a finite stand-in (which biased every
-    // NEE contribution: it used to add 1e-4 to the denominator), and the
-    // bounce side reports 0 for the same point, meaning NEE never delivers
-    // it.
-    let behind = Vec3A::new(0.0, 0.0, -1.0);
-    assert!(light.sample_li(behind, 0.5, 0.5).is_none());
-    assert_eq!(light.pdf_at_point(behind, Vec3A::new(0.1, 0.2, 0.0)), 0.0);
+    assert!(approx(back.pdf, 1.0, 1e-5), "{}", back.pdf);
+    let p = behind + back.direction * back.distance;
+    assert!(approx(
+        one_sided.pdf_at_point(behind, p),
+        back.pdf,
+        1e-4 * back.pdf
+    ));
+    assert_eq!(front.radiance, Vec3A::ONE);
+    assert_eq!(back.radiance, Vec3A::ZERO);
+    // A two-sided emitter keeps direct sampling from behind.
+    let two_sided = AreaLight::new(Box::new(rect()), Arc::new(Emissive::new(Vec3A::ONE)), 1);
+    assert_eq!(
+        two_sided.sample_li(behind, 0.5, 0.5).unwrap().radiance,
+        Vec3A::ONE
+    );
 }
 
 #[test]
@@ -739,10 +760,7 @@ fn ellipsoid_light_cone_matches_area_quadrature() {
 }
 
 /// Inside the ellipsoid, and for the flat and tubular unit shapes, there is
-/// no cone: area sampling, on both MIS sides. From inside, every point of
-/// the surface faces away (its normal points out), so the area density is
-/// infinite everywhere: NEE refuses every sample and the bounce side reports
-/// 0 for every point, leaving the whole surface to the bounce ray.
+/// no cone: area sampling, on both MIS sides.
 #[test]
 fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
     let (shape, light) = ellipsoid_light();
@@ -751,10 +769,12 @@ fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
     assert!(shape.solid_angle_pdf(inside, Vec3A::ZERO).is_none());
     let mut rng = Rng::new(22);
     for _ in 0..200 {
-        let (u, v) = (rng.next_f32(), rng.next_f32());
-        assert!(light.sample_li(inside, u, v).is_none());
-        let p = shape.sample_point(u, v);
-        assert_eq!(light.pdf_at_point(inside, p), 0.0);
+        let s = light
+            .sample_li(inside, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let p = inside + s.direction * s.distance;
+        let bounce = light.pdf_at_point(inside, p);
+        assert!(approx(bounce, s.pdf, 1e-3 * s.pdf.max(1.0)));
     }
 
     for unit in [UnitShape::Disk, UnitShape::Cylinder] {
@@ -766,9 +786,7 @@ fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
 }
 
 /// Inside the sphere there is no cone: it falls back to area sampling, and
-/// both MIS sides agree that it did. Every point faces away from inside, so
-/// that agreement is a refusal on both: no NEE sample, and a zero pdf that
-/// leaves the surface to the bounce ray at full weight.
+/// both MIS sides agree that it did.
 #[test]
 fn sphere_light_from_inside_falls_back_to_area_sampling() {
     let center = Vec3A::new(0.0, 1.0, 0.0);
@@ -787,11 +805,17 @@ fn sphere_light_from_inside_falls_back_to_area_sampling() {
     let light = sphere_light(center, 2.0, Vec3A::ONE, 0);
     let mut rng = Rng::new(13);
     for _ in 0..200 {
-        let (u, v) = (rng.next_f32(), rng.next_f32());
-        assert!(light.sample_li(from, u, v).is_none());
-        let p = shape.sample_point(u, v);
+        let s = light
+            .sample_li(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let p = from + s.direction * s.distance;
         assert!(approx((p - center).length(), 2.0, 1e-3));
-        assert_eq!(light.pdf_at_point(from, p), 0.0);
+        let pdf = light.pdf_at_point(from, p);
+        assert!(
+            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            "{pdf} vs {}",
+            s.pdf
+        );
     }
 }
 

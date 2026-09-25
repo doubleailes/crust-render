@@ -506,11 +506,15 @@ sampling (§5.2) exist for.
 
 ### 3.10 Without the epsilon (§9.1 b)
 
-**The change.** `AreaLight::pdf_toward` is `d² / (cos θ_l · A)` with nothing
-added to the denominator. A point whose density is not finite (back-facing,
-edge-on, degenerate) is refused on both MIS sides: `sample_li` returns `None`,
-and `pdf_at_point` returns 0, which `bounce_emission_weight` reads as "NEE
-never delivers this point" and answers with full weight.
+**The change.** `AreaLight::pdf_toward` is `d² / (|cos θ_l| · A)` with nothing
+added to the denominator. The cosine is unsigned, as in pbrt-v4: the
+area-to-solid-angle Jacobian does not depend on which side the point is seen
+from, and whether that side emits is the emitter's question
+(`radiance_toward`'s `front`). A point whose density is not finite (edge-on,
+degenerate) is refused on both MIS sides: `sample_li` returns `None`, and
+`pdf_at_point` returns 0, which `bounce_emission_weight` reads as "NEE never
+delivers this point" and answers with `SamplingStrategy::unopposed_weight`,
+which is 1 under every strategy.
 
 It touches only area sampling: disks, tubes, and the sphere, ellipsoid and rect
 cases that fall back to it (inside the sphere, sheared, tiny or grazing
@@ -546,20 +550,29 @@ averaged over three seeds: **0.5756 ± 0.0011** (standard error).
 
 **What else it fixes.** A **two-sided** emitter seen from behind by an
 area-sampled shape used to be lost to both strategies. NEE divided by a pdf of
-about `d²/1e-4`, and the bounce weight against that pdf was nearly zero. The
-bounce ray now carries it at full weight. crust's UsdLux lights are one-sided,
-so this only reaches the procedural fallback's two-sided sphere light, seen
-from inside.
+about `d²/1e-4`, and the bounce weight against that pdf was nearly zero. It is
+now sampled by NEE at its true density from behind as from in front, and both
+MIS sides agree on that density. (A first version of this change also refused
+back-facing points, which handed such an emitter to the bounce ray alone:
+unbiased, but without direct sampling. Review caught it.) crust's UsdLux
+lights are one-sided, so this only reaches the procedural fallback's two-sided
+sphere light, seen from inside. A one-sided light seen from behind is sampled
+too, at zero radiance, and NEE skips it before tracing a shadow ray (§3.11).
 
 **Tests.**
 - `area_pdf_has_no_epsilon` (`light.rs`) checks `pdf == d²/(cos·A)` to 1e-4
   relative on a small tilted ellipse, where the old epsilon was a 4.5% error.
-- `back_facing_area_samples_are_refused_on_both_sides` checks the refusal from
-  behind and edge-on.
+- `area_samples_are_refused_only_edge_on` checks that the density from behind
+  equals the density in front on both MIS sides, and that edge-on is refused on
+  both.
 - `rect_light_is_effectively_one_sided`,
   `affine_shapes_without_a_cone_fall_back_to_area_sampling` and
   `sphere_light_from_inside_falls_back_to_area_sampling` (`tests/lights.rs`)
-  used to pin the exploding pdf. They now pin the refusal.
+  used to pin the exploding pdf. They now pin a finite density that both sides
+  agree on, and, for the rect, zero radiance from behind a one-sided emitter but
+  not a two-sided one.
+- `unopposed_contributions_are_taken_whole` (`tracer.rs`) pins
+  `unopposed_weight` at 1 under all four strategies.
 
 ### 3.11 Shadow rays last (§9.1 c)
 

@@ -584,10 +584,16 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   density (default: its area, i.e. uniform); `AffineShape` samples uniformly in local
   area, so its world density varies under a non-uniform scale and it reports
   `local_area · |det M| · |M⁻ᵀ n|` — both MIS halves read it, so it need only be the
-  density actually sampled. Where the area density `d²/(cos θ_l · A)` is not finite
-  (back-facing, edge-on) `AreaLight` **refuses** the point on both sides, pbrt-v4's
-  way: `sample_li` returns `None` and `pdf_at_point` returns **0**, which
-  `bounce_emission_weight` reads as "NEE never delivers this" and gives full weight.
+  density actually sampled. The cosine in the area density `d²/(|cos θ_l| · A)` is
+  **unsigned**, as the Jacobian requires: a point seen from behind has a finite
+  density, and whether that side emits is `radiance_toward`'s `front`, not the pdf's
+  (a one-sided light returns zero radiance and NEE skips it before the shadow ray; a
+  two-sided emitter keeps NEE from behind and from inside a sphere). Where the
+  density is not finite (edge-on, degenerate) `AreaLight` **refuses** the point on
+  both sides, pbrt-v4's way: `sample_li` returns `None` and `pdf_at_point` returns
+  **0**, which `bounce_emission_weight` reads as "NEE never delivers this" and gives
+  `SamplingStrategy::unopposed_weight` (1 for every strategy, `light` included —
+  the same weight every no-competitor branch there and in `escaped_emission` takes).
   It used to add `1e-4` to that denominator instead, an NEE bias of
   `1 + 1e-4/(cos θ_l · A)` (+12.7% measured on a 1.3e-3 m² disk,
   `docs/light_sampling.md` §3.10); do not reintroduce a finite stand-in.
