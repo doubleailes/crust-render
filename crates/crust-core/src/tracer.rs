@@ -91,6 +91,22 @@ impl SamplingStrategy {
         }
     }
 
+    /// Weight of a contribution only one technique can produce: bounce-hit
+    /// emission NEE could not have delivered (a delta or non-evaluable
+    /// previous vertex, a light it never picks, a point its light refuses to
+    /// sample, emissive geometry with no light-list entry), or NEE-free
+    /// escapes. With nothing competing there is nothing to partition, so
+    /// every strategy takes it whole — `LightOnly` included, which would
+    /// otherwise lose light that NEE cannot reach.
+    pub fn unopposed_weight(self) -> f32 {
+        match self {
+            SamplingStrategy::PowerMis
+            | SamplingStrategy::BalanceMis
+            | SamplingStrategy::LightOnly
+            | SamplingStrategy::BsdfOnly => 1.0,
+        }
+    }
+
     /// Weight of bounce-hit emission on a light that NEE could also have
     /// sampled with density `light_pdf`. Mirror of [`Self::light_weight`]:
     /// for every strategy the two weights sum to one.
@@ -1052,7 +1068,7 @@ fn bounce_emission_weight(
     let (from, bounce_pdf) = match prev {
         PrevVertex::Surface(p) => {
             if p.delta || p.mat.eval(&p.ray, &p.rec, p.dir).is_none() {
-                return 1.0;
+                return strategy.unopposed_weight();
             }
             (p.rec.p, p.pdf)
         }
@@ -1060,17 +1076,17 @@ fn bounce_emission_weight(
     };
     match lights.find_by_geom(hit.geom_id) {
         Some((light, pmf)) if pmf > 0.0 => {
-            // A zero pdf is a point NEE refuses to sample (the back of an
-            // area-sampled light, say): nothing competes for it, exactly as
-            // for a light NEE never picks.
+            // A zero pdf is a point NEE refuses to sample (an edge-on point
+            // of an area-sampled light, say): nothing competes for it,
+            // exactly as for a light NEE never picks.
             let point_pdf = light.pdf_at_point(from, hit.rec.p);
             if point_pdf <= 0.0 {
-                return 1.0;
+                return strategy.unopposed_weight();
             }
             let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
-        _ => 1.0,
+        _ => strategy.unopposed_weight(),
     }
 }
 
@@ -1121,7 +1137,7 @@ fn escaped_emission(
             }
             // No NEE ran for this vertex, the strategy does not sample lights
             // at all, or the selection never picks this one: nothing competes.
-            _ => 1.0,
+            _ => strategy.unopposed_weight(),
         };
         radiance += emitted * weight;
     }
@@ -1827,6 +1843,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A contribution with no competing technique is taken whole under
+    /// every strategy. `bounce_weight` against a zero light pdf is not the
+    /// same thing: `LightOnly` gives it 0, which would drop light NEE cannot
+    /// reach, and the power heuristic's `1e-6` keeps it just short of 1.
+    #[test]
+    fn unopposed_contributions_are_taken_whole() {
+        for s in [
+            SamplingStrategy::PowerMis,
+            SamplingStrategy::BalanceMis,
+            SamplingStrategy::LightOnly,
+            SamplingStrategy::BsdfOnly,
+        ] {
+            assert_eq!(s.unopposed_weight(), 1.0, "{s:?}");
+        }
+        assert_eq!(SamplingStrategy::LightOnly.bounce_weight(1.0, 0.0), 0.0);
     }
 
     #[test]
