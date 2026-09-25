@@ -18,8 +18,9 @@ of each other, and a few are cheap.
 What crust's direct lighting does today, per path vertex:
 
 1. pick **one** light, **uniformly** (`LightList::pick`, `light.rs`);
-2. sample a point on it **uniformly by area**, including, for a sphere, the half
-   that faces away (`SphereShape::sample_point`);
+2. sample a point on it **uniformly by area**. Sphere lights are the exception
+   since §9.2 (d): they now sample their visible cone. They used to sample the
+   whole sphere, including the half that faces away;
 3. trace **one** shadow ray. It is traced *before* the BSDF or the emission is
    evaluated, so rays whose contribution is already known to be zero are
    traced anyway;
@@ -36,7 +37,7 @@ has the detail and §8 the measurement protocol.
 
 | # | Change | Layer | Effort | Gain at 16 spp | Changes the image? |
 |---|---|---|---|---|---|
-| 1 | Sample sphere lights by the **visible cone** (Shirley et al. 1996) | per-light pdf | ~60 lines | **measured 1.3–1.7× lower relMSE** on the three sphere-lit samples (prototype, §3.6) | noise only |
+| 1 | ✅ **Done.** Sample sphere lights by the **visible cone** (Shirley et al. 1996) | per-light pdf | ~60 lines | **measured 1.3–12.9× lower relMSE** on the five sphere-lit samples, for about 8% more time per sample (§3.7) | noise only |
 | 2 | **Spherical-rectangle** sampling for rect lights (Ureña et al. 2013) + a bilinear cosine warp (Hart et al. 2020) | per-light pdf | ~200 lines | large on near/large panels | noise only |
 | 3 | **Power-proportional light pick** (alias table), with the dome/sun given a deliberate share | selection | ~80 lines | large as soon as lights differ in power | noise only |
 | 4 | **More than one light sample at the camera vertex** (RenderMan `numLightSamples`, Arnold per-light `samples`) | sample count | ~50 lines | ≈ k× less first-bounce direct variance | noise only |
@@ -112,7 +113,7 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 
 | Light | Sampling today | What is lost |
 |---|---|---|
-| `SphereLight` (similarity transform) | `SphereShape`: uniform over the **whole** sphere | Everything outside the visible cap: at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one is a traced shadow ray that returns zero. |
+| `SphereLight` (similarity transform) | **Fixed (§9.2 d):** `SphereShape` now samples the visible cone. It used to sample uniformly over the **whole** sphere. | What area sampling lost: everything outside the visible cap, at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one was a traced shadow ray that returned zero. |
 | `RectLight` | `RectShape`: uniform in `(u, v)` | For a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. |
 | `DiskLight`, `CylinderLight`, squashed sphere | `AffineShape`: uniform in local area | Same as the rect. The tube also samples its far side. |
 | Shaped rect/disk (`ShapingAPI`, IES) | uniform by area, shaping applied as a factor | Every sample the cone rejects. A 30° spot wastes most of them. |
@@ -180,18 +181,19 @@ central argument of the Arvo (1995) and Ureña (2013) papers.
 ### 3.6 Baseline, measured
 
 Protocol as in §8: 1024 spp reference, 16 spp test, `exr_diff` relMSE, same
-binary.
+binary. These are the numbers from **before** any change in §9. §3.7 has what
+the first one did.
 
 relMSE, lower is better:
 
-| Scene | Lights | power (default) | balance | light only | bsdf only | **+ sphere cone sampling** (prototype) |
-|---|---|---|---|---|---|---|
-| `veach_mis` | 4 spheres, glossy plates | 0.0195 | 0.0190 | 46.2 | 9.86 | **0.0113** (1.73×) |
-| `cornellbox_guided` | 1 shrouded sphere, guided | 0.0761 | 0.0741 | 0.225 | 0.315 | **0.0468** (1.62×) |
-| `openpbr_showcase` | 2 spheres, distant | 0.00655 | 0.00636 | 0.00579 | 0.0896 | **0.00517** (1.27×) |
-| `usdlux` | 7 mixed, incl. dome | 0.137 | 0.135 | 1.14 | 16.5 | — (no uniformly scaled sphere) |
-| `domelight` | dome + sun | 0.113 | 0.113 | 243 | 16.3 | — |
-| `cornellbox` | **none** (sky gradient) | 0.0125 | 0.0125 | 0.0125 | 0.0125 | — |
+| Scene | Lights | power (default) | balance | light only | bsdf only |
+|---|---|---|---|---|---|
+| `veach_mis` | 4 spheres, glossy plates | 0.0195 | 0.0190 | 46.2 | 9.86 |
+| `cornellbox_guided` | 1 shrouded sphere, guided | 0.0761 | 0.0741 | 0.225 | 0.315 |
+| `openpbr_showcase` | 2 spheres, distant | 0.00655 | 0.00636 | 0.00579 | 0.0896 |
+| `usdlux` | 7 mixed, incl. dome | 0.137 | 0.135 | 1.14 | 16.5 |
+| `domelight` | dome + sun | 0.113 | 0.113 | 243 | 16.3 |
+| `cornellbox` | **none** (sky gradient) | 0.0125 | 0.0125 | 0.0125 | 0.0125 |
 
 What the table says:
 
@@ -202,14 +204,9 @@ What the table says:
     heuristics. That is the situation §7.2's MIS compensation and variance-aware
     MIS address: the heuristic gives BSDF samples weight in a region where they
     only add noise.
-- **The per-light pdf is the cheapest noise left.** The cone-sampling prototype
-  (item 1, about 60 lines, not committed) cuts relMSE by 1.3–1.7× at equal spp
-  on every sphere-lit scene.
-  - The gain grows as the lights get nearer and larger, as §5.2 predicts:
-    `openpbr_showcase`'s lights are far away, `veach_mis`'s and the shrouded
-    ceiling light are near.
-  - Its cost per sample was within the noise of sequential timing: 106 s against
-    100 s on `cornellbox_guided`, on a loaded machine and not `bench_ab`'d.
+- **The per-light pdf is the cheapest noise left.** §3.7 shows the first
+  per-light change, sphere cone sampling, cutting relMSE on every sphere-lit
+  scene.
 - **`cornellbox` confirms no NEE runs there.** All four strategies produce the
   *identical* image. Its relMSE is nonetheless low: the box is open, so bounce
   rays find the sky easily.
@@ -220,6 +217,61 @@ What the table says:
 
 The 16 spp images' noise elsewhere is therefore mostly per-light (§5) and
 selection (§6) noise, and the number of shadow rays per camera sample (§2).
+
+### 3.7 After sphere cone sampling (§9.2 d)
+
+The same protocol, with fresh 1024 spp references rendered by the new binary.
+The five samples with a uniformly scaled `SphereLight`, relMSE at 16 spp:
+
+| Scene | Sphere lights | area sampling (before) | cone sampling (after) | Gain |
+|---|---|---|---|---|
+| `light_visibility` | 3, near the objects they light | 0.00242 | 0.000188 | **12.9×** |
+| `veach_mis` | 4, sizes 0.05 to 1.35 | 0.0192 | 0.0110 | **1.75×** |
+| `cornellbox_guided` | 1, shrouded, guided | 0.0761 | 0.0468 | **1.62×** |
+| `usdlux` | 1 (the IES fixture) of 7 | 0.138 | 0.0963 | **1.43×** |
+| `openpbr_showcase` | 2, far away | 0.00655 | 0.00498 | **1.32×** |
+
+- **The gain tracks how near and how large the light is,** as §5.2 predicts.
+  `light_visibility`'s spheres sit next to what they light, so area sampling
+  there wasted most of its samples on the far side and weighted the rest by a
+  `cos/r²` that varied wildly. `openpbr_showcase`'s are far away, where area
+  sampling was merely half-wasted.
+- **It costs about 8% per sample and pays that back.** Measured with
+  `scripts/bench_ab.sh` (4 interleaved reps, the scenes' own settings):
+  - `veach_mis` has adaptive stopping off, so it takes exactly 128 spp either
+    way and measures pure per-sample cost: **+8.4% min, +8.1% mean**. Against
+    1.75× lower relMSE that is about 1.6× the efficiency
+    (`1 / (time × relMSE)`).
+  - The likely source is that area sampling's back-facing samples were cheap
+    shadow rays, occluded by the sphere at the first hit, while every cone
+    sample is a real connection that must traverse to its end. There are also a
+    few more transcendentals per sample.
+  - `openpbr_showcase` has adaptive stopping on (threshold 0.05), so pixels
+    reach the threshold sooner: **−27.7% min, −27.2% mean render time**, and
+    lower noise too.
+  - `light_visibility` renders in 5 ms, too little to time.
+- **It is unbiased, and checked two ways.**
+  - The references from before and after the change differ by relMSE 8e-5
+    (`veach_mis`), 1.7e-4 (`openpbr_showcase`) and 3.3e-4 (`usdlux`). That is
+    what two independent 1024 spp renders of the same image differ by, about
+    the sum of their 16 spp relMSEs over 64.
+  - Rendering `openpbr_showcase` at 16, 64 and 256 spp, each binary measured
+    against the *other* binary's reference, falls as about 1/N for both, and the
+    cone sampler stays ahead at every count: 1.27×, 1.15×, 1.10×. The gain
+    narrows only toward the references' own noise floor. A bias would plateau
+    instead.
+  - Measuring each binary against its *own* reference is misleading here and
+    worth knowing about. Both use the same sampler seeds, so a 256 spp render
+    shares its first 256 samples with its 1024 spp reference and looks closer
+    than it is. Always compare against a reference from a different binary, or
+    from a different frame seed.
+- **Unit-tested** in `crates/crust-core/tests/lights.rs`:
+  - samples lie on the cap facing the shading point and inside the subtended
+    cone, near, far and in the small-angle branch;
+  - `cos θ` and the azimuth are uniform (a histogram), which fails when the `u`
+    mapping is perturbed;
+  - a unit-radiance sphere integrates to the analytic irradiance `π sin² θ_max`;
+  - inside the sphere, both MIS sides fall back to area sampling together.
 
 ---
 
@@ -759,15 +811,17 @@ estimator unbiased.
 
 ### 9.2 Per-light sampling
 
-**(d) Sphere cone sampling.**
-- Add a solid-angle hook to `LightShape`: `sample_solid_angle(from, u, v)` and
-  `pdf_solid_angle(from, p)`, both defaulting to `None`. `AreaLight` uses it when
-  present, in both `sample_li` and `pdf_at_point`.
+**(d) Sphere cone sampling. ✅ Done; measured in §3.7.**
+- `LightShape` has a solid-angle hook, `sample_solid_angle(from, u, v)` and
+  `solid_angle_pdf(from, p)`, both defaulting to `None`. `AreaLight` prefers it,
+  when present, in both `sample_li` and `pdf_at_point`.
+  - The contract: whether a shape answers depends on `from` alone, and both
+    methods answer for the same `from`s with the same density.
+  - Items (e), (g) and (h) plug into the same hook.
 - `SphereShape` implements it as pbrt-v4 does:
   - area fallback inside the sphere;
-  - the Taylor branch below `sin² θ_max < 6.85e-4`.
-- The prototype behind the §3.6 figure is exactly this, about 60 lines.
-- `AffineShape` spheres (non-uniform scale) keep area sampling. Sampling the
+  - the Taylor branch below `sin² θ_max < 6.85e-4` (`SMALL_CONE_SIN2`).
+- `AffineShape` spheres (non-uniform scale) still use area sampling. Sampling the
   visible half is the cheap intermediate there.
 
 **(e) Spherical rectangles + bilinear cosine warp.**
@@ -846,7 +900,7 @@ marked, and not guessed.
 | **V-Ray** | "Adaptive Lights": learned from the light cache; light-tree fallback | — | — |
 | **Iray** | a light hierarchy over per-triangle flux (Keller et al., arXiv 2017) | — | details not verified |
 | **Manuka** | not verified | — | — |
-| **crust** | uniform | uniform area (sphere: whole sphere) | power MIS; piecewise-constant dome |
+| **crust** | uniform | sphere: visible cone; everything else uniform area | power MIS; piecewise-constant dome |
 
 ---
 

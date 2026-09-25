@@ -5,8 +5,10 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 
 /// The emitting surface of an area light, decoupled from any material: pure
-/// geometry that knows how to sample itself uniformly by area. One shape
-/// implementation per supported UsdLux schema (sphere, rect, …).
+/// geometry that knows how to sample itself uniformly by area, and — where it
+/// has a better strategy — by the solid angle it subtends from a shading
+/// point. One shape implementation per supported UsdLux schema (sphere, rect,
+/// …).
 pub trait LightShape: Send + Sync {
     /// A point on the surface, uniform by area, from two unit random numbers.
     fn sample_point(&self, u: f32, v: f32) -> Vec3A;
@@ -26,9 +28,88 @@ pub trait LightShape: Send + Sync {
     fn inv_pdf_area(&self, _p: Vec3A) -> f32 {
         self.area()
     }
+
+    /// A point on the surface as seen from `from`, sampled by a density over
+    /// the *solid angle* the shape subtends there, as `(point, pdf)` with the
+    /// pdf in solid-angle measure. `None` (the default) means the shape has no
+    /// such strategy from `from`, and [`AreaLight`] falls back to
+    /// [`LightShape::sample_point`] by area.
+    ///
+    /// Two rules make it safe to implement. Whether it answers must depend on
+    /// `from` alone — never on `u`, `v` — and [`LightShape::solid_angle_pdf`]
+    /// must answer for exactly the same `from`s with the same density, or the
+    /// two MIS sides describe different strategies and emission is
+    /// double-counted. And every point it returns must be one a ray from
+    /// `from` could hit first, i.e. on the side of the shape that faces it.
+    fn sample_solid_angle(&self, _from: Vec3A, _u: f32, _v: f32) -> Option<(Vec3A, f32)> {
+        None
+    }
+
+    /// The solid-angle pdf, seen from `from`, of
+    /// [`LightShape::sample_solid_angle`] having produced `p` — the bounce side
+    /// of MIS. `None` exactly when `sample_solid_angle` is.
+    fn solid_angle_pdf(&self, _from: Vec3A, _p: Vec3A) -> Option<f32> {
+        None
+    }
+}
+
+/// `sin² 1.5°`. Below it a cone's `1 − cos θ_max` is taken from its Taylor
+/// expansion instead of the subtraction, which in f32 cancels to nothing for a
+/// small, distant sphere — pbrt-v4's threshold and remedy.
+const SMALL_CONE_SIN2: f32 = 0.000_685_23;
+
+/// The cone a sphere subtends from a point outside it.
+#[derive(Clone, Copy, Debug)]
+struct SubtendedCone {
+    /// `sin² θ_max = r² / d²`.
+    sin2_max: f32,
+    cos_max: f32,
+    /// `1 − cos θ_max`, cancellation-free (see [`SMALL_CONE_SIN2`]).
+    one_minus_cos_max: f32,
+}
+
+impl SubtendedCone {
+    /// `None` from inside the sphere (or on it), where there is no cone and
+    /// every direction reaches the surface — and for a cone too thin to
+    /// represent (a zero radius, or `r²/d²` underflowing), which would
+    /// otherwise divide zero by zero below.
+    fn new(center: Vec3A, radius: f32, from: Vec3A) -> Option<Self> {
+        let d2 = (center - from).length_squared();
+        let r2 = radius * radius;
+        if d2 <= r2 {
+            return None;
+        }
+        let sin2_max = r2 / d2;
+        if sin2_max.is_nan() || sin2_max <= 0.0 {
+            return None;
+        }
+        let cos_max = (1.0 - sin2_max).max(0.0).sqrt();
+        let one_minus_cos_max = if sin2_max < SMALL_CONE_SIN2 {
+            0.5 * sin2_max
+        } else {
+            1.0 - cos_max
+        };
+        Some(Self {
+            sin2_max,
+            cos_max,
+            one_minus_cos_max,
+        })
+    }
+
+    /// Uniform over the cone: `1 / (2π (1 − cos θ_max))`.
+    fn pdf(&self) -> f32 {
+        1.0 / (2.0 * PI * self.one_minus_cos_max)
+    }
 }
 
 /// Spherical light surface (UsdLux `SphereLight`).
+///
+/// Seen from outside, it is sampled uniformly over the **cone it subtends**
+/// (Shirley, Wang & Zimmerman 1996; pbrt-v4's `Sphere::Sample`), not over its
+/// area: area sampling spends at least half its samples on the hemisphere
+/// facing away — every one of them a shadow ray the sphere itself occludes —
+/// and weights the rest by a `cos/r²` that blows up at the silhouette. From
+/// inside, where there is no cone, it falls back to area sampling.
 pub struct SphereShape {
     pub center: Vec3A,
     pub radius: f32,
@@ -48,6 +129,36 @@ impl LightShape for SphereShape {
 
     fn area(&self) -> f32 {
         4.0 * std::f32::consts::PI * self.radius * self.radius
+    }
+
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+        let cone = SubtendedCone::new(self.center, self.radius, from)?;
+        // A direction uniform in the cone, as its angle θ off the axis toward
+        // the centre...
+        let (sin2_theta, cos_theta) = if cone.sin2_max < SMALL_CONE_SIN2 {
+            let sin2 = cone.sin2_max * u;
+            (sin2, (1.0 - sin2).sqrt())
+        } else {
+            let cos = (cone.cos_max - 1.0) * u + 1.0;
+            (1.0 - cos * cos, cos)
+        };
+        // ...then the point it meets on the sphere in closed form, as the
+        // angle α at the centre between the axis and that point (the law of
+        // sines/cosines), rather than by intersecting a ray. `sin² θ / sin θ_max`
+        // plus `cos θ · √(1 − sin² θ / sin² θ_max)` is pbrt-v4's arrangement.
+        let cos_alpha = sin2_theta / cone.sin2_max.sqrt()
+            + cos_theta * (1.0 - sin2_theta / cone.sin2_max).max(0.0).sqrt();
+        let sin_alpha = (1.0 - cos_alpha * cos_alpha).max(0.0).sqrt();
+        let phi = 2.0 * PI * v;
+        let local = Vec3A::new(sin_alpha * phi.cos(), sin_alpha * phi.sin(), cos_alpha);
+        // α is measured from the centre toward `from`, so the point lies on
+        // the cap that faces it.
+        let n = utils::align_to_normal(local, (from - self.center).normalize()).normalize();
+        Some((self.center + self.radius * n, cone.pdf()))
+    }
+
+    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<f32> {
+        SubtendedCone::new(self.center, self.radius, from).map(|cone| cone.pdf())
     }
 }
 
@@ -340,14 +451,19 @@ impl AreaLight {
         }
     }
 
-    /// Solid-angle pdf of sampling `light_point` uniformly by area, as seen
-    /// from `from`: `dist² / (cos(θ_light) · area)`, where θ_light is the
+    /// Solid-angle pdf, as seen from `from`, of the strategy
+    /// [`Light::sample_li`] used to reach `light_point`: the shape's own
+    /// solid-angle density where it has one, otherwise that of sampling
+    /// uniformly by area, `dist² / (cos(θ_light) · area)`, where θ_light is the
     /// angle between the light's surface normal at `light_point` and the
     /// direction back toward the shaded point. Back-facing points clamp the
     /// cosine to zero, so their pdf explodes and both MIS strategies agree
     /// the contribution is negligible — area lights are effectively
     /// one-sided.
     fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> f32 {
+        if let Some(pdf) = self.shape.solid_angle_pdf(from, light_point) {
+            return pdf;
+        }
         let direction = light_point - from;
         let dir_to_light = direction.normalize();
         let light_normal = self.shape.normal_at(light_point);
@@ -370,7 +486,11 @@ impl AreaLight {
 
 impl Light for AreaLight {
     fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
-        let light_point = self.shape.sample_point(u, v);
+        // The shape's solid-angle strategy where it has one from here, area
+        // sampling otherwise. `pdf_at_point` makes the same choice through
+        // `solid_angle_pdf`, which is what keeps the two MIS sides one strategy.
+        let solid_angle = self.shape.sample_solid_angle(from, u, v);
+        let light_point = solid_angle.map_or_else(|| self.shape.sample_point(u, v), |(p, _)| p);
         let to_light = light_point - from;
         let distance = to_light.length();
         if distance < 1e-6 {
@@ -390,7 +510,10 @@ impl Light for AreaLight {
             radiance: self
                 .material
                 .radiance_toward(light_point, -dir_to_light, front),
-            pdf: self.pdf_toward(to_light, dir_to_light, light_normal, light_point),
+            pdf: solid_angle.map_or_else(
+                || self.pdf_toward(to_light, dir_to_light, light_normal, light_point),
+                |(_, pdf)| pdf,
+            ),
         })
     }
 

@@ -217,13 +217,186 @@ fn area_light_declines_a_coincident_shading_point() {
     assert!(light.sample_li(pole, 0.0, 0.0).is_none());
 }
 
+/// Area sampling's density in solid angle is `d² / (cos · A)`, so twice as
+/// far is four times the pdf. (A rect light, because a sphere seen from
+/// outside is no longer area-sampled — see the cone tests below.)
 #[test]
 fn area_light_pdf_falls_with_the_inverse_square_of_distance() {
-    let light = sphere_light(Vec3A::ZERO, 0.1, Vec3A::ONE, 0);
-    let p = Vec3A::new(0.0, 0.0, 0.1); // the +Z pole, facing +Z
-    let near = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.1), p);
-    let far = light.pdf_at_point(Vec3A::new(0.0, 0.0, 4.1), p);
+    let rect = RectShape::new(
+        Vec3A::new(-0.05, -0.05, 0.0),
+        Vec3A::new(0.1, 0.0, 0.0),
+        Vec3A::new(0.0, 0.1, 0.0),
+        Vec3A::Z,
+    );
+    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 0);
+    let near = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
+    let far = light.pdf_at_point(Vec3A::new(0.0, 0.0, 4.0), Vec3A::ZERO);
     assert!(approx(far / near, 4.0, 0.01), "{}", far / near);
+}
+
+// ---------------------------------------------------------------------------
+// Sphere lights: sampled by the cone they subtend
+// ---------------------------------------------------------------------------
+
+/// The cone a sphere subtends from `from`, in f64: its axis and `cos θ_max`.
+fn subtended_cone(center: Vec3A, radius: f32, from: Vec3A) -> (Vec3A, f64) {
+    let d = (center - from).length() as f64;
+    let sin_max = radius as f64 / d;
+    (
+        (center - from).normalize(),
+        (1.0 - sin_max * sin_max).sqrt(),
+    )
+}
+
+/// The three regimes: a sphere nearly touching the shading point, an ordinary
+/// one, and one far enough (`sin² θ_max ≈ 2.8e-6`) to take the small-angle
+/// branch, where `1 − cos θ_max` cancels to nothing in f32.
+const CONE_CASES: [(Vec3A, f32, Vec3A); 3] = [
+    (Vec3A::new(0.3, 1.2, -0.1), 1.0, Vec3A::new(0.3, 0.0, -0.1)),
+    (Vec3A::new(2.0, 3.0, -1.0), 0.7, Vec3A::new(0.5, -1.0, 2.0)),
+    (Vec3A::new(0.0, 300.0, 0.0), 0.5, Vec3A::ZERO),
+];
+
+/// Every point lies on the sphere, on the cap that faces the shading point
+/// (so none is spent where the sphere occludes its own shadow ray), inside the
+/// subtended cone, and carries the cone's uniform density.
+#[test]
+fn sphere_light_samples_only_the_cap_facing_the_shading_point() {
+    for (center, radius, from) in CONE_CASES {
+        let shape = SphereShape { center, radius };
+        let light = sphere_light(center, radius, Vec3A::ONE, 0);
+        let (axis, cos_max) = subtended_cone(center, radius, from);
+        let expected_pdf = 1.0 / (2.0 * std::f64::consts::PI * (1.0 - cos_max));
+        let mut rng = Rng::new(11);
+        for _ in 0..2000 {
+            let (u, v) = (rng.next_f32(), rng.next_f32());
+            let (p, pdf) = shape
+                .sample_solid_angle(from, u, v)
+                .expect("outside the sphere there is always a cone");
+            assert!(
+                approx((p - center).length(), radius, 1e-4 * radius),
+                "off the sphere: {p}"
+            );
+            let facing = (p - center).normalize().dot((from - p).normalize());
+            assert!(facing >= -1e-3, "sampled the far side: cos = {facing}");
+            let cos_theta = (p - from).normalize().dot(axis) as f64;
+            assert!(
+                cos_theta >= cos_max - 1e-5,
+                "outside the cone: {cos_theta} < {cos_max}"
+            );
+            assert!(
+                ((pdf as f64) - expected_pdf).abs() <= 1e-3 * expected_pdf,
+                "pdf {pdf} vs the cone's {expected_pdf}"
+            );
+            // And the light hands NEE exactly that point and density.
+            let s = light.sample_li(from, u, v).expect("reachable");
+            assert_eq!(s.pdf, pdf);
+            assert!(s.direction.dot((p - from).normalize()) > 1.0 - 1e-5);
+        }
+    }
+}
+
+/// Uniform in solid angle: `cos θ` off the axis is uniform on
+/// `[cos θ_max, 1]` and the azimuth is uniform on `[0, 2π)`. A sampler that
+/// put the right points on the cap with the wrong density would pass the
+/// geometry test above and bias every render.
+#[test]
+fn sphere_light_cone_samples_are_uniform_in_solid_angle() {
+    let (center, radius, from) = CONE_CASES[1];
+    let shape = SphereShape { center, radius };
+    let (axis, cos_max) = subtended_cone(center, radius, from);
+    // Any frame around the axis: the azimuth is measured in it.
+    let t = axis.any_orthonormal_vector();
+    let b = axis.cross(t);
+    const N: usize = 80_000;
+    const BINS: usize = 10;
+    let (mut theta_bins, mut phi_bins) = ([0usize; BINS], [0usize; BINS]);
+    let mut rng = Rng::new(12);
+    for _ in 0..N {
+        let (p, _) = shape
+            .sample_solid_angle(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let w = (p - from).normalize();
+        let x = (w.dot(axis) as f64 - cos_max) / (1.0 - cos_max);
+        theta_bins[((x * BINS as f64) as usize).min(BINS - 1)] += 1;
+        let phi = (w.dot(b) as f64)
+            .atan2(w.dot(t) as f64)
+            .rem_euclid(std::f64::consts::TAU);
+        phi_bins[((phi / std::f64::consts::TAU * BINS as f64) as usize).min(BINS - 1)] += 1;
+    }
+    let expected = (N / BINS) as f64;
+    for (name, bins) in [("cos θ", theta_bins), ("φ", phi_bins)] {
+        for (i, &n) in bins.iter().enumerate() {
+            // 8 000 per bin; 5% is over four standard deviations.
+            assert!(
+                ((n as f64) - expected).abs() < 0.05 * expected,
+                "{name} bin {i}: {n} samples, expected {expected}"
+            );
+        }
+    }
+}
+
+/// End to end: a unit-radiance sphere seen from a surface facing its centre
+/// delivers `E = π sin² θ_max`, and the cone estimator `L cos θ / pdf`
+/// recovers it — near, far, and in the small-angle branch.
+#[test]
+fn sphere_light_cone_estimates_the_analytic_irradiance() {
+    for (center, radius, from) in CONE_CASES {
+        let light = sphere_light(center, radius, Vec3A::ONE, 0);
+        let (axis, cos_max) = subtended_cone(center, radius, from);
+        let exact = std::f64::consts::PI * (1.0 - cos_max * cos_max);
+        const K: usize = 128;
+        let mut sum = 0.0f64;
+        for i in 0..K {
+            for j in 0..K {
+                let u = (i as f32 + 0.5) / K as f32;
+                let v = (j as f32 + 0.5) / K as f32;
+                let s = light.sample_li(from, u, v).unwrap();
+                let cos = s.direction.dot(axis).max(0.0);
+                sum += (s.radiance.x * cos / s.pdf) as f64;
+            }
+        }
+        let estimate = sum / (K * K) as f64;
+        assert!(
+            (estimate - exact).abs() <= 2e-3 * exact,
+            "radius {radius} at distance {}: {estimate} vs π sin²θ = {exact}",
+            (center - from).length()
+        );
+    }
+}
+
+/// Inside the sphere there is no cone: it falls back to area sampling, and
+/// both MIS sides agree that it did.
+#[test]
+fn sphere_light_from_inside_falls_back_to_area_sampling() {
+    let center = Vec3A::new(0.0, 1.0, 0.0);
+    let shape = SphereShape {
+        center,
+        radius: 2.0,
+    };
+    let from = Vec3A::new(0.5, 0.5, 0.0);
+    assert!(shape.sample_solid_angle(from, 0.3, 0.6).is_none());
+    assert!(
+        shape
+            .solid_angle_pdf(from, center + Vec3A::Y * 2.0)
+            .is_none()
+    );
+
+    let light = sphere_light(center, 2.0, Vec3A::ONE, 0);
+    let mut rng = Rng::new(13);
+    for _ in 0..200 {
+        let s = light
+            .sample_li(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let p = from + s.direction * s.distance;
+        assert!(approx((p - center).length(), 2.0, 1e-3));
+        let pdf = light.pdf_at_point(from, p);
+        assert!(
+            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            "{pdf} vs {}",
+            s.pdf
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
