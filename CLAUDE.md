@@ -554,13 +554,15 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   and the coat's angular emission factor stays unit-testable against a bare cosine.
   A material that emits only through `emitted_at` must therefore never become a
   light-list entry, or NEE would sample it at zero radiance while the bounce side saw
-  the real value. Three implementations: **`OpenPBR`**,
+  the real value. Four implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**
   (`material/materialx.rs`), which evaluates a MaterialX graph per shading point and
   *delegates* the BSDF to the `OpenPBR` it reduces to — so sampling, MIS
-  densities and energy compensation stay in one place. Two hooks gate the
+  densities and energy compensation stay in one place — and **`PreviewSurface`**
+  (`material/preview_surface.rs`), the same delegation for a `UsdPreviewSurface`
+  whose inputs are driven by `UsdUVTexture`s. Two hooks gate the
   per-triangle side tables the importer would otherwise build for every mesh:
   `face_texture()` for Ptex and `uses_uv()` for the `primvars:st` chart. Shared shading helpers (aniso GGX VNDF sampling,
   Schlick/F82 Fresnel, EON diffuse, Charlie sheen, thin-film, Cauchy dispersion) live in
