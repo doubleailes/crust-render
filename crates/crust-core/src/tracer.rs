@@ -1060,9 +1060,14 @@ fn bounce_emission_weight(
     };
     match lights.find_by_geom(hit.geom_id) {
         Some((light, pmf)) if pmf > 0.0 => {
-            let light_pdf = lights
-                .density(light.pdf_at_point(from, hit.rec.p), pmf)
-                .max(1e-6);
+            // A zero pdf is a point NEE refuses to sample (the back of an
+            // area-sampled light, say): nothing competes for it, exactly as
+            // for a light NEE never picks.
+            let point_pdf = light.pdf_at_point(from, hit.rec.p);
+            if point_pdf <= 0.0 {
+                return 1.0;
+            }
+            let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
         _ => 1.0,
