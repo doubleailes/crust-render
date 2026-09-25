@@ -163,12 +163,14 @@ fn area_light_pdf_at_point_matches_its_own_sample() {
     }
 }
 
+/// A sheared parallelogram is not a rectangle, so it keeps area sampling,
+/// whose solid-angle density is `d² / (cos · A)`.
 #[test]
-fn rect_light_pdf_is_distance_squared_over_cosine_area() {
+fn sheared_rect_light_pdf_is_distance_squared_over_cosine_area() {
     let rect = RectShape::new(
-        Vec3A::new(-0.5, -0.5, 0.0),
+        Vec3A::new(-0.75, -0.5, 0.0),
         Vec3A::new(1.0, 0.0, 0.0),
-        Vec3A::new(0.0, 1.0, 0.0),
+        Vec3A::new(0.5, 1.0, 0.0),
         Vec3A::Z,
     );
     let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
@@ -219,20 +221,245 @@ fn area_light_declines_a_coincident_shading_point() {
 }
 
 /// Area sampling's density in solid angle is `d² / (cos · A)`, so twice as
-/// far is four times the pdf. (A rect light, because a sphere seen from
-/// outside is no longer area-sampled — see the cone tests below.)
+/// far is four times the pdf. (A sheared rect light, because neither a
+/// sphere nor a true rectangle seen from its front is area-sampled any more.)
 #[test]
 fn area_light_pdf_falls_with_the_inverse_square_of_distance() {
     let rect = RectShape::new(
-        Vec3A::new(-0.05, -0.05, 0.0),
+        Vec3A::new(-0.075, -0.05, 0.0),
         Vec3A::new(0.1, 0.0, 0.0),
-        Vec3A::new(0.0, 0.1, 0.0),
+        Vec3A::new(0.05, 0.1, 0.0),
         Vec3A::Z,
     );
     let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 0);
     let near = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
     let far = light.pdf_at_point(Vec3A::new(0.0, 0.0, 4.0), Vec3A::ZERO);
     assert!(approx(far / near, 4.0, 0.01), "{}", far / near);
+}
+
+// ---------------------------------------------------------------------------
+// Rect lights: sampled by the spherical rectangle they subtend
+// ---------------------------------------------------------------------------
+
+/// The solid angle of the triangle `(a, b, c)` seen from the origin, by Van
+/// Oosterom & Strackee's formula — independent of the Ureña map under test.
+fn triangle_solid_angle(a: glam::DVec3, b: glam::DVec3, c: glam::DVec3) -> f64 {
+    let (la, lb, lc) = (a.length(), b.length(), c.length());
+    let num = a.dot(b.cross(c)).abs();
+    let den = la * lb * lc + a.dot(b) * lc + a.dot(c) * lb + b.dot(c) * la;
+    2.0 * num.atan2(den)
+}
+
+/// The solid angle, seen from `from`, of the part `[s0, s1] × [t0, t1]` of the
+/// parallelogram `origin + s·eu + t·ev`, as two triangles.
+fn rect_solid_angle(
+    from: Vec3A,
+    origin: Vec3A,
+    eu: Vec3A,
+    ev: Vec3A,
+    (s0, s1): (f64, f64),
+    (t0, t1): (f64, f64),
+) -> f64 {
+    let d = |v: Vec3A| glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64);
+    let (o, eu, ev) = (d(origin - from), d(eu), d(ev));
+    let p = |s: f64, t: f64| o + s * eu + t * ev;
+    triangle_solid_angle(p(s0, t0), p(s1, t0), p(s1, t1))
+        + triangle_solid_angle(p(s0, t0), p(s1, t1), p(s0, t1))
+}
+
+/// A 2 x 1 panel in the z = 0 plane, emitting toward +Z, and a shading point
+/// near it and off its axis — where area sampling is at its worst.
+fn near_rect() -> (Vec3A, Vec3A, Vec3A, Vec3A) {
+    (
+        Vec3A::new(-1.0, -0.5, 0.0),
+        Vec3A::new(2.0, 0.0, 0.0),
+        Vec3A::new(0.0, 1.0, 0.0),
+        Vec3A::new(0.7, -0.2, 0.35),
+    )
+}
+
+#[test]
+fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
+    let rect = RectShape::new(
+        Vec3A::new(-0.5, -0.5, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        Vec3A::new(0.0, 1.0, 0.0),
+        Vec3A::Z,
+    );
+    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
+    // Above the centre of a 2a x 2b rectangle at height h the solid angle is
+    // 4 asin(ab / √((a² + h²)(b² + h²))).
+    let omega = 4.0 * (0.25f64 / (4.25f64 * 4.25).sqrt()).asin();
+    let pdf = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
+    assert!(
+        ((pdf as f64) * omega - 1.0).abs() < 1e-5,
+        "{pdf} vs {}",
+        1.0 / omega
+    );
+    // Off axis, against the two-triangle formula.
+    let (origin, eu, ev, from) = near_rect();
+    let light = AreaLight::new(
+        Box::new(RectShape::new(origin, eu, ev, Vec3A::Z)),
+        Arc::new(Emissive::new(Vec3A::ONE)),
+        1,
+    );
+    let omega = rect_solid_angle(from, origin, eu, ev, (0.0, 1.0), (0.0, 1.0));
+    let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+    assert!(
+        ((pdf as f64) * omega - 1.0).abs() < 1e-5,
+        "{pdf} vs {omega}"
+    );
+    // From beyond each edge and corner, where the corner angles change sign,
+    // and far enough that the solid angle is just above the point where area
+    // sampling takes over and `Σg − 2π` would cancel in f32.
+    for from in [
+        Vec3A::new(3.0, 0.2, 0.5),
+        Vec3A::new(-2.5, -1.5, 0.2),
+        Vec3A::new(0.3, 2.0, 1.5),
+        Vec3A::new(-1.2, 0.9, 0.05),
+        Vec3A::new(40.0, -30.0, 120.0),
+    ] {
+        let omega = rect_solid_angle(from, origin, eu, ev, (0.0, 1.0), (0.0, 1.0));
+        let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+        assert!(
+            ((pdf as f64) * omega - 1.0).abs() < 1e-5,
+            "from {from}: {pdf} vs {omega}"
+        );
+    }
+    // And the bounce side agrees with every sample's own density.
+    let mut rng = Rng::new(21);
+    for _ in 0..200 {
+        let s = light
+            .sample_li(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let p = from + s.direction * s.distance;
+        assert!(p.z.abs() < 1e-5 && p.x.abs() <= 1.0 + 1e-5 && p.y.abs() <= 0.5 + 1e-5);
+        assert_eq!(s.pdf, light.pdf_at_point(from, p));
+    }
+}
+
+/// Uniform in solid angle means each cell of the rectangle catches samples in
+/// proportion to the solid angle *it* subtends — measured with an independent
+/// formula, from a point close enough that the cells' solid angles differ by
+/// an order of magnitude.
+#[test]
+fn rect_light_samples_are_uniform_in_solid_angle() {
+    let (origin, eu, ev, from) = near_rect();
+    let rect = RectShape::new(origin, eu, ev, Vec3A::Z);
+    const N: usize = 4;
+    const SAMPLES: usize = 400_000;
+    let mut counts = [[0usize; N]; N];
+    let mut rng = Rng::new(5);
+    for _ in 0..SAMPLES {
+        let (p, _) = rect
+            .sample_solid_angle(from, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let s = ((p - origin).dot(eu) / eu.length_squared()).clamp(0.0, 0.999_999);
+        let t = ((p - origin).dot(ev) / ev.length_squared()).clamp(0.0, 0.999_999);
+        counts[(s * N as f32) as usize][(t * N as f32) as usize] += 1;
+    }
+    let total = rect_solid_angle(from, origin, eu, ev, (0.0, 1.0), (0.0, 1.0));
+    let cell = 1.0 / N as f64;
+    let (mut smallest, mut largest) = (f64::MAX, 0.0f64);
+    for (i, row) in counts.iter().enumerate() {
+        for (j, &count) in row.iter().enumerate() {
+            let (s0, t0) = (i as f64 * cell, j as f64 * cell);
+            let expected =
+                rect_solid_angle(from, origin, eu, ev, (s0, s0 + cell), (t0, t0 + cell)) / total;
+            smallest = smallest.min(expected);
+            largest = largest.max(expected);
+            let got = count as f64 / SAMPLES as f64;
+            // Five binomial standard deviations.
+            let tol = 5.0 * (expected / SAMPLES as f64).sqrt();
+            assert!(
+                (got - expected).abs() < tol,
+                "cell ({i}, {j}): {got} vs {expected}"
+            );
+        }
+    }
+    assert!(largest > 10.0 * smallest, "{smallest} .. {largest}");
+}
+
+/// A unit-radiance rect light estimates the irradiance on a tilted receiver:
+/// through the light's own sampler, against plain area quadrature.
+#[test]
+fn rect_light_estimates_the_irradiance() {
+    let (origin, eu, ev, from) = near_rect();
+    let light = AreaLight::new(
+        Box::new(RectShape::new(origin, eu, ev, Vec3A::Z)),
+        Arc::new(Emissive::light(Vec3A::ONE, None)),
+        1,
+    );
+    let receiver = Vec3A::new(-0.4, 0.2, -1.0).normalize();
+    let mut quadrature = 0.0f64;
+    const Q: usize = 800;
+    let area = (eu.cross(ev).length() / (Q * Q) as f32) as f64;
+    for i in 0..Q {
+        for j in 0..Q {
+            let p =
+                origin + eu * ((i as f32 + 0.5) / Q as f32) + ev * ((j as f32 + 0.5) / Q as f32);
+            let w = p - from;
+            let r2 = w.length_squared() as f64;
+            let w = w.normalize();
+            let cos_x = receiver.dot(w).max(0.0) as f64;
+            let cos_l = (-w).dot(Vec3A::Z).max(0.0) as f64;
+            quadrature += cos_x * cos_l * area / r2;
+        }
+    }
+    let mut estimate = 0.0f64;
+    const M: usize = 256;
+    for i in 0..M {
+        for j in 0..M {
+            let s = light
+                .sample_li(
+                    from,
+                    (i as f32 + 0.5) / M as f32,
+                    (j as f32 + 0.5) / M as f32,
+                )
+                .unwrap();
+            estimate += (s.radiance.x * receiver.dot(s.direction).max(0.0) / s.pdf) as f64;
+        }
+    }
+    estimate /= (M * M) as f64;
+    assert!(
+        (estimate / quadrature - 1.0).abs() < 2e-3,
+        "{estimate} vs {quadrature}"
+    );
+}
+
+/// Area sampling stays wherever the map does not apply or does not pay: a
+/// sheared parallelogram, a shading point behind the one-sided light or on
+/// its plane, and a light too small to be worth it. Both MIS sides fall back
+/// together.
+#[test]
+fn rect_light_falls_back_to_area_sampling() {
+    let (origin, eu, ev, from) = near_rect();
+    let square = RectShape::new(origin, eu, ev, Vec3A::Z);
+    let sheared = RectShape::new(origin, eu, ev + 0.3 * eu, Vec3A::Z);
+    let tiny = RectShape::new(
+        Vec3A::ZERO,
+        Vec3A::new(0.01, 0.0, 0.0),
+        Vec3A::new(0.0, 0.01, 0.0),
+        Vec3A::Z,
+    );
+    let behind = Vec3A::new(0.1, 0.2, -0.5);
+    let on_plane = Vec3A::new(3.0, 0.0, 0.0);
+    let far = Vec3A::new(0.0, 0.0, 5.0);
+    for (shape, from) in [
+        (&sheared, from),
+        (&square, behind),
+        (&square, on_plane),
+        (&tiny, far),
+    ] {
+        assert!(shape.sample_solid_angle(from, 0.3, 0.6).is_none());
+        assert!(shape.solid_angle_pdf(from, Vec3A::ZERO).is_none());
+    }
+    assert!(square.sample_solid_angle(from, 0.3, 0.6).is_some());
+    // The same tiny light, near enough to subtend more than the threshold.
+    assert!(
+        tiny.sample_solid_angle(Vec3A::new(0.0, 0.0, 0.5), 0.3, 0.6)
+            .is_some()
+    );
 }
 
 // ---------------------------------------------------------------------------
