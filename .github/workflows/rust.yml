@@ -96,6 +96,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # The root Cargo.toml is a virtual manifest, and the action lists
+          # the binaries to build with `cargo read-manifest`, which refuses
+          # one (and ignores EXTRA_COMMAND_FLAGS, so `-p` cannot help). Run
+          # it from the binary crate instead; EXTRA_FILES still resolve
+          # against the repository root.
+          SRC_DIR: crates/crust-render
           RUSTTARGET: ${{ matrix.target }}
           EXTRA_FILES: "README.md LICENSE"
           TOOLCHAIN_VERSION: ${{ env.RUST_VERSION }}
