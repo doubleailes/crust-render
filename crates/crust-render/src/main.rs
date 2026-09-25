@@ -66,6 +66,12 @@ struct Cli {
     /// their default (non-time-sampled) value.
     #[arg(short, long, allow_negative_numbers = true, value_parser = parse_frame)]
     frame: Option<f64>,
+    /// Camera to render through, as an absolute USD prim path (e.g.
+    /// `/root/camera01/renderCam`). Without it the stage's
+    /// `RenderSettings.camera` is used, else the first camera found. A path
+    /// that is not a camera on the stage stops the render.
+    #[arg(long, value_name = "PRIM_PATH")]
+    camera: Option<String>,
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
     /// strategy alone to visualize what MIS balances between.
@@ -320,7 +326,11 @@ fn main() {
     let scene: Scene = if let Some(t) = input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
-        match Scene::from_usd_at_frame(input_path, &assets, cli.frame) {
+        let options = crust_core::UsdImportOptions {
+            frame: cli.frame,
+            camera: cli.camera.clone(),
+        };
+        match Scene::from_usd_with_options(input_path, &assets, &options) {
             Ok(scene) => scene,
             Err(e) => {
                 error!("Failed to load USD scene: {}", e);
@@ -333,6 +343,9 @@ fn main() {
             warn!(
                 "--frame {frame} has no effect without -i/--input: the procedural scene is static"
             );
+        }
+        if let Some(camera) = &cli.camera {
+            warn!("--camera {camera} has no effect without -i/--input");
         }
         let (world, lights) = simple_scene();
         let (camera, settings) = get_settings();

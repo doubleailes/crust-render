@@ -2361,3 +2361,105 @@ def Xform "W"
         "neutral grey: {f}"
     );
 }
+
+/// Which camera renders: `UsdImportOptions::camera` (the CLI's `--camera`),
+/// else `RenderSettings.camera`, else the first camera met. ALab's stage
+/// carries a trailer camera per shot beside the shot camera, and the first
+/// one the traversal meets is a trailer camera.
+#[test]
+fn camera_choice_follows_the_option_then_render_settings() {
+    use crust_core::{Error, UsdImportOptions};
+
+    let dir = std::env::temp_dir().join("crust_camera_choice");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let stage = |settings_camera: Option<&str>| {
+        let rel = settings_camera
+            .map(|p| format!("rel camera = <{p}>"))
+            .unwrap_or_default();
+        format!(
+            r#"#usda 1.0
+def Xform "W"
+{{
+    def Camera "A"
+    {{
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Camera "B"
+    {{
+        double3 xformOp:translate = (10, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+}}
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int2 resolution = (64, 36)
+        {rel}
+    }}
+}}
+"#
+        )
+    };
+    let load = |settings_camera: Option<&str>, camera: Option<&str>| {
+        let path = dir.join(format!(
+            "cam_{}.usda",
+            settings_camera.unwrap_or("none").replace('/', "_")
+        ));
+        std::fs::write(&path, stage(settings_camera)).expect("write stage");
+        Scene::from_usd_with_options(
+            &path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                camera: camera.map(str::to_owned),
+                ..UsdImportOptions::default()
+            },
+        )
+    };
+    let x = |scene: Scene| scene.camera.get_ray(0.5, 0.5, [0.5, 0.5], 0.0).origin().x;
+
+    assert_eq!(
+        x(load(None, Some("/W/B")).expect("loads")),
+        10.0,
+        "the option picks B"
+    );
+    assert_eq!(
+        x(load(None, Some("/W/A")).expect("loads")),
+        0.0,
+        "the option picks A"
+    );
+    assert_eq!(
+        x(load(Some("/W/B"), None).expect("loads")),
+        10.0,
+        "RenderSettings.camera picks B"
+    );
+    assert_eq!(
+        x(load(Some("/W/B"), Some("/W/A")).expect("loads")),
+        0.0,
+        "the option wins over RenderSettings.camera"
+    );
+    // A dangling RenderSettings.camera warns and falls back to a real camera.
+    let fallback = x(load(Some("/W/Nope"), None).expect("falls back"));
+    assert!(fallback == 0.0 || fallback == 10.0, "{fallback}");
+
+    match load(None, Some("/W/Nope")) {
+        Err(Error::CameraNotFound { path, available }) => {
+            assert_eq!(path, "/W/Nope");
+            let mut available = available;
+            available.sort();
+            assert_eq!(
+                available,
+                ["/W/A", "/W/B"],
+                "the error lists the real cameras"
+            );
+        }
+        other => panic!("expected CameraNotFound, got {:?}", other.map(|_| ())),
+    }
+    for bad in ["W/A", "/", "/W/A.xformOp:translate", ""] {
+        assert!(
+            matches!(load(None, Some(bad)), Err(Error::InvalidCameraPath(_))),
+            "{bad:?} must be refused"
+        );
+    }
+}

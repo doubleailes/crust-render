@@ -193,6 +193,17 @@ struct ImportCtx<'a> {
     lights: LightList,
     volumes: Vec<VolumeRegion>,
     camera: Option<Camera>,
+    /// The camera to render through, when one was named; see
+    /// [`CameraChoice`]. `None` takes the first camera met.
+    wanted_camera: Option<CameraChoice>,
+    /// The first camera met, kept while a named one is still being looked
+    /// for: it is the fallback when a `RenderSettings.camera` target turns
+    /// out not to exist.
+    first_camera: Option<(Camera, sdf::Path)>,
+    /// Every camera prim met, for the error that names the alternatives when
+    /// a requested camera is missing. A path per camera, and a stage has a
+    /// handful of them.
+    cameras_seen: Vec<sdf::Path>,
     caches: ImportCaches<'a>,
     /// Direct mesh placements whose representation is not yet decided, in
     /// traversal order. Drained by [`flush_meshes`] after the last chunk —
@@ -304,12 +315,19 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             .flatten()
             .is_some()
         {
-            if ctx.camera.is_none() {
+            ctx.cameras_seen.push(prim.path().clone());
+            let named = ctx.wanted_camera.as_ref().map(CameraChoice::path);
+            let is_named = named == Some(prim.path());
+            // A named camera is built when met; otherwise only the first
+            // camera is, and kept aside as the fallback while a named one
+            // might still turn up later in the traversal.
+            if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
                 match build_camera(stage, &prim, &ctx.settings) {
-                    Some(c) => {
+                    Some(c) if is_named || named.is_none() => {
                         debug!("Imported USD camera at {}", prim.path());
                         ctx.camera = Some(c);
                     }
+                    Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
                     None => warn!("Failed to build camera from {}", prim.path()),
                 }
             }
@@ -380,8 +398,9 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
 pub(crate) fn load_scene(
     path: &Path,
     assets: &dyn AssetLoader,
-    time: Option<f64>,
+    options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
+    let time = options.frame;
     // The authoritative check: every host reaches the importer through here,
     // and nothing past this point expects a non-finite time.
     if let Some(t) = time
@@ -389,6 +408,17 @@ pub(crate) fn load_scene(
     {
         return Err(crate::Error::InvalidFrame(t));
     }
+    // Same for the camera: a malformed path is refused before the stage is
+    // opened, not discovered after a four-minute traversal.
+    let requested_camera = match &options.camera {
+        Some(c) => Some(
+            sdf::path(c)
+                .ok()
+                .filter(|p| p.is_abs() && p.is_prim_path() && !p.is_abs_root())
+                .ok_or_else(|| crate::Error::InvalidCameraPath(c.clone()))?,
+        ),
+        None => None,
+    };
     let _time_scope = EvalTimeScope::enter(time);
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
@@ -419,6 +449,16 @@ pub(crate) fn load_scene(
     }
     // Render settings come first — the camera importer needs the aspect ratio.
     let mut settings = import_render_settings(&index);
+    // Which camera to render through: the host's explicit choice, else the
+    // stage's own `RenderSettings.camera`. Decided here, on the index stage,
+    // because the traversal needs it before it meets any camera.
+    let wanted_camera = match requested_camera {
+        Some(p) => Some(CameraChoice::Requested(p)),
+        None => render_settings_camera(&index).map(CameraChoice::Settings),
+    };
+    if let Some(choice) = &wanted_camera {
+        debug!("Rendering through {choice}");
+    }
     if let Some(t) = time {
         // The sampler's frame seed follows the frame being rendered, so an
         // image sequence gets independent noise per frame instead of one
@@ -438,6 +478,9 @@ pub(crate) fn load_scene(
         lights: LightList::new(),
         volumes: Vec::new(),
         camera: None,
+        wanted_camera,
+        first_camera: None,
+        cameras_seen: Vec::new(),
         // Prims binding the same material path share one Arc, and prims
         // with identical local geometry + material share one copy of that
         // geometry — placed by an instance when it is placed more than once,
@@ -520,10 +563,30 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let camera = ctx.camera.unwrap_or_else(|| {
-        warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
-        crate::world::get_settings().0
-    });
+    let camera = match (
+        ctx.camera.take(),
+        ctx.wanted_camera.take(),
+        ctx.first_camera.take(),
+    ) {
+        (Some(c), _, _) => c,
+        (None, Some(CameraChoice::Requested(p)), _) => {
+            return Err(crate::Error::CameraNotFound {
+                path: p.to_string(),
+                available: ctx.cameras_seen.iter().map(ToString::to_string).collect(),
+            });
+        }
+        (None, Some(CameraChoice::Settings(p)), Some((c, first))) => {
+            warn!(
+                "RenderSettings.camera targets {p}, which is not a camera on this stage — \
+                 rendering through {first} instead"
+            );
+            c
+        }
+        (None, _, _) => {
+            warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
+            crate::world::get_settings().0
+        }
+    };
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
@@ -4852,16 +4915,56 @@ fn shader_input_vec3(shader: &Shader, name: &str) -> Option<Vec3A> {
 // Render settings
 // -----------------------------------------------------------------------
 
-fn import_render_settings(stage: &Stage) -> RenderSettings {
-    let path = match UsdRenderSettings::stage_settings_path(stage).ok().flatten() {
-        Some(p) => p,
-        None => {
-            // Fall back to the conventional /Render/settings location.
-            match sdf::path("/Render/settings").ok() {
-                Some(p) => p,
-                None => return default_settings(),
-            }
+/// A camera the render was told to use, and who said so — which decides what
+/// happens if it is not on the stage.
+enum CameraChoice {
+    /// The host's `UsdImportOptions::camera` (the CLI's `--camera`). Missing
+    /// is an error.
+    Requested(sdf::Path),
+    /// The stage's `RenderSettings.camera` relationship. Missing warns and
+    /// falls back to the first camera met.
+    Settings(sdf::Path),
+}
+
+impl CameraChoice {
+    fn path(&self) -> &sdf::Path {
+        match self {
+            CameraChoice::Requested(p) | CameraChoice::Settings(p) => p,
         }
+    }
+}
+
+impl std::fmt::Display for CameraChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CameraChoice::Requested(p) => write!(f, "camera {p} (requested)"),
+            CameraChoice::Settings(p) => write!(f, "camera {p} (RenderSettings.camera)"),
+        }
+    }
+}
+
+/// The prim holding the stage's render settings: the one the stage's
+/// `renderSettingsPrimPath` metadatum names, else the conventional
+/// `/Render/settings`.
+fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
+    UsdRenderSettings::stage_settings_path(stage)
+        .ok()
+        .flatten()
+        .or_else(|| sdf::path("/Render/settings").ok())
+}
+
+/// The first target of the render settings' `camera` relationship — the USD
+/// way for a stage to say which of its cameras is the shot camera.
+fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
+    let s = UsdRenderSettings::get(stage, render_settings_path(stage)?)
+        .ok()
+        .flatten()?;
+    s.camera_rel().targets().ok()?.into_iter().next()
+}
+
+fn import_render_settings(stage: &Stage) -> RenderSettings {
+    let Some(path) = render_settings_path(stage) else {
+        return default_settings();
     };
 
     let s = match UsdRenderSettings::get(stage, path.clone()).ok().flatten() {

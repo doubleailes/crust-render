@@ -68,7 +68,7 @@ pub use medium::Medium;
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone};
 pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
-pub use scene::{AssetLoader, NoAssets};
+pub use scene::{AssetLoader, NoAssets, UsdImportOptions};
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats, RayStats, RenderStats,
     SceneCounters, TextureCacheStats, peak_memory_bytes,

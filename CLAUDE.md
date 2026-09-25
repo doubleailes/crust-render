@@ -29,6 +29,8 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
+# --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
+#   else the first camera found -- a wrong path errors and lists the stage's cameras),
 # --stats (per-phase profile + scene statistics),
 # --auto-tx (convert UV textures to a .tx beside the original on first use)
 
@@ -1581,6 +1583,16 @@ Schema mapping:
   `read_preview_surface`, default only), and `crust:motion:translate` motion blur, which
   is still an authored offset rather than derived from the samples across the shutter.
   Sample: `samples/animation.usda`.
+- **Camera choice** (`UsdImportOptions::camera`, the CLI's `--camera`): the named prim,
+  else the stage's **`RenderSettings.camera`** relationship (read off the index stage, so
+  the traversal knows it before meeting any camera), else the first `UsdGeomCamera` the
+  traversal meets. A requested path that is malformed is refused before the stage opens
+  (`Error::InvalidCameraPath`), and one that names no camera fails after traversal with
+  `Error::CameraNotFound`, which **lists every camera the stage has** — a production
+  camera's path is usually buried in a referenced binary cache, and passing a bogus path
+  is the quickest way to discover the real one. A dangling `RenderSettings.camera`
+  target warns and falls back to the first camera, since the stage, not the operator,
+  made that mistake.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
@@ -1640,9 +1652,9 @@ which is prototype-sharing accounting rather than rendered geometry — the like
 being that `/island` is a single top-level subtree, so `MIN_STREAM_CHUNKS` keeps the
 direct read single-stage while the 22-prim layer streams, giving the two different
 `MaterialCache` epochs. That layer also authors a camera inline as a copy of `shotCam`,
-because the importer takes the *first* `UsdGeomCamera` it meets and traversal order is
-unspecified — reading `island.usda` directly gets whichever of its seven cameras comes
-first.
+from before `--camera` existed: without a named camera the importer takes the *first*
+`UsdGeomCamera` it meets, and traversal order is unspecified, so reading `island.usda`
+directly gets whichever of its seven cameras comes first. `--camera` names one instead.
 
 Measured per element (Ptex declined, so geometry only): **~57.7 M top-level triangles**
 across the 20 elements, the largest being `osOcean` (15.6 M), `isCoral` (14.5 M),
@@ -1974,13 +1986,16 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
     has `ao`, `ior`, `metallic`, `ntu`, `surfaceColor`). The host logs one
     `No tiles found` ERROR for it every render, and the wrench shades at the schema's
     roughness 0.5.
-  - **The shot camera is not selected.** The importer takes the *first*
-    `UsdGeomCamera` it traverses. On `entry.usda` that is trailer camera
-    `/root/cameras/camera_mk020_0280`, not the shot's `/root/camera01/…/renderCam`.
-    The trailer cameras have to be deactivated in a wrapper layer (`over "cameras" (
-    active = false )`). Neither a `RenderSettings.camera` relationship nor a CLI
-    camera flag is read. Each trailer camera also carries a `projectionPlane_M_geo`
-    mesh, which renders as grey geometry if its camera is left active.
+  - **The shot camera has to be named.** `entry.usda` carries 29 camera prims — 28
+    under `/root/cameras` for the 27 trailer shots (`mk020_0110` has two) plus the
+    shot's — and no
+    `RenderSettings.camera`, and the first one traversed is trailer camera
+    `mk020_0280`. Render the shot with
+    `--camera /root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam`
+    (found by passing a bogus `--camera`, whose error lists every camera). Each trailer
+    camera also carries a `projectionPlane_M_geo` mesh, which still imports as grey
+    geometry; deactivating `/root/cameras` in a wrapper layer (`over "cameras" ( active
+    = false )`) removes both.
   - The rig's **13 `CylinderLight`s** (oscilloscope and ham-radio button lights) now
     import as analytic cylinder lights; this used to be a gap.
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
