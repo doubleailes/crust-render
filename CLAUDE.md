@@ -585,6 +585,19 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   area, so its world density varies under a non-uniform scale and it reports
   `local_area · |det M| · |M⁻ᵀ n|` — both MIS halves read it, so it need only be the
   density actually sampled.
+  A shape with a better strategy than area sampling implements
+  **`LightShape::sample_solid_angle` / `solid_angle_pdf`** (default `None`, meaning
+  "sample me by area"): a point plus its *solid-angle* pdf as seen from the shading
+  point, which `AreaLight::sample_li` and `pdf_at_point` both prefer when present. The
+  contract is what keeps the two MIS sides one strategy — whether the shape answers
+  must depend on `from` alone, never on `u`/`v`, and the two methods must answer for
+  exactly the same `from`s with the same density. **`SphereShape` samples the cone it
+  subtends** (Shirley et al. 1996, pbrt-v4's `Sphere::Sample`): uniform over the
+  visible cap, pdf `1/(2π(1 − cos θ_max))`, with pbrt's small-angle branch below
+  `sin² θ_max < sin² 1.5°` (`SMALL_CONE_SIN2`, where `1 − cos θ_max` cancels in f32),
+  and area sampling only from inside the sphere. Area sampling spent at least half its
+  shadow rays on the hemisphere facing away. `AffineShape` spheres (non-uniform scale)
+  are still area-sampled.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
@@ -1935,9 +1948,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
 - **Light sampling is the main source of 16 spp noise**, and `docs/light_sampling.md`
   is the survey of the state of the art (SIGGRAPH/EGSR/HPG, pbrt-v4, Cycles,
   RenderMan, Arnold, Hyperion) with a ranked roadmap and a measured baseline. In
-  short: the light pick is uniform; sphere lights sample the *whole* sphere (≥50%
-  of shadow rays wasted — a visible-cone prototype measured 1.3–1.7× lower relMSE);
-  rect/disk/tube lights sample by area rather than solid angle; the built-in sky
+  short: the light pick is uniform; sphere lights now sample their visible cone
+  (1.3–12.9× lower relMSE at 16 spp on the five sphere-lit samples for ~8% more time
+  per sample, §3.7 there),
+  but rect/disk/tube lights still sample by area rather than solid angle; the built-in sky
   gradient is not a light, so NEE never samples it; `AreaLight::pdf_toward`'s
   `+1e-4` biases NEE upward on small lights; and the shadow ray is traced before
   the BSDF and emission are known to be non-zero. Measure changes with
