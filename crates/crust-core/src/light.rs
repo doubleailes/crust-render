@@ -1,6 +1,7 @@
-use crate::environment::EnvironmentMap;
+use crate::environment::{EnvironmentMap, luminance};
 use crate::material::Emissive;
 use glam::{Affine3A, Mat3A, Vec3A};
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::Arc;
 
@@ -487,6 +488,20 @@ pub trait Light: Send + Sync {
     fn geom_id(&self) -> Option<u32> {
         None
     }
+
+    /// The light's emitted power as a luminance flux — what
+    /// [`LightSelection::Power`] divides shadow rays by. It is a sampling
+    /// weight, never a shading quantity, so it must be proportionate across
+    /// lights and positive wherever the light emits, not exact.
+    ///
+    /// `None` for a light at infinity, which has no finite power to compare.
+    /// pbrt-v4's `PowerLightSampler` gives one the flux it sends into the
+    /// scene's bounding sphere; measured here, that let a sun take 88% of the
+    /// shadow rays from its dome and made `samples/domelight.usda` 1.4× noisier,
+    /// because in the sun's shadows the dome is the only light. So power
+    /// selection gives lights at infinity a fixed share instead, as pbrt-v4's
+    /// BVH sampler and Karma do.
+    fn power(&self) -> Option<f32>;
 }
 
 /// A geometric area light: any [`LightShape`] paired with the [`Emissive`]
@@ -581,6 +596,33 @@ impl Light for AreaLight {
 
     fn geom_id(&self) -> Option<u32> {
         Some(self.geom_id)
+    }
+
+    /// The emission's flux ([`Emissive::flux`]), with the projected area a
+    /// shaped light integrates against taken from a fixed grid of points
+    /// drawn from the shape's own area sampler, each weighted by the
+    /// reciprocal of its density — exact for a flat light, whose normal is
+    /// the same everywhere, and a close quadrature for a curved one.
+    fn power(&self) -> Option<f32> {
+        const GRID: usize = 16;
+        let points: Vec<(Vec3A, f32)> = (0..GRID * GRID)
+            .map(|k| {
+                let u = ((k / GRID) as f32 + 0.5) / GRID as f32;
+                let v = ((k % GRID) as f32 + 0.5) / GRID as f32;
+                let p = self.shape.sample_point(u, v);
+                (self.shape.normal_at(p), self.shape.inv_pdf_area(p))
+            })
+            .collect();
+        let projected_area = |w: Vec3A| {
+            points
+                .iter()
+                .map(|&(n, area)| area * n.dot(w).max(0.0))
+                .sum::<f32>()
+                / points.len() as f32
+        };
+        Some(luminance(
+            self.material.flux(self.shape.area(), projected_area),
+        ))
     }
 }
 
@@ -698,6 +740,11 @@ impl Light for DistantLight {
         self.covers(direction)
             .then(|| (self.radiance(), self.cone_pdf()))
     }
+
+    /// At infinity: no finite power (see [`Light::power`]).
+    fn power(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// The cosine-weighted solid angle of a cone of half-angle `half` (≤ π/2)
@@ -801,12 +848,60 @@ impl Light for DomeLight {
         // A dome covers every direction, so every escaping ray finds it.
         Some((self.radiance_toward(direction), self.pdf_toward(direction)))
     }
+
+    /// At infinity: no finite power (see [`Light::power`]).
+    fn power(&self) -> Option<f32> {
+        None
+    }
 }
 
-/// The `LightList` struct manages a collection of light sources in the scene.
+/// How NEE chooses which light to sample at a vertex (`crust:lightSelection`,
+/// `--light-selection`). Measured in `docs/light_sampling.md` §3.8.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightSelection {
+    /// One in N, whatever the lights emit: the renderer's behaviour before
+    /// selection was a choice, reproduced bit for bit (see
+    /// [`LightList::density`]), and the A/B for [`LightSelection::Power`].
+    Uniform,
+    /// The default: by power (Shirley et al. 1996; pbrt-v4's
+    /// `PowerLightSampler`), made defensive. Lights at infinity keep their
+    /// uniform share, since they have no comparable power ([`Light::power`]).
+    /// The finite lights split the rest [`DEFENSIVE_SHARE`] evenly and the
+    /// remainder in proportion to power, so no light falls below half its
+    /// uniform share — power is blind to distance and visibility, and the
+    /// even half is what bounds the cost where that blindness is wrong. It
+    /// pays off when a few lights outshine many that light the same things
+    /// (4.6× lower relMSE on a key among seven dim fills) and costs a few
+    /// percent where each light owns its own region (6% on `veach_mis`).
+    #[default]
+    Power,
+}
+
+/// Under [`LightSelection::Power`], the share of the finite lights' shadow
+/// rays split evenly among them rather than by power (Hesterberg's
+/// defensive importance sampling).
+pub const DEFENSIVE_SHARE: f64 = 0.5;
+
+/// The scene's lights, and how NEE picks one of them.
+///
+/// The pick's probability is half of the light strategy's MIS density (the
+/// other half is the light's own `sample_li` pdf), so whatever
+/// [`LightList::pick`] reports, [`LightList::find_by_geom`] and
+/// [`LightList::iter`] report the same number for the same light: the bounce
+/// side weights emission it found by chance with it, and the two sides must
+/// describe one strategy or emission is double-counted.
 pub struct LightList {
-    /// A vector of light sources stored as `Arc<dyn Light>` for shared ownership.
+    /// The lights. Add them through [`LightList::add`], which keeps the
+    /// geometry index and the selection in step with this vector.
     pub lights: Vec<Arc<dyn Light>>,
+    /// Per-light selection probability, empty while the selection is
+    /// uniform — [`LightList::select_by`] fills it.
+    pmf: Vec<f32>,
+    /// Inclusive running sum of `pmf`, ending at exactly 1.
+    cdf: Vec<f32>,
+    /// `geom_id → index into lights`, so a bounce hit finds its light in O(1)
+    /// rather than by scanning the list on every emissive hit.
+    by_geom: HashMap<u32, usize>,
 }
 
 impl Default for LightList {
@@ -817,39 +912,171 @@ impl Default for LightList {
 }
 
 impl LightList {
-    /// Creates a new, empty `LightList`.
+    /// Creates a new, empty `LightList`, selecting uniformly until
+    /// [`LightList::select_by`] says otherwise.
     pub fn new() -> Self {
-        Self { lights: Vec::new() }
-    }
-
-    /// Adds a light source to the `LightList`.
-    pub fn add(&mut self, light: Arc<dyn Light>) {
-        self.lights.push(light);
-    }
-
-    /// Uniformly picks a light source from the `LightList` from a single
-    /// `[0, 1)` sample `u`.
-    ///
-    /// # Returns
-    /// - `Some(&Arc<dyn Light>)` if the list is not empty.
-    /// - `None` if the list is empty.
-    pub fn pick(&self, u: f32) -> Option<&Arc<dyn Light>> {
-        if self.lights.is_empty() {
-            None
-        } else {
-            let i = (u * self.lights.len() as f32) as usize;
-            // Guard against `u == 1.0 - epsilon` rounding to len.
-            let i = i.min(self.lights.len() - 1);
-            self.lights.get(i)
+        Self {
+            lights: Vec::new(),
+            pmf: Vec::new(),
+            cdf: Vec::new(),
+            by_geom: HashMap::new(),
         }
     }
 
-    /// Finds the light whose scene geometry has world id `geom_id`. Used
-    /// by the integrator to attribute a bounce-hit emissive surface to its
-    /// light for MIS; emissive geometry with no light-list entry returns
-    /// `None`.
-    pub fn find_by_geom(&self, geom_id: u32) -> Option<&Arc<dyn Light>> {
-        self.lights.iter().find(|l| l.geom_id() == Some(geom_id))
+    /// Adds a light source. The selection falls back to uniform until the
+    /// next [`LightList::select_by`], since a table built over the old list
+    /// would describe the wrong one.
+    pub fn add(&mut self, light: Arc<dyn Light>) {
+        if let Some(id) = light.geom_id() {
+            self.by_geom.insert(id, self.lights.len());
+        }
+        self.lights.push(light);
+        self.pmf.clear();
+        self.cdf.clear();
+    }
+
+    /// Builds the selection over the current lights (see [`LightSelection`]).
+    ///
+    /// A finite light whose power comes out non-finite or non-positive — a
+    /// black one — gets probability zero, so NEE never spends a ray on it,
+    /// and the bounce side, seeing the same zero, keeps its emission at full
+    /// weight, so nothing is lost. With nothing left to pick from, the
+    /// selection stays uniform.
+    ///
+    /// The table is inverted by its CDF rather than an alias table, and that
+    /// is deliberate: the map from `u` to light stays monotone, so the
+    /// stratified samples that pick light *k* are still one contiguous slice
+    /// of the pick dimension, as under uniform picking.
+    pub fn select_by(&mut self, selection: LightSelection) {
+        self.pmf.clear();
+        self.cdf.clear();
+        if selection == LightSelection::Uniform || self.lights.is_empty() {
+            return;
+        }
+        // `None` at infinity; `Some(0)` for a finite light that emits nothing.
+        let powers: Vec<Option<f64>> = self
+            .lights
+            .iter()
+            .map(|l| {
+                l.power().map(|p| {
+                    let p = p as f64;
+                    if p.is_finite() && p > 0.0 { p } else { 0.0 }
+                })
+            })
+            .collect();
+        let infinite = powers.iter().filter(|p| p.is_none()).count();
+        let lit: Vec<f64> = powers
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&p| p > 0.0)
+            .collect();
+        let live = infinite + lit.len();
+        if live == 0 {
+            return;
+        }
+        let finite_share = lit.len() as f64 / live as f64;
+        let lit_total: f64 = lit.iter().sum();
+        let weights: Vec<f64> = powers
+            .iter()
+            .map(|p| match *p {
+                None => 1.0 / live as f64,
+                Some(p) if p > 0.0 => {
+                    finite_share
+                        * (DEFENSIVE_SHARE / lit.len() as f64
+                            + (1.0 - DEFENSIVE_SHARE) * p / lit_total)
+                }
+                Some(_) => 0.0,
+            })
+            .collect();
+        let total: f64 = weights.iter().sum();
+        let mut running = 0.0f64;
+        for (index, w) in weights.into_iter().enumerate() {
+            running += w;
+            self.pmf.push((w / total) as f32);
+            self.cdf.push((running / total) as f32);
+            tracing::debug!(
+                "light {index} (geom {:?}): power {:?}, picked with probability {:.4}",
+                self.lights[index].geom_id(),
+                powers[index],
+                w / total
+            );
+        }
+        // The last light with any power ends the CDF at exactly one, so no
+        // `u` below one can fall past it.
+        if let Some(last) = self.pmf.iter().rposition(|&p| p > 0.0) {
+            for c in &mut self.cdf[last..] {
+                *c = 1.0;
+            }
+        }
+    }
+
+    /// Which strategy [`LightList::pick`] is using.
+    pub fn selection(&self) -> LightSelection {
+        if self.pmf.is_empty() {
+            LightSelection::Uniform
+        } else {
+            LightSelection::Power
+        }
+    }
+
+    /// The probability [`LightList::pick`] chooses light `index`.
+    pub fn pmf(&self, index: usize) -> f32 {
+        match self.pmf.get(index) {
+            Some(&p) => p,
+            None => 1.0 / self.lights.len() as f32,
+        }
+    }
+
+    /// The light strategy's solid-angle density for a light chosen with
+    /// probability `pmf` (from [`LightList::pick`], [`LightList::find_by_geom`]
+    /// or [`LightList::iter`]) whose own `sample_li` density is `light_pdf`:
+    /// their product. Both MIS halves route through here, so they cannot
+    /// disagree on it. Under uniform selection it is the division
+    /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
+    /// rounds differently when `n` is not a power of two — so the default
+    /// renders bit-identically to the renderer before selection was a choice.
+    pub fn density(&self, light_pdf: f32, pmf: f32) -> f32 {
+        if self.pmf.is_empty() {
+            light_pdf / self.lights.len() as f32
+        } else {
+            light_pdf * pmf
+        }
+    }
+
+    /// Picks a light from one `[0, 1)` sample `u`, with the probability it
+    /// was picked. `None` only for an empty list.
+    pub fn pick(&self, u: f32) -> Option<(&Arc<dyn Light>, f32)> {
+        let n = self.lights.len();
+        if n == 0 {
+            return None;
+        }
+        let index = if self.cdf.is_empty() {
+            // Guard against `u == 1.0 - epsilon` rounding to `n`.
+            ((u * n as f32) as usize).min(n - 1)
+        } else {
+            // The first light whose running sum exceeds `u`; a zero-power
+            // light's slice of the CDF is empty, so it is never landed on.
+            self.cdf.partition_point(|&c| c <= u).min(n - 1)
+        };
+        Some((&self.lights[index], self.pmf(index)))
+    }
+
+    /// Finds the light whose scene geometry has world id `geom_id`, with its
+    /// selection probability. Used by the integrator to attribute a
+    /// bounce-hit emissive surface to its light for MIS; emissive geometry
+    /// with no light-list entry returns `None`.
+    pub fn find_by_geom(&self, geom_id: u32) -> Option<(&Arc<dyn Light>, f32)> {
+        let &index = self.by_geom.get(&geom_id)?;
+        Some((&self.lights[index], self.pmf(index)))
+    }
+
+    /// Every light with its selection probability.
+    pub fn iter(&self) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+        self.lights
+            .iter()
+            .enumerate()
+            .map(|(index, light)| (light, self.pmf(index)))
     }
 
     /// Returns the number of lights in the `LightList`.

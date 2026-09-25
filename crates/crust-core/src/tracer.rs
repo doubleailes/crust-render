@@ -8,7 +8,7 @@ use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{LightList, PathSampler, camera::Camera};
+use crate::{LightList, LightSelection, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,11 +148,21 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(camera: Camera, world: World, lights: LightList, settings: RenderSettings) -> Self {
+    pub fn new(
+        camera: Camera,
+        world: World,
+        mut lights: LightList,
+        settings: RenderSettings,
+    ) -> Self {
+        // Built here rather than by the importer so that every way of
+        // assembling a scene — USD, the procedural fallback, a test — gets
+        // the selection its settings ask for.
+        lights.select_by(settings.light_selection());
         debug!(
-            "Renderer over {} geometries, {} light(s), {} rayon thread(s)",
+            "Renderer over {} geometries, {} light(s) picked by {:?}, {} rayon thread(s)",
             world.count(),
             lights.count(),
+            lights.selection(),
             rayon::current_num_threads()
         );
         Renderer {
@@ -722,6 +732,9 @@ pub struct RenderSettings {
     // Pixel reconstruction filter (see `PixelFilter`; `crust:pixelFilter` /
     // `--filter`). Applied by filter importance sampling in `render_pixel`.
     pixel_filter: PixelFilter,
+    // How NEE picks a light (see `LightSelection`; `crust:lightSelection` /
+    // `--light-selection`). Applied once, in `Renderer::new`.
+    light_selection: LightSelection,
 }
 impl RenderSettings {
     pub fn new(
@@ -746,6 +759,7 @@ impl RenderSettings {
             guiding_prob: 0.5,
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
+            light_selection: LightSelection::default(),
         }
     }
 
@@ -794,6 +808,16 @@ impl RenderSettings {
 
     pub fn pixel_filter(&self) -> PixelFilter {
         self.pixel_filter
+    }
+
+    /// Select how NEE picks a light — see [`LightSelection`].
+    pub fn with_light_selection(mut self, selection: LightSelection) -> Self {
+        self.light_selection = selection;
+        self
+    }
+
+    pub fn light_selection(&self) -> LightSelection {
+        self.light_selection
     }
 
     pub fn get_dimensions(&self) -> (usize, usize) {
@@ -1015,8 +1039,10 @@ enum PrevVertex<'a> {
 /// from eval), so the bounce carries the emission whole — likewise at
 /// vertices where NEE is inactive, and for emissive geometry with no
 /// light-list entry, which NEE can never sample. Otherwise the competing
-/// density is the same strategy the NEE side uses: uniform 1-of-N pick
-/// times the hit light's area-sampling pdf.
+/// density is the same strategy the NEE side uses: the light list's
+/// selection probability for this light times the light's own sampling pdf
+/// — and a light selected with probability zero is one NEE never samples, so
+/// it too keeps its emission whole.
 fn bounce_emission_weight(
     prev: &PrevVertex,
     lights: &LightList,
@@ -1033,11 +1059,13 @@ fn bounce_emission_weight(
         PrevVertex::Phase { pos, pdf } => (*pos, *pdf),
     };
     match lights.find_by_geom(hit.geom_id) {
-        Some(light) => {
-            let light_pdf = (light.pdf_at_point(from, hit.rec.p) / lights.count() as f32).max(1e-6);
+        Some((light, pmf)) if pmf > 0.0 => {
+            let light_pdf = lights
+                .density(light.pdf_at_point(from, hit.rec.p), pmf)
+                .max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
-        None => 1.0,
+        _ => 1.0,
     }
 }
 
@@ -1073,23 +1101,21 @@ fn escaped_emission(
         // NEE — full weight, exactly as `prev = None` means elsewhere.
         None => None,
     };
-    let n_lights = lights.count() as f32;
-
     let mut radiance = Vec3A::ZERO;
     let mut covered = false;
-    for light in &lights.lights {
+    for (light, pmf) in lights.iter() {
         let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
             continue;
         };
         covered = true;
         let weight = match competing {
-            Some((_, bounce_pdf)) if strategy.samples_lights() => {
-                let light_pdf = (pdf / n_lights).max(1e-6);
+            Some((_, bounce_pdf)) if strategy.samples_lights() && pmf > 0.0 => {
+                let light_pdf = lights.density(pdf, pmf).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
-            // No NEE ran for this vertex (or the strategy does not sample
-            // lights at all), so nothing competes.
+            // No NEE ran for this vertex, the strategy does not sample lights
+            // at all, or the selection never picks this one: nothing competes.
             _ => 1.0,
         };
         radiance += emitted * weight;
@@ -1124,7 +1150,7 @@ fn shadow_transmittance(
 }
 
 /// Direct lighting at a volume-region scatter point. The exact mirror of
-/// the surface NEE block: same uniform 1-of-N light strategy, with the
+/// the surface NEE block: same light-selection strategy, with the
 /// phase function (value == pdf for the HG mixture) in place of
 /// `brdf·cos`, and the same phase pdf as the competing bounce density that
 /// `bounce_emission_weight`'s `Phase` arm uses.
@@ -1145,10 +1171,9 @@ fn volume_nee(
         return Vec3A::ZERO;
     }
     let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
-    let Some(light) = lights.pick(nee[0]) else {
+    let Some((light, pmf)) = lights.pick(nee[0]) else {
         return Vec3A::ZERO;
     };
-    let n_lights = lights.count() as f32;
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
         return Vec3A::ZERO;
     };
@@ -1159,7 +1184,7 @@ fn volume_nee(
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
-    let light_pdf = (s.pdf / n_lights).max(1e-6);
+    let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
     let phase_val = phase.pdf(wi.dot(s.direction));
     let weight = strategy.light_weight(light_pdf, phase_val);
     s.radiance * phase_val * tr * weight / light_pdf
@@ -1507,23 +1532,23 @@ fn trace_path(
         let guiding_here = if prev.is_some() { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
-        // The light strategy is "pick one light uniformly, then sample a
-        // point on it by area", so its solid-angle density is
-        // `light.pdf / n_lights`. `bounce_emission_weight` evaluates the
-        // same expression for a bounce-hit light — both MIS weights must
+        // The light strategy is "pick one light with the light list's
+        // selection probability `pmf` (power-proportional by default), then
+        // sample a point on it with its own `sample_li`", so its solid-angle
+        // density is `light.pdf · pmf`. `bounce_emission_weight` evaluates
+        // the same expression for a bounce-hit light — both MIS weights must
         // describe the same strategy or emission is double-counted.
         let mut nee = Vec3A::ZERO;
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
         // `sample_li` returns `None` when the light cannot be reached from
         // this point at all — below a dome's horizon, or a degenerate
         // coincident point.
-        if let Some(light) = strategy
+        if let Some((light, pmf)) = strategy
             .samples_lights()
             .then(|| lights.pick(nee_s[0]))
             .flatten()
             && let Some(ls) = light.sample_li(rec.p, nee_s[1], nee_s[2])
         {
-            let n_lights = lights.count() as f32;
             let light_dir_unit = ls.direction;
 
             let shadow_ray = Ray::new(rec.p, light_dir_unit)
@@ -1533,7 +1558,7 @@ fn trace_path(
             let shadow_tr =
                 shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
             if shadow_tr != Vec3A::ZERO {
-                let light_pdf = (ls.pdf / n_lights).max(1e-6);
+                let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
 
                 // Evaluate the BSDF toward the light direction. Delta and
                 // transmissive materials return None — they cannot see a

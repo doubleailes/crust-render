@@ -4,7 +4,8 @@
 
 use crust_core::{
     AffineShape, AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList,
-    LightShape, RectShape, SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
+    LightSelection, LightShape, LightTexture, RectShape, RectTexture, Shaping, SphereShape,
+    UnitShape, Vec3A, projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;
@@ -817,12 +818,182 @@ fn light_list_picks_uniformly_by_index() {
         l.add(Arc::new(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, id)));
     }
     assert_eq!(l.count(), 4);
-    assert_eq!(l.pick(0.0).unwrap().geom_id(), Some(0));
-    assert_eq!(l.pick(0.26).unwrap().geom_id(), Some(1));
-    assert_eq!(l.pick(0.5).unwrap().geom_id(), Some(2));
-    assert_eq!(l.pick(0.99).unwrap().geom_id(), Some(3));
+    assert_eq!(l.selection(), LightSelection::Uniform);
+    assert_eq!(l.pick(0.0).unwrap().0.geom_id(), Some(0));
+    assert_eq!(l.pick(0.26).unwrap().0.geom_id(), Some(1));
+    assert_eq!(l.pick(0.5).unwrap().0.geom_id(), Some(2));
+    assert_eq!(l.pick(0.99).unwrap().0.geom_id(), Some(3));
     // u rounding up to len must still pick the last light.
-    assert_eq!(l.pick(1.0).unwrap().geom_id(), Some(3));
+    assert_eq!(l.pick(1.0).unwrap().0.geom_id(), Some(3));
+    assert_eq!(l.pick(0.5).unwrap().1, 0.25);
+}
+
+/// A rect light facing −Z (its emitting side), of the given radiance.
+fn rect_light(radiance: f32, shaping: Option<Shaping>, geom_id: u32) -> AreaLight {
+    let rect = RectShape::new(
+        Vec3A::new(-0.5, -1.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        Vec3A::new(0.0, 2.0, 0.0),
+        -Vec3A::Z,
+    );
+    AreaLight::new(
+        Box::new(rect),
+        Arc::new(Emissive::light(Vec3A::splat(radiance), shaping)),
+        geom_id,
+    )
+}
+
+/// Power is flux: `π A L` for a one-sided Lambertian emitter of any shape,
+/// twice that for a two-sided one. Lights at infinity have none to compare.
+#[test]
+fn light_power_is_the_flux_it_emits() {
+    let pi = std::f32::consts::PI;
+    let rel = |a: Option<f32>, b: f32| (a.expect("finite light") - b).abs() / b;
+    // A 1 × 2 rect, one-sided.
+    assert!(rel(rect_light(3.0, None, 0).power(), pi * 2.0 * 3.0) < 1e-5);
+    // A unit-radius sphere: `sphere_light` is a plain (two-sided) emitter.
+    let s = sphere_light(Vec3A::ZERO, 1.0, Vec3A::splat(2.0), 0);
+    assert!(rel(s.power(), 2.0 * pi * 4.0 * pi * 2.0) < 1e-5);
+    let sun = DistantLight::new(-Vec3A::Y, Vec3A::splat(5.0), 0.53);
+    assert_eq!(sun.power(), None);
+    let dome = DomeLight::new(Vec3A::splat(0.5), None, Mat3A::IDENTITY);
+    assert_eq!(dome.power(), None);
+}
+
+/// A shaped light's flux is the cone it emits into: `π A L sin² θ` for a hard
+/// cone of half-angle θ about the normal. The quadrature stops at the cone
+/// angle, so a 2° spot is resolved as well as a 60° one — a fixed direction
+/// grid would step over it and report no power at all.
+#[test]
+fn shaped_light_power_is_the_cone_it_emits_into() {
+    let pi = std::f32::consts::PI;
+    for cone in [60.0f32, 30.0, 2.0] {
+        let mut shaping = Shaping::new(Mat3A::IDENTITY);
+        shaping.cone_angle_deg = cone;
+        let light = rect_light(1.0, Some(shaping), 0);
+        let exact = pi * 2.0 * cone.to_radians().sin().powi(2);
+        let got = light.power().unwrap();
+        assert!(
+            (got - exact).abs() <= 0.01 * exact,
+            "{cone}° cone: power {got} vs {exact}"
+        );
+    }
+}
+
+/// A textured card's power is its texture's area average times the rest.
+#[test]
+fn textured_light_power_uses_the_mean_texel() {
+    let image =
+        Arc::new(LightTexture::new(2, 1, vec![Vec3A::splat(4.0), Vec3A::ZERO]).expect("valid"));
+    let (origin, edge_u, edge_v) = (
+        Vec3A::new(-0.5, -1.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        Vec3A::new(0.0, 2.0, 0.0),
+    );
+    let texture = RectTexture::new(image, origin, edge_u, edge_v).unwrap();
+    let light = AreaLight::new(
+        Box::new(RectShape::new(origin, edge_u, edge_v, -Vec3A::Z)),
+        Arc::new(Emissive::light(Vec3A::ONE, None).with_texture(texture)),
+        0,
+    );
+    let expected = std::f32::consts::PI * 2.0 * 2.0; // mean texel 2
+    assert!((light.power().unwrap() - expected).abs() < 1e-4 * expected);
+}
+
+/// Power selection gives lights at infinity their uniform share, splits the
+/// rest between the finite lights half evenly and half by power, never picks
+/// a dark one, and every accessor reports the same probability for the same
+/// light — the MIS contract between NEE and the bounce side.
+#[test]
+fn power_selection_picks_by_power_defensively() {
+    let mut l = LightList::new();
+    l.add(Arc::new(rect_light(1.0, None, 10)));
+    l.add(Arc::new(rect_light(0.0, None, 11))); // emits nothing
+    l.add(Arc::new(rect_light(3.0, None, 12)));
+    l.add(Arc::new(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY)));
+    l.select_by(LightSelection::Power);
+    assert_eq!(l.selection(), LightSelection::Power);
+    // Three lights can be picked: the dome gets 1/3, and the two lit rects
+    // split 2/3 as `½ · ½ + ½ · power share` each: (¼ + ⅛, ¼ + ⅜) of it.
+    let expected = [2.0 / 3.0 * 0.375, 0.0, 2.0 / 3.0 * 0.625, 1.0 / 3.0];
+    for (i, &p) in expected.iter().enumerate() {
+        assert!(
+            approx(l.pmf(i), p, 1e-6),
+            "pmf({i}) = {}, expected {p}",
+            l.pmf(i)
+        );
+    }
+    for i in [0u32, 1, 2] {
+        let (_, found) = l.find_by_geom(10 + i).unwrap();
+        assert_eq!(found, l.pmf(i as usize), "find_by_geom disagrees with pmf");
+    }
+    let pmfs: Vec<f32> = l.iter().map(|(_, p)| p).collect();
+    assert_eq!(pmfs, (0..4).map(|i| l.pmf(i)).collect::<Vec<_>>());
+
+    // Stratified u: the picks land in exactly those proportions, and the
+    // dark light is never one of them.
+    const N: usize = 12_000;
+    let mut counts = [0usize; 4];
+    for k in 0..N {
+        let (light, pmf) = l.pick((k as f32 + 0.5) / N as f32).unwrap();
+        let i = light.geom_id().map_or(3, |id| (id - 10) as usize);
+        assert_eq!(pmf, l.pmf(i));
+        counts[i] += 1;
+    }
+    assert_eq!(counts[1], 0, "a light with no power was picked");
+    for i in [0, 2, 3] {
+        let got = counts[i] as f32 / N as f32;
+        assert!(
+            (got - expected[i]).abs() < 1e-3,
+            "light {i}: {got} vs {}",
+            expected[i]
+        );
+    }
+    // The top of the range still lands on a light that can be picked.
+    assert_eq!(l.pick(1.0 - f32::EPSILON).unwrap().0.geom_id(), None);
+    assert_eq!(l.pick(0.0).unwrap().0.geom_id(), Some(10));
+    // The strategy's density is the product, on both MIS sides.
+    assert_eq!(l.density(2.0, l.pmf(2)), 2.0 * l.pmf(2));
+}
+
+/// Under uniform selection the density is the division it always was, so
+/// the default renders bit-identically to the renderer before selection was
+/// a choice (`x · (1/3)` and `x / 3` round differently).
+#[test]
+fn uniform_density_is_the_historical_division() {
+    let mut l = LightList::new();
+    for id in 0..3 {
+        l.add(Arc::new(rect_light(1.0, None, id)));
+    }
+    let x = 0.7f32;
+    assert_eq!(l.density(x, l.pmf(0)), x / 3.0);
+}
+
+/// Uniform, all-dark and stale selections all fall back to one in N, so a
+/// `LightList` never reports a probability for a table it does not have.
+#[test]
+fn light_selection_falls_back_to_uniform() {
+    let mut l = LightList::new();
+    l.add(Arc::new(rect_light(1.0, None, 0)));
+    l.add(Arc::new(rect_light(9.0, None, 1)));
+    l.select_by(LightSelection::Uniform);
+    assert_eq!(l.selection(), LightSelection::Uniform);
+    assert_eq!(l.pmf(1), 0.5);
+
+    l.select_by(LightSelection::Power);
+    // ½ · ½ even + ½ · 0.9 by power.
+    assert!(approx(l.pmf(1), 0.7, 1e-6));
+    // Adding a light invalidates the table built over the old list.
+    l.add(Arc::new(rect_light(1.0, None, 2)));
+    assert_eq!(l.selection(), LightSelection::Uniform);
+    assert!(approx(l.pmf(2), 1.0 / 3.0, 1e-6));
+
+    let mut dark = LightList::new();
+    dark.add(Arc::new(rect_light(0.0, None, 0)));
+    dark.add(Arc::new(rect_light(0.0, None, 1)));
+    dark.select_by(LightSelection::Power);
+    assert_eq!(dark.selection(), LightSelection::Uniform);
+    assert_eq!(dark.pmf(0), 0.5);
 }
 
 #[test]
@@ -837,7 +1008,7 @@ fn light_list_finds_lights_by_geometry_id() {
         l.find_by_geom(13).is_none(),
         "an unrelated geometry is not a light"
     );
-    assert_eq!(l.find_by_geom(40).unwrap().geom_id(), Some(40));
+    assert_eq!(l.find_by_geom(40).unwrap().0.geom_id(), Some(40));
 }
 
 #[test]

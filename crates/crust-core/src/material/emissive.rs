@@ -68,6 +68,28 @@ impl Emissive {
         self.color
     }
 
+    /// The flux this emission carries off a surface of total `area`, whose
+    /// projected area toward a unit direction ω (counting the side ω leaves
+    /// from) is `projected_area(ω)`. It weighs lights for power-proportional
+    /// selection, which needs proportion rather than precision.
+    ///
+    /// Emission factors as `color · texture(p) · shaping(ω)`, and that is what
+    /// makes this cheap and exact where it can be. An unshaped side emits
+    /// `π · area` per unit radiance whatever its shape (`∫ P(ω) dω = π A` for
+    /// any surface), so only a shaped light integrates, over directions, with
+    /// [`Shaping::integrate`]. The texture only ever sits on a flat rect,
+    /// whose projected area is the same at every point, so its area average
+    /// factors out exactly as [`RectTexture::mean`].
+    pub fn flux(&self, area: f32, projected_area: impl Fn(Vec3A) -> f32) -> Vec3A {
+        let sides = if self.one_sided { 1.0 } else { 2.0 };
+        let texture = self.texture.as_ref().map_or(Vec3A::ONE, |t| t.mean());
+        let directional = match &self.shaping {
+            None => Vec3A::splat(std::f32::consts::PI * area),
+            Some(s) => s.integrate(projected_area),
+        };
+        self.color * texture * directional * sides
+    }
+
     /// Radiance leaving the surface at world point `p` along the unit world
     /// direction `emission_dir`. `front` says whether that direction is on
     /// the surface's emitting side; a one-sided emitter is dark from behind.
