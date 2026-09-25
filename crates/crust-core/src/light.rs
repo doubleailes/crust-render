@@ -132,34 +132,48 @@ impl LightShape for SphereShape {
     }
 
     fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
-        let cone = SubtendedCone::new(self.center, self.radius, from)?;
-        // A direction uniform in the cone, as its angle θ off the axis toward
-        // the centre...
-        let (sin2_theta, cos_theta) = if cone.sin2_max < SMALL_CONE_SIN2 {
-            let sin2 = cone.sin2_max * u;
-            (sin2, (1.0 - sin2).sqrt())
-        } else {
-            let cos = (cone.cos_max - 1.0) * u + 1.0;
-            (1.0 - cos * cos, cos)
-        };
-        // ...then the point it meets on the sphere in closed form, as the
-        // angle α at the centre between the axis and that point (the law of
-        // sines/cosines), rather than by intersecting a ray. `sin² θ / sin θ_max`
-        // plus `cos θ · √(1 − sin² θ / sin² θ_max)` is pbrt-v4's arrangement.
-        let cos_alpha = sin2_theta / cone.sin2_max.sqrt()
-            + cos_theta * (1.0 - sin2_theta / cone.sin2_max).max(0.0).sqrt();
-        let sin_alpha = (1.0 - cos_alpha * cos_alpha).max(0.0).sqrt();
-        let phi = 2.0 * PI * v;
-        let local = Vec3A::new(sin_alpha * phi.cos(), sin_alpha * phi.sin(), cos_alpha);
-        // α is measured from the centre toward `from`, so the point lies on
-        // the cap that faces it.
-        let n = utils::align_to_normal(local, (from - self.center).normalize()).normalize();
-        Some((self.center + self.radius * n, cone.pdf()))
+        sample_sphere_cone(self.center, self.radius, from, u, v)
     }
 
     fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<f32> {
         SubtendedCone::new(self.center, self.radius, from).map(|cone| cone.pdf())
     }
+}
+
+/// A point on a sphere, uniform over the cone it subtends from `from`, and
+/// that cone's (constant) solid-angle pdf. `None` from inside the sphere.
+/// Shared by [`SphereShape`] and, in its local space, by an [`AffineShape`]
+/// sphere.
+fn sample_sphere_cone(
+    center: Vec3A,
+    radius: f32,
+    from: Vec3A,
+    u: f32,
+    v: f32,
+) -> Option<(Vec3A, f32)> {
+    let cone = SubtendedCone::new(center, radius, from)?;
+    // A direction uniform in the cone, as its angle θ off the axis toward the
+    // centre...
+    let (sin2_theta, cos_theta) = if cone.sin2_max < SMALL_CONE_SIN2 {
+        let sin2 = cone.sin2_max * u;
+        (sin2, (1.0 - sin2).sqrt())
+    } else {
+        let cos = (cone.cos_max - 1.0) * u + 1.0;
+        (1.0 - cos * cos, cos)
+    };
+    // ...then the point it meets on the sphere in closed form, as the angle α
+    // at the centre between the axis and that point (the law of
+    // sines/cosines), rather than by intersecting a ray. `sin² θ / sin θ_max`
+    // plus `cos θ · √(1 − sin² θ / sin² θ_max)` is pbrt-v4's arrangement.
+    let cos_alpha = sin2_theta / cone.sin2_max.sqrt()
+        + cos_theta * (1.0 - sin2_theta / cone.sin2_max).max(0.0).sqrt();
+    let sin_alpha = (1.0 - cos_alpha * cos_alpha).max(0.0).sqrt();
+    let phi = 2.0 * PI * v;
+    let local = Vec3A::new(sin_alpha * phi.cos(), sin_alpha * phi.sin(), cos_alpha);
+    // α is measured from the centre toward `from`, so the point lies on the cap
+    // that faces it.
+    let n = utils::align_to_normal(local, (from - center).normalize()).normalize();
+    Some((center + radius * n, cone.pdf()))
 }
 
 /// Rectangular light surface (UsdLux `RectLight`): the parallelogram
@@ -252,9 +266,11 @@ impl UnitShape {
 /// to the light by its transform stack" requires of a squashed sphere, an
 /// elliptical disk or an elliptical tube.
 ///
-/// Sampling is uniform in the shape's *local* area and mapped through the
-/// placement, so in world space it is denser where the placement compresses
-/// the surface. That is fine — MIS needs a density both sides agree on, not a
+/// A sphere seen from outside is sampled by its visible cone in local space
+/// (see [`LightShape::sample_solid_angle`] below). Otherwise — a disk, a tube,
+/// or a point inside the sphere — sampling is uniform in the shape's *local*
+/// area and mapped through the placement, so in world space it is denser
+/// where the placement compresses the surface. That is fine — MIS needs a density both sides agree on, not a
 /// uniform one — and [`LightShape::inv_pdf_area`] reports it exactly: an
 /// affine map `M` scales the area element at a point with unit local normal
 /// `n` by `|det M| · |M⁻ᵀ n|`. For a disk that factor is constant, so the
@@ -358,6 +374,48 @@ impl LightShape for AffineShape {
     fn inv_pdf_area(&self, p: Vec3A) -> f32 {
         let local = self.world_to_light.transform_point3a(p);
         self.unit.local_area() * self.area_scale(self.unit.normal(local))
+    }
+
+    /// A squashed sphere is sampled by the cone the *unit* sphere subtends in
+    /// local space, mapped through the placement. That is sound because an
+    /// affine map preserves visibility on a convex surface: with normals
+    /// carried by `M⁻ᵀ`, `n_w · (x − p) = n_l · (x_l − p_l) / |M⁻ᵀ n_l|`, so a
+    /// point faces the shading point in world space exactly when it does in
+    /// local space, and the sampled cap is the ellipsoid's visible one. The
+    /// world density is the local cone's times the solid-angle Jacobian of the
+    /// direction map (see [`AffineShape::world_solid_angle_pdf`]), so unlike
+    /// the round sphere's it varies across the cap.
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+        if self.unit != UnitShape::Sphere {
+            return None;
+        }
+        let from_local = self.world_to_light.transform_point3a(from);
+        let (p_local, local_pdf) = sample_sphere_cone(Vec3A::ZERO, 1.0, from_local, u, v)?;
+        Some((
+            self.light_to_world.transform_point3a(p_local),
+            self.world_solid_angle_pdf(local_pdf, p_local - from_local),
+        ))
+    }
+
+    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<f32> {
+        if self.unit != UnitShape::Sphere {
+            return None;
+        }
+        let from_local = self.world_to_light.transform_point3a(from);
+        let cone = SubtendedCone::new(Vec3A::ZERO, 1.0, from_local)?;
+        let p_local = self.world_to_light.transform_point3a(p);
+        Some(self.world_solid_angle_pdf(cone.pdf(), p_local - from_local))
+    }
+}
+
+impl AffineShape {
+    /// A local solid-angle density as a world one, for the direction
+    /// `to_local` (from the shading point toward the surface, in local space).
+    /// The placement sends a local direction `ω` to `Mω / |Mω|`, which scales
+    /// solid angle by `|det M| / |Mω|³`; a density scales by the reciprocal.
+    fn world_solid_angle_pdf(&self, local_pdf: f32, to_local: Vec3A) -> f32 {
+        let stretch = (self.light_to_world.matrix3 * to_local.normalize()).length();
+        local_pdf * stretch * stretch * stretch / self.abs_det
     }
 }
 

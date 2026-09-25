@@ -3,8 +3,8 @@
 //! normalisation conventions of the infinite lights, and the light list.
 
 use crust_core::{
-    AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList, LightShape,
-    RectShape, SphereShape, Vec3A, projected_cone_solid_angle,
+    AffineShape, AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList,
+    LightShape, RectShape, SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;
@@ -362,6 +362,153 @@ fn sphere_light_cone_estimates_the_analytic_irradiance() {
             "radius {radius} at distance {}: {estimate} vs π sin²θ = {exact}",
             (center - from).length()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Squashed sphere lights: the unit sphere's cone, mapped through the placement
+// ---------------------------------------------------------------------------
+
+/// `usdlux.usda`'s ellipsoid (a 0.25 sphere scaled (3, 0.4, 0.4)), tilted so
+/// no axis lines up with the world's.
+fn ellipsoid_placement() -> glam::Affine3A {
+    glam::Affine3A::from_scale_rotation_translation(
+        glam::Vec3::new(0.75, 0.1, 0.1),
+        glam::Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.5, 0.8),
+        glam::Vec3::new(0.0, 2.0, -1.0),
+    )
+}
+
+fn ellipsoid_light() -> (AffineShape, AreaLight) {
+    let m = ellipsoid_placement();
+    let shape = AffineShape::new(UnitShape::Sphere, m).expect("invertible");
+    let light = AreaLight::new(
+        Box::new(AffineShape::new(UnitShape::Sphere, m).unwrap()),
+        Arc::new(Emissive::new(Vec3A::ONE)),
+        0,
+    );
+    (shape, light)
+}
+
+/// Shading points near the long side, off the tip, and far away.
+const ELLIPSOID_VIEWS: [Vec3A; 3] = [
+    Vec3A::new(0.1, 2.3, -0.8),
+    Vec3A::new(1.2, 2.4, -1.5),
+    Vec3A::new(-6.0, 9.0, 4.0),
+];
+
+/// Every sample lies on the ellipsoid, on the side facing the shading point,
+/// and both MIS sides agree on its (now point-dependent) density.
+#[test]
+fn ellipsoid_light_samples_only_its_visible_side() {
+    let (shape, light) = ellipsoid_light();
+    let to_local = ellipsoid_placement().inverse();
+    for from in ELLIPSOID_VIEWS {
+        let mut rng = Rng::new(21);
+        for _ in 0..2000 {
+            let (u, v) = (rng.next_f32(), rng.next_f32());
+            let (p, pdf) = shape
+                .sample_solid_angle(from, u, v)
+                .expect("outside the ellipsoid there is always a cone");
+            let local = to_local.transform_point3a(p);
+            assert!(
+                approx(local.length(), 1.0, 1e-4),
+                "off the surface: local |p| = {}",
+                local.length()
+            );
+            let facing = shape.normal_at(p).dot((from - p).normalize());
+            assert!(facing >= -1e-3, "sampled the far side: cos = {facing}");
+            let bounce = light.pdf_at_point(from, p);
+            assert!(
+                approx(bounce, pdf, 1e-3 * pdf),
+                "MIS sides disagree: {pdf} vs {bounce}"
+            );
+            let s = light.sample_li(from, u, v).unwrap();
+            assert_eq!(s.pdf, pdf);
+        }
+    }
+}
+
+/// The Jacobian is right: the solid angle the ellipsoid subtends
+/// (`E[1/pdf]`) and the irradiance on a tilted receiver (`E[cos⁺/pdf]`) come
+/// out the same from the cone sampler as from plain area quadrature over the
+/// facing side. A wrong `|Mω|³ / |det M|` factor changes both.
+#[test]
+fn ellipsoid_light_cone_matches_area_quadrature() {
+    let (shape, light) = ellipsoid_light();
+    let receiver = Vec3A::new(0.3, 1.0, 0.2).normalize();
+    for from in ELLIPSOID_VIEWS {
+        const K: usize = 128;
+        let (mut omega_cone, mut e_cone) = (0.0f64, 0.0f64);
+        for i in 0..K {
+            for j in 0..K {
+                let u = (i as f32 + 0.5) / K as f32;
+                let v = (j as f32 + 0.5) / K as f32;
+                let s = light.sample_li(from, u, v).unwrap();
+                omega_cone += 1.0 / s.pdf as f64;
+                e_cone += (s.direction.dot(receiver).max(0.0) / s.pdf) as f64;
+            }
+        }
+        let n = (K * K) as f64;
+        let (omega_cone, e_cone) = (omega_cone / n, e_cone / n);
+
+        // dω = cos θ_l dA / r², over the part of the surface facing `from`.
+        const A: usize = 512;
+        let (mut omega_area, mut e_area) = (0.0f64, 0.0f64);
+        for i in 0..A {
+            for j in 0..A {
+                let u = (i as f32 + 0.5) / A as f32;
+                let v = (j as f32 + 0.5) / A as f32;
+                let p = shape.sample_point(u, v);
+                let d = from - p;
+                let r2 = d.length_squared();
+                let w = d / r2.sqrt();
+                let cos_l = shape.normal_at(p).dot(w);
+                if cos_l <= 0.0 {
+                    continue;
+                }
+                let dw = (cos_l * shape.inv_pdf_area(p) / r2) as f64;
+                omega_area += dw;
+                e_area += dw * (-w).dot(receiver).max(0.0) as f64;
+            }
+        }
+        let a = (A * A) as f64;
+        let (omega_area, e_area) = (omega_area / a, e_area / a);
+
+        assert!(
+            (omega_cone - omega_area).abs() <= 5e-3 * omega_area,
+            "from {from}: solid angle {omega_cone} (cone) vs {omega_area} (area)"
+        );
+        assert!(
+            (e_cone - e_area).abs() <= 5e-3 * e_area.max(1e-6),
+            "from {from}: irradiance {e_cone} (cone) vs {e_area} (area)"
+        );
+    }
+}
+
+/// Inside the ellipsoid, and for the flat and tubular unit shapes, there is
+/// no cone: area sampling, on both MIS sides.
+#[test]
+fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
+    let (shape, light) = ellipsoid_light();
+    let inside = ellipsoid_placement().transform_point3a(Vec3A::new(0.3, 0.2, -0.1));
+    assert!(shape.sample_solid_angle(inside, 0.4, 0.6).is_none());
+    assert!(shape.solid_angle_pdf(inside, Vec3A::ZERO).is_none());
+    let mut rng = Rng::new(22);
+    for _ in 0..200 {
+        let s = light
+            .sample_li(inside, rng.next_f32(), rng.next_f32())
+            .unwrap();
+        let p = inside + s.direction * s.distance;
+        let bounce = light.pdf_at_point(inside, p);
+        assert!(approx(bounce, s.pdf, 1e-3 * s.pdf.max(1.0)));
+    }
+
+    for unit in [UnitShape::Disk, UnitShape::Cylinder] {
+        let flat = AffineShape::new(unit, ellipsoid_placement()).unwrap();
+        let from = Vec3A::new(-6.0, 9.0, 4.0);
+        assert!(flat.sample_solid_angle(from, 0.5, 0.5).is_none());
+        assert!(flat.solid_angle_pdf(from, Vec3A::ZERO).is_none());
     }
 }
 
