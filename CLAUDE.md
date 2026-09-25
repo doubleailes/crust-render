@@ -2045,9 +2045,14 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
   ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
   rather than solid angle; the built-in sky
-  gradient is not a light, so NEE never samples it. (The shadow ray is traced *last*,
-  after the light's radiance and `mat.eval`, and only for a non-zero product —
-  bit-identical, since it draws from its own `K_NEE_SHADOW` domain, §3.11 there.)
+  gradient is not a light, so NEE never samples it. (NEE runs its three tests
+  cheapest first: the light's radiance, then `mat.eval`, then the shadow ray —
+  except that a material whose `eval` samples textures
+  (`Material::eval_reads_textures`: `PreviewSurface`, `MtlxMaterial`, Ptex
+  `OpenPBR`) traces the ray before `eval`, since on ALab evaluating the texture
+  network for every occluded sample cost 87–97 s against 66 s. Either order is
+  bit-identical, since the shadow ray draws from its own `K_NEE_SHADOW` domain,
+  §3.11 there.)
   Measure changes with
   `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,

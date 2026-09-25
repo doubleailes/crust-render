@@ -1578,48 +1578,59 @@ fn trace_path(
         {
             let light_dir_unit = ls.direction;
 
-            // Everything but visibility first, cheapest first, and the
-            // shadow ray only for a connection that could still carry light:
-            // the light's radiance (free — a shaped light outside its cone
-            // carries zero), then the BSDF (delta and transmissive materials
-            // return None from `eval` — they cannot see a light-sampled
-            // direction and pick up emission via BSDF sampling instead — and
-            // a light below the surface's horizon gets a zero value). Skipping
-            // the ray there is bit-identical: its contribution would be
-            // exactly zero, and the shadow ray's own draws come from
-            // `K_NEE_SHADOW`, which nothing else reads.
-            if ls.radiance != Vec3A::ZERO
-                && let Some((brdf_value, brdf_pdf)) = mat.eval(&ray, &rec, light_dir_unit)
-                && ls.radiance * brdf_value != Vec3A::ZERO
-            {
+            // A connection carries light only if the light's radiance, the
+            // BSDF and the visibility toward it are all non-zero, and the
+            // three tests run cheapest first. Radiance is free (a shaped
+            // light outside its cone carries zero). The BSDF — delta and
+            // transmissive materials return None from `eval`, since they
+            // cannot see a light-sampled direction and pick up emission via
+            // BSDF sampling instead, and a light below the horizon gets a
+            // zero value — is cheaper than the shadow ray unless it samples
+            // textures, in which case the ray goes first
+            // (`Material::eval_reads_textures`). Either order is
+            // bit-identical: a skipped test's contribution would be exactly
+            // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
+            // which nothing else reads.
+            let mut visibility = || {
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
                     .with_mask(crate::ray::MASK_SHADOW);
-                let shadow_tr =
-                    shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
-                if shadow_tr != Vec3A::ZERO {
-                    let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
-                    // The competing strategy for this MIS weight is the
-                    // bounce sampler, whose density toward the light is the
-                    // guide/BSDF mixture whenever guiding is available at
-                    // this vertex — using the plain BSDF pdf here while the
-                    // bounce side weights with the mixture makes the two
-                    // weights sum past one and double-counts emission.
-                    let bounce_pdf = match guiding_here {
-                        Some(g) if g.field.trained_at(rec.p) => {
-                            let alpha = g.field.config().guide_prob;
-                            alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
-                        }
-                        _ => brdf_pdf,
-                    };
-                    let weight = strategy.light_weight(light_pdf, bounce_pdf);
-                    // `brdf_value` already carries the geometric cosine —
-                    // `Material::eval` returns `brdf · |cos|` (unsigned, so a
-                    // continuous transmission lobe can see a light behind the
-                    // ray-facing normal). Applying it again here is what used
-                    // to make this an integral of `brdf · cos²`.
-                    nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf;
-                }
+                let tr = shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
+                (tr != Vec3A::ZERO).then_some(tr)
+            };
+            let bsdf = || {
+                mat.eval(&ray, &rec, light_dir_unit)
+                    .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
+            };
+            let connection = if ls.radiance == Vec3A::ZERO {
+                None
+            } else if mat.eval_reads_textures() {
+                visibility().and_then(|tr| bsdf().map(|(f, pdf)| (f, pdf, tr)))
+            } else {
+                bsdf().and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
+            };
+            if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
+                let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
+                // The competing strategy for this MIS weight is the
+                // bounce sampler, whose density toward the light is the
+                // guide/BSDF mixture whenever guiding is available at
+                // this vertex — using the plain BSDF pdf here while the
+                // bounce side weights with the mixture makes the two
+                // weights sum past one and double-counts emission.
+                let bounce_pdf = match guiding_here {
+                    Some(g) if g.field.trained_at(rec.p) => {
+                        let alpha = g.field.config().guide_prob;
+                        alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
+                    }
+                    _ => brdf_pdf,
+                };
+                let weight = strategy.light_weight(light_pdf, bounce_pdf);
+                // `brdf_value` already carries the geometric cosine —
+                // `Material::eval` returns `brdf · |cos|` (unsigned, so a
+                // continuous transmission lobe can see a light behind the
+                // ray-facing normal). Applying it again here is what used
+                // to make this an integral of `brdf · cos²`.
+                nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf;
             }
         }
 

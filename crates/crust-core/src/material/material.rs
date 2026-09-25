@@ -84,6 +84,21 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// Whether [`Material::eval`] samples textures — i.e. costs more than a
+    /// shadow ray.
+    ///
+    /// Only the *order* of NEE's two rejection tests depends on it, never the
+    /// estimate: a cheap `eval` runs first so a light below the horizon skips
+    /// its shadow ray, while a textured one (a whole UDIM network fetched
+    /// again per call) runs after the ray, so an occluded light never pays
+    /// for it. On ALab, an interior where most shadow rays are blocked,
+    /// evaluating textures first rendered in 87–97 s against 66–67 s with
+    /// the ray first (interleaved runs, bit-identical images), despite
+    /// tracing 10.3 M shadow rays against 15.0 M.
+    fn eval_reads_textures(&self) -> bool {
+        false
+    }
+
     /// Builds the continuation ray for an externally chosen direction `wi`
     /// (e.g. drawn from the guiding field). Materials that tag rays with an
     /// interior medium on transmission must do the same here, so a guided

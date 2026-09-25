@@ -170,6 +170,11 @@ impl Material for MtlxMaterial {
         self.shade(r_in, rec, |m, rec| m.eval(r_in, rec, wi))
     }
 
+    fn eval_reads_textures(&self) -> bool {
+        // The whole graph runs per `eval`, textures or not.
+        true
+    }
+
     fn uses_uv(&self) -> bool {
         // Unconditionally true rather than "does the program hold a texture":
         // a graph with no `image` node can still carry a `normalmap` over a
