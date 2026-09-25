@@ -24,9 +24,10 @@ What crust's direct lighting does today, per path vertex:
    since §9.2 (d): they now sample their visible cone. They used to sample the
    whole sphere, including the half that faces away. Rect lights are the
    second since §9.2 (e): they sample the spherical rectangle they subtend;
-3. trace **one** shadow ray. It is traced *before* the BSDF or the emission is
-   evaluated, so rays whose contribution is already known to be zero are
-   traced anyway;
+3. trace **one** shadow ray. It used to be traced *before* the BSDF or the
+   emission was evaluated, so rays whose contribution was already known to be
+   zero were traced anyway. Since §9.1 (c) it is traced last, and only when
+   that product is non-zero;
 4. combine with BSDF sampling by the power heuristic.
 
 Step 4 is the state of the art, and the measurements below confirm it. On every
@@ -46,7 +47,7 @@ has the detail and §8 the measurement protocol.
 | 4 | **More than one light sample at the camera vertex** (RenderMan `numLightSamples`, Arnold per-light `samples`) | sample count | ~50 lines | ≈ k× less first-bounce direct variance | noise only |
 | 5 | Make the **built-in sky** an importance-sampled light rather than an escape-only background | coverage | ~40 lines | small on the open `cornellbox` (measured 0.0125 relMSE today), large in enclosed dome-less scenes | noise only |
 | 6 | ✅ **Done.** Remove the `+1e-4` in `AreaLight::pdf_toward` | correctness | ~10 lines | none: it is a **bias** fix, **measured −11.7%** on a 1.3e-3 m² disk light that it had brightened (§3.10) | yes, slightly: ≤0.44% per pixel on the samples |
-| 7 | Evaluate BSDF and emission **before** the shadow ray | cost | ~10 lines | none (bit-identical), fewer rays | no |
+| 7 | ✅ **Done.** Evaluate BSDF and emission **before** the shadow ray | cost | ~10 lines | none (bit-identical): **measured 0.7–50% fewer shadow rays**, instructions −2.0% to +1.1% (§3.11) | no: 0 differing pixels on all 23 samples |
 | 8 | **MIS compensation** for the dome map (Karlík et al. 2019, as in pbrt-v4) | per-light pdf | ~20 lines | large on sun + sky HDRIs | noise only |
 | 9 | **Per-vertex RIS**: M candidates, one shadow ray (Talbot et al. 2005) | selection | ~150 lines | large on glossy surfaces under several lights | noise only |
 | 10 | A **light BVH** with orientation cones (Conty Estevez & Kulla 2018; pbrt-v4, Cycles) | selection | ~600 lines | decisive for 10²+ lights, marginal below | noise only |
@@ -159,6 +160,8 @@ metres-per-unit. pbrt-v4 has no epsilon: it returns no sample when the pdf would
 be infinite.
 
 ### 3.4 Shadow rays traced before the answer is known
+
+*(As audited. Fixed by §9.1 (c); §3.11 has the measurement.)*
 
 The surface NEE block calls `shadow_transmittance` first. It then asks the
 material for `eval` and the light for its radiance, both of which can be zero:
@@ -557,6 +560,62 @@ from inside.
   `affine_shapes_without_a_cone_fall_back_to_area_sampling` and
   `sphere_light_from_inside_falls_back_to_area_sampling` (`tests/lights.rs`)
   used to pin the exploding pdf. They now pin the refusal.
+
+### 3.11 Shadow rays last (§9.1 c)
+
+**The change.** The surface NEE block runs its checks cheapest first:
+1. the light sample's radiance, which is free: a shaped light outside its cone
+   carries zero;
+2. `mat.eval`, which is `None` for delta and transmissive materials and zero
+   below the horizon;
+3. the shadow ray, traced only if the product of the first two is non-zero.
+
+`volume_nee` does the same with the phase value. The output is bit-identical,
+because a skipped connection's contribution would have been exactly zero and the
+shadow ray draws from its own `K_NEE_SHADOW` domain, which nothing else reads.
+
+**Measured, bit-identity.** All 23 checked-in samples at 16 spp render with
+**0 differing pixels** against the previous commit.
+
+**Measured, shadow rays** (the `pass done` counter, summed over passes):
+
+| Scene | before | after | |
+|---|---|---|---|
+| `ptex_quads` | 335 007 | 167 445 | **−50%** |
+| `materialx_basic` | 2 261 987 | 1 574 657 | −30% |
+| `usdpreview_textured` | 2 180 769 | 1 548 140 | −29% |
+| `usdlux` | 3 909 801 | 2 849 558 | −27% |
+| `materialx_showcase` / `lion` / `teapot` | | | −21% / −24% / −24% |
+| `domelight` | 2 175 047 | 1 777 327 | −18% |
+| `motionblur` | | | −16% |
+| `cornellbox_guided` | 268 511 908 | 237 310 680 | −12% |
+| `veach_mis`, `openpbr_showcase`, `instancing`, `subdivision`, `nested_instancing`, `rectlight`, `light_visibility` | | | −7% to −10% |
+| `fog`, `animation`, `curves`, `smoke` | | | −0.7% to −3.5% |
+| `cornellbox`, `materialx_emissive` | 0 | 0 | no light-list entry |
+
+**Measured, cost.** The rays saved are not free, because `mat.eval` now runs
+for every light sample, including the occluded ones it used to skip.
+Callgrind, whole process (import included, so the render share is larger),
+`-s 2`, one thread, against the previous commit:
+
+| Scene | radiance → shadow → eval | eval → shadow | **radiance → eval → shadow (shipped)** |
+|---|---|---|---|
+| `domelight` | +0.19% | +1.13% | **+1.11%** |
+| `usdlux` | −1.80% | −0.74% | **−1.95%** |
+| `materialx_basic` | +0.10% | −0.31% | **−0.33%** |
+| `ptex_quads` | +0.10% | −1.49% | **−1.58%** |
+
+- **`domelight` loses** because it is an open scene with an OpenPBR eval that
+  costs more than one of its shadow rays: most of the sun's samples are
+  occluded, and those evals used to be skipped.
+- **The shipped order wins elsewhere**, and wins more the more a shadow ray
+  costs, which is the production case: an instanced BVH walk on the Moana
+  island is far more expensive than one of these scenes' evals.
+- **Wall clock cannot resolve any of this.** `bench_ab.sh`, 7 reps, put the
+  eval-first build at −4.5% on `ptex_quads` and `materialx_basic` and +3% on
+  `usdlux` and `domelight`. `usdlux` contradicts its own instruction count,
+  which is within this machine's noise (§8, and CLAUDE.md's "Measuring a
+  change").
 
 ---
 
@@ -1092,9 +1151,9 @@ estimator unbiased.
   weight there, exactly as for a light NEE never picks. An infinite pdf would
   weight it to nothing, which is only harmless while the emitter is one-sided.
 
-**(c) Shadow rays last.**
-- Evaluate `mat.eval` and `ls.radiance` first, and skip the shadow ray when
-  their product is zero.
+**(c) Shadow rays last. ✅ Done; measured in §3.11.**
+- Check `ls.radiance` (free), then `mat.eval`, and skip the shadow ray when
+  their product is zero. `volume_nee` does the same with the phase value.
 - The output is bit-identical (the shadow domain is separate), which is what
   makes it a safe first commit. Verify with `scripts/check_images.sh`.
 
