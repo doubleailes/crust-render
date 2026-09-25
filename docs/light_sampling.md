@@ -22,7 +22,8 @@ What crust's direct lighting does today, per path vertex:
    uniform`;
 2. sample a point on it **uniformly by area**. Sphere lights are the exception
    since §9.2 (d): they now sample their visible cone. They used to sample the
-   whole sphere, including the half that faces away;
+   whole sphere, including the half that faces away. Rect lights are the
+   second since §9.2 (e): they sample the spherical rectangle they subtend;
 3. trace **one** shadow ray. It is traced *before* the BSDF or the emission is
    evaluated, so rays whose contribution is already known to be zero are
    traced anyway;
@@ -40,7 +41,7 @@ has the detail and §8 the measurement protocol.
 | # | Change | Layer | Effort | Gain at 16 spp | Changes the image? |
 |---|---|---|---|---|---|
 | 1 | ✅ **Done.** Sample sphere lights by the **visible cone** (Shirley et al. 1996) | per-light pdf | ~60 lines | **measured 1.3–12.9× lower relMSE** on the five sphere-lit samples, for about 8% more time per sample (§3.7) | noise only |
-| 2 | **Spherical-rectangle** sampling for rect lights (Ureña et al. 2013) + a bilinear cosine warp (Hart et al. 2020) | per-light pdf | ~200 lines | large on near/large panels | noise only |
+| 2 | ✅ **Done, without the warp.** **Spherical-rectangle** sampling for rect lights (Ureña et al. 2013); the bilinear cosine warp (Hart et al. 2020) is still open | per-light pdf | ~200 lines | **measured 1.4–1.5× lower relMSE** on a near softbox and in `fog`, but **4–9% higher** on the glossy tiles of `materialx_basic` / `usdpreview_textured`, at 5–22% more render time (§3.9) | noise only |
 | 3 | ✅ **Done, defensively.** Power-proportional light pick, with the dome/sun given a fixed share and half the rays spread evenly | selection | ~250 lines | **measured 4.6×** on a key among dim fills, 2.6% on `usdlux`, **−6%** on `veach_mis` (§3.8) | noise only |
 | 4 | **More than one light sample at the camera vertex** (RenderMan `numLightSamples`, Arnold per-light `samples`) | sample count | ~50 lines | ≈ k× less first-bounce direct variance | noise only |
 | 5 | Make the **built-in sky** an importance-sampled light rather than an escape-only background | coverage | ~40 lines | small on the open `cornellbox` (measured 0.0125 relMSE today), large in enclosed dome-less scenes | noise only |
@@ -119,7 +120,7 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 | Light | Sampling today | What is lost |
 |---|---|---|
 | `SphereLight` (similarity transform) | **Fixed (§9.2 d):** `SphereShape` now samples the visible cone. It used to sample uniformly over the **whole** sphere. | What area sampling lost: everything outside the visible cap, at least half of all samples. More when close, because the visible cap is `(1 − r/d)/2` of the area. Back-facing samples are occluded by the sphere itself, so each one was a traced shadow ray that returned zero. |
-| `RectLight` | `RectShape`: uniform in `(u, v)` | For a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. |
+| `RectLight` | **Fixed (§9.2 e):** `RectShape` samples the spherical rectangle it subtends. It used to sample uniformly in `(u, v)`. | What area sampling lost: for a panel large or near relative to its distance, `cos θ_l / r²` varies by orders of magnitude across it. A few near samples dominate, and the QMC stratification is spent on the wrong measure. Sheared parallelograms and tiny lights still area-sample. |
 | `DiskLight`, `CylinderLight` | `AffineShape`: uniform in local area | Same as the rect. The tube also samples its far side. |
 | Squashed sphere (non-uniform scale) | **Fixed (§9.2 d):** `AffineShape` samples the unit sphere's visible cone in local space. It used to sample uniform in local area. | The same as the round sphere's. |
 | Shaped rect/disk (`ShapingAPI`, IES) | uniform by area, shaping applied as a factor | Every sample the cone rejects. A 30° spot wastes most of them. |
@@ -404,6 +405,97 @@ contiguous slice of that dimension, as under uniform picking.
 - End to end, a bright and a dim sphere, a sun and a dome estimate the same
   radiance under power and uniform selection, with MIS and with light sampling
   alone. Reverting one MIS side to `1/n` fails it by 18%.
+
+### 3.9 Spherical rectangles for rect lights (§9.2 e)
+
+What was built, what it costs, and where it loses — because it does lose
+somewhere, and the table below is the reason not to call it a free win.
+
+**The sampler.** `RectShape` implements the solid-angle hook with Ureña,
+Fajardo & King's map (pbrt-v4's `SampleSphericalRectangle`): uniform in the
+solid angle the rectangle subtends, pdf `1/Ω`, area-preserving from `[0,1]²`.
+- **f64, one `atan2`.** `Ω = Σg − 2π` cancels in f32 at the solid angles where
+  area sampling takes over. The setup is not the paper's: in the rectangle's
+  frame the four edge-plane normals are axis-aligned in closed form, so the
+  corner angle at `(x, y)` is `atan2(h·|v|, ±x·y)`. The map uses only sums of
+  angles, and a sum of arguments is the argument of a product, so `Ω` is one
+  `atan2` of a four-way complex product. `g2 + g3` is kept as its normalised
+  `(cos, sin)`, which the azimuth `a_u = uΩ − (g2 + g3)` takes through the
+  angle-difference identities. The paper's recipe (four normalised cross
+  products, four `asin`) cost ~30 ns more per sample.
+- **The point is returned through the light's own `(s, t)`**, so it lies on the
+  light exactly as an area sample does: on the triangles a bounce ray hits, and
+  at the texel a textured card reads.
+- **Area sampling stays, on both hooks alike** (`RectShape::spherical_rect`):
+  - for a sheared parallelogram (edges more than 1e-5 from perpendicular);
+  - from behind the one-sided light or on its plane;
+  - outside `[1e-4, 6.22]` sr, pbrt-v4's `BilinearPatch` bounds.
+- **Textured cards use it too.** pbrt-v4 gives the map up for an image quad
+  only because it samples the image instead. crust does not ((h)), so the
+  alternative here is area, which follows the map no better.
+
+**Measured.** Same protocol as §3.7: a 1024 spp reference from the *old*
+binary under its own seed (`-f 1`), 16 spp from each binary under `-f 2..5`.
+The mean over the four seeds is shown; every seed moved the same way.
+`softbox` is a scratch scene (not checked in): a 3×2 panel 0.9 above a floor,
+tilted toward a ball, with a zero-intensity dome so the sky does not swamp it.
+`mx key-only` is `materialx_basic` with its dome zeroed.
+
+| Scene | area (before) | spherical (after) | relMSE | time (`bench_ab` min / mean) | efficiency |
+|---|---|---|---|---|---|
+| `softbox` (near, large panel) | 0.01880 | 0.01252 | **1.50× lower** | +15.5% / +15.1% | **1.30×** |
+| `fog` (rect over a homogeneous volume) | 0.1029 | 0.0729 | **1.41× lower** | +22.5% / +21.7% | **1.16×** |
+| `subdivision` | 0.00327 | 0.00324 | 1.0% lower | +1.0% / +5.8% | ~1 |
+| `usdlux` (the rect is one of seven) | 0.0927 | 0.0924 | 0.3% lower | +2.2% / +1.4% | ~1 |
+| `rectlight` (64×64, sky-dominated) | 0.00179 | 0.00183 | 2% higher | too fast to time | ~1 |
+| `usdpreview_textured` (glossy tiles) | 0.00122 | 0.00127 | **4.1% higher** | +12.9% / +9.5% | 0.86× |
+| `materialx_basic` (glossy tiles) | 0.00253 | 0.00277 | **9.4% higher** | +7.2% / +5.3% | 0.87× |
+| `mx key-only` | 0.00360 | 0.00387 | **7.4% higher** | — | — |
+
+- **The gain is where §5.1 says it is:** a panel near what it lights, whose
+  `cos θ_l / r²` varies by orders of magnitude across it, and volume scatter
+  points, which see the light from every distance and angle.
+- **The loss is real, not a bug.**
+  - It is unbiased. The sampler agrees with f64 area quadrature to within
+    0.1–0.5σ at 4 M samples, from four points under `materialx_basic`'s own key.
+  - For a *diffuse* receiver at those same points it is **1.6–3.9× lower in
+    variance** than area sampling, unoccluded.
+  - The loss is on the glossy tiles, and it is in the light strategy itself: NEE
+    alone (`--strategy light`) is ~20% worse on `mx key-only`. The BSDF side of
+    MIS then recovers most of it: 3% worse under balance, 7.5% under power.
+  - Solid angle is not the integrand. A glossy lobe's `f` peaks somewhere on
+    the panel, and area sampling's density in solid angle, `r²/cos θ_l`, is
+    highest on the panel's far, grazing side. Here that side evidently holds the
+    tiles' highlights. The coincidence is scene-dependent, but so is every
+    sampler that ignores `f`.
+- **The cost is latency, not instructions.** Callgrind counts +6.6% instructions
+  on `softbox`, but the wall clock says +15%. A `sample_li` microbenchmark puts
+  spherical sampling at ~145 ns against ~35 ns by area. That is one f64 `atan2`,
+  one `sin_cos` and about a dozen serial `sqrt`/divisions, which the pipeline
+  cannot overlap. Moving the post-azimuth half to f32 changed nothing
+  measurable. pbrt-v4 and Cycles pay the same price.
+- **Scenes without a rect light are bit-identical**: 0 differing pixels at
+  16 spp on `veach_mis`, `cornellbox`, `domelight`, `light_visibility` and
+  `openpbr_showcase`.
+
+**What would close the gap on glossy receivers** is the other half of item 2,
+the bilinear cosine warp (Hart et al. 2020). It needs the receiver's normal,
+which `Light::sample_li` / `pdf_at_point` do not take today, so it is an API
+change on both MIS sides and `volume_nee` (no normal: no warp). Beyond that,
+glossy lobes are what BSDF sampling, RIS (§6.6) and Peters' LTC polygon
+sampling (§5.2) exist for.
+
+**Tests** (`crates/crust-core/tests/lights.rs`):
+- The pdf is `1/Ω` against an independent formula (Van Oosterom & Strackee,
+  two triangles), from above the centre, beyond every edge and corner, and just
+  above the 1e-4 sr threshold. Each sample's pdf equals `pdf_at_point` for its
+  point.
+- Samples fall into a 4×4 grid of cells in proportion to each cell's own solid
+  angle. From the test's near point these span an order of magnitude, so plain
+  `(u, v)` fails it.
+- A unit-radiance panel estimates a tilted receiver's irradiance to 0.2% of area
+  quadrature.
+- Sheared, behind, on-plane and tiny lights fall back on both hooks together.
 
 ---
 
@@ -960,13 +1052,22 @@ estimator unbiased.
   Disks and tubes remain area-sampled. §5.2 lists what would replace that:
   Gamito 2016, Guillén et al. 2017, or Peters' line lights.
 
-**(e) Spherical rectangles + bilinear cosine warp.**
-- Port Cycles' `area.h` (Apache-2.0) or pbrt-v4's `SampleSphericalRectangle` and
-  `SampleBilinear`.
-- Fall back to area sampling:
-  - below about 1e-4 sr;
+**(e) Spherical rectangles. ✅ Done; measured in §3.9. The bilinear cosine
+warp is not.**
+- `RectShape` implements the solid-angle hook with Ureña et al.'s map, as
+  pbrt-v4's `SampleSphericalRectangle`, in f64.
+- Area sampling remains, on both hooks alike:
+  - below 1e-4 sr and above 6.22 sr (pbrt-v4's `BilinearPatch` bounds);
   - for sheared parallelograms;
-  - for textured cards (until (h)).
+  - from behind the one-sided light or on its plane.
+- **Textured cards do use it**, against the plan above. pbrt-v4 gives the map up
+  for an image quad because it samples the image instead; crust does not (that
+  is (h)), so the alternative to solid angle is area, which is no better at
+  following the map and worse at everything else.
+- **The warp** (Hart et al. 2020, pbrt-v4's `SampleBilinear` over the corners'
+  `|n · ω|`) needs the receiver's normal, which `LightShape` and `Light` are
+  not given: `sample_li` and `pdf_at_point` take the shading point alone. It is
+  the next step here, and an API change on both MIS sides.
 
 **(f) Dome MIS compensation**, with a per-vertex fallback to the full pdf where
 BSDF sampling cannot reach the direction.

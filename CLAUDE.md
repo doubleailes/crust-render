@@ -608,6 +608,24 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   `|Mω|³ / |det M|` on the pdf (`world_solid_angle_pdf`), so its density varies over
   the cap and both MIS sides evaluate it at the point. `AffineShape` disks and tubes are
   still area-sampled.
+  **`RectShape` samples the spherical rectangle it subtends** (Ureña, Fajardo & King
+  2013, as pbrt-v4's `SampleSphericalRectangle`): uniform in solid angle, pdf `1/Ω`,
+  and the point is returned through the rectangle's own `(s, t)` so it lies on the
+  light exactly as an area sample does (the triangles a bounce hits, the texel a card
+  reads). It runs in **f64**, because `Σg − 2π` cancels in f32 at the solid angles it
+  hands back to area sampling at, and its setup is not the paper's: in the rectangle's
+  frame the four edge-plane normals are axis-aligned in closed form, so each corner
+  angle is `atan2(h·|v|, ±x·y)`, and the sums the map needs are arguments of complex
+  products — **one** `atan2` in all, `g2 + g3` kept as its normalised `(cos, sin)`.
+  Area sampling stays, on both hooks alike (`RectShape::spherical_rect`), for a sheared
+  parallelogram, from behind the one-sided light or on its plane, and outside
+  `[1e-4, 6.22]` sr (pbrt-v4's bounds). Textured cards take it too, since crust does not
+  sample the image (pbrt gives the map up only because it does). It is not a free win:
+  ~110 ns more per NEE sample than area sampling, and on a glossy receiver it can lose,
+  because area sampling's `r²/cos θ_l` density happens to follow some highlights —
+  measured in `docs/light_sampling.md` §3.9. The bilinear cosine warp (Hart et al.
+  2020) is not done: it needs the receiver's normal, which `Light::sample_li` is not
+  given.
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
@@ -1602,7 +1620,8 @@ Schema mapping:
     as `AssetLoader::load_light_texture` → `LightTexture`, linear **float** RGB decoded
     by `crust_assets::read_rgb_image` (the dome's decoder, EXR / `.hdr` kept as
     authored, LDR un-gamma'd), *not* the UV-texture path, which narrows to 8 bits when
-    preloading. The light is still sampled uniformly by area, not by the map.
+    preloading. The light is sampled by the solid angle it subtends (see `RectShape`
+    under "Core traits"), not by the map.
     Sample: `samples/rectlight.usda`.
   - `UsdLuxSphereLight`, `UsdLuxDiskLight` (local XY plane, emitting along −Z) and
     `UsdLuxCylinderLight` (along local X, emitting from its side and **not** its end caps)
@@ -2010,18 +2029,21 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   bit-identical A/B); sphere lights now sample their visible cone
   (1.3–12.9× lower relMSE at 16 spp on the five sphere-lit samples for ~8% more time
   per sample, §3.7 there),
-  but rect/disk/tube lights still sample by area rather than solid angle; the built-in sky
+  and rect lights their spherical rectangle (1.4–1.5× lower relMSE on near panels and
+  fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
+  ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
+  rather than solid angle; the built-in sky
   gradient is not a light, so NEE never samples it; `AreaLight::pdf_toward`'s
   `+1e-4` biases NEE upward on small lights; and the shadow ray is traced before
   the BSDF and emission are known to be non-zero. Measure changes with
   `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
   light filters, light/shadow linking and `ShadowAPI` are not read. A textured
-  `RectLight` is sampled uniformly by area rather than by its map's luminance (a card
+  `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel
   as the reference's is, and a `.tex` (RenderMan) map is not decoded.
   `inputs:diffuse` / `inputs:specular` warn and are ignored rather than split per lobe. Shaping is per *direction* only, so a shaped light
-  is still sampled uniformly by area: a narrow spotlight wastes the NEE samples its cone
+  is still sampled without regard to its cone (by solid angle for a rect, by area otherwise): a narrow spotlight wastes the NEE samples its cone
   cuts off (unbiased, but noisier than cone-aware sampling), and shaping is not applied
   to distant or dome lights (as in hdEmbree). IES evaluation is bilinear, as the
   reference's is. A tube light samples non-uniformly in world area (correct, not
