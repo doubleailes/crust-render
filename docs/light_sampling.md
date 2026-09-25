@@ -45,7 +45,7 @@ has the detail and §8 the measurement protocol.
 | 3 | ✅ **Done, defensively.** Power-proportional light pick, with the dome/sun given a fixed share and half the rays spread evenly | selection | ~250 lines | **measured 4.6×** on a key among dim fills, 2.6% on `usdlux`, **−6%** on `veach_mis` (§3.8) | noise only |
 | 4 | **More than one light sample at the camera vertex** (RenderMan `numLightSamples`, Arnold per-light `samples`) | sample count | ~50 lines | ≈ k× less first-bounce direct variance | noise only |
 | 5 | Make the **built-in sky** an importance-sampled light rather than an escape-only background | coverage | ~40 lines | small on the open `cornellbox` (measured 0.0125 relMSE today), large in enclosed dome-less scenes | noise only |
-| 6 | Remove the `+1e-4` in `AreaLight::pdf_toward` | correctness | ~10 lines | none: it is a **bias** fix | yes, slightly |
+| 6 | ✅ **Done.** Remove the `+1e-4` in `AreaLight::pdf_toward` | correctness | ~10 lines | none: it is a **bias** fix, **measured −11.7%** on a 1.3e-3 m² disk light that it had brightened (§3.10) | yes, slightly: ≤0.44% per pixel on the samples |
 | 7 | Evaluate BSDF and emission **before** the shadow ray | cost | ~10 lines | none (bit-identical), fewer rays | no |
 | 8 | **MIS compensation** for the dome map (Karlík et al. 2019, as in pbrt-v4) | per-light pdf | ~20 lines | large on sun + sky HDRIs | noise only |
 | 9 | **Per-vertex RIS**: M candidates, one shadow ray (Talbot et al. 2005) | selection | ~150 lines | large on glossy surfaces under several lights | noise only |
@@ -55,7 +55,7 @@ has the detail and §8 the measurement protocol.
 "Noise only" means the change alters the estimator but not its expectation. The
 image moves by noise and nothing else, which §8 shows how to prove.
 
-**The one-line version.** Items 1, 2, 5 and 7 fix defects rather than add
+**The one-line version.** Items 1, 2, 5, 6 and 7 fix defects rather than add
 features. Items 3 and 4 are what every production renderer ships. Items 9 and 10
 are the state of the art, and pay off in proportion to the number of lights.
 
@@ -135,6 +135,8 @@ light-sampling change can improve that scene. And in any enclosed scene lit by
 the gradient, the whole sky is found by chance alone. See §9.1 for the fix.
 
 ### 3.3 A bias, found on the way
+
+*(As audited. Fixed by §9.1 (b); §3.10 has the measurement.)*
 
 ```rust
 // light.rs, AreaLight::pdf_toward
@@ -498,6 +500,63 @@ sampling (§5.2) exist for.
 - A unit-radiance panel estimates a tilted receiver's irradiance to 0.2% of area
   quadrature.
 - Sheared, behind, on-plane and tiny lights fall back on both hooks together.
+
+### 3.10 Without the epsilon (§9.1 b)
+
+**The change.** `AreaLight::pdf_toward` is `d² / (cos θ_l · A)` with nothing
+added to the denominator. A point whose density is not finite (back-facing,
+edge-on, degenerate) is refused on both MIS sides: `sample_li` returns `None`,
+and `pdf_at_point` returns 0, which `bounce_emission_weight` reads as "NEE
+never delivers this point" and answers with full weight.
+
+It touches only area sampling: disks, tubes, and the sphere, ellipsoid and rect
+cases that fall back to it (inside the sphere, sheared, tiny or grazing
+rects). The cone and spherical-rectangle pdfs never carried the epsilon.
+
+**Measured.** A scratch scene, not checked in: a disk light of radius 0.02
+(`A = 1.26e-3`) 0.5 above a diffuse floor, facing down, under a zero-intensity
+dome, seen from above at 64×64 with adaptive sampling off. The image mean
+against the BSDF-only estimate, which never reads the light's pdf and so is
+the unbiased reference both binaries share. The reference is 16 384 spp,
+averaged over three seeds: **0.5756 ± 0.0011** (standard error).
+
+| binary | light only, 1024 spp | power MIS, 1024 spp | vs reference |
+|---|---|---|---|
+| with `+1e-4` | 0.6489 | 0.6489 | **+12.7%** |
+| without | 0.5727 (three seeds: 0.57266 / 0.57270 / 0.57273) | 0.5727 | −0.5% |
+
+- **The +12.7% is the predicted `1 + 1e-4/(cos θ_l · A)`.** That factor is 8%
+  straight under the disk and grows toward the frame edge as `cos θ_l` falls.
+  MIS does not hide it: at this size NEE carries nearly all the weight, so
+  power MIS shows the same image as light-only.
+- **The −0.5% residual** is 2.6 standard errors from the reference, below
+  anything the epsilon could explain. It was not investigated further. On a
+  15× larger disk (radius 0.3) the three estimates agree to 0.1%, with the old
+  binary 0.15% high.
+- **The checked-in samples barely move**, because their lights are large. At
+  16 spp:
+  - 16 of the 23 are bit-identical (0 differing pixels), including
+    `veach_mis`, `domelight`, `rectlight` and `openpbr_showcase`;
+  - `usdlux` (disk + tube) and the three DPEL MaterialX scenes change on
+    88–94% of pixels by at most 0.44% (max relative difference);
+  - `fog`, `smoke` and `instancing` change on under 0.3% of their pixels.
+
+**What else it fixes.** A **two-sided** emitter seen from behind by an
+area-sampled shape used to be lost to both strategies. NEE divided by a pdf of
+about `d²/1e-4`, and the bounce weight against that pdf was nearly zero. The
+bounce ray now carries it at full weight. crust's UsdLux lights are one-sided,
+so this only reaches the procedural fallback's two-sided sphere light, seen
+from inside.
+
+**Tests.**
+- `area_pdf_has_no_epsilon` (`light.rs`) checks `pdf == d²/(cos·A)` to 1e-4
+  relative on a small tilted ellipse, where the old epsilon was a 4.5% error.
+- `back_facing_area_samples_are_refused_on_both_sides` checks the refusal from
+  behind and edge-on.
+- `rect_light_is_effectively_one_sided`,
+  `affine_shapes_without_a_cone_fall_back_to_area_sampling` and
+  `sphere_light_from_inside_falls_back_to_area_sampling` (`tests/lights.rs`)
+  used to pin the exploding pdf. They now pin the refusal.
 
 ---
 
@@ -1023,11 +1082,15 @@ estimator unbiased.
   is BSDF-sampled today) gains NEE plus MIS for the sky.
 - It then competes for picks, which is §9.3's problem.
 
-**(b) The epsilon goes.**
-- `pdf_toward` returns an infinite pdf at `cos ≤ 0`, and `sample_li` returns
-  `None` for a back-facing sample, as pbrt-v4 does.
-- On the bounce side, the one-sided `Emissive` already gives zero radiance from
-  the back.
+**(b) The epsilon goes. ✅ Done; measured in §3.10.**
+- `pdf_toward` returns `None` wherever the area density is not finite
+  (`cos ≤ 0`, or a degenerate shape), and `sample_li` returns `None` for such a
+  sample, as pbrt-v4 does (`Shape::Sample` gives no sample).
+- On the bounce side `pdf_at_point` reports **0** for the same points, as
+  pbrt-v4's `Shape::PDF` does, not ∞. That is the MIS-consistent reading: NEE
+  never delivers the point, so `bounce_emission_weight` gives the bounce full
+  weight there, exactly as for a light NEE never picks. An infinite pdf would
+  weight it to nothing, which is only harmless while the emitter is one-sided.
 
 **(c) Shadow rays last.**
 - Evaluate `mat.eval` and `ls.radiance` first, and skip the shadow ray when

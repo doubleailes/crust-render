@@ -584,7 +584,13 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   density (default: its area, i.e. uniform); `AffineShape` samples uniformly in local
   area, so its world density varies under a non-uniform scale and it reports
   `local_area · |det M| · |M⁻ᵀ n|` — both MIS halves read it, so it need only be the
-  density actually sampled.
+  density actually sampled. Where the area density `d²/(cos θ_l · A)` is not finite
+  (back-facing, edge-on) `AreaLight` **refuses** the point on both sides, pbrt-v4's
+  way: `sample_li` returns `None` and `pdf_at_point` returns **0**, which
+  `bounce_emission_weight` reads as "NEE never delivers this" and gives full weight.
+  It used to add `1e-4` to that denominator instead, an NEE bias of
+  `1 + 1e-4/(cos θ_l · A)` (+12.7% measured on a 1.3e-3 m² disk,
+  `docs/light_sampling.md` §3.10); do not reintroduce a finite stand-in.
   A shape with a better strategy than area sampling implements
   **`LightShape::sample_solid_angle` / `solid_angle_pdf`** (default `None`, meaning
   "sample me by area"): a point plus its *solid-angle* pdf as seen from the shading
@@ -2033,8 +2039,7 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
   ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
   rather than solid angle; the built-in sky
-  gradient is not a light, so NEE never samples it; `AreaLight::pdf_toward`'s
-  `+1e-4` biases NEE upward on small lights; and the shadow ray is traced before
+  gradient is not a light, so NEE never samples it; and the shadow ray is traced before
   the BSDF and emission are known to be non-zero. Measure changes with
   `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,

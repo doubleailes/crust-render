@@ -726,8 +726,9 @@ pub trait Light: Send + Sync {
 
     /// Solid-angle pdf, as seen from `from`, of [`Light::sample_li`] having
     /// produced `light_point` — the bounce side of MIS for a light whose
-    /// geometry a ray hit. Lights at infinity have no such point and keep
-    /// the default.
+    /// geometry a ray hit. Zero means `sample_li` never delivers that point
+    /// (and is the default, for lights at infinity, which have no such
+    /// point): nothing competes there, so the bounce keeps full weight.
     fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A) -> f32 {
         0.0
     }
@@ -788,10 +789,12 @@ impl AreaLight {
     /// solid-angle density where it has one, otherwise that of sampling
     /// uniformly by area, `dist² / (cos(θ_light) · area)`, where θ_light is the
     /// angle between the light's surface normal at `light_point` and the
-    /// direction back toward the shaded point. Back-facing points clamp the
-    /// cosine to zero, so their pdf explodes and both MIS strategies agree
-    /// the contribution is negligible — area lights are effectively
-    /// one-sided.
+    /// direction back toward the shaded point.
+    ///
+    /// Zero where the area density is infinite (a back-facing or edge-on
+    /// point, see [`AreaLight::pdf_toward`]): `sample_li` refuses such a
+    /// sample, so NEE never delivers that point and the bounce side must
+    /// keep its emission whole.
     fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> f32 {
         if let Some(pdf) = self.shape.solid_angle_pdf(from, light_point) {
             return pdf;
@@ -800,19 +803,31 @@ impl AreaLight {
         let dir_to_light = direction.normalize();
         let light_normal = self.shape.normal_at(light_point);
         self.pdf_toward(direction, dir_to_light, light_normal, light_point)
+            .unwrap_or(0.0)
     }
 
-    /// [`AreaLight::solid_angle_pdf`] with the normal already in hand.
+    /// The area-sampling density of `light_point` in solid angle, with the
+    /// normal already in hand. `None` where it is not finite: the point faces
+    /// away from the shading point or is seen edge-on (`cos θ_light ≤ 0`), or
+    /// the shape is degenerate there.
+    ///
+    /// That is pbrt-v4's convention (`Shape::Sample` returns no sample,
+    /// `Shape::PDF` returns 0). This used to add `1e-4` to the denominator
+    /// to keep the pdf finite instead, which inflated every NEE contribution
+    /// by `1 + 1e-4/(cos θ_light · area)`: +0.3% on `veach_mis`'s smallest
+    /// sphere face-on, +100% on a face-on 1 cm² light in a scene modelled in
+    /// metres, and dependent on the scene's units.
     fn pdf_toward(
         &self,
         direction: Vec3A,
         dir_to_light: Vec3A,
         light_normal: Vec3A,
         light_point: Vec3A,
-    ) -> f32 {
+    ) -> Option<f32> {
         let distance_squared = direction.length_squared();
-        let cosine = f32::max(light_normal.dot(-dir_to_light), 0.0);
-        distance_squared / (cosine * self.shape.inv_pdf_area(light_point) + 1e-4)
+        let cosine = light_normal.dot(-dir_to_light);
+        let pdf = distance_squared / (cosine * self.shape.inv_pdf_area(light_point));
+        (cosine > 0.0 && pdf.is_finite() && pdf > 0.0).then_some(pdf)
     }
 }
 
@@ -836,16 +851,21 @@ impl Light for AreaLight {
         // Emission leaves the light back toward `from`; whether that is the
         // emitting side is the same cosine the pdf clamps.
         let front = light_normal.dot(-dir_to_light) > 0.0;
+        // An area sample whose density is infinite is refused rather than
+        // given a finite stand-in, which would bias it (see `pdf_toward`).
+        // `solid_angle_pdf` reports 0 for the same points, so a bounce ray
+        // that hits one keeps its emission at full weight.
+        let pdf = match solid_angle {
+            Some((_, pdf)) => pdf,
+            None => self.pdf_toward(to_light, dir_to_light, light_normal, light_point)?,
+        };
         Some(LightSample {
             direction,
             distance,
             radiance: self
                 .material
                 .radiance_toward(light_point, -dir_to_light, front),
-            pdf: solid_angle.map_or_else(
-                || self.pdf_toward(to_light, dir_to_light, light_normal, light_point),
-                |(_, pdf)| pdf,
-            ),
+            pdf,
         })
     }
 
@@ -1468,6 +1488,73 @@ mod tests {
         // An area light has geometry and no escaped-ray contribution.
         assert_eq!(light.geom_id(), Some(0));
         assert!(light.escaped(Vec3A::ZERO, Vec3A::Y).is_none());
+    }
+
+    /// An area-sampled light's pdf is exactly `d² / (cos θ_l · A)`, with no
+    /// epsilon in the denominator. The `+1e-4` it used to carry was an NEE
+    /// bias of `1 + 1e-4/(cos θ_l · A)`: about +4.5% on this light, a
+    /// 0.1 × 0.04 ellipse at 45°, whose `cos θ_l · A` is about 2.2e-3.
+    #[test]
+    fn area_pdf_has_no_epsilon() {
+        // A small unit disk (local XY, emitting along −Z) squashed to an
+        // ellipse and tilted 45° about X, at z = 3: area-sampled, since only
+        // a sphere has a solid-angle strategy on `AffineShape`.
+        let placement = Affine3A::from_translation(Vec3A::new(0.0, 0.0, 3.0).into())
+            * Affine3A::from_rotation_x(std::f32::consts::FRAC_PI_4)
+            * Affine3A::from_scale(glam::Vec3::new(0.05, 0.02, 1.0));
+        let shape = AffineShape::new(UnitShape::Disk, placement).unwrap();
+        let area = shape.area();
+        let light = AreaLight::new(Box::new(shape), Arc::new(Emissive::new(Vec3A::ONE)), 0);
+        for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.9, 0.7)] {
+            let s = light.sample_li(Vec3A::ZERO, u, v).expect("front-facing");
+            let p = s.direction * s.distance;
+            let n = placement
+                .matrix3
+                .inverse()
+                .transpose()
+                .mul_vec3a(-Vec3A::Z)
+                .normalize();
+            let cos_l = n.dot(-s.direction);
+            let expected = s.distance * s.distance / (cos_l * area);
+            assert!(
+                (s.pdf - expected).abs() <= 1e-4 * expected,
+                "pdf {} vs d²/(cos·A) {}",
+                s.pdf,
+                expected
+            );
+            let bounce = light.pdf_at_point(Vec3A::ZERO, p);
+            assert!((bounce - s.pdf).abs() <= 1e-4 * s.pdf);
+        }
+    }
+
+    /// Behind an area-sampled light the density is infinite. NEE refuses the
+    /// sample rather than inventing a finite pdf, and the bounce side reports
+    /// 0 for the same point, meaning "NEE never delivers this": the two
+    /// sides still describe one strategy, and a two-sided emitter seen from
+    /// behind is carried whole by the bounce ray instead of being weighted
+    /// to nothing on both sides.
+    #[test]
+    fn back_facing_area_samples_are_refused_on_both_sides() {
+        let placement = Affine3A::from_translation(glam::Vec3::new(0.0, 0.0, 3.0));
+        let light = AreaLight::new(
+            Box::new(AffineShape::new(UnitShape::Disk, placement).unwrap()),
+            Arc::new(Emissive::new(Vec3A::ONE)),
+            0,
+        );
+        // The disk emits along −Z, toward the origin; z = 6 is behind it.
+        let behind = Vec3A::new(0.0, 0.0, 6.0);
+        for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.9, 0.7)] {
+            assert!(light.sample_li(behind, u, v).is_none());
+        }
+        let on_disk = Vec3A::new(0.2, -0.1, 3.0);
+        assert_eq!(light.pdf_at_point(behind, on_disk), 0.0);
+        // Edge-on (in the disk's own plane) is refused the same way.
+        let edge_on = Vec3A::new(5.0, 0.0, 3.0);
+        assert!(light.sample_li(edge_on, 0.5, 0.5).is_none());
+        assert_eq!(light.pdf_at_point(edge_on, on_disk), 0.0);
+        // And the front is unaffected.
+        assert!(light.sample_li(Vec3A::ZERO, 0.5, 0.5).is_some());
+        assert!(light.pdf_at_point(Vec3A::ZERO, on_disk) > 0.0);
     }
 
     /// The cone convention: every sampled direction lies inside the
