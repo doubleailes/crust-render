@@ -1932,6 +1932,16 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   texel, against the full mis-weighted one the mip chain had — and unlike that
   one it is a *resize* averaged in the file's own encoding, so fixing it would
   move every render of a texture above the cap. Worth doing, not urgent.
+- **Light sampling is the main source of 16 spp noise**, and `docs/light_sampling.md`
+  is the survey of the state of the art (SIGGRAPH/EGSR/HPG, pbrt-v4, Cycles,
+  RenderMan, Arnold, Hyperion) with a ranked roadmap and a measured baseline. In
+  short: the light pick is uniform; sphere lights sample the *whole* sphere (≥50%
+  of shadow rays wasted — a visible-cone prototype measured 1.3–1.7× lower relMSE);
+  rect/disk/tube lights sample by area rather than solid angle; the built-in sky
+  gradient is not a light, so NEE never samples it; `AreaLight::pdf_toward`'s
+  `+1e-4` biases NEE upward on small lights; and the shadow ray is traced before
+  the BSDF and emission are known to be non-zero. Measure changes with
+  `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
   light filters, light/shadow linking and `ShadowAPI` are not read. A textured
   `RectLight` is sampled uniformly by area rather than by its map's luminance (a card
