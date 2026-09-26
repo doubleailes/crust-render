@@ -342,6 +342,27 @@ Common-subexpression elimination and arity specialisation are not done:
 the census found little to share, and closure compilation, below, would
 specialise per op anyway.
 
+**What is left, after the passes** (lion, line-level callgrind). `run` is
+1.17 G self instructions, and `reduce` is only ~65 M of it: the interpreter is
+the rest, ~5 400 instructions per run for 52 ops, so about 100 per op. No line
+dominates — `Val::zip`'s operand broadcast ~63 M, the `match` dispatch ~63 M,
+`Remap`'s five-operand four-lane arithmetic ~73 M, operand reads (`get` +
+`unwrap_or`) ~57 M, and ~276 M the line tables cannot place — which is the
+signature of per-op overhead rather than of one expensive operator. That is
+what closure compilation with *static* arity attacks: every slot's width is
+known at compile time (textures, constants and `convert` fix it, and a binary
+op takes the wider operand's), so a compiled op can skip the broadcast, the
+dispatch and three idle lanes on the many scalar mask ops. The interpreter is
+now ~14% of the lion's render and ~4% of the teapot's, which bounds what the
+rest of step 4 can buy.
+
+One trap found on the way: `Val::with_arity(1)` (a `convert` to `float`) and a
+one-channel `image` keep lanes 1–3 as they were, and a later `convert` back to
+`color3` exposes them, so a scalar-specialised op must preserve the lanes it
+does not compute or it will not be bit-identical. (Whether a
+`float`→`color3` convert *should* splat lane 0 is a separate question; today
+it does not.)
+
 ### 5. A JIT, only if steps 3–4 are not enough
 
 If `Program::eval` still dominates after steps 3–4, compile each material's
