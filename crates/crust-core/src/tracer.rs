@@ -2,7 +2,7 @@ use crate::buffer::Buffer;
 use crate::filter::{FilterSampler, PixelFilter};
 use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::HitRecord;
-use crate::material::{Material, ScatterSample};
+use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
@@ -944,7 +944,7 @@ fn ray_cones_enabled() -> bool {
 fn sample_bounce_direction(
     r: &Ray,
     rec: &HitRecord,
-    mat: &dyn Material,
+    sp: &ShadingPoint,
     guiding: Option<&GuidingContext>,
     sampler: PathSampler,
 ) -> Option<ScatterSample> {
@@ -953,7 +953,7 @@ fn sample_bounce_direction(
     let bsdf_dom = sampler.new_domain(K_BSDF);
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
-        _ => return mat.scatter_importance(r, rec, bsdf_dom),
+        _ => return sp.scatter_importance(r, bsdf_dom),
     };
     let alpha = g.field.config().guide_prob;
     let gs = sampler.new_domain(K_GUIDE).draw_sample_f32::<4>();
@@ -962,11 +962,11 @@ fn sample_bounce_direction(
         // Guide branch: draw from the field; the material's continuous
         // component supplies the value and the BSDF side of the mixture pdf.
         if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]])
-            && let Some((value, p_bsdf)) = mat.eval(r, rec, wi)
+            && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
             let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
             return Some(ScatterSample {
-                ray: mat.make_ray(rec, wi),
+                ray: sp.make_ray(wi),
                 value,
                 pdf,
                 delta: false,
@@ -979,10 +979,10 @@ fn sample_bounce_direction(
             });
         }
         // Material with no continuous component: pure BSDF sampling.
-        mat.scatter_importance(r, rec, bsdf_dom)
+        sp.scatter_importance(r, bsdf_dom)
     } else {
         // BSDF branch.
-        let mut sample = mat.scatter_importance(r, rec, bsdf_dom)?;
+        let mut sample = sp.scatter_importance(r, bsdf_dom)?;
         if sample.delta {
             // Only this branch can reach the delta lobe, so the coin scaled
             // its selection probability by 1-α.
@@ -995,7 +995,7 @@ fn sample_bounce_direction(
         // yes that is already known.
         let wi = sample.ray.direction().normalize();
         debug_assert!(
-            mat.eval(r, rec, wi).is_some(),
+            sp.eval(r, wi).is_some(),
             "a continuous sample from a material with no continuous component"
         );
         let p_guide = g.field.pdf(rec.p, wi);
@@ -1112,6 +1112,9 @@ impl PrevBounce<'_> {
 /// bounce-hit emission must be MIS-weighted against the same light
 /// strategy or it is double-counted). Carried-medium (subsurface) scatters
 /// run no NEE and keep `prev = None` instead.
+// Large only in debug builds, where `PrevBounce` carries its `check` copy of
+// the hit; boxing it would allocate once per bounce for a debug assertion.
+#[allow(clippy::large_enum_variant)]
 enum PrevVertex<'a> {
     Surface(PrevBounce<'a>),
     Phase {
@@ -1624,6 +1627,12 @@ fn trace_path(
             None => emit_here = emitted,
         }
 
+        // The material's per-hit work (pattern network, textures), done once
+        // for every BSDF query below: NEE's `eval`, the scatter, and guiding's
+        // `eval` / `make_ray`. Every surface vertex scatters, so this is never
+        // wasted work.
+        let sp = ShadingPoint::new(mat, &ray, &rec);
+
         // Guide secondary bounces only: primary vertices vary per pixel far
         // below the guiding field's spatial resolution, so guiding them adds
         // parallax-mismatch variance instead of removing any.
@@ -1656,9 +1665,10 @@ fn trace_path(
             // transmissive materials return None from `eval`, since they
             // cannot see a light-sampled direction and pick up emission via
             // BSDF sampling instead, and a light below the horizon gets a
-            // zero value — is cheaper than the shadow ray unless it samples
-            // textures, in which case the ray goes first
-            // (`Material::eval_reads_textures`). Either order is
+            // zero value — is cheaper than the shadow ray: the shading point
+            // already ran any pattern network, so `eval` reads no texture.
+            // (Before that split a textured `eval` went after the ray, so an
+            // occluded light never paid for the network.) Either order is
             // bit-identical: a skipped test's contribution would be exactly
             // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
             // which nothing else reads.
@@ -1669,16 +1679,12 @@ fn trace_path(
                 let tr = shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
                 (tr != Vec3A::ZERO).then_some(tr)
             };
-            let bsdf = || {
-                mat.eval(&ray, &rec, light_dir_unit)
-                    .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
-            };
             let connection = if ls.radiance == Vec3A::ZERO {
                 None
-            } else if mat.eval_reads_textures() {
-                visibility().and_then(|tr| bsdf().map(|(f, pdf)| (f, pdf, tr)))
             } else {
-                bsdf().and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
+                sp.eval(&ray, light_dir_unit)
+                    .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
+                    .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
             };
             if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
                 let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
@@ -1717,7 +1723,7 @@ fn trace_path(
         };
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some(sample) = sample_bounce_direction(&ray, &rec, mat, guiding_here, v) {
+        if let Some(sample) = sample_bounce_direction(&ray, &rec, &sp, guiding_here, v) {
             let dir = sample.ray.direction().normalize();
             // `sample.value` is the material's `brdf · |cos|` (delta lobes
             // carry their whole throughput there instead), so the estimator is
