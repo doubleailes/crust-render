@@ -1614,7 +1614,12 @@ fn trace_path(
         // way the emission pays the arriving segment's attenuation (an
         // emitter seen through tinted glass or smoke must dim).
         let cos_o = ray.direction().normalize().dot(rec.normal).abs();
-        let emitted = mat.emitted_at(&ray, &rec, cos_o);
+        // The material's per-hit work (pattern network, textures), done once
+        // for every query at this vertex: the emission here, NEE's `eval`, the
+        // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
+        // scatters, so this is never wasted work.
+        let sp = ShadingPoint::new(mat, &ray, &rec, cos_o);
+        let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
         match &prev {
             Some(p) => {
@@ -1626,12 +1631,6 @@ fn trace_path(
             }
             None => emit_here = emitted,
         }
-
-        // The material's per-hit work (pattern network, textures), done once
-        // for every BSDF query below: NEE's `eval`, the scatter, and guiding's
-        // `eval` / `make_ray`. Every surface vertex scatters, so this is never
-        // wasted work.
-        let sp = ShadingPoint::new(mat, &ray, &rec);
 
         // Guide secondary bounces only: primary vertices vary per pixel far
         // below the guiding field's spatial resolution, so guiding them adds

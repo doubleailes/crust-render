@@ -314,6 +314,11 @@ impl PreviewSurface {
         }
     }
 
+    /// Whether the surface can emit at all: textured or constant emission.
+    fn can_emit(&self) -> bool {
+        self.emission_textured || self.base.emission_luminance > 0.0
+    }
+
     /// Names the primvar the textures read, when it is not `st`.
     pub fn with_uv_primvar(mut self, primvar: Option<String>) -> PreviewSurface {
         self.uv_primvar = primvar.filter(|p| p != "st");
@@ -406,11 +411,26 @@ impl Material for PreviewSurface {
         true
     }
 
-    fn resolve(&self, _r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+    fn resolve(
+        &self,
+        _r_in: &Ray,
+        rec: &HitRecord,
+        cos_theta_o: f32,
+    ) -> Option<crate::material::Resolution> {
         let (params, normal) = self.probe(rec);
+        // `emitted_at`'s answer from the same probe, before Ptex is applied.
+        let emitted = if self.can_emit() {
+            params.emitted_directional(cos_theta_o)
+        } else {
+            Vec3A::ZERO
+        };
         let mut rec = *rec;
         rec.normal = normal;
-        Some((params.into_resolved(&rec), rec))
+        Some(crate::material::Resolution {
+            bsdf: params.into_resolved(&rec),
+            rec,
+            emitted,
+        })
     }
 
     fn uv_primvar(&self) -> Option<&str> {
@@ -440,7 +460,7 @@ impl Material for PreviewSurface {
     fn emitted_at(&self, _r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
         // Asked of every surface hit: a surface that cannot emit must not
         // sample its textures to find that out.
-        if !self.emission_textured && self.base.emission_luminance <= 0.0 {
+        if !self.can_emit() {
             return Vec3A::ZERO;
         }
         self.probe(rec).0.emitted_directional(cos_theta_o)
@@ -634,6 +654,40 @@ mod tests {
         assert!(glass.probe(&rec).1.dot(wi) < 0.0 && rec.normal.dot(wi) > 0.0);
         let r = glass.make_ray(&rec, wi);
         assert_ne!(r.origin(), rec.p, "crosses the interface with its offset");
+    }
+
+    #[test]
+    fn resolve_emits_what_emitted_at_does() {
+        // A textured emitter under a coat, so the coat factor (which reads
+        // `base_color`) takes part. `resolve` answers from its one probe and
+        // must match the per-query `emitted_at` bit for bit.
+        let m = PreviewSurface::new(
+            "e".into(),
+            OpenPBR {
+                coat_weight: 0.7,
+                ..OpenPBR::default()
+            },
+            vec![(
+                Target::EmissiveColor,
+                input(tex(Flat([3.0, 1.5, 0.25, 1.0])), TexOutput::Rgb),
+            )],
+            None,
+        );
+        let rec = hit(0.5);
+        let ray = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
+        for cos in [1.0, 0.6, 0.1] {
+            let r = m.resolve(&ray, &rec, cos).expect("textured");
+            assert_eq!(r.emitted, m.emitted_at(&ray, &rec, cos));
+            assert_ne!(r.emitted, Vec3A::ZERO);
+        }
+        // A surface that cannot emit reports zero without being asked twice.
+        let dark = PreviewSurface::new(
+            "d".into(),
+            OpenPBR::default(),
+            vec![(Target::Roughness, input(tex(Flat([0.3; 4])), TexOutput::R))],
+            None,
+        );
+        assert_eq!(dark.resolve(&ray, &rec, 1.0).unwrap().emitted, Vec3A::ZERO);
     }
 
     #[test]

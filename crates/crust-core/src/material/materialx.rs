@@ -128,6 +128,11 @@ impl MtlxMaterial {
         f(&params, &rec)
     }
 
+    /// Whether the graph can emit at all: an EDF, or an emissive base.
+    fn can_emit(&self) -> bool {
+        !self.flat.emission.is_empty() || self.base.emission_luminance > 0.0
+    }
+
     /// Runs the graph at a hit: the OpenPBR it reduces to, and the record
     /// with the graph's shading normal applied.
     fn run(&self, r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord) {
@@ -175,9 +180,25 @@ impl Material for MtlxMaterial {
         self.shade(r_in, rec, |m, rec| m.eval(r_in, rec, wi))
     }
 
-    fn resolve(&self, r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+    fn resolve(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        cos_theta_o: f32,
+    ) -> Option<crate::material::Resolution> {
         let (params, rec) = self.run(r_in, rec);
-        Some((params.into_resolved(&rec), rec))
+        // `emitted_at`'s answer, from the run already made rather than a
+        // second one; see there for the gate and for `cos_theta_o`.
+        let emitted = if self.can_emit() {
+            params.emitted_directional(cos_theta_o)
+        } else {
+            Vec3A::ZERO
+        };
+        Some(crate::material::Resolution {
+            bsdf: params.into_resolved(&rec),
+            rec,
+            emitted,
+        })
     }
 
     fn uses_uv(&self) -> bool {
@@ -198,7 +219,7 @@ impl Material for MtlxMaterial {
         // 140-op one, an extra time per path vertex to be told the answer is
         // zero. Whether the graph has an EDF at all is known at compile time,
         // so this is the same kind of structural gate as `uses_uv`.
-        if self.flat.emission.is_empty() && self.base.emission_luminance <= 0.0 {
+        if !self.can_emit() {
             return Vec3A::ZERO;
         }
         // `cos_theta_o` is used as the tracer measured it, against the
