@@ -92,23 +92,25 @@ pub trait Material: Send + Sync {
     }
 
     /// This material resolved at one hit: the `OpenPBR` its pattern network
-    /// (or textures) reduce to there, and the record to shade it with — the
-    /// hit's own, with any shading normal the network produces applied.
+    /// (or textures) reduce to there, the record to shade it with — the hit's
+    /// own, with any shading normal the network produces applied — and the
+    /// hit's emission toward `cos_theta_o`.
     ///
-    /// The integrator calls this once per path vertex and routes every BSDF
-    /// query at that vertex — the scatter, NEE's `eval`, guiding's `eval` and
-    /// `make_ray` — through the result ([`ShadingPoint`]), so a textured
+    /// The integrator calls this once per path vertex and routes every query
+    /// at that vertex — emission, the scatter, NEE's `eval`, guiding's `eval`
+    /// and `make_ray` — through the result ([`ShadingPoint`]), so a textured
     /// material runs its network once per vertex instead of once per query.
     /// It is the OSL / pbrt-v4 split between running a shader and using the
     /// BSDF it produced.
     ///
     /// `None` (the default) means there is no per-hit work to share and the
-    /// queries go to the material itself. The returned `OpenPBR` must be
+    /// queries go to the material itself. Otherwise every field must answer
+    /// exactly as this material's own methods would at `rec`:
+    /// [`Resolution::emitted`] as [`Material::emitted_at`], and the `OpenPBR`
     /// *fully* resolved — its own per-hit lookups (Ptex) already applied, see
-    /// [`OpenPBR::into_resolved`] — and answer every query exactly as this
-    /// material's own methods would at `rec`.
-    fn resolve(&self, r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
-        let _ = (r_in, rec);
+    /// [`OpenPBR::into_resolved`] — for the BSDF queries.
+    fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
+        let _ = (r_in, rec, cos_theta_o);
         None
     }
 
@@ -205,17 +207,26 @@ pub trait Material: Send + Sync {
     }
 }
 
+/// What [`Material::resolve`] hands back for one hit.
+pub struct Resolution {
+    /// The fully resolved BSDF parameters.
+    pub bsdf: OpenPBR,
+    /// The record the BSDF shades with (the shading normal applied).
+    pub rec: HitRecord,
+    /// [`Material::emitted_at`] at this hit, computed from the parameters the
+    /// network already produced. Taken *before* Ptex is applied, as
+    /// `emitted_at` itself does: OpenPBR's coat emission factor reads
+    /// `base_color`, and a resolved Ptex lookup would change it.
+    pub emitted: Vec3A,
+}
+
 /// A material at one hit, with its per-hit work already done (see
 /// [`Material::resolve`]). Every query here answers exactly as the
 /// material's own method would at the same hit — it only stops repeating the
 /// pattern network and texture fetches between queries.
-///
-/// Emission is deliberately not routed through it: `Material::emitted_at` is
-/// asked at the arriving hit, is already gated for surfaces that cannot emit,
-/// and OpenPBR's coat factor reads the *unresolved* `base_color`, which a
-/// resolved Ptex lookup would change.
 pub struct ShadingPoint<'a> {
     rec: HitRecord,
+    emitted: Vec3A,
     bsdf: Resolved<'a>,
 }
 
@@ -231,18 +242,26 @@ enum Resolved<'a> {
 }
 
 impl<'a> ShadingPoint<'a> {
-    /// Runs `mat`'s per-hit work at `rec`, once.
-    pub fn new(mat: &'a dyn Material, r_in: &Ray, rec: &HitRecord) -> Self {
-        match mat.resolve(r_in, rec) {
-            Some((bsdf, rec)) => ShadingPoint {
-                rec,
-                bsdf: Resolved::OpenPBR(bsdf),
+    /// Runs `mat`'s per-hit work at `rec`, once. `cos_theta_o` is what
+    /// [`Material::emitted_at`] would be given.
+    pub fn new(mat: &'a dyn Material, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Self {
+        match mat.resolve(r_in, rec, cos_theta_o) {
+            Some(r) => ShadingPoint {
+                rec: r.rec,
+                emitted: r.emitted,
+                bsdf: Resolved::OpenPBR(r.bsdf),
             },
             None => ShadingPoint {
                 rec: *rec,
+                emitted: mat.emitted_at(r_in, rec, cos_theta_o),
                 bsdf: Resolved::Material(mat),
             },
         }
+    }
+
+    /// [`Material::emitted_at`] at this hit.
+    pub fn emitted(&self) -> Vec3A {
+        self.emitted
     }
 
     /// [`Material::scatter_importance`] at this hit.

@@ -1290,10 +1290,21 @@ impl Material for OpenPBR {
         self.base_color_ptex.as_ref().map(|t| &*t.0)
     }
 
-    fn resolve(&self, _r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+    fn resolve(
+        &self,
+        _r_in: &Ray,
+        rec: &HitRecord,
+        cos_theta_o: f32,
+    ) -> Option<crate::material::Resolution> {
         // Only a Ptex lookup is per-hit work; an untextured surface is
-        // queried in place, with no copy.
-        self.shaded(rec).map(|m| (m, *rec))
+        // queried in place, with no copy. Emission is the default
+        // `emitted_at`: the unresolved material's, constant `base_color` and
+        // all.
+        self.shaded(rec).map(|bsdf| crate::material::Resolution {
+            bsdf,
+            rec: *rec,
+            emitted: self.emitted_directional(cos_theta_o),
+        })
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {

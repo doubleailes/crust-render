@@ -556,16 +556,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   A material that emits only through `emitted_at` must therefore never become a
   light-list entry, or NEE would sample it at zero radiance while the bounce side saw
   the real value.
-  **`resolve(r_in, rec) -> Option<(OpenPBR, HitRecord)>`** is the shade-once hook: a
-  material with per-hit work (a MaterialX graph, `UsdUVTexture`s, a Ptex lookup)
-  returns the fully resolved `OpenPBR` and the record carrying its shading normal,
-  and the integrator builds one **`ShadingPoint`** per vertex from it, through which
-  the scatter, NEE's `eval`, guiding's `eval` and `make_ray` all go. `None` (the
-  default, and an untextured `OpenPBR`) queries the material in place with no copy.
-  The contract is that each query answers exactly as the material's own method would
-  — output is bit-identical to per-query shading — and emission stays off it
-  (`emitted_at` is gated for non-emitters, and the coat's emission factor reads the
-  *unresolved* `base_color`, which a resolved Ptex lookup would change). Four implementations: **`OpenPBR`**,
+  **`resolve(r_in, rec, cos_theta_o) -> Option<Resolution>`** is the shade-once hook:
+  a material with per-hit work (a MaterialX graph, `UsdUVTexture`s, a Ptex lookup)
+  returns the fully resolved `OpenPBR`, the record carrying its shading normal, and
+  the hit's emission, and the integrator builds one **`ShadingPoint`** per vertex
+  from it, through which the emission, the scatter, NEE's `eval`, guiding's `eval`
+  and `make_ray` all go. `None` (the default, and an untextured `OpenPBR`) queries
+  the material in place with no copy. The contract is that each answer is exactly
+  what the material's own method would give — output is bit-identical to per-query
+  shading. One trap: `Resolution::emitted` must come from the parameters *before*
+  `into_resolved`, as `emitted_at` does, because the coat's emission factor reads
+  `base_color` and a resolved Ptex lookup would change it. Four implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**

@@ -226,22 +226,26 @@ most. It changes the `Material` trait and the integrator's vertex records.
 
 **Done**, in a narrower shape than sketched above:
 
-- **`Material::resolve(r_in, rec) -> Option<(OpenPBR, HitRecord)>`** instead of
-  a `prepare` every material must implement. `MtlxMaterial` runs its graph,
+- **`Material::resolve(r_in, rec, cos_theta_o) -> Option<Resolution>`** instead
+  of a `prepare` every material must implement. `MtlxMaterial` runs its graph,
   `PreviewSurface` its texture inputs, and a Ptex `OpenPBR` its face lookup; each
   returns the fully resolved `OpenPBR` (`OpenPBR::into_resolved` applies Ptex
-  last, as the per-query path did) and the record with the shading normal.
+  last, as the per-query path did), the record with the shading normal, and the
+  hit's emission.
   Everything else returns `None` and is queried in place: no copy, which is why
   `cornellbox` does not move.
 - **`ShadingPoint`** wraps either case, and the integrator builds one per surface
-  vertex, right after emission. The scatter, NEE's `eval`, the guide branch's
-  `eval` and `make_ray` go through it. Every surface vertex scatters, so it is
-  never wasted work.
-- **Emission stays off it.** `emitted_at` is asked at the arriving hit, is
-  already gated for non-emitters, and OpenPBR's coat emission factor reads the
-  *unresolved* `base_color`: routing it through a resolved Ptex lookup would
-  change the image. `PrevVertex` needs nothing from the shading point, because
-  step 2 already removed its `eval` calls.
+  vertex, where the ray arrives. The emission there, the scatter, NEE's `eval`,
+  the guide branch's `eval` and `make_ray` go through it. Every surface vertex
+  scatters, so it is never wasted work. `PrevVertex` needs nothing from it,
+  because step 2 already removed its `eval` calls.
+- **Emission is computed from the pre-Ptex parameters.** `Resolution::emitted`
+  answers as `emitted_at` would: gated for surfaces that cannot emit, and taken
+  from the network's output *before* `into_resolved`, because OpenPBR's coat
+  emission factor reads `base_color` and `emitted_at` never saw the Ptex one.
+  The first version left emission on `emitted_at`, which re-ran a textured
+  emitter's network (review on #151): `materialx_emissive` −7.3% `render_pixel`
+  instructions once folded in, `usdpreview_textured` +0.25% (the gate).
 - **`eval_reads_textures` is retired.** With the network already run, `eval` is
   cheaper than a shadow ray for every material, so NEE takes radiance → eval →
   shadow everywhere. That also skips shadow rays toward lights below a textured
@@ -249,8 +253,9 @@ most. It changes the `Material` trait and the integrator's vertex records.
 - `OpenPBR` size (the concern above) did not show up: copying it once per
   textured vertex is far below the graph runs it replaces.
 
-- **Output:** bit-identical on all 25 `check_images.sh` scenes, both guided
-  variants, and ALab frame 1004 (0 of 230 400 pixels differ).
+- **Output:** bit-identical at 16 spp on all 25 `check_images.sh` scenes, both
+  guided variants, and ALab frame 1004 (0 of 230 400 pixels differ). The 32 spp
+  ALab runs below are timing only.
 - **Runs per vertex: 1.0.** On `materialx_basic`, `resolve` runs 131 255 times
   and `scatter_resolved` 131 255 times; texture-fetch instructions fall from
   258 M (before step 2) to 87 M.
@@ -267,8 +272,8 @@ most. It changes the `Material` trait and the integrator's vertex records.
   | `ptex_quads` | −28.9% / −35.4% | −54.5% / −53.9% |
   | `cornellbox` | +0.5% / +0.7% | −1.3% / +0.6% |
 
-- **ALab** (frame 1004, shot camera, 32 spp, `--stats` Render phase, two
-  interleaved runs each): original 64.8 s / 73.1 s → step 3 56.7 s / 60.2 s
+- **ALab timing** (frame 1004, shot camera, 32 spp, `--stats` Render phase, two
+  interleaved runs each, before emission was folded in): original 64.8 s / 73.1 s → step 3 56.7 s / 60.2 s
   (min −12.5%, mean −15.2%), shadow rays 16 273 773 → 11 496 977. The
   interior's occluded samples were the reason textured `eval` went after the
   shadow ray; with one network run per vertex that order no longer pays.
