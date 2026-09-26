@@ -22,10 +22,11 @@ cargo run --release -- -i samples/materialx_showcase.usda  # both, framed after 
 cargo run --release -- -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
 cargo run --release -- -i samples/usdpreview_textured.usda # UsdPreviewSurface + UsdUVTexture (UDIM, EXR, auto)
 cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
-cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rendering
+cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles are the default)
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), -b/--bucket,
+# --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), --scanline
+#   (row order instead of the default 16x16 tiles; -b/--bucket is accepted and ignored),
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf), --light-selection (uniform|power),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
@@ -442,8 +443,16 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 1. **`main.rs`** builds a `Scene { camera, world, lights, settings, volumes }` — either from
    USD (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
 2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
-   - `render()` — parallel over pixels within each scanline row.
-   - `render_with_tiles()` — parallel over 16×16 tiles (the `--bucket` path).
+   - `render_with_tiles()` — parallel over 16×16 tiles. **The CLI's default**, and
+     13–48% faster than rows on every sample measured (`bench_ab.sh`: cornellbox −27%,
+     materialx_basic −25%, teapot −19%, ptex_quads −48%, usdlux −13%): a tile is a
+     coherent, cache-friendly work unit and there is no per-row barrier.
+   - `render()` — parallel over pixels within each scanline row, rows in sequence
+     (`--scanline`).
+   The two are **bit-identical**, guided renders included: the per-pixel work is the
+   same, and the tiled path hands a pass's guiding training samples and its variance
+   sum (both order-dependent in floating point) on in scanline order. Keep it that way —
+   a render mode must be scheduling only.
    Pixel reconstruction (`filter.rs`, `crust:pixelFilter` / `--filter`) is **filter
    importance sampling**, not splatting: each pixel warps its jitter through the
    filter's distribution and weights radiance by `f/p`, keeping every per-pixel

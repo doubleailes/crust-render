@@ -54,8 +54,15 @@ struct Cli {
     /// `-l debug --log-file` is how a full record of a render is kept.
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
     log_file: Option<std::path::PathBuf>,
-    /// Bucket rendering
-    #[arg(short, long, default_value_t = false)]
+    /// Render in scanline order — rows one after another, each row's pixels
+    /// in parallel — instead of the default 16x16 tiles. The image is
+    /// bit-identical; it is slower (every row is a barrier, and a pixel is the
+    /// work unit), and is kept as the A/B and for a progress bar in rows.
+    #[arg(long, default_value_t = false)]
+    scanline: bool,
+    /// Tiles ("bucket" order) are the default now; accepted so existing
+    /// command lines keep working, and ignored.
+    #[arg(short, long, default_value_t = false, hide = true)]
     bucket: bool,
     /// Samples per pixel. Overrides the scene / default value when set.
     #[arg(short, long)]
@@ -457,7 +464,7 @@ fn main() {
         img_height,
         settings.samples_per_pixel(),
         settings.max_depth(),
-        if cli.bucket { "bucket" } else { "scanline" },
+        if cli.scanline { "scanline" } else { "bucket" },
         match cli.frame {
             Some(frame) => format!(", frame {frame}"),
             None => String::new(),
@@ -486,7 +493,7 @@ fn main() {
         }
         progress_bar.set_position(done);
     };
-    let (buffer, ray_stats) = renderer.render_with_stats(cli.bucket, &progress);
+    let (buffer, ray_stats) = renderer.render_with_stats(!cli.scanline, &progress);
     bar.finish();
     // Close Timer
     let duration: Duration = start.elapsed();
@@ -858,13 +865,16 @@ mod tests {
         assert_eq!(cli.frame, Some(1012.5));
         assert_eq!(cli.input.as_deref(), Some("scene.usda"));
         assert_eq!(cli.output, "out.exr");
-        assert!(cli.bucket);
+        assert!(cli.bucket, "the old flag still parses");
+        assert!(!cli.scanline);
         assert_eq!(cli.samples, Some(12));
         assert!(matches!(cli.strategy, Some(Strategy::Balance)));
         assert!(matches!(cli.filter, Some(Filter::Mitchell)));
         assert_eq!(cli.filter_radius, Some(1.75));
         assert!(cli.stats);
         assert!(matches!(cli.level, LoggerLevel::Debug));
+        let scan = Cli::try_parse_from(["crust-render", "--scanline"]).expect("valid flags");
+        assert!(scan.scanline);
     }
 
     #[test]
@@ -872,7 +882,7 @@ mod tests {
         let cli = Cli::try_parse_from(["crust-render"]).expect("no flags is valid");
         assert!(cli.input.is_none());
         assert_eq!(cli.output, "output.exr");
-        assert!(!cli.bucket);
+        assert!(!cli.scanline, "tiles are the default");
         assert!(cli.samples.is_none());
         assert!(cli.strategy.is_none());
         assert!(cli.filter.is_none());

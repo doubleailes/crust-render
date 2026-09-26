@@ -481,6 +481,45 @@ by material instead of shading each path as it goes: a wavefront restructure,
 not a shading change. It is recorded here as the direction after steps 1–5, not
 as a near-term step.
 
+**Tried; it does not pay yet, and was not merged** (branch
+`shading-wavefront`, 2026-09-26). Two stages, both bit-identical:
+
+- *Stage A* split `trace_path` into a resumable `PathWalk` — `advance` to the
+  next surface hit, `resume` with its `ShadingPoint`, `finish` for the gather —
+  with `trace_path` driving the three in order. Cost: +0.7% `render_pixel`
+  instructions on cornellbox, +0.4% on materialx_basic (walk state held in a
+  struct across the pause).
+- *Stage B* added a batched driver (`CRUST_WAVEFRONT=1`): one path per pixel of
+  a tile in flight; each round advances every path to its hit, shades the
+  paused hits in material order, and resumes them. Pixels keep their sample
+  order, adaptive stop and guiding samples, so output matched on every
+  reference scene and on 64 spp adaptive, bucket, fog and guided renders.
+
+It was slower (bucket mode, `bench_ab.sh`, min / mean): cornellbox
++16.7% / +14.9%, materialx_basic +10.3% / +8.7%, usdpreview_textured
++11.2% / +9.0%, teapot +7.8% / +8.2%, even in its leanest form (no stored
+shading points, slots restarted in place). Callgrind on cornellbox: +16%
+instructions, mostly moving per-path state (`memcpy` 54 M → 326 M), and wall
+time rose further than instructions — 256 live paths cost the cache locality a
+single path walked to completion keeps. In scanline mode it was 5× slower:
+64-pixel chunks of one row leave ~10 parallel tasks for 72 threads.
+
+The reason is structural rather than a tuning miss: grouping hits by material
+only pays when something *consumes* the group — material evaluation over a
+batch in SIMD lanes, a batched texture fetch, coherent ray packets — and none
+of those exists. Reordering alone only adds bookkeeping. Revisit this together
+with such a consumer (the BSDF in SIMD lanes would be the first candidate, as
+`OpenPBR` evaluation is now the largest shading cost), not before; the branch
+keeps both stages.
+
+**What the attempt found instead.** The per-row barrier that sank the scanline
+driver was costing the ordinary renderer too: 16×16 tiles, bit-identical to
+rows, are 13–48% faster on every sample measured (cornellbox −27.4%,
+materialx_basic −25.1%, usdpreview_textured −22.1%, teapot −18.5%, veach_mis
+−14.8%, usdlux −13.2%, ptex_quads −47.7%; min, interleaved). Tiles are now the
+CLI's default (`--scanline` for rows), which is a larger win than steps 4 and
+5 together.
+
 ## Validation for every step
 
 - **Images:** `scripts/check_images.sh record` before, `check` after, at 16 spp.
