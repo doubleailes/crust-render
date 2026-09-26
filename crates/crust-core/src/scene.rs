@@ -140,6 +140,21 @@ pub struct UsdImportOptions {
     /// camera on the stage is an error ([`crate::Error::CameraNotFound`]); a
     /// dangling `RenderSettings.camera` only warns and falls back.
     pub camera: Option<String>,
+    /// Leave the last composed USD stage allocated instead of freeing it.
+    ///
+    /// Tearing a composed stage down is not free: openusd's index cache is
+    /// millions of small allocations, and freeing ALab's took 45 s — 22% of
+    /// its import — right before the render could start. A host that renders
+    /// once and exits (the CLI) loses nothing by skipping it; the memory goes
+    /// back to the OS at exit, and glibc keeps most of a freed heap mapped in
+    /// the meantime anyway. A host that loads several scenes in one process
+    /// must leave this off, or each load leaks its stage.
+    ///
+    /// Only the *final* stage is kept: a streamed import still drops every
+    /// earlier chunk's stage as it goes, so its memory bound holds. Nothing
+    /// in the returned [`Scene`] borrows from the stage, and the image is the
+    /// same either way.
+    pub skip_stage_teardown: bool,
 }
 
 /// How the engine asks its host to decode an image.

@@ -363,6 +363,9 @@ fn main() {
         let options = crust_core::UsdImportOptions {
             frame: cli.frame,
             camera: cli.camera.clone(),
+            // The process renders once and exits, so freeing the composed
+            // stage is pure delay before the render (45 s on ALab).
+            skip_stage_teardown: true,
         };
         match Scene::from_usd_with_options(input_path, &assets, &options) {
             Ok(scene) => scene,

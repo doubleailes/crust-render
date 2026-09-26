@@ -789,6 +789,29 @@ next — see `MaterialCache::key` and `ImportCaches::epoch`. Keying materials on
 path cost 5 835 258 triangles before it was caught, and *no single element reproduces
 it*: it needs two chunks that both carry prototype-internal materials.
 
+**Where import time goes** (ALab frame 1004, single-stage, stack-sampled with
+`eu-stack` every 1.5 s — callgrind is hours on a 30 GiB import, and `perf` is not
+installed here). Before the fixes below, `Traverse prims` was 3:24:
+- **~35% is openusd composing the stage**, serially and lazily: the first query into a
+  prototype namespace (`is_active` on `/__Prototype_0`) runs `discover_prototypes`,
+  which walks and composes the whole populated stage — one call, 105 s. It runs
+  **once** per population epoch, and the traversal reuses what it composed, so it is
+  not duplicated work; C++ USD does the same composition in parallel at open. It is
+  openusd's to parallelise (its stage is `Rc`-based), not crust's.
+- **~23% was prototype BVH builds**, one mesh at a time as `collect_proto_parts` met
+  them. Now each prototype's meshes are collected first and built together in
+  parallel (`MeshArena::commit_slots`); a part holds `placeholder_scene()` until then.
+- **~22% was dropping the composed stage** — openusd's index cache is millions of
+  small allocations, 45 s of `free` before the render could start.
+  `UsdImportOptions::skip_stage_teardown` (off by default, on in the CLI) leaves the
+  *final* stage allocated instead (`release_stage`); a streamed import still drops
+  every earlier chunk, so its memory bound holds. Peak RSS is unchanged (~33 GiB on
+  ALab) — the peak is reached during traversal, and glibc keeps a freed heap mapped
+  anyway — while RSS after the traverse rises to the peak instead of falling. A host
+  that loads several scenes in one process must leave the option off.
+Together: parse 3:29–3:50 → 2:41–2:50 (−23% min, −25% mean, two interleaved runs),
+16 spp image identical.
+
 Schema mapping:
 
 - `UsdGeomMesh` → **either** world-space triangles in the top-level BVH **or** a
@@ -2161,7 +2184,7 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
   (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
   imports and animates under `-f`: 14 893 geometries, 12.9 M triangles plus 9.4 M cubic
-  fur spans, 37 lights, ~3:07 to parse, ~30.5 GiB peak, ~38 s to render 1280x720 at
+  fur spans, 37 lights, ~2:45 to parse (see "Where import time goes"), ~30.5 GiB peak, ~38 s to render 1280x720 at
   64 spp. Two download facts come first. The **Asset Structure** package ships every
   geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte
   placeholder layer. Without **techvar assets** merged *over* that tree, the stage
