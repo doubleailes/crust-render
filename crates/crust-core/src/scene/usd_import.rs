@@ -418,8 +418,8 @@ fn is_invisible(prim: &Prim) -> bool {
         .is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
-/// Drops a stage the traversal is done with, or — for the final stage of a
-/// host that asked for it (`UsdImportOptions::skip_stage_teardown`) — leaves
+/// Drops a stage the traversal is done with, or — for a single-stage import
+/// whose host asked for it (`UsdImportOptions::skip_stage_teardown`) — leaves
 /// it allocated, since freeing openusd's index cache is a long tail of small
 /// deallocations (45 s on ALab) that a render-and-exit process never needs.
 fn release_stage(stage: Stage, keep: bool) {
@@ -594,9 +594,11 @@ pub(crate) fn load_scene(
                 GMat4::IDENTITY,
                 &mut ctx,
             );
-            // Every earlier chunk is dropped as it goes — that is the memory
-            // bound streaming exists for — and only the last may be kept.
-            release_stage(stage, options.skip_stage_teardown && n + 1 == chunks.len());
+            // Always dropped, the last chunk included: that is the memory
+            // bound streaming exists for, and a streamed import's peak often
+            // comes *after* the traversal — at the top-level BVH commit, on
+            // the island — where a kept stage would stack on top of it.
+            release_stage(stage, false);
             // Separate this stage's prototypes from the next stage's —
             // see ImportCaches::epoch. Deliberately not a clear: the
             // mesh cache keys materials by Arc address, so nothing may
@@ -1341,15 +1343,38 @@ impl MeshArena {
                 (k, geom)
             })
             .collect();
-        let built: Vec<(u32, RtScene)> = geoms
-            .into_par_iter()
-            .map(|(k, geom)| (k, commit_mesh(geom)))
-            .collect();
-        for (k, scene) in built {
-            self.slots[k as usize].committed = Some(Arc::new(scene));
+        // Built in batches of bounded total size rather than all at once. A
+        // build's transient memory (references, binary nodes) is proportional
+        // to its triangles, so an unbounded parallel map lets a prototype of
+        // several large meshes hold all their transients together. Batching by
+        // triangle count keeps many small meshes fully parallel and a large
+        // one alone, as it was when this was sequential.
+        let mut geoms = geoms.into_iter().peekable();
+        while geoms.peek().is_some() {
+            let mut batch = Vec::new();
+            let mut tris = 0usize;
+            while let Some((_, g)) = geoms.peek() {
+                if !batch.is_empty() && tris + g.tris.len() > PARALLEL_COMMIT_TRIS {
+                    break;
+                }
+                tris += g.tris.len();
+                batch.push(geoms.next().expect("peeked"));
+            }
+            let built: Vec<(u32, RtScene)> = batch
+                .into_par_iter()
+                .map(|(k, geom)| (k, commit_mesh(geom)))
+                .collect();
+            for (k, scene) in built {
+                self.slots[k as usize].committed = Some(Arc::new(scene));
+            }
         }
     }
 }
+
+/// Triangles `MeshArena::commit_slots` builds side by side at most — a bound
+/// on the build transients that overlap. A mesh larger than this is built
+/// alone, as every mesh was before the builds went parallel.
+const PARALLEL_COMMIT_TRIS: usize = 2_000_000;
 
 /// A local-space mesh as a committed kernel scene.
 fn commit_mesh(geom: MeshGeom) -> RtScene {

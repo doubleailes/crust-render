@@ -2683,9 +2683,9 @@ def Scope "Render"
     }
 }
 
-/// Keeping the final stage allocated (`skip_stage_teardown`) must change
-/// nothing but the teardown: the same render, on a single-stage import and
-/// on a streamed one — where only the last chunk's stage is kept.
+/// Keeping the stage allocated (`skip_stage_teardown`) must change nothing but
+/// the teardown: the same render on a single-stage import, where it applies,
+/// and on a streamed one, where it must not (every chunk is still dropped).
 #[test]
 fn skipping_stage_teardown_leaves_the_render_unchanged() {
     use crust_core::{RenderSettings, Renderer, UsdImportOptions};
@@ -2717,7 +2717,8 @@ fn skipping_stage_teardown_leaves_the_render_unchanged() {
         )
         .expect("stage opens");
         let geometries = scene.world.count();
-        let settings = RenderSettings::new(2, 3, 24, 16, 2, 0.0, 0);
+        // 16 spp with a minimum of 16: every pixel takes exactly 16 samples.
+        let settings = RenderSettings::new(16, 3, 24, 16, 16, 0.0, 0);
         let buf = Renderer::new(scene.camera, scene.world, scene.lights, settings).render();
         let pixels: Vec<[u32; 3]> = (0..16)
             .flat_map(|y| (0..24).map(move |x| (x, y)))

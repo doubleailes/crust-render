@@ -167,6 +167,7 @@ scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/
 scripts/check_images.sh record <dir>           # golden EXRs at 16 spp
 scripts/check_images.sh check  <dir>           # re-render and diff; exits non-zero on any change
 scripts/bench_ab.sh -a <binA> -b <binB> [scenes...]   # interleaved A/B of two binaries
+scripts/bench_ab.sh -a A -b B -p "Parse USD stage" -x "-s 1" scene.usda  # ...of an import phase
 
 # CI runs (toolchain pinned, RUSTFLAGS=-D warnings), as three parallel jobs:
 cargo fmt --all -- --check
@@ -801,16 +802,23 @@ installed here). Before the fixes below, `Traverse prims` was 3:24:
 - **~23% was prototype BVH builds**, one mesh at a time as `collect_proto_parts` met
   them. Now each prototype's meshes are collected first and built together in
   parallel (`MeshArena::commit_slots`); a part holds `placeholder_scene()` until then.
+  The parallel builds go in batches of at most `PARALLEL_COMMIT_TRIS` (2 M) triangles:
+  a build's transient memory is proportional to its triangles, so an unbounded map
+  would let a prototype of several large meshes hold all their transients at once.
 - **~22% was dropping the composed stage** — openusd's index cache is millions of
   small allocations, 45 s of `free` before the render could start.
-  `UsdImportOptions::skip_stage_teardown` (off by default, on in the CLI) leaves the
-  *final* stage allocated instead (`release_stage`); a streamed import still drops
-  every earlier chunk, so its memory bound holds. Peak RSS is unchanged (~33 GiB on
-  ALab) — the peak is reached during traversal, and glibc keeps a freed heap mapped
-  anyway — while RSS after the traverse rises to the peak instead of falling. A host
+  `UsdImportOptions::skip_stage_teardown` (off by default, on in the CLI) leaves a
+  **single-stage** import's stage allocated instead (`release_stage`). A streamed
+  import drops every chunk, the last included: streaming exists for its memory bound,
+  and its peak often comes after the traversal (the top-level BVH commit on the
+  island), where a kept stage would stack on top of it. On ALab peak RSS is unchanged
+  (~33 GiB) — the peak is reached during traversal, and glibc keeps a freed heap mapped
+  anyway — while RSS after the traverse stays at the peak instead of falling. A host
   that loads several scenes in one process must leave the option off.
-Together: parse 3:29–3:50 → 2:41–2:50 (−23% min, −25% mean, two interleaved runs),
-16 spp image identical.
+Together (`scripts/bench_ab.sh -n 2 -p "Parse USD stage" -x "-f 1004 --camera … -s 1"
+samples/ALab/entry.usda`): 209.9 / 216.1 s → 163.2 / 164.1 s, **−22.2% min, −24.1%
+mean**; 16 spp image identical. `bench_ab.sh -p` times any `--stats` phase (default
+`Render`) and `-x` passes extra renderer arguments.
 
 Schema mapping:
 

@@ -21,20 +21,31 @@
 #     cp target/release/crust-render /tmp/bin_after
 #     scripts/bench_ab.sh -a /tmp/bin_before -b /tmp/bin_after cornellbox veach_mis
 #
-# Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [scene ...]
+# Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [-p phase] [-x args] [scene ...]
+#
+#   -p phase  which `--stats` phase to time, by its report name (default
+#             "Render"; e.g. "Parse USD stage" or "Traverse prims" to measure
+#             an import). Durations above a minute (`03:29.3`) are converted.
+#   -x args   extra renderer arguments for every run, e.g. a scene that needs a
+#             frame and a camera:
+#             -x "-f 1004 --camera /root/camera01/.../renderCam -s 1"
 
 set -euo pipefail
 
 BIN_A=""
 BIN_B=""
 REPS=6
+PHASE="Render"
+EXTRA=""
 
-while getopts "a:b:n:h" opt; do
+while getopts "a:b:n:p:x:h" opt; do
     case "$opt" in
         a) BIN_A="$OPTARG" ;;
         b) BIN_B="$OPTARG" ;;
         n) REPS="$OPTARG" ;;
-        h) sed -n '2,26p' "$0"; exit 0 ;;
+        p) PHASE="$OPTARG" ;;
+        x) EXTRA="$OPTARG" ;;
+        h) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 0 ;;
         *) exit 2 ;;
     esac
 done
@@ -49,6 +60,20 @@ SCENES=("$@")
 if [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=(cornellbox openpbr_showcase veach_mis instancing nested_instancing)
 fi
+
+# The first report line naming $PHASE (the execution tree, which comes before
+# the by-time table), as seconds: `41.453s` or `03:29.3`.
+phase_seconds() {
+    awk -v ph="$PHASE" '{
+        l = $0; sub(/^ +/, "", l)
+        if (index(l, ph "  ") == 1) {
+            split(substr(l, length(ph) + 1), f, " ")
+            t = f[1]; sub(/s$/, "", t)
+            if (t ~ /:/) { split(t, m, ":"); t = m[1] * 60 + m[2] }
+            print t; exit
+        }
+    }'
+}
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -73,8 +98,9 @@ for scene in "${SCENES[@]}"; do
             # `|| true`: under `set -e` with `pipefail` a single transient
             # render failure in a 50-run sweep would otherwise abort the whole
             # comparison. Drop the sample and carry on instead.
-            t="$("$bin" -i "$path" -o "$WORK/o.exr" --stats -l error 2>/dev/null \
-                | awk '/^  Render /{gsub(/s$/,"",$2); print $2; exit}' || true)"
+            # shellcheck disable=SC2086  # EXTRA is deliberately word-split
+            t="$("$bin" -i "$path" -o "$WORK/o.exr" --stats -l error $EXTRA 2>/dev/null \
+                | phase_seconds || true)"
             [ -n "$t" ] || continue
             if [ "$side" = a ]; then a_times+=("$t"); else b_times+=("$t"); fi
         done
@@ -99,4 +125,4 @@ for scene in "${SCENES[@]}"; do
 done
 
 echo
-echo "$REPS interleaved reps per scene; negative deltas mean B is faster."
+echo "$REPS interleaved reps per scene, timing \"$PHASE\"; negative deltas mean B is faster."
