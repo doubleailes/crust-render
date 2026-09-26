@@ -78,9 +78,9 @@ pub enum UnOp {
 }
 
 /// One instruction. Operands are slot indices, always strictly less than the
-/// instruction's own index — the compiler emits in topological order, so a
+/// instruction's own slot — the compiler emits in topological order, so a
 /// single forward pass evaluates the whole program.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Op {
     Const(Val),
     /// A UV texture lookup. `tex` is `None` when the host declined the file,
@@ -186,13 +186,105 @@ pub enum Op {
     },
 }
 
+impl Op {
+    /// Calls `f` on every operand slot index, in a fixed order.
+    pub fn for_each_operand(&mut self, mut f: impl FnMut(&mut u32)) {
+        match self {
+            Op::Const(_)
+            | Op::Texture { .. }
+            | Op::TexCoord
+            | Op::Normal
+            | Op::ViewDirection
+            | Op::Position => {}
+            Op::Unary { a, .. }
+            | Op::Luminance { a }
+            | Op::Convert { a, .. }
+            | Op::Extract { a, .. } => f(a),
+            Op::Binary { a, b, .. }
+            | Op::Invert { a, amount: b }
+            | Op::Combine2 { a, b }
+            | Op::DotProduct { a, b }
+            | Op::NormalMap { a, scale: b }
+            | Op::ArtisticIor {
+                reflectivity: a,
+                edge: b,
+                ..
+            } => {
+                f(a);
+                f(b);
+            }
+            Op::Mix { fg, bg, m } => {
+                f(fg);
+                f(bg);
+                f(m);
+            }
+            Op::Clamp { a, low, high } | Op::Smoothstep { a, low, high } => {
+                f(a);
+                f(low);
+                f(high);
+            }
+            Op::Contrast { a, amount, pivot } => {
+                f(a);
+                f(amount);
+                f(pivot);
+            }
+            Op::Combine3 { a, b, c } => {
+                f(a);
+                f(b);
+                f(c);
+            }
+            Op::Remap {
+                a,
+                in_low,
+                in_high,
+                out_low,
+                out_high,
+            } => {
+                f(a);
+                f(in_low);
+                f(in_high);
+                f(out_low);
+                f(out_high);
+            }
+        }
+    }
+
+    /// Whether the result depends on nothing but the operands — no shading
+    /// point, no texture. Such an op over constant operands is a constant.
+    fn is_pure(&self) -> bool {
+        match self {
+            Op::Texture { tex, .. } => tex.is_none(),
+            Op::TexCoord | Op::Normal | Op::ViewDirection | Op::Position | Op::NormalMap { .. } => {
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
 /// A compiled pattern graph.
-#[derive(Default)]
+///
+/// Slots `0..consts.len()` hold `consts`, copied in once per evaluation; slot
+/// `consts.len() + i` holds the value of `ops[i]`. The compiler leaves
+/// `consts` empty and emits every literal as an [`Op::Const`];
+/// [`Program::optimize`] moves them (and everything computable from them)
+/// into `consts`.
+#[derive(Clone, Default)]
 pub struct Program {
+    pub consts: Vec<Val>,
     pub ops: Vec<Op>,
 }
 
 impl Program {
+    /// Number of slots an evaluation fills.
+    pub fn len(&self) -> usize {
+        self.consts.len() + self.ops.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Evaluates every instruction into `slots`, which is resized as needed.
     ///
     /// The caller owns the buffer so it can be reused across shading calls —
@@ -201,152 +293,260 @@ impl Program {
     /// not show up in a profile as one hot line.
     pub fn eval(&self, ctx: &ShadeCtx, slots: &mut Vec<Val>) {
         slots.clear();
-        slots.reserve(self.ops.len());
+        slots.reserve(self.len());
+        slots.extend_from_slice(&self.consts);
         for op in &self.ops {
-            // Every operand index was emitted before this instruction, so the
-            // slot exists. `get` rather than indexing keeps a malformed
-            // program from panicking inside the integrator.
-            let g = |i: u32| -> Val { slots.get(i as usize).copied().unwrap_or(Val::ZERO) };
-            let v = match op {
-                Op::Const(v) => *v,
-                Op::Texture {
-                    tex,
-                    fallback,
-                    scale,
-                    offset,
-                    arity,
-                } => match tex {
-                    Some(t) => {
-                        let u = ctx.uv.0 * scale[0] + offset[0];
-                        let v = ctx.uv.1 * scale[1] + offset[1];
-                        // `uvtiling` scales the coordinates, so it scales the
-                        // footprint with them: a texture tiled 10× is being
-                        // minified 10× and must read a coarser level to match.
-                        // The two axes are averaged because the width is one
-                        // isotropic number.
-                        let w = ctx.uv_width * 0.5 * (scale[0].abs() + scale[1].abs());
-                        let rgba = t.eval(u, v, w);
-                        Val {
-                            v: rgba,
-                            arity: *arity,
-                        }
-                    }
-                    None => *fallback,
-                },
-                Op::TexCoord => Val::vec2(ctx.uv.0, ctx.uv.1),
-                Op::Normal => ctx.normal.into(),
-                Op::ViewDirection => ctx.view.into(),
-                Op::Position => ctx.position.into(),
-                Op::Unary { op, a } => {
-                    let a = g(*a);
-                    match op {
-                        UnOp::Abs => a.map(f32::abs),
-                        // Guarded so a zero or negative operand — which the
-                        // teapot's Beer-Lambert chain can produce from a
-                        // black texel — yields a finite value instead of an
-                        // infinity that then poisons every downstream lane.
-                        UnOp::Ln => a.map(|x| if x > 1e-30 { x.ln() } else { -69.0 }),
-                        UnOp::Exp => a.map(|x| x.clamp(-88.0, 88.0).exp()),
-                        UnOp::Sin => a.map(f32::sin),
-                        UnOp::Cos => a.map(f32::cos),
-                        UnOp::Asin => a.map(|x| x.clamp(-1.0, 1.0).asin()),
-                        UnOp::Acos => a.map(|x| x.clamp(-1.0, 1.0).acos()),
-                        UnOp::Sqrt => a.map(|x| x.max(0.0).sqrt()),
-                        UnOp::Sign => a.map(f32::signum),
-                        UnOp::Floor => a.map(f32::floor),
-                        UnOp::Ceil => a.map(f32::ceil),
-                        UnOp::Normalize => {
-                            let v = a.rgb();
-                            let n = v.length();
-                            if n > 1e-20 { (v / n).into() } else { a }
-                        }
-                    }
-                }
-                Op::Binary { op, a, b } => {
-                    let (a, b) = (g(*a), g(*b));
-                    match op {
-                        BinOp::Add => a.zip(b, |x, y| x + y),
-                        BinOp::Sub => a.zip(b, |x, y| x - y),
-                        BinOp::Mul => a.zip(b, |x, y| x * y),
-                        // A zero divisor is a real possibility in these
-                        // graphs (`1 / transmittance` with a black channel),
-                        // and an infinity survives every later multiply.
-                        BinOp::Div => a.zip(b, |x, y| if y.abs() > 1e-20 { x / y } else { 0.0 }),
-                        BinOp::Pow => a.zip(b, |x, y| x.max(0.0).powf(y)),
-                        BinOp::Min => a.zip(b, f32::min),
-                        BinOp::Max => a.zip(b, f32::max),
-                        BinOp::Modulo => a.zip(b, |x, y| if y.abs() > 1e-20 { x % y } else { 0.0 }),
-                    }
-                }
-                // `bg·(1−m) + fg·m`. Written as two weighted terms rather
-                // than `bg + (fg−bg)·m` so that a `float` mix against wider
-                // operands broadcasts through `zip`'s promotion in both
-                // terms alike.
-                Op::Mix { fg, bg, m } => {
-                    let (fg, bg, m) = (g(*fg), g(*bg), g(*m));
-                    let inv = m.map(|x| 1.0 - x);
-                    bg.zip(inv, |b, t| b * t)
-                        .zip(fg.zip(m, |f, t| f * t), |a, b| a + b)
-                }
-                Op::Clamp { a, low, high } => {
-                    let (a, lo, hi) = (g(*a), g(*low), g(*high));
-                    a.zip(lo, f32::max).zip(hi, f32::min)
-                }
-                Op::Contrast { a, amount, pivot } => {
-                    let (a, amt, piv) = (g(*a), g(*amount), g(*pivot));
-                    a.zip(piv, |x, p| x - p)
-                        .zip(amt, |x, m| x * m)
-                        .zip(piv, |x, p| x + p)
-                }
-                Op::Remap {
-                    a,
-                    in_low,
-                    in_high,
-                    out_low,
-                    out_high,
-                } => {
-                    let (a, il, ih, ol, oh) =
-                        (g(*a), g(*in_low), g(*in_high), g(*out_low), g(*out_high));
-                    let t = a
-                        .zip(il, |x, l| x - l)
-                        .zip(ih.zip(il, |h, l| h - l), |x, d| {
-                            if d.abs() > 1e-20 { x / d } else { 0.0 }
-                        });
-                    ol.zip(oh.zip(ol, |h, l| h - l).zip(t, |d, t| d * t), |l, x| l + x)
-                }
-                Op::Invert { a, amount } => g(*amount).zip(g(*a), |m, x| m - x),
-                Op::Convert { a, arity } => g(*a).with_arity(*arity),
-                Op::Extract { a, index } => Val::float(g(*a).v[(*index).min(3)]),
-                Op::Combine3 { a, b, c } => Val::vec3(g(*a).x(), g(*b).x(), g(*c).x()),
-                Op::Combine2 { a, b } => Val::vec2(g(*a).x(), g(*b).x()),
-                Op::DotProduct { a, b } => Val::float(g(*a).rgb().dot(g(*b).rgb())),
-                Op::Luminance { a } => {
-                    let c = g(*a).rgb();
-                    Val::float(c.dot(Vec3A::new(0.2722287, 0.6740818, 0.0536895)))
-                }
-                Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale).x(), ctx).into(),
-                Op::ArtisticIor {
-                    reflectivity,
-                    edge,
-                    extinction,
-                } => {
-                    let (n, k) = artistic_ior(g(*reflectivity).rgb(), g(*edge).rgb());
-                    if *extinction { k.into() } else { n.into() }
-                }
-                Op::Smoothstep { a, low, high } => {
-                    let (a, lo, hi) = (g(*a), g(*low), g(*high));
-                    a.zip(lo, |x, l| x - l)
-                        .zip(hi.zip(lo, |h, l| h - l), |x, d| {
-                            if d.abs() > 1e-20 {
-                                (x / d).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            }
-                        })
-                        .map(|t| t * t * (3.0 - 2.0 * t))
-                }
-            };
+            let v = apply(op, slots, ctx);
             slots.push(v);
+        }
+    }
+
+    /// Rewrites the program so it computes the same values at `roots` with
+    /// less work per evaluation, and returns where each old slot went
+    /// (`None` for a slot that no longer exists).
+    ///
+    /// Three passes, each exact rather than approximate:
+    ///
+    /// - **Constant folding.** An op whose operands are all constant, and
+    ///   which reads neither the shading point nor a texture, is evaluated
+    ///   here — by [`apply`], the function the interpreter runs, so the value
+    ///   is the one every hit would have computed, bit for bit.
+    /// - **Constant hoisting and deduplication.** Constants move into
+    ///   [`Program::consts`], copied in with one `memcpy` per evaluation
+    ///   instead of one dispatched instruction each, and bitwise-equal ones
+    ///   share a slot (the compiler emits a fresh constant for every literal
+    ///   and every unauthored input's default).
+    /// - **Dead-code elimination.** Ops nothing at `roots` depends on are
+    ///   dropped.
+    ///
+    /// The surviving ops keep their relative order, so operands still precede
+    /// their users.
+    pub fn optimize(&self, roots: &[u32]) -> (Program, Vec<Option<u32>>) {
+        let n = self.len();
+        let nc = self.consts.len();
+        // Every slot's value, where it is a compile-time constant.
+        let mut known: Vec<Option<Val>> = self.consts.iter().copied().map(Some).collect();
+        known.resize(n, None);
+        let ctx = ShadeCtx {
+            uv: (0.0, 0.0),
+            normal: Vec3A::Z,
+            tangent: Vec3A::ZERO,
+            view: -Vec3A::Z,
+            position: Vec3A::ZERO,
+            uv_width: 0.0,
+        };
+        let mut scratch: Vec<Val> = vec![Val::ZERO; n];
+        for (i, op) in self.ops.iter().enumerate() {
+            let slot = nc + i;
+            let mut all_known = op.is_pure();
+            op.clone()
+                .for_each_operand(|o| match known.get(*o as usize).copied().flatten() {
+                    Some(v) => scratch[*o as usize] = v,
+                    None => all_known = false,
+                });
+            if all_known {
+                // `apply` reads operands by slot, so hand it the known values
+                // at their own indices.
+                known[slot] = Some(apply(op, &scratch[..slot], &ctx));
+            }
+        }
+
+        // Liveness, from the roots back.
+        let mut live = vec![false; n];
+        for &r in roots {
+            if let Some(l) = live.get_mut(r as usize) {
+                *l = true;
+            }
+        }
+        for i in (0..self.ops.len()).rev() {
+            let slot = nc + i;
+            if live[slot] && known[slot].is_none() {
+                self.ops[i].clone().for_each_operand(|o| {
+                    if let Some(l) = live.get_mut(*o as usize) {
+                        *l = true;
+                    }
+                });
+            }
+        }
+
+        // Constants first, deduplicated bitwise, then the surviving ops.
+        let mut out = Program::default();
+        let mut remap: Vec<Option<u32>> = vec![None; n];
+        let key = |v: &Val| (v.v.map(f32::to_bits), v.arity);
+        let mut seen: std::collections::HashMap<([u32; 4], u8), u32> = Default::default();
+        for slot in 0..n {
+            if let (true, Some(v)) = (live[slot], known[slot]) {
+                let idx = *seen.entry(key(&v)).or_insert_with(|| {
+                    out.consts.push(v);
+                    (out.consts.len() - 1) as u32
+                });
+                remap[slot] = Some(idx);
+            }
+        }
+        let base = out.consts.len();
+        for (i, op) in self.ops.iter().enumerate() {
+            let slot = nc + i;
+            if live[slot] && known[slot].is_none() {
+                let mut op = op.clone();
+                op.for_each_operand(|o| {
+                    // A live op's operands are live, so they were placed.
+                    *o = remap[*o as usize].unwrap_or(0);
+                });
+                remap[slot] = Some((base + out.ops.len()) as u32);
+                out.ops.push(op);
+            }
+        }
+        (out, remap)
+    }
+}
+
+/// One instruction's value, given the slots computed before it.
+///
+/// Shared by [`Program::eval`] and the constant folder in
+/// [`Program::optimize`], which is what makes a folded constant exactly the
+/// value the interpreter would have produced.
+#[inline(always)]
+fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
+    // Every operand index was emitted before this instruction, so the slot
+    // exists. `get` rather than indexing keeps a malformed program from
+    // panicking inside the integrator.
+    let g = |i: u32| -> Val { slots.get(i as usize).copied().unwrap_or(Val::ZERO) };
+    match op {
+        Op::Const(v) => *v,
+        Op::Texture {
+            tex,
+            fallback,
+            scale,
+            offset,
+            arity,
+        } => match tex {
+            Some(t) => {
+                let u = ctx.uv.0 * scale[0] + offset[0];
+                let v = ctx.uv.1 * scale[1] + offset[1];
+                // `uvtiling` scales the coordinates, so it scales the
+                // footprint with them: a texture tiled 10× is being
+                // minified 10× and must read a coarser level to match.
+                // The two axes are averaged because the width is one
+                // isotropic number.
+                let w = ctx.uv_width * 0.5 * (scale[0].abs() + scale[1].abs());
+                let rgba = t.eval(u, v, w);
+                Val {
+                    v: rgba,
+                    arity: *arity,
+                }
+            }
+            None => *fallback,
+        },
+        Op::TexCoord => Val::vec2(ctx.uv.0, ctx.uv.1),
+        Op::Normal => ctx.normal.into(),
+        Op::ViewDirection => ctx.view.into(),
+        Op::Position => ctx.position.into(),
+        Op::Unary { op, a } => {
+            let a = g(*a);
+            match op {
+                UnOp::Abs => a.map(f32::abs),
+                // Guarded so a zero or negative operand — which the
+                // teapot's Beer-Lambert chain can produce from a
+                // black texel — yields a finite value instead of an
+                // infinity that then poisons every downstream lane.
+                UnOp::Ln => a.map(|x| if x > 1e-30 { x.ln() } else { -69.0 }),
+                UnOp::Exp => a.map(|x| x.clamp(-88.0, 88.0).exp()),
+                UnOp::Sin => a.map(f32::sin),
+                UnOp::Cos => a.map(f32::cos),
+                UnOp::Asin => a.map(|x| x.clamp(-1.0, 1.0).asin()),
+                UnOp::Acos => a.map(|x| x.clamp(-1.0, 1.0).acos()),
+                UnOp::Sqrt => a.map(|x| x.max(0.0).sqrt()),
+                UnOp::Sign => a.map(f32::signum),
+                UnOp::Floor => a.map(f32::floor),
+                UnOp::Ceil => a.map(f32::ceil),
+                UnOp::Normalize => {
+                    let v = a.rgb();
+                    let n = v.length();
+                    if n > 1e-20 { (v / n).into() } else { a }
+                }
+            }
+        }
+        Op::Binary { op, a, b } => {
+            let (a, b) = (g(*a), g(*b));
+            match op {
+                BinOp::Add => a.zip(b, |x, y| x + y),
+                BinOp::Sub => a.zip(b, |x, y| x - y),
+                BinOp::Mul => a.zip(b, |x, y| x * y),
+                // A zero divisor is a real possibility in these
+                // graphs (`1 / transmittance` with a black channel),
+                // and an infinity survives every later multiply.
+                BinOp::Div => a.zip(b, |x, y| if y.abs() > 1e-20 { x / y } else { 0.0 }),
+                BinOp::Pow => a.zip(b, |x, y| x.max(0.0).powf(y)),
+                BinOp::Min => a.zip(b, f32::min),
+                BinOp::Max => a.zip(b, f32::max),
+                BinOp::Modulo => a.zip(b, |x, y| if y.abs() > 1e-20 { x % y } else { 0.0 }),
+            }
+        }
+        // `bg·(1−m) + fg·m`. Written as two weighted terms rather
+        // than `bg + (fg−bg)·m` so that a `float` mix against wider
+        // operands broadcasts through `zip`'s promotion in both
+        // terms alike.
+        Op::Mix { fg, bg, m } => {
+            let (fg, bg, m) = (g(*fg), g(*bg), g(*m));
+            let inv = m.map(|x| 1.0 - x);
+            bg.zip(inv, |b, t| b * t)
+                .zip(fg.zip(m, |f, t| f * t), |a, b| a + b)
+        }
+        Op::Clamp { a, low, high } => {
+            let (a, lo, hi) = (g(*a), g(*low), g(*high));
+            a.zip(lo, f32::max).zip(hi, f32::min)
+        }
+        Op::Contrast { a, amount, pivot } => {
+            let (a, amt, piv) = (g(*a), g(*amount), g(*pivot));
+            a.zip(piv, |x, p| x - p)
+                .zip(amt, |x, m| x * m)
+                .zip(piv, |x, p| x + p)
+        }
+        Op::Remap {
+            a,
+            in_low,
+            in_high,
+            out_low,
+            out_high,
+        } => {
+            let (a, il, ih, ol, oh) = (g(*a), g(*in_low), g(*in_high), g(*out_low), g(*out_high));
+            let t = a
+                .zip(il, |x, l| x - l)
+                .zip(ih.zip(il, |h, l| h - l), |x, d| {
+                    if d.abs() > 1e-20 { x / d } else { 0.0 }
+                });
+            ol.zip(oh.zip(ol, |h, l| h - l).zip(t, |d, t| d * t), |l, x| l + x)
+        }
+        Op::Invert { a, amount } => g(*amount).zip(g(*a), |m, x| m - x),
+        Op::Convert { a, arity } => g(*a).with_arity(*arity),
+        Op::Extract { a, index } => Val::float(g(*a).v[(*index).min(3)]),
+        Op::Combine3 { a, b, c } => Val::vec3(g(*a).x(), g(*b).x(), g(*c).x()),
+        Op::Combine2 { a, b } => Val::vec2(g(*a).x(), g(*b).x()),
+        Op::DotProduct { a, b } => Val::float(g(*a).rgb().dot(g(*b).rgb())),
+        Op::Luminance { a } => {
+            let c = g(*a).rgb();
+            Val::float(c.dot(Vec3A::new(0.2722287, 0.6740818, 0.0536895)))
+        }
+        Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale).x(), ctx).into(),
+        Op::ArtisticIor {
+            reflectivity,
+            edge,
+            extinction,
+        } => {
+            let (n, k) = artistic_ior(g(*reflectivity).rgb(), g(*edge).rgb());
+            if *extinction { k.into() } else { n.into() }
+        }
+        Op::Smoothstep { a, low, high } => {
+            let (a, lo, hi) = (g(*a), g(*low), g(*high));
+            a.zip(lo, |x, l| x - l)
+                .zip(hi.zip(lo, |h, l| h - l), |x, d| {
+                    if d.abs() > 1e-20 {
+                        (x / d).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .map(|t| t * t * (3.0 - 2.0 * t))
         }
     }
 }
