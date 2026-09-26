@@ -66,6 +66,45 @@ pub struct Compiled {
     pub textures: usize,
 }
 
+impl Compiled {
+    /// Every program slot a consumer reads: each lobe's and each emitter's.
+    pub fn roots(&self) -> Vec<u32> {
+        let mut roots = Vec::new();
+        for l in &self.lobes {
+            roots.extend([l.weight, l.color, l.roughness, l.ior, l.extinction]);
+            roots.extend(l.normal);
+        }
+        for e in &self.emission {
+            roots.extend([e.color, e.weight]);
+        }
+        roots
+    }
+
+    /// Replaces the program with [`Program::optimize`]'s and points every
+    /// lobe and emitter at its slot's new home. Every root keeps its value
+    /// bit for bit at every shading point; only the work to reach it shrinks.
+    pub fn optimize(&mut self) {
+        let (program, remap) = self.program.optimize(&self.roots());
+        // Every root is live, so every root was placed.
+        let at = |s: &mut u32| *s = remap[*s as usize].expect("a root slot survives optimization");
+        for l in &mut self.lobes {
+            at(&mut l.weight);
+            at(&mut l.color);
+            at(&mut l.roughness);
+            at(&mut l.ior);
+            at(&mut l.extinction);
+            if let Some(n) = &mut l.normal {
+                at(n);
+            }
+        }
+        for e in &mut self.emission {
+            at(&mut e.color);
+            at(&mut e.weight);
+        }
+        self.program = program;
+    }
+}
+
 /// Parses a `.mtlx` and compiles the named material node.
 ///
 /// `material_node` is the `name` of the `surfacematerial` (or `surface`) node

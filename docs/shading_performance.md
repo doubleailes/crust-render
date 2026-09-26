@@ -302,6 +302,46 @@ program). Pin the optimised program to the reference with a test over the
 checked-in `.mtlx` fixtures at many `(u, v)` points, as `examples/mtlx_shade`
 does by hand.
 
+**Re-profiled after step 3** (callgrind, `-s 1`, shares of `render_pixel`).
+The graph run — interpreter and `reduce`, inlined together into
+`MtlxMaterial::run`, textures excluded — is **22.5% of render on the lion**
+(1.83 G of 8.14 G) and 12.7% on the teapot, against 13.9% and 10.8% for the
+texture fetches. That is about 9 500 instructions per run on the lion for 134
+ops, so per-op overhead is worth attacking. A census of the compiled programs
+says most of those ops need not run per hit:
+
+| Material | Ops | Constants | Foldable | Dead | Live non-constant |
+|---|---|---|---|---|---|
+| lion | 134 | 66 | 14 | 3 | 52 |
+| teapot ceramic | 90 | 43 | 5 | 6 | 38 |
+| teapot metal | 52 | 21 | 0 | 0 | 31 |
+| `materialx_basic` | 16 | 11 | 2 | 0 | 3 |
+
+**Optimisation passes: done** (`Program::optimize`, applied by
+`Compiled::optimize` at load; `CRUST_MTLX_OPT=0` keeps the compiled program).
+Constants move into a prefix of the slot array (`Program::consts`), copied in
+once per run and deduplicated bitwise; ops whose operands are all constant and
+which read neither the shading point nor a texture are folded, by the same
+`apply` function the interpreter runs, so a folded value is the interpreter's
+value bit for bit; ops no lobe or emitter reads are dropped. A declined
+texture folds to its fallback. `tests/optimize.rs` compares every root slot
+bitwise against the unoptimised program, for every material in the fixtures
+and the DPEL assets, at 64 shading points with a procedural texture on every
+`image` node.
+
+- **Output:** bit-identical on all 25 `check_images.sh` scenes.
+- **Instructions:** `MtlxMaterial::run` (graph + `reduce` + textures) lion
+  3.054 G → 2.340 G (−23.4%; −37% of its non-texture part), teapot 1.480 G →
+  1.187 G (−19.8%), `materialx_basic` 292 M → 222 M (−24.0%).
+  `render_pixel`: lion −8.8%, teapot −4.9%, `materialx_basic` −5.8%.
+- **Time** (`bench_ab.sh` against `main`, 6 interleaved reps, min / mean):
+  lion −7.8% / −7.3%, teapot −3.0% / −4.0%, `materialx_basic` −9.0% / −6.7%,
+  `materialx_emissive` −4.3% / −0.4%.
+
+Common-subexpression elimination and arity specialisation are not done:
+the census found little to share, and closure compilation, below, would
+specialise per op anyway.
+
 ### 5. A JIT, only if steps 3–4 are not enough
 
 If `Program::eval` still dominates after steps 3–4, compile each material's

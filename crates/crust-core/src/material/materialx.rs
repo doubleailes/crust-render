@@ -92,9 +92,10 @@ impl std::fmt::Debug for MtlxMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MtlxMaterial({}, {} ops, {} lobes, {} emission)",
+            "MtlxMaterial({}, {} ops + {} constants, {} lobes, {} emission)",
             self.name,
             self.program.ops.len(),
+            self.program.consts.len(),
             self.flat.lobes.len(),
             self.flat.emission.len()
         )
@@ -259,6 +260,15 @@ pub struct Loaded {
     pub textures: usize,
 }
 
+/// Is the MaterialX program optimiser on? `CRUST_MTLX_OPT=0` keeps the
+/// program exactly as compiled — every literal an instruction, nothing folded
+/// or pruned — which is the reference the optimised program is pinned
+/// against, and must render bit-identically to it.
+fn optimize_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CRUST_MTLX_OPT").as_deref() != Ok("0"))
+}
+
 /// Builds a material from a `.mtlx` file.
 ///
 /// `material_node` is the name of the `surfacematerial` (or `surface`) node to
@@ -274,7 +284,10 @@ pub fn load(
     material_node: Option<&str>,
     load_texture: TextureLoader<'_>,
 ) -> Result<Loaded, MtlxError> {
-    let c = crust_mtlx::compile(path, material_node, load_texture)?;
+    let mut c = crust_mtlx::compile(path, material_node, load_texture)?;
+    if optimize_enabled() {
+        c.optimize();
+    }
     let material = MtlxMaterial {
         program: c.program,
         flat: Flattened {
