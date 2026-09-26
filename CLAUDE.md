@@ -60,6 +60,7 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 cargo run --release -p crust-mtlx --example mtlx_bench -- lion_ldX.mtlx   # ns per MaterialX program run
+cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...interpreter vs JIT
 
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).
@@ -235,7 +236,10 @@ constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution
 A/B that separates a subdivision artifact from a material or lighting one; `CRUST_TEX=0`
 declines every UV texture so a MaterialX surface renders on its constant inputs (the
 `CRUST_PTEX=0` of the UV path), and `CRUST_TEX_MAX` caps each decoded texture tile's edge
-length in pixels (default 1024). Texture *filtering* has three more, which pair up:
+length in pixels (default 1024). MaterialX programs have two, each bit-identical against
+the other side: `CRUST_MTLX_OPT=0` keeps a program as compiled (no constant folding,
+hoisting or dead-op pruning), and `CRUST_SHADER_JIT=0` runs it on the interpreter instead
+of crust-jit's machine code. Texture *filtering* has three more, which pair up:
 `CRUST_TEX_MIP=0` and `CRUST_PTEX_MIP=0` build no mip pyramid (one level per tile / per
 face, a third less memory, and `eval`'s width ignored structurally rather than by a
 branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids still
@@ -325,7 +329,7 @@ rather than plateauing.
 
 ## Workspace layout
 
-Six crates under `crates/`:
+Seven crates under `crates/`:
 
 - **`crust-rt`** (lib name `crust_rt`) — the intersection kernel, factored out the way
   `openqmc-rs` was, behind a deliberately **Embree-shaped API**: `Geometry` values
@@ -350,6 +354,22 @@ Six crates under `crates/`:
   `(u, v) → RGBA` sampler — and crust-core re-exports that trait as its own
   `Texture2D`, exactly as it adopts `crust_rt::Geometry`. What a renderer does
   with the lobes is not decided here; crust's OpenPBR pooling is in crust-core.
+- **`crust-jit`** (lib name `crust_jit`) — a Cranelift JIT for `crust-mtlx`
+  programs (step 5 of `docs/shading_performance.md`), behind crust-core's `jit`
+  feature (on by default in `crust-render`; `--no-default-features` builds
+  without it) and `CRUST_SHADER_JIT=0` at run time. **Bit-identical to the
+  interpreter by construction**: only exact IEEE ops (`+ − × ÷`, ordered
+  compares and `select`, `fabs`, lane shuffles) are emitted inline, mirroring
+  `Val::zip`'s broadcast with widths known at compile time; textures are called
+  directly with coordinates computed in the interpreter's operand order; every
+  other op (`ln`/`exp`/`pow`/trig, `min`/`max` — Rust's `minnum` is not
+  Cranelift's `fmin` — `normalize`, `normalmap`, dot products, and any op whose
+  operand width is only known at run time) calls back into the interpreter's
+  own step, `Program::apply_op`. `tests/jit.rs` compares every slot bitwise.
+  **The one crate that is not `forbid(unsafe_code)`**: `deny`, with two
+  audited blocks (the code-pointer transmute and the host callbacks' raw
+  pointers). cranelift-jit deliberately leaks a finalized module's code on
+  drop, so a `JitProgram` holds only the function pointer and its ops.
 - **`crust-core`** — the engine as a library (`crust_core`): renderer, integrator,
   materials, lights, volumes, path guiding, USD import (MaterialX through
   `crust-mtlx`, with `material/materialx.rs` as the adapter — `MtlxMaterial` and
@@ -1261,9 +1281,9 @@ Schema mapping:
     the budget is a target, not an invariant, and is briefly exceeded by
     whatever other threads insert while one sweeps. That is a few hundred lines
     of `std::sync`, which is why there is no `moka`/`quick_cache` dependency:
-    both carry internal `unsafe`, and the whole workspace is now
+    both carry internal `unsafe`, and the whole workspace is
     `forbid(unsafe_code)` (`crust-core` is `deny`, for one test-only
-    `GlobalAlloc`).
+    `GlobalAlloc`; `crust-jit` is `deny`, for calling generated code).
   - **Three tiers, and the top one does the work.** A per-thread two-entry
     microcache, then 64 sharded maps, then a decode. Measured on the alias
     scene: **98.6% of 8.7 M lookups never reach a lock**, because a bilinear tap

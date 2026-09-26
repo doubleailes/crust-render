@@ -8,6 +8,10 @@ license-file.workspace = true
 # Print per-ray BVH traversal counts in --stats. Diagnostic: the counters
 # are global atomics, so counts are trustworthy and timings are not.
 traversal-stats = ["crust-core/traversal-stats"]
+# MaterialX shading programs compiled to machine code (see crust-core's `jit`
+# feature). `--no-default-features` builds the interpreter-only renderer.
+default = ["jit"]
+jit = ["crust-core/jit"]
 
 [dependencies]
 crust-core = { path = "../crust-core" }

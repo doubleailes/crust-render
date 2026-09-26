@@ -79,6 +79,12 @@ pub use crust_mtlx::MtlxError;
 /// volumes already are.
 pub struct MtlxMaterial {
     program: Program,
+    /// `program` compiled to machine code, when the `jit` feature is on and
+    /// `CRUST_SHADER_JIT` is not `0`. It fills the slots with the same bits
+    /// the interpreter does (crust-jit's own tests pin it), so it is purely a
+    /// faster way to run `program`.
+    #[cfg(feature = "jit")]
+    jit: Option<crust_jit::JitProgram>,
     /// The BSDF lobes and the EDF emission terms the graph flattened to.
     flat: Flattened,
     /// Defaults for everything neither a lobe nor an emission term speaks to,
@@ -147,6 +153,12 @@ impl MtlxMaterial {
         };
         SLOTS.with(|cell| {
             let mut slots = cell.borrow_mut();
+            #[cfg(feature = "jit")]
+            match &self.jit {
+                Some(jit) => jit.eval(&ctx, &mut slots),
+                None => self.program.eval(&ctx, &mut slots),
+            }
+            #[cfg(not(feature = "jit"))]
             self.program.eval(&ctx, &mut slots);
             let (params, normal) = reduce(&self.flat, &slots, &self.base);
             // A shading normal from the graph replaces the geometric one for
@@ -269,6 +281,15 @@ fn optimize_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("CRUST_MTLX_OPT").as_deref() != Ok("0"))
 }
 
+/// Is the shader JIT on? `CRUST_SHADER_JIT=0` runs every MaterialX program on
+/// the interpreter, which the JIT must match bit for bit — the A/B for any
+/// change to either.
+#[cfg(feature = "jit")]
+fn jit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CRUST_SHADER_JIT").as_deref() != Ok("0"))
+}
+
 /// Builds a material from a `.mtlx` file.
 ///
 /// `material_node` is the name of the `surfacematerial` (or `surface`) node to
@@ -288,7 +309,19 @@ pub fn load(
     if optimize_enabled() {
         c.optimize();
     }
+    #[cfg(feature = "jit")]
+    let jit = jit_enabled()
+        .then(|| match crust_jit::JitProgram::new(&c.program) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                tracing::warn!("{e}; {} runs on the interpreter", c.root_name);
+                None
+            }
+        })
+        .flatten();
     let material = MtlxMaterial {
+        #[cfg(feature = "jit")]
+        jit,
         program: c.program,
         flat: Flattened {
             lobes: c.lobes,

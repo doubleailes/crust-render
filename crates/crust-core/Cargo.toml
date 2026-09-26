@@ -11,6 +11,11 @@ path = "src/lib.rs"
 [features]
 # Forwards crust-rt's traversal counters; see that crate's feature.
 traversal-stats = ["crust-rt/traversal-stats"]
+# Compile MaterialX programs to machine code with Cranelift (crust-jit, the
+# workspace's one crate that is not `forbid(unsafe_code)`). Off here and on in
+# the renderer, so the engine library carries no JIT unless a host asks;
+# `CRUST_SHADER_JIT=0` turns it off at run time.
+jit = ["dep:crust-jit"]
 
 [dependencies]
 utils = { path = "../utils" }
@@ -31,6 +36,7 @@ opensubdiv-rs = "0.1"
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }
+crust-jit = { path = "../crust-jit", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"

@@ -15,7 +15,12 @@
 //! multiply two channels by zero.
 
 /// A MaterialX numeric value: up to four lanes, plus how many are meaningful.
+///
+/// `repr(C)` so generated code (crust-jit) can address a slot's lanes and
+/// arity at fixed offsets; it reads them through `offset_of!` rather than
+/// assuming them.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct Val {
     pub v: [f32; 4],
     /// Meaningful lanes, 1..=4. A `Val` of arity 1 is a MaterialX `float` and
