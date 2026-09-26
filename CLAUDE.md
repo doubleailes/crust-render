@@ -308,7 +308,9 @@ tooling above exists to work around each.
    ```
 
    Function names resolve from the symbol table with no debug info; add
-   `RUSTFLAGS='-C debuginfo=line-tables-only'` only when you want line-level detail.
+   `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` only when you want line-level detail
+   (not `RUSTFLAGS='-C debuginfo=…'`: the release profile's default `strip = "debuginfo"`
+   removes it, and callgrind silently attributes every line to `???`).
    Note callgrind counts instructions, not cycles, so it under-reports anything whose gain
    is cache behaviour — and it cannot see `panic = "abort"` at all.
 3. **Compare images at `-s 16`, never higher.** `min_samples_per_pixel` defaults to 32 and

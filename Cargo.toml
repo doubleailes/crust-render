@@ -86,7 +86,10 @@ panic = "abort"
 # was taken; `debug = "line-tables-only"` adds only *line*-level attribution
 # and quadruples the binary (5 MiB -> 20 MiB). Ask for it per-invocation when
 # you actually want to annotate inside a function:
-#     RUSTFLAGS='-C debuginfo=line-tables-only' cargo build --release
+#     CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release
+# (Not `RUSTFLAGS='-C debuginfo=...'`: since Rust 1.77 a release profile with
+# no `debug` setting also defaults to `strip = "debuginfo"`, which removes
+# whatever the flag produced, and callgrind silently falls back to `???`.)
 
 # Benchmarks inherit their own profile, not `release`, so mirror the codegen
 # or they measure a different program than the one that ships. (`panic` is
