@@ -220,9 +220,11 @@ struct ImportCtx<'a> {
 /// into `ctx`. Takes the stage by reference and keeps nothing borrowed
 /// from it, so the caller may drop the stage afterwards and walk another.
 fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx) {
-    let mut stack: Vec<(Prim, GMat4)> = vec![(root, root_xf)];
+    // The flag is "under an invisible ancestor", which hides everything but
+    // cameras — see below.
+    let mut stack: Vec<(Prim, GMat4, bool)> = vec![(root, root_xf, false)];
 
-    while let Some((prim, parent_world)) = stack.pop() {
+    while let Some((prim, parent_world, parent_hidden)) = stack.pop() {
         // `class` prims (and their descendants) describe geometry that
         // exists only to be referenced or instanced — they are never
         // rendered in their own right. Prototypes reach the same prims
@@ -247,6 +249,29 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         let local = local_matrix_at(stage, &prim);
         let resets = resets_xform_stack_at(stage, &prim);
         let this_world = if resets { local } else { parent_world * local };
+
+        // An invisible subtree draws nothing and lights nothing, but is still
+        // walked for cameras: a camera's own visibility only hides its gizmo
+        // in a viewport, and a rig hidden that way is still rendered through.
+        // Pruning it outright would make `--camera` fail on it and move the
+        // first-camera fallback. Instances are not entered — crust never
+        // takes a camera from a prototype.
+        let hidden = parent_hidden || is_invisible(&prim);
+        if hidden {
+            if !parent_hidden {
+                debug!("Skipping invisible prim {} and its subtree", prim.path());
+            }
+            if prim.is_instance().unwrap_or(false) {
+                continue;
+            }
+            visit_camera(stage, &prim, ctx);
+            if let Ok(children) = prim.children() {
+                for child in children {
+                    stack.push((child, this_world, true));
+                }
+            }
+            continue;
+        }
 
         // Native instancing: an `instanceable` prim with a composition arc
         // shares one prototype with every other instance of it. Take the
@@ -310,27 +335,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_curves(&mut ctx.world, &prim, &curves, this_world, mat);
-        } else if UsdCamera::get(stage, prim.path().clone())
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            ctx.cameras_seen.push(prim.path().clone());
-            let named = ctx.wanted_camera.as_ref().map(CameraChoice::path);
-            let is_named = named == Some(prim.path());
-            // A named camera is built when met; otherwise only the first
-            // camera is, and kept aside as the fallback while a named one
-            // might still turn up later in the traversal.
-            if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
-                match build_camera(stage, &prim, &ctx.settings) {
-                    Some(c) if is_named || named.is_none() => {
-                        debug!("Imported USD camera at {}", prim.path());
-                        ctx.camera = Some(c);
-                    }
-                    Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
-                    None => warn!("Failed to build camera from {}", prim.path()),
-                }
-            }
+        } else if visit_camera(stage, &prim, ctx) {
+            // Recorded (and built, if it is the one) inside the call.
         } else if let Ok(Some(light)) = SphereLight::get(stage, prim.path().clone()) {
             emit_sphere_light(stage, ctx, &prim, &light, this_world);
         } else if let Ok(Some(light)) = RectLight::get(stage, prim.path().clone()) {
@@ -357,10 +363,58 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // per-prim dispatch above will pick up any typed schemas encountered.
         if let Ok(children) = prim.children() {
             for child in children {
-                stack.push((child, this_world));
+                stack.push((child, this_world, false));
             }
         }
     }
+}
+
+/// Records `prim` if it is a camera — as a candidate for the error listing
+/// alternatives, and built when it is the one to render through. `false` when
+/// it is not a camera.
+fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
+    if UsdCamera::get(stage, prim.path().clone())
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    ctx.cameras_seen.push(prim.path().clone());
+    let named = ctx.wanted_camera.as_ref().map(CameraChoice::path);
+    let is_named = named == Some(prim.path());
+    // A named camera is built when met; otherwise only the first
+    // camera is, and kept aside as the fallback while a named one
+    // might still turn up later in the traversal.
+    if ctx.camera.is_none() && (is_named || ctx.first_camera.is_none()) {
+        match build_camera(stage, prim, &ctx.settings) {
+            Some(c) if is_named || named.is_none() => {
+                debug!("Imported USD camera at {}", prim.path());
+                ctx.camera = Some(c);
+            }
+            Some(c) => ctx.first_camera = Some((c, prim.path().clone())),
+            None => warn!("Failed to build camera from {}", prim.path()),
+        }
+    }
+    true
+}
+
+/// Whether `prim` authors `visibility = "invisible"` at the evaluated time.
+///
+/// Visibility is inherited and cannot be undone below: an `invisible`
+/// ancestor hides its whole subtree whatever the descendants author (their
+/// only other value, `inherited`, defers to it), so as with `purpose` the
+/// subtree is decided where the opinion is authored (UsdGeomImageable's
+/// `ComputeVisibility`). It applies to lights as it does to geometry: an
+/// invisible light does not illuminate. ALab's rig parks three interior
+/// fills/bounces and a debug dome this way, and all four used to light the
+/// shot.
+fn is_invisible(prim: &Prim) -> bool {
+    prim.attribute("visibility")
+        .get_at::<sdf::Value>(eval_time())
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
@@ -2229,6 +2283,18 @@ fn collect_proto_parts(
         if let Some(purpose) = non_render_purpose(&prim) {
             debug!(
                 "Skipping {purpose}-purpose prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
+            continue;
+        }
+        // Visibility counts from the prototype root down, as UsdImaging
+        // computes it for a prototype: an invisible part of a prototype is
+        // missing from every instance. No camera is taken from a prototype,
+        // so here the subtree is simply pruned.
+        if is_invisible(&prim) {
+            debug!(
+                "Skipping invisible prim {} (prototype {})",
                 prim.path(),
                 root.path()
             );
@@ -4140,7 +4206,12 @@ fn preview_surface_material(
         (Target::EmissiveColor, ps.emissive_color.texture().is_some()),
         (Target::Metallic, ps.metallic.texture().is_some()),
         (Target::Roughness, ps.roughness.texture().is_some()),
-        (Target::Opacity, ps.opacity.texture().is_some()),
+        // A cutout mask has no per-point counterpart (`geometry_opacity` is
+        // not implemented), so only translucency drives a texture.
+        (
+            Target::Opacity,
+            ps.opacity.texture().is_some() && opacity_transmission(&ps),
+        ),
         (Target::Ior, ps.ior.texture().is_some()),
         (Target::Clearcoat, ps.clearcoat.texture().is_some()),
         (
@@ -4186,11 +4257,16 @@ fn preview_surface_material(
     for (name, set) in [
         ("occlusion", ps.occlusion.is_set()),
         ("specularColor", ps.specular_color.is_set()),
-        ("opacityThreshold", ps.opacity_threshold.is_set()),
     ] {
         if set {
             debug!("UsdPreviewSurface at {mat_path}: {name} is not read");
         }
+    }
+    if !opacity_transmission(&ps) && ps.opacity.is_set() {
+        debug!(
+            "UsdPreviewSurface at {mat_path}: opacityThreshold > 0 makes opacity a cutout \
+             mask, which crust does not implement; the surface renders opaque"
+        );
     }
 
     if inputs.is_empty() && normal.is_none() {
@@ -4407,7 +4483,11 @@ fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
         o.specular_roughness = *r;
     }
     if let Some(op) = ps.opacity.value() {
-        o.geometry_opacity = *op;
+        if opacity_transmission(ps) {
+            o.transmission_weight = 1.0 - op.clamp(0.0, 1.0);
+        } else {
+            o.geometry_opacity = *op;
+        }
     }
     if let Some(rgb) = ps.emissive_color.value() {
         o.emission_color = Vec3A::new(rgb[0], rgb[1], rgb[2]);
@@ -4427,6 +4507,20 @@ fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
     }
 
     o
+}
+
+/// Whether a `UsdPreviewSurface`'s `opacity` means translucency, which crust
+/// maps to refraction (`transmission_weight = 1 − opacity` at `ior`), rather
+/// than a cutout mask.
+///
+/// The spec gives `opacity` two modes. Under the default `opacityThreshold`
+/// of 0 a surface below 1 is translucent, and its `ior` is "the index of
+/// refraction to be used for translucent objects" — a dielectric, which is how
+/// ALab authors all of its glass (opacity ≈ 0, ior ≈ 1.49). Above 0 it is a
+/// mask that keeps or discards each point whole, which is the host cutout
+/// `geometry_opacity` names and does not refract at all.
+fn opacity_transmission(ps: &ReadPreviewSurface) -> bool {
+    ps.opacity_threshold.value().is_none_or(|t| *t <= 0.0)
 }
 
 /// Whether the material has a child `Shader` prim with this `info:id`.
@@ -5078,6 +5172,11 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     if let Some(radius) = custom_f32(&prim, "crust:pixelFilterRadius") {
         filter = filter.with_radius(radius);
     }
+    // Firefly clamp on indirect light, in the film's linear units (the
+    // largest channel of one sample's indirect radiance). Unauthored takes
+    // the engine default; an authored 0 leaves the estimator unbiased.
+    let indirect_clamp =
+        custom_f32(&prim, "crust:indirectClamp").unwrap_or(crate::tracer::DEFAULT_INDIRECT_CLAMP);
 
     // What the stage asked for, before the CLI's own overrides. Every field
     // here silently falls back to a default when unauthored, so this is the
@@ -5085,10 +5184,15 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
     debug!(
         "RenderSettings at {}: {w}x{h}, {spp} spp (min {min_spp}, variance threshold \
          {variance}), max depth {max_depth}, frame {frame}, strategy {strategy:?}, \
-         light selection {light_selection:?}, filter {} radius {}, guiding {}",
+         light selection {light_selection:?}, filter {} radius {}, indirect clamp {}, guiding {}",
         prim.path(),
         filter.name(),
         filter.radius(),
+        if indirect_clamp > 0.0 {
+            indirect_clamp.to_string()
+        } else {
+            "off".to_string()
+        },
         if guiding {
             format!("on ({guiding_iters} training iterations, guide probability {guiding_prob})")
         } else {
@@ -5100,6 +5204,7 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)
+        .with_indirect_clamp(indirect_clamp)
 }
 
 /// Warns when `time` lies outside the stage's authored

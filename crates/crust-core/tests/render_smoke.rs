@@ -67,6 +67,7 @@ fn render_settings_report_what_they_were_given() {
     assert_eq!(s.sampling_strategy(), SamplingStrategy::PowerMis);
     assert_eq!(s.pixel_filter(), PixelFilter::Triangle { radius: 1.0 });
     assert_eq!(s.light_selection(), LightSelection::Power);
+    assert_eq!(s.indirect_clamp(), 10.0, "firefly clamp on by default");
 }
 
 #[test]
@@ -523,6 +524,127 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
             "{s:?}: {m} vs {reference}"
         );
     }
+}
+
+/// A floor under a small, very hot sphere light, a sun and a dome — every way
+/// direct light reaches the primary vertex: NEE, a bounce that hits the
+/// emitter, a bounce that escapes to a light at infinity. With `bounce_wall`
+/// a large diffuse sphere stands beside the light, so light also arrives
+/// after a second vertex (floor → sphere → light), which is indirect.
+fn clamp_scene(bounce_wall: bool, clamp: f32) -> Renderer {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::TriangleMesh {
+            vertices: vec![
+                Vec3A::new(-50.0, 0.0, -50.0),
+                Vec3A::new(50.0, 0.0, -50.0),
+                Vec3A::new(50.0, 0.0, 50.0),
+                Vec3A::new(-50.0, 0.0, 50.0),
+            ],
+            indices: vec![[0, 2, 1], [0, 3, 2]],
+            normals: None,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+    );
+    if bounce_wall {
+        world.attach(
+            Geometry::Sphere {
+                center: Vec3A::new(1.5, 1.0, 0.0),
+                radius: 1.0,
+            },
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.8))),
+        );
+    }
+    let mut lights = LightList::new();
+    let (center, radius) = (Vec3A::new(-0.5, 1.5, 0.0), 0.1);
+    let emitter = Arc::new(Emissive::new(Vec3A::new(5000.0, 3000.0, 1000.0)));
+    let id = world.attach_masked(
+        Geometry::Sphere { center, radius },
+        emitter.clone(),
+        MASK_SHADOW | MASK_INDIRECT,
+    );
+    lights.add(Arc::new(AreaLight::new(
+        Box::new(SphereShape { center, radius }),
+        emitter,
+        id,
+    )));
+    lights.add(Arc::new(DistantLight::new(
+        Vec3A::new(0.3, -1.0, 0.2),
+        Vec3A::splat(2.0),
+        5.0,
+    )));
+    lights.add(Arc::new(DomeLight::new(
+        Vec3A::splat(0.2),
+        None,
+        glam::Mat3A::IDENTITY,
+    )));
+    let camera = Camera::new(
+        Vec3A::new(0.0, 3.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        50.0,
+        4.0 / 3.0,
+        0.0,
+        5.0,
+    );
+    // Adaptive stopping off, so every setting takes the same samples and the
+    // renders differ by the clamp alone.
+    let settings = RenderSettings::new(16, 6, 32, 24, 16, 0.0, 0).with_indirect_clamp(clamp);
+    Renderer::new(camera, world.commit(), lights, settings)
+}
+
+/// Direct light — NEE, a bounce that hits an emitter, a bounce that escapes
+/// to the sun or the dome — is never clamped, however low the limit: both
+/// MIS halves must keep full energy or their weights no longer partition it.
+/// With no second surface nothing in this scene is indirect, so a clamp of
+/// 1e-3 against radiance in the thousands must change no pixel at all.
+#[test]
+fn indirect_clamp_never_touches_direct_light() {
+    let (w, h) = (32, 24);
+    let off = clamp_scene(false, 0.0).render();
+    let clamped = clamp_scene(false, 1e-3).render();
+    assert!(buffer_sum(&off, w, h) > 0.0);
+    assert!(
+        buffers_equal(&off, &clamped, w, h),
+        "direct light was clamped"
+    );
+}
+
+/// Light that arrives past the primary vertex is capped per sample, so the
+/// image darkens monotonically as the limit falls — pixel by pixel, since the
+/// clamp changes no sample — and a limit nothing reaches is the unclamped
+/// render. Disabled (the default) is the unbiased estimator.
+#[test]
+fn indirect_clamp_caps_light_found_past_the_first_bounce() {
+    let (w, h) = (32, 24);
+    let render = |clamp| clamp_scene(true, clamp).render();
+    let off = render(0.0);
+    let loose = render(1e30);
+    let mid = render(1.0);
+    let tight = render(0.05);
+
+    let sum_off = buffer_sum(&off, w, h);
+    assert!(
+        (buffer_sum(&loose, w, h) - sum_off).abs() < 1e-5 * sum_off,
+        "a limit nothing reaches is the unclamped render"
+    );
+    for y in 0..h {
+        for x in 0..w {
+            let (t, m, l) = (
+                tight.get_pixel(x, y),
+                mid.get_pixel(x, y),
+                loose.get_pixel(x, y),
+            );
+            assert!(
+                t.cmple(m).all() && m.cmple(l).all(),
+                "({x}, {y}): {t} / {m} / {l} not monotone in the limit"
+            );
+        }
+    }
+    assert!(
+        buffer_sum(&tight, w, h) < 0.99 * sum_off,
+        "a tight limit removes indirect energy"
+    );
 }
 
 /// Picking lights by power changes which light each shadow ray goes to, and

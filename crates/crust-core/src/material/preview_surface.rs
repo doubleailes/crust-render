@@ -23,6 +23,13 @@
 //!   its fallbacks), so a reader naming any other primvar is warned about by
 //!   the importer and shaded from that chart.
 //!
+//! - **`opacity`** as translucency: `transmission_weight = 1 − opacity`,
+//!   refracting at `ior`. The spec defines `ior` as "the index of refraction
+//!   to be used for translucent objects" and says clear glass at opacity 0
+//!   "still has a specular response", so a translucent surface is a
+//!   dielectric, not an alpha blend. Under `opacityThreshold > 0` opacity is a
+//!   cutout mask instead, which the importer keeps off this path.
+//!
 //! What it does not: `UsdTransform2d` (warned about, identity chart),
 //! `occlusion` and `displacement` (no counterpart in the integrator), and a
 //! texture's alpha (the host samplers return opaque RGB, so `outputs:a` reads
@@ -221,10 +228,17 @@ impl Target {
             Target::EmissiveColor => o.emission_color = colour(input.color(s)),
             Target::Metallic => o.base_metalness = unit(input.scalar(s)),
             Target::Roughness => o.specular_roughness = unit(input.scalar(s)),
-            Target::Opacity => o.geometry_opacity = unit(input.scalar(s)),
+            // Translucency, not a cutout: the importer never builds this
+            // target under `opacityThreshold > 0` (see `opacity_transmission`).
+            Target::Opacity => o.transmission_weight = 1.0 - unit(input.scalar(s)),
+            // Below 1 is refused, not clamped. A production `ior` map is 0 in
+            // its UV gutters, so a filtered tap near an island's edge blends
+            // toward 0 — ALab's TV reads a median of 0.78 on one tile — and an
+            // interface below 1 there would invert refraction along every seam.
+            // Such a tap keeps the surface's constant instead.
             Target::Ior => {
                 let ior = input.scalar(s);
-                if ior.is_finite() && ior > 0.0 {
+                if ior.is_finite() && ior >= 1.0 {
                     o.specular_ior = ior;
                 }
             }
@@ -246,6 +260,9 @@ pub struct PreviewSurface {
     /// Whether emission varies per point. Decides whether the hit-free
     /// `emitted()` can still answer.
     emission_textured: bool,
+    /// Whether transmission varies per point. Decides whether `make_ray` can
+    /// answer from the constants.
+    transmission_textured: bool,
     /// The primvar the network's `UsdPrimvarReader_float2` names, when it is
     /// not `st` (see [`Material::uv_primvar`]).
     uv_primvar: Option<String>,
@@ -282,11 +299,13 @@ impl PreviewSurface {
         if emission_textured {
             base.emission_luminance = 1.0;
         }
+        let transmission_textured = inputs.iter().any(|(t, _)| *t == Target::Opacity);
         PreviewSurface {
             base,
             inputs,
             normal,
             emission_textured,
+            transmission_textured,
             uv_primvar: None,
             name,
         }
@@ -359,9 +378,16 @@ impl Material for PreviewSurface {
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
-        // Only decides whether the ray enters a medium, which no preview
-        // input textures; the constants answer it.
-        self.base.make_ray(rec, wi)
+        // Decides whether a guided direction crosses the interface, which
+        // hangs on `transmission_weight`: a textured `opacity` has to be read
+        // at the hit, through the same shading normal `scatter_importance`
+        // saw, or a guided refraction leaves without the origin offset and
+        // medium tag a BSDF-sampled one gets. Otherwise the constants answer.
+        if self.transmission_textured {
+            self.shade(rec, |m, rec| m.make_ray(rec, wi))
+        } else {
+            self.base.make_ray(rec, wi)
+        }
     }
 
     fn face_texture(&self) -> Option<&dyn crate::PtexTexture> {
@@ -536,6 +562,70 @@ mod tests {
         assert_eq!(p.base_metalness, 0.9);
         assert_eq!(n, Vec3A::Z, "no normal map, no perturbation");
         assert_eq!(m.emitted(), Vec3A::ZERO);
+    }
+
+    #[test]
+    fn textured_opacity_is_translucency_and_refracts() {
+        // ALab's glass: opacity 0 over the glass, 1 on the opaque parts.
+        let glass = |opacity: f32| {
+            PreviewSurface::new(
+                "g".into(),
+                OpenPBR::default(),
+                vec![(
+                    Target::Opacity,
+                    input(tex(Flat([opacity, 0.0, 0.0, 1.0])), TexOutput::R),
+                )],
+                None,
+            )
+        };
+        assert_eq!(glass(0.0).probe(&hit(0.5)).0.transmission_weight, 1.0);
+        assert_eq!(glass(1.0).probe(&hit(0.5)).0.transmission_weight, 0.0);
+        assert_eq!(glass(0.25).probe(&hit(0.5)).0.transmission_weight, 0.75);
+        // A filtered map rings past both ends; it may not leave [0, 1].
+        assert_eq!(glass(-0.13).probe(&hit(0.5)).0.transmission_weight, 1.0);
+        assert_eq!(glass(1.13).probe(&hit(0.5)).0.transmission_weight, 0.0);
+        assert_eq!(
+            glass(0.0).probe(&hit(0.5)).0.geometry_opacity,
+            1.0,
+            "translucency is not a cutout"
+        );
+
+        // A guided direction into a textured glass crosses the interface as a
+        // sampled one would: offset along `wi`. The constants alone (opaque)
+        // would answer with the bare hit point.
+        let rec = HitRecord {
+            front_face: true,
+            ..hit(0.5)
+        };
+        let r = glass(0.0).make_ray(&rec, -Vec3A::Z);
+        assert!(r.origin().z < 0.0, "refracted ray starts past the surface");
+        let r = glass(1.0).make_ray(&rec, -Vec3A::Z);
+        assert_eq!(r.origin(), rec.p, "an opaque texel does not refract");
+    }
+
+    #[test]
+    fn a_textured_ior_below_one_keeps_the_constant() {
+        let ior = |v: f32| {
+            PreviewSurface::new(
+                "i".into(),
+                OpenPBR {
+                    specular_ior: 1.45,
+                    ..OpenPBR::default()
+                },
+                vec![(
+                    Target::Ior,
+                    input(tex(Flat([v, 0.0, 0.0, 1.0])), TexOutput::R),
+                )],
+                None,
+            )
+            .probe(&hit(0.5))
+            .0
+            .specular_ior
+        };
+        assert_eq!(ior(1.489), 1.489);
+        assert_eq!(ior(1.0), 1.0);
+        assert_eq!(ior(0.78), 1.45, "a tap blended toward a zero gutter");
+        assert_eq!(ior(0.0), 1.45, "the gutter itself");
     }
 
     #[test]

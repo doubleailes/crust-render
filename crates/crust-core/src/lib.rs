@@ -74,6 +74,8 @@ pub use stats::{
     SceneCounters, TextureCacheStats, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, Texture2D, TextureRef};
-pub use tracer::{ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color};
+pub use tracer::{
+    DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color,
+};
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

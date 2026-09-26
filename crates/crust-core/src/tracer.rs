@@ -40,6 +40,15 @@ pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 /// image estimator.
 const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
 
+/// The indirect clamp a render gets unless the stage (`crust:indirectClamp`)
+/// or the host (`--indirect-clamp`) says otherwise — see
+/// [`RenderSettings::with_indirect_clamp`]. On by default, as in production
+/// renderers, because a path tracer's worst fireflies are indirect: a diffuse
+/// bounce finding a tiny, very hot light. 10 is far above any ordinarily lit
+/// surface, so it removes outliers rather than shading; `0` restores the
+/// unbiased estimator.
+pub const DEFAULT_INDIRECT_CLAMP: f32 = 10.0;
+
 /// Russian roulette: paths may terminate stochastically once they carry at
 /// least this many vertices; the survival probability tracks the path
 /// throughput but never drops below the floor, so weights stay bounded.
@@ -681,6 +690,7 @@ impl Renderer {
                 &self.volumes,
                 self.settings.max_depth as i32,
                 self.settings.sampling_strategy,
+                self.settings.indirect_clamp,
                 root,
                 gctx,
                 &mut samples,
@@ -751,6 +761,10 @@ pub struct RenderSettings {
     // How NEE picks a light (see `LightSelection`; `crust:lightSelection` /
     // `--light-selection`). Applied once, in `Renderer::new`.
     light_selection: LightSelection,
+    // Firefly clamp on each camera sample's indirect light (see
+    // `with_indirect_clamp`; `crust:indirectClamp` / `--indirect-clamp`).
+    // `DEFAULT_INDIRECT_CLAMP` unless overridden; 0 disables it.
+    indirect_clamp: f32,
 }
 impl RenderSettings {
     pub fn new(
@@ -776,6 +790,7 @@ impl RenderSettings {
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
+            indirect_clamp: DEFAULT_INDIRECT_CLAMP,
         }
     }
 
@@ -836,6 +851,33 @@ impl RenderSettings {
         self.light_selection
     }
 
+    /// Clamp each camera sample's **indirect** light to at most `limit` in
+    /// its largest channel, scaling the colour down whole so the hue
+    /// survives. Defaults to [`DEFAULT_INDIRECT_CLAMP`]; `0`, a negative or a
+    /// non-finite value disables it, which is the unbiased estimator. See
+    /// [`clamp_indirect`] for what counts as indirect.
+    ///
+    /// Biased on purpose — energy is removed exactly where it is rare and
+    /// bright — and the standard trade in production renderers (Cycles'
+    /// *Clamp Indirect*, Arnold's `indirect_sample_clamp`): a diffuse
+    /// bounce that happens to find a tiny, very hot light or a sharp
+    /// highlight is a firefly that would take thousands of samples to
+    /// average out. Direct light is never touched, so lights, their direct
+    /// illumination and their MIS-weighted bounce hits keep full energy.
+    pub fn with_indirect_clamp(mut self, limit: f32) -> Self {
+        self.indirect_clamp = if limit.is_finite() && limit > 0.0 {
+            limit
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// The indirect clamp in effect; `0.0` when disabled.
+    pub fn indirect_clamp(&self) -> f32 {
+        self.indirect_clamp
+    }
+
     pub fn get_dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
     }
@@ -870,6 +912,7 @@ pub fn ray_color(
         volumes,
         depth,
         strategy,
+        0.0,
         sampler,
         None,
         &mut no_training,
@@ -1233,6 +1276,7 @@ fn trace_path(
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
+    indirect_clamp: f32,
     sampler: PathSampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
@@ -1729,7 +1773,7 @@ fn trace_path(
     // (next vertex's emission suppressed — its MIS-weighted share enters
     // separately through `next_emit`).
     let mut radiance = terminal;
-    for vrec in records.iter().rev() {
+    for (index, vrec) in records.iter().enumerate().rev() {
         if let Some(t) = &vrec.train {
             // The full incident radiance (reflected + the raw hit emission),
             // weighted by the cosine to match this tracer's estimator. One
@@ -1741,13 +1785,62 @@ fn trace_path(
                 radiance: (luminance(radiance + vrec.next_emit) * t.cos).min(TRAIN_RADIANCE_CLAMP),
             });
         }
-        radiance = vrec.segment_emit
-            + vrec.atten
-                * (vrec.emit_here
-                    + vrec.nee
-                    + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + radiance));
+        // With a single record the continuation is only `terminal`: the
+        // primary bounce escaped, and what it found at infinity (a dome, a
+        // sun, the sky) is the bounce half of *direct* light, whose NEE half
+        // is exact. So only a deeper vertex makes the continuation indirect.
+        radiance = if index == 0 && indirect_clamp > 0.0 && records.len() > 1 {
+            // The primary vertex splits into what `clamp_indirect` leaves
+            // alone and the continuation it clamps. Kept off the ordinary
+            // expression below, which a disabled clamp must reproduce to the
+            // bit.
+            vrec.segment_emit
+                + vrec.atten
+                    * (vrec.emit_here
+                        + vrec.nee
+                        + vrec.factor * (vrec.next_emit * vrec.next_emit_weight))
+                + clamp_indirect(vrec.atten * (vrec.factor * radiance), indirect_clamp)
+        } else {
+            vrec.segment_emit
+                + vrec.atten
+                    * (vrec.emit_here
+                        + vrec.nee
+                        + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + radiance))
+        };
     }
     radiance
+}
+
+/// Scales `indirect` down whole so its largest channel is at most `limit`.
+///
+/// "Indirect" is everything a camera sample gathers past its **primary**
+/// vertex — the radiance the primary vertex's continuation carries back,
+/// NEE and emission found at every deeper vertex alike. What stays exact is
+/// the primary vertex's own emission, its NEE, and the MIS-weighted emission
+/// its bounce ray finds — an emitter it hits, or a light at infinity it
+/// escapes to: together the two halves of direct lighting, which is
+/// Cycles' split between *Clamp Direct* and *Clamp Indirect* (an emitter hit
+/// from the first bounce counts as direct there too). Clamping one MIS half
+/// of direct light and not the other would bias the weights against each
+/// other, so direct light is left alone entirely.
+///
+/// One consequence worth knowing: a surface seen *through* glass or in a
+/// mirror is a deeper vertex, so its lighting is indirect and clamped, as in
+/// Cycles — harmless at a sensible limit (an ordinarily lit wall is far
+/// below it) and it removes the caustic fireflies such paths also carry.
+///
+/// The colour is scaled rather than clamped per channel, so a saturated
+/// highlight keeps its hue instead of drifting toward white. A NaN channel
+/// compares false and passes through unchanged: the clamp bounds bright
+/// samples, it does not repair broken ones.
+#[inline]
+fn clamp_indirect(indirect: Vec3A, limit: f32) -> Vec3A {
+    let peak = indirect.max_element();
+    if peak > limit {
+        indirect * (limit / peak)
+    } else {
+        indirect
+    }
 }
 
 /// Per-pixel luminance of the inverse-variance blend of `passes` — the
@@ -1823,6 +1916,19 @@ fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::SamplingStrategy;
+
+    /// The clamp caps the brightest channel and scales the others with it,
+    /// so a saturated firefly keeps its hue; below the limit it is exact.
+    #[test]
+    fn clamp_indirect_keeps_hue_and_caps_the_peak() {
+        use super::clamp_indirect;
+        use glam::Vec3A;
+        let c = clamp_indirect(Vec3A::new(40.0, 20.0, 4.0), 10.0);
+        assert_eq!(c, Vec3A::new(10.0, 5.0, 1.0));
+        let under = Vec3A::new(3.0, 9.0, 0.5);
+        assert_eq!(clamp_indirect(under, 10.0), under);
+        assert_eq!(clamp_indirect(Vec3A::ZERO, 10.0), Vec3A::ZERO);
+    }
 
     /// The invariant every strategy must keep: for a light both strategies
     /// can reach, the NEE weight and the bounce-emission weight are a
