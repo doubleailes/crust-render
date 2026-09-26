@@ -38,8 +38,9 @@ pub use ptex_stream::{
     MICRO_SLOTS as PTEX_MICRO_SLOTS, MipSpace as PtexMipSpace, PtexStream,
     StreamStats as PtexStreamStats, cache_budget_from_env as ptex_cache_budget_from_env,
     micro_reserve as ptex_micro_reserve, micro_retained_bytes as ptex_micro_retained_bytes,
-    micro_slot_max as ptex_micro_slot_max, micro_threads as ptex_micro_threads,
-    mip_space_from_env as ptex_mip_space_from_env, stream_enabled as ptex_stream_enabled,
+    micro_slot_max as ptex_micro_slot_max, micro_thread_bytes as ptex_micro_thread_bytes,
+    micro_threads as ptex_micro_threads, mip_space_from_env as ptex_mip_space_from_env,
+    stream_enabled as ptex_stream_enabled,
     stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
 };
 pub use ptex_texture::{
