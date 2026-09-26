@@ -19,7 +19,7 @@ jit = ["dep:crust-jit"]
 
 [dependencies]
 utils = { path = "../utils" }
-openqmc-rs = "0.2"
+openqmc-rs = "0.2.4"
 crust-rt = { path = "../crust-rt" }
 rayon = "1.10.0"
 glam.workspace = true

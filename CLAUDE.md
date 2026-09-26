@@ -434,6 +434,15 @@ consumed as ordinary dependencies:
   (materials, `guiding/`, `volume.rs`, `tracer.rs`) for every stochastic draw. Idiomatic
   divergences from the C++: the caller-allocated `void*` cache (a GPU concern) becomes a
   lazy process-global, keeping every `Sampler<T>` a small `Copy + Send` value.
+  **Performance, as of 0.2.4:** Sobol draws were 16–24% of a render here (callgrind,
+  `draw_block`), almost all of it the GF(2) direction-matrix product done as a 16-step
+  loop over the index bits. 0.2.4 evaluates it from two compile-time 256-entry byte
+  tables per dimension (the product is linear over GF(2), so the two lookups XORed are
+  the loop's result exactly): render instructions −10–18%, render time −6–20%, every
+  image bit-identical. The workspace requires `0.2.4` because `Cargo.lock` is not
+  committed. Profile the sampler before assuming a cost is the BSDF's — `draw_block`
+  is inlined into its callers (`scatter_resolved`, NEE, the camera) and easy to misread
+  as their own.
 
 `crust-core/src/lib.rs` re-exports the public surface (`Renderer`, `Scene`, `Camera`, the
 material types, `simple_scene`, `get_settings`). Prefer importing from `crust_core::` roots.
