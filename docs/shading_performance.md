@@ -418,6 +418,60 @@ program to machine code.
 - Texture fetches stay calls into the host's `Texture2D::eval`. A JIT does not
   make them faster.
 
+**Done anyway, on request** (the gate above was not met, and the result is
+the size the gate predicted). `crates/crust-jit`, behind crust-core's `jit`
+feature — on by default in `crust-render`, `--no-default-features` without it —
+and `CRUST_SHADER_JIT=0` at run time; the only crate that is not
+`forbid(unsafe_code)`, with two audited blocks.
+
+*How it stays bit-identical.* Not by trusting Cranelift to agree with LLVM,
+but by splitting the instruction set:
+
+- **Inline**: only ops whose every step is exact IEEE-754 — `+ − × ÷`,
+  ordered compares and `select` (the divide guard, `f32::clamp`), `fabs`, lane
+  shuffles (`convert`, `extract`, `combine`) — so `Mix`, `Contrast`, `Remap`,
+  `Invert`, `Smoothstep` and the four arithmetic `Binary` ops are machine code.
+  Each transcribes the interpreter's expression in its operand order;
+  Cranelift never contracts to FMA; broadcasting mirrors `Val::zip` with widths
+  inferred at compile time, lanes 1–3 of a one-lane value included.
+- **Texture**: the coordinates and footprint are computed inline in the
+  interpreter's operand order, then one direct call samples.
+- **Everything else goes back to the interpreter**, one op at a time, through
+  `Program::apply_op`: `ln`/`exp`/`pow`/trig (libm), `min`/`max` (Rust's
+  `minnum` handles NaN and signed zeros differently from Cranelift's `fmin`),
+  `normalize`, `normalmap`, `artistic_ior`, the dot products, and any op whose
+  operand width is only known at run time (`normalize` of a non-`vector3`).
+  Those are exact by construction.
+
+`crust-jit/tests/jit.rs` compares **every slot**, bitwise, against the
+interpreter, for every fixture and DPEL material (compiled and optimised) at
+96 shading points, plus a synthetic program of ~950 inlined ops over every
+width, zero divisors, negative zero and a one-lane texture with distinct
+upper lanes. It passes in debug and release.
+
+*Results.* Bit-identical on all 25 `check_images.sh` scenes, and JIT against
+interpreter on the four MaterialX scenes at 16 spp (0 pixels differ).
+`examples/jit_bench` (optimised programs, procedural texture, min of 15):
+
+| Material | inline / interpreter ops | interpreter | JIT | compile |
+|---|---|---|---|---|
+| lion | 34 / 18 | 535–543 ns | 390–403 ns | ~2.4 ms |
+| teapot ceramic | 23 / 15 | 358–359 ns | 329–330 ns | ~1.2 ms |
+| teapot metal | 14 / 17 | 449–479 ns | 415–441 ns | ~1.1 ms |
+
+The first version, which zero-filled the slot array and sent textures through
+`apply_op`, was only 11% faster on the lion and *slower* on the metal; the
+texture path and the skipped fill are what the table reflects.
+
+End to end (`bench_ab.sh`, 8 interleaved reps, min / mean, against step 4):
+lion −5.0% / −5.2%, teapot −2.7% / −2.0%; `materialx_basic`,
+`materialx_emissive` and `cornellbox` within noise. ALab has no MaterialX and
+is unaffected. That is about a third of the interpreter's ~14% share on the
+lion, which is roughly what removing dispatch from 34 of 52 ops should buy.
+The next increments, if wanted, are more ops inline (the dot products and
+`normalize` need glam's exact summation order; `min`/`max` need LLVM's exact
+`minnum` lowering), not a different backend.
+
 ### 6. Longer term: shade many points at once
 
 Interpreter overhead (and JIT call overhead) can also be amortised by running

@@ -1,0 +1,23 @@
+[package]
+name = "crust-jit"
+version = { workspace = true }
+edition = { workspace = true }
+license-file = { workspace = true }
+description = "Cranelift JIT for crust-mtlx shading programs: exact IEEE ops inline, everything else through the interpreter's own step."
+
+[lib]
+name = "crust_jit"
+path = "src/lib.rs"
+
+[dependencies]
+crust-mtlx = { path = "../crust-mtlx" }
+# Pure-Rust code generation (the workspace takes no C++ toolchain). One
+# version for all five: they are released in lockstep.
+cranelift-codegen = "0.136"
+cranelift-frontend = "0.136"
+cranelift-jit = "0.136"
+cranelift-module = "0.136"
+cranelift-native = "0.136"
+
+[dev-dependencies]
+glam.workspace = true

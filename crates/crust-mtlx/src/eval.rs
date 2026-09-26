@@ -285,6 +285,14 @@ impl Program {
         self.len() == 0
     }
 
+    /// One instruction's value, given the slots computed before it — the
+    /// interpreter's own step, for an evaluator that runs some ops another
+    /// way and hands the rest back here (crust-jit), so that both produce the
+    /// same bits by construction.
+    pub fn apply_op(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
+        apply(op, slots, ctx)
+    }
+
     /// Evaluates every instruction into `slots`, which is resized as needed.
     ///
     /// The caller owns the buffer so it can be reused across shading calls —
