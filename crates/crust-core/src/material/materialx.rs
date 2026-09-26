@@ -115,17 +115,22 @@ thread_local! {
 impl MtlxMaterial {
     /// Evaluates the graph at a hit and hands the resulting OpenPBR to `f`.
     ///
-    /// The parameter set is a temporary rather than something cached on the
-    /// hit, because [`Material`]'s methods take `&self` and a `&HitRecord`
-    /// with nowhere to stash it. That means a vertex evaluated for NEE *and*
-    /// for a BSDF sample runs the graph twice — correct, and the obvious thing
-    /// to memoise if MaterialX surfaces ever dominate a render.
+    /// Every call runs the graph. The integrator does not come through here:
+    /// it asks [`Material::resolve`] once per vertex and queries the result,
+    /// so this serves the direct `Material` methods (tests, probes).
     fn shade<R>(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
         f: impl FnOnce(&OpenPBR, &HitRecord) -> R,
     ) -> R {
+        let (params, rec) = self.run(r_in, rec);
+        f(&params, &rec)
+    }
+
+    /// Runs the graph at a hit: the OpenPBR it reduces to, and the record
+    /// with the graph's shading normal applied.
+    fn run(&self, r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord) {
         let ctx = ShadeCtx {
             uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
             normal: rec.normal,
@@ -151,7 +156,7 @@ impl MtlxMaterial {
                     rec.normal = n;
                 }
             }
-            f(&params, &rec)
+            (params, rec)
         })
     }
 }
@@ -170,9 +175,9 @@ impl Material for MtlxMaterial {
         self.shade(r_in, rec, |m, rec| m.eval(r_in, rec, wi))
     }
 
-    fn eval_reads_textures(&self) -> bool {
-        // The whole graph runs per `eval`, textures or not.
-        true
+    fn resolve(&self, r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+        let (params, rec) = self.run(r_in, rec);
+        Some((params.into_resolved(&rec), rec))
     }
 
     fn uses_uv(&self) -> bool {
@@ -290,7 +295,7 @@ pub fn load(
 /// numbers it produces at a named point on the chart — not to compare renders.
 impl MtlxMaterial {
     pub fn probe(&self, r_in: &Ray, rec: &HitRecord) -> OpenPBR {
-        self.shade(r_in, rec, |params, _| params.clone())
+        self.run(r_in, rec).0
     }
 }
 

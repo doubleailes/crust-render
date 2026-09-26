@@ -1097,6 +1097,16 @@ impl OpenPBR {
     /// be unbiased but needlessly noisy.
     ///
     /// The returned copy carries no texture, so it cannot recurse.
+    /// This material with its per-hit lookups (Ptex `base_color`) applied at
+    /// `rec` — what [`Material::resolve`] implementations hand back, so the
+    /// `*_resolved` methods can be called on it directly.
+    pub fn into_resolved(self, rec: &HitRecord) -> OpenPBR {
+        match self.shaded(rec) {
+            Some(m) => m,
+            None => self,
+        }
+    }
+
     fn shaded(&self, rec: &HitRecord) -> Option<OpenPBR> {
         let tex = self.base_color_ptex.as_ref()?;
         if rec.face_id == HitRecord::NO_FACE {
@@ -1112,7 +1122,7 @@ impl OpenPBR {
         })
     }
 
-    fn scatter_resolved(
+    pub(crate) fn scatter_resolved(
         &self,
         r_in: &Ray,
         rec: &HitRecord,
@@ -1228,7 +1238,12 @@ impl OpenPBR {
         })
     }
 
-    fn eval_resolved(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+    pub(crate) fn eval_resolved(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        wi: Vec3A,
+    ) -> Option<(Vec3A, f32)> {
         // Evaluates the continuous component over the full sphere: the
         // reflection lobes above the ray-facing hemisphere and — for thick
         // transmissive surfaces, dispersive or not — the Walter BTDF below
@@ -1275,8 +1290,10 @@ impl Material for OpenPBR {
         self.base_color_ptex.as_ref().map(|t| &*t.0)
     }
 
-    fn eval_reads_textures(&self) -> bool {
-        self.base_color_ptex.is_some()
+    fn resolve(&self, _r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+        // Only a Ptex lookup is per-hit work; an untextured surface is
+        // queried in place, with no copy.
+        self.shaded(rec).map(|m| (m, *rec))
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {

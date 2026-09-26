@@ -406,8 +406,11 @@ impl Material for PreviewSurface {
         true
     }
 
-    fn eval_reads_textures(&self) -> bool {
-        true
+    fn resolve(&self, _r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+        let (params, normal) = self.probe(rec);
+        let mut rec = *rec;
+        rec.normal = normal;
+        Some((params.into_resolved(&rec), rec))
     }
 
     fn uv_primvar(&self) -> Option<&str> {

@@ -653,6 +653,13 @@ The two images have 0 differing pixels. The five samples re-checked at 16 spp
 been re-run on the table above, so its three textured rows describe the
 previous order.
 
+**Superseded (step 3 of `docs/shading_performance.md`).** The per-material order
+existed because `eval` re-ran a textured material's whole network. Since each
+vertex now resolves its material once (`Material::resolve` → `ShadingPoint`) and
+every query reads that, `eval` samples no texture, `eval_reads_textures` is gone,
+and every material runs radiance → eval → shadow again. The images are
+bit-identical to both orders above.
+
 ---
 
 ## 4. The anatomy of the direct-lighting estimator

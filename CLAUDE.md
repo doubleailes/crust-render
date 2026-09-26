@@ -555,7 +555,17 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   and the coat's angular emission factor stays unit-testable against a bare cosine.
   A material that emits only through `emitted_at` must therefore never become a
   light-list entry, or NEE would sample it at zero radiance while the bounce side saw
-  the real value. Four implementations: **`OpenPBR`**,
+  the real value.
+  **`resolve(r_in, rec) -> Option<(OpenPBR, HitRecord)>`** is the shade-once hook: a
+  material with per-hit work (a MaterialX graph, `UsdUVTexture`s, a Ptex lookup)
+  returns the fully resolved `OpenPBR` and the record carrying its shading normal,
+  and the integrator builds one **`ShadingPoint`** per vertex from it, through which
+  the scatter, NEE's `eval`, guiding's `eval` and `make_ray` all go. `None` (the
+  default, and an untextured `OpenPBR`) queries the material in place with no copy.
+  The contract is that each query answers exactly as the material's own method would
+  — output is bit-identical to per-query shading — and emission stays off it
+  (`emitted_at` is gated for non-emitters, and the coat's emission factor reads the
+  *unresolved* `base_color`, which a resolved Ptex lookup would change). Four implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**
@@ -925,8 +935,9 @@ Schema mapping:
   onto OpenPBR, and the importer-facing `load()`.
   - **Compiled once, not walked per hit.** A look-dev graph must be evaluated
     per shading point — its textures and masks are the point — but the teapot's
-    ceramic graph is ~50 nodes consulted several times per path vertex (sample,
-    then once per NEE and guide evaluation). So the graph is compiled into a
+    ceramic graph is ~50 nodes run at every path vertex (once, since
+    `Material::resolve` shares the result between the vertex's sample, NEE and
+    guide queries). So the graph is compiled into a
     `Program`: a topologically ordered `Vec<Op>` whose operands are slot
     *indices*. Evaluation is a linear scan with no name hashing and no
     allocation (the value stack is a thread-local scratch buffer). ~30 node
@@ -1932,11 +1943,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   layered BSDF material, not a different reduction. `subsurface_bsdf` maps to OpenPBR's
   subsurface weight but not its radius; `thin_film_bsdf` is pooled as an
   ordinary dielectric; MaterialX transmission maps to no lobe, so a
-  MaterialX-authored glass renders opaque. The graph is re-evaluated at every
-  `scatter`/`eval` call on a vertex rather than memoised per hit, which is the
-  obvious optimisation if MaterialX surfaces ever dominate a render
-  (`docs/shading_performance.md` is the plan: 3–5 graph runs per vertex today,
-  shade-once-per-hit first, a Cranelift JIT only last). Only
+  MaterialX-authored glass renders opaque. The graph runs **once per path
+  vertex** (`Material::resolve` → `ShadingPoint`; it used to run once per
+  query, 3.0 times a vertex measured), and `docs/shading_performance.md` is the
+  plan from here: a faster interpreter next, a Cranelift JIT only last. Only
   document-scope and `<nodegraph>` nodes are read — `<nodedef>` custom node
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
@@ -2074,13 +2084,13 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
   rather than solid angle; the built-in sky
   gradient is not a light, so NEE never samples it. (NEE runs its three tests
-  cheapest first: the light's radiance, then `mat.eval`, then the shadow ray —
-  except that a material whose `eval` samples textures
-  (`Material::eval_reads_textures`: `PreviewSurface`, `MtlxMaterial`, Ptex
-  `OpenPBR`) traces the ray before `eval`, since on ALab evaluating the texture
-  network for every occluded sample cost 87–97 s against 66 s. Either order is
-  bit-identical, since the shadow ray draws from its own `K_NEE_SHADOW` domain,
-  §3.11 there.)
+  cheapest first: the light's radiance, then the BSDF `eval`, then the shadow
+  ray — for every material now, since `eval` goes through the vertex's
+  `ShadingPoint` and reads no texture. Textured materials used to trace the ray
+  first (`eval_reads_textures`, retired), because a per-query network run made
+  their `eval` dearer than the ray: on ALab 87–97 s against 66 s. Either order
+  is bit-identical, since the shadow ray draws from its own `K_NEE_SHADOW`
+  domain, §3.11 there.)
   Measure changes with
   `exr_diff ref.exr test.exr`'s `relmse:` against a 1024 spp reference (§8 there).
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,

@@ -1,5 +1,6 @@
 use crate::PathSampler;
 use crate::hittable::HitRecord;
+use crate::material::OpenPBR;
 use crate::ray::Ray;
 use glam::Vec3A;
 
@@ -90,19 +91,25 @@ pub trait Material: Send + Sync {
         None
     }
 
-    /// Whether [`Material::eval`] samples textures — i.e. costs more than a
-    /// shadow ray.
+    /// This material resolved at one hit: the `OpenPBR` its pattern network
+    /// (or textures) reduce to there, and the record to shade it with — the
+    /// hit's own, with any shading normal the network produces applied.
     ///
-    /// Only the *order* of NEE's two rejection tests depends on it, never the
-    /// estimate: a cheap `eval` runs first so a light below the horizon skips
-    /// its shadow ray, while a textured one (a whole UDIM network fetched
-    /// again per call) runs after the ray, so an occluded light never pays
-    /// for it. On ALab, an interior where most shadow rays are blocked,
-    /// evaluating textures first rendered in 87–97 s against 66–67 s with
-    /// the ray first (interleaved runs, bit-identical images), despite
-    /// tracing 10.3 M shadow rays against 15.0 M.
-    fn eval_reads_textures(&self) -> bool {
-        false
+    /// The integrator calls this once per path vertex and routes every BSDF
+    /// query at that vertex — the scatter, NEE's `eval`, guiding's `eval` and
+    /// `make_ray` — through the result ([`ShadingPoint`]), so a textured
+    /// material runs its network once per vertex instead of once per query.
+    /// It is the OSL / pbrt-v4 split between running a shader and using the
+    /// BSDF it produced.
+    ///
+    /// `None` (the default) means there is no per-hit work to share and the
+    /// queries go to the material itself. The returned `OpenPBR` must be
+    /// *fully* resolved — its own per-hit lookups (Ptex) already applied, see
+    /// [`OpenPBR::into_resolved`] — and answer every query exactly as this
+    /// material's own methods would at `rec`.
+    fn resolve(&self, r_in: &Ray, rec: &HitRecord) -> Option<(OpenPBR, HitRecord)> {
+        let _ = (r_in, rec);
+        None
     }
 
     /// Builds the continuation ray for an externally chosen direction `wi`
@@ -195,5 +202,70 @@ pub trait Material: Send + Sync {
     fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
         let _ = (r_in, rec);
         self.emitted_directional(cos_theta_o)
+    }
+}
+
+/// A material at one hit, with its per-hit work already done (see
+/// [`Material::resolve`]). Every query here answers exactly as the
+/// material's own method would at the same hit — it only stops repeating the
+/// pattern network and texture fetches between queries.
+///
+/// Emission is deliberately not routed through it: `Material::emitted_at` is
+/// asked at the arriving hit, is already gated for surfaces that cannot emit,
+/// and OpenPBR's coat factor reads the *unresolved* `base_color`, which a
+/// resolved Ptex lookup would change.
+pub struct ShadingPoint<'a> {
+    rec: HitRecord,
+    bsdf: Resolved<'a>,
+}
+
+// Lives on the stack for one path vertex; boxing the `OpenPBR` to shrink the
+// enum would put a heap allocation on every vertex of a textured surface.
+#[allow(clippy::large_enum_variant)]
+enum Resolved<'a> {
+    /// No per-hit work: queries go to the material with the hit's record.
+    Material(&'a dyn Material),
+    /// The material's resolved `OpenPBR`, queried through its `*_resolved`
+    /// methods with the record `resolve` returned.
+    OpenPBR(OpenPBR),
+}
+
+impl<'a> ShadingPoint<'a> {
+    /// Runs `mat`'s per-hit work at `rec`, once.
+    pub fn new(mat: &'a dyn Material, r_in: &Ray, rec: &HitRecord) -> Self {
+        match mat.resolve(r_in, rec) {
+            Some((bsdf, rec)) => ShadingPoint {
+                rec,
+                bsdf: Resolved::OpenPBR(bsdf),
+            },
+            None => ShadingPoint {
+                rec: *rec,
+                bsdf: Resolved::Material(mat),
+            },
+        }
+    }
+
+    /// [`Material::scatter_importance`] at this hit.
+    pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
+        match &self.bsdf {
+            Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),
+            Resolved::OpenPBR(m) => m.scatter_resolved(r_in, &self.rec, sampler),
+        }
+    }
+
+    /// [`Material::eval`] at this hit.
+    pub fn eval(&self, r_in: &Ray, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        match &self.bsdf {
+            Resolved::Material(m) => m.eval(r_in, &self.rec, wi),
+            Resolved::OpenPBR(m) => m.eval_resolved(r_in, &self.rec, wi),
+        }
+    }
+
+    /// [`Material::make_ray`] at this hit.
+    pub fn make_ray(&self, wi: Vec3A) -> Ray {
+        match &self.bsdf {
+            Resolved::Material(m) => m.make_ray(&self.rec, wi),
+            Resolved::OpenPBR(m) => m.make_ray(&self.rec, wi),
+        }
     }
 }

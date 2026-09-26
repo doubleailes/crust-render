@@ -224,6 +224,55 @@ Things this has to respect:
 This is the largest structural change in the plan and the one expected to pay
 most. It changes the `Material` trait and the integrator's vertex records.
 
+**Done**, in a narrower shape than sketched above:
+
+- **`Material::resolve(r_in, rec) -> Option<(OpenPBR, HitRecord)>`** instead of
+  a `prepare` every material must implement. `MtlxMaterial` runs its graph,
+  `PreviewSurface` its texture inputs, and a Ptex `OpenPBR` its face lookup; each
+  returns the fully resolved `OpenPBR` (`OpenPBR::into_resolved` applies Ptex
+  last, as the per-query path did) and the record with the shading normal.
+  Everything else returns `None` and is queried in place: no copy, which is why
+  `cornellbox` does not move.
+- **`ShadingPoint`** wraps either case, and the integrator builds one per surface
+  vertex, right after emission. The scatter, NEE's `eval`, the guide branch's
+  `eval` and `make_ray` go through it. Every surface vertex scatters, so it is
+  never wasted work.
+- **Emission stays off it.** `emitted_at` is asked at the arriving hit, is
+  already gated for non-emitters, and OpenPBR's coat emission factor reads the
+  *unresolved* `base_color`: routing it through a resolved Ptex lookup would
+  change the image. `PrevVertex` needs nothing from the shading point, because
+  step 2 already removed its `eval` calls.
+- **`eval_reads_textures` is retired.** With the network already run, `eval` is
+  cheaper than a shadow ray for every material, so NEE takes radiance → eval →
+  shadow everywhere. That also skips shadow rays toward lights below a textured
+  surface's horizon, which the reordered path used to trace (ALab below).
+- `OpenPBR` size (the concern above) did not show up: copying it once per
+  textured vertex is far below the graph runs it replaces.
+
+- **Output:** bit-identical on all 25 `check_images.sh` scenes, both guided
+  variants, and ALab frame 1004 (0 of 230 400 pixels differ).
+- **Runs per vertex: 1.0.** On `materialx_basic`, `resolve` runs 131 255 times
+  and `scatter_resolved` 131 255 times; texture-fetch instructions fall from
+  258 M (before step 2) to 87 M.
+- **Instructions** (`render_pixel`): `materialx_basic` 1.519 G → 1.212 G after
+  step 2 (−20.2%; −38.0% against the original 1.954 G), `usdpreview_textured`
+  1.130 G → 1.019 G (−9.8%; −26.0% against 1.377 G).
+- **Time** (`bench_ab.sh`, 6 interleaved reps, min / mean):
+
+  | Scene | step 2 → step 3 | original → step 3 |
+  |---|---|---|
+  | `materialx_basic` | −21.8% / −25.6% | −41.4% / −41.5% |
+  | `usdpreview_textured` | −12.9% / −11.3% | −27.4% / −28.2% |
+  | `materialx_teapot` | −10.4% / −9.8% | −21.4% / −22.0% |
+  | `ptex_quads` | −28.9% / −35.4% | −54.5% / −53.9% |
+  | `cornellbox` | +0.5% / +0.7% | −1.3% / +0.6% |
+
+- **ALab** (frame 1004, shot camera, 32 spp, `--stats` Render phase, two
+  interleaved runs each): original 64.8 s / 73.1 s → step 3 56.7 s / 60.2 s
+  (min −12.5%, mean −15.2%), shadow rays 16 273 773 → 11 496 977. The
+  interior's occluded samples were the reason textured `eval` went after the
+  shadow ray; with one network run per vertex that order no longer pays.
+
 ### 4. Make the interpreter faster, in safe Rust
 
 If step 1, re-run after step 3, still shows non-texture `Program::eval` as a
