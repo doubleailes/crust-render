@@ -2020,6 +2020,110 @@ fn a_declined_preview_texture_falls_back_to_its_fallback_then_the_constant() {
     assert!((c.x - c.y).abs() < 1e-6 && (c.y - c.z).abs() < 1e-6, "{c}");
 }
 
+/// `UsdPreviewSurface` `opacity` below 1 is translucency — a dielectric
+/// refracting at `ior`, as the spec's "index of refraction to be used for
+/// translucent objects" says — not an alpha cutout. Both the constant and the
+/// texture-driven input take that path; `opacityThreshold > 0` is the spec's
+/// cutout mode, which does not refract. ALab authors every flask, beaker and
+/// screen as opacity ≈ 0 with an `ior` map, all of which rendered opaque.
+#[test]
+fn preview_surface_opacity_refracts_unless_it_is_a_cutout() {
+    use crust_core::{MASK_CAMERA, Ray, Vec3A};
+
+    let dir = std::env::temp_dir().join("crust_preview_opacity");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let quad = |name: &str, x: f32, mat: &str| {
+        format!(
+            r#"
+    def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </W/Looks/{mat}>
+    }}"#,
+            x0 = x,
+            x1 = x + 1.0
+        )
+    };
+    let material = |name: &str, body: &str, extra: &str| {
+        format!(
+            r#"
+    def Material "{name}"
+    {{
+        token outputs:surface.connect = </W/Looks/{name}/S.outputs:surface>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:ior = 1.5
+            float inputs:roughness = 0.5
+            {body}
+            token outputs:surface
+        }}{extra}
+    }}"#
+        )
+    };
+    // The texture never loads (`FakeAssets` decodes nothing), so it reads its
+    // authored fallback of 0 — through the textured path, not the constant.
+    let textured = material(
+        "Textured",
+        "float inputs:opacity.connect = </W/Looks/Textured/T.outputs:r>",
+        r#"
+        def Shader "T"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @missing_opacity.<UDIM>.exr@
+            float4 inputs:fallback = (0, 0, 0, 1)
+            float outputs:r
+        }"#,
+    );
+    let stage = format!(
+        "#usda 1.0\n(\n    defaultPrim = \"W\"\n)\ndef Xform \"W\"\n{{\ndef Scope \"Looks\"\n{{{}{}{}{}\n}}\ndef Xform \"Geo\"\n{{{}{}{}{}\n}}\n}}\n",
+        material("Glass", "float inputs:opacity = 0", ""),
+        textured,
+        material(
+            "Cutout",
+            "float inputs:opacity = 0\n            float inputs:opacityThreshold = 0.5",
+            ""
+        ),
+        material("Opaque", "", ""),
+        quad("A", -4.0, "Glass"),
+        quad("B", -2.0, "Textured"),
+        quad("C", 0.0, "Cutout"),
+        quad("D", 2.0, "Opaque"),
+    );
+    let path = dir.join("opacity.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let scene = Scene::from_usd_with_assets(&path, &FakeAssets::default()).expect("stage opens");
+
+    // The BSDF toward straight through the quad, from straight above: zero
+    // unless the surface transmits.
+    let through = |x: f32| -> Vec3A {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        hit.mat
+            .eval(&r, &hit.rec, -Vec3A::Z)
+            .map_or(Vec3A::ZERO, |(f, _)| f)
+    };
+    let glass = through(-3.5);
+    assert!(
+        glass.min_element() > 0.0,
+        "constant opacity 0 refracts: {glass}"
+    );
+    let textured = through(-1.5);
+    assert!(
+        textured.min_element() > 0.0,
+        "textured opacity 0 refracts: {textured}"
+    );
+    assert_eq!(through(0.5), Vec3A::ZERO, "a cutout does not refract");
+    assert_eq!(through(2.5), Vec3A::ZERO, "the default opacity is opaque");
+}
+
 /// Bindings are inherited from ancestors and resolved for the `full` purpose,
 /// falling back to all-purpose — `ComputeBoundMaterial` semantics. ALab binds
 /// every asset through `material:binding:full` on its `GEO` scope, never on
@@ -2185,6 +2289,120 @@ def Xform "W"
         "only the render- and default-purpose quads, not the proxy (even with \
          `render` authored beneath it) or the guide"
     );
+}
+
+/// `visibility = "invisible"` hides a prim and its whole subtree — geometry
+/// and lights alike, whatever a descendant authors, at the evaluated time,
+/// and inside a prototype as well. A camera in a hidden subtree is still
+/// rendered through: its visibility only hides a viewport gizmo. ALab's rig
+/// parks three interior fills/bounces and a debug dome as invisible, and all
+/// four lit the shot.
+#[test]
+fn invisible_subtrees_draw_and_light_nothing_but_keep_their_cameras() {
+    use crust_core::UsdImportOptions;
+
+    let dir = std::env::temp_dir().join("crust_visibility_prune");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let quad = |name: &str, extra: &str| {
+        format!(
+            r#"
+        def Mesh "{name}"
+        {{
+            {extra}
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        }}"#
+        )
+    };
+    let stage = format!(
+        r#"#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 2
+)
+def Xform "W"
+{{
+    def Xform "Hidden"
+    {{
+        token visibility = "invisible"{hidden}
+        def Xform "Inner"
+        {{
+            token visibility = "inherited"{inherited}
+        }}
+        def Camera "Cam"
+        {{
+            double3 xformOp:translate = (10, 0, 5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }}
+        def SphereLight "HiddenByParent" {{ float inputs:radius = 0.1 }}
+    }}
+    def Xform "Shown"
+    {{{shown}{invisible_mesh}
+    }}
+    def SphereLight "Key" {{ float inputs:radius = 0.1 }}
+    def SphereLight "Parked" {{
+        float inputs:radius = 0.1
+        token visibility = "invisible"
+    }}
+    def DomeLight "Debug" {{ token visibility = "invisible" }}
+    def DistantLight "Blink" {{
+        token visibility.timeSamples = {{ 1: "inherited", 2: "invisible" }}
+    }}
+    def PointInstancer "Scatter"
+    {{
+        rel prototypes = [</W/Scatter/Protos/P>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, 3), (2, 0, 3)]
+        def Scope "Protos"
+        {{
+            def Xform "P"
+            {{{proto_visible}{proto_hidden}
+            }}
+        }}
+    }}
+}}
+"#,
+        hidden = quad("H", ""),
+        inherited = quad("I", ""),
+        shown = quad("D", ""),
+        invisible_mesh = quad("X", r#"token visibility = "invisible""#),
+        proto_visible = quad("V", ""),
+        proto_hidden = quad("Q", r#"token visibility = "invisible""#),
+    );
+    let path = dir.join("visibility.usda");
+    std::fs::write(&path, stage).expect("write stage");
+    let load = |frame: Option<f64>, camera: Option<&str>| {
+        Scene::from_usd_with_options(
+            &path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                frame,
+                camera: camera.map(str::to_owned),
+            },
+        )
+        .expect("stage opens")
+    };
+
+    let scene = load(None, None);
+    // D, Key's source sphere, and the prototype's visible part once per
+    // instance (2); not H, I, X, the hidden prototype part, or any hidden
+    // light's geometry.
+    assert_eq!(scene.world.count(), 4, "only the visible geometry");
+    // Key, and Blink, whose samples are not read without a frame (its
+    // default is unauthored, so `inherited`).
+    assert_eq!(
+        scene.lights.count(),
+        2,
+        "invisible lights do not illuminate"
+    );
+
+    assert_eq!(load(Some(1.0), None).lights.count(), 2, "Blink shown at 1");
+    assert_eq!(load(Some(2.0), None).lights.count(), 1, "Blink hidden at 2");
+
+    let scene = load(None, Some("/W/Hidden/Cam"));
+    let x = scene.camera.get_ray(0.5, 0.5, [0.5, 0.5], 0.0).origin().x;
+    assert_eq!(x, 10.0, "a camera under an invisible rig still renders");
 }
 
 /// A relative texture path that openusd cannot resolve — every `<UDIM>` path,

@@ -91,6 +91,11 @@ struct Cli {
     /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
     #[arg(long)]
     filter_radius: Option<f32>,
+    /// Firefly clamp: cap each sample's indirect light at this value in its
+    /// largest channel (linear, hue kept). Biased, and 0 turns it off.
+    /// Overrides the scene's `crust:indirectClamp`.
+    #[arg(long)]
+    indirect_clamp: Option<f32>,
     /// Print render statistics and a per-phase profile (parse, build,
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
@@ -416,6 +421,10 @@ fn main() {
         debug!("--filter-radius {radius} overrides the filter's own radius");
         settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
     }
+    if let Some(limit) = cli.indirect_clamp {
+        debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
+        settings = settings.with_indirect_clamp(limit);
+    }
     // A BVH can only cull primitives whose bounds are small against the
     // whole scene. Report the ratio so a scene whose instance boxes all
     // span everything -- where no split can help -- is visible.
@@ -443,7 +452,7 @@ fn main() {
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!(
-        "Rendering {}x{} at {} spp, max depth {} ({} order){}",
+        "Rendering {}x{} at {} spp, max depth {} ({} order){}{}",
         img_width,
         img_height,
         settings.samples_per_pixel(),
@@ -452,6 +461,12 @@ fn main() {
         match cli.frame {
             Some(frame) => format!(", frame {frame}"),
             None => String::new(),
+        },
+        // Biased, so a render that clamps says so in its one banner line.
+        if settings.indirect_clamp() > 0.0 {
+            format!(", indirect clamp {}", settings.indirect_clamp())
+        } else {
+            String::new()
         }
     );
     // Progress bar over the engine's (completed, total) callback — the
@@ -739,6 +754,29 @@ mod tests {
         assert!(matches!(cli.light_selection, Some(Selection::Power)));
         let cli = Cli::try_parse_from(["crust-render"]).unwrap();
         assert!(cli.light_selection.is_none());
+    }
+
+    #[test]
+    fn cli_indirect_clamp_defaults_to_ten_and_zero_disables() {
+        let cli = Cli::try_parse_from(["crust-render", "--indirect-clamp", "10"]).unwrap();
+        assert_eq!(cli.indirect_clamp, Some(10.0));
+        assert!(
+            Cli::try_parse_from(["crust-render"])
+                .unwrap()
+                .indirect_clamp
+                .is_none()
+        );
+        let (_, base) = crust_core::get_settings();
+        assert_eq!(
+            base.indirect_clamp(),
+            crust_core::DEFAULT_INDIRECT_CLAMP,
+            "on by default"
+        );
+        assert_eq!(crust_core::DEFAULT_INDIRECT_CLAMP, 10.0);
+        assert_eq!(base.with_indirect_clamp(10.0).indirect_clamp(), 10.0);
+        assert_eq!(base.with_indirect_clamp(0.0).indirect_clamp(), 0.0);
+        assert_eq!(base.with_indirect_clamp(-3.0).indirect_clamp(), 0.0);
+        assert_eq!(base.with_indirect_clamp(f32::NAN).indirect_clamp(), 0.0);
     }
 
     #[test]

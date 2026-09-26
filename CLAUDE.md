@@ -29,6 +29,7 @@ cargo run --release -- --bucket -i samples/cornellbox.usda   # tiled/bucket rend
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf), --light-selection (uniform|power),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
+# --indirect-clamp VALUE (firefly clamp on each sample's indirect light; default 10, 0 = off),
 # --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
 #   else the first camera found -- a wrong path errors and lists the stage's cameras),
 # --stats (per-phase profile + scene statistics),
@@ -843,10 +844,19 @@ Schema mapping:
   read. The walk starts at the nearest ancestor that *carries* the API, because
   `MaterialBindingAPI::get` refuses any other prim — which is every mesh under a bound
   group. `preview` bindings are never used. Prims under a `proxy` or `guide` purpose are
-  pruned with their subtree, like `active = false`. Then dispatch is on the bound
-  shader's `info:id`:
+  pruned with their subtree, like `active = false`, and so is a `visibility =
+  "invisible"` subtree (read at the evaluated time, lights included — ALab parks four
+  lights that way), except that the top-level walk still descends it **for cameras
+  only**: a hidden camera rig is still rendered through, and pruning it would break
+  `--camera`. Then dispatch is on the bound shader's `info:id`:
   - `UsdPreviewSurface` → mapped into `OpenPBR` (portable; `diffuseColor→baseColor`,
-    `metallic→baseMetalness`, `roughness→specularRoughness`, etc.). Constant inputs
+    `metallic→baseMetalness`, `roughness→specularRoughness`, etc.). **`opacity` < 1 is
+    refraction, not a cutout**: `transmission_weight = 1 − opacity` at `ior`, the
+    spec's "index of refraction to be used for translucent objects" — how ALab authors
+    all its glass (opacity ≈ 0, ior ≈ 1.49). `opacityThreshold > 0` is the spec's
+    cutout mode and stays on the unimplemented `geometry_opacity`. A textured `ior`
+    below 1 keeps the constant: production `ior` maps are 0 in their UV gutters, so a
+    filtered tap there would invert refraction along every seam. Constant inputs
     are still read **undecoded** (the openspec `add-material-color-management` change
     owns that). An input connected to a **`UsdUVTexture`** makes the material a
     `PreviewSurface` (`material/preview_surface.rs`), which samples the network per
@@ -1700,9 +1710,25 @@ Schema mapping:
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
   `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power`,
   `crust:pixelFilter` token = `box` | `triangle` |
-  `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float). Missing attrs
+  `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float,
+  `crust:indirectClamp` float). Missing attrs
   fall back to defaults (128 spp, depth 32, 640×360, power MIS, power light selection,
-  triangle filter at radius 1.0) defined as consts at the top of the file.
+  triangle filter at radius 1.0, indirect clamp 10) defined as consts at the top of the file
+  (the clamp's in `tracer.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
+  **`crust:indirectClamp`** is the one biased setting: it caps each camera sample's
+  *indirect* light (everything past the primary vertex's continuation) at the value in
+  its largest channel, scaling the colour whole (`tracer.rs`, `clamp_indirect`). Direct
+  light is never touched — the primary vertex's NEE, its emission, and what its bounce
+  finds, an emitter *or an escape to a dome or sun* — because clamping one MIS half and
+  not the other would bias the pair; the escape case is why the clamp only engages when
+  the path has a second vertex (`indirect_clamp_never_touches_direct_light` pins it).
+  **It is on by default at 10** (as in production renderers), so the default render is
+  biased: on the checked-in samples at 16 spp it moves 0–0.17% of pixels (outliers
+  only; cornellbox and veach_mis not at all). `--indirect-clamp 0` (or an authored
+  `crust:indirectClamp = 0`) is the unbiased estimator and bit-identical to the renderer
+  before the clamp existed — use it for any convergence or bias measurement
+  (`relmse` against a reference, the 1/√N check, guiding's unbiasedness), and record
+  goldens with the same setting on both sides of an A/B.
 
 Note: `openusd` is a hard dependency and USD is always compiled in — there is no `usd`
 feature flag.
