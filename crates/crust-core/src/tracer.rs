@@ -1830,13 +1830,15 @@ fn trace_path(
 /// below it) and it removes the caustic fireflies such paths also carry.
 ///
 /// The colour is scaled rather than clamped per channel, so a saturated
-/// highlight keeps its hue instead of drifting toward white. A NaN channel
-/// compares false and passes through unchanged: the clamp bounds bright
-/// samples, it does not repair broken ones.
+/// highlight keeps its hue instead of drifting toward white. A non-finite
+/// sample passes through unchanged — a NaN channel compares false, and an
+/// infinite peak is excluded explicitly, since scaling by `limit / inf = 0`
+/// would turn the infinite channel into a NaN: the clamp bounds bright
+/// samples, it does not repair (or further break) broken ones.
 #[inline]
 fn clamp_indirect(indirect: Vec3A, limit: f32) -> Vec3A {
     let peak = indirect.max_element();
-    if peak > limit {
+    if peak > limit && peak.is_finite() {
         indirect * (limit / peak)
     } else {
         indirect
@@ -1928,6 +1930,17 @@ mod tests {
         let under = Vec3A::new(3.0, 9.0, 0.5);
         assert_eq!(clamp_indirect(under, 10.0), under);
         assert_eq!(clamp_indirect(Vec3A::ZERO, 10.0), Vec3A::ZERO);
+    }
+
+    /// A broken sample is left as it came, never turned into a NaN.
+    #[test]
+    fn clamp_indirect_passes_non_finite_samples_through() {
+        use super::clamp_indirect;
+        use glam::Vec3A;
+        let inf = Vec3A::new(f32::INFINITY, 2.0, 1.0);
+        assert_eq!(clamp_indirect(inf, 10.0), inf);
+        let nan = clamp_indirect(Vec3A::new(f32::NAN, 20.0, 1.0), 10.0);
+        assert!(nan.x.is_nan());
     }
 
     /// The invariant every strategy must keep: for a light both strategies
