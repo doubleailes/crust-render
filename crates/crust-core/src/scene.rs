@@ -150,8 +150,10 @@ pub struct UsdImportOptions {
     /// the meantime anyway. A host that loads several scenes in one process
     /// must leave this off, or each load leaks its stage.
     ///
-    /// Only the *final* stage is kept: a streamed import still drops every
-    /// earlier chunk's stage as it goes, so its memory bound holds. Nothing
+    /// Applies to a **single-stage** import only. A streamed import still drops
+    /// every chunk's stage as it goes, the last one included: its memory bound
+    /// is the point of streaming, and its peak often comes after the traversal
+    /// (the top-level BVH commit), where a kept stage would add to it. Nothing
     /// in the returned [`Scene`] borrows from the stage, and the image is the
     /// same either way.
     pub skip_stage_teardown: bool,
