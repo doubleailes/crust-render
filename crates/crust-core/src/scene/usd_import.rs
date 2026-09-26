@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::Mat4 as GMat4;
+use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::camera::Camera;
@@ -417,6 +418,19 @@ fn is_invisible(prim: &Prim) -> bool {
         .is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
+/// Drops a stage the traversal is done with, or — for the final stage of a
+/// host that asked for it (`UsdImportOptions::skip_stage_teardown`) — leaves
+/// it allocated, since freeing openusd's index cache is a long tail of small
+/// deallocations (45 s on ALab) that a render-and-exit process never needs.
+fn release_stage(stage: Stage, keep: bool) {
+    if keep {
+        debug!("Leaving the final composed stage allocated (skip_stage_teardown)");
+        std::mem::forget(stage);
+    } else {
+        drop(stage);
+    }
+}
+
 /// Opens the stage with payloads loaded, optionally masked to one subtree.
 fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<Stage, crate::Error> {
     let started = Instant::now();
@@ -560,6 +574,7 @@ pub(crate) fn load_scene(
             GMat4::IDENTITY,
             &mut ctx,
         );
+        release_stage(stage, options.skip_stage_teardown);
     } else {
         debug!("Streaming import over {} subtrees", chunks.len());
         for (n, chunk) in chunks.iter().enumerate() {
@@ -579,6 +594,9 @@ pub(crate) fn load_scene(
                 GMat4::IDENTITY,
                 &mut ctx,
             );
+            // Every earlier chunk is dropped as it goes — that is the memory
+            // bound streaming exists for — and only the last may be kept.
+            release_stage(stage, options.skip_stage_teardown && n + 1 == chunks.len());
             // Separate this stage's prototypes from the next stage's —
             // see ImportCaches::epoch. Deliberately not a clear: the
             // mesh cache keys materials by Arc address, so nothing may
@@ -1291,16 +1309,57 @@ impl MeshArena {
             .local
             .take()
             .expect("a slot is either still local or already committed");
-        let mut b = RtSceneBuilder::new();
-        b.attach(Geometry::TriangleMesh {
-            vertices: geom.verts,
-            indices: geom.tris,
-            normals: geom.normals,
-        });
-        let scene = Arc::new(b.commit());
+        let scene = Arc::new(commit_mesh(geom));
         s.committed = Some(Arc::clone(&scene));
         scene
     }
+
+    /// Commits every slot in `slots` not committed yet, in parallel, so the
+    /// [`MeshArena::committed_scene`] calls that follow are cache hits.
+    ///
+    /// A prototype's meshes used to be built one at a time as the walk met
+    /// them — 21% of ALab's import on one core. Each build is independent and
+    /// deterministic, so building them side by side gives the same scenes.
+    fn commit_slots(&mut self, slots: &[u32]) {
+        let mut todo: Vec<u32> = slots
+            .iter()
+            .copied()
+            .filter(|&k| self.slots[k as usize].committed.is_none())
+            .collect();
+        todo.sort_unstable();
+        todo.dedup();
+        if todo.len() < 2 {
+            return; // nothing to overlap; `committed_scene` builds it
+        }
+        let geoms: Vec<(u32, MeshGeom)> = todo
+            .into_iter()
+            .map(|k| {
+                let geom = self.slots[k as usize]
+                    .local
+                    .take()
+                    .expect("an uncommitted slot still holds its geometry");
+                (k, geom)
+            })
+            .collect();
+        let built: Vec<(u32, RtScene)> = geoms
+            .into_par_iter()
+            .map(|(k, geom)| (k, commit_mesh(geom)))
+            .collect();
+        for (k, scene) in built {
+            self.slots[k as usize].committed = Some(Arc::new(scene));
+        }
+    }
+}
+
+/// A local-space mesh as a committed kernel scene.
+fn commit_mesh(geom: MeshGeom) -> RtScene {
+    let mut b = RtSceneBuilder::new();
+    b.attach(Geometry::TriangleMesh {
+        vertices: geom.verts,
+        indices: geom.tris,
+        normals: geom.normals,
+    });
+    b.commit()
 }
 
 fn emit_mesh(
@@ -2268,6 +2327,11 @@ fn collect_proto_parts(
         return parts;
     }
     let mut stack: Vec<(Prim, GMat4)> = vec![(root.clone(), GMat4::IDENTITY)];
+    // Mesh parts found by the walk, as (index into `parts`, mesh slot). Their
+    // kernel scenes are built together once the walk is done — in parallel,
+    // see `MeshArena::commit_slots` — and each part holds a placeholder until
+    // then.
+    let mut pending_meshes: Vec<(usize, u32)> = Vec::new();
 
     while let Some((prim, parent_local)) = stack.pop() {
         // Same pruning as the top-level traversal: an inactive prim (and
@@ -2359,8 +2423,9 @@ fn collect_proto_parts(
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
+                pending_meshes.push((parts.len(), slot));
                 parts.push(ProtoPart {
-                    scene: caches.meshes.committed_scene(slot),
+                    scene: placeholder_scene(),
                     local: this_local,
                     material,
                     mask,
@@ -2443,7 +2508,21 @@ fn collect_proto_parts(
             }
         }
     }
+    // Committing is also what marks each slot as ineligible for baking, so a
+    // mesh used both directly and as a prototype is not stored twice.
+    let slots: Vec<u32> = pending_meshes.iter().map(|&(_, slot)| slot).collect();
+    caches.meshes.commit_slots(&slots);
+    for (index, slot) in pending_meshes {
+        parts[index].scene = caches.meshes.committed_scene(slot);
+    }
     parts
+}
+
+/// What a prototype's mesh part holds until its kernel scene is built at the
+/// end of the walk (see `collect_proto_parts`). Never attached to anything.
+fn placeholder_scene() -> Arc<RtScene> {
+    static EMPTY: std::sync::OnceLock<Arc<RtScene>> = std::sync::OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit())))
 }
 
 /// Expands a `PointInstancer` found *inside* a prototype into parts.

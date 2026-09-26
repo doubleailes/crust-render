@@ -2379,6 +2379,7 @@ def Xform "W"
             &UsdImportOptions {
                 frame,
                 camera: camera.map(str::to_owned),
+                ..UsdImportOptions::default()
             },
         )
         .expect("stage opens")
@@ -2680,4 +2681,57 @@ def Scope "Render"
             "{bad:?} must be refused"
         );
     }
+}
+
+/// Keeping the final stage allocated (`skip_stage_teardown`) must change
+/// nothing but the teardown: the same render, on a single-stage import and
+/// on a streamed one — where only the last chunk's stage is kept.
+#[test]
+fn skipping_stage_teardown_leaves_the_render_unchanged() {
+    use crust_core::{RenderSettings, Renderer, UsdImportOptions};
+    // Five subtrees under one root prim: enough to take the streamed path.
+    let dir = std::env::temp_dir().join(format!("crust_stage_teardown_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let streamed = dir.join("five.usda");
+    let mut usda =
+        String::from("#usda 1.0\n(\n    defaultPrim = \"World\"\n)\n\ndef Xform \"World\"\n{\n");
+    for k in 0..5 {
+        usda += &format!(
+            "    def Sphere \"S{k}\"\n    {{\n        double radius = 0.4\n        \
+             double3 xformOp:translate = ({} 0 -3)\n        \
+             uniform token[] xformOpOrder = [\"xformOp:translate\"]\n    }}\n",
+            k as f64 - 2.0
+        );
+    }
+    usda += "    def Camera \"Cam\"\n    {\n    }\n}\n";
+    std::fs::write(&streamed, usda).unwrap();
+
+    let render = |path: &std::path::Path, keep: bool| {
+        let scene = Scene::from_usd_with_options(
+            path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                skip_stage_teardown: keep,
+                ..UsdImportOptions::default()
+            },
+        )
+        .expect("stage opens");
+        let geometries = scene.world.count();
+        let settings = RenderSettings::new(2, 3, 24, 16, 2, 0.0, 0);
+        let buf = Renderer::new(scene.camera, scene.world, scene.lights, settings).render();
+        let pixels: Vec<[u32; 3]> = (0..16)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let c = buf.get_pixel(x, y);
+                [c.x.to_bits(), c.y.to_bits(), c.z.to_bits()]
+            })
+            .collect();
+        (geometries, pixels)
+    };
+    for path in [sample("cornellbox.usda"), streamed] {
+        let (a, b) = (render(&path, false), render(&path, true));
+        assert!(a.0 > 0, "{}: nothing imported", path.display());
+        assert_eq!(a, b, "{}", path.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
