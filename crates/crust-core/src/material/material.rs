@@ -79,6 +79,12 @@ pub trait Material: Send + Sync {
     /// a single estimator per vertex before choosing a direction. Rejecting a
     /// particular direction (e.g. below the hemisphere) must instead return
     /// `Some((Vec3A::ZERO, pdf))` with a small positive pdf.
+    ///
+    /// And a non-delta sample from `scatter_importance` at a hit means this
+    /// returns `Some` at that hit — a continuous sample *is* a draw from the
+    /// continuous component. The integrator relies on it to read "could NEE
+    /// have competed here" off the sample instead of asking `eval`, which
+    /// for a textured material re-runs the whole pattern network.
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
         let _ = (r_in, rec, wi);
         None

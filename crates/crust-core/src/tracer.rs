@@ -989,11 +989,17 @@ fn sample_bounce_direction(
             sample.value /= 1.0 - alpha;
             return Some(sample);
         }
+        // A continuous sample means the material has a continuous component
+        // (`Material::eval`'s contract), so the mixture always applies here —
+        // asking `eval` would run a textured material's whole network for a
+        // yes that is already known.
         let wi = sample.ray.direction().normalize();
-        if mat.eval(r, rec, wi).is_some() {
-            let p_guide = g.field.pdf(rec.p, wi);
-            sample.pdf = (alpha * p_guide + (1.0 - alpha) * sample.pdf).max(1e-4);
-        }
+        debug_assert!(
+            mat.eval(r, rec, wi).is_some(),
+            "a continuous sample from a material with no continuous component"
+        );
+        let p_guide = g.field.pdf(rec.p, wi);
+        sample.pdf = (alpha * p_guide + (1.0 - alpha) * sample.pdf).max(1e-4);
         Some(sample)
     }
 }
@@ -1067,15 +1073,38 @@ impl PathScratch {
 }
 
 /// The state of the previous surface bounce that the next vertex needs to
-/// MIS-weight its emission: the sampling context (`ray`/`rec`/`mat`/`dir`
-/// for the lazy NEE-capability check) and the bounce density.
+/// MIS-weight its emission: where it was and the bounce density.
+///
+/// Whether NEE could have competed there is `!delta` alone. A continuous
+/// sample implies the material has a continuous component, which is exactly
+/// what `Material::eval` returning `Some` means; the integrator used to ask
+/// `eval` again, which for a textured material is a full network run
+/// answering a question the sample already had.
 struct PrevBounce<'a> {
-    ray: Ray,
-    rec: HitRecord,
-    mat: &'a dyn Material,
-    dir: Vec3A,
+    pos: Vec3A,
     pdf: f32,
     delta: bool,
+    /// What a fresh `eval` would be asked, kept only to check the claim
+    /// above in debug builds.
+    #[cfg(debug_assertions)]
+    check: (Ray, HitRecord, &'a dyn Material, Vec3A),
+    #[cfg(not(debug_assertions))]
+    _mat: std::marker::PhantomData<&'a dyn Material>,
+}
+
+impl PrevBounce<'_> {
+    /// Whether NEE could have sampled what this bounce reached.
+    fn continuous(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            let (ray, rec, mat, dir) = &self.check;
+            debug_assert!(
+                self.delta || mat.eval(ray, rec, *dir).is_some(),
+                "a continuous sample from a material with no continuous component"
+            );
+        }
+        !self.delta
+    }
 }
 
 /// The previous path vertex, as far as emission MIS is concerned: either a
@@ -1110,10 +1139,10 @@ fn bounce_emission_weight(
 ) -> f32 {
     let (from, bounce_pdf) = match prev {
         PrevVertex::Surface(p) => {
-            if p.delta || p.mat.eval(&p.ray, &p.rec, p.dir).is_none() {
+            if !p.continuous() {
                 return strategy.unopposed_weight();
             }
-            (p.rec.p, p.pdf)
+            (p.pos, p.pdf)
         }
         PrevVertex::Phase { pos, pdf } => (*pos, *pdf),
     };
@@ -1157,9 +1186,7 @@ fn escaped_emission(
     // means NEE could not have found this light, so there is no competing
     // strategy and the emission is taken whole.
     let competing = match prev {
-        Some(PrevVertex::Surface(p)) => {
-            (!p.delta && p.mat.eval(&p.ray, &p.rec, p.dir).is_some()).then_some((p.rec.p, p.pdf))
-        }
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf)),
         Some(PrevVertex::Phase { pos, pdf }) => Some((*pos, *pdf)),
         // Primary rays, and rays leaving a carried-medium scatter, run no
         // NEE — full weight, exactly as `prev = None` means elsewhere.
@@ -1734,12 +1761,13 @@ fn trace_path(
                 }
                 vrec.factor = factor;
                 prev = Some(PrevVertex::Surface(PrevBounce {
-                    ray: ray.clone(),
-                    rec,
-                    mat,
-                    dir,
+                    pos: rec.p,
                     pdf: sample.pdf,
                     delta: sample.delta,
+                    #[cfg(debug_assertions)]
+                    check: (ray.clone(), rec, mat, dir),
+                    #[cfg(not(debug_assertions))]
+                    _mat: std::marker::PhantomData,
                 }));
                 stats.vertices += 1;
                 records.push(vrec);

@@ -3,9 +3,9 @@
 Arnold and RenderMan are much faster than crust, and the working bet is that
 shading is where much of the gap lies. This document records what the shading
 path does today, where its cost multiplies, and an ordered plan for reducing it.
-The plan runs from the cheapest, output-preserving changes up to a JIT. **Nothing
-here is measured yet**: the call counts come from reading the code, and step 1
-exists to replace them with numbers before any larger change is made.
+The plan runs from the cheapest, output-preserving changes up to a JIT. Step 1
+(the profile) and step 2 are done; their measurements are recorded under each
+step, and the call counts below were confirmed by them.
 
 ## What a shading call costs today
 
@@ -96,6 +96,33 @@ Report the inclusive share of:
 
 Also count calls to `shade` per camera sample, to confirm the 3–5 figure above.
 
+**Measured** (2026-09-26, callgrind, `RAYON_NUM_THREADS=1`, `-s 1`, before
+step 2). Shares are of `Renderer::render_pixel` inclusive, not of the whole
+process: at 1 spp the two DPEL assets spend over 90% of their instructions
+loading, which says nothing about shading.
+
+| Scene | `render_pixel` Ir | Material `eval`+`scatter` | `Program::eval` | of which textures | non-texture | `reduce` | `World::intersect` |
+|---|---|---|---|---|---|---|---|
+| `materialx_basic` | 1.95 G | 67.5% | 33.6% | 13.2% | 20.4% | 9.9% | 8.9% |
+| `usdpreview_textured` | 1.38 G | 55.0% | — | 14.3% | — | — | 12.3% |
+| `materialx_teapot` | 7.78 G | 39.2% | 33.3% | 15.5% | 17.9% | 2.1% | 21.7% |
+| `materialx_lion` | 11.18 G | 55.8% | 46.5% | 18.4% | 28.1% | 2.9% | 18.0% |
+
+(`PreviewSurface` has no `Program`; its `probe` — texture fetches and the
+normal map — is 22.0% of render, and the `OpenPBR` BSDF it delegates to 30.2%.)
+
+- **Shading is the gap on every textured scene**: 39–68% of render, against
+  9–22% for the kernel.
+- **Runs per vertex: 3.0**, confirmed. On `materialx_basic`,
+  `scatter_importance` ran 131 255 times and `eval` 259 169 times: 129 019 of
+  those from NEE, the rest from the yes/no checks step 2 removes (12 935 in
+  `bounce_emission_weight`, the remainder in `escaped_emission`, inlined into
+  `render_pixel`). `usdpreview_textured`: 128 956 and 253 580.
+- **Neither texture fetches nor interpreter overhead dominate alone.** Texture
+  fetches are 13–18% of render; non-texture `Program::eval` is 18–28%, largest on
+  the 140-op lion. Both are multiplied by the run count, so steps 2–3 come first,
+  and step 4 stays justified afterwards if the lion's non-texture share holds.
+
 **What decides the next steps:**
 
 - If `shade` is a small share, shading is not the gap and this plan stops.
@@ -124,6 +151,29 @@ place of the three calls.
 - **Risk:** a material that breaks the contract (its `None` depends on `wi`)
   would change behaviour. Add a debug assertion comparing the flag with a fresh
   `eval` in debug builds while the change settles.
+
+**Done.** No flag had to be stored: a *non-delta* sample is a draw from the
+continuous component, so "`eval` would return `Some`" is `!sample.delta`, which
+`PrevBounce` already carried. That implication is now stated in the
+`Material::eval` contract, and the three calls are replaced by it, each behind a
+`debug_assert!` that runs the old `eval` (`PrevBounce::continuous`;
+`PrevBounce` itself shrinks to position, pdf and the delta flag in release).
+All four materials already satisfied it: `OpenPBR` returns `None` from both
+`scatter` and `eval` on the same `v·n ≤ 0` test, `MtlxMaterial` and
+`PreviewSurface` delegate with the same shaded record, and `Emissive` never
+scatters.
+
+- **Output:** bit-identical on all 25 `check_images.sh` scenes, and on guided
+  variants of `materialx_basic` and `usdpreview_textured` (the guided BSDF
+  branch is one of the three sites).
+- **Instructions** (`render_pixel`, callgrind): `materialx_basic` 1.954 G →
+  1.519 G (−22.2%), `usdpreview_textured` 1.377 G → 1.130 G (−17.9%). `eval`
+  calls on `materialx_basic`: 259 169 → 129 019 — what remains is NEE, so a
+  vertex now runs its network 2.0 times.
+- **Time** (`bench_ab.sh`, 6 interleaved reps, min / mean): `materialx_basic`
+  −22.3% / −21.7%, `usdpreview_textured` −19.6% / −15.4%, `materialx_teapot`
+  −12.5% / −13.2%, `cornellbox` −3.8% / −2.5% (untextured: it saves the
+  `OpenPBR` evaluation, not a network run).
 
 ### 3. Shade once per hit
 
