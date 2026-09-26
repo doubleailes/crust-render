@@ -206,3 +206,46 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
     let (inline, host) = same(&p, "synthetic");
     assert!(inline > 900 && host >= 2, "inline {inline}, host {host}");
 }
+
+#[test]
+fn a_malformed_program_is_refused_not_compiled() {
+    // The generated code reads operands without bounds checks, so a program
+    // whose operand points forward or out of range must never reach it.
+    let mut p = Program::default();
+    p.ops.push(Op::Const(Val::float(2.0)));
+    p.ops.push(Op::Binary {
+        op: BinOp::Mul,
+        a: 0,
+        b: 1_000_000,
+    });
+    assert!(JitProgram::new(&p).is_err());
+    p.ops[1] = Op::Binary {
+        op: BinOp::Mul,
+        a: 0,
+        b: 1,
+    };
+    assert!(JitProgram::new(&p).is_err(), "an op reading its own slot");
+}
+
+#[test]
+fn programs_can_be_built_and_dropped_repeatedly() {
+    // Each program owns and frees its code; a survivor must keep working
+    // while others are compiled and freed around it.
+    let path = repo().join("samples/materialx_basic.mtlx");
+    let mut c: Compiled = compile(&path, None, &procedural).unwrap();
+    c.optimize();
+    let survivor = JitProgram::new(&c.program).unwrap();
+    let ctx = shading_points()[11];
+    let (mut want, mut got) = (Vec::new(), Vec::new());
+    c.program.eval(&ctx, &mut want);
+    for _ in 0..500 {
+        let j = JitProgram::new(&c.program).unwrap();
+        j.eval(&ctx, &mut got);
+        drop(j);
+        survivor.eval(&ctx, &mut got);
+        assert_eq!(
+            want.iter().map(bits).collect::<Vec<_>>(),
+            got.iter().map(bits).collect::<Vec<_>>()
+        );
+    }
+}

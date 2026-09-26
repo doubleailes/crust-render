@@ -285,6 +285,19 @@ impl Program {
         self.len() == 0
     }
 
+    /// Whether every operand refers to a slot strictly before its user's —
+    /// what the compiler always emits, and what anything that runs a program
+    /// by other means than [`Program::eval`]'s bounds-checked reads relies on.
+    pub fn is_well_formed(&self) -> bool {
+        let nc = self.consts.len();
+        self.ops.iter().enumerate().all(|(i, op)| {
+            let mut ok = true;
+            op.clone()
+                .for_each_operand(|o| ok &= (*o as usize) < nc + i);
+            ok
+        })
+    }
+
     /// One instruction's value, given the slots computed before it — the
     /// interpreter's own step, for an evaluator that runs some ops another
     /// way and hands the rest back here (crust-jit), so that both produce the
@@ -329,9 +342,17 @@ impl Program {
     ///
     /// The surviving ops keep their relative order, so operands still precede
     /// their users.
+    ///
+    /// A malformed program — an operand that does not precede its user, or a
+    /// root out of range — is returned unchanged with the identity remap: the
+    /// interpreter already reads such an operand as zero, and rewriting it
+    /// would have to invent a meaning for it.
     pub fn optimize(&self, roots: &[u32]) -> (Program, Vec<Option<u32>>) {
         let n = self.len();
         let nc = self.consts.len();
+        if !self.is_well_formed() || roots.iter().any(|&r| r as usize >= n) {
+            return (self.clone(), (0..n as u32).map(Some).collect());
+        }
         // Every slot's value, where it is a compile-time constant.
         let mut known: Vec<Option<Val>> = self.consts.iter().copied().map(Some).collect();
         known.resize(n, None);

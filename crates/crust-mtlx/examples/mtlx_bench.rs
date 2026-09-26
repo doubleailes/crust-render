@@ -51,19 +51,35 @@ fn points() -> Vec<ShadeCtx> {
         .collect()
 }
 
-/// Min-of-N nanoseconds per run of `run` over every shading point.
-fn time(pts: &[ShadeCtx], mut run: impl FnMut(&ShadeCtx, &mut Vec<Val>)) -> f64 {
+/// Min-of-N nanoseconds per run for two evaluators, **interleaved**: each
+/// repeat times both, alternating which goes first, so load or a frequency
+/// change lands on both rather than on whichever phase it happened to hit
+/// (the in-process version of `scripts/bench_ab.sh`).
+fn time_ab(
+    pts: &[ShadeCtx],
+    mut a: impl FnMut(&ShadeCtx, &mut Vec<Val>),
+    mut b: impl FnMut(&ShadeCtx, &mut Vec<Val>),
+) -> (f64, f64) {
     let mut slots = Vec::new();
-    let mut best = f64::INFINITY;
-    for _ in 0..REPEATS {
+    let once = |run: &mut dyn FnMut(&ShadeCtx, &mut Vec<Val>), slots: &mut Vec<Val>| {
         let t = Instant::now();
         for p in pts {
-            run(black_box(p), &mut slots);
-            black_box(&slots);
+            run(black_box(p), slots);
+            black_box(&*slots);
         }
-        best = best.min(t.elapsed().as_nanos() as f64 / pts.len() as f64);
+        t.elapsed().as_nanos() as f64 / pts.len() as f64
+    };
+    let (mut best_a, mut best_b) = (f64::INFINITY, f64::INFINITY);
+    for rep in 0..REPEATS {
+        if rep % 2 == 0 {
+            best_a = best_a.min(once(&mut a, &mut slots));
+            best_b = best_b.min(once(&mut b, &mut slots));
+        } else {
+            best_b = best_b.min(once(&mut b, &mut slots));
+            best_a = best_a.min(once(&mut a, &mut slots));
+        }
     }
-    best
+    (best_a, best_b)
 }
 
 fn main() {
@@ -80,8 +96,7 @@ fn main() {
             let mut optimized: Compiled = compile(path, Some(&node.name), &procedural).unwrap();
             optimized.optimize();
             let (p, o): (&Program, &Program) = (&reference.program, &optimized.program);
-            let t_ref = time(&pts, |c, s| p.eval(c, s));
-            let t_opt = time(&pts, |c, s| o.eval(c, s));
+            let (t_ref, t_opt) = time_ab(&pts, |c, s| p.eval(c, s), |c, s| o.eval(c, s));
             println!(
                 "{:<40} {:>6} {:>6} {:>10.1} {:>10.1}",
                 node.name,

@@ -366,10 +366,15 @@ Seven crates under `crates/`:
   Cranelift's `fmin` — `normalize`, `normalmap`, dot products, and any op whose
   operand width is only known at run time) calls back into the interpreter's
   own step, `Program::apply_op`. `tests/jit.rs` compares every slot bitwise.
-  **The one crate that is not `forbid(unsafe_code)`**: `deny`, with two
-  audited blocks (the code-pointer transmute and the host callbacks' raw
-  pointers). cranelift-jit deliberately leaks a finalized module's code on
-  drop, so a `JitProgram` holds only the function pointer and its ops.
+  **The one crate that is not `forbid(unsafe_code)`**: `deny`, with four
+  audited blocks (the code-pointer transmute, the two host callbacks' raw
+  pointers, and freeing the code in `Drop`). A `JitProgram` owns its
+  `JITModule` (in a `Mutex`, since the module is `Send` but not `Sync`) and
+  frees it on drop — cranelift-jit would otherwise leak the code, which a host
+  reloading scenes would accumulate. A malformed program (an operand not
+  strictly before its user) is refused, never compiled: the generated code
+  has no bounds checks, and `Program::optimize` returns such a program
+  unchanged.
 - **`crust-core`** — the engine as a library (`crust_core`): renderer, integrator,
   materials, lights, volumes, path guiding, USD import (MaterialX through
   `crust-mtlx`, with `material/materialx.rs` as the adapter — `MtlxMaterial` and

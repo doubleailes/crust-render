@@ -28,10 +28,14 @@
 //!
 //! This is the one crate in the workspace that is not `forbid(unsafe_code)`,
 //! as the plan requires: calling generated code cannot be done without it.
-//! `deny(unsafe_code)` holds everywhere except two audited blocks — the
-//! transmute of the finalized code pointer to a function type
-//! ([`JitProgram::new`]) and the raw-pointer reads in [`host_apply`] — each
-//! with its safety argument beside it.
+//! `deny(unsafe_code)` holds everywhere except four audited blocks, each with
+//! its safety argument beside it: the transmute of the finalized code pointer
+//! to a function type ([`JitProgram::new`]), the raw-pointer accesses in the
+//! two callbacks ([`host_apply`], [`host_texture`]), and the release of the
+//! code memory in `JitProgram`'s `Drop`. The generated code itself reads and
+//! writes only slots of the array [`JitProgram::eval`] sizes, which holds
+//! because `new` refuses any program whose operands are not all earlier
+//! slots.
 #![deny(unsafe_code)]
 
 use cranelift_codegen::ir::condcodes::FloatCC;
@@ -57,8 +61,32 @@ pub struct JitProgram {
     /// The ops [`host_apply`] is handed pointers to. Boxed so their addresses,
     /// baked into the generated code as constants, never move.
     _ops: Box<[Op]>,
+    /// Owns the code `func` points into, freed when the program is dropped.
+    /// Behind a `Mutex` only because `JITModule` is `Send` but not `Sync` and
+    /// a material is shared across render threads; it is never touched again
+    /// until `drop`.
+    module: std::sync::Mutex<Option<JITModule>>,
     inline_ops: usize,
     host_ops: usize,
+}
+
+impl Drop for JitProgram {
+    fn drop(&mut self) {
+        let module = match self.module.get_mut() {
+            Ok(m) => m.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(module) = module {
+            #[allow(unsafe_code)]
+            // SAFETY: `func` points into this module's code and is only ever
+            // called by `eval`, which borrows `self`. `drop` has `&mut self`,
+            // so no `eval` is running and none can start; `func` is dropped
+            // with `self` and never called again.
+            unsafe {
+                module.free_memory();
+            }
+        }
+    }
 }
 
 /// Why a program was not compiled.
@@ -80,11 +108,21 @@ fn err(e: impl std::fmt::Display) -> JitError {
 impl JitProgram {
     /// Compiles `program` for the host CPU.
     ///
-    /// The code memory is never freed: cranelift-jit deliberately leaks a
-    /// finalized module's memory when the module is dropped, so the function
-    /// pointer stays valid. A material's program lives as long as the scene,
-    /// so this costs a few kilobytes per material for the process.
+    /// The generated code lives in a module the program owns, and is freed
+    /// when the program is dropped, so a host that reloads scenes does not
+    /// accumulate executable pages.
+    ///
+    /// A malformed program — an operand that does not precede its user — is
+    /// refused rather than compiled: the generated code reads operands without
+    /// the interpreter's bounds checks, so it must never be given one out of
+    /// range. The caller then runs the program on the interpreter, which
+    /// reads such an operand as zero.
     pub fn new(program: &Program) -> Result<JitProgram, JitError> {
+        if !program.is_well_formed() {
+            return Err(JitError(
+                "an operand does not precede its user; not compiling a malformed program".into(),
+            ));
+        }
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").map_err(err)?;
         flags.set("is_pic", "false").map_err(err)?;
@@ -172,16 +210,18 @@ impl JitProgram {
         #[allow(unsafe_code)]
         // SAFETY: `code` is the finalized entry of the function defined above
         // with signature `(ptr, ptr) -> ()` in the host's default calling
-        // convention, which is `extern "C"` for the native ISA; the module's
-        // code memory is leaked on drop (see `new`'s docs), so the pointer
-        // outlives `module`. Its two arguments are only ever supplied by
-        // `JitProgram::eval`, which upholds what the code assumes of them.
+        // convention, which is `extern "C"` for the native ISA. The module
+        // that owns the code moves into the returned program and is freed only
+        // in its `Drop`, after which `func` is gone too. Its two arguments are
+        // only ever supplied by `JitProgram::eval`, which upholds what the code
+        // assumes of them.
         let func: Shade = unsafe { std::mem::transmute::<*const u8, Shade>(code) };
         Ok(JitProgram {
             consts: program.consts.clone(),
             len: program.len(),
             func,
             _ops: ops,
+            module: std::sync::Mutex::new(Some(module)),
             inline_ops,
             host_ops,
         })
