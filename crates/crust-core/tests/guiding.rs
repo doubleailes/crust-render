@@ -77,3 +77,34 @@ fn guided_render_with_tiles_smoke() {
     }
     assert!(total > 1.0, "tiled guided render came back black");
 }
+
+/// A render mode is scheduling only: tiles and rows must give the same bits,
+/// guided renders included — the tiled pass hands its training samples and
+/// variance sum on in scanline order, since both are order-dependent in
+/// floating point. 37×21 leaves partial tiles on both edges, and the final
+/// pass stops pixels adaptively (min 4 spp at a 5% threshold).
+#[test]
+fn guided_tiles_and_rows_are_bit_identical() {
+    let (w, h) = (37, 21);
+    let render = |tiled: bool| {
+        let scene = Scene::from_usd(&sample_scene()).expect("load cornellbox_guided.usda");
+        let settings = RenderSettings::new(8, 6, w, h, 4, 0.05, 0).with_guiding(true, 3, 0.5);
+        let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
+        if tiled {
+            renderer.render_with_tiles()
+        } else {
+            renderer.render()
+        }
+    };
+    let (rows, tiles) = (render(false), render(true));
+    for y in 0..h {
+        for x in 0..w {
+            let (a, b) = (rows.get_pixel(x, y), tiles.get_pixel(x, y));
+            assert_eq!(
+                (a.x.to_bits(), a.y.to_bits(), a.z.to_bits()),
+                (b.x.to_bits(), b.y.to_bits(), b.z.to_bits()),
+                "pixel ({x}, {y})"
+            );
+        }
+    }
+}

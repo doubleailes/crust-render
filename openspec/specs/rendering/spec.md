@@ -75,21 +75,30 @@ training passes.
 
 ### Requirement: Parallel scanline and bucket rendering
 
-The renderer SHALL offer two Rayon-parallel execution strategies that produce an
-equivalent image buffer: a default scanline strategy (`render`) parallel over
-pixels within each row, and a tiled strategy (`render_with_tiles`) parallel over
-16×16 buckets.
+The renderer SHALL offer two Rayon-parallel execution strategies that produce a
+**bit-identical** image buffer, guided renders included: a scanline strategy
+(`render`) parallel over pixels within each row, and a tiled strategy
+(`render_with_tiles`) parallel over 16×16 buckets. The choice is the caller's —
+the `Renderer` API favours neither — and the CLI defaults to tiles (see the cli
+spec). Progress callbacks SHALL be delivered one at a time, with the completed
+count increasing by one per report, under either strategy.
 
-#### Scenario: Default scanline rendering
+#### Scenario: Scanline rendering
 
-- **WHEN** the renderer is invoked without bucket mode
-- **THEN** `render()` fills the buffer, parallelising pixels within each scanline
+- **WHEN** `render()` is called (CLI `--scanline`)
+- **THEN** it fills the buffer, parallelising pixels within each scanline
 
 #### Scenario: Bucket rendering
 
-- **WHEN** bucket mode is requested (CLI `--bucket`)
-- **THEN** `render_with_tiles()` divides the image into 16×16 tiles rendered in
-  parallel and reassembles them into the same buffer
+- **WHEN** `render_with_tiles()` is called (the CLI default)
+- **THEN** it divides the image into 16×16 tiles rendered in parallel and
+  reassembles them into the same buffer
+
+#### Scenario: A guided render is independent of the strategy
+
+- **WHEN** a guided render runs under either strategy
+- **THEN** each pass's guiding training samples and variance sum are gathered
+  in scanline order, so the two strategies produce the same bits
 
 ### Requirement: Participating-media transport for medium-carrying rays
 

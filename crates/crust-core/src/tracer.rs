@@ -11,7 +11,6 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{LightList, LightSelection, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
@@ -31,7 +30,9 @@ const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
 
 /// Render-progress callback: invoked with `(completed, total)` work units
 /// (scanline rows, or tiles under bucket rendering) as a pass advances.
-/// Called from worker threads, hence `Sync`. Presentation (progress bars,
+/// Called from worker threads, hence `Sync`, but never concurrently and always
+/// with `completed` increasing by one — a host can show the last value it was
+/// given. Presentation (progress bars,
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
@@ -481,12 +482,16 @@ impl Renderer {
         );
 
         if cfg.tiled {
-            let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
+            let tiles = generate_tiles(self.settings.width, self.settings.height, TILE); // tile size: 16x16
             let total = tiles.len() as u64;
-            let done = AtomicU64::new(0);
-            type TileOut = (Vec<(usize, usize, Vec3A, f64, Vec<SampleData>)>, RayStats);
+            // Incremented and reported under one lock, so the callback sees
+            // completions in increasing order even though tiles finish on
+            // many threads at once (see `ProgressCallback`). Taken once per
+            // tile, which no render will notice.
+            let done = std::sync::Mutex::new(0u64);
+            type TileOut = (Vec<(Vec3A, f64, Vec<SampleData>)>, RayStats);
             let results: Vec<TileOut> = tiles
-                .into_par_iter()
+                .par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
                     // Private to this tile, so no two threads share a
@@ -506,11 +511,13 @@ impl Renderer {
                                 &mut scratch,
                                 &mut tile_rays,
                             );
-                            pixels.push((i, j, color, v, s));
+                            pixels.push((color, v, s));
                         }
                     }
                     if let Some(cb) = progress {
-                        cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                        let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
+                        *n += 1;
+                        cb(*n, total);
                     }
                     (pixels, tile_rays)
                 })
@@ -522,26 +529,33 @@ impl Renderer {
             // are order-dependent in floating point (the SD-tree accumulates
             // the samples it is given), so this is what keeps a guided render
             // bit-identical whichever order the pixels were rendered in.
+            //
+            // The tile results are replayed in that order straight from the
+            // tile grid (`generate_tiles` emits tile rows by increasing `y`,
+            // each left to right, so walking it backwards by row gives rows
+            // in scanline order), and nothing full-frame is allocated to do
+            // it.
             let w = self.settings.width;
-            let mut pixel_samples: Vec<Vec<SampleData>> = Vec::new();
-            for (pixels, tile_rays) in results {
-                rays.merge(&tile_rays);
-                for (i, j, color, var, s) in pixels {
-                    buffer.set_pixel(i, j, color);
-                    var_map[j * w + i] = var;
-                    if !s.is_empty() {
-                        if pixel_samples.is_empty() {
-                            pixel_samples.resize_with(w * self.settings.height, Vec::new);
-                        }
-                        pixel_samples[j * w + i] = s;
-                    }
-                }
+            let mut results = results;
+            for (_, tile_rays) in &results {
+                rays.merge(tile_rays);
             }
-            for j in (0..self.settings.height).rev() {
-                for i in 0..w {
-                    variance_sum += var_map[j * w + i];
-                    if let Some(s) = pixel_samples.get_mut(j * w + i) {
-                        all_samples.append(s);
+            let tiles_x = w.div_ceil(TILE);
+            for ty in (0..tiles.len() / tiles_x.max(1)).rev() {
+                let row = ty * tiles_x..(ty + 1) * tiles_x;
+                let (y0, rows) = (tiles[row.start].y, tiles[row.start].height);
+                for j in (y0..y0 + rows).rev() {
+                    for k in row.clone() {
+                        let tile = &tiles[k];
+                        let pixels = &mut results[k].0;
+                        for i in tile.x..tile.x + tile.width {
+                            let (color, var, s) =
+                                &mut pixels[(j - tile.y) * tile.width + (i - tile.x)];
+                            buffer.set_pixel(i, j, *color);
+                            var_map[j * w + i] = *var;
+                            variance_sum += *var;
+                            all_samples.append(s);
+                        }
                     }
                 }
             }
@@ -1950,6 +1964,11 @@ struct Tile {
     pub height: usize,
 }
 
+/// Edge length of a render tile, in pixels.
+const TILE: usize = 16;
+
+/// The tile grid, in tile rows from `y = 0` up, each row left to right —
+/// the order `render_pass` relies on to replay tiles in scanline order.
 fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> Vec<Tile> {
     let mut tiles = Vec::new();
     for y in (0..image_height).step_by(tile_size) {
