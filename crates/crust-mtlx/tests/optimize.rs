@@ -161,3 +161,37 @@ fn constants_are_folded_hoisted_and_pruned() {
     let o = eval(&opt, &ctx)[remap[out as usize].unwrap() as usize];
     assert_eq!(bits(r), bits(o));
 }
+
+#[test]
+fn a_malformed_program_is_returned_unchanged_rather_than_panicking() {
+    use crust_mtlx::{BinOp, Op};
+    // An operand that points forward (and one far out of range): the
+    // interpreter reads both as zero, and the optimiser must not crash or
+    // reinterpret them.
+    let mut p = Program::default();
+    p.ops.push(Op::Const(Val::float(2.0)));
+    p.ops.push(Op::Binary {
+        op: BinOp::Add,
+        a: 0,
+        b: 2,
+    });
+    p.ops.push(Op::Binary {
+        op: BinOp::Mul,
+        a: 1,
+        b: 99,
+    });
+    assert!(!p.is_well_formed());
+    let (o, remap) = p.optimize(&[2]);
+    assert_eq!(o.ops.len(), p.ops.len());
+    assert_eq!(remap, vec![Some(0), Some(1), Some(2)]);
+    let ctx = shading_points()[3];
+    assert_eq!(eval(&p, &ctx), eval(&o, &ctx));
+    // A root out of range is malformed too.
+    let (o, _) = compile_basic().program.optimize(&[u32::MAX]);
+    assert!(o.consts.is_empty());
+}
+
+fn compile_basic() -> Compiled {
+    let path = repo().join("samples/materialx_basic.mtlx");
+    compile(&path, None, &procedural).unwrap()
+}
