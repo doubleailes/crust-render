@@ -20,7 +20,7 @@
 //! default, declines to stream such a texture at all — so the tests here both
 //! pin the refusal and measure what the `file` opt-in accepts instead.
 
-use crust_assets::{PtexColor, PtexStream, ptex_micro_retained_bytes, ptex_micro_slot_max};
+use crust_assets::{PtexColor, PtexStream, ptex_micro_slot_max, ptex_micro_thread_bytes};
 
 /// The per-slot microcache ceiling a render would derive from `budget`.
 ///
@@ -28,6 +28,17 @@ use crust_assets::{PtexColor, PtexStream, ptex_micro_retained_bytes, ptex_micro_
 /// retention rule under test is the one a render actually applies.
 fn micro_max(budget: usize) -> usize {
     ptex_micro_slot_max(budget)
+}
+
+/// A slot size that holds a whole tile on any machine.
+///
+/// `micro_max` divides a budget by the thread count, so at 8 MiB a 4-core
+/// runner gets 256 KiB slots and a 72-core workstation ~14.5 KB ones, below
+/// this fixture's tiles, so nothing is retained there. A test about what the
+/// microcache *does with* a tile needs one that fits; a 1 GiB budget gives the
+/// full 256 KiB ceiling up to 512 threads.
+fn full_slot() -> usize {
+    micro_max(1 << 30)
 }
 use crust_core::{PtexTexture, Vec3A};
 use std::path::{Path, PathBuf};
@@ -230,7 +241,7 @@ fn the_microcache_absorbs_most_taps() {
     // Inside a tile: a small magnified neighbourhood, so the four taps of
     // each lookup and the successive lookups all share one tile.
     let interior =
-        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(10), true).expect("stream");
+        PtexStream::open_with(&path, 8 << 20, full_slot(), Some(10), true).expect("stream");
     for i in 0..400 {
         let t = i as f32 / 400.0;
         interior.eval(0, 0.3 + 0.0005 * t, 0.7 + 0.0005 * t, 0.0);
@@ -247,7 +258,7 @@ fn the_microcache_absorbs_most_taps() {
     // taps either side of texel 511/512 and the v taps either side of
     // 255/256 — four tiles for four taps, two slots.
     let corner =
-        PtexStream::open_with(&path, 8 << 20, micro_max(8 << 20), Some(10), true).expect("stream");
+        PtexStream::open_with(&path, 8 << 20, full_slot(), Some(10), true).expect("stream");
     for i in 0..400 {
         let t = i as f32 / 400.0;
         corner.eval(0, 0.5 + 0.000_001 * t, 0.5 + 0.000_001 * t, 0.0);
@@ -757,7 +768,9 @@ fn a_tile_larger_than_a_slot_is_never_retained() {
     // slot of this budget may keep.
     let budget = 1024 * 1024;
     let slot = micro_max(budget);
-    let before = ptex_micro_retained_bytes();
+    // This thread's slots only: the process-wide counter also moves with
+    // every other test running beside this one, which made the check flaky.
+    let before = ptex_micro_thread_bytes();
 
     let stream = PtexStream::open_with(&path, budget, slot, None, true).expect("stream");
     for i in 0..=64 {
@@ -766,10 +779,9 @@ fn a_tile_larger_than_a_slot_is_never_retained() {
         }
     }
 
-    let retained = ptex_micro_retained_bytes();
+    let retained = ptex_micro_thread_bytes();
     // Whatever this thread kept, no single slot may exceed the ceiling, so
-    // four of them cannot exceed four times it. Other tests in the binary
-    // share the process, hence the `before` baseline.
+    // four of them cannot exceed four times it.
     let grew = retained.saturating_sub(before);
     assert!(
         grew <= (slot * crust_assets::PTEX_MICRO_SLOTS) as u64,

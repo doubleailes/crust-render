@@ -323,6 +323,21 @@ pub fn micro_retained_bytes() -> u64 {
     MICRO_BYTES.load(Ordering::Relaxed)
 }
 
+/// Bytes the *calling thread's* microcache holds.
+///
+/// [`micro_retained_bytes`] is process-wide, so anything else rendering at the
+/// same time — another test in the same binary, for one — moves it too. A
+/// check on what one sequence of lookups retained has to read this instead.
+pub fn micro_thread_bytes() -> u64 {
+    MICRO.with(|m| {
+        m.borrow()
+            .iter()
+            .flatten()
+            .map(|(_, data)| data.len() as u64)
+            .sum()
+    })
+}
+
 thread_local! {
     static MICRO: std::cell::RefCell<MicroSlots> =
         const { std::cell::RefCell::new([const { None }; MICRO_SLOTS]) };
