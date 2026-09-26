@@ -260,9 +260,10 @@ pub struct PreviewSurface {
     /// Whether emission varies per point. Decides whether the hit-free
     /// `emitted()` can still answer.
     emission_textured: bool,
-    /// Whether transmission varies per point. Decides whether `make_ray` can
-    /// answer from the constants.
-    transmission_textured: bool,
+    /// Whether `make_ray` has to shade the hit: transmission varies per
+    /// point, or a normal map moves the normal that decides whether a
+    /// direction crosses a transmissive interface.
+    ray_reads_hit: bool,
     /// The primvar the network's `UsdPrimvarReader_float2` names, when it is
     /// not `st` (see [`Material::uv_primvar`]).
     uv_primvar: Option<String>,
@@ -300,12 +301,14 @@ impl PreviewSurface {
             base.emission_luminance = 1.0;
         }
         let transmission_textured = inputs.iter().any(|(t, _)| *t == Target::Opacity);
+        let ray_reads_hit =
+            transmission_textured || (normal.is_some() && base.transmission_weight > 0.0);
         PreviewSurface {
             base,
             inputs,
             normal,
             emission_textured,
-            transmission_textured,
+            ray_reads_hit,
             uv_primvar: None,
             name,
         }
@@ -379,11 +382,13 @@ impl Material for PreviewSurface {
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         // Decides whether a guided direction crosses the interface, which
-        // hangs on `transmission_weight`: a textured `opacity` has to be read
-        // at the hit, through the same shading normal `scatter_importance`
-        // saw, or a guided refraction leaves without the origin offset and
-        // medium tag a BSDF-sampled one gets. Otherwise the constants answer.
-        if self.transmission_textured {
+        // hangs on `transmission_weight` and on the side of the *shading*
+        // normal `wi` lies: a textured `opacity`, or a normal map over a
+        // transmissive surface, has to be read at the hit as
+        // `scatter_importance` read it, or a guided refraction leaves without
+        // the origin offset and medium tag a BSDF-sampled one gets. Otherwise
+        // the constants answer.
+        if self.ray_reads_hit {
             self.shade(rec, |m, rec| m.make_ray(rec, wi))
         } else {
             self.base.make_ray(rec, wi)
@@ -601,6 +606,31 @@ mod tests {
         assert!(r.origin().z < 0.0, "refracted ray starts past the surface");
         let r = glass(1.0).make_ray(&rec, -Vec3A::Z);
         assert_eq!(r.origin(), rec.p, "an opaque texel does not refract");
+    }
+
+    #[test]
+    fn a_normal_map_decides_which_side_a_guided_glass_ray_leaves() {
+        // Constant glass (no opacity texture) under a normal map tilted 45°
+        // toward +X. `wi` is below the tilted shading normal but above the
+        // geometric one, so only the mapped normal sees it refract.
+        let n = 0.5f32.sqrt();
+        let glass = PreviewSurface::new(
+            "g".into(),
+            OpenPBR {
+                transmission_weight: 1.0,
+                ..OpenPBR::default()
+            },
+            vec![],
+            Some(input(tex(Flat([n, 0.0, n, 1.0])), TexOutput::Rgb)),
+        );
+        let rec = HitRecord {
+            front_face: true,
+            ..hit(0.5)
+        };
+        let wi = Vec3A::new(-1.0, 0.0, 0.2).normalize();
+        assert!(glass.probe(&rec).1.dot(wi) < 0.0 && rec.normal.dot(wi) > 0.0);
+        let r = glass.make_ray(&rec, wi);
+        assert_ne!(r.origin(), rec.p, "crosses the interface with its offset");
     }
 
     #[test]
