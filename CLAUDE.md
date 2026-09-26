@@ -59,6 +59,7 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 # Perf probes (better than criterion for kernel A/B: min-of-N, not a drifting mean)
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
+cargo run --release -p crust-mtlx --example mtlx_bench -- lion_ldX.mtlx   # ns per MaterialX program run
 
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).

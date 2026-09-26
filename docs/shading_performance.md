@@ -363,6 +363,36 @@ does not compute or it will not be bit-identical. (Whether a
 `float`→`color3` convert *should* splat lane 0 is a separate question; today
 it does not.)
 
+**Closure compilation: tried, measured slower, not kept.** Each op was built
+into a boxed closure with its operator chosen at build time (so the second
+`match`, on `UnOp`/`BinOp`, folded away) and its operand slots captured and
+validated once, calling the very `op_*` arithmetic the interpreter used. On
+`examples/mtlx_bench` (min of 15 × 4 096 runs, procedural texture):
+
+| Material | interpreter (optimised) | closures, value returned | closures, written in place |
+|---|---|---|---|
+| lion | 546–564 ns | 747–783 ns | 668–702 ns |
+| teapot ceramic | 369–374 ns | 507–514 ns | 444–477 ns |
+| teapot metal | 448–450 ns | 527–534 ns | 485–505 ns |
+
+An indirect call per op costs more than the two-level `match` it replaces:
+`apply` is `#[inline(always)]` into one loop, so LLVM already compiles the
+interpreter to a jump table over inlined bodies, and a closure can neither be
+inlined nor keep a `Val` in registers across the call. The "1.5–3×" above is
+the figure for tree-walking interpreters over boxed nodes, not for a flat,
+fully inlined `match`. `examples/mtlx_bench` stays as the probe for the next
+attempt, which — if one is made — should specialise *inside* the `match`
+(static arity, fused `texture → convert` and `Remap` forms) rather than
+replace it.
+
+**Where step 4 leaves the plan.** The interpreter is ~14% of the lion's render,
+~4% of the teapot's, and nothing on `UsdPreviewSurface` scenes such as ALab
+(frame 1004 at 32 spp: render 65.5 / 74.6 s before step 2, 62.1 / 65.7 s after
+step 4, 0 pixels differing at 16 spp; the whole ALab run is 78% USD parsing).
+Step 5's own gate — "if `Program::eval` still dominates" — is not met, so the
+JIT is not started. The remaining shading cost on textured scenes is the
+`OpenPBR` BSDF itself and the texture fetches, which a JIT does not touch.
+
 ### 5. A JIT, only if steps 3–4 are not enough
 
 If `Program::eval` still dominates after steps 3–4, compile each material's
