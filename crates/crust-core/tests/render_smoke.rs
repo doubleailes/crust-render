@@ -213,7 +213,14 @@ fn progress_callback_reaches_the_total() {
         let total = AtomicU64::new(0);
         let calls = AtomicU64::new(0);
         let cb = |done: u64, all: u64| {
-            last.store(done, Ordering::SeqCst);
+            // Reports are never concurrent and always one more than the
+            // last — tiles finish on many threads, but the engine serialises
+            // what it tells the host (see `ProgressCallback`).
+            let before = last.swap(done, Ordering::SeqCst);
+            assert!(
+                done == before + 1 || done == 1,
+                "tiled={tiled}: {before} then {done}"
+            );
             total.store(all, Ordering::SeqCst);
             calls.fetch_add(1, Ordering::SeqCst);
         };

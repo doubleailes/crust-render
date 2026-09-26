@@ -12,19 +12,32 @@ and writes the output image. This is the only user-facing surface of the tool.
 
 The CLI SHALL accept `-i/--input` (USD scene path), `-o/--output` (output path,
 default `output.exr`), `-l/--level` (log verbosity, default `info`),
-`-b/--bucket` (tiled rendering, default off), `-s/--samples` (override the
-scene's samples-per-pixel), and `--strategy` (override the scene's MIS
-sampling strategy: `power` | `balance` | `light` | `bsdf`).
+`--scanline` (row-order rendering instead of the default 16×16 tiles),
+`-s/--samples` (override the scene's samples-per-pixel), and `--strategy`
+(override the scene's MIS sampling strategy: `power` | `balance` | `light` |
+`bsdf`). `-b/--bucket` SHALL still be accepted, for compatibility with existing
+command lines, and SHALL have no effect.
 
 #### Scenario: Rendering a scene file
 
 - **WHEN** the user runs the binary with `-i <scene.usda>`
 - **THEN** the scene is loaded from that USD file and rendered
 
-#### Scenario: Bucket flag selects tiled rendering
+#### Scenario: Tiled rendering is the default
 
-- **WHEN** `--bucket` is passed
-- **THEN** the renderer uses the tiled (bucket) strategy instead of scanline
+- **WHEN** neither `--scanline` nor `--bucket` is passed
+- **THEN** the renderer uses the tiled (bucket) strategy
+
+#### Scenario: Scanline flag selects row rendering
+
+- **WHEN** `--scanline` is passed
+- **THEN** the renderer uses the scanline strategy instead of tiles, and the
+  image is bit-identical to the tiled one
+
+#### Scenario: The bucket flag is accepted and ignored
+
+- **WHEN** `--bucket` (or `-b`) is passed
+- **THEN** the command line parses and the render is the default tiled one
 
 #### Scenario: Overriding samples and sampling strategy
 
