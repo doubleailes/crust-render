@@ -484,12 +484,11 @@ impl Renderer {
             let tiles = generate_tiles(self.settings.width, self.settings.height, 16); // tile size: 16x16
             let total = tiles.len() as u64;
             let done = AtomicU64::new(0);
-            type TileOut = (Vec<(usize, usize, Vec3A, f64)>, Vec<SampleData>, RayStats);
+            type TileOut = (Vec<(usize, usize, Vec3A, f64, Vec<SampleData>)>, RayStats);
             let results: Vec<TileOut> = tiles
                 .into_par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
-                    let mut samples = Vec::new();
                     // Private to this tile, so no two threads share a
                     // counter and there is nothing to synchronise. The path
                     // scratch has the same ownership story: one buffer serves
@@ -498,7 +497,7 @@ impl Renderer {
                     let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, mut s, v) = self.render_pixel(
+                            let (color, s, v) = self.render_pixel(
                                 i,
                                 j,
                                 &cfg,
@@ -507,24 +506,44 @@ impl Renderer {
                                 &mut scratch,
                                 &mut tile_rays,
                             );
-                            pixels.push((i, j, color, v));
-                            samples.append(&mut s);
+                            pixels.push((i, j, color, v, s));
                         }
                     }
                     if let Some(cb) = progress {
                         cb(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     }
-                    (pixels, samples, tile_rays)
+                    (pixels, tile_rays)
                 })
                 .collect();
-            for (pixels, samples, tile_rays) in results {
+            // Tiles finish in tile order, but what the pass hands on — the
+            // guiding field's training samples and the pass variance, an f64
+            // sum — is gathered in *scanline* order (rows top-down, pixels
+            // left to right), exactly as the scanline path gathers it. Both
+            // are order-dependent in floating point (the SD-tree accumulates
+            // the samples it is given), so this is what keeps a guided render
+            // bit-identical whichever order the pixels were rendered in.
+            let w = self.settings.width;
+            let mut pixel_samples: Vec<Vec<SampleData>> = Vec::new();
+            for (pixels, tile_rays) in results {
                 rays.merge(&tile_rays);
-                for (i, j, color, var) in pixels {
+                for (i, j, color, var, s) in pixels {
                     buffer.set_pixel(i, j, color);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
+                    var_map[j * w + i] = var;
+                    if !s.is_empty() {
+                        if pixel_samples.is_empty() {
+                            pixel_samples.resize_with(w * self.settings.height, Vec::new);
+                        }
+                        pixel_samples[j * w + i] = s;
+                    }
                 }
-                all_samples.extend(samples);
+            }
+            for j in (0..self.settings.height).rev() {
+                for i in 0..w {
+                    variance_sum += var_map[j * w + i];
+                    if let Some(s) = pixel_samples.get_mut(j * w + i) {
+                        all_samples.append(s);
+                    }
+                }
             }
         } else {
             let total = self.settings.height as u64;
