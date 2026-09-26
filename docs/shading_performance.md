@@ -1,0 +1,244 @@
+# Shading performance: a plan
+
+Arnold and RenderMan are much faster than crust, and the working bet is that
+shading is where much of the gap lies. This document records what the shading
+path does today, where its cost multiplies, and an ordered plan for reducing it.
+The plan runs from the cheapest, output-preserving changes up to a JIT. **Nothing
+here is measured yet**: the call counts come from reading the code, and step 1
+exists to replace them with numbers before any larger change is made.
+
+## What a shading call costs today
+
+Two materials evaluate a pattern network at every hit:
+
+- **`MtlxMaterial`** (`material/materialx.rs`). `shade()` runs the compiled
+  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then `reduce()` pools the
+  flattened lobes onto an `OpenPBR`, then hands that `OpenPBR` to the requested
+  query. The `Program` is already a linear, slot-indexed instruction list with a
+  thread-local value buffer. It does no name hashing and allocates nothing.
+  Each instruction is still one `match` arm over `Op`, and each operand read is a
+  bounds-checked `slots.get()`. `Val` is always four lanes plus an arity tag, so
+  scalar graphs do four-lane work.
+- **`PreviewSurface`** (`material/preview_surface.rs`). Its `shade()` samples each
+  connected `UsdUVTexture` and writes the results over its `OpenPBR` fields. It
+  has almost no arithmetic: its cost is texture fetches.
+
+Both do this work on **every** `Material` call. The comment on
+`MtlxMaterial::shade` states why: `Material`'s methods take `&self` and a
+`&HitRecord`, and there is nowhere to keep the result between calls.
+
+### How many times a vertex is shaded
+
+At one vertex of an unguided path (`tracer.rs`):
+
+| Call | Site | Graph runs |
+|---|---|---|
+| `emitted_at`, when the ray arrives | `trace_path` | 1 |
+| `scatter_importance` | `sample_bounce_direction` | 1 |
+| NEE `mat.eval` toward the sampled light | `trace_path` | 1 |
+| `eval(..).is_none()` on the *previous* vertex, when the bounce hits an emitter | `bounce_emission_weight` | +1 |
+| `eval(..).is_some()` on the previous vertex, when the path escapes | `escaped_emission` | +1 |
+
+A guided render adds one or two more `eval` calls in `sample_bounce_direction`:
+the guide branch evaluates the BSDF at the guided direction, and the BSDF branch
+calls `eval(..).is_some()` to decide whether to mix densities.
+
+So a textured surface's network runs **3–5 times per vertex**. Every run
+evaluates every graph instruction, fetches every texture and repeats the
+reduction.
+
+### How production renderers avoid it
+
+OSL (Arnold, RenderMan) and pbrt-v4 split shading into two phases:
+
+1. **Run the shader once per hit.** This produces a BSDF value: OSL closures, or
+   pbrt-v4's `BSDF` returned by `Material::GetBSDF`. All texture fetches and
+   pattern arithmetic happen here.
+2. **Sample and evaluate that BSDF** as many times as the integrator needs, for
+   NEE, the bounce, guiding and MIS weights. None of this touches textures or the
+   pattern network.
+
+A JIT makes one shader run cheaper. The split removes most of the runs. A JIT
+without the split still pays 3–5 runs per vertex, so the split comes first
+whether or not a JIT follows.
+
+## The plan
+
+Each step is independently useful, can stop the sequence if the profile says
+so, and keeps the previous behaviour reachable for A/B comparison, as the rest
+of the renderer does.
+
+### 1. Profile the shading path
+
+Measure before changing anything. Scenes:
+
+- `samples/materialx_teapot.usda` and `samples/materialx_lion.usda` (large
+  MaterialX graphs; the lion is 140 ops and 7 textures);
+- `samples/materialx_basic.usda` (small, checked in, always available);
+- `samples/usdpreview_textured.usda`, and one ALab frame if it is available
+  (`PreviewSurface`-dominated).
+
+Use callgrind, per "Measuring a change" in `CLAUDE.md`:
+
+```bash
+RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+    target/release/crust-render -i samples/materialx_lion.usda -o /tmp/x.exr -s 2
+callgrind_annotate --inclusive=yes callgrind.out.<pid>
+```
+
+Report the inclusive share of:
+
+- `Program::eval`, split into texture ops versus everything else;
+- `reduce`;
+- the `OpenPBR` BSDF methods (`scatter_importance`, `eval`);
+- `MtlxMaterial::shade` / `PreviewSurface::shade` as a whole;
+- the kernel (`intersect`, `occluded`) for scale.
+
+Also count calls to `shade` per camera sample, to confirm the 3–5 figure above.
+
+**What decides the next steps:**
+
+- If `shade` is a small share, shading is not the gap and this plan stops.
+- If texture fetches dominate `shade`, steps 2–3 are the lever and a JIT buys
+  nothing: generated code still calls the same `Texture2D::eval`.
+- If interpreter overhead (non-texture `Program::eval`) is large even after
+  step 3, steps 4–5 are justified.
+
+### 2. Stop evaluating the BSDF to answer a yes/no question
+
+`bounce_emission_weight` and `escaped_emission` call `p.mat.eval(&p.ray, &p.rec,
+p.dir)` and keep only whether the result is `Some`, and so does
+`sample_bounce_direction`'s BSDF branch. For a MaterialX or
+`PreviewSurface` material, each call is a full graph run, a reduction and a
+full BSDF evaluation that is then discarded.
+
+The `Material::eval` contract already guarantees that whether it returns `None`
+"must never depend on `wi`". The answer is therefore known when the vertex is
+scattered. Record it as a `has_continuous: bool` on the surface
+`PrevVertex` record, set in `sample_bounce_direction`, and read the flag in
+place of the three calls.
+
+- **Expected output:** bit-identical. The same boolean is computed from the same
+  hit, only once. Verify with `scripts/check_images.sh check` on all samples.
+- **Cost:** one byte per vertex record.
+- **Risk:** a material that breaks the contract (its `None` depends on `wi`)
+  would change behaviour. Add a debug assertion comparing the flag with a fresh
+  `eval` in debug builds while the change settles.
+
+### 3. Shade once per hit
+
+Split `Material` into a preparation step and a prepared BSDF, in the OSL /
+pbrt-v4 shape:
+
+```rust
+trait Material {
+    /// Runs the pattern network once at a hit.
+    fn prepare(&self, r_in: &Ray, rec: &HitRecord) -> ShadingPoint;
+    ...
+}
+
+/// Everything the integrator asks of a surface at one vertex, with no texture
+/// or graph work left in it.
+struct ShadingPoint {
+    bsdf: OpenPBR,        // or a smaller, hit-specific BSDF value
+    rec: HitRecord,       // with the graph's shading normal applied
+    has_continuous: bool, // subsumes step 2
+    ...
+}
+```
+
+The integrator calls `prepare` once per vertex and routes `emitted_at`,
+`scatter_importance`, NEE `eval` and every guided / MIS `eval` through the
+`ShadingPoint`. The previous vertex keeps its `ShadingPoint` in `PrevVertex`, so
+`bounce_emission_weight` and `escaped_emission` read it without shading again.
+
+Things this has to respect:
+
+- **The light list reads `emitted()`, which stays hit-free.** A material that
+  emits only through `emitted_at` must still never become a light-list entry.
+  The split must not blur that.
+- **NEE order.** `eval_reads_textures` exists so that texture-reading materials
+  trace the shadow ray *before* `eval` (on ALab, evaluating the texture network
+  for occluded samples cost 87–97 s against 66 s). Once `prepare` has already
+  run, `eval` no longer reads textures, and the reordering stops mattering. The
+  cost it avoided moves into `prepare`, which runs whether or not the shadow ray
+  is occluded, because the bounce needs it anyway.
+- **Size of `ShadingPoint`.** `OpenPBR` is large. If copying it per vertex
+  shows up in the profile, return a trimmed, hit-specific BSDF value instead.
+  This is a second-order concern next to removing 2–4 graph runs.
+- **`OpenPBR`, `Emissive` and other materials with no network** implement
+  `prepare` as a cheap copy, so they pay nearly nothing.
+- **Expected output:** bit-identical, if every query sees the same `OpenPBR` and
+  `HitRecord` it saw before. Verify with `check_images.sh` on all samples.
+
+This is the largest structural change in the plan and the one expected to pay
+most. It changes the `Material` trait and the integrator's vertex records.
+
+### 4. Make the interpreter faster, in safe Rust
+
+If step 1, re-run after step 3, still shows non-texture `Program::eval` as a
+significant share:
+
+- **Closure compilation.** Compile each `Op` into a pre-built closure (or a tree
+  of them) once at material load. This removes the per-instruction `match` and
+  the per-operand bounds checks. It is typically 1.5–3× faster than a `match`
+  interpreter, and needs no `unsafe`.
+- **Optimisation passes over `Program`**, at compile time:
+  - constant folding (for example a `Mix` whose mask is a constant, or a chain
+    of arithmetic on constants);
+  - dead-code elimination for ops that only feed lobes pruned at flatten time;
+  - common-subexpression elimination;
+  - arity specialisation, so scalar ops stop doing four-lane work;
+  - fused instructions for frequent sequences (a texture fetch followed by a
+    colour decode, a `Mix` with constant operands).
+
+Keep the current interpreter as the reference and gate the new path behind an
+environment switch (for example `CRUST_MTLX_OPT=0` restores the unoptimised
+program). Pin the optimised program to the reference with a test over the
+checked-in `.mtlx` fixtures at many `(u, v)` points, as `examples/mtlx_shade`
+does by hand.
+
+### 5. A JIT, only if steps 3–4 are not enough
+
+If `Program::eval` still dominates after steps 3–4, compile each material's
+program to machine code.
+
+| Option | For | Against |
+|---|---|---|
+| **Cranelift** (`cranelift-jit`) | Pure Rust. About a millisecond to compile a material. Code quality roughly LLVM `-O1`. | Calling generated code needs one `unsafe` transmute to a function pointer, and every crate in the workspace is `forbid`/`deny(unsafe_code)`. |
+| LLVM (inkwell) | What OSL uses; best code. | A C++ toolchain dependency, against the project's pure-Rust approach. |
+| wasmtime | Safe API; Cranelift underneath. | Each texture fetch becomes a host call across the sandbox boundary, which is exactly the hot path. |
+| Rust codegen, compiled ahead of time | Like MaterialX ShaderGen, targeting Rust. | Needs `rustc` at render time and `unsafe` dylib loading. |
+
+**Cranelift is the realistic choice**, under these conditions:
+
+- It lives in its own crate (`crust-jit`) that opts out of `forbid(unsafe_code)`
+  for one audited block, behind a cargo feature. Nothing else in the workspace
+  changes its unsafe policy.
+- The interpreter remains the reference and the fallback. A switch (for example
+  `CRUST_SHADER_JIT=0`) selects it at runtime.
+- Output should be bit-identical to the interpreter. That holds if the generated
+  code keeps the interpreter's operation order and emits no fused multiply-add.
+  Pin it with the same fixture test as step 4.
+- Texture fetches stay calls into the host's `Texture2D::eval`. A JIT does not
+  make them faster.
+
+### 6. Longer term: shade many points at once
+
+Interpreter overhead (and JIT call overhead) can also be amortised by running
+one program over a batch of shading points, in SIMD lanes. This is how batched
+OSL and wavefront GPU renderers work. It requires the integrator to queue hits
+by material instead of shading each path as it goes: a wavefront restructure,
+not a shading change. It is recorded here as the direction after steps 1–5, not
+as a near-term step.
+
+## Validation for every step
+
+- **Images:** `scripts/check_images.sh record` before, `check` after, at 16 spp.
+  Steps 2–5 are expected to be bit-identical. Any difference is a bug until
+  shown otherwise.
+- **Time:** `scripts/bench_ab.sh` between the two binaries, reporting min and
+  mean. Sequential before/after timings are not trusted here (see "Measuring a
+  change" in `CLAUDE.md`).
+- **Instructions:** callgrind, for steps whose gain is below the timing noise
+  floor.

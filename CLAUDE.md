@@ -1908,7 +1908,9 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   ordinary dielectric; MaterialX transmission maps to no lobe, so a
   MaterialX-authored glass renders opaque. The graph is re-evaluated at every
   `scatter`/`eval` call on a vertex rather than memoised per hit, which is the
-  obvious optimisation if MaterialX surfaces ever dominate a render. Only
+  obvious optimisation if MaterialX surfaces ever dominate a render
+  (`docs/shading_performance.md` is the plan: 3–5 graph runs per vertex today,
+  shade-once-per-hit first, a Cranelift JIT only last). Only
   document-scope and `<nodegraph>` nodes are read — `<nodedef>` custom node
   *implementations* are not, so a graph instantiating one gets that input at a
   constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
