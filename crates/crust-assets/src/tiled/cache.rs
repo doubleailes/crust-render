@@ -839,7 +839,7 @@ mod tests {
                 [(x % 251) as u8, (y % 251) as u8, ((x * 3 + y) % 251) as u8]
             })
             .collect();
-        write_tx(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+        write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw).expect("write");
         path
     }
 
@@ -901,7 +901,8 @@ mod tests {
                 [x * 0.125, y * 0.0625, 12.5]
             })
             .collect();
-        crate::tiled::write_tx_exr(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+        crate::tiled::write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw)
+            .expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         let budget = 1024 * 1024;

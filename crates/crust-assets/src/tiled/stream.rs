@@ -16,9 +16,10 @@
 
 use super::cache::{TileCache, TileId, with_tile};
 use super::{LevelInfo, TiledFile};
+use crate::TransferCurve;
 use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
-use crate::uv_texture::{to_linear_table, udim_number};
-use crust_core::{ColorSpace, Texture2D};
+use crate::uv_texture::udim_number;
+use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -51,8 +52,8 @@ pub struct StreamingTexture {
     /// *file*, read once at open, which is what lets the texel fetch pick its
     /// decode from a loop-invariant field instead of from every tile.
     linear: bool,
-    /// The space the texels decode under, `Auto` resolved against the file.
-    space: ColorSpace,
+    /// The space the texels decode under, resolved against the file.
+    space: ResolvedColorSpace,
     tiled: bool,
     fallback: [f32; 4],
 }
@@ -65,16 +66,11 @@ pub struct StreamingTexture {
 /// no longer says whether the source was a greyscale mask. Without a marker
 /// (an OIIO `maketx` file) the format decides, by the same rule the preload
 /// path applies: half is linear, 8-bit RGB is sRGB.
-fn resolve_auto_space(f: &TiledFile) -> ColorSpace {
+fn resolve_auto_space(f: &TiledFile) -> ResolvedColorSpace {
     let named = f.mip_space().and_then(|m| {
-        [
-            ColorSpace::Srgb,
-            ColorSpace::Gamma22,
-            ColorSpace::Gamma18,
-            ColorSpace::Raw,
-        ]
-        .into_iter()
-        .find(|s| crate::tiled::space_name(*s) == m)
+        ResolvedColorSpace::ALL
+            .into_iter()
+            .find(|s| crate::tiled::space_name(*s) == m)
     });
     named.unwrap_or_else(|| ColorSpace::Auto.resolve_auto(!f.is_linear(), 3))
 }
@@ -95,8 +91,8 @@ impl StreamingTexture {
         // `Auto` is settled by the first file that opens (see
         // `resolve_auto_space`); every later tile must then match that answer,
         // exactly as it must match an explicit space.
-        let mut space = space;
-        let mut want_space = crate::tiled::space_name(space);
+        let mut resolved = space.resolved();
+        let mut settle = |f: &TiledFile| *resolved.get_or_insert_with(|| resolve_auto_space(f));
 
         let mut charts = Vec::new();
         if tiled {
@@ -109,14 +105,12 @@ impl StreamingTexture {
                     if !p.exists() {
                         continue;
                     }
-                    let opened = TiledFile::open(&p).inspect(|f| {
-                        if space == ColorSpace::Auto {
-                            space = resolve_auto_space(f);
-                            want_space = crate::tiled::space_name(space);
-                        }
+                    let opened = TiledFile::open(&p).map(|f| {
+                        let want = crate::tiled::space_name(settle(&f));
+                        (f, want)
                     });
                     match opened {
-                        Ok(f) if !f.mip_space_matches(want_space) => {
+                        Ok((f, want_space)) if !f.mip_space_matches(want_space) => {
                             tracing::warn!(
                                 "{}: mip chain was reduced in {:?}, not {want_space} — \
                                  falling back to the preloaded texture",
@@ -125,7 +119,7 @@ impl StreamingTexture {
                             );
                             return None;
                         }
-                        Ok(f) => {
+                        Ok((f, _)) => {
                             if let Some(id) = cache.intern(f.clone()) {
                                 charts.push(Chart {
                                     number: 1001 + u + 10 * v,
@@ -139,14 +133,12 @@ impl StreamingTexture {
                 }
             }
         } else {
-            let opened = TiledFile::open(path).inspect(|f| {
-                if space == ColorSpace::Auto {
-                    space = resolve_auto_space(f);
-                    want_space = crate::tiled::space_name(space);
-                }
+            let opened = TiledFile::open(path).map(|f| {
+                let want = crate::tiled::space_name(settle(&f));
+                (f, want)
             });
             match opened {
-                Ok(f) if !f.mip_space_matches(want_space) => {
+                Ok((f, want_space)) if !f.mip_space_matches(want_space) => {
                     tracing::warn!(
                         "{}: mip chain was reduced in {:?}, not {want_space} — \
                          falling back to the preloaded texture",
@@ -155,7 +147,7 @@ impl StreamingTexture {
                     );
                     return None;
                 }
-                Ok(f) => {
+                Ok((f, _)) => {
                     let id = cache.intern(f.clone())?;
                     charts.push(Chart {
                         number: 1001,
@@ -170,11 +162,13 @@ impl StreamingTexture {
             return None;
         }
 
+        // Settled by the first chart, which is also the first file opened.
+        let space = settle(&charts[0].file);
         let linear = charts[0].file.is_linear();
         Some(StreamingTexture {
             charts,
             cache,
-            to_linear: to_linear_table(space),
+            to_linear: space.to_linear_table(),
             linear,
             space,
             tiled,
@@ -206,8 +200,8 @@ impl StreamingTexture {
         self.linear
     }
 
-    /// The colour space the texels decode under, with `Auto` resolved.
-    pub fn color_space(&self) -> ColorSpace {
+    /// The colour space the texels decode under.
+    pub fn color_space(&self) -> ResolvedColorSpace {
         self.space
     }
 
@@ -380,7 +374,7 @@ mod tests {
         name: &str,
         w: usize,
         h: usize,
-        space: crust_core::ColorSpace,
+        space: crust_core::ResolvedColorSpace,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("crust_stream_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -415,7 +409,7 @@ mod tests {
     /// two paths stop being comparable at all.
     #[test]
     fn streaming_and_preloading_agree_bit_for_bit() {
-        let (png, tx) = pair("agree", 256, 192, crust_core::ColorSpace::Srgb);
+        let (png, tx) = pair("agree", 256, 192, crust_core::ResolvedColorSpace::Srgb);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::Srgb, true).expect("preload");
         let cache = Arc::new(TileCache::new(64 * 1024 * 1024));
         let stream = StreamingTexture::open(&tx, crust_core::ColorSpace::Srgb, cache, |_, _| None)
@@ -445,7 +439,7 @@ mod tests {
     /// edge, which is where the clipped-edge-tile stride would show up.
     #[test]
     fn agreement_holds_across_clipped_edge_tiles() {
-        let (png, tx) = pair("clipped", 150, 100, crust_core::ColorSpace::Raw);
+        let (png, tx) = pair("clipped", 150, 100, crust_core::ResolvedColorSpace::Raw);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::Raw, true).expect("preload");
         let cache = Arc::new(TileCache::new(16 * 1024 * 1024));
         let stream = StreamingTexture::open(&tx, crust_core::ColorSpace::Raw, cache, |_, _| None)
@@ -474,7 +468,7 @@ mod tests {
     fn a_thrashing_budget_changes_timing_not_pixels() {
         // Big enough that level 0 alone (3.1 MB of tiles) is several times
         // the cache's 1 MiB floor, so the sweep really runs.
-        let (png, tx) = pair("thrash", 1024, 1024, crust_core::ColorSpace::Srgb);
+        let (png, tx) = pair("thrash", 1024, 1024, crust_core::ResolvedColorSpace::Srgb);
         let pre = UvTexture::open_with(&png, crust_core::ColorSpace::Srgb, true).expect("preload");
         let cache = Arc::new(TileCache::new(1));
         let stream =
@@ -553,7 +547,7 @@ mod tests {
             .into_raw();
 
         let tx = dir.join("src.tx");
-        crate::tiled::write_tx_exr(&tx, &decoded, w, h, crust_core::ColorSpace::Raw)
+        crate::tiled::write_tx_exr(&tx, &decoded, w, h, crust_core::ResolvedColorSpace::Raw)
             .expect("write tx");
 
         let pre = UvTexture::open_with(&hdr, crust_core::ColorSpace::Raw, true).expect("preload");
@@ -622,7 +616,8 @@ mod tests {
         let tx = dir.join("s.tx");
         let (w, h) = (32usize, 32usize);
         let src: Vec<f32> = (0..w * h * 3).map(|i| (i % 17) as f32 / 16.0).collect();
-        crate::tiled::write_tx_exr(&tx, &src, w, h, crust_core::ColorSpace::Srgb).expect("write");
+        crate::tiled::write_tx_exr(&tx, &src, w, h, crust_core::ResolvedColorSpace::Srgb)
+            .expect("write");
 
         let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
         assert_eq!(
@@ -654,7 +649,7 @@ mod tests {
     /// falls back to preloading, which is slower and right.
     #[test]
     fn a_mismatched_mip_space_declines_instead_of_reading_the_wrong_levels() {
-        let (png, tx) = pair("space", 128, 128, crust_core::ColorSpace::Srgb);
+        let (png, tx) = pair("space", 128, 128, crust_core::ResolvedColorSpace::Srgb);
         let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
 
         // Same space: opens.
@@ -698,7 +693,7 @@ mod tests {
     /// chosen for. That arm is `TiledFile::mip_space_matches`'s `None` case.
     #[test]
     fn the_mip_space_marker_round_trips_and_discriminates() {
-        let (png, tx) = pair("unmarked", 96, 96, crust_core::ColorSpace::Srgb);
+        let (png, tx) = pair("unmarked", 96, 96, crust_core::ResolvedColorSpace::Srgb);
         let tf = TiledFile::open(&tx).expect("open");
         assert_eq!(tf.mip_space(), Some("srgb_texture"));
         assert!(tf.mip_space_matches("srgb_texture"));

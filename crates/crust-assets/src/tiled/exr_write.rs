@@ -22,7 +22,7 @@
 
 use super::write::space_name;
 use crate::uv_texture::reduce_half_linear;
-use crust_core::ColorSpace;
+use crust_core::ResolvedColorSpace;
 use exr::math::RoundingMode;
 use exr::prelude::{
     AnyChannel, AnyChannels, Blocks, Compression, Encoding, FlatSamples, Image, Layer,
@@ -44,7 +44,7 @@ pub fn write_tx_exr(
     src: &[f32],
     width: usize,
     height: usize,
-    space: ColorSpace,
+    space: ResolvedColorSpace,
 ) -> io::Result<Vec<(usize, usize)>> {
     if width == 0 || height == 0 {
         return Err(io::Error::new(
