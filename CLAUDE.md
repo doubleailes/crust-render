@@ -59,6 +59,11 @@ cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did th
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
+# ...and .github/workflows/nightly.yml in parallel: clippy + tests on a pinned nightly
+# (NIGHTLY_PINNED; red means this code) and on the latest one (allowed to fail, and
+# run daily), plus the nightly-only `bvh8` feature. Reproduce the pinned leg with:
+cargo +nightly-2026-09-26 clippy --workspace --all-targets -- -D warnings
+cargo +nightly-2026-09-26 test -p crust-rt --features bvh8
 ```
 
 The probe examples (`mtlx_shade`, `tex_probe`, `ptex_verify`, `ptex_seams`,

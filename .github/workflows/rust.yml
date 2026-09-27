@@ -78,28 +78,8 @@ jobs:
       - name: Subdivision memory probe
         run: cargo test -p crust-core --lib subdivision_memory_probe -- --ignored --nocapture --test-threads=1
 
-  # The nightly-only `bvh8` experiment (8-wide BVH nodes on `std::simd`;
-  # docs/simd.md, "BVH8 on nightly"). Pinned to one nightly so it does not
-  # break on code nobody touched, and non-blocking: it keeps the experiment
-  # compiling without making nightly a gate for the stable build. Not a
-  # `needs` of `release`.
-  nightly-bvh8:
-    name: nightly bvh8 (experimental)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    env:
-      NIGHTLY: nightly-2026-09-26
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toolchain
-        run: |
-          rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component clippy
-          rustup default ${{ env.NIGHTLY }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Lint
-        run: cargo clippy -p crust-rt --all-targets --features bvh8 -- -D warnings
-      - name: Run tests
-        run: cargo test -p crust-rt --features bvh8 --no-fail-fast
+  # Nightly Rust, the `bvh8` experiment included, runs in parallel as its
+  # own workflow: .github/workflows/nightly.yml.
 
   release:
     runs-on: ubuntu-latest
