@@ -48,6 +48,43 @@ struct PassConfig {
 }
 
 /// Image-quality statistics of one render pass.
+/// A pass's guiding training samples, where the workers left them: one
+/// buffer per work unit (tile or row), and the order to read them in.
+///
+/// The SD-tree accumulates its samples in floating point, so they must reach
+/// it in scanline order whichever order the pixels were rendered in. Rather
+/// than copy every sample into one frame-order vector, the pass records, per
+/// pixel in scanline order, which buffer holds its samples and where; reading
+/// through [`PassSamples::iter`] visits them in exactly that order.
+#[derive(Default)]
+struct PassSamples {
+    buffers: Vec<Vec<SampleData>>,
+    /// `(buffer, start, end)` runs in scanline order.
+    order: Vec<(u32, u32, u32)>,
+}
+
+impl PassSamples {
+    fn len(&self) -> usize {
+        self.buffers.iter().map(Vec::len).sum()
+    }
+
+    /// Appends the run `buffer[start..end]`, extending the last run when it
+    /// continues it (the next pixel of the same tile row).
+    fn push_run(&mut self, buffer: u32, start: u32, end: u32) {
+        match self.order.last_mut() {
+            Some((b, _, e)) if *b == buffer && *e == start => *e = end,
+            _ => self.order.push((buffer, start, end)),
+        }
+    }
+
+    /// Every sample, in scanline order.
+    fn iter(&self) -> impl Iterator<Item = &SampleData> {
+        self.order
+            .iter()
+            .flat_map(|&(b, s, e)| &self.buffers[b as usize][s as usize..e as usize])
+    }
+}
+
 struct PassStats {
     /// Mean per-pixel variance of the pixel estimate — the inverse-variance
     /// blending weight (`f64::INFINITY` when spp < 2 makes estimation
@@ -261,7 +298,7 @@ impl Renderer {
             } else if k == cfg.train_iterations - 1 {
                 eff_guided = Some((stats.var_map, secs));
             }
-            field.update(&samples, k + 1);
+            field.update(samples.iter(), k + 1);
             debug!(
                 "path guiding: field now holds {} spatial leaf/leaves after pass {}/{}",
                 field.leaf_count(),
@@ -368,9 +405,9 @@ impl Renderer {
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
-    ) -> (Buffer, Vec<SampleData>, PassStats) {
+    ) -> (Buffer, PassSamples, PassStats) {
         let mut buffer = Buffer::new(self.settings.width, self.settings.height);
-        let mut all_samples = Vec::new();
+        let mut all_samples = PassSamples::default();
         let mut variance_sum = 0.0f64;
         let mut rays = RayStats::default();
         let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
@@ -416,11 +453,14 @@ impl Renderer {
             // many threads at once (see `ProgressCallback`). Taken once per
             // tile, which no render will notice.
             let done = std::sync::Mutex::new(0u64);
-            type TileOut = (Vec<(Vec3A, f64, Vec<SampleData>)>, RayStats);
+            // Per pixel: its colour, variance, and where its training samples
+            // end in the tile's one sample buffer.
+            type TileOut = (Vec<(Vec3A, f64, u32)>, Vec<SampleData>, RayStats);
             let results: Vec<TileOut> = tiles
                 .par_iter()
                 .map(|tile| {
                     let mut pixels = Vec::with_capacity(tile.width * tile.height);
+                    let mut samples = Vec::new();
                     // Private to this tile, so no two threads share a
                     // counter and there is nothing to synchronise. The path
                     // scratch has the same ownership story: one buffer serves
@@ -429,13 +469,14 @@ impl Renderer {
                     let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, s, v) = if profiling {
+                            let (color, v) = if profiling {
                                 self.render_pixel::<true>(
                                     i,
                                     j,
                                     &cfg,
                                     &filter,
                                     gctx,
+                                    &mut samples,
                                     &mut scratch,
                                     &mut tile_rays,
                                 )
@@ -446,11 +487,12 @@ impl Renderer {
                                     &cfg,
                                     &filter,
                                     gctx,
+                                    &mut samples,
                                     &mut scratch,
                                     &mut tile_rays,
                                 )
                             };
-                            pixels.push((color, v, s));
+                            pixels.push((color, v, samples.len() as u32));
                         }
                     }
                     // Once per tile, and a no-op unless `--profile` is on.
@@ -460,7 +502,7 @@ impl Renderer {
                         *n += 1;
                         cb(*n, total);
                     }
-                    (pixels, tile_rays)
+                    (pixels, samples, tile_rays)
                 })
                 .collect();
             // Tiles finish in tile order, but what the pass hands on — the
@@ -474,11 +516,12 @@ impl Renderer {
             // The tile results are replayed in that order straight from the
             // tile grid (`generate_tiles` emits tile rows by increasing `y`,
             // each left to right, so walking it backwards by row gives rows
-            // in scanline order), and nothing full-frame is allocated to do
-            // it.
+            // in scanline order). Nothing full-frame is copied to do it: the
+            // samples stay in the tile buffers, and only their scanline-order
+            // runs are recorded, one per tile per row.
             let w = self.settings.width;
-            let mut results = results;
-            for (_, tile_rays) in &results {
+            let training = results.iter().any(|(_, s, _)| !s.is_empty());
+            for (_, _, tile_rays) in &results {
                 rays.merge(tile_rays);
             }
             let tiles_x = w.div_ceil(TILE);
@@ -488,18 +531,24 @@ impl Renderer {
                 for j in (y0..y0 + rows).rev() {
                     for k in row.clone() {
                         let tile = &tiles[k];
-                        let pixels = &mut results[k].0;
+                        let pixels = &results[k].0;
                         for i in tile.x..tile.x + tile.width {
-                            let (color, var, s) =
-                                &mut pixels[(j - tile.y) * tile.width + (i - tile.x)];
-                            buffer.set_pixel(i, j, *color);
-                            var_map[j * w + i] = *var;
-                            variance_sum += *var;
-                            all_samples.append(s);
+                            let p = (j - tile.y) * tile.width + (i - tile.x);
+                            let (color, var, end) = pixels[p];
+                            buffer.set_pixel(i, j, color);
+                            var_map[j * w + i] = var;
+                            variance_sum += var;
+                            // Where this pixel's samples sit in its tile's
+                            // buffer: from where the previous pixel's ended.
+                            let start = if p == 0 { 0 } else { pixels[p - 1].2 };
+                            if training && end > start {
+                                all_samples.push_run(k as u32, start, end);
+                            }
                         }
                     }
                 }
             }
+            all_samples.buffers = results.into_iter().map(|(_, s, _)| s).collect();
         } else {
             // Rows are the work unit, and each worker writes its row of the
             // buffer and of the variance map in place: `par_chunks_mut` hands
@@ -521,13 +570,14 @@ impl Renderer {
                     let mut row_rays = RayStats::default();
                     let mut samples = Vec::new();
                     for i in 0..w {
-                        let (c, s, v) = if profiling {
+                        let (c, v) = if profiling {
                             self.render_pixel::<true>(
                                 i,
                                 j,
                                 &cfg,
                                 &filter,
                                 gctx,
+                                &mut samples,
                                 &mut scratch,
                                 &mut row_rays,
                             )
@@ -538,13 +588,13 @@ impl Renderer {
                                 &cfg,
                                 &filter,
                                 gctx,
+                                &mut samples,
                                 &mut scratch,
                                 &mut row_rays,
                             )
                         };
                         pixels[i] = c;
                         vars[i] = v;
-                        samples.extend(s);
                     }
                     // Once per row, and a no-op unless `--profile` is on.
                     profile::flush();
@@ -560,15 +610,20 @@ impl Renderer {
             // an f64 sum, and the training samples the SD-tree accumulates —
             // is gathered serially in scanline order (rows top-down, pixels
             // left to right), exactly as the tiled path gathers it.
-            for (j, (samples, row_rays)) in rows.into_iter().enumerate().rev() {
-                rays.merge(&row_rays);
+            for (j, (samples, row_rays)) in rows.iter().enumerate().rev() {
+                rays.merge(row_rays);
                 // Pixel by pixel into the one running sum: a per-row partial
                 // would round differently.
                 for &v in &var_map[j * w..(j + 1) * w] {
                     variance_sum += v;
                 }
-                all_samples.extend(samples);
+                // A row's samples are already in pixel order in its own
+                // buffer: one run per row.
+                if !samples.is_empty() {
+                    all_samples.push_run(j as u32, 0, samples.len() as u32);
+                }
             }
+            all_samples.buffers = rows.into_iter().map(|(s, _)| s).collect();
         }
 
         let elapsed = pass_start.elapsed();
@@ -611,9 +666,10 @@ impl Renderer {
         cfg: &PassConfig,
         filter: &FilterSampler,
         gctx: Option<&GuidingContext>,
+        samples: &mut Vec<SampleData>,
         scratch: &mut PathScratch,
         stats: &mut RayStats,
-    ) -> (Vec3A, Vec<SampleData>, f64) {
+    ) -> (Vec3A, f64) {
         let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
         let mut sum = Vec3A::ZERO;
         // FIS weight sum (see `filter.rs`): the pixel estimate is the
@@ -622,7 +678,6 @@ impl Renderer {
         // is the plain mean — box at radius 0.5 stays bit-identical to the
         // historical unweighted, unfiltered estimator.
         let mut weight_sum = 0.0f32;
-        let mut samples = Vec::new();
         let mut lum_sum = 0.0f64;
         let mut lum_sq = 0.0f64;
 
@@ -706,7 +761,7 @@ impl Renderer {
                 self.settings.indirect_clamp,
                 root,
                 gctx,
-                &mut samples,
+                samples,
                 scratch,
                 stats,
             ) * (wx * wy);
@@ -759,7 +814,7 @@ impl Renderer {
         } else {
             sum / taken as f32
         };
-        (mean, samples, variance)
+        (mean, variance)
     }
 }
 
