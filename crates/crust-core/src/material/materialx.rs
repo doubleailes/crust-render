@@ -153,6 +153,7 @@ impl MtlxMaterial {
         };
         SLOTS.with(|cell| {
             let mut slots = cell.borrow_mut();
+            let shader = crate::profile::scope(crate::profile::Section::RunShader);
             #[cfg(feature = "jit")]
             match &self.jit {
                 Some(jit) => jit.eval(&ctx, &mut slots),
@@ -160,6 +161,7 @@ impl MtlxMaterial {
             }
             #[cfg(not(feature = "jit"))]
             self.program.eval(&ctx, &mut slots);
+            drop(shader);
             let (params, normal) = reduce(&self.flat, &slots, &self.base);
             // A shading normal from the graph replaces the geometric one for
             // the BSDF, but must not flip the surface: a normal map can push
@@ -180,6 +182,10 @@ impl MtlxMaterial {
 }
 
 impl Material for MtlxMaterial {
+    fn kind(&self) -> &'static str {
+        "MaterialX"
+    }
+
     fn scatter_importance(
         &self,
         r_in: &Ray,

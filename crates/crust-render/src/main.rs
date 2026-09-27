@@ -107,6 +107,13 @@ struct Cli {
     /// render, output) when the render finishes.
     #[arg(long, default_value_t = false)]
     stats: bool,
+    /// Also time the render section by section (Trace, EvalBsdfs, Texture,
+    /// SurfaceLighting, ...) and add Guerilla-style profiles of it to the
+    /// `--stats` report, which it implies. Costs render time (the report
+    /// prints its own estimate), so it is separate from `--stats`, whose
+    /// Render phase must stay comparable between runs.
+    #[arg(long, default_value_t = false)]
+    profile: bool,
     /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
     /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
     /// older than its source. A `.tx` beside a texture is always streamed when
@@ -454,6 +461,7 @@ fn main() {
     // the CLI's --samples / --strategy overrides have been applied, so the
     // report describes the render that actually ran.
     stats.image = (&settings).into();
+    crust_core::profile::set_enabled(cli.profile);
     // Timer
     let start = Instant::now();
     // World
@@ -507,6 +515,10 @@ fn main() {
     // once the last one has stopped.
     stats.textures = assets.texture_cache_stats();
     stats.ptex = assets.ptex_stats();
+    stats.inventory_from(&renderer.world, &renderer.lights);
+    if cli.profile {
+        stats.profile = crust_core::profile::take();
+    }
     info!("Render finished in {duration:?}");
     // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
@@ -538,7 +550,7 @@ fn main() {
     // separately from RenderStats because they come from the kernel and
     // only exist in a feature-on build.
     #[cfg(feature = "traversal-stats")]
-    if cli.stats {
+    if cli.stats || cli.profile {
         // Accumulated into one string and emitted as a single event, for the
         // reason the report below is: a `println!` per row would leave these
         // lines out of `--log-file`, and one event per row would stamp each
@@ -570,7 +582,7 @@ fn main() {
         info!(target: STATS_TARGET, "{out}");
     }
 
-    if cli.stats {
+    if cli.stats || cli.profile {
         // Through `tracing` rather than `println!`, so the report reaches
         // every sink the run configured — `--log-file` above all, which is
         // where a record of a render is least useful without its profile.
@@ -859,6 +871,7 @@ mod tests {
             "--filter-radius",
             "1.75",
             "--stats",
+            "--profile",
             "-l",
             "debug",
             "--frame",
@@ -875,6 +888,7 @@ mod tests {
         assert!(matches!(cli.filter, Some(Filter::Mitchell)));
         assert_eq!(cli.filter_radius, Some(1.75));
         assert!(cli.stats);
+        assert!(cli.profile);
         assert!(matches!(cli.level, LoggerLevel::Debug));
         let scan = Cli::try_parse_from(["crust-render", "--scanline"]).expect("valid flags");
         assert!(scan.scanline);
@@ -892,6 +906,7 @@ mod tests {
         assert!(cli.filter_radius.is_none());
         assert!(cli.frame.is_none());
         assert!(!cli.stats);
+        assert!(!cli.profile);
         assert!(matches!(cli.level, LoggerLevel::Info));
     }
 

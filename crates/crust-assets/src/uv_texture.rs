@@ -605,6 +605,7 @@ impl UvTexture {
 
 impl Texture2D for UvTexture {
     fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
+        let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
         if !u.is_finite() || !v.is_finite() {
             return [0.0, 0.0, 0.0, 1.0];
         }

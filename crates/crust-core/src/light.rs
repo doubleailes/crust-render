@@ -11,6 +11,11 @@ use std::sync::Arc;
 /// point. One shape implementation per supported UsdLux schema (sphere, rect,
 /// …).
 pub trait LightShape: Send + Sync {
+    /// Short name for the `--stats` light breakdown.
+    fn kind(&self) -> &'static str {
+        "area"
+    }
+
     /// A point on the surface, uniform by area, from two unit random numbers.
     fn sample_point(&self, u: f32, v: f32) -> Vec3A;
 
@@ -139,6 +144,10 @@ pub struct SphereShape {
 }
 
 impl LightShape for SphereShape {
+    fn kind(&self) -> &'static str {
+        "sphere"
+    }
+
     fn sample_point(&self, u: f32, v: f32) -> Vec3A {
         let theta = 2.0 * std::f32::consts::PI * u;
         let phi = (1.0 - 2.0 * v).acos();
@@ -445,6 +454,10 @@ impl SphericalRect {
 }
 
 impl LightShape for RectShape {
+    fn kind(&self) -> &'static str {
+        "rect"
+    }
+
     fn sample_point(&self, u: f32, v: f32) -> Vec3A {
         self.origin + u * self.edge_u + v * self.edge_v
     }
@@ -617,6 +630,14 @@ impl AffineShape {
 }
 
 impl LightShape for AffineShape {
+    fn kind(&self) -> &'static str {
+        match self.unit {
+            UnitShape::Sphere => "sphere (affine)",
+            UnitShape::Disk => "disk",
+            UnitShape::Cylinder => "cylinder",
+        }
+    }
+
     fn sample_point(&self, u: f32, v: f32) -> Vec3A {
         self.light_to_world
             .transform_point3a(self.unit.sample(u, v))
@@ -717,6 +738,11 @@ pub struct LightSample {
 /// infinity it is a ray escaping the scene, weighted with
 /// [`Light::escaped`]. A light implements whichever applies.
 pub trait Light: Send + Sync {
+    /// Short name for the `--stats` light breakdown.
+    fn kind(&self) -> &'static str {
+        "light"
+    }
+
     /// Samples a direction from `from` toward the light. `None` when the
     /// light cannot be reached from there (below a dome's horizon, say).
     ///
@@ -839,6 +865,10 @@ impl AreaLight {
 }
 
 impl Light for AreaLight {
+    fn kind(&self) -> &'static str {
+        self.shape.kind()
+    }
+
     fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
         // The shape's solid-angle strategy where it has one from here, area
         // sampling otherwise. `pdf_at_point` makes the same choice through
@@ -1007,6 +1037,10 @@ impl DistantLight {
 }
 
 impl Light for DistantLight {
+    fn kind(&self) -> &'static str {
+        "distant"
+    }
+
     fn sample_li(&self, _from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
         // Uniform direction within the cone around `-direction`.
         let cos_theta = 1.0 - u * (1.0 - self.cos_half_angle);
@@ -1103,6 +1137,10 @@ impl DomeLight {
 }
 
 impl Light for DomeLight {
+    fn kind(&self) -> &'static str {
+        "dome"
+    }
+
     fn sample_li(&self, _from: Vec3A, u: f32, v: f32) -> Option<LightSample> {
         let (direction, radiance, pdf) = match &self.map {
             Some(map) => {
@@ -1374,6 +1412,20 @@ impl LightList {
     }
 
     /// Returns the number of lights in the `LightList`.
+    /// Lights grouped by [`Light::kind`], most numerous first.
+    pub fn kind_breakdown(&self) -> Vec<(&'static str, usize)> {
+        let mut out: Vec<(&'static str, usize)> = Vec::new();
+        for (light, _) in self.iter() {
+            let kind = light.kind();
+            match out.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, n)) => *n += 1,
+                None => out.push((kind, 1)),
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        out
+    }
+
     pub fn count(&self) -> usize {
         self.lights.len()
     }

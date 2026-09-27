@@ -1267,6 +1267,10 @@ impl OpenPBR {
 }
 
 impl Material for OpenPBR {
+    fn kind(&self) -> &'static str {
+        "OpenPBR"
+    }
+
     fn scatter_importance(
         &self,
         r_in: &Ray,

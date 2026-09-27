@@ -372,6 +372,10 @@ impl PreviewSurface {
 }
 
 impl Material for PreviewSurface {
+    fn kind(&self) -> &'static str {
+        "UsdPreviewSurface (textured)"
+    }
+
     fn scatter_importance(
         &self,
         r_in: &Ray,
