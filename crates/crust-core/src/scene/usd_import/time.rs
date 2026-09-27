@@ -1,5 +1,7 @@
 //! Evaluation time: the USD time code every attribute read resolves at.
 
+use std::marker::PhantomData;
+
 use openusd::usd::TimeCode;
 
 thread_local! {
@@ -23,11 +25,16 @@ thread_local! {
 
 /// Sets [`EVAL_TIME`] for the lifetime of one `load_scene` call and restores
 /// whatever was there before, including on an early `?` return.
-pub(super) struct EvalTimeScope(Option<f64>);
+///
+/// `!Send`: the guard restores a thread-local, so dropping it on any other
+/// thread than the one that entered it would restore the wrong thread's time.
+/// The marker makes moving it into a rayon task a compile error.
+#[must_use = "the evaluation time is restored when the scope is dropped"]
+pub(super) struct EvalTimeScope(Option<f64>, PhantomData<*const ()>);
 
 impl EvalTimeScope {
     pub(super) fn enter(time: Option<f64>) -> Self {
-        EvalTimeScope(EVAL_TIME.with(|t| t.replace(time)))
+        EvalTimeScope(EVAL_TIME.with(|t| t.replace(time)), PhantomData)
     }
 }
 

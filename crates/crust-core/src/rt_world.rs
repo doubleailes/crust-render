@@ -526,6 +526,7 @@ impl WorldBuilder {
     }
 
     /// Builds the acceleration structure (parallel, deterministic).
+    #[must_use = "the committed world is the only way to intersect it"]
     pub fn commit(self) -> World {
         World {
             scene: self.rt.commit(),
@@ -554,6 +555,7 @@ pub struct World {
 
 impl World {
     /// Closest hit in `(t_min, t_max)` with its material resolved.
+    #[must_use]
     pub fn intersect(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<WorldHit<'_>> {
         let h = self.scene.intersect(ray.rt(), t_min, t_max)?;
         // The kernel reports triangle barycentrics; a per-face-textured mesh
@@ -619,6 +621,7 @@ impl World {
     }
 
     /// Early-exit occlusion query — the shadow-ray fast path.
+    #[must_use]
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         self.scene.occluded(ray.rt(), t_min, t_max)
     }

@@ -39,11 +39,13 @@ impl Ray {
         }
     }
 
+    #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_time(mut self, time: f32) -> Ray {
         self.time = time;
         self
     }
 
+    #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_mask(mut self, mask: u32) -> Ray {
         self.mask = mask;
         self

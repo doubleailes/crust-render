@@ -326,6 +326,7 @@ impl PhaseMix {
     /// direction `wi` (normalized). `lobe_u` picks the phase lobe and `hg_uv`
     /// samples the Henyey-Greenstein direction — the caller draws all three
     /// stratified dimensions from one QMC domain.
+    #[must_use]
     pub fn sample(&self, wi: Vec3A, lobe_u: f32, hg_uv: [f32; 2]) -> Vec3A {
         let mut pick = lobe_u;
         let mut g = self.lobes[self.lobes.len() - 1].1;

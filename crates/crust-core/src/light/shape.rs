@@ -47,6 +47,7 @@ pub trait LightShape: Send + Sync {
     /// two MIS sides describe different strategies and emission is
     /// double-counted. And every point it returns must be one a ray from
     /// `from` could hit first, i.e. on the side of the shape that faces it.
+    #[must_use]
     fn sample_solid_angle(&self, _from: Vec3A, _u: f32, _v: f32) -> Option<(Vec3A, f32)> {
         None
     }
@@ -54,6 +55,7 @@ pub trait LightShape: Send + Sync {
     /// The solid-angle pdf, seen from `from`, of
     /// [`LightShape::sample_solid_angle`] having produced `p` — the bounce side
     /// of MIS. `None` exactly when `sample_solid_angle` is.
+    #[must_use]
     fn solid_angle_pdf(&self, _from: Vec3A, _p: Vec3A) -> Option<f32> {
         None
     }

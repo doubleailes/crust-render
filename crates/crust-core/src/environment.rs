@@ -172,6 +172,7 @@ impl EnvironmentMap {
     /// Importance-samples a direction. Returns `(direction, radiance,
     /// solid-angle pdf)`; `None` only for a wholly black map, which has
     /// nothing to sample.
+    #[must_use]
     pub fn sample(&self, u1: f32, u2: f32) -> Option<(Vec3A, Vec3A, f32)> {
         if self.marginal.integral <= 0.0 {
             return None;

@@ -284,6 +284,7 @@ impl SceneBuilder {
     }
 
     /// Expands every geometry into primitives and builds the BVH.
+    #[must_use = "the committed scene is the only way to intersect it"]
     pub fn commit(self) -> Scene {
         let n_geoms = self.geoms.len() as u32;
         // Size the primitive array exactly once, from the total the
@@ -496,6 +497,7 @@ pub struct Scene {
 impl Scene {
     /// Closest hit in `(t_min, t_max)`, or `None` (Embree's
     /// `rtcIntersect1`).
+    #[must_use]
     pub fn intersect(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<RayHit> {
         let hit = self.bvh.hit(ray, t_min, t_max)?;
         let front_face = ray.dir.dot(hit.outward) < 0.0;
@@ -516,6 +518,7 @@ impl Scene {
 
     /// Does the ray hit *anything* in `(t_min, t_max)`? Early-exit
     /// traversal — the shadow-ray fast path (Embree's `rtcOccluded1`).
+    #[must_use]
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         self.bvh.hit_any(ray, t_min, t_max)
     }
@@ -1525,7 +1528,7 @@ mod tests {
             MASK_ALL,
             InstanceHitId::Offset(u32::MAX - 5),
         );
-        b.commit();
+        let _ = b.commit();
     }
 
     /// The bound is exact enough to accept the largest offset that fits.
