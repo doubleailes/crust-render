@@ -24,6 +24,7 @@ use super::{Light, LightSample};
 /// hop behind a heap pointer: the move `crust_rt`'s `PrimNode` made. The
 /// trait stays the contract every variant implements; the enum is only the
 /// dispatch.
+#[derive(Clone)]
 pub enum AreaShape {
     Sphere(SphereShape),
     Affine(AffineShape),
@@ -99,6 +100,7 @@ impl LightShape for AreaShape {
 /// A geometric area light: an [`AreaShape`] paired with the [`Emissive`]
 /// material its scene geometry carries (Cornell-box semantics — the same
 /// surface is both light and visible object).
+#[derive(Clone)]
 pub struct AreaLight {
     pub(super) shape: AreaShape,
     pub(super) material: Arc<Emissive>,

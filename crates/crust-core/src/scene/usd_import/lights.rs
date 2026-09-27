@@ -367,7 +367,7 @@ fn emit_round_light(
         Some(sphere) => sphere.into(),
         None => affine.into(),
     };
-    lights.add(Arc::new(AreaLight::new(shape, material, geom_id)));
+    lights.add(AreaLight::new(shape, material, geom_id));
     debug!(
         "{:?} light {}: area={} normalize={} radiance={:?} ({})",
         unit,
@@ -583,11 +583,11 @@ pub(super) fn emit_rect_light(
         material.clone(),
         light_ray_mask(prim),
     );
-    ctx.lights.add(Arc::new(AreaLight::new(
+    ctx.lights.add(AreaLight::new(
         RectShape::new(origin, edge_u, edge_v, normal),
         material,
         geom_id,
-    )));
+    ));
     debug!(
         "RectLight: origin={:?} edge_u={:?} edge_v={:?} normalize={} radiance={:?}",
         origin, edge_u, edge_v, params.normalize, radiance
@@ -653,7 +653,7 @@ pub(super) fn emit_distant_light(
         angle,
         params.normalize
     );
-    lights.add(Arc::new(light));
+    lights.add(light);
 }
 
 /// Imports a `UsdLuxDomeLight` as an infinite environment.
@@ -738,7 +738,7 @@ pub(super) fn emit_dome_light(
             None => "uniform".to_string(),
         }
     );
-    lights.add(Arc::new(CoreDomeLight::new(tint, map, rotation)));
+    lights.add(CoreDomeLight::new(tint, map, rotation));
 }
 
 /// The dome's `inputs:texture:file` as a filesystem path.

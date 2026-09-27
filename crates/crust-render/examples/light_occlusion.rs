@@ -28,8 +28,8 @@
 
 use crust_assets::FileAssets;
 use crust_core::{
-    LightSelection, MASK_SHADOW, Material, Ray, Renderer, ShadingPoint, UsdImportOptions, Vec3A,
-    World,
+    Light, LightSelection, MASK_SHADOW, Material, Ray, Renderer, ShadingPoint, UsdImportOptions,
+    Vec3A, World,
 };
 use std::path::PathBuf;
 

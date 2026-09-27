@@ -17,7 +17,7 @@ use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{LightList, PathSampler, profile};
+use crate::{Light, LightList, PathSampler, profile};
 
 use super::GuidingContext;
 use super::settings::SamplingStrategy;
@@ -296,6 +296,11 @@ enum PrevVertex<'a> {
 /// selection probability for this light times the light's own sampling pdf
 /// — and a light selected with probability zero is one NEE never samples, so
 /// it too keeps its emission whole.
+///
+/// `inline(always)` for the reason `escaped_emission` is: called once per
+/// `trace_path` instance, and with the lights statically dispatched the
+/// integrator grew past where LLVM would inline it on its own.
+#[inline(always)]
 fn bounce_emission_weight(
     prev: &PrevVertex,
     lights: &LightList,

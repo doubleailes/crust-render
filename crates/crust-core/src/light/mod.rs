@@ -4,12 +4,14 @@ use crate::pdf::PdfSolidAngle;
 
 mod area;
 mod infinite;
+mod kind;
 mod list;
 mod rect;
 mod shape;
 
 pub use area::{AreaLight, AreaShape};
 pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
+pub use kind::LightKind;
 pub use list::{LightList, LightSelection};
 pub use rect::RectShape;
 pub use shape::{AffineShape, LightShape, SphereShape, UnitShape};

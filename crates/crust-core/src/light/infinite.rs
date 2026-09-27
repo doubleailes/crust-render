@@ -33,6 +33,7 @@ use super::{Light, LightSample};
 /// `emit_distant_light` — and also owns what widening a zero angle means for
 /// each: a zero-angle light is a delta, whose `intensity` the spec and
 /// hdEmbree both deliver as irradiance, so it goes through `new` too.
+#[derive(Clone)]
 pub struct DistantLight {
     /// Unit direction the light travels *toward* (the direction photons
     /// move), so a shading point is lit from `-direction`.
@@ -177,6 +178,7 @@ const UNIFORM_SPHERE_PDF: PdfSolidAngle = PdfSolidAngle::from_measure(1.0 / (4.0
 /// `orientation` maps *world* directions into the dome's own space, so a
 /// rotated dome prim rotates the sky. It is the inverse of the prim's
 /// world transform, cached once.
+#[derive(Clone)]
 pub struct DomeLight {
     pub(super) tint: Vec3A,
     pub(super) map: Option<Arc<EnvironmentMap>>,

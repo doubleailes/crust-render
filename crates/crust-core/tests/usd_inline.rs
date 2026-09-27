@@ -3,7 +3,7 @@
 //! volumes, masks, subdivision and error handling. Complements
 //! `usd_scene.rs`, which loads the checked-in sample files.
 
-use crust_core::{MASK_CAMERA, Ray, SamplingStrategy, Scene, Vec3A};
+use crust_core::{Light, MASK_CAMERA, Ray, SamplingStrategy, Scene, Vec3A};
 use std::path::PathBuf;
 
 /// Writes `body` (the prims under `/World`) into a fresh `.usda` and loads it.

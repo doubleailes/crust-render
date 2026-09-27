@@ -31,11 +31,11 @@ fn add_sphere_light(
         material.clone(),
         MASK_INDIRECT | MASK_SHADOW,
     );
-    lights.add(Arc::new(AreaLight::new(
+    lights.add(AreaLight::new(
         SphereShape { center, radius },
         material,
         geom_id,
-    )));
+    ));
 }
 
 pub fn simple_scene() -> (World, LightList) {

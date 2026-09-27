@@ -321,14 +321,14 @@ fn distant_light_has_no_geometry() {
 fn find_by_geom_matches_by_id() {
     let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
     let mut lights = LightList::new();
-    lights.add(Arc::new(AreaLight::new(
+    lights.add(AreaLight::new(
         SphereShape {
             center: Vec3A::ZERO,
             radius: 1.0,
         },
         mat,
         7,
-    )));
+    ));
 
     assert!(lights.find_by_geom(7).is_some());
     assert!(lights.find_by_geom(8).is_none());
@@ -342,23 +342,19 @@ fn infinite_at_is_iter_at_filtered_to_escaped() {
     let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
     let mut lights = LightList::new();
     let area = |c: f32, id: u32| {
-        Arc::new(AreaLight::new(
+        AreaLight::new(
             SphereShape {
                 center: Vec3A::new(c, 0.0, 0.0),
                 radius: 1.0,
             },
             mat.clone(),
             id,
-        ))
+        )
     };
     lights.add(area(0.0, 0));
-    lights.add(Arc::new(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0)));
+    lights.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
     lights.add(area(3.0, 1));
-    lights.add(Arc::new(DomeLight::new(
-        Vec3A::ONE,
-        None,
-        glam::Mat3A::IDENTITY,
-    )));
+    lights.add(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY));
     for selection in [LightSelection::Uniform, LightSelection::Power] {
         lights.select_by(selection);
         let from = Vec3A::new(0.0, 5.0, 0.0);

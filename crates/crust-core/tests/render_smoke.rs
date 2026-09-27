@@ -519,11 +519,7 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
         emitter.clone(),
         MASK_SHADOW | MASK_INDIRECT,
     );
-    lights.add(Arc::new(AreaLight::new(
-        SphereShape { center, radius },
-        emitter,
-        id,
-    )));
+    lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
     let world = world.commit();
     let volumes = Volumes::default();
     let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
@@ -597,21 +593,17 @@ fn clamp_scene(bounce_wall: bool, clamp: f32) -> Renderer {
         emitter.clone(),
         MASK_SHADOW | MASK_INDIRECT,
     );
-    lights.add(Arc::new(AreaLight::new(
-        SphereShape { center, radius },
-        emitter,
-        id,
-    )));
-    lights.add(Arc::new(DistantLight::new(
+    lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
+    lights.add(DistantLight::new(
         Vec3A::new(0.3, -1.0, 0.2),
         Vec3A::splat(2.0),
         5.0,
-    )));
-    lights.add(Arc::new(DomeLight::new(
+    ));
+    lights.add(DomeLight::new(
         Vec3A::splat(0.2),
         None,
         glam::Mat3A::IDENTITY,
-    )));
+    ));
     let camera = Camera::new(
         Vec3A::new(0.0, 3.0, 5.0),
         Vec3A::ZERO,
@@ -714,22 +706,18 @@ fn power_light_selection_agrees_with_uniform_in_expectation() {
             emitter.clone(),
             MASK_SHADOW | MASK_INDIRECT,
         );
-        lights.add(Arc::new(AreaLight::new(
-            SphereShape { center, radius },
-            emitter,
-            id,
-        )));
+        lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
     }
-    lights.add(Arc::new(DistantLight::new(
+    lights.add(DistantLight::new(
         Vec3A::new(0.3, -1.0, 0.2),
         Vec3A::splat(2.0),
         5.0,
-    )));
-    lights.add(Arc::new(DomeLight::new(
+    ));
+    lights.add(DomeLight::new(
         Vec3A::splat(0.2),
         None,
         glam::Mat3A::IDENTITY,
-    )));
+    ));
     let world = world.commit();
     let volumes = Volumes::default();
     let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
@@ -795,11 +783,7 @@ fn light_geometry_hidden_from_camera_rays_still_lights_the_scene() {
         emitter.clone(),
         MASK_SHADOW | MASK_INDIRECT,
     );
-    lights.add(Arc::new(AreaLight::new(
-        SphereShape { center, radius },
-        emitter,
-        id,
-    )));
+    lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
     // The camera looks straight at the light: its geometry must not show.
     let camera = Camera::new(
         Vec3A::new(0.0, 0.0, 6.0),
