@@ -74,7 +74,13 @@ pub(super) fn collapse(
     indices: &[u32],
     prims: &[PrimNode],
 ) -> (Vec<WideNode>, LeafData) {
-    let mut out = Vec::with_capacity(binary.len() / 2 + 1);
+    // A binary tree of `n` nodes has `(n + 1) / 2` leaves, and a full
+    // `LANES`-wide tree over `L` leaves needs `(L - 1) / (LANES - 1)`
+    // internal nodes. Reserving one node per leaf instead (as this once did)
+    // held three times the 4-wide tree's nodes and seven times the 8-wide
+    // one's; an uneven tree that needs more just grows the vector.
+    let leaves = binary.len().div_ceil(2);
+    let mut out = Vec::with_capacity(leaves.saturating_sub(1) / (LANES - 1) + 1);
     let mut data = LeafData::default();
     if binary.is_empty() {
         return (out, data);
@@ -89,6 +95,13 @@ pub(super) fn collapse(
         return (out, data);
     }
     collapse_node(binary, indices, prims, 0, &mut out, &mut data);
+    // These live as long as the scene, and `Bvh::accumulate_footprint`
+    // counts capacity, so a growth doubling's slack would be both resident
+    // and reported. Trimming costs one copy per vector at build time.
+    out.shrink_to_fit();
+    data.leaves.shrink_to_fit();
+    data.packets.shrink_to_fit();
+    data.indices.shrink_to_fit();
     (out, data)
 }
 
