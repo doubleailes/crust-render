@@ -480,12 +480,13 @@ fn a_float_operand_broadcasts_into_a_colour() {
 
 #[test]
 fn unauthored_binary_inputs_take_their_defaults() {
-    // multiply defaults both inputs to 1, add to 0.
+    // The nodedefs' defaults: multiply's `in1` is 0 and `in2` 1 (so an
+    // unauthored multiply is 0, not 1), add's both 0.
     let v = run(
         r#"<materialx><multiply name="n" type="float" /></materialx>"#,
         "n",
     );
-    assert!(approx(v.x(), 1.0));
+    assert!(approx(v.x(), 0.0));
     let v = run(
         r#"<materialx><add name="n" type="float" /></materialx>"#,
         "n",

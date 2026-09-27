@@ -92,7 +92,7 @@ impl Val {
     /// alone. This is the promotion the componentwise operators apply to
     /// their narrower operand.
     #[inline]
-    fn broadcast_to(self, n: u8) -> Val {
+    pub(crate) fn broadcast_to(self, n: u8) -> Val {
         if self.arity == 1 && n > 1 {
             Val {
                 v: [self.v[0]; 4],
