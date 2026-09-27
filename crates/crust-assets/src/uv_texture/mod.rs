@@ -50,7 +50,9 @@
 use std::path::Path;
 
 use crust_core::{ColorSpace, Texture2D};
-use tracing::error;
+use tracing::warn;
+
+use crate::error::AssetError;
 
 mod decode;
 mod mip;
@@ -145,14 +147,32 @@ impl UvTexture {
     }
 
     /// [`UvTexture::open_with`] with the `CRUST_TEX_MAX` edge cap passed in
-    /// too: what [`FileAssets`](crate::FileAssets) calls with its own
-    /// [`Config`](crust_core::Config).
+    /// too. A failure is logged as a warning; [`UvTexture::try_open_capped`]
+    /// returns it.
     pub fn open_capped(
         path: &Path,
         space: ColorSpace,
         mip: bool,
         max_edge: usize,
     ) -> Option<UvTexture> {
+        UvTexture::try_open_capped(path, space, mip, max_edge)
+            .map_err(|e| tracing::warn!("{e}"))
+            .ok()
+    }
+
+    /// [`UvTexture::open_capped`], with the reason it failed: what
+    /// [`FileAssets`](crate::FileAssets) calls with its own
+    /// [`Config`](crust_core::Config), and logs once.
+    ///
+    /// A tile of a UDIM set that exists but does not decode is skipped with a
+    /// warning of its own — the set still renders on the tiles it has — and a
+    /// set with no tile at all is the error.
+    pub fn try_open_capped(
+        path: &Path,
+        space: ColorSpace,
+        mip: bool,
+        max_edge: usize,
+    ) -> Result<UvTexture, AssetError> {
         let name = path.to_string_lossy().into_owned();
         let token = TileToken::detect(&name);
         // Decided by the name, not per tile: a UDIM set is one format, and
@@ -172,7 +192,7 @@ impl UvTexture {
         let mut decode = |p: &Path, number: u32| {
             let (tile, format) = decode_tile(p, number, max_edge)?;
             resolved.get_or_insert_with(|| space.resolve_auto(format.0, format.1));
-            Some(tile)
+            Ok::<_, AssetError>(tile)
         };
         if let Some(token) = token {
             // Only tiles that exist on disk are opened, so a chart with holes
@@ -186,18 +206,20 @@ impl UvTexture {
                     if !p.exists() {
                         continue;
                     }
-                    if let Some(t) = decode(p, udim_number(u, v)) {
-                        tiles.push(t);
+                    match decode(p, udim_number(u, v)) {
+                        Ok(t) => tiles.push(t),
+                        Err(e) => warn!("{e} — skipping that UDIM tile"),
                     }
                 }
             }
             if tiles.is_empty() {
-                error!(
-                    "No tiles found for {} ({} expanded over the 10x10 grid)",
-                    path.display(),
-                    token.as_str()
-                );
-                return None;
+                return Err(AssetError::unusable(
+                    path,
+                    format!(
+                        "no tiles found ({} expanded over the 10x10 grid)",
+                        token.as_str()
+                    ),
+                ));
             }
         } else {
             tiles.push(decode(path, udim_number(0, 0))?);
@@ -212,7 +234,7 @@ impl UvTexture {
             }
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
-        Some(UvTexture {
+        Ok(UvTexture {
             storage: Storage::U8(tiles),
             to_linear,
             space,
@@ -236,7 +258,7 @@ impl UvTexture {
         space: ColorSpace,
         mip: bool,
         max_edge: usize,
-    ) -> Option<UvTexture> {
+    ) -> Result<UvTexture, AssetError> {
         let space = space.resolve_auto(false, 3);
         let mut tiles = Vec::new();
         if let Some(token) = token {
@@ -248,18 +270,20 @@ impl UvTexture {
                     if !p.exists() {
                         continue;
                     }
-                    if let Some(t) = decode_exr_tile(p, udim_number(u, v), max_edge, space) {
-                        tiles.push(t);
+                    match decode_exr_tile(p, udim_number(u, v), max_edge, space) {
+                        Ok(t) => tiles.push(t),
+                        Err(e) => warn!("{e} — skipping that UDIM tile"),
                     }
                 }
             }
             if tiles.is_empty() {
-                error!(
-                    "No tiles found for {} ({} expanded over the 10x10 grid)",
-                    path.display(),
-                    token.as_str()
-                );
-                return None;
+                return Err(AssetError::unusable(
+                    path,
+                    format!(
+                        "no tiles found ({} expanded over the 10x10 grid)",
+                        token.as_str()
+                    ),
+                ));
             }
         } else {
             tiles.push(decode_exr_tile(path, udim_number(0, 0), max_edge, space)?);
@@ -270,7 +294,7 @@ impl UvTexture {
             }
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
-        Some(UvTexture {
+        Ok(UvTexture {
             storage: Storage::F32(tiles),
             to_linear: to_linear_table(ColorSpace::Raw),
             space,

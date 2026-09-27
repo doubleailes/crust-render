@@ -411,13 +411,13 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
         // other way opening a stage can fail.
         let mask = StagePopulationMask::new([p]).map_err(|e| crate::Error::UsdOpen {
             path: path.to_path_buf(),
-            message: e.to_string(),
+            source: e.into(),
         })?;
         builder = builder.mask(mask);
     }
     let stage = builder.open(path_str).map_err(|e| crate::Error::UsdOpen {
         path: path.to_path_buf(),
-        message: e.to_string(),
+        source: e.into(),
     })?;
     match &masked {
         Some(m) => debug!(
@@ -472,7 +472,7 @@ pub(crate) fn load_scene(
         .open(path_str)
         .map_err(|e| crate::Error::UsdOpen {
             path: path.to_path_buf(),
-            message: e.to_string(),
+            source: e.into(),
         })?;
     debug!(
         "Opened index stage (payloads unloaded) for {} in {:?}",

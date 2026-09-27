@@ -12,6 +12,8 @@
 //! `openspec/specs/textures/design.md`).
 
 use crust_core::ColorSpace;
+
+use crate::error::AssetError;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -57,7 +59,7 @@ enum Source {
 
 /// Decodes `src`, reporting its pixel format as `(eight_bit, channels)` — what
 /// [`ColorSpace::resolve_auto`] asks about.
-fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), String> {
+fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), AssetError> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -67,18 +69,17 @@ fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), String> {
     // `exr` feature, and it is the one reader that handles single-channel and
     // layer-prefixed channels.
     if ext == "exr" {
-        let (pixels, w, h) =
-            crate::read_exr_rgb(src).ok_or_else(|| "could not decode".to_string())?;
+        let (pixels, w, h) = crate::environment::try_read_exr_rgb(src)?;
         return Ok((Source::Floats(pixels), w, h, (false, 3)));
     }
     let mut reader = image::ImageReader::open(src)
-        .map_err(|e| e.to_string())?
+        .map_err(AssetError::io(src))?
         .with_guessed_format()
-        .map_err(|e| e.to_string())?;
+        .map_err(AssetError::io(src))?;
     // Trusted, locally authored assets; an 8K texture exceeds the default
     // allocation limit, which is exactly the size this exists for.
     reader.no_limits();
-    let img = reader.decode().map_err(|e| e.to_string())?;
+    let img = reader.decode().map_err(AssetError::image(src))?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let color = img.color();
     let format = (
@@ -104,20 +105,20 @@ pub fn make_tx(
     dst: &Path,
     space: ColorSpace,
     format: TxFormat,
-) -> Result<MadeTx, String> {
+) -> Result<MadeTx, AssetError> {
     if src == dst {
-        return Err("input is already a .tx".into());
+        return Err(AssetError::unusable(src, "input is already a .tx"));
     }
     if is_ptex(src) {
-        return Err(
+        return Err(AssetError::unusable(
+            src,
             "a Ptex file is already a tiled per-face mip pyramid and is streamed as is \
-                    (CRUST_PTEX_STREAM) — it is never converted to .tx"
-                .into(),
-        );
+             (CRUST_PTEX_STREAM) — it is never converted to .tx",
+        ));
     }
     let (source, w, h, (eight_bit, channels)) = decode(src)?;
     if w == 0 || h == 0 {
-        return Err("zero-sized image".into());
+        return Err(AssetError::unusable(src, "zero-sized image"));
     }
     let space = space.resolve_auto(eight_bit, channels);
 
@@ -142,7 +143,7 @@ pub fn make_tx(
                 .map(|&b| crate::to_linear(space, b as f32 / 255.0))
                 .collect(),
         };
-        super::write_tx_exr(dst, &linear, w, h, space).map_err(|e| e.to_string())?;
+        super::write_tx_exr(dst, &linear, w, h, space).map_err(AssetError::io(dst))?;
         "half, exr"
     } else {
         let bytes: Vec<u8> = match source {
@@ -153,7 +154,7 @@ pub fn make_tx(
                 .map(|&s| (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
                 .collect(),
         };
-        super::write_tx(dst, &bytes, w, h, space).map_err(|e| e.to_string())?;
+        super::write_tx(dst, &bytes, w, h, space).map_err(AssetError::io(dst))?;
         "8-bit, tiff"
     };
 
@@ -208,7 +209,11 @@ pub fn tx_is_stale(src: &Path, dst: &Path) -> bool {
 /// because it exists and is newer than its source. The rename is atomic on
 /// one filesystem, and the temporary is in `dst`'s own directory to keep it
 /// on one filesystem.
-pub fn make_tx_atomic(src: &Path, space: ColorSpace, format: TxFormat) -> Result<MadeTx, String> {
+pub fn make_tx_atomic(
+    src: &Path,
+    space: ColorSpace,
+    format: TxFormat,
+) -> Result<MadeTx, AssetError> {
     let dst = tx_sibling(src);
     let tmp = dst.with_extension(format!(
         "tx.tmp{}.{}",
@@ -223,7 +228,10 @@ pub fn make_tx_atomic(src: &Path, space: ColorSpace, format: TxFormat) -> Result
         Ok(mut m) => {
             std::fs::rename(&tmp, &dst).map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);
-                format!("could not move the converted file into place: {e}")
+                AssetError::Io {
+                    path: dst.clone(),
+                    source: e,
+                }
             })?;
             m.dst = dst;
             Ok(m)
@@ -303,7 +311,7 @@ mod tests {
             std::fs::write(&src, b"Ptex").unwrap();
             let err = make_tx_atomic(&src, ColorSpace::Raw, TxFormat::FromSampleType)
                 .expect_err("ptex must not convert");
-            assert!(err.contains("Ptex"), "{err}");
+            assert!(err.to_string().contains("Ptex"), "{err}");
             assert!(!tx_sibling(&src).exists());
         }
         assert!(!is_ptex(&dir.join("a.png")));

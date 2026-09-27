@@ -1572,10 +1572,15 @@ fn error_display_names_the_path() {
     assert!(e.to_string().contains("UTF-8"));
     let e = crust_core::Error::UsdOpen {
         path: PathBuf::from("/tmp/y.usda"),
-        message: "boom".into(),
+        source: "boom".into(),
     };
     assert!(e.to_string().contains("boom") && e.to_string().contains("y.usda"));
-    let _: &dyn std::error::Error = &e;
+    let dyn_e: &dyn std::error::Error = &e;
+    // The cause is kept as the source, not only flattened into the message.
+    assert_eq!(
+        dyn_e.source().map(|s| s.to_string()).as_deref(),
+        Some("boom")
+    );
 }
 
 #[test]

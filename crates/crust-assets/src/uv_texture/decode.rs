@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use crust_core::ColorSpace;
-use tracing::error;
+
+use crate::error::AssetError;
 
 use super::tile::Tile;
 
@@ -23,20 +24,15 @@ pub(super) fn decode_tile(
     path: &Path,
     number: u32,
     max_edge: usize,
-) -> Option<(Tile<u8>, (bool, u8))> {
+) -> Result<(Tile<u8>, (bool, u8)), AssetError> {
     let mut reader = image::ImageReader::open(path)
-        .map_err(|e| error!("Texture decode failed for {}: {e}", path.display()))
-        .ok()?
+        .map_err(AssetError::io(path))?
         .with_guessed_format()
-        .map_err(|e| error!("Texture decode failed for {}: {e}", path.display()))
-        .ok()?;
+        .map_err(AssetError::io(path))?;
     // Same reasoning as the environment decoder: these are trusted, locally
     // authored assets and an 8K texture exceeds the default allocation limit.
     reader.no_limits();
-    let decoded = reader
-        .decode()
-        .map_err(|e| error!("Texture decode failed for {}: {e}", path.display()))
-        .ok()?;
+    let decoded = reader.decode().map_err(AssetError::image(path))?;
     let color = decoded.color();
     let format = (
         color.bytes_per_pixel() == color.channel_count(),
@@ -45,11 +41,11 @@ pub(super) fn decode_tile(
     let img = decoded.to_rgb8();
     let (sw, sh) = (img.width() as usize, img.height() as usize);
     if sw == 0 || sh == 0 {
-        return None;
+        return Err(AssetError::unusable(path, "zero-sized image"));
     }
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
-        return Some((Tile::unmipped(number, img.into_raw(), sw, sh), format));
+        return Ok((Tile::unmipped(number, img.into_raw(), sw, sh), format));
     }
     let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
     let src = img.as_raw();
@@ -85,7 +81,7 @@ pub(super) fn decode_tile(
             }
         }
     }
-    Some((Tile::unmipped(number, pixels, w, h), format))
+    Ok((Tile::unmipped(number, pixels, w, h), format))
 }
 
 /// [`decode_tile`] for an EXR: linear `f32` RGB, box-filtered under the same
@@ -100,10 +96,10 @@ pub(super) fn decode_exr_tile(
     number: u32,
     max_edge: usize,
     space: ColorSpace,
-) -> Option<Tile<f32>> {
-    let (mut src, sw, sh) = crate::read_exr_rgb(path)?;
+) -> Result<Tile<f32>, AssetError> {
+    let (mut src, sw, sh) = crate::environment::try_read_exr_rgb(path)?;
     if sw == 0 || sh == 0 {
-        return None;
+        return Err(AssetError::unusable(path, "zero-sized image"));
     }
     if space != ColorSpace::Raw {
         for c in &mut src {
@@ -112,7 +108,7 @@ pub(super) fn decode_exr_tile(
     }
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
-        return Some(Tile::unmipped(number, src, sw, sh));
+        return Ok(Tile::unmipped(number, src, sw, sh));
     }
     let (w, h) = ((sw / factor).max(1), (sh / factor).max(1));
     let mut pixels = vec![0.0f32; w * h * 3];
@@ -143,5 +139,5 @@ pub(super) fn decode_exr_tile(
             }
         }
     }
-    Some(Tile::unmipped(number, pixels, w, h))
+    Ok(Tile::unmipped(number, pixels, w, h))
 }
