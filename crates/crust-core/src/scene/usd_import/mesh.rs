@@ -909,13 +909,13 @@ fn remap_subdivided_faces(map: FaceMap, sub: &subdiv::SubdivFaces) -> FaceMap {
     let mut slices = Vec::with_capacity(n);
     let mut uvs = Vec::with_capacity(n);
     for (&refined, &slice) in map.faces.iter().zip(&map.slices) {
-        let base = sub.base_face[refined as usize];
-        if base == u32::MAX {
+        let Some(base) = sub.base_face[refined as usize] else {
+            // The face table's own sentinel: there the layout is the point.
             faces.push(u32::MAX);
             slices.push(FanSlice::Unmappable);
             uvs.push([[0.0f32; 2]; 3]);
             continue;
-        }
+        };
         let [c0, c1, c2, c3] = sub.corner_uvs[refined as usize];
         faces.push(base);
         slices.push(slice);
@@ -1327,7 +1327,7 @@ mod face_table_tests {
             density: Vec::new(),
         };
         let sub = subdiv::SubdivFaces {
-            base_face: vec![u32::MAX, u32::MAX],
+            base_face: vec![None, None],
             corner_uvs: vec![[[0.0; 2]; 4]; 2],
         };
         let map = remap_subdivided_faces(map, &sub);
