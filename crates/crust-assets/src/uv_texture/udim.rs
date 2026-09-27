@@ -61,6 +61,6 @@ pub(crate) fn expand_token(name: &str, u: u32, v: u32) -> Option<String> {
 /// The UDIM number of the tile at zero-based chart coordinates.
 ///
 /// The internal tile key, whichever token named the file.
-pub(super) fn udim_number(u: u32, v: u32) -> u32 {
+pub(crate) fn udim_number(u: u32, v: u32) -> u32 {
     1001 + u + 10 * v
 }

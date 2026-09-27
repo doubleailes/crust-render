@@ -26,6 +26,7 @@
 
 mod environment;
 mod ies;
+mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
 pub mod tiled;

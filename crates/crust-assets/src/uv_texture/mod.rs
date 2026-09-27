@@ -58,8 +58,11 @@ mod tile;
 mod udim;
 
 use decode::{decode_exr_tile, decode_tile};
-use tile::{Level, Texel, Tile};
-use udim::{TileToken, udim_number};
+use tile::{Texel, Tile};
+use udim::TileToken;
+pub(crate) use udim::udim_number;
+
+use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
 
 pub(crate) use mip::{encode_fn, reduce_half, reduce_half_linear, to_linear_table};
 pub(crate) use udim::expand_token;
@@ -326,52 +329,33 @@ impl UvTexture {
     }
 
     /// Trilinear lookup inside one tile, at coordinates already reduced to
-    /// `[0, 1)` and over a footprint `width` wide *in tile units*.
-    ///
-    /// The level is `log2(width · texels_across)`: a footprint covering one
-    /// texel of level 0 reads level 0, one covering two reads level 1, and so
-    /// on. The two bracketing levels are sampled bilinearly and blended, so a
-    /// surface receding from the camera crosses mip levels smoothly instead
-    /// of stepping.
-    ///
-    /// `width <= 0` — a caller with no derivatives, or `CRUST_RAY_CONES=0` —
-    /// and a tile with no pyramid both short-circuit to a single bilinear tap
-    /// on level 0, which is bit-identical to what this did before it had
-    /// levels at all.
+    /// `[0, 1)` and over a footprint `width` wide *in tile units* — the
+    /// shared [`trilinear`] over this tile's pyramid.
+    #[inline(always)]
     fn sample_tile<T: Texel>(&self, t: &Tile<T>, u: f32, v: f32, width: f32) -> [f32; 4] {
-        if t.levels.len() == 1 || width <= 0.0 {
-            return self.sample_level(&t.levels[0], u, v);
-        }
-        // Measured against the widest axis: an isotropic footprint over an
-        // anisotropic tile is minified most where the texels are densest, and
-        // reading the coarser of the two is the choice that does not alias.
-        let across = t.levels[0].width.max(t.levels[0].height) as f32;
-        let texels = width * across;
-        // Magnification — the footprint fits inside one texel — is the common
-        // case in practice and its answer is level 0 whatever the `log2` says.
-        // Taking it here rather than through the clamp is worth having: the
-        // `log2` is otherwise paid on every fetch of every texture that is
-        // being magnified, which measured ~9% of render on a scene whose
-        // output does not change at all.
-        if texels <= 1.0 {
-            return self.sample_level(&t.levels[0], u, v);
-        }
-        let lod = texels.log2();
-        let top = (t.levels.len() - 1) as f32;
-        let lod = lod.clamp(0.0, top);
-        let lo = lod.floor();
-        let frac = lod - lo;
-        let a = self.sample_level(&t.levels[lo as usize], u, v);
-        if frac <= 0.0 {
-            return a;
-        }
-        let b = self.sample_level(&t.levels[(lo as usize + 1).min(t.levels.len() - 1)], u, v);
-        let mut out = [0.0f32; 4];
-        for k in 0..3 {
-            out[k] = a[k] + (b[k] - a[k]) * frac;
-        }
-        out[3] = 1.0;
-        out
+        let source = TileSource { tex: self, tile: t };
+        trilinear(&source, u, v, width).expect("a preloaded tile always answers")
+    }
+}
+
+/// One preloaded tile as a [`MipSource`].
+struct TileSource<'a, T> {
+    tex: &'a UvTexture,
+    tile: &'a Tile<T>,
+}
+
+impl<T: Texel> MipSource for TileSource<'_, T> {
+    type Texel = [f32; 4];
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.tile.levels.len()
+    }
+
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        let l0 = &self.tile.levels[0];
+        l0.width.max(l0.height) as f32
     }
 
     /// Bilinear lookup inside one mip level, at coordinates already reduced
@@ -382,35 +366,32 @@ impl UvTexture {
     /// texel grid is plainly visible under point sampling — the artefact the
     /// dome light's own nearest-texel sampling is still criticised for in
     /// `openspec/specs/lighting/design.md`.
-    fn sample_level<T: Texel>(&self, t: &Level<T>, u: f32, v: f32) -> [f32; 4] {
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<[f32; 4]> {
+        let t = &self.tile.levels[level];
         // Image rows run top-down while `v` grows upward, the same flip the
         // rest of the graphics world applies between UV and raster space.
-        let x = u * t.width as f32 - 0.5;
-        let y = (1.0 - v) * t.height as f32 - 0.5;
-        let x0 = x.floor();
-        let y0 = y.floor();
-        let (fx, fy) = (x - x0, y - y0);
-        let clampi = |i: f32, n: usize| (i.max(0.0) as usize).min(n.saturating_sub(1));
-        let (x0i, y0i) = (clampi(x0, t.width), clampi(y0, t.height));
-        let (x1i, y1i) = (clampi(x0 + 1.0, t.width), clampi(y0 + 1.0, t.height));
+        let taps = Taps::new(
+            u * t.width as f32 - 0.5,
+            (1.0 - v) * t.height as f32 - 0.5,
+            t.width,
+            t.height,
+        );
         let texel = |xi: usize, yi: usize| {
             let o = (yi * t.width + xi) * 3;
-            T::linear(&t.pixels, o, &self.to_linear)
+            T::linear(&t.pixels, o, &self.tex.to_linear)
         };
-        let (a, b, c, d) = (
-            texel(x0i, y0i),
-            texel(x1i, y0i),
-            texel(x0i, y1i),
-            texel(x1i, y1i),
-        );
-        let mut out = [0.0f32; 4];
-        for k in 0..3 {
-            let top = a[k] + (b[k] - a[k]) * fx;
-            let bot = c[k] + (d[k] - c[k]) * fx;
-            out[k] = top + (bot - top) * fy;
-        }
-        out[3] = 1.0;
-        out
+        Some(taps.blend_rgb(
+            texel(taps.x0, taps.y0),
+            texel(taps.x1, taps.y0),
+            texel(taps.x0, taps.y1),
+            texel(taps.x1, taps.y1),
+        ))
+    }
+
+    #[inline(always)]
+    fn blend(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+        lerp_rgba(a, b, t)
     }
 }
 

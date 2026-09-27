@@ -16,7 +16,8 @@
 
 use super::cache::{TileCache, TileId, with_tile};
 use super::{LevelInfo, TiledFile};
-use crate::uv_texture::to_linear_table;
+use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
+use crate::uv_texture::{to_linear_table, udim_number};
 use crust_core::{ColorSpace, Texture2D};
 use std::path::Path;
 use std::sync::Arc;
@@ -267,49 +268,11 @@ impl StreamingTexture {
         .unwrap_or(miss)
     }
 
-    /// Bilinear lookup within one level, at coordinates already reduced to
-    /// `[0, 1)`.
-    ///
-    /// Mirrors `UvTexture::sample_level` exactly, including the `v` flip and
-    /// the clamp-to-edge: the two are supposed to produce identical images, and
-    /// a half-texel difference here would show up as a scene-wide shift that
-    /// no test of either alone would catch.
-    fn sample_level<const HALF: bool>(
-        &self,
-        chart: &Chart,
-        level: usize,
-        u: f32,
-        v: f32,
-    ) -> [f32; 4] {
-        let li = chart.file.level(level);
-        let (w, h) = (li.width, li.height);
-        let x = u * w as f32 - 0.5;
-        let y = (1.0 - v) * h as f32 - 0.5;
-        let x0 = x.floor();
-        let y0 = y.floor();
-        let (fx, fy) = (x - x0, y - y0);
-        let clampi = |i: f32, n: usize| (i.max(0.0) as usize).min(n.saturating_sub(1));
-        let (x0i, y0i) = (clampi(x0, w), clampi(y0, h));
-        let (x1i, y1i) = (clampi(x0 + 1.0, w), clampi(y0 + 1.0, h));
-        let a = self.texel::<HALF>(chart, level, &li, x0i, y0i);
-        let b = self.texel::<HALF>(chart, level, &li, x1i, y0i);
-        let c = self.texel::<HALF>(chart, level, &li, x0i, y1i);
-        let d = self.texel::<HALF>(chart, level, &li, x1i, y1i);
-        let mut out = [0.0f32; 4];
-        for k in 0..3 {
-            let top = a[k] + (b[k] - a[k]) * fx;
-            let bot = c[k] + (d[k] - c[k]) * fx;
-            out[k] = top + (bot - top) * fy;
-        }
-        out[3] = 1.0;
-        out
-    }
-
-    /// Trilinear lookup, level chosen from the footprint.
-    ///
-    /// Kept line-for-line equivalent to `UvTexture::sample_tile` — same widest-
-    /// axis measure, same magnification short-circuit before the `log2` (which
-    /// was worth ~9% of render when it was missing), same floor and lerp.
+    /// Trilinear lookup, level chosen from the footprint: the shared
+    /// [`trilinear`] over this chart's levels, the same function the preloaded
+    /// `UvTexture` runs, so the two select levels by one piece of code rather
+    /// than by two kept in step.
+    #[inline(always)]
     fn sample_chart<const HALF: bool>(
         &self,
         chart: &Chart,
@@ -317,30 +280,54 @@ impl StreamingTexture {
         v: f32,
         width: f32,
     ) -> [f32; 4] {
-        let levels = chart.file.level_count();
-        if levels == 1 || width <= 0.0 {
-            return self.sample_level::<HALF>(chart, 0, u, v);
-        }
-        let l0 = chart.file.level(0);
-        let across = l0.width.max(l0.height) as f32;
-        let texels = width * across;
-        if texels <= 1.0 {
-            return self.sample_level::<HALF>(chart, 0, u, v);
-        }
-        let lod = texels.log2().clamp(0.0, (levels - 1) as f32);
-        let lo = lod.floor();
-        let frac = lod - lo;
-        let a = self.sample_level::<HALF>(chart, lo as usize, u, v);
-        if frac <= 0.0 {
-            return a;
-        }
-        let b = self.sample_level::<HALF>(chart, (lo as usize + 1).min(levels - 1), u, v);
-        let mut out = [0.0f32; 4];
-        for k in 0..3 {
-            out[k] = a[k] + (b[k] - a[k]) * frac;
-        }
-        out[3] = 1.0;
-        out
+        let source = ChartSource::<HALF> { tex: self, chart };
+        trilinear(&source, u, v, width).expect("a streamed chart always answers")
+    }
+}
+
+/// One streamed chart as a [`MipSource`], its payload fixed by `HALF`.
+struct ChartSource<'a, const HALF: bool> {
+    tex: &'a StreamingTexture,
+    chart: &'a Chart,
+}
+
+impl<const HALF: bool> MipSource for ChartSource<'_, HALF> {
+    type Texel = [f32; 4];
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.chart.file.level_count()
+    }
+
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        let l0 = self.chart.file.level(0);
+        l0.width.max(l0.height) as f32
+    }
+
+    /// Bilinear lookup within one level, at coordinates already reduced to
+    /// `[0, 1)`.
+    ///
+    /// The same taps and blend as `UvTexture`'s ([`Taps`]), including the `v`
+    /// flip and the clamp-to-edge: the two are supposed to produce identical
+    /// images, and a half-texel difference here would show up as a
+    /// scene-wide shift that no test of either alone would catch.
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<[f32; 4]> {
+        let (tex, chart) = (self.tex, self.chart);
+        let li = chart.file.level(level);
+        let (w, h) = (li.width, li.height);
+        let taps = Taps::new(u * w as f32 - 0.5, (1.0 - v) * h as f32 - 0.5, w, h);
+        let a = tex.texel::<HALF>(chart, level, &li, taps.x0, taps.y0);
+        let b = tex.texel::<HALF>(chart, level, &li, taps.x1, taps.y0);
+        let c = tex.texel::<HALF>(chart, level, &li, taps.x0, taps.y1);
+        let d = tex.texel::<HALF>(chart, level, &li, taps.x1, taps.y1);
+        Some(taps.blend_rgb(a, b, c, d))
+    }
+
+    #[inline(always)]
+    fn blend(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+        lerp_rgba(a, b, t)
     }
 }
 
@@ -369,7 +356,7 @@ impl StreamingTexture {
             if !(0.0..10.0).contains(&tu) || !(0.0..10.0).contains(&tv) {
                 return [0.0, 0.0, 0.0, 1.0];
             }
-            let number = 1001 + tu as u32 + 10 * tv as u32;
+            let number = udim_number(tu as u32, tv as u32);
             match self.charts.iter().find(|c| c.number == number) {
                 Some(c) => self.sample_chart::<HALF>(c, u - tu, v - tv, width),
                 None => [0.0, 0.0, 0.0, 1.0],

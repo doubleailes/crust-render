@@ -21,6 +21,7 @@
 //! reader computes any level they lack, so this costs nothing but a smaller read.
 //! `CRUST_PTEX_MAX_LOG2` overrides the cap as a log2 edge length.
 
+use crate::mip_filter::{MipSource, Taps, trilinear};
 use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
 
@@ -273,24 +274,53 @@ impl PtexColor {
     /// across at all.
     fn sample_level(&self, off: usize, w: usize, h: usize, fu: f32, fv: f32) -> Vec3A {
         // Texel centres sit at (i + 0.5)/n.
-        let x = fu * w as f32 - 0.5;
-        let y = fv * h as f32 - 0.5;
-        let x0 = x.floor();
-        let y0 = y.floor();
-        let tx = x - x0;
-        let ty = y - y0;
-        let cx = |c: f32| (c.max(0.0) as usize).min(w - 1);
-        let cy = |c: f32| (c.max(0.0) as usize).min(h - 1);
-        let (x0i, x1i) = (cx(x0), cx(x0 + 1.0));
-        let (y0i, y1i) = (cy(y0), cy(y0 + 1.0));
-
+        let t = Taps::new(fu * w as f32 - 0.5, fv * h as f32 - 0.5, w, h);
         let top = self
-            .texel(off, w, x0i, y0i)
-            .lerp(self.texel(off, w, x1i, y0i), tx);
+            .texel(off, w, t.x0, t.y0)
+            .lerp(self.texel(off, w, t.x1, t.y0), t.fx);
         let bot = self
-            .texel(off, w, x0i, y1i)
-            .lerp(self.texel(off, w, x1i, y1i), tx);
-        top.lerp(bot, ty)
+            .texel(off, w, t.x0, t.y1)
+            .lerp(self.texel(off, w, t.x1, t.y1), t.fx);
+        top.lerp(bot, t.fy)
+    }
+}
+
+/// One preloaded face as a [`MipSource`].
+struct FaceSource<'a> {
+    tex: &'a PtexColor,
+    face: &'a Face,
+}
+
+impl MipSource for FaceSource<'_> {
+    type Texel = Vec3A;
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.face.levels as usize
+    }
+
+    /// `width` is a fraction of the face, so it converts to texels by the
+    /// level-0 resolution, measured against the denser axis: an isotropic
+    /// footprint over a 64x16 face is minified most where the texels are.
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        self.face.width.max(self.face.height) as f32
+    }
+
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
+        let (off, w, h) = if level == 0 {
+            let f = self.face;
+            (f.offset as usize, f.width as usize, f.height as usize)
+        } else {
+            self.face.level(level)
+        };
+        Some(self.tex.sample_level(off, w, h, u, v))
+    }
+
+    #[inline(always)]
+    fn blend(a: Vec3A, b: Vec3A, t: f32) -> Vec3A {
+        a.lerp(b, t)
     }
 }
 
@@ -316,32 +346,11 @@ impl PtexTexture for PtexColor {
             0.0
         };
 
-        // No footprint, or no pyramid to choose from: level 0 bilinear, which
-        // is bit for bit what this returned before it had levels.
-        if f.levels == 1 || !width.is_finite() || width <= 0.0 {
-            return self.sample_level(f.offset as usize, w, h, fu, fv);
-        }
-
-        // `width` is a fraction of the face, so it converts to texels by the
-        // level-0 resolution. Measured against the denser axis: an isotropic
-        // footprint over a 64x16 face is minified most where the texels are,
-        // and reading the coarser level is the choice that does not alias.
-        let texels = width * w.max(h) as f32;
-        // Magnification short-circuit, as in `UvTexture::sample_tile`: the
-        // answer is level 0 and the `log2` would only confirm it.
-        if texels <= 1.0 {
-            return self.sample_level(f.offset as usize, w, h, fu, fv);
-        }
-        let lod = texels.log2().clamp(0.0, (f.levels - 1) as f32);
-        let lo = lod.floor();
-        let frac = lod - lo;
-        let (off_a, wa, ha) = f.level(lo as usize);
-        let a = self.sample_level(off_a, wa, ha, fu, fv);
-        if frac <= 0.0 {
-            return a;
-        }
-        let (off_b, wb, hb) = f.level(lo as usize + 1);
-        a.lerp(self.sample_level(off_b, wb, hb, fu, fv), frac)
+        // The shared trilinear filter: no footprint, or no pyramid to choose
+        // from, is level 0 bilinear, bit for bit what this returned before it
+        // had levels.
+        trilinear(&FaceSource { tex: self, face: f }, fu, fv, width)
+            .expect("a preloaded face always answers")
     }
 
     fn num_faces(&self) -> usize {

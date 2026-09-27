@@ -32,6 +32,7 @@
 //! the docs on [`MipSpace`] for the one place they cannot agree — and what
 //! is refused rather than documented as a result.
 
+use crate::mip_filter::{MipSource, Taps, trilinear};
 use crate::read_channel;
 use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
@@ -662,24 +663,57 @@ impl PtexStream {
         let (w, h) = (res.u(), res.v());
 
         // Texel centres sit at (i + 0.5)/n.
-        let x = fu * w as f32 - 0.5;
-        let y = fv * h as f32 - 0.5;
-        let x0 = x.floor();
-        let y0 = y.floor();
-        let tx = x - x0;
-        let ty = y - y0;
-        let cx = |c: f32| (c.max(0.0) as usize).min(w - 1);
-        let cy = |c: f32| (c.max(0.0) as usize).min(h - 1);
-        let (x0i, x1i) = (cx(x0), cx(x0 + 1.0));
-        let (y0i, y1i) = (cy(y0), cy(y0 + 1.0));
-
+        let t = Taps::new(fu * w as f32 - 0.5, fv * h as f32 - 0.5, w, h);
         let top = self
-            .texel(face, &layout, x0i, y0i)?
-            .lerp(self.texel(face, &layout, x1i, y0i)?, tx);
+            .texel(face, &layout, t.x0, t.y0)?
+            .lerp(self.texel(face, &layout, t.x1, t.y0)?, t.fx);
         let bot = self
-            .texel(face, &layout, x0i, y1i)?
-            .lerp(self.texel(face, &layout, x1i, y1i)?, tx);
-        Some(top.lerp(bot, ty))
+            .texel(face, &layout, t.x0, t.y1)?
+            .lerp(self.texel(face, &layout, t.x1, t.y1)?, t.fx);
+        Some(top.lerp(bot, t.fy))
+    }
+}
+
+/// One streamed face as a [`MipSource`]: `base` is its level 0 after the
+/// cap, `levels` how many the pyramid holds (1 without mips).
+struct StreamFace<'a> {
+    tex: &'a PtexStream,
+    face: u32,
+    base: ptex::Res,
+    levels: usize,
+}
+
+impl MipSource for StreamFace<'_> {
+    type Texel = Vec3A;
+
+    #[inline(always)]
+    fn level_count(&self) -> usize {
+        self.levels
+    }
+
+    /// `width` is a fraction of the face, so it converts to texels by the
+    /// base resolution, measured against the denser axis — an isotropic
+    /// footprint over a 64x16 face is minified most where the texels are.
+    #[inline(always)]
+    fn texels_across(&self) -> f32 {
+        self.base.u().max(self.base.v()) as f32
+    }
+
+    #[inline(always)]
+    fn bilinear(&self, level: usize, u: f32, v: f32) -> Option<Vec3A> {
+        // Level 0 is `base` itself; asking `level_res` for it would only
+        // rebuild the same resolution.
+        let res = if level == 0 {
+            self.base
+        } else {
+            level_res(self.base, level as u8)
+        };
+        self.tex.sample_level(self.face, res, u, v)
+    }
+
+    #[inline(always)]
+    fn blend(a: Vec3A, b: Vec3A, t: f32) -> Vec3A {
+        a.lerp(b, t)
     }
 }
 
@@ -701,7 +735,6 @@ impl PtexTexture for PtexStream {
             return self.fallback;
         };
         let base = self.base_res(info.res);
-        let (w, h) = (base.u(), base.v());
 
         let fu = if u.is_finite() {
             u.clamp(0.0, 1.0)
@@ -715,38 +748,16 @@ impl PtexTexture for PtexStream {
         };
 
         let levels = if self.mip { level_count(base) } else { 1 };
-
-        // No footprint, or no pyramid to choose from: base-level bilinear.
-        if levels == 1 || !width.is_finite() || width <= 0.0 {
-            return self
-                .sample_level(face_id, base, fu, fv)
-                .unwrap_or(self.fallback);
-        }
-
-        // `width` is a fraction of the face, so it converts to texels by the
-        // base resolution, measured against the denser axis — an isotropic
-        // footprint over a 64x16 face is minified most where the texels are.
-        let texels = width * w.max(h) as f32;
-        // Magnification short-circuit: the answer is the base level and the
-        // `log2` would only confirm it.
-        if texels <= 1.0 {
-            return self
-                .sample_level(face_id, base, fu, fv)
-                .unwrap_or(self.fallback);
-        }
-        let lod = texels.log2().clamp(0.0, (levels - 1) as f32);
-        let lo = lod.floor();
-        let frac = lod - lo;
-        let Some(a) = self.sample_level(face_id, level_res(base, lo as u8), fu, fv) else {
-            return self.fallback;
+        // The shared trilinear filter, as the preloaded backend runs it; a
+        // failed read of the finer level falls back, of the coarser one keeps
+        // the finer.
+        let source = StreamFace {
+            tex: self,
+            face: face_id,
+            base,
+            levels: levels as usize,
         };
-        if frac <= 0.0 {
-            return a;
-        }
-        match self.sample_level(face_id, level_res(base, lo as u8 + 1), fu, fv) {
-            Some(b) => a.lerp(b, frac),
-            None => a,
-        }
+        trilinear(&source, fu, fv, width).unwrap_or(self.fallback)
     }
 
     fn num_faces(&self) -> usize {
