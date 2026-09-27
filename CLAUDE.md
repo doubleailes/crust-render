@@ -444,6 +444,15 @@ consumed as ordinary dependencies:
   committed. Profile the sampler before assuming a cost is the BSDF's — `draw_block`
   is inlined into its callers (`scatter_resolved`, NEE, the camera) and easy to misread
   as their own.
+  **Do not replace `u32::reverse_bits` with a lookup table** — measured slower both ways
+  (2026-09-27, prototype against 0.2.4). Bit reversal is the sampler's largest remaining
+  cost (~71 M instructions on cornellbox at 2 spp), but on x86-64 `reverse_bits` is a
+  `bswap` plus three mask-shift-or rounds, ~16 register-only instructions. A 256-entry
+  byte table (four lookups) cost **+7.7%** `render_pixel` instructions; a 64 Ki-entry
+  `u16` table (two lookups, 128 KiB, out of L1) cost +3.0% instructions and **+3–8.5%**
+  wall time (`bench_ab.sh`, cornellbox / veach_mis / materialx_basic /
+  usdpreview_textured). Routing dimension 0 through the GF(2) byte tables instead of
+  `reverse_bits16` would be exact but saves under 0.5% of render.
 
 `crust-core/src/lib.rs` re-exports the public surface (`Renderer`, `Scene`, `Camera`, the
 material types, `simple_scene`, `get_settings`). Prefer importing from `crust_core::` roots.
