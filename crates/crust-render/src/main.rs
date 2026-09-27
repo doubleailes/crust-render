@@ -219,7 +219,24 @@ const STATS_TARGET: &str = "crust_render::stats";
 /// point of it is the one case that is easy to regress into silence —
 /// [`STATS_TARGET`] passing at a level that rejects everything else.
 fn event_enabled(target: &str, level: &Level, max: Level) -> bool {
-    target == STATS_TARGET || *level <= max
+    target == STATS_TARGET || effective_level(target, level) <= max
+}
+
+/// The level an event is filtered at, which for a few dependencies is not
+/// the level it was emitted at.
+///
+/// `cranelift_jit` logs the whole IR of every function it defines at INFO —
+/// one multi-hundred-line dump per MaterialX program, so a default render's
+/// INFO output grew with the number of materials, against the rule that INFO
+/// lines do not scale with the scene. `tracing` cannot rewrite an event's
+/// level, so it is *filtered* as DEBUG (shown from `-l debug` on) while still
+/// printing its own `INFO` stamp. WARN and ERROR from cranelift are untouched.
+fn effective_level(target: &str, level: &Level) -> Level {
+    if *level == Level::INFO && target.starts_with("cranelift") {
+        Level::DEBUG
+    } else {
+        *level
+    }
 }
 
 fn get_logger_level(level: LoggerLevel) -> Level {
@@ -706,6 +723,12 @@ mod tests {
         assert!(event_enabled("crust_assets", &Level::WARN, Level::INFO));
         // A near-miss on the target name is not the stats target.
         assert!(!event_enabled("stats", &Level::INFO, Level::ERROR));
+        // Cranelift's INFO IR dumps are filtered as DEBUG, and only those.
+        let jit = "cranelift_jit::backend";
+        assert!(!event_enabled(jit, &Level::INFO, Level::INFO));
+        assert!(event_enabled(jit, &Level::INFO, Level::DEBUG));
+        assert!(event_enabled(jit, &Level::WARN, Level::INFO));
+        assert!(event_enabled("crust_render", &Level::INFO, Level::INFO));
         assert!(!event_enabled(
             "crust_render::stats_extra",
             &Level::INFO,
