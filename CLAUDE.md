@@ -116,9 +116,10 @@ without the other (full list: `docs/architecture.md` § Invariants):
 - `Emissive::radiance_toward` is the one answer to "what does this light emit toward
   here", for `AreaLight::sample_li` and `Material::emitted_at` alike. A material that
   emits only through `emitted_at` must never become a light-list entry.
-- `LightShape::sample_solid_angle` / `solid_angle_pdf` answer for exactly the same
-  `from`s with the same density; a non-finite density is refused on both sides
-  (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
+- A shape's solid-angle sample and its pdf answer for exactly the same `from`s with
+  the same density — structural now: both come from the one
+  `LightShape::solid_angle_sampler(from)`. A non-finite density is refused on both
+  sides (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines (a render
   mode is scheduling only); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).

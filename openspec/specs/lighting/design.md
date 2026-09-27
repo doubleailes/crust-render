@@ -42,12 +42,17 @@
   direction its map gives no density (a black texel), which `escaped_emission` takes
   unopposed, the same rule as a refused point.
   A shape with a better strategy than area sampling implements
-  **`LightShape::sample_solid_angle` / `solid_angle_pdf`** (default `None`, meaning
-  "sample me by area"): a point plus its *solid-angle* pdf as seen from the shading
-  point, which `AreaLight::sample_li` and `pdf_at_point` both prefer when present. The
-  contract is what keeps the two MIS sides one strategy — whether the shape answers
-  must depend on `from` alone, never on `u`/`v`, and the two methods must answer for
-  exactly the same `from`s with the same density. **`SphereShape` samples the cone it
+  **`LightShape::solid_angle_sampler(from)`** (default `None`, meaning "sample me by
+  area"): a `SolidAngleSampler` whose `sample(u, v)` gives a point plus its
+  *solid-angle* pdf as seen from the shading point and whose `pdf(p)` gives the
+  density of a point, which `AreaLight::sample_li` and `pdf_at_point` both prefer when
+  present. The contract is what keeps the two MIS sides one strategy — whether the
+  shape answers depends on `from` alone, never on `u`/`v`, and both halves answer for
+  exactly the same `from`s with the same density. It used to be two independent trait
+  methods kept in step by prose (and `AffineShape` repeated its sphere-only guard in
+  each); one hook returning one sampler makes it structural, at no measurable cost
+  once the sampler is `inline(always)` (callgrind, 2 spp: veach_mis +0.04%, usdlux
+  +0.03%, rectlight +0.05%; without it `sample_li` grew 6%). **`SphereShape` samples the cone it
   subtends** (Shirley et al. 1996, pbrt-v4's `Sphere::Sample`): uniform over the
   visible cap, pdf `1/(2π(1 − cos θ_max))`, with pbrt's small-angle threshold
   `sin² θ_max < sin² 1.5°` (`SMALL_CONE_SIN2`, where `1 − cos θ_max` cancels in f32)

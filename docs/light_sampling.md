@@ -1314,11 +1314,14 @@ estimator unbiased.
 ### 9.2 Per-light sampling
 
 **(d) Sphere cone sampling. ✅ Done; measured in §3.7.**
-- `LightShape` has a solid-angle hook, `sample_solid_angle(from, u, v)` and
-  `solid_angle_pdf(from, p)`, both defaulting to `None`. `AreaLight` prefers it,
-  when present, in both `sample_li` and `pdf_at_point`.
+- `LightShape` has a solid-angle hook, `solid_angle_sampler(from)`, defaulting to
+  `None`; the `SolidAngleSampler` it returns has both halves, `sample(u, v)` and
+  `pdf(p)` (`sample_solid_angle` / `solid_angle_pdf` are the not-overridable
+  `SolidAngleSampling` forms of the two). `AreaLight` prefers it, when present, in
+  both `sample_li` and `pdf_at_point`.
   - The contract: whether a shape answers depends on `from` alone, and both
-    methods answer for the same `from`s with the same density.
+    halves answer for the same `from`s with the same density — which one hook
+    returning one sampler makes structural.
   - Items (e), (g) and (h) plug into the same hook.
 - `SphereShape` implements it as pbrt-v4 does:
   - area fallback inside the sphere;
