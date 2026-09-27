@@ -84,6 +84,17 @@ impl StripedCounter {
             .fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Takes `n` back off this thread's stripe. Sound for a quantity each
+    /// thread only ever takes back what it added itself — a thread-local
+    /// cache's bytes — so no stripe goes below zero; `load` is then the
+    /// current total.
+    #[inline]
+    pub fn sub(&self, n: u64) {
+        self.stripes[thread_stripe()]
+            .0
+            .fetch_sub(n, Ordering::Relaxed);
+    }
+
     /// The exact total. Not a snapshot while threads are still counting, like
     /// any relaxed counter, but reports read it after the render.
     pub fn load(&self) -> u64 {
@@ -98,16 +109,15 @@ impl StripedCounter {
 #[inline]
 fn thread_stripe() -> usize {
     thread_local! {
-        static STRIPE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+        static STRIPE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     }
     STRIPE.with(|s| {
-        let v = s.get();
-        if v != usize::MAX {
+        if let Some(v) = s.get() {
             return v;
         }
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let v = NEXT.fetch_add(1, Ordering::Relaxed) % STRIPES;
-        s.set(v);
+        s.set(Some(v));
         v
     })
 }
