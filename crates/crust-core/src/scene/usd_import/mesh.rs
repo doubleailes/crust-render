@@ -155,13 +155,16 @@ impl MeshArena {
     /// Interns a mesh by content, returning its slot index. Triangulates on
     /// first sight; `None` if nothing survives triangulation (matching the
     /// old behaviour, which also did not cache a failed mesh).
+    ///
+    /// Takes the source by value: its normals move into the slot rather than
+    /// being copied, and nothing reads a source after it is interned.
     pub(super) fn intern(
         &mut self,
         prim: &Prim,
-        src: &MeshSource,
+        src: MeshSource,
         material: &Arc<dyn Material>,
     ) -> Option<u32> {
-        let key = MeshKey::new(src, material);
+        let key = MeshKey::new(&src, material);
         if let Some(&slot) = self.by_key.get(&key) {
             debug!(
                 "Mesh at {} shares geometry with an earlier prim",
@@ -212,7 +215,7 @@ impl MeshArena {
             local: Some(MeshGeom {
                 verts,
                 tris,
-                normals: src.normals.clone(),
+                normals: src.normals,
             }),
             faces,
             uvs,
@@ -420,7 +423,7 @@ pub(super) fn emit_mesh(
     // depends on how many times it is placed in total, which is not known
     // until the whole stage has been walked — so claim the `geom_id` now (it
     // must keep its traversal order) and decide in `flush_meshes`.
-    let Some(slot) = meshes.intern(prim, &src, &material) else {
+    let Some(slot) = meshes.intern(prim, src, &material) else {
         return;
     };
     meshes.slots[slot as usize].n_place += 1;

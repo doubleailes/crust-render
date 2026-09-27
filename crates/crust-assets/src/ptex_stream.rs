@@ -36,7 +36,7 @@ use crate::mip_filter::{MipSource, Taps, trilinear};
 use crate::read_channel;
 use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Default cache budget, in MiB.
 ///
@@ -256,11 +256,17 @@ pub fn micro_slot_max(total: usize) -> usize {
 /// touches no shared state. Reported by `--stats` beside the reader's own
 /// resident figure, because a number that is not reported is a number nobody
 /// checks against the budget.
-static MICRO_BYTES: AtomicU64 = AtomicU64::new(0);
+///
+/// Striped, like the hit counters, rather than one atomic every thread
+/// writes on every insert and eviction: each thread adds and removes only its
+/// own microcache's bytes, so every stripe stays non-negative and their sum
+/// is the total.
+static MICRO_BYTES: std::sync::LazyLock<crate::tiled::StripedCounter> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Bytes retained across every thread's microcache. See [`MICRO_BYTES`].
 pub fn micro_retained_bytes() -> u64 {
-    MICRO_BYTES.load(Ordering::Relaxed)
+    MICRO_BYTES.load()
 }
 
 /// Bytes the *calling thread's* microcache holds.
@@ -617,10 +623,10 @@ impl PtexStream {
             // its bytes leave the accounting with it; `rotate_right` then
             // puts that hole in front for the new tile.
             if let Some((_, old)) = slots[MICRO_SLOTS - 1].take() {
-                MICRO_BYTES.fetch_sub(old.len() as u64, Ordering::Relaxed);
+                MICRO_BYTES.sub(old.len() as u64);
             }
             slots.rotate_right(1);
-            MICRO_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
+            MICRO_BYTES.add(data.len() as u64);
             slots[0] = Some((id, data));
         });
         Some(r)
