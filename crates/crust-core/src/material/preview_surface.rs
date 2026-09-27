@@ -52,17 +52,23 @@ pub enum TexOutput {
     Rgb,
 }
 
+crate::names::named!(
+    TexOutput,
+    "UsdUVTexture output",
+    [
+        (TexOutput::R, "r", "Red"),
+        (TexOutput::G, "g", "Green"),
+        (TexOutput::B, "b", "Blue"),
+        (TexOutput::A, "a", "Alpha"),
+        (TexOutput::Rgb, "rgb", "Colour"),
+    ]
+);
+
 impl TexOutput {
-    /// From the connected output's base name (`rgb`, `r`, ...).
+    /// From the connected output's base name (`rgb`, `r`, ...): the
+    /// `FromStr` impl, as an `Option`.
     pub fn from_name(name: &str) -> Option<TexOutput> {
-        Some(match name {
-            "r" => TexOutput::R,
-            "g" => TexOutput::G,
-            "b" => TexOutput::B,
-            "a" => TexOutput::A,
-            "rgb" => TexOutput::Rgb,
-            _ => return None,
-        })
+        name.parse().ok()
     }
 }
 

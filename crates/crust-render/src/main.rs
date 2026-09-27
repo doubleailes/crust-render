@@ -83,16 +83,16 @@ struct Cli {
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
     /// strategy alone to visualize what MIS balances between.
-    #[arg(long, value_enum)]
-    strategy: Option<Strategy>,
+    #[arg(long, value_parser = choices(SamplingStrategy::CHOICES))]
+    strategy: Option<SamplingStrategy>,
     /// How NEE picks the light it samples at each vertex. Overrides the
     /// scene's `crust:lightSelection` when set.
-    #[arg(long, value_enum)]
-    light_selection: Option<Selection>,
+    #[arg(long, value_parser = choices(LightSelection::CHOICES))]
+    light_selection: Option<LightSelection>,
     /// Pixel reconstruction filter. Overrides the scene's
     /// `crust:pixelFilter` when set.
-    #[arg(long, value_enum)]
-    filter: Option<Filter>,
+    #[arg(long, value_parser = choices(PixelFilter::CHOICES))]
+    filter: Option<PixelFilter>,
     /// Pixel filter radius in pixels, measured from the pixel center
     /// (each filter has its own default: box 0.5, triangle 1, gaussian /
     /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
@@ -135,75 +135,22 @@ fn parse_frame(s: &str) -> std::result::Result<f64, String> {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Debug, Copy)]
-enum Strategy {
-    /// β=2 power-heuristic MIS (default)
-    Power,
-    /// Balance-heuristic MIS
-    Balance,
-    /// Light sampling (NEE) only
-    Light,
-    /// BSDF sampling only
-    Bsdf,
-}
-
-impl From<Strategy> for SamplingStrategy {
-    fn from(s: Strategy) -> Self {
-        match s {
-            Strategy::Power => SamplingStrategy::PowerMis,
-            Strategy::Balance => SamplingStrategy::BalanceMis,
-            Strategy::Light => SamplingStrategy::LightOnly,
-            Strategy::Bsdf => SamplingStrategy::BsdfOnly,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Clone, Debug, Copy)]
-enum Selection {
-    /// By power, defensively: lights at infinity keep their uniform share (default)
-    Power,
-    /// One light in N, whatever it emits (the renderer before selection, bit for bit)
-    Uniform,
-    /// Visibility-aware: per-region pick distributions learned by a short pre-pass
-    Learned,
-}
-
-impl From<Selection> for LightSelection {
-    fn from(s: Selection) -> Self {
-        match s {
-            Selection::Uniform => LightSelection::Uniform,
-            Selection::Power => LightSelection::Power,
-            Selection::Learned => LightSelection::Learned,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Clone, Debug, Copy)]
-enum Filter {
-    /// One-pixel box (the pre-filter jitter, bit-identical at radius 0.5)
-    Box,
-    /// Tent filter (default)
-    Triangle,
-    /// Truncated Gaussian
-    Gaussian,
-    /// 4-term Blackman-Harris window
-    Blackman,
-    /// Mitchell-Netravali (negative lobes: sharp, may ring)
-    Mitchell,
-}
-
-impl From<Filter> for PixelFilter {
-    fn from(f: Filter) -> Self {
-        // The names match `PixelFilter::from_name`'s and cannot miss.
-        PixelFilter::from_name(match f {
-            Filter::Box => "box",
-            Filter::Triangle => "triangle",
-            Filter::Gaussian => "gaussian",
-            Filter::Blackman => "blackman",
-            Filter::Mitchell => "mitchell",
-        })
-        .expect("CLI filter names mirror PixelFilter::from_name")
-    }
+/// A clap parser for one of the engine's named settings: the possible values
+/// and their `--help` lines come from the enum's own table (`CHOICES`), and
+/// the value from its `FromStr`, so the CLI holds no second spelling.
+fn choices<T>(
+    table: &'static [(T, &'static str, &'static str)],
+) -> impl clap::builder::TypedValueParser<Value = T>
+where
+    T: std::str::FromStr<Err = crust_core::names::UnknownName> + Clone + Send + Sync + 'static,
+{
+    use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+    PossibleValuesParser::new(
+        table
+            .iter()
+            .map(|&(_, name, help)| PossibleValue::new(name).help(help)),
+    )
+    .try_map(|s| s.parse::<T>())
 }
 
 /// Target the `--stats` report is emitted under.
@@ -436,19 +383,19 @@ fn main() {
         None => scene.settings,
     };
     if let Some(strategy) = cli.strategy {
-        debug!("--strategy {strategy:?} overrides the scene's crust:samplingStrategy");
-        settings = settings.with_sampling_strategy(strategy.into());
+        debug!("--strategy {strategy} overrides the scene's crust:samplingStrategy");
+        settings = settings.with_sampling_strategy(strategy);
     }
     if let Some(selection) = cli.light_selection {
-        debug!("--light-selection {selection:?} overrides the scene's crust:lightSelection");
-        settings = settings.with_light_selection(selection.into());
+        debug!("--light-selection {selection} overrides the scene's crust:lightSelection");
+        settings = settings.with_light_selection(selection);
     }
     // --filter replaces the scene's filter (at the filter's default radius);
     // --filter-radius then resizes whichever filter is in effect, so it also
     // works alone to widen the scene-authored one.
     if let Some(filter) = cli.filter {
-        debug!("--filter {filter:?} overrides the scene's crust:pixelFilter");
-        settings = settings.with_pixel_filter(filter.into());
+        debug!("--filter {filter} overrides the scene's crust:pixelFilter");
+        settings = settings.with_pixel_filter(filter);
     }
     if let Some(radius) = cli.filter_radius {
         debug!("--filter-radius {radius} overrides the filter's own radius");
@@ -825,38 +772,34 @@ mod tests {
         }
     }
 
+    /// The CLI parses straight into the engine's enums, through their own
+    /// name tables: every name the engine knows is a CLI value, and parses to
+    /// the value the engine means by it.
     #[test]
-    fn cli_strategy_names_map_onto_the_engine_enum() {
+    fn cli_names_are_the_engine_names() {
+        let parse = |flag: &str, value: &str| {
+            Cli::try_parse_from(["crust-render", flag, value]).expect("a known name")
+        };
+        for &(value, name, _) in SamplingStrategy::CHOICES {
+            assert_eq!(parse("--strategy", name).strategy, Some(value));
+        }
+        for &(value, name, _) in LightSelection::CHOICES {
+            assert_eq!(
+                parse("--light-selection", name).light_selection,
+                Some(value)
+            );
+        }
+        for &(value, name, _) in PixelFilter::CHOICES {
+            assert_eq!(parse("--filter", name).filter, Some(value));
+        }
         assert_eq!(
-            SamplingStrategy::from(Strategy::Power),
-            SamplingStrategy::PowerMis
+            parse("--strategy", "power").strategy,
+            Some(SamplingStrategy::PowerMis)
         );
         assert_eq!(
-            SamplingStrategy::from(Strategy::Balance),
-            SamplingStrategy::BalanceMis
+            parse("--light-selection", "uniform").light_selection,
+            Some(LightSelection::Uniform)
         );
-        assert_eq!(
-            SamplingStrategy::from(Strategy::Light),
-            SamplingStrategy::LightOnly
-        );
-        assert_eq!(
-            SamplingStrategy::from(Strategy::Bsdf),
-            SamplingStrategy::BsdfOnly
-        );
-    }
-
-    #[test]
-    fn cli_light_selection_names_map_onto_the_engine_enum() {
-        assert_eq!(
-            LightSelection::from(Selection::Uniform),
-            LightSelection::Uniform
-        );
-        assert_eq!(
-            LightSelection::from(Selection::Power),
-            LightSelection::Power
-        );
-        let cli = Cli::try_parse_from(["crust-render", "--light-selection", "power"]).unwrap();
-        assert!(matches!(cli.light_selection, Some(Selection::Power)));
         let cli = Cli::try_parse_from(["crust-render"]).unwrap();
         assert!(cli.light_selection.is_none());
     }
@@ -886,25 +829,27 @@ mod tests {
 
     #[test]
     fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
+        let filter = |name: &str| {
+            Cli::try_parse_from(["crust-render", "--filter", name])
+                .unwrap()
+                .filter
+        };
+        assert_eq!(filter("box"), Some(PixelFilter::BoxFilter { radius: 0.5 }));
         assert_eq!(
-            PixelFilter::from(Filter::Box),
-            PixelFilter::BoxFilter { radius: 0.5 }
+            filter("triangle"),
+            Some(PixelFilter::Triangle { radius: 1.0 })
         );
         assert_eq!(
-            PixelFilter::from(Filter::Triangle),
-            PixelFilter::Triangle { radius: 1.0 }
+            filter("gaussian"),
+            Some(PixelFilter::Gaussian { radius: 1.5 })
         );
         assert_eq!(
-            PixelFilter::from(Filter::Gaussian),
-            PixelFilter::Gaussian { radius: 1.5 }
+            filter("blackman"),
+            Some(PixelFilter::Blackman { radius: 1.5 })
         );
         assert_eq!(
-            PixelFilter::from(Filter::Blackman),
-            PixelFilter::Blackman { radius: 1.5 }
-        );
-        assert_eq!(
-            PixelFilter::from(Filter::Mitchell),
-            PixelFilter::Mitchell { radius: 2.0 }
+            filter("mitchell"),
+            Some(PixelFilter::Mitchell { radius: 2.0 })
         );
     }
 
@@ -967,8 +912,8 @@ mod tests {
         assert!(cli.bucket, "the old flag still parses");
         assert!(!cli.scanline);
         assert_eq!(cli.samples, Some(12));
-        assert!(matches!(cli.strategy, Some(Strategy::Balance)));
-        assert!(matches!(cli.filter, Some(Filter::Mitchell)));
+        assert_eq!(cli.strategy, Some(SamplingStrategy::BalanceMis));
+        assert!(matches!(cli.filter, Some(PixelFilter::Mitchell { .. })));
         assert_eq!(cli.filter_radius, Some(1.75));
         assert!(cli.stats);
         assert!(cli.profile);

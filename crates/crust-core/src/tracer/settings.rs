@@ -42,6 +42,30 @@ pub enum SamplingStrategy {
     BsdfOnly,
 }
 
+crate::names::named!(
+    SamplingStrategy,
+    "sampling strategy",
+    [
+        (
+            SamplingStrategy::PowerMis,
+            "power",
+            "β=2 power-heuristic MIS (default)"
+        ),
+        (
+            SamplingStrategy::BalanceMis,
+            "balance",
+            "Balance-heuristic MIS"
+        ),
+        (
+            SamplingStrategy::LightOnly,
+            "light",
+            "Light sampling (NEE) only"
+        ),
+        (SamplingStrategy::BsdfOnly, "bsdf", "BSDF sampling only"),
+    ],
+    aliases[("mis", SamplingStrategy::PowerMis)]
+);
+
 impl SamplingStrategy {
     /// Does this strategy trace NEE shadow rays at all?
     pub fn samples_lights(self) -> bool {

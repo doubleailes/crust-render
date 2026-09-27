@@ -112,32 +112,21 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let guiding_prob = custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
 
     // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
-    let strategy = match custom_token(&prim, "crust:samplingStrategy").as_deref() {
-        None | Some("power") | Some("mis") => SamplingStrategy::PowerMis,
-        Some("balance") => SamplingStrategy::BalanceMis,
-        Some("light") => SamplingStrategy::LightOnly,
-        Some("bsdf") => SamplingStrategy::BsdfOnly,
-        Some(other) => {
-            warn!(
-                "Unknown crust:samplingStrategy \"{}\" (expected power | balance | light | bsdf) — using power MIS",
-                other
-            );
+    let strategy = match custom_token(&prim, "crust:samplingStrategy") {
+        None => SamplingStrategy::PowerMis,
+        Some(name) => name.parse().unwrap_or_else(|e| {
+            warn!("crust:samplingStrategy: {e} — using power MIS");
             SamplingStrategy::PowerMis
-        }
+        }),
     };
 
     // Light selection: `power` (default) | `uniform` | `learned`.
-    let light_selection = match custom_token(&prim, "crust:lightSelection").as_deref() {
-        None | Some("power") => LightSelection::Power,
-        Some("uniform") => LightSelection::Uniform,
-        Some("learned") => LightSelection::Learned,
-        Some(other) => {
-            warn!(
-                "Unknown crust:lightSelection \"{}\" (expected power | uniform | learned) — picking lights by power",
-                other
-            );
+    let light_selection = match custom_token(&prim, "crust:lightSelection") {
+        None => LightSelection::Power,
+        Some(name) => name.parse().unwrap_or_else(|e| {
+            warn!("crust:lightSelection: {e} — picking lights by power");
             LightSelection::Power
-        }
+        }),
     };
 
     // Pixel reconstruction filter: `box` | `triangle` (default) | `gaussian`
@@ -145,11 +134,8 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     // `crust:pixelFilterRadius` overrides it (in pixels, from the center).
     let mut filter = match custom_token(&prim, "crust:pixelFilter") {
         None => PixelFilter::default(),
-        Some(name) => PixelFilter::from_name(&name).unwrap_or_else(|| {
-            warn!(
-                "Unknown crust:pixelFilter \"{}\" (expected box | triangle | gaussian | blackman | mitchell) — using the triangle filter",
-                name
-            );
+        Some(name) => name.parse().unwrap_or_else(|e| {
+            warn!("crust:pixelFilter: {e} — using the triangle filter");
             PixelFilter::default()
         }),
     };
