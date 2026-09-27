@@ -1,4 +1,4 @@
-//! Collapsing the binary build tree into 4-wide [`WideNode`]s, packing each
+//! Collapsing the binary build tree into [`LANES`]-wide [`WideNode`]s, packing each
 //! all-triangle leaf into `Tri4` SIMD packets.
 
 use glam::Vec3A;
@@ -7,7 +7,7 @@ use crate::prim::PrimNode;
 use crate::triangle::Tri4;
 
 use super::build::surface_area;
-use super::{Leaf, Node, WideNode};
+use super::{LANES, Leaf, Node, WideNode};
 
 /// Everything the collapse pass emits besides the nodes themselves: one
 /// [`Leaf`] per leaf lane, the triangle packets those leaves run, and the
@@ -63,9 +63,9 @@ impl LeafData {
     }
 }
 
-/// Collapses the binary tree into 4-wide nodes: each wide node adopts its
+/// Collapses the binary tree into [`LANES`]-wide nodes: each wide node adopts its
 /// binary node's two children, then repeatedly replaces the largest-area
-/// internal child with that child's own two children until four lanes are
+/// internal child with that child's own two children until every lane is
 /// filled (or only leaves remain). Leaf lanes are converted to [`Leaf`]
 /// entries with their triangles packed into SIMD packets as they are
 /// reached. Purely input-driven, so determinism is preserved.
@@ -109,11 +109,11 @@ fn collapse_node(
     let slot = out.len();
     out.push(WideNode::empty());
 
-    let mut kids = [0u32; 4];
+    let mut kids = [0u32; LANES];
     kids[0] = b_idx + 1;
     kids[1] = binary[b_idx as usize].first_or_right;
     let mut n_kids = 2;
-    while n_kids < 4 {
+    while n_kids < LANES {
         // Expand the internal kid with the largest surface area; ties
         // resolve to the first (deterministic).
         let mut best: Option<(usize, f32)> = None;
