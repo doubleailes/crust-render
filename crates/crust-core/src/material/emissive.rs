@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// A purely emissive surface material. Emission is all it knows — the shape
 /// of the light it belongs to lives in a `LightShape` on the light side
-/// (`light.rs`), and the two are tied together by binding the same
+/// (`light/`), and the two are tied together by binding the same
 /// `Arc<Emissive>` to both the scene geometry and the `AreaLight`.
 ///
 /// Two kinds. [`Emissive::new`] is a plain glowing surface: the same

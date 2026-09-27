@@ -1,6 +1,6 @@
 //! Traversal benchmarks for the intersection kernel.
 //!
-//! These exist to make the SIMD work in `bvh.rs` / `triangle.rs`
+//! These exist to make the SIMD work in `bvh/` / `triangle.rs`
 //! measurable: they time the two query entry points (`intersect` and
 //! `occluded`) over a fixed, deterministic ray batch, so a change to the
 //! slab test or the leaf intersector shows up directly instead of being

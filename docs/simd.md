@@ -109,7 +109,7 @@ Free, no source change:
 | --- | --- | --- |
 | `tri_spheres intersect` (criterion mean) | 6.71 ms | 5.32 ms (**−21%**) |
 
-### 2. Mask-driven BVH4 traversal (`bvh.rs`)
+### 2. Mask-driven BVH4 traversal (`bvh/`)
 
 The 4-wide slab test computed `(tnear, tfar)` as `Vec4`s and then threw the
 vectorization away, reading lanes back one at a time (`tnear[l] <= tfar[l]`,
@@ -129,7 +129,7 @@ four times, plus four branches to skip unused lanes). Now:
   per-axis min/max un-inverts an inverted box, and +INF/+INF bounds pass
   when `t_max == INF` and the ray direction is all-positive.)
 
-### 3. 4-wide triangle packets in the leaves (`triangle.rs`, `bvh.rs`)
+### 3. 4-wide triangle packets in the leaves (`triangle.rs`, `bvh/`)
 
 The Woop et al. 2013 watertight intersector splits cleanly into a per-*ray*
 part and a per-*triangle* part: the axis permutation and shear depend only
@@ -166,7 +166,7 @@ order, no FMA contraction — and `simd_matches_scalar_bitwise` pins that with
 Anything looser would mean the two paths could disagree about a hit near an
 edge, which is exactly what watertightness forbids.
 
-### 4. Leaf size retuned to the SIMD width (`bvh.rs`)
+### 4. Leaf size retuned to the SIMD width (`bvh/`)
 
 With a 4-wide leaf intersector, `MIN_LEAF = 2` leaves half the lanes idle:
 measured packet occupancy was **1.66 of 4 lanes**. But raising the floor for
