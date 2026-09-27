@@ -6,7 +6,7 @@ mod list;
 mod rect;
 mod shape;
 
-pub use area::AreaLight;
+pub use area::{AreaLight, AreaShape};
 pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
 pub use list::{LightList, LightSelection};
 pub use rect::RectShape;

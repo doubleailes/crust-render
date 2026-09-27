@@ -83,10 +83,10 @@ fn rect_shape_samples_lie_in_rect() {
 #[test]
 fn area_light_pdf_is_positive_facing_side() {
     let light = AreaLight::new(
-        Box::new(SphereShape {
+        SphereShape {
             center: Vec3A::new(0.0, 5.0, 0.0),
             radius: 1.0,
-        }),
+        },
         Arc::new(Emissive::new(Vec3A::splat(10.0))),
         0,
     );
@@ -135,7 +135,7 @@ fn area_pdf_has_no_epsilon() {
         * Affine3A::from_scale(glam::Vec3::new(0.05, 0.02, 1.0));
     let shape = AffineShape::new(UnitShape::Disk, placement).unwrap();
     let area = shape.area();
-    let light = AreaLight::new(Box::new(shape), Arc::new(Emissive::new(Vec3A::ONE)), 0);
+    let light = AreaLight::new(shape, Arc::new(Emissive::new(Vec3A::ONE)), 0);
     for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.9, 0.7)] {
         let s = light.sample_li(Vec3A::ZERO, u, v).expect("front-facing");
         let p = s.direction * s.distance;
@@ -168,7 +168,7 @@ fn area_pdf_has_no_epsilon() {
 fn area_samples_are_refused_only_edge_on() {
     let placement = Affine3A::from_translation(glam::Vec3::new(0.0, 0.0, 3.0));
     let light = AreaLight::new(
-        Box::new(AffineShape::new(UnitShape::Disk, placement).unwrap()),
+        AffineShape::new(UnitShape::Disk, placement).unwrap(),
         Arc::new(Emissive::new(Vec3A::ONE)),
         0,
     );
@@ -299,10 +299,10 @@ fn find_by_geom_matches_by_id() {
     let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
     let mut lights = LightList::new();
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape {
+        SphereShape {
             center: Vec3A::ZERO,
             radius: 1.0,
-        }),
+        },
         mat,
         7,
     )));
@@ -320,10 +320,10 @@ fn infinite_at_is_iter_at_filtered_to_escaped() {
     let mut lights = LightList::new();
     let area = |c: f32, id: u32| {
         Arc::new(AreaLight::new(
-            Box::new(SphereShape {
+            SphereShape {
                 center: Vec3A::new(c, 0.0, 0.0),
                 radius: 1.0,
-            }),
+            },
             mat.clone(),
             id,
         ))

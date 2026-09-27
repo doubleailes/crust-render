@@ -111,7 +111,7 @@ fn rect_shape_samples_lie_in_the_parallelogram() {
 
 fn sphere_light(center: Vec3A, radius: f32, color: Vec3A, geom_id: u32) -> AreaLight {
     AreaLight::new(
-        Box::new(SphereShape { center, radius }),
+        SphereShape { center, radius },
         Arc::new(Emissive::new(color)),
         geom_id,
     )
@@ -173,7 +173,7 @@ fn sheared_rect_light_pdf_is_distance_squared_over_cosine_area() {
         Vec3A::new(0.5, 1.0, 0.0),
         Vec3A::Z,
     );
-    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
+    let light = AreaLight::new(rect, Arc::new(Emissive::new(Vec3A::ONE)), 1);
     // Straight above the centre at distance 2: cos = 1, area = 1 → pdf ≈ 4.
     let pdf = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
     assert!(approx(pdf, 4.0, 1e-3), "{pdf}");
@@ -199,11 +199,7 @@ fn rect_light_is_effectively_one_sided() {
     // d² / (|cos θ| · A) = 1, and both MIS sides agree on it. Being
     // one-sided is the emitter's business: `Emissive::light` gives zero
     // radiance from the back, which NEE skips without a shadow ray.
-    let one_sided = AreaLight::new(
-        Box::new(rect()),
-        Arc::new(Emissive::light(Vec3A::ONE, None)),
-        1,
-    );
+    let one_sided = AreaLight::new(rect(), Arc::new(Emissive::light(Vec3A::ONE, None)), 1);
     let front = one_sided
         .sample_li(Vec3A::new(0.0, 0.0, 1.0), 0.5, 0.5)
         .unwrap();
@@ -219,7 +215,7 @@ fn rect_light_is_effectively_one_sided() {
     assert_eq!(front.radiance, Vec3A::ONE);
     assert_eq!(back.radiance, Vec3A::ZERO);
     // A two-sided emitter keeps direct sampling from behind.
-    let two_sided = AreaLight::new(Box::new(rect()), Arc::new(Emissive::new(Vec3A::ONE)), 1);
+    let two_sided = AreaLight::new(rect(), Arc::new(Emissive::new(Vec3A::ONE)), 1);
     assert_eq!(
         two_sided.sample_li(behind, 0.5, 0.5).unwrap().radiance,
         Vec3A::ONE
@@ -250,7 +246,7 @@ fn area_light_pdf_falls_with_the_inverse_square_of_distance() {
         Vec3A::new(0.05, 0.1, 0.0),
         Vec3A::Z,
     );
-    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 0);
+    let light = AreaLight::new(rect, Arc::new(Emissive::new(Vec3A::ONE)), 0);
     let near = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
     let far = light.pdf_at_point(Vec3A::new(0.0, 0.0, 4.0), Vec3A::ZERO);
     assert!(approx(far / near, 4.0, 0.01), "{}", far / near);
@@ -305,7 +301,7 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
         Vec3A::new(0.0, 1.0, 0.0),
         Vec3A::Z,
     );
-    let light = AreaLight::new(Box::new(rect), Arc::new(Emissive::new(Vec3A::ONE)), 1);
+    let light = AreaLight::new(rect, Arc::new(Emissive::new(Vec3A::ONE)), 1);
     // Above the centre of a 2a x 2b rectangle at height h the solid angle is
     // 4 asin(ab / √((a² + h²)(b² + h²))).
     let omega = 4.0 * (0.25f64 / (4.25f64 * 4.25).sqrt()).asin();
@@ -318,7 +314,7 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
     // Off axis, against the two-triangle formula.
     let (origin, eu, ev, from) = near_rect();
     let light = AreaLight::new(
-        Box::new(RectShape::new(origin, eu, ev, Vec3A::Z)),
+        RectShape::new(origin, eu, ev, Vec3A::Z),
         Arc::new(Emissive::new(Vec3A::ONE)),
         1,
     );
@@ -405,7 +401,7 @@ fn rect_light_samples_are_uniform_in_solid_angle() {
 fn rect_light_estimates_the_irradiance() {
     let (origin, eu, ev, from) = near_rect();
     let light = AreaLight::new(
-        Box::new(RectShape::new(origin, eu, ev, Vec3A::Z)),
+        RectShape::new(origin, eu, ev, Vec3A::Z),
         Arc::new(Emissive::light(Vec3A::ONE, None)),
         1,
     );
@@ -456,7 +452,7 @@ fn rect_light_takes_the_map_only_when_the_edges_are_perpendicular() {
     let (origin, eu, ev, from) = near_rect();
     let slight = ev + 2e-7 * eu;
     let light = AreaLight::new(
-        Box::new(RectShape::new(origin, eu, slight, Vec3A::Z)),
+        RectShape::new(origin, eu, slight, Vec3A::Z),
         Arc::new(Emissive::new(Vec3A::ONE)),
         1,
     );
@@ -656,7 +652,7 @@ fn ellipsoid_light() -> (AffineShape, AreaLight) {
     let m = ellipsoid_placement();
     let shape = AffineShape::new(UnitShape::Sphere, m).expect("invertible");
     let light = AreaLight::new(
-        Box::new(AffineShape::new(UnitShape::Sphere, m).unwrap()),
+        AffineShape::new(UnitShape::Sphere, m).unwrap(),
         Arc::new(Emissive::new(Vec3A::ONE)),
         0,
     );
@@ -1109,7 +1105,7 @@ fn rect_light(radiance: f32, shaping: Option<Shaping>, geom_id: u32) -> AreaLigh
         -Vec3A::Z,
     );
     AreaLight::new(
-        Box::new(rect),
+        rect,
         Arc::new(Emissive::light(Vec3A::splat(radiance), shaping)),
         geom_id,
     )
@@ -1164,7 +1160,7 @@ fn textured_light_power_uses_the_mean_texel() {
     );
     let texture = RectTexture::new(image, origin, edge_u, edge_v).unwrap();
     let light = AreaLight::new(
-        Box::new(RectShape::new(origin, edge_u, edge_v, -Vec3A::Z)),
+        RectShape::new(origin, edge_u, edge_v, -Vec3A::Z),
         Arc::new(Emissive::light(Vec3A::ONE, None).with_texture(texture)),
         0,
     );

@@ -511,7 +511,7 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
         MASK_SHADOW | MASK_INDIRECT,
     );
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape { center, radius }),
+        SphereShape { center, radius },
         emitter,
         id,
     )));
@@ -589,7 +589,7 @@ fn clamp_scene(bounce_wall: bool, clamp: f32) -> Renderer {
         MASK_SHADOW | MASK_INDIRECT,
     );
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape { center, radius }),
+        SphereShape { center, radius },
         emitter,
         id,
     )));
@@ -706,7 +706,7 @@ fn power_light_selection_agrees_with_uniform_in_expectation() {
             MASK_SHADOW | MASK_INDIRECT,
         );
         lights.add(Arc::new(AreaLight::new(
-            Box::new(SphereShape { center, radius }),
+            SphereShape { center, radius },
             emitter,
             id,
         )));
@@ -787,7 +787,7 @@ fn light_geometry_hidden_from_camera_rays_still_lights_the_scene() {
         MASK_SHADOW | MASK_INDIRECT,
     );
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape { center, radius }),
+        SphereShape { center, radius },
         emitter,
         id,
     )));

@@ -32,7 +32,7 @@ fn add_sphere_light(
         MASK_INDIRECT | MASK_SHADOW,
     );
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape { center, radius }),
+        SphereShape { center, radius },
         material,
         geom_id,
     )));

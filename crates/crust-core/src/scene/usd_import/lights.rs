@@ -15,8 +15,8 @@ use openusd_schemas::lux::{
 use tracing::{debug, warn};
 
 use crate::light::{
-    AffineShape, AreaLight, DistantLight as CoreDistantLight, DomeLight as CoreDomeLight,
-    LightList, LightShape, RectShape, SphereShape, UnitShape,
+    AffineShape, AreaLight, AreaShape, DistantLight as CoreDistantLight,
+    DomeLight as CoreDomeLight, LightList, LightShape, RectShape, SphereShape, UnitShape,
 };
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
@@ -363,9 +363,9 @@ fn emit_round_light(
     });
     let geom_id = world.attach_masked(geometry, material.clone(), light_ray_mask(prim));
 
-    let shape: Box<dyn LightShape> = match round_sphere {
-        Some(sphere) => Box::new(sphere),
-        None => Box::new(affine),
+    let shape: AreaShape = match round_sphere {
+        Some(sphere) => sphere.into(),
+        None => affine.into(),
     };
     lights.add(Arc::new(AreaLight::new(shape, material, geom_id)));
     debug!(
@@ -584,7 +584,7 @@ pub(super) fn emit_rect_light(
         light_ray_mask(prim),
     );
     ctx.lights.add(Arc::new(AreaLight::new(
-        Box::new(RectShape::new(origin, edge_u, edge_v, normal)),
+        RectShape::new(origin, edge_u, edge_v, normal),
         material,
         geom_id,
     )));

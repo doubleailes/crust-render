@@ -55,10 +55,10 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
             MASK_SHADOW | MASK_INDIRECT,
         );
         lights.add(Arc::new(AreaLight::new(
-            Box::new(SphereShape {
+            SphereShape {
                 center,
                 radius: 0.3,
-            }),
+            },
             emitter,
             id,
         )));
@@ -216,10 +216,10 @@ fn one_light_learns_nothing() {
     );
     let mut lights = LightList::new();
     lights.add(Arc::new(AreaLight::new(
-        Box::new(SphereShape {
+        SphereShape {
             center: VISIBLE,
             radius: 0.3,
-        }),
+        },
         emitter,
         id,
     )));
