@@ -1071,6 +1071,26 @@ fn sample_interior_medium(m: &OpenPBR) -> Option<Arc<Medium>> {
     panic!("material never transmitted");
 }
 
+/// The interior medium is built once per material and shared by every
+/// refraction into it; a clone — made to be changed — starts empty and
+/// builds its own from its own parameters.
+#[test]
+fn interior_medium_is_built_once_and_not_cloned() {
+    let m = OpenPBR {
+        transmission_color: Vec3A::new(0.5, 0.7, 0.9),
+        transmission_depth: 2.0,
+        ..OpenPBR::glass(1.5)
+    };
+    let a = sample_interior_medium(&m).expect("deep glass carries a medium");
+    let b = sample_interior_medium(&m).expect("deep glass carries a medium");
+    assert!(Arc::ptr_eq(&a, &b), "rebuilt the medium per refraction");
+    let mut changed = m.clone();
+    changed.transmission_depth = 4.0;
+    let c = sample_interior_medium(&changed).expect("deep glass carries a medium");
+    assert!(!Arc::ptr_eq(&a, &c));
+    assert_eq!(c.sigma_a, a.sigma_a * 0.5, "the clone kept the old medium");
+}
+
 #[test]
 fn transmission_scatter_wires_into_interior_medium() {
     // transmission_scatter/depth becomes the interior σₛ, the extinction

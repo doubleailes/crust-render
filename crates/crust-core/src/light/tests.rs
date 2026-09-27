@@ -331,7 +331,11 @@ fn infinite_at_is_iter_at_filtered_to_escaped() {
     lights.add(area(0.0, 0));
     lights.add(Arc::new(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0)));
     lights.add(area(3.0, 1));
-    lights.add(Arc::new(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY)));
+    lights.add(Arc::new(DomeLight::new(
+        Vec3A::ONE,
+        None,
+        glam::Mat3A::IDENTITY,
+    )));
     for selection in [LightSelection::Uniform, LightSelection::Power] {
         lights.select_by(selection);
         let from = Vec3A::new(0.0, 5.0, 0.0);

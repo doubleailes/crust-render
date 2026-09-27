@@ -134,6 +134,38 @@ pub struct OpenPBR {
     /// fallback for hits with no face identity (and for hosts that decode no
     /// Ptex), so an unresolved texture degrades to a flat plausible colour.
     pub base_color_ptex: Option<crate::PtexRef>,
+
+    // --- derived --------------------------------------------------------
+    /// The interior medium, built on first use. Not a parameter: leave it at
+    /// its default (`..OpenPBR::default()`). See [`InteriorCache`].
+    pub interior: InteriorCache,
+}
+
+/// [`OpenPBR`]'s interior medium, computed the first time a ray refracts
+/// into the material and shared by every refraction after it — instead of
+/// rebuilding the `Medium` (three logarithms, a van de Hulst inversion and a
+/// blend) and allocating a fresh `Arc` for each one. The medium depends only
+/// on the transmission and subsurface parameters.
+///
+/// Cloning yields an **empty** cache, never a copy: an `OpenPBR` is cloned to
+/// be changed — the per-hit Ptex substitution, a pattern material's
+/// per-query parameter set — and a copied medium would outlive the
+/// parameters it was built from. A material is shaded behind an `Arc`,
+/// immutably, so the one it caches cannot go stale; do not change the
+/// parameters of an `OpenPBR` you have already rendered with.
+#[derive(Default)]
+pub struct InteriorCache(std::sync::OnceLock<Option<Arc<Medium>>>);
+
+impl Clone for InteriorCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for InteriorCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InteriorCache")
+    }
 }
 
 impl Default for OpenPBR {
@@ -177,6 +209,7 @@ impl Default for OpenPBR {
             geometry_opacity: 1.0,
             geometry_thin_walled: false,
             base_color_ptex: None,
+            interior: InteriorCache::default(),
         }
     }
 }
@@ -231,7 +264,16 @@ impl OpenPBR {
     /// rays refracting into the front face; `None` when the interior
     /// neither absorbs nor scatters (zero-depth clear glass), so inert
     /// interiors skip medium tracking entirely.
+    ///
+    /// Built once per material ([`InteriorCache`]); each call is a refcount.
     fn interior_medium(&self) -> Option<Arc<Medium>> {
+        self.interior
+            .0
+            .get_or_init(|| self.build_interior_medium())
+            .clone()
+    }
+
+    fn build_interior_medium(&self) -> Option<Arc<Medium>> {
         let trans_frac = self.transmission_weight;
         let sss_frac = (1.0 - self.transmission_weight) * self.subsurface_weight;
         let total = trans_frac + sss_frac;
