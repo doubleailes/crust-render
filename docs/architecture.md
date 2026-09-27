@@ -42,15 +42,16 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, BSDF/EDF flattening to weighted lobes | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, stats/profile | file formats, image codecs, UI |
+| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, stats/profile | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
 
-- **`crust-core` decodes nothing.** Every byte read from an image or Ptex file
-  crosses the `AssetLoader` seam (below) into `crust-assets`. That is why the
+- **`crust-core` decodes no assets.** It parses USD itself (through `openusd`),
+  but every byte read from an image, Ptex or IES file crosses the
+  `AssetLoader` seam (below) into `crust-assets`. That is why the
   engine library has no codec dependencies and why the probe examples in
   `crust-render/examples/` decode exactly the way the renderer does.
 - **The two leaf libraries have no crust dependency.** `crust-rt` and
