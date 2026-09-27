@@ -63,6 +63,10 @@ pub struct LightList {
     /// `geom_id → index into lights`, so a bounce hit finds its light in O(1)
     /// rather than by scanning the list on every emissive hit.
     pub(super) by_geom: HashMap<u32, usize>,
+    /// Indices into `lights` of the lights at infinity ([`Light::at_infinity`]),
+    /// in list order: the only ones an escaping ray can find, so
+    /// [`LightList::infinite_at`] visits these rather than every light.
+    pub(super) infinite: Vec<u32>,
     /// The learned per-region selection, under [`LightSelection::Learned`].
     /// Consulted by every `*_at` method; `pmf` / `cdf` are what it falls back
     /// to outside trained cells.
@@ -85,6 +89,7 @@ impl LightList {
             pmf: Vec::new(),
             cdf: Vec::new(),
             by_geom: HashMap::new(),
+            infinite: Vec::new(),
             cache: None,
         }
     }
@@ -95,6 +100,9 @@ impl LightList {
     pub fn add(&mut self, light: Arc<dyn Light>) {
         if let Some(id) = light.geom_id() {
             self.by_geom.insert(id, self.lights.len());
+        }
+        if light.at_infinity() {
+            self.infinite.push(self.lights.len() as u32);
         }
         self.lights.push(light);
         self.pmf.clear();
@@ -287,6 +295,28 @@ impl LightList {
         self.lights.iter().enumerate().map(move |(index, light)| {
             (
                 light,
+                match table {
+                    Some(pmf) => pmf[index],
+                    None => self.pmf(index),
+                },
+            )
+        })
+    }
+
+    /// [`LightList::iter_at`] restricted to the lights at infinity, in the
+    /// same order: what an escaping ray needs. A finite light's
+    /// [`Light::escaped`] is `None` by contract, so skipping it changes
+    /// nothing but the number of virtual calls.
+    pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+        let table = if self.infinite.is_empty() {
+            None
+        } else {
+            self.cache.as_ref().and_then(|c| c.lookup(p)).map(|t| t.0)
+        };
+        self.infinite.iter().map(move |&index| {
+            let index = index as usize;
+            (
+                &self.lights[index],
                 match table {
                     Some(pmf) => pmf[index],
                     None => self.pmf(index),

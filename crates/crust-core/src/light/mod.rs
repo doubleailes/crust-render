@@ -81,6 +81,15 @@ pub trait Light: Send + Sync {
         None
     }
 
+    /// Whether this light is at infinity — whether [`Light::escaped`] can
+    /// ever answer `Some`. [`LightList`] records the lights that are once,
+    /// so an escaping ray asks only them rather than every light in the
+    /// scene. A light that overrides `escaped` must override this too, or
+    /// escaping rays never find it.
+    fn at_infinity(&self) -> bool {
+        false
+    }
+
     /// The `geom_id` of this light's scene geometry in the world, used to
     /// recognize the light when a bounce ray hits it. `None` for lights
     /// with no geometry in the world.
