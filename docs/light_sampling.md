@@ -660,6 +660,113 @@ every query reads that, `eval` samples no texture, `eval_reads_textures` is gone
 and every material runs radiance → eval → shadow again. The images are
 bit-identical to both orders above.
 
+### 3.12 Learned, visibility-aware selection (§9.3 n)
+
+**Why.** ALab, the first production interior crust renders, broke power
+selection outright. `examples/light_occlusion` samples every light from a grid of
+camera hits and records how each sample ends. Weighted by how often NEE picks
+each light, **3.2% of light samples delivered light**:
+
+| outcome | share of NEE picks |
+|---|---|
+| backfacing (a one-sided or shaped light facing away) | 29.5% |
+| below the receiver's horizon | 15.1% |
+| occluded, opaque blocker | 41.8% |
+| occluded, glass only | 10.4% |
+| **visible** | **3.2%** |
+
+Two exterior rect lights took 49% of the picks for being the most powerful and
+were visible from **0%** of the receivers, as were the sun and the dome. The
+lights that actually light the frame got about 1% each. Glass was a tenth of the
+loss, not the cause. A light BVH (§6.3) would recover the backfacing share and
+none of the rest: power, distance and orientation cannot see a wall.
+
+**The change.** `crust:lightSelection = "learned"` / `--light-selection learned`
+(`light_cache.rs`):
+- **Pre-pass.** Before the first pass, a deterministic training pre-pass traces
+  one camera path per 4×4 pixels with two BSDF bounces. At each vertex it
+  estimates **every** light's NEE contribution with the integrand itself: the
+  same `sample_li`, BSDF `eval` and shadow-ray query NEE uses, 2 samples per
+  light, `luminance(L·f)/p` where the shadow ray is clear.
+- **Grid.** The estimates sum into a uniform grid over the receivers' 2–98%
+  quantile bounds, sized for about 16 receivers per occupied cell.
+- **Per-cell tables.** A cell with at least 2 receivers and any light seen gets
+  `p = 0.7 · E/ΣE + 0.3 / n_live`; every other point uses the power table.
+- **MIS.** `LightList::pick_at` / `pmf_at` / `find_by_geom_at` / `iter_at` serve
+  both MIS sides from the same stored `f32`, at the vertex NEE sampled from. The
+  bounce side reads it at `prev.pos`, which is that vertex.
+- **Unbiased.** The defensive share gives every light that emits at least
+  `0.3/n` everywhere.
+- **Deterministic.** The pre-pass reduces in receiver order and is frozen before
+  any pass, so tiled and scanline renders stay bit-identical
+  (`tests/learned_selection.rs`).
+
+**Three choices, each measured.**
+- **Robust bounds.** The receivers' full bounds let bounce vertices outside
+  ALab's room stretch the grid to 4 cells for the whole frame. Quantile bounds
+  give 2 568.
+- **The mean, not the second moment.** Picking ∝ √E[F²] (Vévoda et al. 2018's
+  optimum for one sample) won on `usdlux` (0.0395 against 0.0430) and lost on
+  the textured scenes.
+- **A 0.3 uniform defensive share, not 0.2 and not power-mixed.** At 0.2, a
+  `domelight` cell straddling the sun's shadow boundary left the sun a tenth of
+  the picks, and fireflies followed. Mixing with the power table puts ALab's
+  hidden lights back in the picks.
+
+**Measured, bit-identity.** `power` (still the default) renders all 20 checked-in
+samples at 16 spp with **0 differing pixels** against the previous commit.
+
+**Measured, noise.** relMSE at 16 spp against a 1024 spp `power` reference,
+`--indirect-clamp 0`. "Trimmed" discards the worst 0.1% of pixels (`exr_diff`
+now prints both), because on scenes with fireflies one pixel can decide the
+mean. Scenes marked (4) average four seeds (`-f 1..4`); `domelight`'s full relMSE
+varies 9× between seeds under power alone.
+
+| scene | power full / trimmed | learned full / trimmed | gain |
+|---|---|---|---|
+| ALab frame 1004, **direct lighting only** | 0.01097 / 0.00922 | 0.00269 / 0.00210 | **4.07× / 4.40×** |
+| ALab frame 1004, full | 1.174 / 0.0340 | 1.165 / 0.0260 | 1.01× / **1.31×** |
+| `usdlux` (4) | 0.0924 / 0.0776 | 0.0453 / 0.0370 | **2.04× / 2.10×** |
+| `veach_mis` (4) | 0.0128 / 0.00592 | 0.0090 / 0.00405 | 1.42× / 1.46× |
+| `domelight` (4) | 0.335 / 0.0222 | 0.296 / 0.0179 | 1.13× / 1.24× |
+| `materialx_basic` | 0.00263 / 0.00239 | 0.00212 / 0.00193 | 1.24× / 1.23× |
+| `usdpreview_textured` | 0.00116 / 0.00091 | 0.00106 / 0.00084 | 1.09× / 1.08× |
+| `openpbr_showcase` | 0.00501 / 0.00232 | 0.00498 / 0.00229 | 1.01× / 1.01× |
+| `light_visibility`, adaptive off | 5.19e-4 / 4.95e-4 | 5.11e-4 / 4.86e-4 | 1.02× / 1.02× |
+| `rectlight`, `fog`, `smoke` | — | — | one light: identical |
+
+On ALab, occluded shadow rays fall from 94.2% to 33.4% (direct) and from 96.1%
+to 55.1% (full). The full image gains less because most of ALab's light is
+indirect: sun and sky through the windows, reached by bounce paths, which light
+selection cannot help. That is guiding's problem (§9.3's guided training passes).
+
+`light_visibility` first read as 2.15× *worse*. It authors
+`minSamplesPerPixel = 4` with a variance threshold, so at `-s 16` its pixels
+stop adaptively. Learned stopped more of them (5.75 against 6.16 spp), and the
+comparison was not equal-sample. With adaptive sampling off, it is a tie.
+
+**Measured, cost, and the equal-time verdict.** The pre-pass is 0.43–0.57 s on
+ALab (40 064 receivers × 47 lights × 2 samples), but that is the small part.
+Each sample also costs more, and for the reason the change works:
+- NEE casts 18% more shadow rays, because fewer picks die at the radiance test;
+- a shadow ray that reaches its light traverses the whole BVH, where an occluded
+  one exits at its first hit.
+
+`bench_ab.sh` at the default 128 spp, 2 interleaved reps:
+
+| ALab | power | learned | |
+|---|---|---|---|
+| Render, min / mean | 24.79 / 24.79 s | 28.35 / 30.42 s | +14.4% / +22.7% |
+
+So at **equal time**:
+- direct lighting is still about **3.6×** better (4.07× relMSE for ~1.14× time);
+- the full ALab image is only about **1.07–1.15×** better (1.31× trimmed for
+  1.14–1.23× time).
+
+The checked-in samples' per-sample gains shrink by their own time costs, which
+this section has not measured scene by scene. That, and the noise-pattern change
+to every render, is why `learned` is opt-in rather than the default.
+
 ---
 
 ## 4. The anatomy of the direct-lighting estimator
@@ -1146,7 +1253,11 @@ checking is *how much* noise, and proof that nothing *but* noise moved. On top o
    `exr_diff ref.exr test.exr` prints `relmse:`, the mean of
    `(test − ref)² / (ref² + 0.01)`, the literature's standard. Use it, not
    `rmse`, which on `veach_mis` is dominated by the camera-visible light
-   spheres.
+   spheres. It also prints `relmse (trimmed 0.1%)`, the same with the worst
+   0.1% of pixels discarded. Report both: on a scene with fireflies (ALab,
+   `domelight`) one pixel can decide the untrimmed mean.
+   Mind **adaptive sampling**: a scene authoring `minSamplesPerPixel` below 16
+   stops pixels early, and at different counts for different strategies.
 4. **Equal time, not just equal spp.** A better sampler that costs more per
    sample must win on `relMSE × render seconds`, the inverse efficiency. Time it
    with `scripts/bench_ab.sh`, never sequentially.
@@ -1273,8 +1384,13 @@ imports scenes with hundreds of lights. That means mesh lights (`MeshLightAPI`),
 emissive curves and instances. The Moana island's light rig is small, so this is
 not urgent for it.
 
-**(n) Visibility-aware selection** learned during the guiding training passes
-(§6.5).
+**(n) Visibility-aware selection. ✅ Done as an opt-in mode; measured in
+§3.12.** Learned by its own deterministic pre-pass rather than by guiding's
+training passes, so it works on an unguided render (ALab is one).
+`--light-selection learned`: 4.1× lower direct-lighting relMSE on ALab, 2.0× on
+`usdlux`, never worse per sample on the checked-in samples, but +14–23% render
+time on ALab at 128 spp (§3.12). Not the default: that costs time and changes
+every render's noise pattern.
 
 ### 9.4 What each step needs to keep
 

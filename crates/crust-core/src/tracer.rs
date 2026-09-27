@@ -185,6 +185,28 @@ impl Renderer {
         // assembling a scene — USD, the procedural fallback, a test — gets
         // the selection its settings ask for.
         lights.select_by(settings.light_selection());
+        if settings.light_selection() == LightSelection::Learned {
+            let started = std::time::Instant::now();
+            match crate::light_cache::train(
+                &world,
+                &camera,
+                &lights,
+                settings.width,
+                settings.height,
+                settings.frame,
+            ) {
+                Some(cache) => {
+                    debug!(
+                        "learned light selection: {} receivers, {} trained cells, in {:?}",
+                        cache.receivers,
+                        cache.trained_cells,
+                        started.elapsed()
+                    );
+                    lights.set_cache(cache);
+                }
+                None => debug!("learned light selection: nothing to learn, picking by power"),
+            }
+        }
         debug!(
             "Renderer over {} geometries, {} light(s) picked by {:?}, {} rayon thread(s)",
             world.count(),
@@ -1233,7 +1255,7 @@ fn bounce_emission_weight(
         }
         PrevVertex::Phase { pos, pdf } => (*pos, *pdf),
     };
-    match lights.find_by_geom(hit.geom_id) {
+    match lights.find_by_geom_at(hit.geom_id, from) {
         Some((light, pmf)) if pmf > 0.0 => {
             // A zero pdf is a point NEE refuses to sample (an edge-on point
             // of an area-sampled light, say): nothing competes for it,
@@ -1282,8 +1304,9 @@ fn escaped_emission(
     };
     let mut radiance = Vec3A::ZERO;
     let mut covered = false;
-    for (light, pmf) in lights.iter() {
-        let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+    let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+    // The pmf at the vertex the escaping ray left: the one its NEE picked with.
+    for (light, pmf) in lights.iter_at(from) {
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
             continue;
         };
@@ -1353,7 +1376,7 @@ fn volume_nee<const PROFILE: bool>(
     }
     let _p = profile::scope_if::<PROFILE>(Section::VolumeLighting);
     let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
-    let Some((light, pmf)) = lights.pick(nee[0]) else {
+    let Some((light, pmf)) = lights.pick_at(p, nee[0]) else {
         return Vec3A::ZERO;
     };
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
@@ -1755,7 +1778,7 @@ fn trace_path<const PROFILE: bool>(
         // coincident point.
         if let Some((light, pmf)) = strategy
             .samples_lights()
-            .then(|| lights.pick(nee_s[0]))
+            .then(|| lights.pick_at(rec.p, nee_s[0]))
             .flatten()
             && let Some(ls) = light.sample_li(rec.p, nee_s[1], nee_s[2])
         {

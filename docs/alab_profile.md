@@ -243,8 +243,22 @@ counter, not the miss rate, was the main cause.
 
 What remains: 15% of lookups still reach the shard mutexes, and consecutive
 shading points on one thread are often different materials, which no per-thread
-cache absorbs. The light-sampling finding above is untouched and is now the
-larger share of what a frame costs in noise.
+cache absorbs.
+
+## Outcome: NEE's misses
+
+`examples/light_occlusion` settled the NEE finding above. It was selection, not
+glass: power sent 49% of the picks to two exterior lights that are visible from
+none of the frame. `--light-selection learned` (`docs/light_sampling.md` §3.12)
+does the following at 16 spp:
+- occluded shadow rays fall from 94.2% to 33.4% in direct lighting;
+- direct-lighting relMSE falls **4.1×**;
+- the full image's trimmed relMSE falls 1.31×.
+
+It costs +14–23% render time at 128 spp, because shadow rays that reach their
+light traverse the whole BVH. At equal time that leaves about 3.6× on direct
+lighting and about 1.1× on the full image. The rest of the full image's noise is
+indirect light from the windows, which selection cannot reach.
 
 ## Reproducing the scaling pair
 
