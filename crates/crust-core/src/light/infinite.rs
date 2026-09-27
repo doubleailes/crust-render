@@ -7,6 +7,7 @@ use std::sync::Arc;
 use glam::{Mat3A, Vec3A};
 
 use crate::environment::EnvironmentMap;
+use crate::pdf::PdfSolidAngle;
 
 use super::{Light, LightSample};
 
@@ -92,9 +93,11 @@ impl DistantLight {
         self.radiance
     }
 
-    /// Uniform-cone pdf, constant inside the cone.
-    pub(super) fn cone_pdf(&self) -> f32 {
-        1.0 / self.solid_angle.max(1e-12)
+    /// Uniform-cone pdf, constant inside the cone. Finite and positive: the
+    /// solid angle is floored, and the cone is at least
+    /// [`MIN_DISTANT_ANGLE_DEG`] wide.
+    pub(super) fn cone_pdf(&self) -> PdfSolidAngle {
+        PdfSolidAngle::from_measure(1.0 / self.solid_angle.max(1e-12))
     }
 
     /// Is `direction` (pointing away from the shaded point) inside the
@@ -124,9 +127,9 @@ impl Light for DistantLight {
         })
     }
 
-    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
+    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, Option<PdfSolidAngle>)> {
         self.covers(direction)
-            .then(|| (self.radiance(), self.cone_pdf()))
+            .then(|| (self.radiance(), Some(self.cone_pdf())))
     }
 
     fn at_infinity(&self) -> bool {
@@ -156,6 +159,9 @@ pub fn projected_cone_solid_angle(half: f32) -> f32 {
     let c = half.clamp(0.0, 0.5 * PI).cos();
     PI * (1.0 - c) * (1.0 + c)
 }
+
+/// The uniform density over the sphere of directions, `1 / 4π`.
+const UNIFORM_SPHERE_PDF: PdfSolidAngle = PdfSolidAngle::from_measure(1.0 / (4.0 * PI));
 
 /// A `UsdLuxDomeLight`: an infinite environment surrounding the scene.
 ///
@@ -199,11 +205,13 @@ impl DomeLight {
     }
 
     /// Solid-angle pdf of a world-space `direction` under this dome's own
-    /// sampling: the map's distribution, or uniform over the sphere.
-    pub(super) fn pdf_toward(&self, direction: Vec3A) -> f32 {
+    /// sampling: the map's distribution, or uniform over the sphere. `None`
+    /// where the map's is not a finite, positive density — a direction
+    /// `sample_li` never delivers.
+    pub(super) fn pdf_toward(&self, direction: Vec3A) -> Option<PdfSolidAngle> {
         match &self.map {
-            Some(map) => map.pdf(self.world_to_light * direction),
-            None => 1.0 / (4.0 * std::f32::consts::PI),
+            Some(map) => PdfSolidAngle::new(map.pdf(self.world_to_light * direction)),
+            None => Some(UNIFORM_SPHERE_PDF),
         }
     }
 }
@@ -217,7 +225,11 @@ impl Light for DomeLight {
         let (direction, radiance, pdf) = match &self.map {
             Some(map) => {
                 let (local, radiance, pdf) = map.sample(u, v)?;
-                ((self.light_to_world * local).normalize(), radiance, pdf)
+                (
+                    (self.light_to_world * local).normalize(),
+                    radiance,
+                    PdfSolidAngle::new(pdf)?,
+                )
             }
             None => {
                 // Uniform over the sphere.
@@ -227,11 +239,11 @@ impl Light for DomeLight {
                 (
                     Vec3A::new(r * phi.cos(), z, r * phi.sin()),
                     Vec3A::ONE,
-                    1.0 / (4.0 * std::f32::consts::PI),
+                    UNIFORM_SPHERE_PDF,
                 )
             }
         };
-        (pdf > 0.0).then(|| LightSample {
+        Some(LightSample {
             direction,
             // Nothing in the scene can occlude the environment beyond it.
             distance: f32::INFINITY,
@@ -240,8 +252,9 @@ impl Light for DomeLight {
         })
     }
 
-    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
-        // A dome covers every direction, so every escaping ray finds it.
+    fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, Option<PdfSolidAngle>)> {
+        // A dome covers every direction, so every escaping ray finds it; the
+        // same refusal as `sample_li`'s says whether NEE could have.
         Some((self.radiance_toward(direction), self.pdf_toward(direction)))
     }
 

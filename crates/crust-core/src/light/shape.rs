@@ -5,6 +5,8 @@ use std::f32::consts::PI;
 
 use glam::{Affine3A, Mat3A, Vec3A};
 
+use crate::pdf::{InvPdfArea, PdfSolidAngle};
+
 /// The emitting surface of an area light, decoupled from any material: pure
 /// geometry that knows how to sample itself uniformly by area, and — where it
 /// has a better strategy — by the solid angle it subtends from a shading
@@ -31,8 +33,8 @@ pub trait LightShape: Send + Sync {
     /// world area — a unit sphere mapped through a non-uniform scale is denser
     /// where it is squashed — overrides it. Both halves of MIS read this, so
     /// the density need only be the one actually sampled, not uniform.
-    fn inv_pdf_area(&self, _p: Vec3A) -> f32 {
-        self.area()
+    fn inv_pdf_area(&self, _p: Vec3A) -> InvPdfArea {
+        InvPdfArea::new(self.area())
     }
 
     /// A point on the surface as seen from `from`, sampled by a density over
@@ -48,7 +50,7 @@ pub trait LightShape: Send + Sync {
     /// double-counted. And every point it returns must be one a ray from
     /// `from` could hit first, i.e. on the side of the shape that faces it.
     #[must_use]
-    fn sample_solid_angle(&self, _from: Vec3A, _u: f32, _v: f32) -> Option<(Vec3A, f32)> {
+    fn sample_solid_angle(&self, _from: Vec3A, _u: f32, _v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         None
     }
 
@@ -56,7 +58,7 @@ pub trait LightShape: Send + Sync {
     /// [`LightShape::sample_solid_angle`] having produced `p` — the bounce side
     /// of MIS. `None` exactly when `sample_solid_angle` is.
     #[must_use]
-    fn solid_angle_pdf(&self, _from: Vec3A, _p: Vec3A) -> Option<f32> {
+    fn solid_angle_pdf(&self, _from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
         None
     }
 }
@@ -105,13 +107,13 @@ impl SubtendedCone {
             cos_max,
             one_minus_cos_max,
         };
-        let pdf = cone.pdf();
-        (pdf.is_finite() && pdf > 0.0).then_some(cone)
+        PdfSolidAngle::new(cone.pdf().get()).map(|_| cone)
     }
 
-    /// Uniform over the cone: `1 / (2π (1 − cos θ_max))`.
-    pub(super) fn pdf(&self) -> f32 {
-        1.0 / (2.0 * PI * self.one_minus_cos_max)
+    /// Uniform over the cone: `1 / (2π (1 − cos θ_max))`. Finite and positive
+    /// for every cone [`SubtendedCone::new`] returns.
+    pub(super) fn pdf(&self) -> PdfSolidAngle {
+        PdfSolidAngle::from_measure(1.0 / (2.0 * PI * self.one_minus_cos_max))
     }
 
     /// A direction uniform over the cone, as `(sin² θ, cos θ)` of its angle θ
@@ -165,11 +167,11 @@ impl LightShape for SphereShape {
         4.0 * std::f32::consts::PI * self.radius * self.radius
     }
 
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         sample_sphere_cone(self.center, self.radius, from, u, v)
     }
 
-    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<f32> {
+    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
         SubtendedCone::new(self.center, self.radius, from).map(|cone| cone.pdf())
     }
 }
@@ -184,7 +186,7 @@ fn sample_sphere_cone(
     from: Vec3A,
     u: f32,
     v: f32,
-) -> Option<(Vec3A, f32)> {
+) -> Option<(Vec3A, PdfSolidAngle)> {
     let cone = SubtendedCone::new(center, radius, from)?;
     // A direction uniform in the cone, as its angle θ off the axis toward the
     // centre...
@@ -371,9 +373,9 @@ impl LightShape for AffineShape {
         self.area
     }
 
-    fn inv_pdf_area(&self, p: Vec3A) -> f32 {
+    fn inv_pdf_area(&self, p: Vec3A) -> InvPdfArea {
         let local = self.world_to_light.transform_point3a(p);
-        self.unit.local_area() * self.area_scale(self.unit.normal(local))
+        InvPdfArea::new(self.unit.local_area() * self.area_scale(self.unit.normal(local)))
     }
 
     /// A squashed sphere is sampled by the cone the *unit* sphere subtends in
@@ -385,7 +387,7 @@ impl LightShape for AffineShape {
     /// world density is the local cone's times the solid-angle Jacobian of the
     /// direction map (see [`AffineShape::world_solid_angle_pdf`]), so unlike
     /// the round sphere's it varies across the cap.
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         if self.unit != UnitShape::Sphere {
             return None;
         }
@@ -397,7 +399,7 @@ impl LightShape for AffineShape {
         ))
     }
 
-    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<f32> {
+    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
         if self.unit != UnitShape::Sphere {
             return None;
         }
@@ -413,8 +415,16 @@ impl AffineShape {
     /// `to_local` (from the shading point toward the surface, in local space).
     /// The placement sends a local direction `ω` to `Mω / |Mω|`, which scales
     /// solid angle by `|det M| / |Mω|³`; a density scales by the reciprocal.
-    pub(super) fn world_solid_angle_pdf(&self, local_pdf: f32, to_local: Vec3A) -> f32 {
+    ///
+    /// Taken as it comes rather than refused when not finite: the refusal has
+    /// to depend on `from` alone (see [`LightShape::sample_solid_angle`]), and
+    /// this varies across the cap.
+    pub(super) fn world_solid_angle_pdf(
+        &self,
+        local_pdf: PdfSolidAngle,
+        to_local: Vec3A,
+    ) -> PdfSolidAngle {
         let stretch = (self.light_to_world.matrix3 * to_local.normalize()).length();
-        local_pdf * stretch * stretch * stretch / self.abs_det
+        PdfSolidAngle::from_measure(local_pdf.get() * stretch * stretch * stretch / self.abs_det)
     }
 }

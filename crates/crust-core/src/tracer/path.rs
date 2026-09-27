@@ -11,6 +11,7 @@ use crate::guiding::SampleData;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
+use crate::pdf::PdfSolidAngle;
 use crate::profile::Section;
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
@@ -243,7 +244,7 @@ impl PathScratch {
 /// answering a question the sample already had.
 struct PrevBounce<'a> {
     pub(super) pos: Vec3A,
-    pub(super) pdf: f32,
+    pub(super) pdf: PdfSolidAngle,
     pub(super) delta: bool,
     /// What a fresh `eval` would be asked, kept only to check the claim
     /// above in debug builds.
@@ -282,7 +283,7 @@ enum PrevVertex<'a> {
         /// The scatter point (the light strategy's pdf is evaluated from it).
         pos: Vec3A,
         /// Solid-angle pdf of the sampled phase direction.
-        pdf: f32,
+        pdf: PdfSolidAngle,
     },
 }
 
@@ -312,13 +313,12 @@ fn bounce_emission_weight(
     };
     match lights.find_by_geom_at(hit.geom_id, from) {
         Some((light, pmf)) if pmf > 0.0 => {
-            // A zero pdf is a point NEE refuses to sample (an edge-on point
-            // of an area-sampled light, say): nothing competes for it,
-            // exactly as for a light NEE never picks.
-            let point_pdf = light.pdf_at_point(from, hit.rec.p);
-            if point_pdf <= 0.0 {
+            // No pdf is a point NEE refuses to sample (an edge-on point of
+            // an area-sampled light, say): nothing competes for it, exactly
+            // as for a light NEE never picks.
+            let Some(point_pdf) = light.pdf_at_point(from, hit.rec.p) else {
                 return strategy.unopposed_weight();
-            }
+            };
             let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
             strategy.bounce_weight(bounce_pdf, light_pdf)
         }
@@ -367,13 +367,14 @@ fn escaped_emission(
             continue;
         };
         covered = true;
-        let weight = match competing {
-            Some((_, bounce_pdf)) if strategy.samples_lights() && pmf > 0.0 => {
+        let weight = match (competing, pdf) {
+            (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
                 let light_pdf = lights.density(pdf, pmf).max(1e-6);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
             // No NEE ran for this vertex, the strategy does not sample lights
-            // at all, or the selection never picks this one: nothing competes.
+            // at all, the selection never picks this one, or the light never
+            // samples this direction: nothing competes.
             _ => strategy.unopposed_weight(),
         };
         radiance += emitted * weight;
@@ -455,8 +456,9 @@ fn volume_nee<const PROFILE: bool>(
         return Vec3A::ZERO;
     }
     let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
-    let weight = strategy.light_weight(light_pdf, phase_val);
-    s.radiance * phase_val * tr * weight / light_pdf
+    // The phase function is its own pdf, in solid angle.
+    let weight = strategy.light_weight(light_pdf, PdfSolidAngle::from_measure(phase_val));
+    s.radiance * phase_val * tr * weight / light_pdf.get()
 }
 
 /// The integrator: an iterative path tracer in two passes. The forward walk
@@ -640,7 +642,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 }
                 prev = Some(PrevVertex::Phase {
                     pos: p,
-                    pdf: phase_pdf,
+                    pdf: PdfSolidAngle::from_measure(phase_pdf),
                 });
                 stats.vertices += 1;
                 records.push(vrec);
@@ -884,20 +886,20 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 // this vertex — using the plain BSDF pdf here while the
                 // bounce side weights with the mixture makes the two
                 // weights sum past one and double-counts emission.
-                let bounce_pdf = match guiding_here {
+                let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
                     Some(g) if g.field.trained_at(rec.p) => {
                         let alpha = g.field.config().guide_prob;
                         alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
                     }
                     _ => brdf_pdf,
-                };
+                });
                 let weight = strategy.light_weight(light_pdf, bounce_pdf);
                 // `brdf_value` already carries the geometric cosine —
                 // `Material::eval` returns `brdf · |cos|` (unsigned, so a
                 // continuous transmission lobe can see a light behind the
                 // ray-facing normal). Applying it again here is what used
                 // to make this an integral of `brdf · cos²`.
-                nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf;
+                nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
             }
         }
         drop(lighting);
@@ -966,7 +968,8 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 vrec.factor = factor;
                 prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
-                    pdf: sample.pdf,
+                    // A BSDF (or guide-mixture) pdf, in solid angle.
+                    pdf: PdfSolidAngle::from_measure(sample.pdf),
                     delta: sample.delta,
                     #[cfg(debug_assertions)]
                     check: (ray.clone(), rec, mat, dir),

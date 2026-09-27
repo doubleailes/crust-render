@@ -7,6 +7,7 @@ use std::sync::Arc;
 use glam::Vec3A;
 
 use super::Light;
+use crate::pdf::PdfSolidAngle;
 
 /// How NEE chooses which light to sample at a vertex (`crust:lightSelection`,
 /// `--light-selection`). Measured in `docs/light_sampling.md` §3.8.
@@ -224,12 +225,12 @@ impl LightList {
     /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
     /// rounds differently when `n` is not a power of two — so the default
     /// renders bit-identically to the renderer before selection was a choice.
-    pub fn density(&self, light_pdf: f32, pmf: f32) -> f32 {
-        if self.pmf.is_empty() {
-            light_pdf / self.lights.len() as f32
+    pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32) -> PdfSolidAngle {
+        PdfSolidAngle::from_measure(if self.pmf.is_empty() {
+            light_pdf.get() / self.lights.len() as f32
         } else {
-            light_pdf * pmf
-        }
+            light_pdf.get() * pmf
+        })
     }
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it

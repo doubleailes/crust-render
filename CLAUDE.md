@@ -117,8 +117,8 @@ without the other (full list: `docs/architecture.md` § Invariants):
   here", for `AreaLight::sample_li` and `Material::emitted_at` alike. A material that
   emits only through `emitted_at` must never become a light-list entry.
 - `LightShape::sample_solid_angle` / `solid_angle_pdf` answer for exactly the same
-  `from`s with the same density; a non-finite density is refused on both sides (pdf 0),
-  never replaced by a finite stand-in.
+  `from`s with the same density; a non-finite density is refused on both sides
+  (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines (a render
   mode is scheduling only); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).

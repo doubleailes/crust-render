@@ -4,8 +4,8 @@
 
 use crust_core::{
     AffineShape, AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList,
-    LightSelection, LightShape, LightTexture, RectShape, RectTexture, Shaping, SphereShape,
-    UnitShape, Vec3A, projected_cone_solid_angle,
+    LightSelection, LightShape, LightTexture, PdfSolidAngle, RectShape, RectTexture, Shaping,
+    SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;
@@ -134,7 +134,7 @@ fn area_light_sample_aims_at_a_point_on_its_surface() {
             "sampled point off the sphere: {p}"
         );
         assert_eq!(s.radiance, Vec3A::splat(10.0));
-        assert!(s.pdf > 0.0 && s.pdf.is_finite());
+        assert!(s.pdf.get() > 0.0 && s.pdf.get().is_finite());
         assert!(s.distance.is_finite());
     }
     assert_eq!(light.geom_id(), Some(7));
@@ -154,11 +154,11 @@ fn area_light_pdf_at_point_matches_its_own_sample() {
             .sample_li(from, rng.next_f32(), rng.next_f32())
             .unwrap();
         let p = from + s.direction * s.distance;
-        let pdf = light.pdf_at_point(from, p);
+        let pdf = light.pdf_at_point(from, p).map_or(0.0, |p| p.get());
         assert!(
-            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            approx(pdf, s.pdf.get(), 1e-3 * s.pdf.get().max(1.0)),
             "{pdf} vs {}",
-            s.pdf
+            s.pdf.get()
         );
     }
 }
@@ -175,10 +175,14 @@ fn sheared_rect_light_pdf_is_distance_squared_over_cosine_area() {
     );
     let light = AreaLight::new(rect, Arc::new(Emissive::new(Vec3A::ONE)), 1);
     // Straight above the centre at distance 2: cos = 1, area = 1 → pdf ≈ 4.
-    let pdf = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
+    let pdf = light
+        .pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(approx(pdf, 4.0, 1e-3), "{pdf}");
     // At 45°: the same point seen from (2, 0, 2): dist² = 8, cos = 1/√2.
-    let pdf = light.pdf_at_point(Vec3A::new(2.0, 0.0, 2.0), Vec3A::ZERO);
+    let pdf = light
+        .pdf_at_point(Vec3A::new(2.0, 0.0, 2.0), Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(approx(pdf, 8.0 * 2f32.sqrt(), 1e-2), "{pdf}");
 }
 
@@ -204,13 +208,13 @@ fn rect_light_is_effectively_one_sided() {
         .sample_li(Vec3A::new(0.0, 0.0, 1.0), 0.5, 0.5)
         .unwrap();
     let back = one_sided.sample_li(behind, 0.5, 0.5).unwrap();
-    assert!(front.pdf.is_finite() && front.pdf > 0.0);
-    assert!(approx(back.pdf, 1.0, 1e-5), "{}", back.pdf);
+    assert!(front.pdf.get().is_finite() && front.pdf.get() > 0.0);
+    assert!(approx(back.pdf.get(), 1.0, 1e-5), "{}", back.pdf.get());
     let p = behind + back.direction * back.distance;
     assert!(approx(
-        one_sided.pdf_at_point(behind, p),
-        back.pdf,
-        1e-4 * back.pdf
+        one_sided.pdf_at_point(behind, p).map_or(0.0, |p| p.get()),
+        back.pdf.get(),
+        1e-4 * back.pdf.get()
     ));
     assert_eq!(front.radiance, Vec3A::ONE);
     assert_eq!(back.radiance, Vec3A::ZERO);
@@ -247,8 +251,12 @@ fn area_light_pdf_falls_with_the_inverse_square_of_distance() {
         Vec3A::Z,
     );
     let light = AreaLight::new(rect, Arc::new(Emissive::new(Vec3A::ONE)), 0);
-    let near = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
-    let far = light.pdf_at_point(Vec3A::new(0.0, 0.0, 4.0), Vec3A::ZERO);
+    let near = light
+        .pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
+    let far = light
+        .pdf_at_point(Vec3A::new(0.0, 0.0, 4.0), Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(approx(far / near, 4.0, 0.01), "{}", far / near);
 }
 
@@ -305,7 +313,9 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
     // Above the centre of a 2a x 2b rectangle at height h the solid angle is
     // 4 asin(ab / √((a² + h²)(b² + h²))).
     let omega = 4.0 * (0.25f64 / (4.25f64 * 4.25).sqrt()).asin();
-    let pdf = light.pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO);
+    let pdf = light
+        .pdf_at_point(Vec3A::new(0.0, 0.0, 2.0), Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(
         ((pdf as f64) * omega - 1.0).abs() < 1e-5,
         "{pdf} vs {}",
@@ -319,7 +329,9 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
         1,
     );
     let omega = rect_solid_angle(from, origin, eu, ev, (0.0, 1.0), (0.0, 1.0));
-    let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+    let pdf = light
+        .pdf_at_point(from, Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(
         ((pdf as f64) * omega - 1.0).abs() < 1e-5,
         "{pdf} vs {omega}"
@@ -335,7 +347,9 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
         Vec3A::new(40.0, -30.0, 120.0),
     ] {
         let omega = rect_solid_angle(from, origin, eu, ev, (0.0, 1.0), (0.0, 1.0));
-        let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+        let pdf = light
+            .pdf_at_point(from, Vec3A::ZERO)
+            .map_or(0.0, |p| p.get());
         assert!(
             ((pdf as f64) * omega - 1.0).abs() < 1e-5,
             "from {from}: {pdf} vs {omega}"
@@ -349,7 +363,10 @@ fn rect_light_pdf_is_the_inverse_subtended_solid_angle() {
             .unwrap();
         let p = from + s.direction * s.distance;
         assert!(p.z.abs() < 1e-5 && p.x.abs() <= 1.0 + 1e-5 && p.y.abs() <= 0.5 + 1e-5);
-        assert_eq!(s.pdf, light.pdf_at_point(from, p));
+        assert_eq!(
+            s.pdf.get(),
+            light.pdf_at_point(from, p).map_or(0.0, |p| p.get())
+        );
     }
 }
 
@@ -432,7 +449,7 @@ fn rect_light_estimates_the_irradiance() {
                     (j as f32 + 0.5) / M as f32,
                 )
                 .unwrap();
-            estimate += (s.radiance.x * receiver.dot(s.direction).max(0.0) / s.pdf) as f64;
+            estimate += (s.radiance.x * receiver.dot(s.direction).max(0.0) / s.pdf.get()) as f64;
         }
     }
     estimate /= (M * M) as f64;
@@ -457,7 +474,9 @@ fn rect_light_takes_the_map_only_when_the_edges_are_perpendicular() {
         1,
     );
     let omega = rect_solid_angle(from, origin, eu, slight, (0.0, 1.0), (0.0, 1.0));
-    let pdf = light.pdf_at_point(from, Vec3A::ZERO);
+    let pdf = light
+        .pdf_at_point(from, Vec3A::ZERO)
+        .map_or(0.0, |p| p.get());
     assert!(
         ((pdf as f64) * omega - 1.0).abs() < 1e-5,
         "{pdf} vs {omega}"
@@ -542,6 +561,7 @@ fn sphere_light_samples_only_the_cap_facing_the_shading_point() {
             let (p, pdf) = shape
                 .sample_solid_angle(from, u, v)
                 .expect("outside the sphere there is always a cone");
+            let pdf = pdf.get();
             assert!(
                 approx((p - center).length(), radius, 1e-4 * radius),
                 "off the sphere: {p}"
@@ -559,7 +579,7 @@ fn sphere_light_samples_only_the_cap_facing_the_shading_point() {
             );
             // And the light hands NEE exactly that point and density.
             let s = light.sample_li(from, u, v).expect("reachable");
-            assert_eq!(s.pdf, pdf);
+            assert_eq!(s.pdf.get(), pdf);
             assert!(s.direction.dot((p - from).normalize()) > 1.0 - 1e-5);
         }
     }
@@ -622,7 +642,7 @@ fn sphere_light_cone_estimates_the_analytic_irradiance() {
                 let v = (j as f32 + 0.5) / K as f32;
                 let s = light.sample_li(from, u, v).unwrap();
                 let cos = s.direction.dot(axis).max(0.0);
-                sum += (s.radiance.x * cos / s.pdf) as f64;
+                sum += (s.radiance.x * cos / s.pdf.get()) as f64;
             }
         }
         let estimate = sum / (K * K) as f64;
@@ -679,6 +699,7 @@ fn ellipsoid_light_samples_only_its_visible_side() {
             let (p, pdf) = shape
                 .sample_solid_angle(from, u, v)
                 .expect("outside the ellipsoid there is always a cone");
+            let pdf = pdf.get();
             let local = to_local.transform_point3a(p);
             assert!(
                 approx(local.length(), 1.0, 1e-4),
@@ -687,13 +708,13 @@ fn ellipsoid_light_samples_only_its_visible_side() {
             );
             let facing = shape.normal_at(p).dot((from - p).normalize());
             assert!(facing >= -1e-3, "sampled the far side: cos = {facing}");
-            let bounce = light.pdf_at_point(from, p);
+            let bounce = light.pdf_at_point(from, p).map_or(0.0, |p| p.get());
             assert!(
                 approx(bounce, pdf, 1e-3 * pdf),
                 "MIS sides disagree: {pdf} vs {bounce}"
             );
             let s = light.sample_li(from, u, v).unwrap();
-            assert_eq!(s.pdf, pdf);
+            assert_eq!(s.pdf.get(), pdf);
         }
     }
 }
@@ -714,8 +735,8 @@ fn ellipsoid_light_cone_matches_area_quadrature() {
                 let u = (i as f32 + 0.5) / K as f32;
                 let v = (j as f32 + 0.5) / K as f32;
                 let s = light.sample_li(from, u, v).unwrap();
-                omega_cone += 1.0 / s.pdf as f64;
-                e_cone += (s.direction.dot(receiver).max(0.0) / s.pdf) as f64;
+                omega_cone += 1.0 / s.pdf.get() as f64;
+                e_cone += (s.direction.dot(receiver).max(0.0) / s.pdf.get()) as f64;
             }
         }
         let n = (K * K) as f64;
@@ -736,7 +757,7 @@ fn ellipsoid_light_cone_matches_area_quadrature() {
                 if cos_l <= 0.0 {
                     continue;
                 }
-                let dw = (cos_l * shape.inv_pdf_area(p) / r2) as f64;
+                let dw = (cos_l * shape.inv_pdf_area(p).get() / r2) as f64;
                 omega_area += dw;
                 e_area += dw * (-w).dot(receiver).max(0.0) as f64;
             }
@@ -769,8 +790,8 @@ fn affine_shapes_without_a_cone_fall_back_to_area_sampling() {
             .sample_li(inside, rng.next_f32(), rng.next_f32())
             .unwrap();
         let p = inside + s.direction * s.distance;
-        let bounce = light.pdf_at_point(inside, p);
-        assert!(approx(bounce, s.pdf, 1e-3 * s.pdf.max(1.0)));
+        let bounce = light.pdf_at_point(inside, p).map_or(0.0, |p| p.get());
+        assert!(approx(bounce, s.pdf.get(), 1e-3 * s.pdf.get().max(1.0)));
     }
 
     for unit in [UnitShape::Disk, UnitShape::Cylinder] {
@@ -806,11 +827,11 @@ fn sphere_light_from_inside_falls_back_to_area_sampling() {
             .unwrap();
         let p = from + s.direction * s.distance;
         assert!(approx((p - center).length(), 2.0, 1e-3));
-        let pdf = light.pdf_at_point(from, p);
+        let pdf = light.pdf_at_point(from, p).map_or(0.0, |p| p.get());
         assert!(
-            approx(pdf, s.pdf, 1e-3 * s.pdf.max(1.0)),
+            approx(pdf, s.pdf.get(), 1e-3 * s.pdf.get().max(1.0)),
             "{pdf} vs {}",
-            s.pdf
+            s.pdf.get()
         );
     }
 }
@@ -836,7 +857,7 @@ fn distant_light_samples_lie_in_its_cone_at_infinity() {
             s.direction
         );
         assert_eq!(s.distance, f32::INFINITY);
-        assert!(s.pdf > 0.0);
+        assert!(s.pdf.get() > 0.0);
     }
     assert!(light.geom_id().is_none());
 }
@@ -847,9 +868,9 @@ fn distant_light_pdf_is_the_inverse_cone_solid_angle() {
     let omega = 2.0 * std::f32::consts::PI * (1.0 - 5f32.to_radians().cos());
     let s = light.sample_li(Vec3A::ZERO, 0.3, 0.3).unwrap();
     assert!(
-        approx(s.pdf, 1.0 / omega, 1e-3 / omega),
+        approx(s.pdf.get(), 1.0 / omega, 1e-3 / omega),
         "{} vs {}",
-        s.pdf,
+        s.pdf.get(),
         1.0 / omega
     );
 }
@@ -878,7 +899,7 @@ fn distant_light_new_takes_irradiance_with_radiance_takes_nits() {
     for angle in [0.0f32, 0.53, 1.5, 30.0] {
         let light = DistantLight::new(-Vec3A::Y, e, angle);
         let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
-        let omega = 1.0 / s.pdf as f64;
+        let omega = 1.0 / s.pdf.get() as f64;
         let c = 1.0 - omega / (2.0 * std::f64::consts::PI);
         let delivered = s.radiance.x as f64 * omega * (1.0 + c) / 2.0;
         assert!(
@@ -896,14 +917,14 @@ fn distant_light_new_takes_irradiance_with_radiance_takes_nits() {
 fn distant_light_zero_angle_is_widened_not_singular() {
     let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 0.0);
     let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).unwrap();
-    assert!(s.pdf.is_finite());
+    assert!(s.pdf.get().is_finite());
     assert!(s.radiance.is_finite());
     // The documented floor is an angular diameter of 0.05 degrees.
     let floor = 2.0 * std::f32::consts::PI * (1.0 - (0.5f32 * 0.05).to_radians().cos());
     assert!(
-        approx(s.pdf, 1.0 / floor, 1e-2 / floor),
+        approx(s.pdf.get(), 1.0 / floor, 1e-2 / floor),
         "{} vs {}",
-        s.pdf,
+        s.pdf.get(),
         1.0 / floor
     );
 }
@@ -917,7 +938,7 @@ fn distant_light_escaped_agrees_with_sampling_inside_the_cone_only() {
         .escaped(Vec3A::ZERO, s.direction)
         .expect("a sampled direction is covered");
     assert_eq!(radiance, s.radiance);
-    assert_eq!(pdf, s.pdf);
+    assert_eq!(pdf, Some(s.pdf));
     // Straight back along the light is the cone axis.
     assert!(light.escaped(Vec3A::ZERO, -toward).is_some());
     // Perpendicular and opposite directions are outside.
@@ -947,7 +968,7 @@ fn uniform_dome_samples_the_whole_sphere_uniformly() {
             .sample_li(Vec3A::ZERO, rng.next_f32(), rng.next_f32())
             .unwrap();
         assert!(approx(s.direction.length(), 1.0, 1e-5));
-        assert!(approx(s.pdf, quarter_pi_inv, 1e-7));
+        assert!(approx(s.pdf.get(), quarter_pi_inv, 1e-7));
         assert_eq!(s.radiance, tint);
         assert_eq!(s.distance, f32::INFINITY);
         if s.direction.y < 0.0 {
@@ -959,7 +980,11 @@ fn uniform_dome_samples_the_whole_sphere_uniformly() {
         "a dome is a full sphere, not a hemisphere"
     );
     assert!(dome.geom_id().is_none());
-    assert_eq!(dome.pdf_at_point(Vec3A::ZERO, Vec3A::Y), 0.0);
+    assert_eq!(
+        dome.pdf_at_point(Vec3A::ZERO, Vec3A::Y)
+            .map_or(0.0, |p| p.get()),
+        0.0
+    );
 }
 
 #[test]
@@ -971,6 +996,7 @@ fn uniform_dome_answers_every_escaping_ray() {
             .escaped(Vec3A::ZERO, d)
             .expect("a dome covers every direction");
         assert_eq!(r, tint);
+        let pdf = pdf.expect("a uniform dome samples every direction").get();
         assert!(approx(pdf, 1.0 / (4.0 * std::f32::consts::PI), 1e-7));
     }
 }
@@ -1022,7 +1048,12 @@ fn textured_dome_sample_and_escaped_share_one_density() {
         assert_eq!(s.radiance, Vec3A::splat(1.5));
         let (r, pdf) = dome.escaped(Vec3A::ZERO, s.direction).unwrap();
         assert_eq!(r, s.radiance);
-        assert!(approx(pdf, s.pdf, 2e-2 * s.pdf), "{pdf} vs {}", s.pdf);
+        let pdf = pdf.expect("NEE sampled this direction").get();
+        assert!(
+            approx(pdf, s.pdf.get(), 2e-2 * s.pdf.get()),
+            "{pdf} vs {}",
+            s.pdf.get()
+        );
     }
 }
 
@@ -1044,9 +1075,9 @@ fn textured_dome_importance_samples_a_bright_sun() {
             // One texel of a 16x8 map near the equator covers ~0.15 sr,
             // so a sample landing on it carries a density around 6.5.
             assert!(
-                s.pdf > 5.0,
+                s.pdf.get() > 5.0,
                 "the sun texel must carry a high pdf: {}",
-                s.pdf
+                s.pdf.get()
             );
         }
     }
@@ -1058,10 +1089,11 @@ fn a_black_textured_dome_cannot_be_sampled() {
     let map = Arc::new(EnvironmentMap::new(2, 2, vec![Vec3A::ZERO; 4]).unwrap());
     let dome = DomeLight::new(Vec3A::ONE, Some(map), Mat3A::IDENTITY);
     assert!(dome.sample_li(Vec3A::ZERO, 0.5, 0.5).is_none());
-    // But an escaping ray still gets an answer (black, pdf 0).
+    // But an escaping ray still gets an answer (black, and no density: NEE
+    // never samples it, so nothing competes).
     let (r, pdf) = dome.escaped(Vec3A::ZERO, Vec3A::X).unwrap();
     assert_eq!(r, Vec3A::ZERO);
-    assert_eq!(pdf, 0.0);
+    assert_eq!(pdf, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,7 +1253,8 @@ fn power_selection_picks_by_power_defensively() {
     assert_eq!(l.pick(1.0 - f32::EPSILON).unwrap().0.geom_id(), None);
     assert_eq!(l.pick(0.0).unwrap().0.geom_id(), Some(10));
     // The strategy's density is the product, on both MIS sides.
-    assert_eq!(l.density(2.0, l.pmf(2)), 2.0 * l.pmf(2));
+    let two = PdfSolidAngle::new(2.0).unwrap();
+    assert_eq!(l.density(two, l.pmf(2)).get(), 2.0 * l.pmf(2));
 }
 
 /// Under uniform selection the density is the division it always was, so
@@ -1234,7 +1267,10 @@ fn uniform_density_is_the_historical_division() {
         l.add(Arc::new(rect_light(1.0, None, id)));
     }
     let x = 0.7f32;
-    assert_eq!(l.density(x, l.pmf(0)), x / 3.0);
+    assert_eq!(
+        l.density(PdfSolidAngle::new(x).unwrap(), l.pmf(0)).get(),
+        x / 3.0
+    );
 }
 
 /// Uniform, all-dark and stale selections all fall back to one in N, so a

@@ -1,4 +1,5 @@
 use super::SamplingStrategy;
+use crate::pdf::PdfSolidAngle;
 
 /// The clamp caps the brightest channel and scales the others with it,
 /// so a saturated firefly keeps its hue; below the limit it is exact.
@@ -46,8 +47,13 @@ fn strategy_weights_partition_unity() {
     ];
     for s in strategies {
         for (light_pdf, bounce_pdf) in pdf_pairs {
-            let sum =
-                s.light_weight(light_pdf, bounce_pdf) + s.bounce_weight(bounce_pdf, light_pdf);
+            let sum = s.light_weight(
+                PdfSolidAngle::from_measure(light_pdf),
+                PdfSolidAngle::from_measure(bounce_pdf),
+            ) + s.bounce_weight(
+                PdfSolidAngle::from_measure(bounce_pdf),
+                PdfSolidAngle::from_measure(light_pdf),
+            );
             assert!(
                 (sum - 1.0).abs() < 1e-3,
                 "{s:?}: weights sum to {sum} at pdfs ({light_pdf}, {bounce_pdf})"
@@ -70,17 +76,47 @@ fn unopposed_contributions_are_taken_whole() {
     ] {
         assert_eq!(s.unopposed_weight(), 1.0, "{s:?}");
     }
-    assert_eq!(SamplingStrategy::LightOnly.bounce_weight(1.0, 0.0), 0.0);
+    assert_eq!(
+        SamplingStrategy::LightOnly.bounce_weight(
+            PdfSolidAngle::from_measure(1.0),
+            PdfSolidAngle::from_measure(0.0)
+        ),
+        0.0
+    );
 }
 
 #[test]
 fn single_strategy_modes_disable_the_other_side() {
     assert!(!SamplingStrategy::BsdfOnly.samples_lights());
     assert!(SamplingStrategy::LightOnly.samples_lights());
-    assert_eq!(SamplingStrategy::LightOnly.light_weight(1.0, 100.0), 1.0);
-    assert_eq!(SamplingStrategy::LightOnly.bounce_weight(100.0, 1.0), 0.0);
-    assert_eq!(SamplingStrategy::BsdfOnly.light_weight(100.0, 1.0), 0.0);
-    assert_eq!(SamplingStrategy::BsdfOnly.bounce_weight(1.0, 100.0), 1.0);
+    assert_eq!(
+        SamplingStrategy::LightOnly.light_weight(
+            PdfSolidAngle::from_measure(1.0),
+            PdfSolidAngle::from_measure(100.0)
+        ),
+        1.0
+    );
+    assert_eq!(
+        SamplingStrategy::LightOnly.bounce_weight(
+            PdfSolidAngle::from_measure(100.0),
+            PdfSolidAngle::from_measure(1.0)
+        ),
+        0.0
+    );
+    assert_eq!(
+        SamplingStrategy::BsdfOnly.light_weight(
+            PdfSolidAngle::from_measure(100.0),
+            PdfSolidAngle::from_measure(1.0)
+        ),
+        0.0
+    );
+    assert_eq!(
+        SamplingStrategy::BsdfOnly.bounce_weight(
+            PdfSolidAngle::from_measure(1.0),
+            PdfSolidAngle::from_measure(100.0)
+        ),
+        1.0
+    );
 }
 
 /// The power heuristic commits harder to the denser strategy than the
@@ -89,7 +125,13 @@ fn single_strategy_modes_disable_the_other_side() {
 #[test]
 fn power_sharpens_balance() {
     let (a, b) = (10.0, 1.0);
-    let balance = SamplingStrategy::BalanceMis.light_weight(a, b);
-    let power = SamplingStrategy::PowerMis.light_weight(a, b);
+    let balance = SamplingStrategy::BalanceMis.light_weight(
+        PdfSolidAngle::from_measure(a),
+        PdfSolidAngle::from_measure(b),
+    );
+    let power = SamplingStrategy::PowerMis.light_weight(
+        PdfSolidAngle::from_measure(a),
+        PdfSolidAngle::from_measure(b),
+    );
     assert!(power > balance, "power {power} <= balance {balance}");
 }

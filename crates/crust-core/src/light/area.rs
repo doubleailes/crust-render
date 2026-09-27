@@ -7,6 +7,7 @@ use glam::Vec3A;
 use utils::luminance;
 
 use crate::material::Emissive;
+use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
 use super::rect::RectShape;
 use super::shape::{AffineShape, LightShape, SphereShape};
@@ -80,17 +81,17 @@ impl LightShape for AreaShape {
     }
 
     #[inline]
-    fn inv_pdf_area(&self, p: Vec3A) -> f32 {
+    fn inv_pdf_area(&self, p: Vec3A) -> InvPdfArea {
         dispatch!(self, s => s.inv_pdf_area(p))
     }
 
     #[inline]
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         dispatch!(self, s => s.sample_solid_angle(from, u, v))
     }
 
     #[inline]
-    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<f32> {
+    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
         dispatch!(self, s => s.solid_angle_pdf(from, p))
     }
 }
@@ -122,19 +123,18 @@ impl AreaLight {
     /// angle between the light's surface normal at `light_point` and the
     /// direction back toward the shaded point.
     ///
-    /// Zero where the area density is infinite (an edge-on point, see
+    /// `None` where the area density is infinite (an edge-on point, see
     /// [`AreaLight::pdf_toward`]): `sample_li` refuses such a sample, so NEE
     /// never delivers that point and the bounce side must keep its emission
     /// whole.
-    pub(super) fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> f32 {
+    pub(super) fn solid_angle_pdf(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
         if let Some(pdf) = self.shape.solid_angle_pdf(from, light_point) {
-            return pdf;
+            return Some(pdf);
         }
         let direction = light_point - from;
         let dir_to_light = direction.normalize();
         let light_normal = self.shape.normal_at(light_point);
         self.pdf_toward(direction, dir_to_light, light_normal, light_point)
-            .unwrap_or(0.0)
     }
 
     /// The area-sampling density of `light_point` in solid angle, with the
@@ -161,11 +161,11 @@ impl AreaLight {
         dir_to_light: Vec3A,
         light_normal: Vec3A,
         light_point: Vec3A,
-    ) -> Option<f32> {
-        let distance_squared = direction.length_squared();
+    ) -> Option<PdfSolidAngle> {
         let cosine = light_normal.dot(-dir_to_light).abs();
-        let pdf = distance_squared / (cosine * self.shape.inv_pdf_area(light_point));
-        (cosine > 0.0 && pdf.is_finite() && pdf > 0.0).then_some(pdf)
+        self.shape
+            .inv_pdf_area(light_point)
+            .to_solid_angle(direction.length_squared(), cosine)
     }
 }
 
@@ -195,7 +195,7 @@ impl Light for AreaLight {
         let front = light_normal.dot(-dir_to_light) > 0.0;
         // An area sample whose density is infinite is refused rather than
         // given a finite stand-in, which would bias it (see `pdf_toward`).
-        // `solid_angle_pdf` reports 0 for the same points, so a bounce ray
+        // `solid_angle_pdf` refuses the same points, so a bounce ray
         // that hits one keeps its emission at full weight.
         let pdf = match solid_angle {
             Some((_, pdf)) => pdf,
@@ -211,7 +211,7 @@ impl Light for AreaLight {
         })
     }
 
-    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A) -> f32 {
+    fn pdf_at_point(&self, from: Vec3A, light_point: Vec3A) -> Option<PdfSolidAngle> {
         self.solid_angle_pdf(from, light_point)
     }
 
@@ -231,7 +231,7 @@ impl Light for AreaLight {
                 let u = ((k / GRID) as f32 + 0.5) / GRID as f32;
                 let v = ((k % GRID) as f32 + 0.5) / GRID as f32;
                 let p = self.shape.sample_point(u, v);
-                (self.shape.normal_at(p), self.shape.inv_pdf_area(p))
+                (self.shape.normal_at(p), self.shape.inv_pdf_area(p).get())
             })
             .collect();
         let projected_area = |w: Vec3A| {

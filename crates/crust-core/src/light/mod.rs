@@ -1,5 +1,7 @@
 use glam::Vec3A;
 
+use crate::pdf::PdfSolidAngle;
+
 mod area;
 mod infinite;
 mod list;
@@ -29,11 +31,12 @@ pub struct LightSample {
     pub radiance: Vec3A,
     /// Solid-angle pdf of this direction under the light's own sampling.
     ///
-    /// Always finite and positive: crust has no delta lights. A
+    /// Always finite and positive (the type's constructor refuses anything
+    /// else): crust has no delta lights. A
     /// `DistantLight` with a zero `angle` is widened to a small but real
     /// cone rather than being made singular, which keeps one MIS path
     /// through the integrator instead of two.
-    pub pdf: f32,
+    pub pdf: PdfSolidAngle,
 }
 
 /// The `Light` trait is what the integrator's light-sampling strategy (NEE)
@@ -65,19 +68,21 @@ pub trait Light: Send + Sync {
 
     /// Solid-angle pdf, as seen from `from`, of [`Light::sample_li`] having
     /// produced `light_point` — the bounce side of MIS for a light whose
-    /// geometry a ray hit. Zero means `sample_li` never delivers that point
+    /// geometry a ray hit. `None` means `sample_li` never delivers that point
     /// (and is the default, for lights at infinity, which have no such
     /// point): nothing competes there, so the bounce keeps full weight.
-    fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A) -> f32 {
-        0.0
+    fn pdf_at_point(&self, _from: Vec3A, _light_point: Vec3A) -> Option<PdfSolidAngle> {
+        None
     }
 
     /// For a ray that escaped the scene along `direction`: the radiance it
     /// picks up and the solid-angle pdf NEE would have used for that
     /// direction, as `(radiance, pdf)`. This is the bounce side of MIS for
     /// lights at infinity. `None` for lights with finite geometry, and for
-    /// directions this light does not cover.
-    fn escaped(&self, _from: Vec3A, _direction: Vec3A) -> Option<(Vec3A, f32)> {
+    /// directions this light does not cover; a `None` pdf is a direction the
+    /// light covers but NEE never samples (a black texel of a dome's map), so
+    /// nothing competes and the escape keeps full weight.
+    fn escaped(&self, _from: Vec3A, _direction: Vec3A) -> Option<(Vec3A, Option<PdfSolidAngle>)> {
         None
     }
 

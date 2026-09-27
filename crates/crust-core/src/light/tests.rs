@@ -3,6 +3,7 @@ use std::sync::Arc;
 use glam::Affine3A;
 
 use crate::material::Emissive;
+use crate::pdf::PdfSolidAngle;
 
 use super::shape::*;
 use super::*;
@@ -47,7 +48,7 @@ fn a_cone_whose_pdf_overflows_is_refused() {
         radius: 1e-3,
     };
     let (_, pdf) = small.sample_solid_angle(Vec3A::ZERO, 0.5, 0.5).unwrap();
-    assert!(pdf.is_finite() && pdf > 0.0);
+    assert!(PdfSolidAngle::new(pdf.get()).is_some());
     assert_eq!(small.solid_angle_pdf(Vec3A::ZERO, small.center), Some(pdf));
 }
 
@@ -91,7 +92,9 @@ fn area_light_pdf_is_positive_facing_side() {
         0,
     );
     // Nearest point on the sphere as seen from below.
-    let pdf = light.pdf_at_point(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0));
+    let pdf = light
+        .pdf_at_point(Vec3A::ZERO, Vec3A::new(0.0, 4.0, 0.0))
+        .map_or(0.0, |p| p.get());
     assert!(pdf.is_finite() && pdf > 0.0);
 
     // The sampled connection agrees: it aims upward at the light, stops
@@ -103,16 +106,18 @@ fn area_light_pdf_is_positive_facing_side() {
     assert!(s.direction.is_normalized());
     assert!(s.distance.is_finite() && s.distance > 0.0);
     assert_eq!(s.radiance, Vec3A::splat(10.0));
-    assert!(s.pdf.is_finite() && s.pdf > 0.0);
+    assert!(s.pdf.get().is_finite() && s.pdf.get() > 0.0);
 
     // `sample_li` and `pdf_at_point` are the two MIS sides of one
     // strategy and must agree on the density of the same direction.
     let point = Vec3A::ZERO + s.direction * s.distance;
-    let from_point = light.pdf_at_point(Vec3A::ZERO, point);
+    let from_point = light
+        .pdf_at_point(Vec3A::ZERO, point)
+        .map_or(0.0, |p| p.get());
     assert!(
-        (s.pdf - from_point).abs() <= 1e-3 * s.pdf.max(from_point),
+        (s.pdf.get() - from_point).abs() <= 1e-3 * s.pdf.get().max(from_point),
         "MIS sides disagree: sample_li {} vs pdf_at_point {}",
-        s.pdf,
+        s.pdf.get(),
         from_point
     );
 
@@ -148,13 +153,13 @@ fn area_pdf_has_no_epsilon() {
         let cos_l = n.dot(-s.direction);
         let expected = s.distance * s.distance / (cos_l * area);
         assert!(
-            (s.pdf - expected).abs() <= 1e-4 * expected,
+            (s.pdf.get() - expected).abs() <= 1e-4 * expected,
             "pdf {} vs d²/(cos·A) {}",
-            s.pdf,
+            s.pdf.get(),
             expected
         );
-        let bounce = light.pdf_at_point(Vec3A::ZERO, p);
-        assert!((bounce - s.pdf).abs() <= 1e-4 * s.pdf);
+        let bounce = light.pdf_at_point(Vec3A::ZERO, p).map_or(0.0, |p| p.get());
+        assert!((bounce - s.pdf.get()).abs() <= 1e-4 * s.pdf.get());
     }
 }
 
@@ -178,20 +183,28 @@ fn area_samples_are_refused_only_edge_on() {
         let f = light.sample_li(front, u, v).expect("front");
         let b = light.sample_li(behind, u, v).expect("behind");
         assert!(
-            (b.pdf - f.pdf).abs() <= 1e-4 * f.pdf,
+            (b.pdf.get() - f.pdf.get()).abs() <= 1e-4 * f.pdf.get(),
             "{} vs {}",
-            b.pdf,
-            f.pdf
+            b.pdf.get(),
+            f.pdf.get()
         );
         assert_eq!(b.radiance, Vec3A::ONE);
         let p = behind + b.direction * b.distance;
-        assert!((light.pdf_at_point(behind, p) - b.pdf).abs() <= 1e-4 * b.pdf);
+        assert!(
+            (light.pdf_at_point(behind, p).map_or(0.0, |p| p.get()) - b.pdf.get()).abs()
+                <= 1e-4 * b.pdf.get()
+        );
     }
     // Edge-on (in the disk's own plane) is refused on both sides.
     let edge_on = Vec3A::new(5.0, 0.0, 3.0);
     let on_disk = Vec3A::new(0.2, -0.1, 3.0);
     assert!(light.sample_li(edge_on, 0.5, 0.5).is_none());
-    assert_eq!(light.pdf_at_point(edge_on, on_disk), 0.0);
+    assert_eq!(
+        light
+            .pdf_at_point(edge_on, on_disk)
+            .map_or(0.0, |p| p.get()),
+        0.0
+    );
 }
 
 /// The cone convention: every sampled direction lies inside the
@@ -217,11 +230,12 @@ fn distant_light_cone_is_consistent() {
         let (radiance, pdf) = light
             .escaped(Vec3A::ZERO, s.direction)
             .expect("sample_li produced a direction escaped() does not cover");
+        let pdf = pdf.expect("NEE sampled this direction").get();
         assert_eq!(radiance, s.radiance);
         assert!(
-            (pdf - s.pdf).abs() < 1e-3 * s.pdf,
+            (pdf - s.pdf.get()).abs() < 1e-3 * s.pdf.get(),
             "MIS sides disagree on the pdf: {} vs {}",
-            s.pdf,
+            s.pdf.get(),
             pdf
         );
     }
@@ -270,7 +284,11 @@ fn distant_light_irradiance_is_angle_invariant() {
 fn distant_light_zero_angle_stays_finite() {
     let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 0.0);
     let s = light.sample_li(Vec3A::ZERO, 0.5, 0.5).expect("reachable");
-    assert!(s.pdf.is_finite() && s.pdf > 0.0, "pdf = {}", s.pdf);
+    assert!(
+        s.pdf.get().is_finite() && s.pdf.get() > 0.0,
+        "pdf = {}",
+        s.pdf.get()
+    );
     assert!(
         s.radiance.is_finite(),
         "radiance must stay finite: {:?}",
@@ -291,7 +309,12 @@ fn distant_light_zero_angle_stays_finite() {
 fn distant_light_has_no_geometry() {
     let light = DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0);
     assert_eq!(light.geom_id(), None);
-    assert_eq!(light.pdf_at_point(Vec3A::ZERO, Vec3A::Y), 0.0);
+    assert_eq!(
+        light
+            .pdf_at_point(Vec3A::ZERO, Vec3A::Y)
+            .map_or(0.0, |p| p.get()),
+        0.0
+    );
 }
 
 #[test]
