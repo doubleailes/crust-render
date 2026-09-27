@@ -47,6 +47,7 @@
 //! what a per-texel match costs (`openspec/specs/textures/design.md`, "the
 //! second backing must cost the first one nothing").
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
@@ -114,8 +115,8 @@ pub const DEFAULT_MAX_EDGE: usize = crust_core::config::DEFAULT_TEX_MAX;
 /// the variable.
 ///
 /// [`max_log2_from_env`]: crate::max_log2_from_env
-pub fn max_edge_from_env() -> usize {
-    crust_core::config().tex_max.get()
+pub fn max_edge_from_env() -> NonZeroUsize {
+    crust_core::config().tex_max
 }
 
 /// Are mip pyramids built? `CRUST_TEX_MIP=0` keeps each tile at its single
@@ -155,7 +156,7 @@ impl UvTexture {
         path: &Path,
         space: ColorSpace,
         mip: bool,
-        max_edge: usize,
+        max_edge: NonZeroUsize,
     ) -> Option<UvTexture> {
         UvTexture::try_open_capped(path, space, mip, max_edge)
             .map_err(|e| tracing::warn!("{e}"))
@@ -173,7 +174,7 @@ impl UvTexture {
         path: &Path,
         space: ColorSpace,
         mip: bool,
-        max_edge: usize,
+        max_edge: NonZeroUsize,
     ) -> Result<UvTexture, AssetError> {
         let name = path.to_string_lossy().into_owned();
         let token = TileToken::detect(&name);
@@ -260,7 +261,7 @@ impl UvTexture {
         token: Option<TileToken>,
         space: ColorSpace,
         mip: bool,
-        max_edge: usize,
+        max_edge: NonZeroUsize,
     ) -> Result<UvTexture, AssetError> {
         let space = space.resolve_auto(false, 3);
         let mut tiles = Vec::new();
