@@ -166,17 +166,10 @@ fn main() {
                 }
             },
             "--light-selection" => {
-                selection = Some(match value.as_str() {
-                    "power" => LightSelection::Power,
-                    "uniform" => LightSelection::Uniform,
-                    "learned" => LightSelection::Learned,
-                    other => {
-                        eprintln!(
-                            "--light-selection {other:?}: expected power | uniform | learned"
-                        );
-                        std::process::exit(2);
-                    }
-                })
+                selection = Some(value.parse::<LightSelection>().unwrap_or_else(|e| {
+                    eprintln!("--light-selection: {e}");
+                    std::process::exit(2);
+                }))
             }
             "--camera" => camera = Some(value),
             "--grid" => {

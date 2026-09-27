@@ -25,6 +25,7 @@ mod light_cache;
 mod lux;
 mod material;
 mod medium;
+pub mod names;
 mod pdf;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".

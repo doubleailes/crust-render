@@ -36,6 +36,28 @@ pub enum LightSelection {
     Learned,
 }
 
+crate::names::named!(
+    LightSelection,
+    "light selection",
+    [
+        (
+            LightSelection::Power,
+            "power",
+            "By power, defensively: lights at infinity keep their uniform share (default)"
+        ),
+        (
+            LightSelection::Uniform,
+            "uniform",
+            "One light in N, whatever it emits (the renderer before selection, bit for bit)"
+        ),
+        (
+            LightSelection::Learned,
+            "learned",
+            "Visibility-aware: per-region pick distributions learned by a short pre-pass"
+        ),
+    ]
+);
+
 /// Under [`LightSelection::Power`], the share of the finite lights' shadow
 /// rays split evenly among them rather than by power (Hesterberg's
 /// defensive importance sampling).

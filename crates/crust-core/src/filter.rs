@@ -47,6 +47,38 @@ impl Default for PixelFilter {
     }
 }
 
+crate::names::named!(
+    PixelFilter,
+    "pixel filter",
+    [
+        (
+            PixelFilter::BoxFilter { radius: 0.5 },
+            "box",
+            "One-pixel box (the pre-filter jitter, bit-identical at radius 0.5)"
+        ),
+        (
+            PixelFilter::Triangle { radius: 1.0 },
+            "triangle",
+            "Tent filter (default)"
+        ),
+        (
+            PixelFilter::Gaussian { radius: 1.5 },
+            "gaussian",
+            "Truncated Gaussian"
+        ),
+        (
+            PixelFilter::Blackman { radius: 1.5 },
+            "blackman",
+            "4-term Blackman-Harris window"
+        ),
+        (
+            PixelFilter::Mitchell { radius: 2.0 },
+            "mitchell",
+            "Mitchell-Netravali (negative lobes: sharp, may ring)"
+        ),
+    ]
+);
+
 /// Narrower than any sensible filter, but keeps a zero or negative authored
 /// radius from producing a degenerate distribution.
 const MIN_RADIUS: f32 = 0.01;
@@ -55,15 +87,9 @@ impl PixelFilter {
     /// The filter a name maps to, at that filter's conventional default
     /// radius (box 0.5, triangle 1.0, gaussian/blackman 1.5, mitchell 2.0).
     /// `None` for a name that is no filter — the caller owns the warning.
+    /// The `FromStr` impl, as an `Option`.
     pub fn from_name(name: &str) -> Option<PixelFilter> {
-        Some(match name {
-            "box" => PixelFilter::BoxFilter { radius: 0.5 },
-            "triangle" => PixelFilter::Triangle { radius: 1.0 },
-            "gaussian" => PixelFilter::Gaussian { radius: 1.5 },
-            "blackman" => PixelFilter::Blackman { radius: 1.5 },
-            "mitchell" => PixelFilter::Mitchell { radius: 2.0 },
-            _ => return None,
-        })
+        name.parse().ok()
     }
 
     /// The same filter with an explicit radius (clamped to stay sane).
@@ -88,14 +114,12 @@ impl PixelFilter {
         }
     }
 
+    /// The filter's name (its `Display`), whatever its radius.
     pub fn name(&self) -> &'static str {
-        match self {
-            PixelFilter::BoxFilter { .. } => "box",
-            PixelFilter::Triangle { .. } => "triangle",
-            PixelFilter::Gaussian { .. } => "gaussian",
-            PixelFilter::Blackman { .. } => "blackman",
-            PixelFilter::Mitchell { .. } => "mitchell",
-        }
+        Self::CHOICES
+            .iter()
+            .find(|(f, _, _)| crate::names::same_choice(f, self))
+            .map_or("?", |(_, name, _)| *name)
     }
 
     /// Evaluate the (unnormalized) 1D filter kernel at `x` pixels from the
