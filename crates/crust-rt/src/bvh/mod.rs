@@ -30,7 +30,7 @@ use collapse::{LeafData, collapse};
 use glam::Vec3A;
 
 use crate::aabb::AABB;
-use crate::prim::{PrimHit, PrimNode, TrianglePrim};
+use crate::prim::{PrimHit, PrimNode, TrianglePrim, VertexNormals};
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
 use crate::triangle::{RayShear, Tri4};
@@ -205,6 +205,9 @@ pub(crate) struct Bvh {
     indices: Box<[u32]>,
     /// The primitives, stored once each, in input order.
     prims: Box<[PrimNode]>,
+    /// Per-vertex shading normals of the triangles that have them, indexed
+    /// by [`TrianglePrim::normals`](crate::prim::TrianglePrim).
+    normals: Box<[VertexNormals]>,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
 }
@@ -231,7 +234,8 @@ struct Subtree {
 }
 
 impl Bvh {
-    pub(crate) fn new(prims: Vec<PrimNode>) -> Self {
+    /// `normals` is the table the triangles among `prims` index.
+    pub(crate) fn new(prims: Vec<PrimNode>, normals: Vec<VertexNormals>) -> Self {
         let refs: Vec<PrimRef> = prims
             .iter()
             .enumerate()
@@ -256,6 +260,7 @@ impl Bvh {
             packets: collected.packets.into_boxed_slice(),
             indices: collected.indices.into_boxed_slice(),
             prims: prims.into_boxed_slice(),
+            normals: normals.into_boxed_slice(),
             root_bbox,
         }
     }
@@ -314,6 +319,7 @@ impl Bvh {
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.indices += size_of_val(&*self.indices);
+        acc.vertex_normals += size_of_val(&*self.normals);
         for p in &self.prims {
             match p {
                 PrimNode::Instance(i) => {
@@ -481,7 +487,9 @@ impl Bvh {
                     continue;
                 }
                 let tri = self.triangle(packet.prim[lane]);
-                if let Some(hit) = tri.hit_from_barycentric(out.t[lane], out.u[lane], out.v[lane]) {
+                if let Some(hit) =
+                    tri.hit_from_barycentric(&self.normals, out.t[lane], out.u[lane], out.v[lane])
+                {
                     closest = hit.t;
                     best = Some(hit);
                 }
@@ -492,7 +500,7 @@ impl Bvh {
                 let lane = fb.trailing_zeros() as usize;
                 fb &= fb - 1;
                 let pi = packet.prim[lane] as usize;
-                if let Some(hit) = self.prims[pi].hit(ray, t_min, closest) {
+                if let Some(hit) = self.prims[pi].hit(ray, t_min, closest, &self.normals) {
                     closest = hit.t;
                     best = Some(hit);
                 }
@@ -501,7 +509,7 @@ impl Bvh {
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
+            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest, &self.normals) {
                 closest = hit.t;
                 best = Some(hit);
             }

@@ -29,7 +29,7 @@ fn a_reference_wider_than_its_primitive_does_not_outvote_its_own_bounds() {
         v0: Vec3A::new(0.0, 0.0, 0.0),
         v1: Vec3A::new(0.05, 1.0, 0.0),
         v2: Vec3A::new(0.0, 0.0, 1.0),
-        normals: None,
+        normals: crate::prim::NO_NORMALS,
         geom_id: 0,
         prim_id: 0,
         mask: MASK_ALL,
@@ -122,7 +122,7 @@ fn diagonal_shards(n: i32) -> Vec<PrimNode> {
             v0: Vec3A::new(o, o, o),
             v1: Vec3A::new(o + 10.0, o + 10.0, o + 10.2),
             v2: Vec3A::new(o + 10.0, o + 10.3, o + 10.0),
-            normals: None,
+            normals: crate::prim::NO_NORMALS,
             geom_id: 0,
             prim_id: i as u32,
             mask: MASK_ALL,
@@ -135,7 +135,7 @@ fn linear_scan(prims: &[PrimNode], ray: &Ray, t_min: f32, t_max: f32) -> Option<
     let mut closest = t_max;
     let mut best = None;
     for p in prims {
-        if let Some(h) = p.hit(ray, t_min, closest) {
+        if let Some(h) = p.hit(ray, t_min, closest, &[]) {
             closest = h.t;
             best = Some(h);
         }
@@ -144,7 +144,7 @@ fn linear_scan(prims: &[PrimNode], ray: &Ray, t_min: f32, t_max: f32) -> Option<
 }
 
 fn assert_matches_linear(objects: impl Fn() -> Vec<PrimNode>) {
-    let bvh = Bvh::new(objects());
+    let bvh = Bvh::new(objects(), Vec::new());
     let reference = objects();
 
     let origins = [
@@ -205,7 +205,7 @@ fn spatial_splits_match_linear_scan() {
 /// two places now: packed SIMD lanes and the scalar `indices` list.
 #[test]
 fn spatial_splits_duplicate_references() {
-    let bvh = Bvh::new(diagonal_shards(64));
+    let bvh = Bvh::new(diagonal_shards(64), Vec::new());
     let refs = bvh.leaf_ref_count();
     assert!(
         refs > bvh.prims.len(),
@@ -218,7 +218,7 @@ fn spatial_splits_duplicate_references() {
 /// triangle must be packed rather than left on the scalar path.
 #[test]
 fn triangles_are_packed_into_simd_lanes() {
-    let bvh = Bvh::new(diagonal_shards(64));
+    let bvh = Bvh::new(diagonal_shards(64), Vec::new());
     assert!(
         !bvh.packets.is_empty(),
         "no packets built for a triangle scene"
@@ -230,14 +230,14 @@ fn triangles_are_packed_into_simd_lanes() {
     );
 
     // Spheres are not packable and must stay on the scalar path.
-    let bvh = Bvh::new(sphere_grid(4));
+    let bvh = Bvh::new(sphere_grid(4), Vec::new());
     assert!(bvh.packets.is_empty(), "spheres must not be packed");
     assert_eq!(bvh.indices.len(), bvh.leaf_ref_count());
 
     // Mixed leaves must place each primitive on exactly one path.
     let mut mixed = diagonal_shards(16);
     mixed.extend(sphere_grid(2));
-    let bvh = Bvh::new(mixed);
+    let bvh = Bvh::new(mixed, Vec::new());
     assert!(!bvh.packets.is_empty() && !bvh.indices.is_empty());
     assert!(bvh.leaf_ref_count() >= bvh.prims.len());
 }
@@ -246,7 +246,7 @@ fn triangles_are_packed_into_simd_lanes() {
 /// that mostly emitted 1-lane packets would be SIMD in name only.
 #[test]
 fn packets_are_well_filled() {
-    let bvh = Bvh::new(diagonal_shards(256));
+    let bvh = Bvh::new(diagonal_shards(256), Vec::new());
     let lanes: u32 = bvh.packets.iter().map(|p| p.active.count_ones()).sum();
     let avg = lanes as f32 / bvh.packets.len() as f32;
     // `MIN_LEAF_PACKED` is what keeps this high — ~2.9 of 4 on this
@@ -258,7 +258,7 @@ fn packets_are_well_filled() {
 /// `hit_any` must agree with `hit(..).is_some()` for every ray and range.
 #[test]
 fn hit_any_matches_hit() {
-    let bvh = Bvh::new(sphere_grid(4));
+    let bvh = Bvh::new(sphere_grid(4), Vec::new());
     let origins = [
         Vec3A::new(-5.0, 4.5, 4.5),
         Vec3A::new(20.0, 3.0, 3.0),
@@ -293,6 +293,16 @@ fn wide_node_is_two_cache_lines() {
     assert_eq!(std::mem::align_of::<WideNode>(), 16);
 }
 
+/// A triangle is its three vertices and four ids — one cache line — with its
+/// shading normals in the BVH's side table. A `PrimNode` is that plus its
+/// tag, 80 bytes; it was 128 with the normals inline. (A linear curve
+/// segment is 64 bytes too, so 80 is also what the curves alone would cost.)
+#[test]
+fn a_triangle_is_one_cache_line() {
+    assert_eq!(std::mem::size_of::<TrianglePrim>(), 64);
+    assert_eq!(std::mem::size_of::<PrimNode>(), 80);
+}
+
 /// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
 #[test]
 #[cfg(feature = "bvh8")]
@@ -305,8 +315,8 @@ fn wide8_node_is_four_cache_lines() {
 /// always produces byte-identical topology.
 #[test]
 fn build_is_deterministic() {
-    let a = Bvh::new(sphere_grid(6));
-    let b = Bvh::new(sphere_grid(6));
+    let a = Bvh::new(sphere_grid(6), Vec::new());
+    let b = Bvh::new(sphere_grid(6), Vec::new());
     assert_eq!(a.wide.len(), b.wide.len());
     assert_eq!(a.indices, b.indices);
     assert_eq!(a.packets.len(), b.packets.len());
@@ -327,7 +337,7 @@ fn build_is_deterministic() {
 /// fewer wide nodes than a binary tree would need.
 #[test]
 fn collapse_widens_the_tree() {
-    let bvh = Bvh::new(sphere_grid(6)); // 216 prims
+    let bvh = Bvh::new(sphere_grid(6), Vec::new()); // 216 prims
     let n_leaf_slots: usize = bvh
         .wide
         .iter()
@@ -376,7 +386,7 @@ fn collapsed_tables_hold_no_spare_capacity() {
 
 #[test]
 fn empty_bvh_misses() {
-    let bvh = Bvh::new(Vec::new());
+    let bvh = Bvh::new(Vec::new(), Vec::new());
     let ray = Ray::new(Vec3A::ZERO, Vec3A::X);
     assert!(bvh.hit(&ray, 0.001, f32::INFINITY).is_none());
     assert!(bvh.bounds().is_none());
@@ -384,7 +394,7 @@ fn empty_bvh_misses() {
 
 #[test]
 fn bounds_cover_all_prims() {
-    let bvh = Bvh::new(sphere_grid(3));
+    let bvh = Bvh::new(sphere_grid(3), Vec::new());
     let bbox = bvh.bounds().expect("grid is fully bounded");
     assert!(bbox.minimum.cmple(Vec3A::splat(-0.5)).all());
     assert!(bbox.maximum.cmpge(Vec3A::splat(6.5)).all());
