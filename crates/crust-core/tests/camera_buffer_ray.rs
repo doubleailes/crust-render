@@ -111,16 +111,14 @@ fn ray_builders_and_kernel_view_agree() {
 #[test]
 fn hit_record_defaults_to_no_face_and_no_uv() {
     let h = HitRecord::new();
-    assert_eq!(h.face_id, HitRecord::NO_FACE);
-    assert_eq!(HitRecord::NO_FACE, u32::MAX);
+    assert_eq!(h.face, None);
     assert!(!h.has_uv);
     assert_eq!(h.uv, (0.0, 0.0));
-    assert_eq!(h.face_uv, (0.0, 0.0));
     assert_eq!(h.tangent, Vec3A::ZERO);
     assert!(!h.front_face);
     assert_eq!(h.t, 0.0);
     let d = HitRecord::default();
-    assert_eq!(d.face_id, HitRecord::NO_FACE);
+    assert_eq!(d.face, None);
 }
 
 #[test]

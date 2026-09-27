@@ -59,8 +59,10 @@ fn hit() -> HitRecord {
         tangent: Vec3A::X,
         t: 1.0,
         front_face: true,
-        face_id: 3,
-        face_uv: (0.3, 0.7),
+        face: Some(crust_core::FaceHit {
+            id: 3,
+            uv: (0.3, 0.7),
+        }),
         uv: (0.4, 0.6),
         has_uv: true,
         ..HitRecord::default()

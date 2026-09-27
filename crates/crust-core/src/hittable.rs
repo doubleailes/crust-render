@@ -17,19 +17,12 @@ pub struct HitRecord {
     pub t: f32,
     /// Indicates whether the ray hit the front face of the surface.
     pub front_face: bool,
-    /// Index of the *source* (pre-triangulation) mesh face, or
-    /// [`HitRecord::NO_FACE`] when the hit carries no face identity — every
-    /// primitive that is not a triangulated polygon mesh, and every mesh whose
-    /// material asked for no per-face texture.
-    ///
-    /// This is a Ptex face id: the kernel reports the index of the *triangle*
-    /// it hit, and [`crate::World`] maps that back through the fan
-    /// triangulation to the polygon the triangle came from.
-    pub face_id: u32,
-    /// Position within `face_id`'s own `[0, 1]²` parametric domain, already
-    /// mapped out of the hit triangle's barycentrics. Meaningless — and left
-    /// at zero — when `face_id` is [`HitRecord::NO_FACE`].
-    pub face_uv: (f32, f32),
+    /// The *source* (pre-triangulation) mesh face the hit lies on, and where
+    /// on it — `None` when the hit carries no face identity: every primitive
+    /// that is not a triangulated polygon mesh, and every mesh whose material
+    /// asked for no per-face texture. One `Option` for both, so a position
+    /// can never be read off a hit that has no face.
+    pub face: Option<FaceHit>,
     /// Interpolated `primvars:st` texture coordinates, the chart a *UV*
     /// texture indexes — unrelated to `face_uv`, which is Ptex's per-face
     /// parameterisation. Deliberately **not** wrapped into `[0, 1]`: a UDIM
@@ -65,13 +58,27 @@ pub struct HitRecord {
     pub uv_width: f32,
     /// Width of the ray's texture footprint at this hit, in `face_id`'s own
     /// `[0, 1]²` — the filter width a Ptex texture should read `face_uv`
-    /// with. `0.0` carries the same meaning as `uv_width`.
+    /// with. `0.0` carries the same meaning as `uv_width`, and it is `0.0`
+    /// whenever `face` is `None`.
     pub face_width: f32,
 }
 
-/// Hand-written rather than derived so `face_id` defaults to
-/// [`HitRecord::NO_FACE`] and not to `0`, which is a perfectly valid face and
-/// would make an unmapped hit silently sample the first face of some texture.
+/// A hit's Ptex face identity (see [`HitRecord::face`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceHit {
+    /// The Ptex face id: the kernel reports the index of the *triangle* it
+    /// hit, and [`crate::World`] maps that back through the fan triangulation
+    /// to the polygon the triangle came from.
+    pub id: u32,
+    /// Position within the face's own `[0, 1]²` parametric domain, already
+    /// mapped out of the hit triangle's barycentrics.
+    pub uv: (f32, f32),
+}
+
+/// Hand-written rather than derived so that it states every field's "no
+/// data" value — `face` is `None`, not face 0, which is a perfectly valid
+/// face and would make an unmapped hit silently sample the first face of
+/// some texture.
 impl Default for HitRecord {
     fn default() -> Self {
         HitRecord {
@@ -79,8 +86,7 @@ impl Default for HitRecord {
             normal: Vec3A::ZERO,
             t: 0.0,
             front_face: false,
-            face_id: HitRecord::NO_FACE,
-            face_uv: (0.0, 0.0),
+            face: None,
             uv: (0.0, 0.0),
             tangent: Vec3A::ZERO,
             has_uv: false,
@@ -91,9 +97,6 @@ impl Default for HitRecord {
 }
 
 impl HitRecord {
-    /// `face_id` sentinel for a hit with no per-face texture identity.
-    pub const NO_FACE: u32 = u32::MAX;
-
     /// Creates a new, default `HitRecord`.
     pub fn new() -> HitRecord {
         Default::default()

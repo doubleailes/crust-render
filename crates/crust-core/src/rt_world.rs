@@ -562,12 +562,12 @@ impl World {
         // needs the polygon they belong to. Geometries without a table (the
         // overwhelming majority) skip straight past this.
         let tables = &self.faces[h.geom_id as usize];
-        let (face_id, face_uv) = match &tables.map {
+        let face = match &tables.map {
             Some(m) => match m.resolve(h.prim_id, h.u, h.v, tables.swapped) {
-                Some((face, u, v)) => (face, (u, v)),
-                None => (HitRecord::NO_FACE, (0.0, 0.0)),
+                Some((id, u, v)) => Some(crate::hittable::FaceHit { id, uv: (u, v) }),
+                None => None,
             },
-            None => (HitRecord::NO_FACE, (0.0, 0.0)),
+            None => None,
         };
         let (uv, tangent, has_uv) = match &tables.uv {
             Some(m) => match m.resolve(h.prim_id, h.u, h.v, tables.swapped) {
@@ -606,8 +606,7 @@ impl World {
                 normal: h.normal,
                 t: h.t,
                 front_face: h.front_face,
-                face_id,
-                face_uv,
+                face,
                 uv,
                 tangent,
                 has_uv,
