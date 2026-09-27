@@ -19,7 +19,11 @@
 
 use glam::Vec3A;
 
-#[derive(Debug, Clone)]
+/// Plain data — two coefficient vectors and an anisotropy — so it is `Copy`
+/// and rides in a [`Ray`](crate::Ray) by value: no refcount to bump when a
+/// ray is cloned, and no atomic on a cache line every thread shading the same
+/// glass would share.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Medium {
     /// Per-channel absorption coefficient.
     pub sigma_a: Vec3A,

@@ -35,8 +35,6 @@
 //! - `geometry_opacity` (host-renderer cutout) and authored geometry
 //!   normals/tangents.
 
-use std::sync::Arc;
-
 use glam::Vec3A;
 use utils::cosine_hemisphere;
 
@@ -142,9 +140,9 @@ pub struct OpenPBR {
 }
 
 /// [`OpenPBR`]'s interior medium, computed the first time a ray refracts
-/// into the material and shared by every refraction after it — instead of
+/// into the material and copied into every refraction after it — instead of
 /// rebuilding the `Medium` (three logarithms, a van de Hulst inversion and a
-/// blend) and allocating a fresh `Arc` for each one. The medium depends only
+/// blend) for each one. The medium depends only
 /// on the transmission and subsurface parameters.
 ///
 /// Cloning yields an **empty** cache, never a copy: an `OpenPBR` is cloned to
@@ -154,7 +152,7 @@ pub struct OpenPBR {
 /// immutably, so the one it caches cannot go stale; do not change the
 /// parameters of an `OpenPBR` you have already rendered with.
 #[derive(Default)]
-pub struct InteriorCache(std::sync::OnceLock<Option<Arc<Medium>>>);
+pub struct InteriorCache(std::sync::OnceLock<Option<Medium>>);
 
 impl Clone for InteriorCache {
     fn clone(&self) -> Self {
@@ -265,15 +263,12 @@ impl OpenPBR {
     /// neither absorbs nor scatters (zero-depth clear glass), so inert
     /// interiors skip medium tracking entirely.
     ///
-    /// Built once per material ([`InteriorCache`]); each call is a refcount.
-    fn interior_medium(&self) -> Option<Arc<Medium>> {
-        self.interior
-            .0
-            .get_or_init(|| self.build_interior_medium())
-            .clone()
+    /// Built once per material ([`InteriorCache`]); each call is a copy.
+    fn interior_medium(&self) -> Option<Medium> {
+        *self.interior.0.get_or_init(|| self.build_interior_medium())
     }
 
-    fn build_interior_medium(&self) -> Option<Arc<Medium>> {
+    fn build_interior_medium(&self) -> Option<Medium> {
         let trans_frac = self.transmission_weight;
         let sss_frac = (1.0 - self.transmission_weight) * self.subsurface_weight;
         let total = trans_frac + sss_frac;
@@ -305,7 +300,7 @@ impl OpenPBR {
         if medium.sigma_t_max() <= 1e-6 {
             None
         } else {
-            Some(Arc::new(medium))
+            Some(medium)
         }
     }
 }

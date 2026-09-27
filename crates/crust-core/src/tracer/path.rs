@@ -656,7 +656,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     crate::RayCone::MAX_SPREAD,
                 );
                 ray = match ray.medium() {
-                    Some(m) => Ray::new_in_medium(p, dir, m.clone()),
+                    Some(m) => Ray::new_in_medium(p, dir, *m),
                     None => Ray::new(p, dir),
                 }
                 .with_time(ray.time())
@@ -674,7 +674,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         if t_med < t_surf {
             // === Carried-medium scatter vertex (subsurface interiors) ===
             stats.medium_scatters += 1;
-            let medium = ray.medium().expect("t_med implies a medium").clone();
+            let medium = *ray.medium().expect("t_med implies a medium");
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
