@@ -501,47 +501,73 @@ impl Renderer {
                 }
             }
         } else {
+            // Rows are the work unit, and each worker writes its row of the
+            // buffer and of the variance map in place: `par_chunks_mut` hands
+            // out disjoint `&mut` rows, so there is no lock, no atomic and no
+            // per-row fork/join barrier — the borrow checker is what proves
+            // two workers never touch the same pixel.
+            let w = self.settings.width;
             let total = self.settings.height as u64;
-            let mut done = 0u64;
-            for j in (0..self.settings.height).rev() {
-                // `map_init` rather than `map`: the path scratch is reused
-                // across every pixel rayon hands one worker, instead of being
-                // rebuilt per pixel. (This path parallelises over pixels, so
-                // unlike the tiled path there is no per-work-unit closure to
-                // hang the buffer on.)
-                let row: Vec<(Vec3A, Vec<SampleData>, f64, RayStats)> = (0..self.settings.width)
-                    .into_par_iter()
-                    .map_init(
-                        || PathScratch::new(self.settings.max_depth as usize),
-                        |scratch, i| {
-                            let mut px = RayStats::default();
-                            let (c, s, v) = if profiling {
-                                self.render_pixel::<true>(
-                                    i, j, &cfg, &filter, gctx, scratch, &mut px,
-                                )
-                            } else {
-                                self.render_pixel::<false>(
-                                    i, j, &cfg, &filter, gctx, scratch, &mut px,
-                                )
-                            };
-                            // Per pixel here, having no work unit to hang it
-                            // on; only `--profile` pays the lock.
-                            profile::flush();
-                            (c, s, v, px)
-                        },
-                    )
-                    .collect();
-                for (i, (color, samples, var, px_rays)) in row.into_iter().enumerate() {
-                    rays.merge(&px_rays);
-                    buffer.set_pixel(i, j, color);
-                    all_samples.extend(samples);
-                    var_map[j * self.settings.width + i] = var;
-                    variance_sum += var;
+            // Incremented and reported under one lock, as the tiles do, so the
+            // callback sees rows complete in increasing count.
+            let done = std::sync::Mutex::new(0u64);
+            let rows: Vec<(Vec<SampleData>, RayStats)> = buffer
+                .pixels_mut()
+                .par_chunks_mut(w)
+                .zip(var_map.par_chunks_mut(w))
+                .enumerate()
+                .map(|(j, (pixels, vars))| {
+                    let mut scratch = PathScratch::new(self.settings.max_depth as usize);
+                    let mut row_rays = RayStats::default();
+                    let mut samples = Vec::new();
+                    for i in 0..w {
+                        let (c, s, v) = if profiling {
+                            self.render_pixel::<true>(
+                                i,
+                                j,
+                                &cfg,
+                                &filter,
+                                gctx,
+                                &mut scratch,
+                                &mut row_rays,
+                            )
+                        } else {
+                            self.render_pixel::<false>(
+                                i,
+                                j,
+                                &cfg,
+                                &filter,
+                                gctx,
+                                &mut scratch,
+                                &mut row_rays,
+                            )
+                        };
+                        pixels[i] = c;
+                        vars[i] = v;
+                        samples.extend(s);
+                    }
+                    // Once per row, and a no-op unless `--profile` is on.
+                    profile::flush();
+                    if let Some(cb) = progress {
+                        let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
+                        *n += 1;
+                        cb(*n, total);
+                    }
+                    (samples, row_rays)
+                })
+                .collect();
+            // What is order-dependent in floating point — the pass variance,
+            // an f64 sum, and the training samples the SD-tree accumulates —
+            // is gathered serially in scanline order (rows top-down, pixels
+            // left to right), exactly as the tiled path gathers it.
+            for (j, (samples, row_rays)) in rows.into_iter().enumerate().rev() {
+                rays.merge(&row_rays);
+                // Pixel by pixel into the one running sum: a per-row partial
+                // would round differently.
+                for &v in &var_map[j * w..(j + 1) * w] {
+                    variance_sum += v;
                 }
-                done += 1;
-                if let Some(cb) = progress {
-                    cb(done, total);
-                }
+                all_samples.extend(samples);
             }
         }
 

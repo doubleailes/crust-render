@@ -54,10 +54,10 @@ struct Cli {
     /// `-l debug --log-file` is how a full record of a render is kept.
     #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
     log_file: Option<std::path::PathBuf>,
-    /// Render in scanline order — rows one after another, each row's pixels
-    /// in parallel — instead of the default 16x16 tiles. The image is
-    /// bit-identical; it is slower (every row is a barrier, and a pixel is the
-    /// work unit), and is kept as the A/B and for a progress bar in rows.
+    /// Render by scanlines — a row is the work unit, rows in parallel, each
+    /// written into the image in place — instead of the default 16x16 tiles.
+    /// The image is bit-identical; kept as the A/B and for a progress bar in
+    /// rows.
     #[arg(long, default_value_t = false)]
     scanline: bool,
     /// Tiles ("bucket" order) are the default now; accepted so existing
