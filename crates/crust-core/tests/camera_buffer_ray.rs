@@ -4,7 +4,6 @@
 use crust_core::{
     Buffer, Camera, HitRecord, MASK_ALL, MASK_CAMERA, MASK_SHADOW, Medium, Ray, RayCone, Vec3A,
 };
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Buffer
@@ -83,18 +82,12 @@ fn ray_defaults_to_vacuum_time_zero_and_all_masks() {
 
 #[test]
 fn ray_in_medium_carries_it() {
-    let m = Arc::new(Medium::from_transmission(
-        Vec3A::splat(0.5),
-        1.0,
-        Vec3A::ZERO,
-        0.0,
-    ));
-    let r = Ray::new_in_medium(Vec3A::ZERO, Vec3A::X, Arc::clone(&m));
-    let carried = r.medium().expect("medium kept");
-    assert!(Arc::ptr_eq(carried, &m));
-    // Cloning a ray shares the medium.
+    let m = Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 0.0);
+    let r = Ray::new_in_medium(Vec3A::ZERO, Vec3A::X, m);
+    assert_eq!(r.medium(), Some(&m), "medium kept");
+    // Cloning a ray carries the medium with it, by value.
     let c = r.clone();
-    assert!(Arc::ptr_eq(c.medium().unwrap(), &m));
+    assert_eq!(c.medium(), Some(&m));
 }
 
 #[test]

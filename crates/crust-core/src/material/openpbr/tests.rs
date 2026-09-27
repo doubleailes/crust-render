@@ -1,5 +1,4 @@
 use std::f32::consts::PI;
-use std::sync::Arc;
 
 use glam::Vec3A;
 
@@ -1051,7 +1050,7 @@ fn thin_film_on_metal_is_bounded_and_active() {
 
 /// Draw transmission samples until one refracts into the surface, and
 /// return the interior medium it carries (None if the ray has none).
-fn sample_interior_medium(m: &OpenPBR) -> Option<Arc<Medium>> {
+fn sample_interior_medium(m: &OpenPBR) -> Option<Medium> {
     let mut sampler = s();
     let mut rec = HitRecord::new();
     rec.p = Vec3A::ZERO;
@@ -1065,7 +1064,7 @@ fn sample_interior_medium(m: &OpenPBR) -> Option<Arc<Medium>> {
         if let Some(sample) = m.scatter_importance(&r_in, &rec, sampler.next())
             && sample.ray.direction().z < 0.0
         {
-            return sample.ray.medium().cloned();
+            return sample.ray.medium().copied();
         }
     }
     panic!("material never transmitted");
@@ -1081,13 +1080,19 @@ fn interior_medium_is_built_once_and_not_cloned() {
         transmission_depth: 2.0,
         ..OpenPBR::glass(1.5)
     };
+    assert!(m.interior.0.get().is_none());
     let a = sample_interior_medium(&m).expect("deep glass carries a medium");
+    assert_eq!(
+        m.interior.0.get(),
+        Some(&Some(a)),
+        "the first refraction fills the cache"
+    );
     let b = sample_interior_medium(&m).expect("deep glass carries a medium");
-    assert!(Arc::ptr_eq(&a, &b), "rebuilt the medium per refraction");
+    assert_eq!(a, b);
     let mut changed = m.clone();
+    assert!(changed.interior.0.get().is_none(), "a clone starts empty");
     changed.transmission_depth = 4.0;
     let c = sample_interior_medium(&changed).expect("deep glass carries a medium");
-    assert!(!Arc::ptr_eq(&a, &c));
     assert_eq!(c.sigma_a, a.sigma_a * 0.5, "the clone kept the old medium");
 }
 

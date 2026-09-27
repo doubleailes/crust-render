@@ -271,9 +271,9 @@ fn transmittance_decreases_monotonically_with_distance() {
 }
 
 #[test]
-fn medium_is_cloneable_and_debuggable() {
+fn medium_is_copy_and_debuggable() {
     let m = Medium::from_transmission(Vec3A::splat(0.5), 1.0, Vec3A::ZERO, 0.0);
-    let c = m.clone();
-    assert_eq!(c.sigma_a, m.sigma_a);
+    let c = m;
+    assert_eq!(c, m);
     assert!(format!("{m:?}").contains("sigma_a"));
 }

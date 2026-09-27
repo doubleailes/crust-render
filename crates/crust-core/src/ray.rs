@@ -1,6 +1,5 @@
 use crate::medium::Medium;
 use glam::Vec3A;
-use std::sync::Arc;
 
 pub use crust_rt::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
 
@@ -71,7 +70,7 @@ impl RayCone {
 #[derive(Default, Clone)]
 pub struct Ray {
     rt: crust_rt::Ray,
-    medium: Option<Arc<Medium>>,
+    medium: Option<Medium>,
     cone: RayCone,
 }
 
@@ -88,7 +87,7 @@ impl Ray {
 
     /// Creates a new `Ray` travelling through the given medium. Use this on
     /// a refraction that enters a transmissive volume.
-    pub fn new_in_medium(origin: Vec3A, direction: Vec3A, medium: Arc<Medium>) -> Ray {
+    pub fn new_in_medium(origin: Vec3A, direction: Vec3A, medium: Medium) -> Ray {
         Ray {
             rt: crust_rt::Ray::new(origin, direction),
             medium: Some(medium),
@@ -134,7 +133,7 @@ impl Ray {
         self.rt.dir
     }
 
-    pub fn medium(&self) -> Option<&Arc<Medium>> {
+    pub fn medium(&self) -> Option<&Medium> {
         self.medium.as_ref()
     }
 
