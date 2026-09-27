@@ -31,7 +31,7 @@ against the same mechanism.
 - Introduce a `ColorSpace` concept (e.g. `Linear`, `Srgb` piecewise EOTF,
   `Gamma(2.2)` flat power curve) and route every material-input decode in the
   USD importer through it, replacing today's two separate inline
-  implementations (`usd_import.rs`'s `srgb_to_linear` and `main.rs`'s Ptex
+  implementations (`usd_import/`'s `srgb_to_linear` and `main.rs`'s Ptex
   `powf(2.2)`) with one shared conversion.
 - **Fix**: `UsdPreviewSurface`'s `diffuseColor` and `emissiveColor` are decoded
   sRGB→linear like every other portable color input, instead of read raw.
@@ -87,7 +87,7 @@ against the same mechanism.
 
 ## Impact
 
-- `crates/crust-core/src/scene/usd_import.rs`: `preview_surface_openpbr`,
+- `crates/crust-core/src/scene/usd_import/`: `preview_surface_openpbr`,
   `disney_to_openpbr`, `decode_crust_openpbr`, and the existing `srgb_to_linear`
   helper.
 - `crates/crust-core/src/material/openpbr.rs`: **not** affected — the `OpenPBR`
@@ -97,7 +97,7 @@ against the same mechanism.
 - `crates/crust-render/src/main.rs`: `PtexColor::open`'s texel decode, as a
   candidate to route through the shared conversion instead of its own inline
   `powf(2.2)`.
-- `crates/crust-core/src/scene/usd_import.rs`: `lux_emission` (feeding
+- `crates/crust-core/src/scene/usd_import/`: `lux_emission` (feeding
   `emit_distant_light`/`emit_sphere_light`/`emit_rect_light`/the dome-light
   path) and the volume-region attribute reads (`custom_color3` for
   `sigmaS`/`sigmaA`/`emission`).

@@ -28,7 +28,7 @@ in a per-ray profile.
 
 The work is split across the two crates along the same seam as everything else:
 `crust-core` converts values it reads from USD *attributes* itself
-(`usd_import.rs`), but decodes no **asset** — every image and Ptex decoder lives
+(`crust-core/src/scene/usd_import/`), but decodes no **asset** — every image and Ptex decoder lives
 in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `PtexTexture` trait pins the contract at that boundary
 (`crust-core/src/texture.rs`, the `PtexTexture` trait): values returned from
@@ -43,7 +43,7 @@ interchangeable:
 | Curve | Formula | Where |
 | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import.rs:2862`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
+| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
 | **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture.rs`, `to_linear_table`) |
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
@@ -65,7 +65,7 @@ is matched to what the source content actually applies. The Moana island's shadi
 networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
-that reasoning in a comment at the call site (`usd_import.rs:2856-2861`,
+that reasoning in a comment at the call site (`usd_import/materials.rs`, `disney_to_openpbr`;
 `crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`).
 
 How much does the distinction matter? Across most of the range, very little —
@@ -98,15 +98,15 @@ takes the texture's `sourceColorSpace` instead (see the textures table).
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `UsdPreviewSurface.diffuseColor` | `usd_import.rs:2651` | **none** | ⚠️ **bug** — see [Known gaps](#known-gaps) |
-| `UsdPreviewSurface.emissiveColor` | `usd_import.rs:2665` | **none** | ⚠️ **bug** — same |
-| `PxrDisneyBsdf.baseColor` | `usd_import.rs:2740` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
-| `crust:openpbr` — all 7 colour fields[^1] | `usd_import.rs:2886` | **none** | ✅ intentional — native format is linear-authored |
+| `UsdPreviewSurface.diffuseColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** | ⚠️ **bug** — see [Known gaps](#known-gaps) |
+| `UsdPreviewSurface.emissiveColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** | ⚠️ **bug** — same |
+| `PxrDisneyBsdf.baseColor` | `usd_import/materials.rs`, `disney_to_openpbr` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
+| `crust:openpbr` — all 7 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** | ✅ intentional — native format is linear-authored |
 | MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_leaf` | whatever the feeding node declares | ✅ correct per MaterialX |
 
 [^1]: `baseColor`, `specularColor`, `transmissionColor`, `subsurfaceColor`,
 `fuzzColor`, `coatColor`, `emissionColor` — all via the `c` closure at
-`usd_import.rs:2886`, fields assigned across `2891-2953`.
+the top of `decode_crust_openpbr` (`usd_import/materials.rs`), which assigns every field.
 
 `crust:openpbr` is crust's own lossless 1:1 mirror of the `OpenPBR` struct, so
 values are authored in the renderer's working space by definition. That makes
@@ -134,7 +134,7 @@ clamp, correctly.
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `inputs:color` (all four lux types[^2]) | `usd_import.rs:2240` via `attr_color3f:3168` | **none** | ✅ correct — see below |
+| `inputs:color` (all four lux types[^2]) | `usd_import/lights.rs`, `lux_params`, via `attrs::attr_color3f` | **none** | ✅ correct — see below |
 
 [^2]: `UsdLuxDistantLight`, `UsdLuxDomeLight`, `UsdLuxSphereLight`,
 `UsdLuxRectLight` — all four share the one `lux_emission` helper, so there is a
@@ -148,7 +148,7 @@ implication) into the emission value handed to `DistantLight`/`DomeLight`/
 `Emissive`.
 
 Dome-light textures are decoded separately by the host (see below) and are
-**not** double-decoded: `usd_import.rs` only resolves the path and hands it to
+**not** double-decoded: the importer (`usd_import/lights.rs`) only resolves the path and hands it to
 `AssetLoader::load_environment`, then multiplies the already-linear map by the
 already-linear tint.
 
@@ -156,9 +156,9 @@ already-linear tint.
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `crust:volume:sigmaS` | `usd_import.rs:482` via `custom_color3:3130` | **none** | ✅ correct |
-| `crust:volume:sigmaA` | `usd_import.rs:483` | **none** | ✅ correct |
-| `crust:volume:emission` | `usd_import.rs:484` | **none** | ✅ correct |
+| `crust:volume:sigmaS` | `usd_import/volume.rs`, `emit_volume`, via `attrs::custom_color3` | **none** | ✅ correct |
+| `crust:volume:sigmaA` | `usd_import/volume.rs`, `emit_volume` | **none** | ✅ correct |
+| `crust:volume:emission` | `usd_import/volume.rs`, `emit_volume` | **none** | ✅ correct |
 
 These are crust-custom attributes (no upstream schema to defer to) holding
 *physical quantities* — scattering and absorption cross-sections, and emitted
@@ -175,7 +175,7 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture.rs` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture.rs` | flat 1.8 | ✅ correct per MaterialX |
 | UV texture, any other tag or none | `crust-assets/src/uv_texture.rs` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
-| `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import.rs` (`preview_uv_input`) → `uv_texture.rs` | piecewise sRGB | ✅ correct per the node set |
+| `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import/preview.rs` (`preview_uv_input`) → `uv_texture.rs` | piecewise sRGB | ✅ correct per the node set |
 | `UsdUVTexture`, `sourceColorSpace = "raw"` | same | none (pass-through) | ✅ correct per the node set |
 | `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for 8-bit RGB/RGBA, none otherwise | ✅ the UsdUVTexture rule (Hydra's) — note the default is `auto`, **not** raw as in MaterialX |
 | Preloaded `.exr` UV texture | `crust-assets/src/uv_texture.rs` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
@@ -296,7 +296,7 @@ clamped and re-encoded.
 ## Known gaps
 
 **1. `UsdPreviewSurface` colours are not decoded.** `diffuseColor` and
-`emissiveColor` land in `OpenPBR` raw (`usd_import.rs:2651`, `2665`). Values
+`emissiveColor` land in `OpenPBR` raw (`usd_import/preview.rs`, `preview_surface_openpbr`). Values
 authored as DCC colour-picker swatches — the normal case for this schema — are
 therefore used as if already linear, overshooting albedo substantially. Note
 for honesty: the `UsdPreviewSurface` spec itself does **not** mandate a colour
@@ -310,7 +310,7 @@ of any convention.
 crossing the `AssetLoader` seam names its space — that is what makes
 `srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. USD
 *attribute* reads are not covered: their curves remain independent inline
-implementations (`usd_import.rs` `disney_to_openpbr`, `crust-assets`
+implementations (`usd_import/materials.rs` `disney_to_openpbr`, `crust-assets`
 `PtexColor::open_with`) that happen to agree, and nothing forces a newly added
 colour attribute to state its source space; the default behaviour of adding
 one is to get gap #1 again, silently.

@@ -6,10 +6,11 @@
 
 <br/>
 
-A physically-based path tracer written in 100% safe Rust (edition 2024,
-`forbid(unsafe_code)` on every crate but `crust-core`, which is `deny` so that one
+A physically-based path tracer written in safe Rust (edition 2024,
+`forbid(unsafe_code)` on every crate but two that are `deny`: `crust-core`, so that one
 test-only counting allocator — a `GlobalAlloc`, which cannot be implemented safely — can
-opt out explicitly). It loads scenes directly from **USD** — including production-scale assets
+opt out explicitly, and the optional `crust-jit` MaterialX compiler, whose four audited
+blocks call the machine code it generates). It loads scenes directly from **USD** — including production-scale assets
 such as Disney Animation's [Moana Island](#moana-benchmark) dataset — and implements its own
 watertight ray/triangle kernel, SBVH acceleration structure, OpenPBR übershader, MaterialX
 graph reader, volumetric integrator and Practical Path Guiding, with no dependency on Embree,
@@ -19,7 +20,8 @@ in One Weekend*, Autodesk Standard Surface / OpenPBR and the published Embree/Op
 but every kernel, material model and importer here is a from-scratch implementation, and the
 [known limitations](#known-limitations) — no GPU path, no deformation motion blur, no OpenVDB
 import — are documented rather than hidden. See `docs/embree_comparison.md` for a detailed,
-feature-by-feature comparison against Embree's intersection kernels.
+feature-by-feature comparison against Embree's intersection kernels, and
+[`docs/architecture.md`](docs/architecture.md) for how the crates fit together.
 
 ## 📸 Preview
 
@@ -411,9 +413,19 @@ cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
     --strategy power                   # power | balance | light | bsdf
     --filter gaussian                  # box | triangle | gaussian | blackman | mitchell
     --filter-radius 1.5                # filter radius in pixels
-    -b                                 # bucket (16×16 tile) rendering
+    --light-selection power            # uniform | power | learned
+    --indirect-clamp 10                # firefly clamp on indirect light (0 = off, unbiased)
+    --camera /path/to/cam              # render through this camera prim
+    --scanline                         # row order instead of the default 16×16 tiles
+    --stats                            # per-phase timings, memory and scene statistics
+    --profile                          # --stats plus a per-section render profile (slower)
+    --auto-tx                          # convert UV textures to streamable .tx on first use
     -l debug                           # log level
+    --log-file renders/logs            # tee the log to a timestamped file
 ```
+
+`CRUST_*` environment variables switch individual optimizations off for A/B
+comparison; [`docs/architecture.md`](docs/architecture.md#environment-switches) lists them.
 
 ### Known limitations
 
@@ -462,6 +474,7 @@ the full, per-feature detail and workarounds:
   nodes have no glass lobe equivalent yet.
 - **Path guiding covers surfaces only** — no volume/phase-function guiding, and it
   trains on luminance rather than a chromatic distribution.
-- Some USD light types (`DiskLight`, `CylinderLight`) and material inputs
-  (`subsurface*`/`specularTint` on `PxrDisneyBsdf`) are read and warned about rather
-  than mapped.
+- Some USD inputs are read and warned about rather than mapped: `subsurface*` /
+  `specularTint` on `PxrDisneyBsdf`, `inputs:diffuse` / `inputs:specular` on lights, and
+  `UsdTransform2d` on preview-surface textures. `PortalLight`, mesh lights, light
+  filters and light linking are not read.

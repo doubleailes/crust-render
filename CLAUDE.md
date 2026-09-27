@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Start with `docs/architecture.md` for the map (crates, render flow, seams, cross-module
+invariants, every `CRUST_*` switch, and the open technical-debt register); this file is
+the long-form, per-feature record behind it.
+
 ## What this is
 
 Crust Render is a toy, physically-based path tracer written in safe Rust (edition 2024),
@@ -453,8 +457,11 @@ Seven crates under `crates/`:
   `crust_assets::FileAssets`), calls the `Renderer` (wiring an `indicatif` bar to the
   progress callback), writes the EXR and the tone-mapped PNG. `main.rs` is the only
   source file, and it only *writes* images — decoding is `crust-assets`.
-- **`utils`** — math/RNG helpers (`random*`, `random_cosine_direction`, `align_to_normal`,
-  `balance_heuristic`, `power_heuristic`, `clamp`, `Lerp`). Depended on by `crust-core`.
+- **`utils`** — stateless math helpers: sampling warps (`cosine_hemisphere`,
+  `uniform_sphere`, `uniform_ball`, `concentric_disk`), `align_to_normal`,
+  `balance_heuristic`, `power_heuristic`, Rec.709 `luminance` (the one copy — do not
+  re-inline the weights), `Lerp`. No RNG: every stochastic draw goes through `openqmc`.
+  Depended on by `crust-core`.
 Two libraries were extracted out of this tree into repositories of their own on the
 same principle (zero crust types in the API, generally useful, published) and are
 consumed as ordinary dependencies:
@@ -845,9 +852,17 @@ carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a doma
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
 
-## USD import (`scene/usd_import.rs`)
+## USD import (`scene/usd_import/`)
 
-The only scene format. `load_scene` opens the stage, imports `RenderSettings` first (the
+The only scene format. The module is split by schema family — `mod.rs` holds
+`load_scene`, the streaming chunk loop, the traversal and the import-wide state
+(`ImportCtx`, `ImportCaches`), and dispatches into `mesh`, `shapes`, `instancing`,
+`lights`, `materials`, `preview`, `volume`, `camera`, `xform`, `settings`, `attrs` and
+`time`; the table in `mod.rs`'s module doc says which reads what. Siblings expose what
+they share as `pub(super)` and import each other explicitly — keep it that way (no
+`use super::*`), so a file's `use` block stays its real dependency list.
+
+`load_scene` opens the stage, imports `RenderSettings` first (the
 camera needs the aspect ratio), then traverses prims with an explicit stack that bakes the
 Xform hierarchy into world matrices.
 
@@ -1926,7 +1941,7 @@ the `geom` / `lux` / `shade` / `render` feature flags the core crate used to. So
 `openusd::schemas::geom` is now `openusd_schemas::geom`, and core `openusd` has no
 features left but `serde`.
 
-Three API changes came with it, all in `scene/usd_import.rs`:
+Three API changes came with it, all in `scene/usd_import/`:
 
 - `Stage::prim` / `Stage::attribute` / `sdf::Layer::prim` take any path-like argument and
   therefore return a `Result` whose error is a *parse* failure. Every call here passes an
@@ -2069,7 +2084,7 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
 - **`openusd` xformOp bug, worked around locally; fixed upstream in 0.6.0.** `openusd`
   0.5.0 composed multi-op `xformOpOrder` stacks in the wrong order (the authored
   translate came back multiplied by the scale), which used to make
-  `samples/cornellbox.usda` render as floating objects against sky. `usd_import.rs`
+  `samples/cornellbox.usda` render as floating objects against sky. `usd_import/xform.rs`
   therefore composes the individual `xformOp:*` attributes itself
   (`compose_xform_ops`: translate/scale/rotateX·Y·Z/rotate-Euler-triples/orient/
   transform, `!invert!` prefixes, namespaced suffixes), falling back to openusd's
