@@ -28,7 +28,7 @@ cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles 
 # --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), --scanline
 #   (row order instead of the default 16x16 tiles; -b/--bucket is accepted and ignored),
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
-# --strategy (power|balance|light|bsdf), --light-selection (uniform|power),
+# --strategy (power|balance|light|bsdf), --light-selection (uniform|power|learned),
 # --filter (box|triangle|gaussian|blackman|mitchell) + --filter-radius (pixels),
 # --indirect-clamp VALUE (firefly clamp on each sample's indirect light; default 10, 0 = off),
 # --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
@@ -67,6 +67,12 @@ cargo run --release -p crust-rt --example ray_throughput          # Mray/s per s
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 cargo run --release -p crust-mtlx --example mtlx_bench -- lion_ldX.mtlx   # ns per MaterialX program run
 cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...interpreter vs JIT
+
+# Why does NEE fail? Per light: what fraction of its samples is backfacing,
+# below the horizon, occluded (opaque vs glass only, by the light's own
+# fixture vs the receiver's cavity) or visible. Renders nothing.
+cargo run --release -p crust-render --example light_occlusion -- \
+    samples/ALab/entry.usda --frame 1004 --camera /path/to/cam
 
 # Placing a camera in a downloaded production asset, and settling whether a
 # texture is display-encoded or linear (see "Ptex" under USD import).
@@ -757,6 +763,33 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
     - a black light gets zero.
   - **`uniform`** is one in N, the renderer before this was a choice, reproduced
     **bit for bit**: 0 differing pixels on all 22 checked-in samples at 16 spp.
+  - **`learned`** (opt-in, `light_cache.rs`; `docs/light_sampling.md` §3.12) is
+    visibility-aware. Before the first pass, a deterministic pre-pass (one camera
+    path per 4×4 pixels, two BSDF bounces) estimates **every** light's NEE
+    contribution at each vertex with the integrand itself (radiance × BSDF ×
+    shadow ray), and sums the estimates into a grid. Each trained cell picks
+    `0.7 · E/ΣE + 0.3 / n_live`, and everywhere else the power table answers.
+    It exists because of ALab: power gave 49% of the picks to two exterior
+    lights visible from **no** receiver, and 3.2% of light samples delivered
+    light (`examples/light_occlusion` measures that per light). Learned cuts
+    ALab's direct-lighting relMSE **4.1×** and `usdlux`'s 2.0×, and is never
+    worse per sample on the checked-in samples. **It costs time, though**:
+    +14% / +23% Render (min / mean) on ALab at 128 spp. Only ~0.6 s of that is
+    the pre-pass. The rest is shadow rays that now reach their light and
+    traverse the whole BVH. So at equal time it is ~3.6× on ALab's direct
+    lighting and only ~1.1× on its full image, which is mostly indirect. Four
+    details are load-bearing:
+    - **MIS.** Both sides go through `LightList::pick_at` / `pmf_at` /
+      `find_by_geom_at` / `iter_at`, keyed by the vertex NEE sampled from. The
+      bounce side passes `prev.pos`. Route a new pmf read through the `*_at`
+      form or emission is double-counted.
+    - **Robust grid bounds.** The grid spans the receivers' 2–98% quantiles.
+      With the full bounds, ALab's stray exterior bounces made it 4 cells.
+    - **The defensive share is uniform, at 0.3.** Mixing with power reinstates
+      the hidden lights, and at 0.2 `domelight` fireflied at shadow boundaries.
+    - **Power table underneath.** The cache only installs over a power table:
+      with none, `density` divides by `n` and would disagree with the per-cell
+      pmf.
 
   **Both halves of the design were forced by measurement** (`docs/light_sampling.md`
   §3.8):
@@ -1861,7 +1894,7 @@ Schema mapping:
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
   `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
-  `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power`,
+  `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power` | `learned`,
   `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float,
   `crust:indirectClamp` float). Missing attrs

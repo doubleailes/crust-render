@@ -19,6 +19,7 @@ mod filter;
 mod guiding;
 mod hittable;
 mod light;
+mod light_cache;
 mod lux;
 mod material;
 mod medium;

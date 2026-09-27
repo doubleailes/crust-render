@@ -164,6 +164,8 @@ enum Selection {
     Power,
     /// One light in N, whatever it emits (the renderer before selection, bit for bit)
     Uniform,
+    /// Visibility-aware: per-region pick distributions learned by a short pre-pass
+    Learned,
 }
 
 impl From<Selection> for LightSelection {
@@ -171,6 +173,7 @@ impl From<Selection> for LightSelection {
         match s {
             Selection::Uniform => LightSelection::Uniform,
             Selection::Power => LightSelection::Power,
+            Selection::Learned => LightSelection::Learned,
         }
     }
 }

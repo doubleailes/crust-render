@@ -1199,6 +1199,11 @@ pub enum LightSelection {
     /// percent where each light owns its own region (6% on `veach_mis`).
     #[default]
     Power,
+    /// Visibility-aware: per-region pick distributions learned by a short
+    /// pre-pass before the render (see `light_cache.rs`), over the power
+    /// selection wherever nothing was learned. What an interior lit through
+    /// windows needs, where the most powerful lights are the ones hidden.
+    Learned,
 }
 
 /// Under [`LightSelection::Power`], the share of the finite lights' shadow
@@ -1229,6 +1234,10 @@ pub struct LightList {
     /// `geom_id → index into lights`, so a bounce hit finds its light in O(1)
     /// rather than by scanning the list on every emissive hit.
     by_geom: HashMap<u32, usize>,
+    /// The learned per-region selection, under [`LightSelection::Learned`].
+    /// Consulted by every `*_at` method; `pmf` / `cdf` are what it falls back
+    /// to outside trained cells.
+    cache: Option<std::sync::Arc<crate::light_cache::LightCache>>,
 }
 
 impl Default for LightList {
@@ -1247,6 +1256,7 @@ impl LightList {
             pmf: Vec::new(),
             cdf: Vec::new(),
             by_geom: HashMap::new(),
+            cache: None,
         }
     }
 
@@ -1260,6 +1270,7 @@ impl LightList {
         self.lights.push(light);
         self.pmf.clear();
         self.cdf.clear();
+        self.cache = None;
     }
 
     /// Builds the selection over the current lights (see [`LightSelection`]).
@@ -1274,9 +1285,14 @@ impl LightList {
     /// is deliberate: the map from `u` to light stays monotone, so the
     /// stratified samples that pick light *k* are still one contiguous slice
     /// of the pick dimension, as under uniform picking.
+    ///
+    /// [`LightSelection::Learned`] builds the power table here; the learned
+    /// part needs the scene and is added by the renderer
+    /// ([`LightList::set_cache`]).
     pub fn select_by(&mut self, selection: LightSelection) {
         self.pmf.clear();
         self.cdf.clear();
+        self.cache = None;
         if selection == LightSelection::Uniform || self.lights.is_empty() {
             return;
         }
@@ -1338,9 +1354,17 @@ impl LightList {
         }
     }
 
+    /// Installs a learned selection over the power one (see
+    /// [`LightSelection::Learned`]). Must be built for this list's lights.
+    pub(crate) fn set_cache(&mut self, cache: crate::light_cache::LightCache) {
+        self.cache = Some(std::sync::Arc::new(cache));
+    }
+
     /// Which strategy [`LightList::pick`] is using.
     pub fn selection(&self) -> LightSelection {
-        if self.pmf.is_empty() {
+        if self.cache.is_some() {
+            LightSelection::Learned
+        } else if self.pmf.is_empty() {
             LightSelection::Uniform
         } else {
             LightSelection::Power
@@ -1396,6 +1420,50 @@ impl LightList {
     pub fn find_by_geom(&self, geom_id: u32) -> Option<(&Arc<dyn Light>, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((&self.lights[index], self.pmf(index)))
+    }
+
+    /// [`LightList::pick`] for a vertex at `p`: under a learned selection, from
+    /// the distribution of the cell holding `p`; otherwise exactly `pick`.
+    #[inline]
+    pub fn pick_at(&self, p: Vec3A, u: f32) -> Option<(&Arc<dyn Light>, f32)> {
+        match self.cache.as_ref().and_then(|c| c.lookup(p)) {
+            Some((pmf, cdf)) => {
+                let index = cdf.partition_point(|&c| c <= u).min(self.lights.len() - 1);
+                Some((&self.lights[index], pmf[index]))
+            }
+            None => self.pick(u),
+        }
+    }
+
+    /// The probability [`LightList::pick_at`] at `p` picks light `index` —
+    /// what the bounce side weights emission found from a vertex at `p` with.
+    #[inline]
+    pub fn pmf_at(&self, p: Vec3A, index: usize) -> f32 {
+        match self.cache.as_ref().and_then(|c| c.lookup(p)) {
+            Some((pmf, _)) => pmf[index],
+            None => self.pmf(index),
+        }
+    }
+
+    /// [`LightList::find_by_geom`] with the pick probability of a vertex at
+    /// `p`: the bounce-side half of [`LightList::pick_at`].
+    pub fn find_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(&Arc<dyn Light>, f32)> {
+        let &index = self.by_geom.get(&geom_id)?;
+        Some((&self.lights[index], self.pmf_at(p, index)))
+    }
+
+    /// [`LightList::iter`] with the pick probabilities of a vertex at `p`.
+    pub fn iter_at(&self, p: Vec3A) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+        let table = self.cache.as_ref().and_then(|c| c.lookup(p)).map(|t| t.0);
+        self.lights.iter().enumerate().map(move |(index, light)| {
+            (
+                light,
+                match table {
+                    Some(pmf) => pmf[index],
+                    None => self.pmf(index),
+                },
+            )
+        })
     }
 
     /// Every light with its selection probability.

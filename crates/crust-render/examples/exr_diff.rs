@@ -51,14 +51,20 @@ fn main() {
     let mut sum_abs = 0.0f64;
     let mut sum_sq = 0.0f64;
     let mut sum_rel_sq = 0.0f64;
+    // Per-pixel relative squared error (mean over channels), for the trimmed
+    // relMSE below.
+    let mut pixel_rel = Vec::with_capacity(aw * ah);
     for p in 0..aw * ah {
         let mut pixel_differs = false;
+        let mut rel = 0.0f64;
         for c in 0..3 {
             let (x, y) = (a[p * 4 + c], b[p * 4 + c]);
             let d = (x - y).abs();
             sum_abs += d as f64;
             sum_sq += (d as f64) * (d as f64);
-            sum_rel_sq += (d as f64) * (d as f64) / ((x as f64) * (x as f64) + 1e-2);
+            let r = (d as f64) * (d as f64) / ((x as f64) * (x as f64) + 1e-2);
+            sum_rel_sq += r;
+            rel += r / 3.0;
             if d != 0.0 {
                 pixel_differs = true;
                 max_abs = max_abs.max(d);
@@ -68,6 +74,7 @@ fn main() {
                 }
             }
         }
+        pixel_rel.push(rel);
         if pixel_differs {
             differing_pixels += 1;
             if differing_pixels <= 8 {
@@ -101,4 +108,15 @@ fn main() {
     // pixels that see a light directly, so it measures the lit surfaces a
     // light-sampling change is actually meant to clean up.
     println!("relmse: {:e}", sum_rel_sq / (total * 3) as f64);
+    // The same with the worst 0.1% of pixels discarded, the convention of the
+    // path-guiding literature (Müller et al. 2017 and after). A handful of
+    // fireflies -- a single one can carry an error of 1e5 -- otherwise decide
+    // the mean on their own, and a change that cleans up the whole lit image
+    // can read as no change at all.
+    pixel_rel.sort_by(f64::total_cmp);
+    let keep = total - total / 1000;
+    println!(
+        "relmse (trimmed 0.1%): {:e}",
+        pixel_rel[..keep].iter().sum::<f64>() / keep.max(1) as f64
+    );
 }

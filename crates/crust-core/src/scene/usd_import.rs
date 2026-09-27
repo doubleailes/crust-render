@@ -5247,13 +5247,14 @@ fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     };
 
-    // Light selection: `power` (default) | `uniform`.
+    // Light selection: `power` (default) | `uniform` | `learned`.
     let light_selection = match custom_token(&prim, "crust:lightSelection").as_deref() {
         None | Some("power") => LightSelection::Power,
         Some("uniform") => LightSelection::Uniform,
+        Some("learned") => LightSelection::Learned,
         Some(other) => {
             warn!(
-                "Unknown crust:lightSelection \"{}\" (expected power | uniform) — picking lights by power",
+                "Unknown crust:lightSelection \"{}\" (expected power | uniform | learned) — picking lights by power",
                 other
             );
             LightSelection::Power
