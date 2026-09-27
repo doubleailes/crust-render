@@ -245,6 +245,20 @@ rounds once instead of twice and would break both. Rust does not contract by
 default, but that is worth re-verifying rather than assuming, especially
 across toolchain bumps. All four configurations pass.
 
+The script also checks the claim directly, not only through test results: it
+emits crust-rt's LLVM IR under `+avx2,+fma` and fails on any `contract` /
+fast-math flag or `llvm.fmuladd` — the only ways the compiler could fuse
+crust's own arithmetic. Grepping the machine code for `vfmadd` would not do:
+**glam fuses on purpose** when the target has FMA (`m128_mul_add` /
+`m128_neg_mul_sub` in its SSE2 backend), so `Vec3A::cross` — and so
+`Affine3A::inverse` — become `vfnmadd` under `+fma`. Those arrive as explicit
+`llvm.fma` calls, which the check counts but allows: they sit in the
+geometric normal (`TrianglePrim::hit`) and motion-instance inverses, off the
+edge-function path, so every bitwise pair above still holds *within* a build.
+What they do mean is that an FMA build shades very slightly different normals
+from an SSE2 one — images are comparable bit for bit only between binaries
+built with the same target features.
+
 (GitHub Actions runners generally do not expose AVX-512, so that leg only
 really runs locally — as the article notes.)
 
