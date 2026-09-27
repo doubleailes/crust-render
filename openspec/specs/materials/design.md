@@ -71,7 +71,14 @@
   what the material's own method would give — output is bit-identical to per-query
   shading. One trap: `Resolution::emitted` must come from the parameters *before*
   `into_resolved`, as `emitted_at` does, because the coat's emission factor reads
-  `base_color` and a resolved Ptex lookup would change it. Four implementations: **`OpenPBR`**,
+  `base_color` and a resolved Ptex lookup would change it. That order is now the
+  only one that compiles: `into_resolved` consumes the `OpenPBR` and returns a
+  `ResolvedOpenPBR`, which has the BSDF queries and no emission method, and a
+  `Resolution` is built only by `Resolution::new`, which reads the emission and
+  then resolves. `tests/resolve.rs` pins the contract bit for bit for every kind
+  of material (plain, Ptex, glass, emissive, textured preview surface, MaterialX).
+  The pattern materials share their `Material` impl through `PatternMaterial`
+  (`material/pattern.rs`), which states the order once. Four implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**
