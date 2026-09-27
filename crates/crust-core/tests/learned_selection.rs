@@ -188,8 +188,11 @@ fn same(a: &Buffer, b: &Buffer) -> bool {
 /// so the render mode stays a scheduling choice and reruns agree.
 #[test]
 fn learned_renders_are_deterministic_and_scheduling_free() {
-    let (a, _) = scene(LightSelection::Learned, 4);
-    let (b, _) = scene(LightSelection::Learned, 4);
+    // At 16 spp, as every image comparison in the repository is: with the
+    // minimum at the budget no pixel stops adaptively, so an exact match is a
+    // statement about scheduling alone.
+    let (a, _) = scene(LightSelection::Learned, 16);
+    let (b, _) = scene(LightSelection::Learned, 16);
     let tiles = a.render_with_tiles();
     assert!(same(&tiles, &a.render()), "tiles vs scanlines");
     assert!(

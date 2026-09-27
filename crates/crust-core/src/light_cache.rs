@@ -44,8 +44,15 @@ use crate::rt_world::World;
 use crate::{PathSampler, Vec3A};
 use rayon::prelude::*;
 
-/// One training path per `TRAIN_STRIDE` x `TRAIN_STRIDE` pixels.
+/// One training path per `TRAIN_STRIDE` x `TRAIN_STRIDE` pixels, at least.
 const TRAIN_STRIDE: usize = 4;
+/// Receiver-light pairs the pre-pass may estimate, and so retain as `f32`s
+/// until the reduction: 32 MiB of contributions, `LIGHT_SAMPLES` times as many
+/// light evaluations. The stride grows past `TRAIN_STRIDE` to stay inside it.
+/// Resolution times light count is what scales, and unbounded, 3840x2160 at
+/// the `MAX_LIGHTS` limit would hold ~2 GiB and evaluate over a billion light
+/// samples before the first pass. ALab (47 lights, 640x360) uses 2.0 M.
+const MAX_PAIRS: usize = 8 << 20;
 /// BSDF bounces after the primary hit, so cells that only indirect paths
 /// reach are trained too.
 const TRAIN_BOUNCES: usize = 2;
@@ -153,7 +160,14 @@ pub(crate) fn train(
         );
         return None;
     }
-    let (gw, gh) = (width.div_ceil(TRAIN_STRIDE), height.div_ceil(TRAIN_STRIDE));
+    // Vertices per path, times lights, times paths, within `MAX_PAIRS`.
+    let per_path = (1 + TRAIN_BOUNCES) * n;
+    let stride = TRAIN_STRIDE.max(
+        ((width * height * per_path) as f64 / MAX_PAIRS as f64)
+            .sqrt()
+            .ceil() as usize,
+    );
+    let (gw, gh) = (width.div_ceil(stride), height.div_ceil(stride));
     let list = lights.lights();
 
     // Parallel over rows, collected in row order: the reduction below is then
@@ -163,8 +177,19 @@ pub(crate) fn train(
         .map(|j| {
             let mut out = Vec::new();
             for i in 0..gw {
-                let root =
-                    PathSampler::new(i as i32, j as i32, frame as i32, 0).new_domain(K_TRAIN);
+                // OpenQMC decorrelates coordinates within a 256x256 tile only, so
+                // grids past 256 take a tile domain, as `render_pixel` does. It is
+                // skipped for tile 0, which leaves every grid up to 256 — every
+                // render up to 1024 pixels across, the ones measured in
+                // `docs/light_sampling.md` §3.12 — drawing exactly what it did.
+                let base = PathSampler::new(i as i32, j as i32, frame as i32, 0);
+                let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
+                let base = if tile == 0 {
+                    base
+                } else {
+                    base.new_domain(tile)
+                };
+                let root = base.new_domain(K_TRAIN);
                 let cam = root.draw_sample_f32::<4>();
                 let u = (i as f32 + cam[0]) / gw as f32;
                 let v = (j as f32 + cam[1]) / gh as f32;
@@ -313,25 +338,9 @@ pub(crate) fn train(
         }
         slot[c] = trained as u32;
         trained += 1;
-        let mut running = 0.0f64;
-        let start = pmf.len();
-        for k in 0..n {
-            let p = if live[k] {
-                (1.0 - DEFENSIVE as f64) * sum[k] / total + DEFENSIVE as f64 / n_live as f64
-            } else {
-                0.0
-            };
-            running += p;
-            pmf.push(p as f32);
-            cdf.push(running as f32);
-        }
-        // As in `LightList::select_by`: the last pickable light ends the CDF
-        // at exactly one, so no `u` below one falls past it.
-        if let Some(last) = pmf[start..].iter().rposition(|&p| p > 0.0) {
-            for c in &mut cdf[start + last..] {
-                *c = 1.0;
-            }
-        }
+        let (cell_cdf, cell_pmf) = cell_table(sum, total, &live, n_live);
+        cdf.extend(cell_cdf);
+        pmf.extend(cell_pmf);
     }
     if trained == 0 {
         return None;
@@ -347,4 +356,92 @@ pub(crate) fn train(
         receivers: receivers.len(),
         trained_cells: trained,
     })
+}
+
+/// One trained cell's `(cdf, pmf)`: `(1 - DEFENSIVE) * E/ΣE` plus the
+/// defensive share spread over the live lights.
+///
+/// The CDF is finalised first, in f32, and each pmf is then the width of its
+/// own interval, `cdf[k] - cdf[k-1]`. So the probability NEE divides by, and
+/// the bounce side weights with, is the one the pick actually lands with.
+/// Rounding `p` and the running sum separately could let the two differ, and
+/// the forced final 1.0 could make them differ by more.
+fn cell_table(sum: &[f64], total: f64, live: &[bool], n_live: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut running = 0.0f64;
+    let mut cdf = Vec::with_capacity(sum.len());
+    let mut last_live = None;
+    for (k, &e) in sum.iter().enumerate() {
+        let p = if live[k] {
+            last_live = Some(k);
+            (1.0 - DEFENSIVE as f64) * e / total + DEFENSIVE as f64 / n_live as f64
+        } else {
+            0.0
+        };
+        running += p;
+        cdf.push(running as f32);
+    }
+    // As in `LightList::select_by`: the last pickable light ends the CDF at
+    // exactly one, so no `u` below one falls past it.
+    if let Some(last) = last_live {
+        for c in &mut cdf[last..] {
+            *c = 1.0;
+        }
+    }
+    let mut prev = 0.0f32;
+    let pmf = cdf
+        .iter()
+        .map(|&c| {
+            let p = c - prev;
+            prev = c;
+            p
+        })
+        .collect();
+    (cdf, pmf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pmf is exactly its own CDF interval, including the last live
+    /// light's, whose boundary is forced to 1.0, and a dead light's, which is
+    /// empty. Checked where rounding bites: many lights, tiny and uneven
+    /// contributions.
+    #[test]
+    fn each_pmf_is_exactly_its_cdf_interval() {
+        let n = MAX_LIGHTS;
+        let sum: Vec<f64> = (0..n)
+            .map(|k| {
+                if k % 7 == 0 {
+                    0.0
+                } else {
+                    1e-9 * (k as f64).powf(1.7)
+                }
+            })
+            .collect();
+        let total: f64 = sum.iter().sum();
+        // A few dead lights, the last one among them.
+        let live: Vec<bool> = (0..n).map(|k| k % 101 != 3 && k != n - 1).collect();
+        let n_live = live.iter().filter(|&&l| l).count();
+        let (cdf, pmf) = cell_table(&sum, total, &live, n_live);
+
+        let mut prev = 0.0f32;
+        for k in 0..n {
+            assert_eq!(pmf[k], cdf[k] - prev, "light {k}");
+            prev = cdf[k];
+            if live[k] {
+                // The defensive floor survives the rounding.
+                assert!(
+                    pmf[k] >= 0.99 * DEFENSIVE / n_live as f32,
+                    "light {k}: {}",
+                    pmf[k]
+                );
+            } else {
+                assert_eq!(pmf[k], 0.0, "dead light {k}");
+            }
+        }
+        assert_eq!(*cdf.last().unwrap(), 1.0);
+        let total_p: f64 = pmf.iter().map(|&p| p as f64).sum();
+        assert!((total_p - 1.0).abs() < 1e-6, "{total_p}");
+    }
 }
