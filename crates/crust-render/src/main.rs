@@ -16,6 +16,7 @@ use crust_core::{get_settings, simple_scene};
 use exr::prelude::*;
 use indicatif::ProgressBar;
 use std::path::Path;
+use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{Level, debug, error, info, warn};
@@ -291,37 +292,32 @@ fn utc_stamp(t: std::time::SystemTime) -> String {
 
 /// Opens the run's log file, creating any missing directories in `dir`.
 ///
-/// Fails the process rather than warning: nothing has been rendered yet when
-/// this runs, so exiting costs no work, and a `--log-file` that quietly
+/// A failure fails the run rather than warning: nothing has been rendered yet
+/// when this runs, so stopping costs no work, and a `--log-file` that quietly
 /// produced no file would be discovered only after the render it was meant to
-/// record.
-fn open_log_file(dir: &Path) -> std::fs::File {
+/// record. The error is the message to print.
+fn open_log_file(dir: &Path) -> std::result::Result<std::fs::File, String> {
     let path = dir.join(format!("crust-render-{}.log", utc_stamp(SystemTime::now())));
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        eprintln!(
-            "error: could not create log directory {}: {e}",
+        return Err(format!(
+            "could not create log directory {}: {e}",
             parent.display()
-        );
-        std::process::exit(1);
+        ));
     }
-    match std::fs::File::create(&path) {
-        Ok(f) => {
-            // Said on stderr rather than through `tracing`: the subscriber
-            // this file belongs to does not exist yet.
-            eprintln!("Logging to {}", path.display());
-            f
-        }
-        Err(e) => {
-            eprintln!("error: could not create log file {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    }
+    let f = std::fs::File::create(&path)
+        .map_err(|e| format!("could not create log file {}: {e}", path.display()))?;
+    // Said on stderr rather than through `tracing`: the subscriber this file
+    // belongs to does not exist yet.
+    eprintln!("Logging to {}", path.display());
+    Ok(f)
 }
 
-fn main() {
+/// Every failure returns through here rather than `std::process::exit`, so
+/// the stack unwinds normally and every destructor runs on the way out.
+fn main() -> ExitCode {
     // CLI
     let cli = Cli::parse();
     // Add tracing. Two layers rather than one writer teed into both, because
@@ -330,11 +326,18 @@ fn main() {
     // registry that composes them costs no new dependency — `sharded-slab`
     // and `thread_local` are already in the graph via the `fmt` feature.
     //
-    // The file is written unbuffered, deliberately: several error paths here
-    // end in `std::process::exit`, which runs no destructors, so a
-    // `BufWriter` would drop exactly the lines explaining why the run
-    // stopped. A log at these volumes is not worth a flush-on-exit guard.
-    let log_file = cli.log_file.as_deref().map(open_log_file);
+    // The file is written unbuffered, deliberately: the subscriber that owns
+    // it is the process-global one, which is never dropped, so a `BufWriter`
+    // would never be flushed and would lose exactly the last lines — the ones
+    // explaining why a run stopped. A log at these volumes is not worth a
+    // flush guard.
+    let log_file = match cli.log_file.as_deref().map(open_log_file).transpose() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let level = get_logger_level(cli.level);
     tracing_subscriber::registry()
         // `-l` for everything except the `--stats` report, which the user
@@ -367,7 +370,7 @@ fn main() {
             Ok(scene) => scene,
             Err(e) => {
                 error!("Failed to load USD scene: {}", e);
-                std::process::exit(1);
+                return ExitCode::FAILURE;
             }
         }
     } else {
@@ -519,7 +522,7 @@ fn main() {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
             error!("Error writing image: {}", e);
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     }
     let png_path = Path::new(&output).with_extension("png");
@@ -528,7 +531,7 @@ fn main() {
         Ok(_) => info!("Image written to: {:?}", png_path),
         Err(e) => {
             error!("Error writing PNG: {}", e);
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
     }
     let output_elapsed = output_start.elapsed();
@@ -645,6 +648,7 @@ fn main() {
         // table's top edge would not line up with the rest of it.
         info!(target: STATS_TARGET, "\n{stats}");
     }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

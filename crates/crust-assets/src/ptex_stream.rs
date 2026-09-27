@@ -32,6 +32,7 @@
 //! the docs on [`MipSpace`] for the one place they cannot agree — and what
 //! is refused rather than documented as a result.
 
+use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
 use crate::read_channel;
 use crust_core::{PtexTexture, Vec3A};
@@ -367,14 +368,14 @@ impl PtexStream {
     /// Opens `path` for streaming, with the budget and caps of
     /// [`crust_core::config()`].
     ///
-    /// `Err` carries a message suitable for a warning; the caller falls back
-    /// to preloading rather than failing the render.
-    pub fn open(path: &Path) -> Result<Self, String> {
+    /// `Err` says why, for a warning; the caller falls back to preloading
+    /// rather than failing the render.
+    pub fn open(path: &Path) -> Result<Self, AssetError> {
         PtexStream::open_config(path, crust_core::config())
     }
 
     /// [`PtexStream::open`] with the budget and caps of `config`.
-    pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, String> {
+    pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, AssetError> {
         let total = budget_bytes(config);
         PtexStream::open_with(
             path,
@@ -399,17 +400,17 @@ impl PtexStream {
         micro_max: usize,
         cap: Option<i8>,
         mip: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AssetError> {
         let options = ptex::CacheOptions {
             premultiply: false,
             budget_bytes,
         };
         let reader =
-            ptex::SharedReader::open_with_options(path, options).map_err(|e| e.to_string())?;
+            ptex::SharedReader::open_with_options(path, options).map_err(AssetError::ptex(path))?;
 
         let n_chan = reader.num_channels();
         if n_chan == 0 {
-            return Err("file has no channels".into());
+            return Err(AssetError::unusable(path, "Ptex file has no channels"));
         }
         let dt = reader.data_type();
         let scale = dt.one_value_inv();

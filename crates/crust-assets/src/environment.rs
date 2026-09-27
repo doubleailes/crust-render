@@ -4,7 +4,9 @@
 use crust_core::{EnvironmentMap, Vec3A};
 use exr::prelude::*;
 use std::path::Path;
-use tracing::error;
+use tracing::warn;
+
+use crate::error::AssetError;
 
 /// A light's image as linear float RGB, row-major with row 0 at the top:
 /// `(width, height, pixels)`. EXR by extension, everything else through
@@ -14,7 +16,16 @@ use tracing::error;
 /// `RectLight`'s `inputs:texture:file`. It is deliberately *not* the
 /// UV-texture path: that one narrows to 8 bits when preloading, and a
 /// light's texture is exactly where the range above 1.0 matters.
+///
+/// A failure is logged as a warning; [`try_read_rgb_image`] returns it.
 pub fn read_rgb_image(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
+    try_read_rgb_image(path).map_err(|e| warn!("{e}")).ok()
+}
+
+/// [`read_rgb_image`], with the reason it failed.
+pub(crate) fn try_read_rgb_image(
+    path: &Path,
+) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
     let is_exr = path
         .extension()
         .and_then(|e| e.to_str())
@@ -27,11 +38,27 @@ pub fn read_rgb_image(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
 }
 
 pub fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
-    let (w, h, pixels) = decode_exr_pixels(path)?;
-    EnvironmentMap::new(w, h, pixels)
+    try_load_environment(path, true)
+        .map_err(|e| warn!("{e}"))
+        .ok()
 }
 
-fn decode_exr_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
+/// An environment map from an EXR (`exr`) or any other image, with the reason
+/// it could not be built.
+pub(crate) fn try_load_environment(
+    path: &Path,
+    exr: bool,
+) -> std::result::Result<EnvironmentMap, AssetError> {
+    let (w, h, pixels) = if exr {
+        decode_exr_pixels(path)?
+    } else {
+        decode_image_pixels(path)?
+    };
+    EnvironmentMap::new(w, h, pixels)
+        .ok_or_else(|| AssetError::unusable(path, "not a usable environment map (empty)"))
+}
+
+fn decode_exr_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
     let image = read_first_rgba_layer_from_file(
         path,
         |resolution, _| {
@@ -44,9 +71,8 @@ fn decode_exr_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
             pixels[pos.y() * *w + pos.x()] = Vec3A::new(r, g, b);
         },
     )
-    .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
-    .ok()?;
-    Some(image.layer_data.channel_data.pixels)
+    .map_err(AssetError::exr(path))?;
+    Ok(image.layer_data.channel_data.pixels)
 }
 
 /// An EXR's RGB samples, interleaved, row-major, linear — nothing else.
@@ -67,10 +93,17 @@ fn decode_exr_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
 /// — or a `Y` luminance channel — is replicated into all three, which is what
 /// the streaming EXR reader already does; a missing colour channel otherwise
 /// reads 0.
+///
+/// A failure is logged as a warning; [`try_read_exr_rgb`] returns it.
 pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
-    let image = read_first_flat_layer_from_file(path)
-        .map_err(|e| error!("EXR decode failed for {}: {e}", path.display()))
-        .ok()?;
+    try_read_exr_rgb(path).map_err(|e| warn!("{e}")).ok()
+}
+
+/// [`read_exr_rgb`], with the reason it failed.
+pub(crate) fn try_read_exr_rgb(
+    path: &Path,
+) -> std::result::Result<(Vec<f32>, usize, usize), AssetError> {
+    let image = read_first_flat_layer_from_file(path).map_err(AssetError::exr(path))?;
     let layer = &image.layer_data;
     let (w, h) = (layer.size.width(), layer.size.height());
     let channels = &layer.channel_data.list;
@@ -78,11 +111,10 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
     // pixel, so reading them in raster order would pack them into the top of
     // the image. Refused, as the streaming reader refuses them.
     if channels.iter().any(|c| c.sampling != exr::math::Vec2(1, 1)) {
-        error!(
-            "EXR decode failed for {}: sub-sampled channels are not supported",
-            path.display()
-        );
-        return None;
+        return Err(AssetError::unusable(
+            path,
+            "sub-sampled EXR channels are not supported",
+        ));
     }
     // Base names compare case-insensitively, exactly as the streaming
     // reader's `resolve_rgb` does, so both paths pick the same channels.
@@ -98,15 +130,16 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
     let pick = |want: &str| find(want).or(mono);
     let rgb = [pick("R"), pick("G"), pick("B")];
     if rgb.iter().all(Option::is_none) {
-        error!(
-            "EXR decode failed for {}: no R, G, B or Y channel among {:?}",
-            path.display(),
-            channels
-                .iter()
-                .map(|c| c.name.to_string())
-                .collect::<Vec<_>>()
-        );
-        return None;
+        return Err(AssetError::unusable(
+            path,
+            format!(
+                "no R, G, B or Y channel among {:?}",
+                channels
+                    .iter()
+                    .map(|c| c.name.to_string())
+                    .collect::<Vec<_>>()
+            ),
+        ));
     }
     let mut pixels = vec![0.0f32; w * h * 3];
     for (k, channel) in rgb.iter().enumerate() {
@@ -120,29 +153,25 @@ pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
             pixels[t * 3 + k] = v;
         }
     }
-    Some((pixels, w, h))
+    Ok((pixels, w, h))
 }
 
 pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
-    let (w, h, pixels) = decode_image_pixels(path)?;
-    EnvironmentMap::new(w, h, pixels)
+    try_load_environment(path, false)
+        .map_err(|e| warn!("{e}"))
+        .ok()
 }
 
-fn decode_image_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
+fn decode_image_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
     // `image::open`'s default 512MiB decode-allocation limit is well below a
     // production-scale panorama (e.g. a 16k HDRI): lift it for this trusted,
     // locally-authored asset rather than have large dome lights fail to load.
     let mut reader = image::ImageReader::open(path)
-        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
-        .ok()?
+        .map_err(AssetError::io(path))?
         .with_guessed_format()
-        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
-        .ok()?;
+        .map_err(AssetError::io(path))?;
     reader.no_limits();
-    let decoded = reader
-        .decode()
-        .map_err(|e| error!("Image decode failed for {}: {e}", path.display()))
-        .ok()?;
+    let decoded = reader.decode().map_err(AssetError::image(path))?;
     let rgb = decoded.to_rgb32f();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     // `to_rgb32f` keeps HDR values as authored, but rescales integer
@@ -160,7 +189,7 @@ fn decode_image_pixels(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
         .pixels()
         .map(|p| Vec3A::new(to_linear(p[0]), to_linear(p[1]), to_linear(p[2])))
         .collect();
-    Some((w, h, pixels))
+    Ok((w, h, pixels))
 }
 
 #[cfg(test)]

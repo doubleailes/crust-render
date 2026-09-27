@@ -21,6 +21,7 @@
 //! reader computes any level they lack, so this costs nothing but a smaller read.
 //! `CRUST_PTEX_MAX_LOG2` overrides the cap as a log2 edge length.
 
+use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
 use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
@@ -131,9 +132,9 @@ pub struct PtexColor {
 impl PtexColor {
     /// Opens `path` and decodes every face to linear RGB.
     ///
-    /// `Err` carries a message suitable for a warning; the caller falls back to
-    /// a constant colour rather than failing the render.
-    pub fn open(path: &Path) -> Result<Self, String> {
+    /// `Err` says why, for a warning; the caller falls back to a constant
+    /// colour rather than failing the render.
+    pub fn open(path: &Path) -> Result<Self, AssetError> {
         PtexColor::open_with(path, mip_enabled(), max_log2_from_env())
     }
 
@@ -143,12 +144,12 @@ impl PtexColor {
     /// process-global the rest of the program is reading. `PtexStream` needs
     /// the resolution cap on that seam too, since pinning the two backends
     /// against each other means asking both for the same one.
-    pub fn open_with(path: &Path, mip: bool, max_log2: i8) -> Result<Self, String> {
-        let mut tx = ptex::PtexReader::open(path).map_err(|e| e.to_string())?;
+    pub fn open_with(path: &Path, mip: bool, max_log2: i8) -> Result<Self, AssetError> {
+        let mut tx = ptex::PtexReader::open(path).map_err(AssetError::ptex(path))?;
 
         let n_chan = tx.num_channels();
         if n_chan == 0 {
-            return Err("file has no channels".into());
+            return Err(AssetError::unusable(path, "Ptex file has no channels"));
         }
         let dt = tx.data_type();
         let scale = dt.one_value_inv();
@@ -170,7 +171,7 @@ impl PtexColor {
         let mut texels: Vec<f32> = Vec::new();
 
         for faceid in 0..n_faces {
-            let info = *tx.face_info(faceid).map_err(|e| e.to_string())?;
+            let info = *tx.face_info(faceid).map_err(AssetError::ptex(path))?;
             // Clamp each axis independently: Ptex faces are frequently
             // non-square (64x16 is common) and clamping the pair together
             // would distort the aspect the file chose. A *triangle* face is

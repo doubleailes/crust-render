@@ -7,8 +7,13 @@ use std::path::PathBuf;
 pub enum Error {
     /// The scene path is not valid UTF-8 (required by the openusd API).
     NonUtf8Path(PathBuf),
-    /// Opening or parsing the USD stage failed.
-    UsdOpen { path: PathBuf, message: String },
+    /// Opening or parsing the USD stage failed. The openusd error is kept
+    /// whole, as the [`source`](std::error::Error::source), rather than
+    /// flattened to its message.
+    UsdOpen {
+        path: PathBuf,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// The requested frame is not a finite time code (`NaN` or `±inf`).
     /// Refused rather than passed on: `NaN` compares false against the
     /// stage's time range, so it would slip past the range check and reach
@@ -34,13 +39,8 @@ impl fmt::Display for Error {
             Error::NonUtf8Path(path) => {
                 write!(f, "USD path is not valid UTF-8: {}", path.display())
             }
-            Error::UsdOpen { path, message } => {
-                write!(
-                    f,
-                    "failed to open USD stage {}: {}",
-                    path.display(),
-                    message
-                )
+            Error::UsdOpen { path, source } => {
+                write!(f, "failed to open USD stage {}: {}", path.display(), source)
             }
             Error::InvalidFrame(frame) => {
                 write!(
@@ -70,4 +70,11 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::UsdOpen { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}

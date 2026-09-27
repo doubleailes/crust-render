@@ -478,7 +478,7 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
     `tool_wrench_boxend03`'s `usd_full` connects `roughness` to
     `tool_wrench_boxend03_roughness.<UDIM>.exr`, which ALab does not ship (its folder
     has `ao`, `ior`, `metallic`, `ntu`, `surfaceColor`). The host logs one
-    `No tiles found` ERROR for it every render, and the wrench shades at the schema's
+    `no tiles found` WARN for it every render, and the wrench shades at the schema's
     roughness 0.5.
   - **The shot camera has to be named.** `entry.usda` carries 29 camera prims — 28
     under `/root/cameras` for the 27 trailer shots (`mk020_0110` has two) plus the

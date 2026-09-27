@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod environment;
+mod error;
 mod ies;
 mod mip_filter;
 mod ptex_stream;
@@ -33,6 +34,7 @@ pub mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb, read_rgb_image};
+pub use error::AssetError;
 pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
@@ -690,21 +692,22 @@ impl AssetLoader for FileAssets {
             .unwrap_or_default()
             .to_ascii_lowercase();
         let started = Instant::now();
-        let loaded = match ext.as_str() {
-            "exr" => load_exr_environment(path),
-            _ => load_image_environment(path),
-        };
-        match &loaded {
-            Some(map) => debug!(
-                "Loaded environment {} ({}x{}) in {:?}",
-                path.display(),
-                map.width(),
-                map.height(),
-                started.elapsed()
-            ),
-            None => error!("Could not load environment {}", path.display()),
+        match environment::try_load_environment(path, ext == "exr") {
+            Ok(map) => {
+                debug!(
+                    "Loaded environment {} ({}x{}) in {:?}",
+                    path.display(),
+                    map.width(),
+                    map.height(),
+                    started.elapsed()
+                );
+                Some(map)
+            }
+            Err(e) => {
+                warn!("{e} — the dome renders without its map");
+                None
+            }
         }
-        loaded
     }
 
     fn load_texture(
@@ -746,8 +749,20 @@ impl AssetLoader for FileAssets {
             );
         }
         let started = Instant::now();
-        let loaded =
-            UvTexture::open_capped(path, space, self.config.tex_mip, self.config.tex_max.get())?;
+        let loaded = match UvTexture::try_open_capped(
+            path,
+            space,
+            self.config.tex_mip,
+            self.config.tex_max.get(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // The one place a texture failure becomes the seam's `None`,
+                // so the one place it is logged.
+                warn!("{e} — the input reads its fallback");
+                return None;
+            }
+        };
         {
             use std::sync::atomic::Ordering::Relaxed;
             self.preloaded_textures.fetch_add(1, Relaxed);
@@ -773,18 +788,26 @@ impl AssetLoader for FileAssets {
 
     fn load_light_texture(&self, path: &Path) -> Option<std::sync::Arc<LightTexture>> {
         let started = Instant::now();
-        let loaded = read_rgb_image(path).and_then(|(w, h, px)| LightTexture::new(w, h, px));
-        match &loaded {
-            Some(t) => debug!(
-                "Loaded light texture {} ({}x{}) in {:?}",
-                path.display(),
-                t.width(),
-                t.height(),
-                started.elapsed()
-            ),
-            None => error!("Could not load light texture {}", path.display()),
+        let loaded = environment::try_read_rgb_image(path).and_then(|(w, h, px)| {
+            LightTexture::new(w, h, px)
+                .ok_or_else(|| AssetError::unusable(path, "not a usable light texture (empty)"))
+        });
+        match loaded {
+            Ok(t) => {
+                debug!(
+                    "Loaded light texture {} ({}x{}) in {:?}",
+                    path.display(),
+                    t.width(),
+                    t.height(),
+                    started.elapsed()
+                );
+                Some(std::sync::Arc::new(t))
+            }
+            Err(e) => {
+                warn!("{e} — the light renders untextured");
+                None
+            }
         }
-        loaded.map(std::sync::Arc::new)
     }
 
     fn load_ies(&self, path: &Path) -> Option<std::sync::Arc<IesProfile>> {
@@ -907,10 +930,7 @@ impl AssetLoader for FileAssets {
                 }
                 Err(e) => {
                     why = PreloadReason::StreamFailed;
-                    error!(
-                        "Could not stream Ptex {}: {e} — preloading instead",
-                        path.display()
-                    );
+                    warn!("{e} — could not stream it, preloading instead");
                 }
             }
         }
@@ -934,7 +954,7 @@ impl AssetLoader for FileAssets {
                 Some(std::sync::Arc::new(tex))
             }
             Err(e) => {
-                error!("Could not load Ptex {}: {e}", path.display());
+                warn!("{e} — the surface uses its constant base colour");
                 None
             }
         }

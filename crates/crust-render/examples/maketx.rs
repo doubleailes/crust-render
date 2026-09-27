@@ -158,7 +158,8 @@ fn convert(
     space: ColorSpace,
     format: TxFormat,
 ) -> Result<(PathBuf, &'static str, u64, u64), String> {
-    let made = crust_assets::tiled::make_tx_atomic(src, space, format)?;
+    let made =
+        crust_assets::tiled::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
     if made.clipped {
         eprintln!(
             "warning: {} holds values above 1.0 that a TIFF backing clips — \

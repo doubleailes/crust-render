@@ -227,9 +227,11 @@ details are load-bearing. It is **two `fmt` layers over a registry**, not one wr
 teed into both sinks, because ANSI is a per-layer setting — a single writer would
 either fill the file with escape codes or strip the colour from the terminal; the
 registry costs no new dependency, since `fmt` already pulls `sharded-slab` and
-`thread_local`. The file is **unbuffered**, because several error paths end in
-`std::process::exit`, which runs no destructors — a `BufWriter` would drop exactly the
-lines explaining why the run stopped. And `utc_stamp` **hand-rolls** the civil-from-days
+`thread_local`. The file is **unbuffered**, because the subscriber that owns it is the
+process-global one, which is never dropped — a `BufWriter` would never be flushed and
+would lose exactly the lines explaining why the run stopped. (`main` returns an
+`ExitCode` rather than calling `std::process::exit`, so every other destructor does
+run.) And `utc_stamp` **hand-rolls** the civil-from-days
 conversion (Hinnant's, era-shifted to March so leap days land at the end of a 400-year
 cycle) rather than taking `chrono` or `time`, neither of which is in the graph and
 either of which would be the largest dependency in this binary for the sake of naming a
