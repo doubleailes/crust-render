@@ -383,16 +383,16 @@ impl OpenPBR {
         self.shaded(rec)
     }
 
+    #[inline(always)]
     fn shaded(&self, rec: &HitRecord) -> Option<ResolvedOpenPBR> {
-        let tex = self.base_color_ptex.as_ref()?;
-        if rec.face_id == HitRecord::NO_FACE {
-            // Geometry the importer could not give a face identity (a sphere,
-            // a curve, an n-gon): fall back to the authored constant.
+        // Geometry the importer could not give a face identity (a sphere, a
+        // curve, an n-gon) falls back to the authored constant.
+        let (Some(tex), Some(face)) = (self.base_color_ptex.as_ref(), rec.face.as_ref()) else {
             return None;
-        }
-        let (u, v) = rec.face_uv;
+        };
+        let (u, v) = face.uv;
         Some(ResolvedOpenPBR(OpenPBR {
-            base_color: tex.eval(rec.face_id, u, v, rec.face_width),
+            base_color: tex.eval(face.id, u, v, rec.face_width),
             base_color_ptex: None,
             ..self.clone()
         }))
