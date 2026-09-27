@@ -380,13 +380,24 @@ fn nested_instancer_parts(
         .map(|target| prototype_group(stage, target, caches, depth))
         .collect();
 
-    // Slots only for the prototypes something actually places, in
-    // prototype order so the layout is independent of placement order.
+    // The placements that draw something: a prototype with no geometry, or a
+    // zero-scale placement (the "hide this instance" idiom), draws nothing.
+    let drawn: Vec<(usize, GMat4)> = layout
+        .placements
+        .iter()
+        .filter_map(|&(k, xf)| {
+            let placement = xf * groups[k].as_ref()?.local;
+            (placement.determinant().abs() >= 1e-12).then_some((k, placement))
+        })
+        .collect();
+
+    // Slots only for the prototypes something actually draws — every slot is
+    // reserved again at each placement of this part, so a prototype placed
+    // only by hidden entries would cost ids no hit can reach — in prototype
+    // order so the layout is independent of placement order.
     let mut first: Vec<Option<u32>> = vec![None; groups.len()];
-    for &(k, _) in &layout.placements {
-        if groups[k].is_some() {
-            first[k] = Some(0);
-        }
+    for &(k, _) in &drawn {
+        first[k] = Some(0);
     }
     let mut slots: Vec<PartSlot> = Vec::new();
     for (k, group) in groups.iter().enumerate() {
@@ -397,15 +408,11 @@ fn nested_instancer_parts(
     }
 
     let mut sub = RtSceneBuilder::new();
-    sub.reserve(layout.placements.len());
-    for &(k, xf) in &layout.placements {
+    sub.reserve(drawn.len());
+    for &(k, placement) in &drawn {
         let (Some(g), Some(f)) = (&groups[k], first[k]) else {
-            continue;
+            unreachable!("a drawn placement has a group and a slot range");
         };
-        let placement = xf * g.local;
-        if placement.determinant().abs() < 1e-12 {
-            continue; // zero scale: the "hide this instance" idiom
-        }
         sub.attach_labelled(
             Geometry::Instance {
                 scene: g.scene.clone(),
@@ -559,7 +566,9 @@ pub(super) fn emit_native_instance(
     );
 }
 
-/// Attaches every part of a prototype at `placement`, one instance each.
+/// Attaches every part of a prototype at `placement`, one instance each,
+/// and returns how many kernel instances that was. A group's instance takes
+/// one `geom_id` per slot, so the ids consumed can exceed the count.
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
@@ -827,7 +836,7 @@ pub(super) fn emit_point_instancer(
     }
 
     debug!(
-        "Imported PointInstancer at {} ({} instances of {} prototype(s), {} geometries attached, geom ids {first}..{}{})",
+        "Imported PointInstancer at {} ({} instances of {} prototype(s): {} kernel instances attached, geom ids {first}..{}{})",
         prim.path(),
         layout.placements.len(),
         layout.targets.len(),

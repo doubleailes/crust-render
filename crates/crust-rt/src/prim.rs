@@ -515,7 +515,8 @@ impl Prim for InstancePrim {
         hit.geom_id = if self.id_offset == NO_ID_OFFSET {
             self.geom_id
         } else {
-            self.id_offset.wrapping_add(hit.geom_id)
+            // Cannot overflow: commit refuses an offset that could.
+            self.id_offset + hit.geom_id
         };
         Some(hit)
     }

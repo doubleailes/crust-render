@@ -902,6 +902,53 @@ fn nested_scatter_of_many_part_prototypes_groups_per_tree() {
     }
 }
 
+/// A prototype that a nested scatter places only at zero scale (the "hide
+/// this instance" idiom) draws nothing, so it must take no slots: every slot
+/// is reserved again at each outer placement, and ids no hit can reach
+/// would multiply with the scatter.
+#[test]
+fn nested_scatter_reserves_no_slots_for_hidden_prototypes() {
+    let path = many_part_stage(
+        "hidden.usda",
+        r#"    def PointInstancer "Groves" {
+        rel prototypes = [</W/Groves/Protos/Grove>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, 0), (40, 0, 0)]
+        def Scope "Protos" {
+            def PointInstancer "Grove" {
+                rel prototypes = [
+                    </W/Groves/Protos/Grove/Protos/Tree>,
+                    </W/Groves/Protos/Grove/Protos/Pebble>
+                ]
+                int[] protoIndices = [0, 1]
+                point3f[] positions = [(0, 0, 0), (0, 3, 0)]
+                float3[] scales = [(0, 0, 0), (1, 1, 1)]
+                def Scope "Protos" {
+                    def Xform "Tree" (references = </W/_Tree>) {}
+                    def Sphere "Pebble" { double radius = 0.2 }
+                }
+            }
+        }
+    }"#,
+    );
+    let scene = Scene::from_usd(&path).expect("load");
+    assert_eq!(
+        scene.world.count(),
+        2,
+        "one slot (the pebble) per grove; the hidden tree's {TREE_PARTS} must not be reserved"
+    );
+    let ray = Ray::new(Vec3A::new(0.0, 3.0, 10.0), -Vec3A::Z);
+    assert!(
+        scene.world.intersect(&ray, 0.001, 40.0).is_some(),
+        "the pebble is drawn"
+    );
+    let ray = Ray::new(Vec3A::new(0.2, 0.2, 10.0), -Vec3A::Z);
+    assert!(
+        scene.world.intersect(&ray, 0.001, 40.0).is_none(),
+        "the tree is hidden"
+    );
+}
+
 /// An `instanceable` prim *inside* another instance's prototype cannot be
 /// read at all with openusd 0.5.0, so the importer must skip it rather
 /// than abort.

@@ -178,7 +178,9 @@ pub enum InstanceHitId {
     As(u32),
     /// `base` plus the id the inner scene reported, so an inner scene whose
     /// hits already carry `0..n` maps onto `base..base + n` here. Nests:
-    /// each level adds its own base.
+    /// each level adds its own base. [`SceneBuilder::commit`] panics if
+    /// `base` plus the largest id the inner scene can report would leave
+    /// the id space, rather than let a hit wrap onto another geometry.
     Offset(u32),
 }
 
@@ -300,6 +302,9 @@ impl SceneBuilder {
             .sum();
         let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
         let mut has_motion = false;
+        // Largest id a hit in this scene can report. Every geometry can
+        // report its own id; labels can report more (see below).
+        let mut max_hit_id = n_geoms.saturating_sub(1);
         for (geom_id, (geom, mask, label)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
             match geom {
@@ -428,9 +433,29 @@ impl SceneBuilder {
                     has_motion |= transform_end.is_some() || scene.has_motion();
                     let (geom_id, id_offset) = match label {
                         InstanceHitId::Own => (geom_id, NO_ID_OFFSET),
-                        InstanceHitId::As(id) => (id, NO_ID_OFFSET),
+                        InstanceHitId::As(id) => {
+                            assert!(id != crate::INVALID_ID, "hit id {id} is reserved");
+                            max_hit_id = max_hit_id.max(id);
+                            (id, NO_ID_OFFSET)
+                        }
                         InstanceHitId::Offset(base) => {
-                            assert!(base != NO_ID_OFFSET, "id offset {base} is reserved");
+                            // Checked here, once per instance, so the hit
+                            // path can add without a branch: an offset that
+                            // could carry an inner id past the id space
+                            // would otherwise wrap onto an unrelated
+                            // geometry, and a host would shade it with that
+                            // geometry's material.
+                            let top = base
+                                .checked_add(scene.max_hit_id)
+                                .filter(|&top| top != crate::INVALID_ID)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "id offset {base} + inner ids up to {} overflows the \
+                                         geom_id space",
+                                        scene.max_hit_id
+                                    )
+                                });
+                            max_hit_id = max_hit_id.max(top);
                             (geom_id, base)
                         }
                     };
@@ -452,6 +477,7 @@ impl SceneBuilder {
             bvh: Bvh::new(prims),
             n_geoms,
             has_motion,
+            max_hit_id,
         }
     }
 }
@@ -461,6 +487,10 @@ pub struct Scene {
     bvh: Bvh,
     n_geoms: u32,
     has_motion: bool,
+    /// Largest `geom_id` a hit in this scene can report — a bound, computed
+    /// at commit, that lets an `Offset` label placing this scene be checked
+    /// once instead of on every hit.
+    max_hit_id: u32,
 }
 
 impl Scene {
@@ -1478,6 +1508,36 @@ mod tests {
         let mut b = SceneBuilder::new();
         b.attach_labelled(placed(&inner, 0.0), MASK_ALL, InstanceHitId::As(42));
         assert_eq!(id_at(&b.commit(), 0.0), Some(42));
+    }
+
+    /// An offset that could carry an inner id past the id space is refused
+    /// at commit: on the hit path it would wrap onto an unrelated id, and a
+    /// host would shade the hit with that geometry's material.
+    #[test]
+    #[should_panic(expected = "overflows the geom_id space")]
+    fn an_offset_that_could_overflow_is_refused_at_commit() {
+        let mut inner = SceneBuilder::new();
+        inner.attach_labelled(placed(&part_at(0.0), 0.0), MASK_ALL, InstanceHitId::As(10));
+        let inner = Arc::new(inner.commit());
+        let mut b = SceneBuilder::new();
+        b.attach_labelled(
+            placed(&inner, 0.0),
+            MASK_ALL,
+            InstanceHitId::Offset(u32::MAX - 5),
+        );
+        b.commit();
+    }
+
+    /// The bound is exact enough to accept the largest offset that fits.
+    #[test]
+    fn the_largest_offset_that_fits_is_accepted() {
+        let mut inner = SceneBuilder::new();
+        inner.attach_labelled(placed(&part_at(0.0), 0.0), MASK_ALL, InstanceHitId::As(10));
+        let inner = Arc::new(inner.commit());
+        let mut b = SceneBuilder::new();
+        let base = u32::MAX - 11;
+        b.attach_labelled(placed(&inner, 0.0), MASK_ALL, InstanceHitId::Offset(base));
+        assert_eq!(id_at(&b.commit(), 0.0), Some(base + 10));
     }
 
     #[test]
