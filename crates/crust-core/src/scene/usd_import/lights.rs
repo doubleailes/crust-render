@@ -606,8 +606,9 @@ pub(super) fn emit_rect_light(
 /// delta light, whose `intensity` both the spec (`sizeFactor = 1`) and
 /// hdEmbree deliver as that illuminance.
 ///
-/// crust widens a cone narrower than [`MIN_DISTANT_ANGLE_DEG`](crate::light::MIN_DISTANT_ANGLE_DEG) rather than
-/// carrying a delta light, and the widening preserves the *illuminance* the
+/// crust widens a cone narrower than `MIN_DISTANT_ANGLE_DEG` (see
+/// [`DistantLight`](crate::light::DistantLight)) rather than carrying a
+/// delta light, and the widening preserves the *illuminance* the
 /// authored cone would have delivered — so it moves the penumbra and nothing
 /// else. The light has no scene geometry, so it is light-list-only: bounce
 /// rays find it by escaping along a direction inside its cone.
