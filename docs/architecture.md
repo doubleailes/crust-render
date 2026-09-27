@@ -262,6 +262,7 @@ Still open, roughly in order of payoff:
 | Rust idioms audit: dispatch, type-level invariants, zero-cost, ownership | `docs/rust_leverage.md` |
 | kernel vs Embree | `docs/embree_comparison.md` |
 | OpenPBR formula alignment | `docs/openpbr_reference_alignment.md` |
+| MaterialX Material Fidelity suite: harness and baseline | `docs/material_fidelity.md` |
 | ALab render profile | `docs/alab_profile.md` |
 | Moana island render profile | `docs/moana_profile.md` |
 | upstream openusd bugs (fixed) | `docs/issues/` |
