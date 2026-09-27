@@ -559,6 +559,21 @@ pub fn current_memory_bytes() -> Option<u64> {
 }
 
 /// `1234567` → `1 234 567`, so seven-digit primitive counts stay readable.
+/// Counts `kinds` by name, heaviest first and alphabetically among equals —
+/// the shape of every `--stats` breakdown (lights by kind, materials by
+/// kind).
+pub(crate) fn breakdown(kinds: impl Iterator<Item = &'static str>) -> Vec<(&'static str, usize)> {
+    let mut out: Vec<(&'static str, usize)> = Vec::new();
+    for kind in kinds {
+        match out.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => out.push((kind, 1)),
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    out
+}
+
 pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);

@@ -361,21 +361,12 @@ impl LightList {
         &self.lights
     }
 
-    /// Returns the number of lights in the `LightList`.
     /// Lights grouped by [`Light::kind`], most numerous first.
     pub fn kind_breakdown(&self) -> Vec<(&'static str, usize)> {
-        let mut out: Vec<(&'static str, usize)> = Vec::new();
-        for (light, _) in self.iter() {
-            let kind = light.kind();
-            match out.iter_mut().find(|(k, _)| *k == kind) {
-                Some((_, n)) => *n += 1,
-                None => out.push((kind, 1)),
-            }
-        }
-        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        out
+        crate::stats::breakdown(self.lights.iter().map(|l| l.kind()))
     }
 
+    /// Returns the number of lights in the `LightList`.
     pub fn count(&self) -> usize {
         self.lights.len()
     }

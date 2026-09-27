@@ -330,44 +330,46 @@ fn disney_to_openpbr(
     caches: &mut ImportCaches<'_>,
 ) -> OpenPBR {
     let prim = prim_at(stage, mat_path.clone());
-    let f = |n: &str| custom_f32(&prim, &format!("inputs:{n}"));
-    let c = |n: &str| custom_vec3(&prim, &format!("inputs:{n}"));
+    // Called with the whole attribute name, `inputs:` included: a literal, so
+    // reading an input allocates no name.
+    let f = |n: &str| custom_f32(&prim, n);
+    let c = |n: &str| custom_vec3(&prim, n);
 
     let mut o = OpenPBR::default();
 
     // `inputs:baseColor` reaches the BSDF through a `PxrColorCorrect` with
     // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
     // decodes it to linear. Do the same, or every surface renders washed out.
-    if let Some(rgb) = c("baseColor") {
+    if let Some(rgb) = c("inputs:baseColor") {
         o.base_color = srgb_to_linear(rgb);
     }
-    if let Some(v) = f("metallic") {
+    if let Some(v) = f("inputs:metallic") {
         o.base_metalness = v;
     }
-    if let Some(v) = f("roughness") {
+    if let Some(v) = f("inputs:roughness") {
         o.specular_roughness = v;
     }
-    if let Some(v) = f("ior") {
+    if let Some(v) = f("inputs:ior") {
         o.specular_ior = v;
     }
-    if let Some(v) = f("anisotropic") {
+    if let Some(v) = f("inputs:anisotropic") {
         o.specular_roughness_anisotropy = v;
     }
-    if let Some(v) = f("clearcoat") {
+    if let Some(v) = f("inputs:clearcoat") {
         o.coat_weight = v;
     }
     // Gloss is the complement of roughness.
-    if let Some(v) = f("clearcoatGloss") {
+    if let Some(v) = f("inputs:clearcoatGloss") {
         o.coat_roughness = (1.0 - v).clamp(0.0, 1.0);
     }
     // Either name turns up across the island's materials.
-    if let Some(v) = f("specularTransmission").or_else(|| f("refractionGain")) {
+    if let Some(v) = f("inputs:specularTransmission").or_else(|| f("inputs:refractionGain")) {
         o.transmission_weight = v;
     }
-    if let Some(v) = f("alpha") {
+    if let Some(v) = f("inputs:alpha") {
         o.geometry_opacity = v;
     }
-    if let Some(v) = f("thinSurface") {
+    if let Some(v) = f("inputs:thinSurface") {
         o.geometry_thin_walled = v != 0.0;
     }
 
@@ -376,7 +378,7 @@ fn disney_to_openpbr(
         "PxrDisneyBsdf {mat_path}: baseColor={:?} (authored {:?}) roughness={} metalness={} \
          fuzz={} coat={} ior={} ptex={}",
         o.base_color,
-        c("baseColor"),
+        c("inputs:baseColor"),
         o.specular_roughness,
         o.base_metalness,
         o.fuzz_weight,
@@ -691,82 +693,86 @@ fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
     let b = |n: &str, d: bool| shader_input_bool(shader, n).unwrap_or(d);
 
     // Base
-    o.base_weight = f("baseWeight", o.base_weight);
-    o.base_color = c("baseColor", o.base_color);
-    o.base_diffuse_roughness = f("baseDiffuseRoughness", o.base_diffuse_roughness);
-    o.base_metalness = f("baseMetalness", o.base_metalness);
+    o.base_weight = f("inputs:baseWeight", o.base_weight);
+    o.base_color = c("inputs:baseColor", o.base_color);
+    o.base_diffuse_roughness = f("inputs:baseDiffuseRoughness", o.base_diffuse_roughness);
+    o.base_metalness = f("inputs:baseMetalness", o.base_metalness);
 
     // Specular
-    o.specular_weight = f("specularWeight", o.specular_weight);
-    o.specular_color = c("specularColor", o.specular_color);
-    o.specular_roughness = f("specularRoughness", o.specular_roughness);
-    o.specular_ior = f("specularIor", o.specular_ior);
+    o.specular_weight = f("inputs:specularWeight", o.specular_weight);
+    o.specular_color = c("inputs:specularColor", o.specular_color);
+    o.specular_roughness = f("inputs:specularRoughness", o.specular_roughness);
+    o.specular_ior = f("inputs:specularIor", o.specular_ior);
     o.specular_roughness_anisotropy = f(
-        "specularRoughnessAnisotropy",
+        "inputs:specularRoughnessAnisotropy",
         o.specular_roughness_anisotropy,
     );
 
     // Transmission
-    o.transmission_weight = f("transmissionWeight", o.transmission_weight);
-    o.transmission_color = c("transmissionColor", o.transmission_color);
-    o.transmission_depth = f("transmissionDepth", o.transmission_depth);
-    o.transmission_scatter = c("transmissionScatter", o.transmission_scatter);
+    o.transmission_weight = f("inputs:transmissionWeight", o.transmission_weight);
+    o.transmission_color = c("inputs:transmissionColor", o.transmission_color);
+    o.transmission_depth = f("inputs:transmissionDepth", o.transmission_depth);
+    o.transmission_scatter = c("inputs:transmissionScatter", o.transmission_scatter);
     o.transmission_scatter_anisotropy = f(
-        "transmissionScatterAnisotropy",
+        "inputs:transmissionScatterAnisotropy",
         o.transmission_scatter_anisotropy,
     );
     o.transmission_dispersion_scale = f(
-        "transmissionDispersionScale",
+        "inputs:transmissionDispersionScale",
         o.transmission_dispersion_scale,
     );
     o.transmission_dispersion_abbe_number = f(
-        "transmissionDispersionAbbeNumber",
+        "inputs:transmissionDispersionAbbeNumber",
         o.transmission_dispersion_abbe_number,
     );
 
     // Subsurface
-    o.subsurface_weight = f("subsurfaceWeight", o.subsurface_weight);
-    o.subsurface_color = c("subsurfaceColor", o.subsurface_color);
-    o.subsurface_radius = f("subsurfaceRadius", o.subsurface_radius);
-    o.subsurface_radius_scale = c("subsurfaceRadiusScale", o.subsurface_radius_scale);
+    o.subsurface_weight = f("inputs:subsurfaceWeight", o.subsurface_weight);
+    o.subsurface_color = c("inputs:subsurfaceColor", o.subsurface_color);
+    o.subsurface_radius = f("inputs:subsurfaceRadius", o.subsurface_radius);
+    o.subsurface_radius_scale = c("inputs:subsurfaceRadiusScale", o.subsurface_radius_scale);
     o.subsurface_scatter_anisotropy = f(
-        "subsurfaceScatterAnisotropy",
+        "inputs:subsurfaceScatterAnisotropy",
         o.subsurface_scatter_anisotropy,
     );
 
     // Fuzz
-    o.fuzz_weight = f("fuzzWeight", o.fuzz_weight);
-    o.fuzz_color = c("fuzzColor", o.fuzz_color);
-    o.fuzz_roughness = f("fuzzRoughness", o.fuzz_roughness);
+    o.fuzz_weight = f("inputs:fuzzWeight", o.fuzz_weight);
+    o.fuzz_color = c("inputs:fuzzColor", o.fuzz_color);
+    o.fuzz_roughness = f("inputs:fuzzRoughness", o.fuzz_roughness);
 
     // Coat
-    o.coat_weight = f("coatWeight", o.coat_weight);
-    o.coat_color = c("coatColor", o.coat_color);
-    o.coat_roughness = f("coatRoughness", o.coat_roughness);
-    o.coat_roughness_anisotropy = f("coatRoughnessAnisotropy", o.coat_roughness_anisotropy);
-    o.coat_ior = f("coatIor", o.coat_ior);
-    o.coat_darkening = f("coatDarkening", o.coat_darkening);
+    o.coat_weight = f("inputs:coatWeight", o.coat_weight);
+    o.coat_color = c("inputs:coatColor", o.coat_color);
+    o.coat_roughness = f("inputs:coatRoughness", o.coat_roughness);
+    o.coat_roughness_anisotropy = f(
+        "inputs:coatRoughnessAnisotropy",
+        o.coat_roughness_anisotropy,
+    );
+    o.coat_ior = f("inputs:coatIor", o.coat_ior);
+    o.coat_darkening = f("inputs:coatDarkening", o.coat_darkening);
 
     // Thin film
-    o.thin_film_weight = f("thinFilmWeight", o.thin_film_weight);
-    o.thin_film_thickness = f("thinFilmThickness", o.thin_film_thickness);
-    o.thin_film_ior = f("thinFilmIor", o.thin_film_ior);
+    o.thin_film_weight = f("inputs:thinFilmWeight", o.thin_film_weight);
+    o.thin_film_thickness = f("inputs:thinFilmThickness", o.thin_film_thickness);
+    o.thin_film_ior = f("inputs:thinFilmIor", o.thin_film_ior);
 
     // Emission
-    o.emission_luminance = f("emissionLuminance", o.emission_luminance);
-    o.emission_color = c("emissionColor", o.emission_color);
+    o.emission_luminance = f("inputs:emissionLuminance", o.emission_luminance);
+    o.emission_color = c("inputs:emissionColor", o.emission_color);
 
     // Geometry
-    o.geometry_opacity = f("geometryOpacity", o.geometry_opacity);
-    o.geometry_thin_walled = b("geometryThinWalled", o.geometry_thin_walled);
+    o.geometry_opacity = f("inputs:geometryOpacity", o.geometry_opacity);
+    o.geometry_thin_walled = b("inputs:geometryThinWalled", o.geometry_thin_walled);
 
     Arc::new(o)
 }
 
-fn shader_input_f32(shader: &Shader, name: &str) -> Option<f32> {
-    let attr_name = format!("inputs:{}", name);
+/// A shader input by its whole attribute name (`inputs:roughness`) — the
+/// callers pass literals, so no name is built per read.
+fn shader_input_f32(shader: &Shader, attr_name: &str) -> Option<f32> {
     let v = shader
-        .attribute(&attr_name)
+        .attribute(attr_name)
         .get_at::<sdf::Value>(eval_time())
         .ok()??;
     match v {
@@ -776,10 +782,9 @@ fn shader_input_f32(shader: &Shader, name: &str) -> Option<f32> {
     }
 }
 
-fn shader_input_bool(shader: &Shader, name: &str) -> Option<bool> {
-    let attr_name = format!("inputs:{}", name);
+fn shader_input_bool(shader: &Shader, attr_name: &str) -> Option<bool> {
     let v = shader
-        .attribute(&attr_name)
+        .attribute(attr_name)
         .get_at::<sdf::Value>(eval_time())
         .ok()??;
     match v {
@@ -788,10 +793,9 @@ fn shader_input_bool(shader: &Shader, name: &str) -> Option<bool> {
     }
 }
 
-fn shader_input_vec3(shader: &Shader, name: &str) -> Option<Vec3A> {
-    let attr_name = format!("inputs:{}", name);
+fn shader_input_vec3(shader: &Shader, attr_name: &str) -> Option<Vec3A> {
     let v = shader
-        .attribute(&attr_name)
+        .attribute(attr_name)
         .get_at::<sdf::Value>(eval_time())
         .ok()??;
     match v {

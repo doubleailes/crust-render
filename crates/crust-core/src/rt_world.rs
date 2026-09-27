@@ -686,27 +686,20 @@ impl World {
         self.scene.memory_footprint()
     }
 
-    /// The material bound to a geometry.
     /// Distinct materials in the table, counted once however many
     /// geometries share one, grouped by [`Material::kind`] — Guerilla's
     /// "allocated materials". Heaviest kind first.
     pub fn material_breakdown(&self) -> Vec<(&'static str, usize)> {
         let mut seen = std::collections::HashSet::new();
-        let mut out: Vec<(&'static str, usize)> = Vec::new();
-        for m in &self.materials {
-            if !seen.insert(Arc::as_ptr(m) as *const () as usize) {
-                continue;
-            }
-            let kind = m.kind();
-            match out.iter_mut().find(|(k, _)| *k == kind) {
-                Some((_, n)) => *n += 1,
-                None => out.push((kind, 1)),
-            }
-        }
-        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        out
+        crate::stats::breakdown(
+            self.materials
+                .iter()
+                .filter(|m| seen.insert(Arc::as_ptr(m) as *const () as usize))
+                .map(|m| m.kind()),
+        )
     }
 
+    /// The material bound to a geometry.
     pub fn material(&self, geom_id: u32) -> &dyn Material {
         self.materials[geom_id as usize].as_ref()
     }
