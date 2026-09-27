@@ -1,0 +1,120 @@
+name: Nightly
+
+# The same CI as rust.yml, on nightly Rust, as a separate workflow so it runs
+# in parallel with the stable pipeline and reports as its own set of checks.
+# It exists for two reasons: the nightly-only `bvh8` feature (8-wide BVH
+# nodes on `std::simd`, docs/simd.md "BVH8 on nightly") can only be built
+# here, and a nightly break in the rest of the workspace is worth seeing
+# weeks before it reaches a stable release.
+#
+# Two channels, and they mean different things when they go red:
+#   - pinned: one dated nightly. Deterministic, so a failure is this
+#     repository's code, and the job fails like any other check. Bump the
+#     date deliberately, the way rust.yml bumps RUST_VERSION.
+#   - latest: whatever nightly is current. A failure may be the compiler's
+#     or a new lint on code nobody touched, so these jobs are
+#     `continue-on-error` and never turn the run red. The daily schedule
+#     keeps them running when nothing is pushed, which is when drift shows.
+#
+# Whether any of these checks blocks a merge is decided by branch
+# protection, not here. rust.yml's release job does not depend on them.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  NIGHTLY_PINNED: nightly-2026-09-26
+
+jobs:
+  # Workspace clippy, every target, as rust.yml runs it on stable. rustfmt is
+  # not repeated: formatting is a text check that stable already gates.
+  clippy:
+    name: clippy (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.channel == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [pinned, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          tc=${{ matrix.channel == 'pinned' && env.NIGHTLY_PINNED || 'nightly' }}
+          rustup toolchain install "$tc" --profile minimal --component clippy
+          rustup default "$tc"
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.channel }}
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.channel == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [pinned, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          tc=${{ matrix.channel == 'pinned' && env.NIGHTLY_PINNED || 'nightly' }}
+          rustup toolchain install "$tc" --profile minimal
+          rustup default "$tc"
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.channel }}
+      - name: Run tests
+        run: cargo test --workspace --no-fail-fast
+
+  # What only nightly can build. The kernel is linted and tested with 8-wide
+  # nodes (its tests pin both node layouts, and hit results against a linear
+  # scan), and the renderer is checked with the feature forwarded through
+  # crust-core, so the plumbing cannot rot either.
+  bvh8:
+    name: bvh8 (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.channel == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [pinned, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          tc=${{ matrix.channel == 'pinned' && env.NIGHTLY_PINNED || 'nightly' }}
+          rustup toolchain install "$tc" --profile minimal --component clippy
+          rustup default "$tc"
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: bvh8-${{ matrix.channel }}
+      - name: Lint crust-rt
+        run: cargo clippy -p crust-rt --all-targets --features bvh8 -- -D warnings
+      - name: Test crust-rt
+        run: cargo test -p crust-rt --features bvh8 --no-fail-fast
+      - name: Check the renderer with bvh8 forwarded
+        run: cargo check -p crust-render --features bvh8

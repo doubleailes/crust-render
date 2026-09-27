@@ -419,8 +419,10 @@ experiment's record and as a starting point: the literature's BVH8 wins
 bounds, so an 8-wide node fits the bytes a 4-wide one does) and from
 cheaper lane ordering, neither of which is a `std::simd` question. Revisit
 with those, and on a traversal-bound workload, before revisiting the
-toolchain. CI builds and tests the feature on a pinned nightly as a
-non-blocking job, so the experiment keeps compiling.
+toolchain. The parallel nightly workflow (`.github/workflows/nightly.yml`)
+lints and tests the feature, and checks the renderer with it forwarded, on
+a pinned nightly (a failure there is this code's) and on the latest one
+(allowed to fail), so the experiment keeps compiling.
 
 ## Not done
 

@@ -115,8 +115,9 @@
   8-wide nodes cost 0.4–3% more kernel memory. So the width wants choosing *per tree
   by size* at `commit()`, which needs both widths compiled in rather than a `cfg`; that
   is a refactor, not a toolchain question, and crust stays on stable. The feature is
-  kept as the record and a starting point, and CI builds it on a pinned nightly without
-  gating on it (`docs/simd.md`, "BVH8 on nightly"). Reaching 256 bits on stable still
+  kept as the record and a starting point, and the parallel nightly workflow
+  (`.github/workflows/nightly.yml`) lints and tests it on a pinned and the latest
+  nightly (`docs/simd.md`, "BVH8 on nightly"). Reaching 256 bits on stable still
   needs `unsafe` `core::arch` intrinsics (against this crate's "100% safe Rust" claim),
   a new dependency (`wide`/`multiversion`), or a non-distributable `-C target-cpu`.
   **The collapsed tables hold no spare capacity.** `collapse()` used to reserve one
