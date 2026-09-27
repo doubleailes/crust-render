@@ -421,7 +421,8 @@ fn attach_proto_parts(
         // world. A prototype containing *nested* instances is the exception:
         // the inner placements' scales live inside the committed kernel scene
         // and are invisible here, so such geometry filters against the outer
-        // scale alone. See the instancing caveats in CLAUDE.md.
+        // scale alone. See the texture filtering gaps in
+        // openspec/specs/textures/design.md.
         world.set_placement_scale(geom_id, placement_scale(&Affine3A::from_mat4(xf)));
         attached += 1;
     }

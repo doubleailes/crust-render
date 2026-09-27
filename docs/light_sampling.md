@@ -804,7 +804,7 @@ the learned methods (§6.5) and Hyperion's cache points add.
 - `escaped_emission` for lights at infinity;
 - the phase arm for volumes.
 
-`CLAUDE.md` states this for the uniform case. It becomes more demanding as `P`
+`openspec/specs/lighting/design.md` states this for the uniform case. It becomes more demanding as `P`
 starts depending on the shading point and normal (a light BVH) or on the BSDF
 (RIS). Every design below says how it meets it.
 

@@ -33,11 +33,13 @@ emission query (`emitted`).
 
 ### Requirement: Supported shading models
 
-The engine SHALL provide exactly two material implementations: **`OpenPBR`**,
-a single übershader covering diffuse, metal, glass/transmission, coat, fuzz,
-thin-film, and subsurface (with `diffuse`/`metal`/`glass`/`glossy` Rust-side
-preset constructors), and **`Emissive`**, a pure emitter with no geometry
-knowledge.
+The engine SHALL shade every surface through **`OpenPBR`**, a single
+übershader covering diffuse, metal, glass/transmission, coat, fuzz, thin-film,
+and subsurface (with `diffuse`/`metal`/`glass`/`glossy` Rust-side preset
+constructors), or through **`Emissive`**, a pure emitter with no geometry
+knowledge. `MtlxMaterial` (a MaterialX graph) and `PreviewSurface` (a textured
+`UsdPreviewSurface`) SHALL evaluate their inputs per shading point and delegate
+the BSDF to the `OpenPBR` they resolve to.
 
 #### Scenario: A model is selected for a surface
 

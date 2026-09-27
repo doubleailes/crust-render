@@ -18,19 +18,20 @@ context: |
     (OpenUSD scene model, OpenPBR shading) over breadth of one-off features.
 
   Tech stack:
-  - Rust 2024, Cargo workspace with six crates under crates/:
+  - Rust 2024, Cargo workspace with seven crates under crates/:
     - crust-rt: the intersection kernel (Embree-shaped API, SBVH → BVH4), no crust deps.
     - crust-mtlx: the MaterialX .mtlx reader (parse → compiled program → flattened
       BSDF lobes), no crust deps; crust-core re-exports its `Texture` trait as `Texture2D`.
+    - crust-jit: Cranelift JIT for crust-mtlx programs, bit-identical to the interpreter.
     - crust-core: the whole engine as a library (renderer, integrator, materials incl.
       the MaterialX→OpenPBR adapter, lights, volumes, path guiding, USD import).
     - crust-assets: host-side decoders implementing crust_core::AssetLoader
       (EXR/LDR environment maps, Ptex, UV/UDIM textures) over exr, image, ptex-rs.
     - crust-render: the thin CLI binary (main.rs only; writes EXR + PNG, decodes
       nothing) — clap args, builds a Scene with crust_assets::FileAssets, runs the Renderer.
-    - utils: math/RNG helpers (random*, balance_heuristic, align_to_normal, clamp, Lerp).
+    - utils: stateless math helpers (sampling warps, MIS heuristics, luminance, align_to_normal, Lerp).
   - Key deps: glam (Vec3A/Mat4), rayon (parallelism), exr + image (output and decoding),
-    openusd 0.6 (scene import — always compiled in, no feature flag), openqmc-rs (QMC
+    openusd 0.7 + openusd-schemas (scene import — always compiled in, no feature flag), openqmc-rs (QMC
     sampling), opensubdiv-rs (subdivision), ptex-rs (Ptex), roxmltree (MaterialX XML),
     tracing (logging), indicatif (progress bar), criterion (benches).
 
@@ -43,14 +44,14 @@ context: |
   - Describe the CURRENT implemented behavior in openspec/specs/. Note known gaps
     explicitly rather than speccing unimplemented features as done.
 
-  Known incomplete work (do not spec as working):
-  - Adaptive sampling params (min_samples_per_pixel, variance_threshold, frame) are
-    parsed into RenderSettings but NOT consumed by the tracer yet.
-  - Non-sphere USD lux lights (Rect/Disk/Distant/Dome/Cylinder) warn once and are skipped.
+  Known incomplete work (do not spec as working): each capability's
+  openspec/specs/<capability>/design.md ends with "Known gaps" sections; read
+  them before writing a spec, and state a gap rather than speccing it as done.
 
 # Per-artifact rules (optional).
 rules:
   specs:
+    - Long-form reasoning, measurements and history for a capability belong in its design.md, not in spec.md or CLAUDE.md.
     - Describe observable behavior (CLI flags, files produced, image results), not Rust internals.
     - Every requirement must have at least one WHEN/THEN scenario.
     - Mark not-yet-implemented behavior clearly; never spec it as if it works.

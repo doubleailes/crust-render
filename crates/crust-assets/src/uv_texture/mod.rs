@@ -44,8 +44,8 @@
 //! all. The two storages share every addressing and filtering decision; only
 //! the texel fetch differs, and it is chosen once per `eval` by monomorphising
 //! over [`Texel`] rather than matched per texel. The streaming path measured
-//! what a per-texel match costs (`CLAUDE.md`, "the second backing must cost
-//! the first one nothing").
+//! what a per-texel match costs (`openspec/specs/textures/design.md`, "the
+//! second backing must cost the first one nothing").
 
 use std::path::Path;
 
@@ -375,7 +375,7 @@ impl UvTexture {
     /// tile capped to 1024 covers a few hundred pixels of the framing, so the
     /// texel grid is plainly visible under point sampling — the artefact the
     /// dome light's own nearest-texel sampling is still criticised for in
-    /// `CLAUDE.md`.
+    /// `openspec/specs/lighting/design.md`.
     fn sample_level<T: Texel>(&self, t: &Level<T>, u: f32, v: f32) -> [f32; 4] {
         // Image rows run top-down while `v` grows upward, the same flip the
         // rest of the graphics world applies between UV and raster space.

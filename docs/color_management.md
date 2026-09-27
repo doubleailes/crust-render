@@ -362,6 +362,6 @@ Rule of thumb — a *linear* albedo should sit well below its authored value
 a decode was skipped.
 
 See also `docs/openpbr_reference_alignment.md` for how the OpenPBR parameters
-these colours feed are defined, and the "Ptex" section of `CLAUDE.md` for the
+these colours feed are defined, and the "Ptex" section of `openspec/specs/textures/design.md` for the
 face-addressing checks that are orthogonal to (and easily confused with)
 colour-space correctness.
