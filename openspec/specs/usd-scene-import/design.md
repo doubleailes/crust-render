@@ -354,7 +354,7 @@ query. isDunesB's `xgTreeFill` scatters 679 bay cedars of 16 181 parts each, and
 nested instancers were grouped per (prototype, part). That gave 64 724 top-level
 instances whose boxes all spanned the dune field, and a ray entered ~12 500 instances
 per query. Grouping per prototype (see "Nesting" under instancing) took the 4 spp render
-from **323.9 s to 1.18 s**, Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
+from **312.6 s to 1.195 s** (`bench_ab.sh`, min of 2; −99.6%), Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
 33.92 GiB and peak RSS from 51.5 to 46.2 GiB.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust

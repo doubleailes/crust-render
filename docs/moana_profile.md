@@ -4,8 +4,10 @@ The first `--profile` run of the full Moana island (`usd/island.usda`, `shotCam`
 The main finding is that **99.9% of render thread time is ray traversal, at
 5.97 ms per closest-hit query**, about 800× ALab's 7.6 µs. Shading, textures and
 the integrator do not register. The cause is not the kernel. It is how the
-importer lays out one element, **isDunesB**. Deactivating that element makes the
-same render **62× faster**, 323.9 s → 5.2 s.
+importer lays out one element, **isDunesB**. Deactivating that element made the
+same render about 62× faster in single runs, 323.9 s → 5.2 s. Grouping its
+prototypes instead (the fix, "Outcome" below) makes it **262× faster** in an
+interleaved `bench_ab.sh` comparison, 312.6 s → 1.195 s (min of 2).
 
 Measured 2026-09-27 at `abae004`, on the same machine as `docs/alab_profile.md`
 (72 vCPUs, 61 GiB).
@@ -91,8 +93,10 @@ triangles. A mean hides a tail of 65 k huge boxes.
 
 The same build now also counts descents per top-level `geom_id`, and the
 importer's DEBUG lines print each instancer's `geom ids a..b` range. Together
-they attribute the work. Of 3.1 M top-level instances, 239 230 were entered at
-all. **99% of all descents go to 65 223 of them.** Nearly all of those 65 k are
+they attribute the work. Unlike the table above, these descents include shadow
+rays (44 274 per camera ray, against 36 504 closest-hit ones), because an
+occluded ray pays for the same boxes. Of 3.1 M top-level instances, 239 230 were
+entered at all. **99% of all descents go to 65 223 of them.** Nearly all of those 65 k are
 isDunesB, whose prototype builds **64 866 parts**:
 
 ```
@@ -190,11 +194,22 @@ In the importer, a prototype of several parts becomes a *group*:
   that enters it one more transform. The threshold is a round number, not a
   measured optimum.
 
-The same render as the first table, with isDunesB still in frame:
+The render time, from `scripts/bench_ab.sh` alternating the two binaries (the
+parent `origin/main` and this change, built from one `Cargo.lock`), 2 reps
+each, with isDunesB still in frame:
+
+| Render (4 spp) | min | mean |
+|---|---|---|
+| before | 312.6 s | 334.1 s |
+| after | **1.195 s** | **1.204 s** |
+| Δ | **−99.6% (262×)** | −99.6% (277×) |
+
+The rest comes from one `--profile` run of each side, the before side being the
+first table above. The per-call figures are thread time, and their ratio is
+far outside run-to-run noise. The memory figures are deterministic.
 
 | | before | after | |
 |---|---|---|---|
-| Render (4 spp) | 323.9 s | **1.18 s** | **275×** |
 | Trace per call | 5.97 ms | 22.3 µs | 268× |
 | Occlusion per call | 2.92 ms | 6.85 µs | 426× |
 | mean ray query | 84.2 µs | 0.31 µs | |
@@ -204,7 +219,7 @@ The same render as the first table, with isDunesB still in frame:
 | peak RSS | 51.51 GiB | 46.17 GiB | −5.34 GiB |
 | Traverse prims | 3:33.8 | 3:02.7 | |
 
-That beats the knockout (5.25 s). The trees in isBayCedarA1 and the mountains'
+That beats the knockout (5.25 s, a single sequential run, so only indicative). The trees in isBayCedarA1 and the mountains'
 scatters were costing traversal too, just less visibly. The render is now 0.4%
 of the run, so the island is back to being an import benchmark: 5:05 of parse,
 of which Ptex preload is 1:37.
@@ -229,8 +244,8 @@ or part:
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance
-  (`crust_rt::traversal_stats::note_descent` / `top_level_descents`). With
-  `--stats`, the renderer prints how concentrated they are (the 50/90/99% lines)
+  (`crust_rt::traversal_stats::note_descent` / `top_level_descents`), shadow
+  rays included. With `--stats`, the renderer prints how concentrated they are (the 50/90/99% lines)
   and the 40 hottest instances with bounds, inner primitive count and how many
   top-level instances share the inner scene (`Scene::describe_instances`).
 - The importer's `Instance … uses prototype` and `Imported PointInstancer`
@@ -238,7 +253,11 @@ or part:
 - One caution about the feature: its per-level node counters are still global
   atomics. On this scene a 1 spp render takes 27 min against ~1.4 min without
   the feature, because every one of ~60 k node visits per ray contends one line.
-  The counts are right, but budget for the wait.
+  The counts are right, but budget for the wait. The descent counts are
+  deliberately *not* collected in an ordinary build. Each one is a hash-map
+  update on the hottest path in the kernel, and on this scene there were
+  tens of thousands per ray. The always-on `--stats` counters are integer
+  bumps per ray or per shading point, and cost nothing measurable.
 
 ## Reproducing
 
@@ -251,4 +270,7 @@ cargo build --release -p crust-render --features traversal-stats --target-dir ta
 target/tstats/release/crust-render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
 # the knockout: a layer that sublayers island.usda and adds
 #   over "island" { over "isDunesB" ( active = false ) { } }
+# the before/after timing, interleaved (binaries built from one Cargo.lock)
+scripts/bench_ab.sh -a bin_before -b bin_after -n 2 -p Render \
+    -x "--camera /island/cam/shotCam -s 4" $ISLAND
 ```

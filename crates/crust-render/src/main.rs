@@ -615,7 +615,8 @@ fn main() {
             }
             let _ = write!(
                 out,
-                "\n  top-level instances entered: {} of them, {:.1} descents per camera ray",
+                "\n  top-level instances entered: {} of them, {:.1} descents per camera ray \
+                 (closest-hit and shadow rays; the rows above count closest-hit only)",
                 descents.len(),
                 per(total)
             );
