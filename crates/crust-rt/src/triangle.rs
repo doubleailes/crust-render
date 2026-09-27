@@ -13,7 +13,7 @@
 //! `simd_matches_scalar_bitwise` pins.
 
 use crate::aabb::AABB;
-use crate::ray::Ray;
+use crate::ray::{Ray, RayMask};
 use glam::{Vec3A, Vec4};
 
 /// One coordinate axis, as the Woop permutation names them.
@@ -231,9 +231,9 @@ pub(crate) struct Tri4 {
     /// two-compare fast path: `ray.mask & mask_and != 0` means every lane
     /// is visible (the overwhelmingly common case), `ray.mask & mask_or == 0`
     /// means none is, and only a genuinely mixed packet pays per-lane tests.
-    mask_and: u32,
-    mask_or: u32,
-    masks: [u32; 4],
+    mask_and: RayMask,
+    mask_or: RayMask,
+    masks: [RayMask; 4],
 }
 
 /// Per-lane outcome of [`Tri4::intersect`].
@@ -255,14 +255,14 @@ pub(crate) struct Hit4 {
 impl Tri4 {
     /// Packs up to four triangles. `tris` shorter than 4 leaves the tail
     /// lanes inactive.
-    pub(crate) fn new(tris: &[(Vec3A, Vec3A, Vec3A, u32, u32)]) -> Self {
+    pub(crate) fn new(tris: &[(Vec3A, Vec3A, Vec3A, u32, RayMask)]) -> Self {
         debug_assert!(!tris.is_empty() && tris.len() <= 4);
         let mut v = [[Vec4::ZERO; 3]; 3];
         let mut prim = [u32::MAX; 4];
-        let mut masks = [0u32; 4];
+        let mut masks = [RayMask::NONE; 4];
         let mut active = 0u32;
-        let mut mask_and = u32::MAX;
-        let mut mask_or = 0u32;
+        let mut mask_and = RayMask::ALL;
+        let mut mask_or = RayMask::NONE;
         for lane in 0..4 {
             // Inactive tail lanes duplicate the last real triangle: the
             // lane is masked off anyway, and duplicating keeps the values
@@ -295,16 +295,16 @@ impl Tri4 {
 
     /// The lanes this ray's category is allowed to see.
     #[inline]
-    fn visible_lanes(&self, ray_mask: u32) -> u32 {
-        if ray_mask & self.mask_and != 0 {
+    fn visible_lanes(&self, ray_mask: RayMask) -> u32 {
+        if ray_mask.sees(self.mask_and) {
             return self.active;
         }
-        if ray_mask & self.mask_or == 0 {
+        if !ray_mask.sees(self.mask_or) {
             return 0;
         }
         let mut m = 0;
         for lane in 0..4 {
-            if self.active & (1 << lane) != 0 && self.masks[lane] & ray_mask != 0 {
+            if self.active & (1 << lane) != 0 && self.masks[lane].sees(ray_mask) {
                 m |= 1 << lane;
             }
         }
@@ -314,7 +314,13 @@ impl Tri4 {
     /// Intersects all four triangles at once. Every step is the `Vec4`
     /// transcription of the scalar path above, in the same order, so a
     /// lane's `t`/`u`/`v` are bit-identical to the scalar result.
-    pub(crate) fn intersect(&self, sh: &RayShear, ray_mask: u32, t_min: f32, t_max: f32) -> Hit4 {
+    pub(crate) fn intersect(
+        &self,
+        sh: &RayShear,
+        ray_mask: RayMask,
+        t_min: f32,
+        t_max: f32,
+    ) -> Hit4 {
         let mut m = self.visible_lanes(ray_mask);
         if m == 0 {
             return Hit4::MISS;
@@ -574,7 +580,7 @@ mod tests {
         let mut compared = 0;
         let mut hits = 0;
         for _ in 0..2000 {
-            let tris: Vec<(Vec3A, Vec3A, Vec3A, u32, u32)> = (0..4)
+            let tris: Vec<(Vec3A, Vec3A, Vec3A, u32, RayMask)> = (0..4)
                 .map(|i| {
                     let base = Vec3A::new(next(), next(), next()) * 4.0;
                     (
@@ -709,7 +715,7 @@ mod tests {
     #[test]
     fn simd_masks_gate_lanes() {
         use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_SHADOW};
-        let tri = |z: f32, pi: u32, mask: u32| {
+        let tri = |z: f32, pi: u32, mask: RayMask| {
             (
                 Vec3A::new(-1.0, -1.0, z),
                 Vec3A::new(1.0, -1.0, z),
@@ -743,7 +749,9 @@ mod tests {
             0b111
         );
         assert_eq!(
-            packet.intersect(&sh, 1 << 20, 0.001, f32::INFINITY).hits,
+            packet
+                .intersect(&sh, RayMask(1 << 20), 0.001, f32::INFINITY)
+                .hits,
             0b100
         );
     }

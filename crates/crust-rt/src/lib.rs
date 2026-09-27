@@ -50,7 +50,7 @@ mod scene;
 mod triangle;
 
 pub use aabb::AABB;
-pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray};
+pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayMask};
 pub use scene::{
     CubicCurveSegment, CurveSegment, Geometry, InstanceHitId, MemoryFootprint, PrimitiveBreakdown,
     RayHit, Scene, SceneBuilder,

@@ -4,7 +4,7 @@
 
 use crate::aabb::{AABB, triangle_aabb};
 use crate::curve::rounded_cone_intersect;
-use crate::ray::Ray;
+use crate::ray::{Ray, RayMask};
 use crate::scene::Scene;
 use crate::triangle::{clip_triangle_aabb, triangle_intersect};
 use glam::{Affine3A, Mat3A, Vec3A};
@@ -49,8 +49,8 @@ pub(crate) trait Prim: Send + Sync {
 }
 
 #[inline]
-fn masked_out(ray: &Ray, mask: u32) -> bool {
-    ray.mask & mask == 0
+fn masked_out(ray: &Ray, mask: RayMask) -> bool {
+    !ray.mask.sees(mask)
 }
 
 // ---------------------------------------------------------------------
@@ -66,7 +66,7 @@ pub(crate) struct TrianglePrim {
     pub normals: Option<[Vec3A; 3]>,
     pub geom_id: u32,
     pub prim_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl TrianglePrim {
@@ -126,7 +126,7 @@ pub(crate) struct SpherePrim {
     pub center: Vec3A,
     pub radius: f32,
     pub geom_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl Prim for SpherePrim {
@@ -181,7 +181,7 @@ pub(crate) struct DiskPrim {
     pub normal: Vec3A,
     pub radius: f32,
     pub geom_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl Prim for DiskPrim {
@@ -235,7 +235,7 @@ pub(crate) struct CylinderPrim {
     pub length: f32,
     pub radius: f32,
     pub geom_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl Prim for CylinderPrim {
@@ -301,7 +301,7 @@ pub(crate) struct CurvePrim {
     pub r1: f32,
     pub geom_id: u32,
     pub prim_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl Prim for CurvePrim {
@@ -351,7 +351,7 @@ pub(crate) struct CubicCurvePrim {
     pub r1: f32,
     pub geom_id: u32,
     pub prim_id: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 impl Prim for CubicCurvePrim {
@@ -409,7 +409,7 @@ pub(crate) struct InstancePrim {
     /// the padding the 16-byte-aligned transforms already leave, so
     /// forwarding costs no resident memory (pinned by a test).
     pub id_offset: u32,
-    pub mask: u32,
+    pub mask: RayMask,
 }
 
 /// [`InstancePrim::id_offset`] for an instance that does not forward.

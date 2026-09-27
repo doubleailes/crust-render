@@ -189,10 +189,12 @@ fn ray_at_walks_an_unnormalized_direction() {
 
 #[test]
 fn mask_constants_are_distinct_bits() {
-    assert_eq!(MASK_CAMERA & MASK_SHADOW, 0);
-    assert_eq!(MASK_CAMERA & MASK_INDIRECT, 0);
-    assert_eq!(MASK_SHADOW & MASK_INDIRECT, 0);
+    assert!(!MASK_CAMERA.sees(MASK_SHADOW));
+    assert!(!MASK_CAMERA.sees(MASK_INDIRECT));
+    assert!(!MASK_SHADOW.sees(MASK_INDIRECT));
     assert_eq!(MASK_ALL & MASK_CAMERA, MASK_CAMERA);
+    assert!(MASK_ALL.sees(MASK_SHADOW | MASK_INDIRECT));
+    assert!(!crust_rt::RayMask::NONE.sees(MASK_ALL));
     assert_eq!(INVALID_ID, u32::MAX);
 }
 

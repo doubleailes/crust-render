@@ -28,7 +28,7 @@ impl LeafData {
     /// one linear sweep of memory at traversal time.
     pub(super) fn push_leaf(&mut self, range: &[u32], prims: &[PrimNode]) -> u32 {
         let pkt_first = self.packets.len() as u32;
-        let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, u32)> = Vec::with_capacity(4);
+        let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, crate::ray::RayMask)> = Vec::with_capacity(4);
         let idx_first = self.indices.len() as u32;
         let mut idx_count = 0u32;
 
