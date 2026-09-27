@@ -62,6 +62,13 @@
   handed back to the scalar path for its f64 tie-break — watertightness intact. The
   packet and scalar intersectors are **bit-identical** (pinned by
   `simd_matches_scalar_bitwise`); change one and you must change the other.
+  A triangle's per-vertex shading normals are a side table too (`Bvh::normals`, indexed
+  by `TrianglePrim::normals`, `NO_NORMALS` when absent): inline as an
+  `Option<[Vec3A; 3]>` they made every triangle — and, as the largest variant, every
+  `PrimNode` — 128 bytes; now 64 and 80, pinned by `a_triangle_is_one_cache_line`.
+  They are read once per closest hit, after traversal. It costs `Bvh::hit` ~1% more
+  instructions (the 80-byte stride, the table argument) and saves 22% of cornellbox's
+  kernel memory; out of cache (`ray_throughput --large`) it is 0–6% faster.
   `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
   while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
   the measurements, and why `std::simd` is not used by default (nightly-only; the
