@@ -252,5 +252,6 @@ Still open, roughly in order of payoff:
 | kernel vs Embree | `docs/embree_comparison.md` |
 | OpenPBR formula alignment | `docs/openpbr_reference_alignment.md` |
 | ALab render profile | `docs/alab_profile.md` |
+| Moana island render profile | `docs/moana_profile.md` |
 | upstream openusd bugs (fixed) | `docs/issues/` |
 | behavioural specs | `openspec/specs/` |

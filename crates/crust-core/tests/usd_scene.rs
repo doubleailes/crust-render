@@ -627,10 +627,10 @@ fn loads_nested_instancing_usda() {
     let scene = Scene::from_usd(&sample("nested_instancing.usda"))
         .expect("failed to open nested_instancing.usda");
 
-    // The Branch prototype expands to 3 parts (leaf, bud husk, bud tip —
-    // one per distinct geometry, since a part carries one material), so
-    // the outer instancer's 5 placements attach 15. Plus 2 planters x 2
-    // parts, the floor and the light.
+    // The Branch prototype expands to one part of 3 slots (leaf, bud husk,
+    // bud tip — one per distinct geometry, since each binds a material), so
+    // the outer instancer's 5 placements take 15 geom_ids. Plus 2 planters x
+    // 2 parts, the floor and the light.
     assert_eq!(
         scene.world.count(),
         21,
@@ -649,11 +649,12 @@ fn nested_instancing_does_not_flatten() {
     let scene = Scene::from_usd(&sample("nested_instancing.usda"))
         .expect("failed to open nested_instancing.usda");
 
-    // 5 branches x 3 parts + 2 planters x 2 parts + floor (2 tris) +
-    // light (2 tris). Flattening the inner instancer would put each of the
-    // 5x4 = 20 nested placements at the top level instead.
+    // 5 branches (one instance each, all three slots inside) + 2 planters x
+    // 2 parts + floor (2 tris) + light (2 tris). Flattening the inner
+    // instancer would put each of the 5x4 = 20 nested placements at the top
+    // level instead; splitting it per part would put 5x3.
     assert!(
-        scene.world.primitive_count() <= 24,
+        scene.world.primitive_count() <= 13,
         "nested instances look flattened: {} kernel primitives",
         scene.world.primitive_count()
     );
@@ -740,6 +741,165 @@ fn multi_part_prototype_keeps_every_part() {
         at(0.0, 0.6).is_none(),
         "a class prototype was drawn at the origin"
     );
+}
+
+/// Parts in [`many_part_stage`]'s tree: above the importer's top-level
+/// grouping threshold, as a Moana bay cedar (16 181 parts) is.
+const TREE_PARTS: usize = 70;
+
+/// A stage whose `_Tree` class is [`TREE_PARTS`] small quads in a row along
+/// +X (part `i` spans `x ∈ [0.5 i, 0.5 i + 0.4]`, `y ∈ [0, 0.4]`), binding
+/// `Even` and `Odd` alternately, plus whatever `placements` authors.
+fn many_part_stage(name: &str, placements: &str) -> PathBuf {
+    let mut parts = String::new();
+    for i in 0..TREE_PARTS {
+        let (x0, x1) = (0.5 * i as f32, 0.5 * i as f32 + 0.4);
+        let look = if i % 2 == 0 { "Even" } else { "Odd" };
+        parts.push_str(&format!(
+            r#"        def Mesh "part{i}" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+            rel material:binding = </W/Looks/{look}>
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 0.4, 0), ({x0}, 0.4, 0)]
+        }}
+"#
+        ));
+    }
+    let look = |name: &str, c: &str| {
+        format!(
+            r#"        def Material "{name}" {{
+            token outputs:surface.connect = </W/Looks/{name}/S.outputs:surface>
+            def Shader "S" {{
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = ({c})
+                token outputs:surface
+            }}
+        }}
+"#
+        )
+    };
+    let dir = std::env::temp_dir().join("crust_many_part_prototypes");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#usda 1.0\n(defaultPrim = \"W\")\ndef Xform \"W\" {{\n    class Xform \"_Tree\" {{\n{parts}    }}\n{placements}\n    def Scope \"Looks\" {{\n{}{}    }}\n}}\n",
+            look("Even", "0.8, 0.1, 0.1"),
+            look("Odd", "0.1, 0.1, 0.8"),
+        ),
+    )
+    .expect("write stage");
+    path
+}
+
+/// Every part of every tree at `origins` is hit, as a geometry of its own
+/// whose material is the one it binds: parts alternate `Even` / `Odd`, so
+/// the material a hit resolves to must alternate with them.
+fn assert_every_part_shades_as_bound(scene: &Scene, origins: &[(f32, f32)]) {
+    let addr = |m: &dyn crust_core::Material| m as *const dyn crust_core::Material as *const ();
+    let mut ids = std::collections::HashSet::new();
+    let mut looks = [None, None];
+    for &(ox, oy) in origins {
+        for i in 0..TREE_PARTS {
+            let (x, y) = (ox + 0.5 * i as f32 + 0.2, oy + 0.2);
+            let ray = Ray::new(Vec3A::new(x, y, 10.0), -Vec3A::Z);
+            let hit = scene
+                .world
+                .intersect(&ray, 0.001, 40.0)
+                .unwrap_or_else(|| panic!("tree at ({ox}, {oy}): part {i} is missing"));
+            assert!(
+                ids.insert(hit.geom_id),
+                "tree at ({ox}, {oy}): part {i} reported geom_id {} twice",
+                hit.geom_id
+            );
+            let look = looks[i % 2].get_or_insert(addr(hit.mat));
+            assert_eq!(
+                *look,
+                addr(hit.mat),
+                "tree at ({ox}, {oy}): part {i} resolved to the wrong material"
+            );
+        }
+    }
+    assert_ne!(looks[0], looks[1], "both parities resolved to one material");
+}
+
+/// A prototype of many parts, natively instanced, is placed as *one*
+/// top-level instance per placement — its parts get a BVH of their own
+/// inside it — while every part still resolves to its own material.
+///
+/// One instance per part used to put that many boxes into the root BVH per
+/// placement; a Moana bay cedar is 16 181.
+#[test]
+fn many_part_native_prototype_is_one_instance_per_placement() {
+    let path = many_part_stage(
+        "native.usda",
+        r#"    def Xform "A" (instanceable = true; references = </W/_Tree>) {}
+    def Xform "B" (instanceable = true; references = </W/_Tree>) {
+        double3 xformOp:translate = (0, 3, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }"#,
+    );
+    let scene = Scene::from_usd(&path).expect("load");
+    assert_eq!(scene.world.primitive_breakdown().instances, 2);
+    assert_eq!(
+        scene.world.count(),
+        2 * TREE_PARTS,
+        "one geom_id per part per placement"
+    );
+    assert_every_part_shades_as_bound(&scene, &[(0.0, 0.0), (0.0, 3.0)]);
+}
+
+/// A scatter of many-part prototypes inside a prototype — the Moana
+/// island's isDunesB shape — nests as scatter → tree → part. The outer
+/// placement is one top-level instance, and each part keeps its material
+/// in every tree of the scatter.
+///
+/// It used to be one top-level instance per *part*, each holding that part
+/// in every tree, so each spanned the whole scatter: 70 identical boxes
+/// here, 64 724 over the island's dunes (`docs/moana_profile.md`).
+#[test]
+fn nested_scatter_of_many_part_prototypes_groups_per_tree() {
+    let path = many_part_stage(
+        "nested.usda",
+        // Prototypes live under the instancer that places them, as on the
+        // island: the streaming importer composes one top-level subtree at a
+        // time, and a sibling prototype would be outside the mask.
+        r#"    def PointInstancer "Groves" {
+        rel prototypes = [</W/Groves/Protos/Grove>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, 0), (40, 0, 0)]
+        def Scope "Protos" {
+            def PointInstancer "Grove" {
+                rel prototypes = [</W/Groves/Protos/Grove/Protos/Tree>]
+                int[] protoIndices = [0, 0, 0]
+                point3f[] positions = [(0, 0, 0), (0, 3, 0), (0, 6, 0)]
+                def Scope "Protos" {
+                    def Xform "Tree" (references = </W/_Tree>) {}
+                }
+            }
+        }
+    }"#,
+    );
+    let scene = Scene::from_usd(&path).expect("load");
+    assert_eq!(
+        scene.world.primitive_breakdown().instances,
+        2,
+        "one top-level instance per grove, not one per part"
+    );
+    assert_eq!(scene.world.count(), 2 * TREE_PARTS);
+    // Within one grove the three trees share their part's slot, so check
+    // one tree per grove for distinct ids, and every tree for materials.
+    assert_every_part_shades_as_bound(&scene, &[(0.0, 0.0), (40.0, 3.0)]);
+    let addr = |m: &dyn crust_core::Material| m as *const dyn crust_core::Material as *const ();
+    for oy in [0.0f32, 3.0, 6.0] {
+        let even = |i: usize| {
+            let ray = Ray::new(Vec3A::new(0.5 * i as f32 + 0.2, oy + 0.2, 10.0), -Vec3A::Z);
+            scene.world.intersect(&ray, 0.001, 40.0).expect("part")
+        };
+        assert_eq!(addr(even(0).mat), addr(even(2).mat));
+        assert_ne!(addr(even(0).mat), addr(even(1).mat));
+    }
 }
 
 /// An `instanceable` prim *inside* another instance's prototype cannot be

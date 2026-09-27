@@ -142,9 +142,16 @@ Schema mapping:
   (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
   place it by transform. A prototype becomes a `Vec<ProtoPart>` — one part per bound leaf
   geometry, each a committed local-space `rt::Scene` plus its prototype-relative transform,
-  material and ray mask. It is split per *part* rather than per prototype because `World`
-  maps materials by top-level `geom_id`: a prototype binding two materials must become two
-  instances or one material is lost. Prototypes are memoized by path in `ImportCaches`.
+  ray mask and **slots** (material + Ptex/UV tables). `World` maps materials by top-level
+  `geom_id`, so a hit must say which part it landed on. A leaf part has one slot. A
+  **group** (`group_parts`) is a whole prototype in one scene, whose member instances
+  label their hits `0..n` (`crust_rt::InstanceHitId`, the one-id version of Embree's
+  `instID[]` stack). It is placed as *one* instance that takes `n` consecutive `geom_id`s,
+  and forwards the hit's slot index on top of the first (`InstanceHitId::Offset`). Grouping
+  is what keeps a many-part prototype one box in the BVH above it. Top-level placements
+  group from `TOP_LEVEL_GROUP_MIN_PARTS` (64) parts, since grouping costs every entering
+  ray one more transform; nested instancers always group. Prototypes (`protos`) and their
+  groups (`groups`) are memoized by path in `ImportCaches`.
   - `UsdGeomPointInstancer` → one instance per entry of the per-instance arrays. The
     transform is USD's `translate ∘ orient ∘ scale`, under the instancer's own world
     matrix; `orientationsf` (quatf) wins over `orientations` (quath); `invisibleIds`
@@ -156,10 +163,14 @@ Schema mapping:
     subtree is never descended into. Without this the importer re-read and re-hashed each
     instance's geometry (~30% of load time on a 2000-instance scene).
   - **Nesting.** A `PointInstancer` inside a prototype expands into real nested sub-scenes
-    (`nested_instancer_parts`), one part per (prototype, part) so the grouping stays
-    per-material: M nested placements of a K-part prototype become K parts, each a
-    committed scene holding M instances. Flattening instead would multiply the outer
-    instance count by the inner one — the blow-up instancing exists to prevent. The kernel
+    (`nested_instancer_parts`): *one* part, a scene holding each nested placement as an
+    instance of its prototype's group, the prototypes' slots laid end to end. M placements
+    of a K-part prototype are M boxes of one tree each. It used to be K parts of M
+    instances each (one per material), and every such part spans the whole scatter: on
+    the Moana island, isDunesB's 679 bay cedars of 16 181 parts each became 64 724
+    identical boxes over the dune field, 99% of all instance descents and a 6 ms ray
+    (`docs/moana_profile.md`). Flattening instead would multiply the outer instance count
+    by the inner one — the blow-up instancing exists to prevent. The kernel
     nests to arbitrary depth. A nested *native* instance is skipped (upstream bug, below).
     Sample scene: `samples/nested_instancing.usda`. `MAX_INSTANCE_NESTING` (8) is a
     backstop against a malformed stage describing an instancing cycle.
@@ -336,6 +347,15 @@ ray cone asks for coarse levels, and a coarse level of a face is a few texels �
 only the resolution the frame resolves is exactly what preloading cannot do. The budget
 is a ceiling, not an allocation, so do not lower it on that number; a closer camera or a
 4K frame walks the same faces at finer levels.
+
+**Rendering it used to be traversal-bound because of one element** (`docs/moana_profile.md`).
+At `shotCam`, 99.9% of render thread time was ray traversal, at 5.97 ms per closest-hit
+query. isDunesB's `xgTreeFill` scatters 679 bay cedars of 16 181 parts each, and
+nested instancers were grouped per (prototype, part). That gave 64 724 top-level
+instances whose boxes all spanned the dune field, and a ray entered ~12 500 instances
+per query. Grouping per prototype (see "Nesting" under instancing) took the 4 spp render
+from **323.9 s to 1.18 s**, Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
+33.92 GiB and peak RSS from 51.5 to 46.2 GiB.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust
 has no per-light camera-visibility, so both light the scene (the sky is doubled) and both
