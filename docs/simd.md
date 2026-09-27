@@ -368,7 +368,47 @@ and B swapped, cornellbox and veach_mis ±3%. That is the shading-bound
 samples hiding the kernel, as the "Not done" notes predicted, not BVH8
 helping.
 
-**Verdict.** Not worth a nightly toolchain. The feature stays as the
+**Out of cache it is a different answer.** Every scene above keeps its
+whole tree in cache (the kernel scenes are 43 k triangles; this VM reports
+a 260 MiB L3), so what they measure is the node test's arithmetic. A
+production stage like the Moana island traverses tens of GiB, where a node
+visit is a DRAM round trip. `ray_throughput -- --large` builds two scenes
+sized for that regime and traces 2^18 incoherent rays through each; timed
+single-threaded, three interleaved rounds per binary, same nightly and
+`x86-64-v3` both sides, identical hit counts:
+
+| scene / query | BVH4 min / mean ms | BVH8 min / mean ms | Δ min | Δ mean |
+| --- | --- | --- | --- | --- |
+| soup (8 M triangles) intersect | 12 921 / 13 065 | 10 621 / 11 036 | **−17.8%** | −15.5% |
+| soup occluded | 12 428 / 12 660 | 9 294 / 10 127 | **−25.2%** | −20.0% |
+| inst_field (2 M instances) intersect | 6 155 / 6 401 | 6 442 / 6 818 | +4.7% | +6.5% |
+| inst_field occluded | 5 245 / 5 413 | 5 541 / 5 912 | +5.6% | +9.2% |
+
+| per closest-hit ray (`traversal-stats`) | BVH4 | BVH8 |
+| --- | --- | --- |
+| soup nodes / leaves | 236.8 / 41.2 | 146.5 / 41.3 |
+| inst_field top-level nodes / instanced nodes | 75.3 / 27.6 | 52.2 / 24.1 |
+| kernel memory, soup / inst_field | 2 141 / 902 MiB | 2 474 / 1 054 MiB |
+
+The soup is ~25 µs a ray at ~140 ns a node: latency-bound. There a 38%
+cut in node visits is worth more than the extra cache lines per visit,
+and BVH8 wins by 18–25%. The instance field splits the same way inside
+one scene: its top level (out of cache) visits 31% fewer nodes, but most
+of the time is spent descending prototypes whose trees fit in cache,
+which is the regime the small scenes measured, so the net is a 5–9% loss.
+The 8-wide nodes also cost 15–17% more kernel memory: their lanes are
+less full, because the collapse runs out of internal children to expand
+before it fills eight.
+
+**Verdict.** The width wants to be chosen **per tree**, by size: 8-wide
+for a tree too large for cache (a baked top level, the island's
+`osOcean` / `isCoral`), 4-wide for the small prototypes it instances. A
+compile-time feature cannot do that; it needs both widths compiled in and
+picked at `commit()`. That is a refactor (the traversal generic over
+`LANES` rather than selected by `cfg`), not a toolchain question, and its
+payoff on the island is unmeasured: the island mixes both regimes, and
+where it lands depends on how its ray time splits between them. Until
+then, the toolchain verdict stands: not worth a nightly toolchain. The feature stays as the
 experiment's record and as a starting point: the literature's BVH8 wins
 (Embree; Ylitie et al. 2017) come from *compressed* nodes (quantised child
 bounds, so an 8-wide node fits the bytes a 4-wide one does) and from
