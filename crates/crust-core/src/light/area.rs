@@ -8,14 +8,98 @@ use utils::luminance;
 
 use crate::material::Emissive;
 
-use super::shape::LightShape;
+use super::rect::RectShape;
+use super::shape::{AffineShape, LightShape, SphereShape};
 use super::{Light, LightSample};
 
-/// A geometric area light: any [`LightShape`] paired with the [`Emissive`]
+/// The emitting surface of an [`AreaLight`]: one of the crate's
+/// [`LightShape`]s, dispatched by `match` rather than through a
+/// `Box<dyn LightShape>`.
+///
+/// The set is closed — one variant per supported UsdLux shape — and NEE asks
+/// the shape three or four questions per sample (`sample_solid_angle`,
+/// `sample_point`, `normal_at`, `inv_pdf_area`). As an enum each is a jump
+/// the optimiser can inline into [`AreaLight::sample_li`] instead of a vtable
+/// hop behind a heap pointer: the move `crust_rt`'s `PrimNode` made. The
+/// trait stays the contract every variant implements; the enum is only the
+/// dispatch.
+pub enum AreaShape {
+    Sphere(SphereShape),
+    Affine(AffineShape),
+    Rect(RectShape),
+}
+
+impl From<SphereShape> for AreaShape {
+    fn from(s: SphereShape) -> Self {
+        AreaShape::Sphere(s)
+    }
+}
+
+impl From<AffineShape> for AreaShape {
+    fn from(s: AffineShape) -> Self {
+        AreaShape::Affine(s)
+    }
+}
+
+impl From<RectShape> for AreaShape {
+    fn from(s: RectShape) -> Self {
+        AreaShape::Rect(s)
+    }
+}
+
+/// Forwards one [`LightShape`] method to the variant.
+macro_rules! dispatch {
+    ($self:ident, $s:ident => $call:expr) => {
+        match $self {
+            AreaShape::Sphere($s) => $call,
+            AreaShape::Affine($s) => $call,
+            AreaShape::Rect($s) => $call,
+        }
+    };
+}
+
+impl LightShape for AreaShape {
+    #[inline]
+    fn kind(&self) -> &'static str {
+        dispatch!(self, s => s.kind())
+    }
+
+    #[inline]
+    fn sample_point(&self, u: f32, v: f32) -> Vec3A {
+        dispatch!(self, s => s.sample_point(u, v))
+    }
+
+    #[inline]
+    fn normal_at(&self, p: Vec3A) -> Vec3A {
+        dispatch!(self, s => s.normal_at(p))
+    }
+
+    #[inline]
+    fn area(&self) -> f32 {
+        dispatch!(self, s => s.area())
+    }
+
+    #[inline]
+    fn inv_pdf_area(&self, p: Vec3A) -> f32 {
+        dispatch!(self, s => s.inv_pdf_area(p))
+    }
+
+    #[inline]
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+        dispatch!(self, s => s.sample_solid_angle(from, u, v))
+    }
+
+    #[inline]
+    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<f32> {
+        dispatch!(self, s => s.solid_angle_pdf(from, p))
+    }
+}
+
+/// A geometric area light: an [`AreaShape`] paired with the [`Emissive`]
 /// material its scene geometry carries (Cornell-box semantics — the same
 /// surface is both light and visible object).
 pub struct AreaLight {
-    pub(super) shape: Box<dyn LightShape>,
+    pub(super) shape: AreaShape,
     pub(super) material: Arc<Emissive>,
     /// The world `geom_id` of the emissive geometry this light shares its
     /// surface with — how bounce hits are attributed back to the light.
@@ -23,9 +107,9 @@ pub struct AreaLight {
 }
 
 impl AreaLight {
-    pub fn new(shape: Box<dyn LightShape>, material: Arc<Emissive>, geom_id: u32) -> Self {
+    pub fn new(shape: impl Into<AreaShape>, material: Arc<Emissive>, geom_id: u32) -> Self {
         Self {
-            shape,
+            shape: shape.into(),
             material,
             geom_id,
         }
