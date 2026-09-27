@@ -47,5 +47,25 @@ run "AVX2 + FMA" "-C target-feature=+avx2,+fma" "$@"
 # only really runs locally.
 run "target-cpu=native" "-C target-cpu=native" "$@"
 
+# Codegen, not test results: does the compiler fuse crust's own arithmetic?
+# Machine code cannot answer it — glam fuses `cross` on purpose under FMA
+# (explicit `llvm.fma`), so `vfmadd` appears either way — but the IR can:
+# contraction needs a `contract` / fast-math flag or `llvm.fmuladd`.
+echo
+echo "=== codegen: no FMA contraction in crust-rt (IR, +avx2,+fma)"
+ir_dir="${CARGO_TARGET_DIR:-target}/simd-matrix-ir"
+RUSTFLAGS="-C target-feature=+avx2,+fma" CARGO_TARGET_DIR="$ir_dir" \
+    cargo rustc -q --release -p crust-rt --lib -- --emit=llvm-ir
+ir=$(ls -t "$ir_dir"/release/deps/crust_rt-*.ll | head -n 1)
+# An instruction carrying a fusing fast-math flag, e.g. `fmul contract float`.
+flagged='= (fadd|fsub|fmul|fdiv|fneg|frem|call)( [a-z]+)* (contract|fast|reassoc)\b'
+contracted=$(grep -cE "$flagged|llvm\.fmuladd" "$ir" || true)
+explicit=$(grep -c "call .*@llvm\.fma" "$ir" || true)
+echo "    contraction-eligible: $contracted; explicit llvm.fma (glam intrinsics): $explicit"
+if [ "$contracted" != 0 ]; then
+    echo "    FAILED: the compiler may fuse crust-rt arithmetic ($ir)"
+    exit 1
+fi
+
 echo
 echo "All SIMD configurations passed."
