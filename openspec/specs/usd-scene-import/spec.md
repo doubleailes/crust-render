@@ -6,7 +6,7 @@ Build the runtime `Scene` (camera, world geometry, lights, render settings) from
 a USD stage. USD is the only supported scene format. This capability covers stage
 loading, Xform-hierarchy baking, geometry and light schema mapping, material
 resolution by shader id, and render-settings parsing. Lives in
-`crust-core/src/scene/usd_import.rs`, entry point `Scene::from_usd`.
+`crust-core/src/scene/usd_import/` (module map in its `mod.rs`), entry point `Scene::from_usd`.
 
 ## Requirements
 

@@ -3,7 +3,7 @@
 //! The standard USD preview network is a `UsdPreviewSurface` whose inputs
 //! connect to `UsdUVTexture` nodes, each reading a file at the coordinates a
 //! `UsdPrimvarReader_float2` supplies. The importer resolves that network once
-//! (`scene/usd_import.rs`) into a list of [`UvInput`]s, one per connected
+//! (`scene/usd_import/preview.rs`) into a list of [`UvInput`]s, one per connected
 //! surface input, and this material evaluates them per shading point, writing
 //! each result over the matching field of an otherwise-constant [`OpenPBR`]
 //! and delegating the BSDF to it, as [`crate::MtlxMaterial`] does.
