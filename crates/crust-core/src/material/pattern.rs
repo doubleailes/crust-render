@@ -92,18 +92,9 @@ impl<T: PatternMaterial> Material for T {
     fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
         let (params, rec) = self.run(r_in, rec);
         // `emitted_at`'s answer from the run already made rather than a second
-        // one, and from the parameters before Ptex is applied, as `emitted_at`
-        // reads them.
-        let emitted = if self.can_emit() {
-            params.emitted_directional(cos_theta_o)
-        } else {
-            Vec3A::ZERO
-        };
-        Some(Resolution {
-            bsdf: params.into_resolved(&rec),
-            rec,
-            emitted,
-        })
+        // one — and, by construction, from the parameters before Ptex is
+        // applied, as `emitted_at` reads them.
+        Some(Resolution::new(params, rec, self.can_emit(), cos_theta_o))
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {

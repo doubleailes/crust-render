@@ -310,6 +310,45 @@ impl OpenPBR {
     }
 }
 
+/// An [`OpenPBR`] with its per-hit lookups applied ([`OpenPBR::into_resolved`]):
+/// what the integrator's BSDF queries run on at a textured vertex.
+///
+/// It answers the BSDF queries and nothing else — no emission method, because
+/// emission is read from the parameters before resolution. The parameters
+/// themselves stay readable ([`ResolvedOpenPBR::params`]) for probes.
+#[derive(Debug, Clone)]
+pub struct ResolvedOpenPBR(OpenPBR);
+
+impl ResolvedOpenPBR {
+    /// The resolved parameters, for probes and tests.
+    pub fn params(&self) -> &OpenPBR {
+        &self.0
+    }
+
+    /// [`Material::scatter_importance`] on the resolved parameters.
+    #[inline]
+    pub(crate) fn scatter(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+    ) -> Option<ScatterSample> {
+        self.0.scatter_resolved(r_in, rec, sampler)
+    }
+
+    /// [`Material::eval`] on the resolved parameters.
+    #[inline]
+    pub(crate) fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
+        self.0.eval_resolved(r_in, rec, wi)
+    }
+
+    /// [`Material::make_ray`] on the resolved parameters.
+    #[inline]
+    pub fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+        self.0.make_ray(rec, wi)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Material impl
 // ---------------------------------------------------------------------------
@@ -327,16 +366,29 @@ impl OpenPBR {
     ///
     /// The returned copy carries no texture, so it cannot recurse.
     /// This material with its per-hit lookups (Ptex `base_color`) applied at
-    /// `rec` — what [`Material::resolve`] implementations hand back, so the
-    /// `*_resolved` methods can be called on it directly.
-    pub fn into_resolved(self, rec: &HitRecord) -> OpenPBR {
+    /// `rec` — what [`Material::resolve`] implementations hand back.
+    ///
+    /// Consumes `self` and returns a different type on purpose: a
+    /// [`ResolvedOpenPBR`] has the BSDF queries and no emission method, so
+    /// emission — which must be read from the parameters *before* resolution
+    /// (the coat factor reads `base_color`, which Ptex replaces) — cannot be
+    /// taken after it. [`Resolution::new`](crate::material::Resolution::new)
+    /// does both in the right order.
+    pub fn into_resolved(self, rec: &HitRecord) -> ResolvedOpenPBR {
         match self.shaded(rec) {
             Some(m) => m,
-            None => self,
+            None => ResolvedOpenPBR(self),
         }
     }
 
-    fn shaded(&self, rec: &HitRecord) -> Option<OpenPBR> {
+    /// [`OpenPBR::into_resolved`] from a borrow: `None` when nothing is
+    /// textured and `self` can be queried in place.
+    #[inline(always)]
+    pub(crate) fn resolved_at(&self, rec: &HitRecord) -> Option<ResolvedOpenPBR> {
+        self.shaded(rec)
+    }
+
+    fn shaded(&self, rec: &HitRecord) -> Option<ResolvedOpenPBR> {
         let tex = self.base_color_ptex.as_ref()?;
         if rec.face_id == HitRecord::NO_FACE {
             // Geometry the importer could not give a face identity (a sphere,
@@ -344,11 +396,11 @@ impl OpenPBR {
             return None;
         }
         let (u, v) = rec.face_uv;
-        Some(OpenPBR {
+        Some(ResolvedOpenPBR(OpenPBR {
             base_color: tex.eval(rec.face_id, u, v, rec.face_width),
             base_color_ptex: None,
             ..self.clone()
-        })
+        }))
     }
 
     pub(crate) fn scatter_resolved(
@@ -507,14 +559,14 @@ impl Material for OpenPBR {
         sampler: PathSampler,
     ) -> Option<ScatterSample> {
         match self.shaded(rec) {
-            Some(m) => m.scatter_resolved(r_in, rec, sampler),
+            Some(m) => m.scatter(r_in, rec, sampler),
             None => self.scatter_resolved(r_in, rec, sampler),
         }
     }
 
     fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
         match self.shaded(rec) {
-            Some(m) => m.eval_resolved(r_in, rec, wi),
+            Some(m) => m.eval(r_in, rec, wi),
             None => self.eval_resolved(r_in, rec, wi),
         }
     }
@@ -533,11 +585,7 @@ impl Material for OpenPBR {
         // queried in place, with no copy. Emission is the default
         // `emitted_at`: the unresolved material's, constant `base_color` and
         // all.
-        self.shaded(rec).map(|bsdf| crate::material::Resolution {
-            bsdf,
-            rec: *rec,
-            emitted: self.emitted_directional(cos_theta_o),
-        })
+        crate::material::Resolution::of_openpbr(self, rec, cos_theta_o)
     }
 
     fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {

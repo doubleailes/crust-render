@@ -124,8 +124,9 @@ without the other (full list: `docs/architecture.md` § Invariants):
   mode is scheduling only); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
 - Anything keyed on a prototype path is scoped by the stage epoch
   (`ImportCaches::epoch`): `/__Prototype_N` is renumbered per masked stage.
-- `Material::resolve` must return exactly what per-query shading would; take
-  `Resolution::emitted` from the parameters *before* `into_resolved`.
+- `Material::resolve` must return exactly what per-query shading would (pinned for every
+  material by `crust-core/tests/resolve.rs`); build it with `Resolution::new`, which takes
+  the emission from the parameters *before* `into_resolved` — the type allows no other order.
 - Every colour input states its colour space (`docs/color_management.md`).
 
 **Logging.** The level is decided by whether the line scales with the scene, not by how

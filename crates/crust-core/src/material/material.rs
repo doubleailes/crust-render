@@ -1,6 +1,6 @@
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::OpenPBR;
+use crate::material::{OpenPBR, ResolvedOpenPBR};
 use crate::ray::Ray;
 use glam::Vec3A;
 
@@ -215,16 +215,72 @@ pub trait Material: Send + Sync {
 }
 
 /// What [`Material::resolve`] hands back for one hit.
+///
+/// Built only by [`Resolution::new`] (and, for a bare `OpenPBR`,
+/// `Resolution::of_openpbr`), which read the emission from the parameters
+/// *before* resolving them: the order the trap in the materials design record
+/// is about is now the only one that compiles.
 pub struct Resolution {
     /// The fully resolved BSDF parameters.
-    pub bsdf: OpenPBR,
+    pub(crate) bsdf: ResolvedOpenPBR,
     /// The record the BSDF shades with (the shading normal applied).
-    pub rec: HitRecord,
+    pub(crate) rec: HitRecord,
     /// [`Material::emitted_at`] at this hit, computed from the parameters the
     /// network already produced. Taken *before* Ptex is applied, as
     /// `emitted_at` itself does: OpenPBR's coat emission factor reads
     /// `base_color`, and a resolved Ptex lookup would change it.
-    pub emitted: Vec3A,
+    pub(crate) emitted: Vec3A,
+}
+
+impl Resolution {
+    /// The resolution of `params` — a network's output, its own Ptex lookups
+    /// not yet applied — shading with `rec`: the emission toward
+    /// `cos_theta_o` read from `params` as they are (zero unless `can_emit`),
+    /// then `params` resolved at `rec`.
+    #[inline]
+    pub fn new(params: OpenPBR, rec: HitRecord, can_emit: bool, cos_theta_o: f32) -> Resolution {
+        let emitted = if can_emit {
+            params.emitted_directional(cos_theta_o)
+        } else {
+            Vec3A::ZERO
+        };
+        Resolution {
+            bsdf: params.into_resolved(&rec),
+            rec,
+            emitted,
+        }
+    }
+
+    /// A bare `OpenPBR`'s resolution at `rec`, `None` when it has no per-hit
+    /// work: the same order as [`Resolution::new`], without copying the
+    /// parameters to get there.
+    #[inline(always)]
+    pub(crate) fn of_openpbr(
+        unresolved: &OpenPBR,
+        rec: &HitRecord,
+        cos_theta_o: f32,
+    ) -> Option<Resolution> {
+        unresolved.resolved_at(rec).map(|bsdf| Resolution {
+            bsdf,
+            rec: *rec,
+            emitted: unresolved.emitted_directional(cos_theta_o),
+        })
+    }
+
+    /// The resolved BSDF.
+    pub fn bsdf(&self) -> &ResolvedOpenPBR {
+        &self.bsdf
+    }
+
+    /// The record the BSDF shades with.
+    pub fn rec(&self) -> &HitRecord {
+        &self.rec
+    }
+
+    /// [`Material::emitted_at`] at this hit.
+    pub fn emitted(&self) -> Vec3A {
+        self.emitted
+    }
 }
 
 /// A material at one hit, with its per-hit work already done (see
@@ -243,9 +299,9 @@ pub struct ShadingPoint<'a> {
 enum Resolved<'a> {
     /// No per-hit work: queries go to the material with the hit's record.
     Material(&'a dyn Material),
-    /// The material's resolved `OpenPBR`, queried through its `*_resolved`
-    /// methods with the record `resolve` returned.
-    OpenPBR(OpenPBR),
+    /// The material's resolved `OpenPBR`, queried with the record `resolve`
+    /// returned.
+    OpenPBR(ResolvedOpenPBR),
 }
 
 impl<'a> ShadingPoint<'a> {
@@ -276,7 +332,7 @@ impl<'a> ShadingPoint<'a> {
     pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),
-            Resolved::OpenPBR(m) => m.scatter_resolved(r_in, &self.rec, sampler),
+            Resolved::OpenPBR(m) => m.scatter(r_in, &self.rec, sampler),
         }
     }
 
@@ -284,7 +340,7 @@ impl<'a> ShadingPoint<'a> {
     pub fn eval(&self, r_in: &Ray, wi: Vec3A) -> Option<(Vec3A, f32)> {
         match &self.bsdf {
             Resolved::Material(m) => m.eval(r_in, &self.rec, wi),
-            Resolved::OpenPBR(m) => m.eval_resolved(r_in, &self.rec, wi),
+            Resolved::OpenPBR(m) => m.eval(r_in, &self.rec, wi),
         }
     }
 

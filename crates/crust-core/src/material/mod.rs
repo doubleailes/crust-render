@@ -8,7 +8,7 @@ pub use emissive::Emissive;
 mod brdf;
 mod openpbr;
 mod pattern;
-pub use openpbr::{InteriorCache, OpenPBR};
+pub use openpbr::{InteriorCache, OpenPBR, ResolvedOpenPBR};
 pub mod materialx;
 pub use materialx::MtlxMaterial;
 pub mod preview_surface;
