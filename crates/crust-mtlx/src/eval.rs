@@ -176,8 +176,10 @@ pub enum Op {
         a: u32,
         b: u32,
     },
+    /// `dot(in.rgb, coeffs)`, keeping a `color4`'s alpha.
     Luminance {
         a: u32,
+        coeffs: u32,
     },
     /// Decodes a tangent-space normal map into a world-space normal.
     NormalMap {
@@ -225,13 +227,11 @@ impl Op {
                 }
             }
             Op::Const(_) | Op::TexCoord { .. } | Op::Normal | Op::ViewDirection | Op::Position => {}
-            Op::Unary { a, .. }
-            | Op::Luminance { a }
-            | Op::Convert { a, .. }
-            | Op::Extract { a, .. } => f(a),
+            Op::Unary { a, .. } | Op::Convert { a, .. } | Op::Extract { a, .. } => f(a),
             Op::Binary { a, b, .. }
             | Op::Invert { a, amount: b }
             | Op::Combine2 { a, b }
+            | Op::Luminance { a, coeffs: b }
             | Op::DotProduct { a, b }
             | Op::NormalMap { a, scale: b }
             | Op::HsvAdjust { a, amount: b }
@@ -541,21 +541,30 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
                 // teapot's Beer-Lambert chain can produce from a
                 // black texel — yields a finite value instead of an
                 // infinity that then poisons every downstream lane.
-                UnOp::Ln => a.map(|x| if x > 1e-30 { x.ln() } else { -69.0 }),
+                // The guard is OSL's `safe_log`, which the MaterialX
+                // reference runs: the operand is raised to the smallest
+                // normal float, so `ln(0)` is `ln(f32::MIN_POSITIVE)`.
+                UnOp::Ln => a.map(|x| x.max(f32::MIN_POSITIVE).ln()),
                 UnOp::Exp => a.map(|x| x.clamp(-88.0, 88.0).exp()),
                 UnOp::Sin => a.map(f32::sin),
                 UnOp::Cos => a.map(f32::cos),
                 UnOp::Asin => a.map(|x| x.clamp(-1.0, 1.0).asin()),
                 UnOp::Acos => a.map(|x| x.clamp(-1.0, 1.0).acos()),
                 UnOp::Sqrt => a.map(|x| x.max(0.0).sqrt()),
-                UnOp::Sign => a.map(f32::signum),
+                // Not `f32::signum`, which answers ±1 for ±0: MaterialX's
+                // `sign` of zero is zero.
+                UnOp::Sign => a.map(|x| {
+                    if x > 0.0 {
+                        1.0
+                    } else if x < 0.0 {
+                        -1.0
+                    } else {
+                        x
+                    }
+                }),
                 UnOp::Floor => a.map(f32::floor),
                 UnOp::Ceil => a.map(f32::ceil),
-                UnOp::Normalize => {
-                    let v = a.rgb();
-                    let n = v.length();
-                    if n > 1e-20 { (v / n).into() } else { a }
-                }
+                UnOp::Normalize => normalize(a),
             }
         }
         Op::Binary { op, a, b } => {
@@ -568,10 +577,15 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
                 // graphs (`1 / transmittance` with a black channel),
                 // and an infinity survives every later multiply.
                 BinOp::Div => a.zip(b, |x, y| if y.abs() > 1e-20 { x / y } else { 0.0 }),
-                BinOp::Pow => a.zip(b, |x, y| x.max(0.0).powf(y)),
+                BinOp::Pow => a.zip(b, safe_pow),
                 BinOp::Min => a.zip(b, f32::min),
                 BinOp::Max => a.zip(b, f32::max),
-                BinOp::Modulo => a.zip(b, |x, y| if y.abs() > 1e-20 { x % y } else { 0.0 }),
+                // MaterialX's `modulo` is OSL's `mod`, which floors
+                // (`-0.2 mod 1` is `0.8`) where Rust's `%` truncates; a
+                // zero divisor returns the dividend, as OSL's does.
+                BinOp::Modulo => {
+                    a.zip(b, |x, y| if y != 0.0 { x - y * (x / y).floor() } else { x })
+                }
             }
         }
         // `bg·(1−m) + fg·m`. Written as two weighted terms rather
@@ -583,9 +597,11 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             let inv = m.map(|x| 1.0 - x);
             bg * inv + fg * m
         }
+        // `max(min(in, high), low)`, OSL's order: it only shows when
+        // `low > high`, where `low` wins.
         Op::Clamp { a, low, high } => {
             let (a, lo, hi) = (g(*a), g(*low), g(*high));
-            a.zip(lo, f32::max).zip(hi, f32::min)
+            a.zip(hi, f32::min).zip(lo, f32::max)
         }
         Op::Contrast { a, amount, pivot } => {
             let (a, amt, piv) = (g(*a), g(*amount), g(*pivot));
@@ -603,16 +619,23 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             ol + (oh - ol) * t
         }
         Op::Invert { a, amount } => g(*amount) - g(*a),
-        Op::Convert { a, arity } => g(*a).with_arity(*arity),
+        Op::Convert { a, arity } => convert(g(*a), *arity),
         Op::Extract { a, index } => Val::float(g(*a).v[(*index).min(3)]),
         Op::Combine3 { a, b, c } => Val::vec3(g(*a).x(), g(*b).x(), g(*c).x()),
-        Op::Combine2 { a, b } => Val::vec2(g(*a).x(), g(*b).x()),
-        Op::DotProduct { a, b } => Val::float(g(*a).rgb().dot(g(*b).rgb())),
-        Op::Luminance { a } => {
-            let c = g(*a).rgb();
-            Val::float(c.dot(Vec3A::new(0.2722287, 0.6740818, 0.0536895)))
+        Op::Combine2 { a, b } => combine2(g(*a), g(*b)),
+        Op::DotProduct { a, b } => dot(g(*a), g(*b)),
+        Op::Luminance { a, coeffs } => {
+            let a = g(*a);
+            let l = a.rgb().dot(g(*coeffs).rgb());
+            // `color4` keeps its alpha; `color3` is the grey `(l, l, l)`,
+            // which a `float` broadcasts to.
+            if a.arity == 4 {
+                Val::vec4(l, l, l, a.v[3])
+            } else {
+                Val::float(l)
+            }
         }
-        Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale).x(), ctx).into(),
+        Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale), ctx).into(),
         Op::ArtisticIor {
             reflectivity,
             edge,
@@ -623,15 +646,12 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         }
         Op::Smoothstep { a, low, high } => {
             let (a, lo, hi) = (g(*a), g(*low), g(*high));
-            (a - lo)
-                .zip(hi - lo, |x, d| {
-                    if d.abs() > 1e-20 {
-                        (x / d).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    }
-                })
-                .map(|t| t * t * (3.0 - 2.0 * t))
+            let n = a.arity.max(lo.arity).max(hi.arity);
+            let (a, lo, hi) = (a.broadcast_to(n), lo.broadcast_to(n), hi.broadcast_to(n));
+            Val {
+                v: [0, 1, 2, 3].map(|i| smoothstep(a.v[i], lo.v[i], hi.v[i])),
+                arity: n,
+            }
         }
         Op::HsvAdjust { a, amount } => {
             let hsv = rgb_to_hsv(g(*a).rgb());
@@ -737,6 +757,123 @@ fn hsv_to_rgb(hsv: Vec3A) -> Vec3A {
     }
 }
 
+/// MaterialX `normalize`, over the value's own lanes. A zero-length input is
+/// returned unchanged rather than divided into NaNs. A `float` broadcasts to a
+/// `vector3`, as it always did here (MaterialX has no `float` variant).
+fn normalize(a: Val) -> Val {
+    match a.arity {
+        4 => {
+            let v = glam::Vec4::from_array(a.v);
+            let n = v.length();
+            if n > 1e-20 {
+                let [x, y, z, w] = (v / n).to_array();
+                Val::vec4(x, y, z, w)
+            } else {
+                a
+            }
+        }
+        arity => {
+            // Lanes past a `vector2`'s are whatever the op that made it left
+            // there, so they are zeroed before they can enter the length.
+            let v = if arity == 2 {
+                Vec3A::new(a.v[0], a.v[1], 0.0)
+            } else {
+                a.rgb()
+            };
+            let n = v.length();
+            if n > 1e-20 {
+                let r = v / n;
+                if arity == 2 {
+                    Val::vec2(r.x, r.y)
+                } else {
+                    r.into()
+                }
+            } else {
+                a
+            }
+        }
+    }
+}
+
+/// MaterialX `dotproduct` over the operands' lanes. The `vector3` sum is
+/// glam's, as it always was; the others extend it. (A `float` operand's
+/// lanes all hold its value, so reading them broadcasts it.)
+fn dot(a: Val, b: Val) -> Val {
+    let n = a.arity.max(b.arity);
+    let lanes = |v: Val| match n {
+        // A `vector2`'s third lane is not its own; see `normalize`.
+        2 => Vec3A::new(v.v[0], v.v[1], 0.0),
+        _ => v.rgb(),
+    };
+    let d = lanes(a).dot(lanes(b));
+    Val::float(if n == 4 { d + a.v[3] * b.v[3] } else { d })
+}
+
+/// MaterialX `convert`. A `float` broadcasts. Widening a wider value fills
+/// the new lanes the way the nodedefs do — zero, except that a `color4` /
+/// `vector4` made from fewer lanes gets `1` in its last (an opaque alpha).
+/// Narrowing keeps the leading lanes; to a `float`, the first.
+fn convert(a: Val, arity: u8) -> Val {
+    let arity = arity.clamp(1, 4);
+    if a.arity == 1 {
+        return a.with_arity(arity);
+    }
+    if arity == 1 {
+        // Every lane of a `float` holds its value; see `Val::float`.
+        return Val::float(a.v[0]);
+    }
+    let mut v = a.v;
+    for (i, lane) in v.iter_mut().enumerate().skip(a.arity as usize) {
+        *lane = if i == 3 { 1.0 } else { 0.0 };
+    }
+    Val { v, arity }
+}
+
+/// MaterialX `combine2`: the lanes of `a`, then of `b`. Covers every
+/// signature — `(float, float)` → `vector2`, `(color3, float)` → `color4`,
+/// `(vector3, float)` and `(vector2, vector2)` → `vector4`.
+fn combine2(a: Val, b: Val) -> Val {
+    let mut v = [0.0; 4];
+    let (na, nb) = (a.arity as usize, b.arity as usize);
+    v[..na].copy_from_slice(&a.v[..na]);
+    let nb = nb.min(4 - na.min(4));
+    v[na..na + nb].copy_from_slice(&b.v[..nb]);
+    Val {
+        v,
+        arity: (na + nb) as u8,
+    }
+}
+
+/// OSL's `pow` (OIIO `safe_pow`), which MaterialX's `power` is: `x^0` is one,
+/// `0^y` zero, a negative base takes only integer exponents (zero otherwise),
+/// and the result is clamped finite.
+fn safe_pow(x: f32, y: f32) -> f32 {
+    if y == 0.0 {
+        return 1.0;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    if x < 0.0 && y != y.floor() {
+        return 0.0;
+    }
+    x.powf(y).clamp(-f32::MAX, f32::MAX)
+}
+
+/// OSL's `smoothstep(low, high, x)`, which MaterialX's is: zero below `low`,
+/// one from `high` up, the Hermite ramp between. With `low >= high` the first
+/// two tests decide every `x`, so no division by the empty interval happens.
+fn smoothstep(x: f32, low: f32, high: f32) -> f32 {
+    if x < low {
+        0.0
+    } else if x >= high {
+        1.0
+    } else {
+        let t = (x - low) / (high - low);
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
 /// MaterialX `normalmap`: decode `[0,1]`-encoded tangent-space vector, scale
 /// its lateral components, and rotate it into world space.
 ///
@@ -745,10 +882,16 @@ fn hsv_to_rgb(hsv: Vec3A) -> Vec3A {
 /// carries one; see crust-core's `UvMap::tangents`). Returning the
 /// geometric normal is the right degradation: a normal map's *mean* is the
 /// surface normal, so the flat surface is the map's own zero.
-fn normal_map(encoded: Val, scale: f32, ctx: &ShadeCtx) -> Vec3A {
+fn normal_map(encoded: Val, scale: Val, ctx: &ShadeCtx) -> Vec3A {
     let v = encoded.rgb() * 2.0 - Vec3A::ONE;
-    let scale = if scale.is_finite() { scale } else { 1.0 };
-    let local = Vec3A::new(v.x * scale, v.y * scale, v.z.max(1e-4));
+    // `scale` is a `float` or, per axis, a `vector2`.
+    let (sx, sy) = if scale.arity >= 2 {
+        (scale.v[0], scale.v[1])
+    } else {
+        (scale.x(), scale.x())
+    };
+    let finite = |s: f32| if s.is_finite() { s } else { 1.0 };
+    let local = Vec3A::new(v.x * finite(sx), v.y * finite(sy), v.z.max(1e-4));
     perturb_normal(local, ctx.normal, ctx.tangent)
 }
 
@@ -794,9 +937,13 @@ fn artistic_ior(reflectivity: Vec3A, edge: Vec3A) -> (Vec3A, Vec3A) {
     let rs = Vec3A::new(r.x.sqrt(), r.y.sqrt(), r.z.sqrt());
     let n_min = (Vec3A::ONE - r) / (Vec3A::ONE + r);
     let n_max = (Vec3A::ONE + rs) / (Vec3A::ONE - rs).max(Vec3A::splat(1e-6));
-    // GLSL `mix(n_max, n_min, edge)`: an edge colour of white — the default —
-    // selects `n_min`.
-    let n = n_max + (n_min - n_max) * edge.clamp(Vec3A::ZERO, Vec3A::ONE);
+    // OSL's `mix(n_max, n_min, edge)`, as `x·(1 − t) + y·t`: an edge colour
+    // of white — the default — selects `n_min` exactly, where `x + (y − x)·t`
+    // would leave `n_max`'s rounding in it (n_max is ~70 for a bright metal).
+    // Clamped, unlike the reference: an edge tint outside [0, 1] extrapolates
+    // the IOR to nonsense, down to negative values.
+    let e = edge.clamp(Vec3A::ZERO, Vec3A::ONE);
+    let n = n_max * (Vec3A::ONE - e) + n_min * e;
     let np1 = n + Vec3A::ONE;
     let nm1 = n - Vec3A::ONE;
     let k2 =
@@ -819,6 +966,9 @@ pub fn reflectivity_from_ior(n: Vec3A, k: Vec3A) -> Vec3A {
 // ---------------------------------------------------------------------------
 // Compilation
 // ---------------------------------------------------------------------------
+
+/// `luminance`'s default `lumacoeffs`: ACEScg's (AP1) weights.
+const AP1_LUMA_COEFFS: Val = Val::vec3(0.2722287, 0.6740818, 0.0536895);
 
 /// Turns named `.mtlx` nodes into a topologically ordered [`Program`].
 pub struct Compiler<'a> {
@@ -870,6 +1020,13 @@ impl<'a> Compiler<'a> {
 
     pub fn constant(&mut self, v: Val) -> u32 {
         self.emit(Op::Const(v))
+    }
+
+    /// `luminance` at the nodedef's default `lumacoeffs`, ACEScg's (AP1) —
+    /// what the stdlib nodegraphs' unauthored `luminance` / `saturate` read.
+    pub fn luminance(&mut self, a: u32) -> u32 {
+        let coeffs = self.constant(AP1_LUMA_COEFFS);
+        self.emit(Op::Luminance { a, coeffs })
     }
 
     /// The value of `slot` when it is a compile-time constant — a literal, or
@@ -1001,14 +1158,19 @@ impl<'a> Compiler<'a> {
             "position" => self.emit(Op::Position),
             "add" => bin(self, BinOp::Add, Val::ZERO, Val::ZERO),
             "subtract" => bin(self, BinOp::Sub, Val::ZERO, Val::ZERO),
-            "multiply" => bin(self, BinOp::Mul, Val::ONE, Val::ONE),
-            "divide" => bin(self, BinOp::Div, Val::ONE, Val::ONE),
-            "power" => bin(self, BinOp::Pow, Val::ONE, Val::ONE),
+            // The unauthored defaults are the nodedefs': `in1` is zero and
+            // `in2` one for every operator whose identity is one.
+            "multiply" => bin(self, BinOp::Mul, Val::ZERO, Val::ONE),
+            "divide" => bin(self, BinOp::Div, Val::ZERO, Val::ONE),
+            "power" => bin(self, BinOp::Pow, Val::ZERO, Val::ONE),
             "min" => bin(self, BinOp::Min, Val::ZERO, Val::ZERO),
             "max" => bin(self, BinOp::Max, Val::ZERO, Val::ZERO),
-            "modulo" => bin(self, BinOp::Modulo, Val::ONE, Val::ONE),
+            "modulo" => bin(self, BinOp::Modulo, Val::ZERO, Val::ONE),
             "absval" => un(self, UnOp::Abs),
-            "ln" => un(self, UnOp::Ln),
+            "ln" => {
+                let a = self.input_or(node, "in", Val::ONE);
+                self.emit(Op::Unary { op: UnOp::Ln, a })
+            }
             "exp" => un(self, UnOp::Exp),
             "sin" => un(self, UnOp::Sin),
             "cos" => un(self, UnOp::Cos),
@@ -1021,7 +1183,9 @@ impl<'a> Compiler<'a> {
             "normalize" => un(self, UnOp::Normalize),
             "luminance" => {
                 let a = self.input_or(node, "in", Val::ZERO);
-                self.emit(Op::Luminance { a })
+                // The nodedef's default: ACEScg's (AP1) coefficients.
+                let coeffs = self.input_or(node, "lumacoeffs", AP1_LUMA_COEFFS);
+                self.emit(Op::Luminance { a, coeffs })
             }
             "dotproduct" => {
                 let a = self.input_or(node, "in1", Val::ZERO);
@@ -1087,8 +1251,23 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Extract { a, index })
             }
             "combine2" => {
+                // The signature fixes each operand's width — `(float, float)`
+                // → `vector2`, `(color3, float)` → `color4`, and for a
+                // `vector4` `(vector3, float)` or `(vector2, vector2)`, told
+                // apart by whichever input declares its type. Each operand is
+                // converted to its width first, so the concatenation is exact
+                // whatever produced it (an unauthored `in1` is a zero `float`,
+                // which must still fill three lanes of a `color4`).
+                let declared = |n: &str| node.input(n).map(|i| arity_of(&i.type_name));
+                let (na, nb) = match arity {
+                    4 if declared("in1") == Some(2) || declared("in2") == Some(2) => (2, 2),
+                    4 => (3, 1),
+                    _ => (1, 1),
+                };
                 let a = self.input_or(node, "in1", Val::ZERO);
+                let a = self.emit(Op::Convert { a, arity: na });
                 let b = self.input_or(node, "in2", Val::ZERO);
+                let b = self.emit(Op::Convert { a: b, arity: nb });
                 self.emit(Op::Combine2 { a, b })
             }
             "combine3" => {
@@ -1103,7 +1282,8 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::NormalMap { a, scale })
             }
             "artistic_ior" => {
-                let reflectivity = self.input_or(node, "reflectivity", Val::vec3(0.94, 0.78, 0.37));
+                let reflectivity =
+                    self.input_or(node, "reflectivity", Val::vec3(0.944, 0.776, 0.373));
                 let edge = self.input_or(node, "edge_color", Val::vec3(0.998, 0.981, 0.751));
                 self.emit(Op::ArtisticIor {
                     reflectivity,
@@ -1196,7 +1376,7 @@ impl<'a> Compiler<'a> {
         }
         if let Some(sat) = param(self, "saturation", 1.0) {
             // `saturate`: mix from the luminance grey toward the colour.
-            let grey = self.emit(Op::Luminance { a: c });
+            let grey = self.luminance(c);
             c = self.emit(Op::Mix {
                 fg: c,
                 bg: grey,

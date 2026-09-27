@@ -54,6 +54,8 @@ scripts/check_images.sh record <dir>                # golden EXRs at 16 spp
 scripts/check_images.sh check  <dir>                # re-render and diff; non-zero exit on any change
 scripts/bench_ab.sh -a <binA> -b <binB> [scenes...] # interleaved A/B of two binaries
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change? (+ relmse)
+cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs MaterialX's own OSL implementation
+scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 
 # CI (toolchain pinned, RUSTFLAGS=-D warnings), three parallel jobs:
 cargo fmt --all -- --check
