@@ -130,10 +130,13 @@ Schema mapping:
   kernel-resident memory scaling exactly ×4 per level (34.67 MiB at level 1 → 2.17 GiB
   at level 4). The whole-process peak is **not** opensubdiv: at level 4 traversal peaks
   at 1.16 GiB while the SBVH build over the baked result peaks at 2.19 GiB — the
-  pre-existing build transient (see "Known incomplete work"), which subdivision merely
+  pre-existing build transient (see "Known gaps: geometry and acceleration" in
+  `openspec/specs/intersection-kernel/design.md`), which subdivision merely
   feeds 4^L× more triangles.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
-  directly, `cubic` (bezier | bspline | catmullRom) flattened at 8 samples per span; widths
+  directly, `cubic` (bezier | bspline | catmullRom) as one `CubicCurveSegment` per span,
+  converted to Bézier control points and subdivided per ray query by the kernel's cubic
+  intersector rather than flattened; widths
   (USD diameters) resolve per-vertex / per-curve / constant by array length.
 - **Instancing** — both USD mechanisms reduce to the same thing, and share one code path
   (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
@@ -317,7 +320,10 @@ thing that made the island possible.)
 `CRUST_PTEX_STREAM_MIPSPACE=file`** — every island `.ptx` is mipmapped, so the default
 policy declines them all and the switch alone reproduces the preloaded column exactly;
 see `docs/ptex_streaming.md`).
-Measured at 640x360 / 8 spp against the same build preloading: Ptex residency **5.98 ->
+Measured at 640x360 / 8 spp against the same build preloading, one sequential run
+each rather than an interleaved `bench_ab.sh` A/B — the memory and residency figures
+are deterministic, but treat the timings as indicative (the `Render` +1.2% is within
+noise, and the decode and load deltas are large enough to survive it): Ptex residency **5.98 ->
 0.61 GiB** (39 textures streamed, 3 579 preloaded under the size threshold), Ptex decode
 **84.8 s -> 14.0 s** so `Load assets` falls 01:40.7 -> 27.3 s, `Traverse prims` RSS
 **47.34 -> 41.48 GiB**, peak RSS **51.28 -> 47.08 GiB**, and `Render` costs **+1.2%** —
@@ -349,8 +355,10 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   live outside the surface BVH by design and cannot ride an instance transform.
   `PointInstancer`
   `velocities` / `accelerations` / `angularVelocities` are ignored, so vectorized instances
-  do not motion-blur (`crust:motion:translate` still works on ordinary prims), and all
-  per-instance arrays are read at the default time sample. Top-level `UsdGeomSphere` prims
+  do not motion-blur (`crust:motion:translate` still works on ordinary prims). The
+  per-instance arrays themselves (`protoIndices`, `positions`, `orientations`,
+  `scales`, `ids`, `invisibleIds`) are evaluated at the requested frame like every
+  other attribute, so an animated instancer does move between frames. Top-level `UsdGeomSphere` prims
   still bake their centre into world space and so ignore scale; spheres *inside* a
   prototype go through the instanced path and scale correctly.
 
@@ -410,9 +418,11 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
   ~3:00 to parse (see "Where import time goes"), 33.2 GiB peak, and 3:20 to render at
   the importer defaults (640x360, 128 spp). **`docs/alab_profile.md` is the
   `--profile` of that render**: streamed texture lookups take 89% of render thread
-  time, and the cause is contention, not work. A shared counter is bumped on every
-  lookup, and the 2-slot microcache misses 25% once a material interleaves ~5
-  textures. So 72 threads render only ~1.25x faster than 8. The earlier "~38 s at
+  time, and the cause was contention, not work. A shared counter was bumped on every
+  lookup, and the 2-slot microcache missed 25% once a material interleaved ~5
+  textures, so 72 threads rendered an estimated ~1.25x faster than 8 (extrapolated
+  from two `--profile` runs at different spp, not a `bench_ab.sh` A/B). Both causes
+  are fixed since; see "Streaming textures" in `openspec/specs/textures/design.md`. The earlier "~38 s at
   1280x720 / 64 spp" figure predates textured materials. Two download facts come
   first. The **Asset Structure** package ships every
   geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte

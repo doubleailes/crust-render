@@ -15,7 +15,8 @@ island loadable at all, at the price of discarding authored detail permanently
 and of still being unable to help a scene that binds more than fits.
 
 The UV path answered this a while ago with `.tx` tile streaming. Ptex could
-not, and "Known incomplete work" was specific about why and about where the
+not, and "Known incomplete work" (now "Known gaps: texture residency" in
+`openspec/specs/textures/design.md`) was specific about why and about where the
 fix belonged:
 
 > That is a limitation of the *reader*, not of crust: a `.ptx` is already a
@@ -144,7 +145,8 @@ it is reversible in one environment variable. It is not the end state. The fix
 that would need neither refusal nor opt-in is to build the linear chain from
 streamed base tiles, and the reason it is not here is structural rather than
 hard: it needs a pyramid cache of crust's own, which is exactly the design
-"Known incomplete work" ruled out, and it would read level 0 to answer a
+"Known gaps: texture residency" (`openspec/specs/textures/design.md`) rules
+out, and it would read level 0 to answer a
 coarse-level lookup — defeating streaming precisely where the island uses it.
 The honest place for it is upstream, beside the tile cache: a reader that
 reduces in a declared working space would let both backends share one chain,
@@ -496,9 +498,10 @@ and the rendered one cannot be checked against different bytes.
   reader that reduces in a declared working space, upstream beside the tile
   cache — see the section above for why building it here would mean a second
   pyramid cache and a level-0 read per coarse lookup.
-- **Ptex is 8-bit through both backends** (`PtexColor` and `PtexStream` both
-  decode to `f32` but the island's files are `u8`), so an HDR `.ptx` gains
-  nothing here — the same gap the `.tx` EXR backing closed for UV textures.
+- **Ptex has no per-texture colour space.** Both backends decode `half` and
+  `float` samples at full range, but both apply the display decode `powf(2.2)`
+  to every `.ptx`, so a linear HDR `.ptx` is mis-decoded; the island's files
+  are `u8` colour, which is what the decode was written for.
 - **No single-flight on a miss**, inherited from the reader: two workers can
   decode the same tile at once. Bounded by the thread count.
 - **No cross-face filtering**, unchanged from preloading — see the filtering

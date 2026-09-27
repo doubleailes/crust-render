@@ -89,7 +89,8 @@ cargo run --release -p crust-render --example mtlx_shade -- \
 # It goes through `FileAssets`, not just `UvTexture`, so `CRUST_TEX_STREAM` is
 # honoured and the `emission` column shows the range an HDR texture actually
 # carries -- a preloaded texel clips to 1.0 and a streamed one does not. This
-# is the A/B for MaterialX emission (see "Known incomplete work"):
+# is the A/B for MaterialX emission (see "Known gaps: HDR texture range" in
+# openspec/specs/textures/design.md):
 cargo run --release -p crust-render --example maketx -- \
     samples/textures/mtlx_emission.hdr raw
 # Once the .tx exists it is streamed by default, so the preloaded side of the
@@ -115,7 +116,8 @@ cargo run --release -p crust-render --example ptex_verify -- model.usd /mesh/pri
 cargo run --release -p crust-render --example ptex_seams -- color.ptx
 
 # openusd composition probes. Each was written to pin down a bug that is now
-# fixed upstream (see docs/issues/ and "Known incomplete work"); keep them as the
+# fixed upstream (see docs/issues/ and "Known gaps: openusd bugs and workarounds" in
+# openspec/specs/usd-scene-import/design.md); keep them as the
 # regression check to run when bumping openusd.
 cargo run --release -p crust-render --example proto_probe -- stage.usda [/prim]   # prototypes
 cargo run --release -p crust-render --example rel_probe   -- stage.usda [relName] # rel targets
@@ -160,10 +162,11 @@ CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
 #       takes the file's chain (darker under minification, up to 0.147 on the
 #       tiled fixture) and the residency that comes with it.
 # `--stats` says `backend` either way, and names the variable that declined.
-CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
+# Both sides at -s 16, per "Measuring a change" in CLAUDE.md.
+CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr -s 16
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+    cargo run --release -- -i samples/ptex_quads.usda -o b.exr -s 16
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
 # The configuration that streams under the *default* policy: no pyramid, so no
 # chain to reduce in the wrong space. Exact and uncapped, at the cost of the
