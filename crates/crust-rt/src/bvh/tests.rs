@@ -345,6 +345,20 @@ fn collapse_widens_the_tree() {
     );
 }
 
+/// The finished tree's tables live as long as the scene, and the memory
+/// footprint counts their capacity, so none of them may keep slack: the
+/// node vector used to reserve one wide node per binary leaf, three times
+/// what a 4-wide tree uses and seven times an 8-wide one.
+#[test]
+fn collapsed_tables_hold_no_spare_capacity() {
+    for bvh in [Bvh::new(sphere_grid(6)), Bvh::new(diagonal_shards(40))] {
+        assert_eq!(bvh.wide.capacity(), bvh.wide.len());
+        assert_eq!(bvh.leaves.capacity(), bvh.leaves.len());
+        assert_eq!(bvh.packets.capacity(), bvh.packets.len());
+        assert_eq!(bvh.indices.capacity(), bvh.indices.len());
+    }
+}
+
 #[test]
 fn empty_bvh_misses() {
     let bvh = Bvh::new(Vec::new());

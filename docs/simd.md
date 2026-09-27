@@ -388,7 +388,7 @@ single-threaded, three interleaved rounds per binary, same nightly and
 | --- | --- | --- |
 | soup nodes / leaves | 236.8 / 41.2 | 146.5 / 41.3 |
 | inst_field top-level nodes / instanced nodes | 75.3 / 27.6 | 52.2 / 24.1 |
-| kernel memory, soup / inst_field | 2 141 / 902 MiB | 2 474 / 1 054 MiB |
+| kernel memory, soup / inst_field | 1 681 / 807 MiB | 1 735 / 810 MiB |
 
 The soup is ~25 µs a ray at ~140 ns a node: latency-bound. There a 38%
 cut in node visits is worth more than the extra cache lines per visit,
@@ -396,9 +396,14 @@ and BVH8 wins by 18–25%. The instance field splits the same way inside
 one scene: its top level (out of cache) visits 31% fewer nodes, but most
 of the time is spent descending prototypes whose trees fit in cache,
 which is the regime the small scenes measured, so the net is a 5–9% loss.
-The 8-wide nodes also cost 15–17% more kernel memory: their lanes are
-less full, because the collapse runs out of internal children to expand
-before it fills eight.
+The 8-wide nodes cost 3% more kernel memory on the soup and 0.4% on the
+field (fewer nodes, each twice the size, with less-full lanes). The first
+measurement said 15–17%, but that came from `collapse()` reserving one wide
+node per binary leaf. That is three times what a 4-wide tree needs and
+seven times an 8-wide one, and the footprint counts capacity. Trimming it
+took **21% off the default BVH4's kernel memory** on the soup (2 141 →
+1 681 MiB) and 11% on the field (902 → 807 MiB); the timings above are
+unaffected, since only unused capacity changed.
 
 **Verdict.** The width wants to be chosen **per tree**, by size: 8-wide
 for a tree too large for cache (a baked top level, the island's
