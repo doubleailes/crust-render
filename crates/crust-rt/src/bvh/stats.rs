@@ -70,7 +70,49 @@ pub fn read_level(level: usize) -> (u64, u64, u64, u64, u64) {
     )
 }
 
+type DescentMap = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, u64>>>;
+
+/// Every thread's descent map, so [`top_level_descents`] can merge them.
+static DESCENT_MAPS: std::sync::Mutex<Vec<DescentMap>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    /// Descents into each *top-level* instance, by `geom_id`, on this
+    /// thread. Per thread (the mutex is only ever contended by the final
+    /// merge) because a scene whose top level will not cull descends
+    /// tens of thousands of times per ray.
+    static DESCENTS: DescentMap = {
+        let m = DescentMap::default();
+        DESCENT_MAPS.lock().unwrap().push(m.clone());
+        m
+    };
+}
+
+/// Record a descent into the instance `geom_id`, if it is a top-level
+/// one. Call before [`enter_instance`].
+#[inline]
+pub fn note_descent(geom_id: u32) {
+    if slot() == 0 {
+        DESCENTS.with(|m| *m.lock().unwrap().entry(geom_id).or_insert(0) += 1);
+    }
+}
+
+/// Descents per top-level instance over every thread, most first.
+pub fn top_level_descents() -> Vec<(u32, u64)> {
+    let mut all = std::collections::HashMap::<u32, u64>::new();
+    for m in DESCENT_MAPS.lock().unwrap().iter() {
+        for (&k, &v) in m.lock().unwrap().iter() {
+            *all.entry(k).or_insert(0) += v;
+        }
+    }
+    let mut v: Vec<_> = all.into_iter().collect();
+    v.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    v
+}
+
 pub fn reset() {
+    for m in DESCENT_MAPS.lock().unwrap().iter() {
+        m.lock().unwrap().clear();
+    }
     for c in [
         &QUERIES,
         &NODES_VISITED,

@@ -17,7 +17,12 @@
   structure; `Scene::intersect`/`Scene::occluded` mirror `rtcIntersect1`/`rtcOccluded1`.
   Hits are plain `Copy` `RayHit`s carrying `geom_id`/`prim_id` — the kernel never sees
   materials. Instanced hits report the *instance's* top-level `geom_id` with the inner
-  `prim_id`. Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
+  `prim_id`, unless the instance carries an `InstanceHitId` label (`attach_labelled`):
+  `As(id)` reports a fixed id, `Offset(base)` adds `base` to the inner hit's id. That is
+  the one-id version of Embree's `instID[]` stack. It lets a host place a prototype of
+  many parts as one instance and still tell the parts apart. The importer relies on it
+  (`docs/moana_profile.md`). The offset sits in `InstancePrim`'s alignment padding (pinned
+  at 240 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
   parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
   glam + rayon; deliberately swappable for Embree bindings behind the same seam.
 

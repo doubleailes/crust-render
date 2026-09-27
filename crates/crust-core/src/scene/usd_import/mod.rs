@@ -697,6 +697,10 @@ struct ImportCaches<'a> {
     /// `(epoch, prototype path)` → its parts, for both instancing
     /// mechanisms. See [`ImportCaches::epoch`] for the epoch.
     protos: HashMap<(u32, String), Arc<Vec<ProtoPart>>>,
+    /// The same prototypes as one [`ProtoPart`] each (see
+    /// `instancing::group_parts`), `None` for one with no geometry. Same keys
+    /// as `protos`.
+    groups: HashMap<(u32, String), Option<ProtoPart>>,
     /// Which stage the entries above came from.
     ///
     /// Prototype paths (`/__Prototype_N`) are numbered per composition, so
@@ -738,6 +742,7 @@ impl<'a> ImportCaches<'a> {
             materials: MaterialCache::default(),
             meshes: MeshArena::default(),
             protos: HashMap::new(),
+            groups: HashMap::new(),
             epoch: 0,
             assets,
             stage_path,

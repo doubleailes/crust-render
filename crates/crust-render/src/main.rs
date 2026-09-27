@@ -595,6 +595,66 @@ fn main() {
                 per(scalars),
             );
         }
+        // Which top-level instances the descents went into. A top level that
+        // culls well spreads them thinly; one that does not concentrates them
+        // on whatever geometry every ray's path overlaps. The importer's
+        // DEBUG lines give each instancer's `geom ids a..b` range, which is
+        // how an id here is traced back to a prim.
+        let descents = ts::top_level_descents();
+        let total: u64 = descents.iter().map(|d| d.1).sum();
+        if total > 0 {
+            let mut acc = 0u64;
+            let mut marks = vec![];
+            for (i, d) in descents.iter().enumerate() {
+                acc += d.1;
+                for f in [0.5, 0.9, 0.99] {
+                    if (acc as f64) >= f * total as f64 && !marks.iter().any(|&(g, _)| g == f) {
+                        marks.push((f, i + 1));
+                    }
+                }
+            }
+            let _ = write!(
+                out,
+                "\n  top-level instances entered: {} of them, {:.1} descents per camera ray",
+                descents.len(),
+                per(total)
+            );
+            for (f, n) in marks {
+                let _ = write!(
+                    out,
+                    "\n    {:.0}% of descents go to {n} instances",
+                    f * 100.0
+                );
+            }
+            let top: Vec<_> = descents.iter().take(40).collect();
+            let ids: std::collections::HashSet<u32> = top.iter().map(|d| d.0).collect();
+            let info: std::collections::HashMap<u32, _> = renderer
+                .world
+                .describe_instances(&ids)
+                .into_iter()
+                .map(|(id, b, n, shared)| (id, (b, n, shared)))
+                .collect();
+            let _ = write!(
+                out,
+                "\n  {:>9} {:>7} {:>9} {:>8} {:>9}  bounds",
+                "geom_id", "share", "per ray", "prims", "shared by"
+            );
+            for &&(id, n) in &top {
+                let (b, prims, shared) = info[&id];
+                let _ = write!(
+                    out,
+                    "\n  {id:>9} {:>6.2}% {:>9.2} {prims:>8} {shared:>9}  [{:.0} {:.0} {:.0}]..[{:.0} {:.0} {:.0}]",
+                    100.0 * n as f64 / total as f64,
+                    per(n),
+                    b.minimum.x,
+                    b.minimum.y,
+                    b.minimum.z,
+                    b.maximum.x,
+                    b.maximum.y,
+                    b.maximum.z,
+                );
+            }
+        }
         info!(target: STATS_TARGET, "{out}");
     }
 
