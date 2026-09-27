@@ -21,7 +21,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crust_rt::{Geometry, InstanceHitId, Scene as RtScene, SceneBuilder as RtSceneBuilder};
+use crust_rt::{
+    Geometry, InstanceHitId, RayMask, Scene as RtScene, SceneBuilder as RtSceneBuilder,
+};
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
@@ -89,7 +91,7 @@ pub(super) struct ProtoPart {
     /// Prototype-root-relative placement. An instance's world transform is
     /// composed onto the left of this.
     pub(super) local: GMat4,
-    pub(super) mask: u32,
+    pub(super) mask: RayMask,
     pub(super) slots: Arc<[PartSlot]>,
 }
 
@@ -98,7 +100,7 @@ impl ProtoPart {
     fn leaf(
         scene: Arc<RtScene>,
         local: GMat4,
-        mask: u32,
+        mask: RayMask,
         material: Arc<dyn Material>,
         faces: Option<Arc<FaceMap>>,
         uvs: Option<Arc<UvMap>>,
@@ -367,7 +369,7 @@ fn nested_instancer_parts(
     prim: &Prim,
     instancer: &PointInstancer,
     local: GMat4,
-    mask: u32,
+    mask: RayMask,
     caches: &mut ImportCaches<'_>,
     depth: usize,
 ) -> Vec<ProtoPart> {
@@ -456,7 +458,7 @@ fn group_parts(parts: &[ProtoPart]) -> Option<ProtoPart> {
     let mut b = RtSceneBuilder::new();
     b.reserve(parts.len());
     let mut slots: Vec<PartSlot> = Vec::new();
-    let mut mask = 0;
+    let mut mask = RayMask::NONE;
     for part in parts {
         if part.local.determinant().abs() < 1e-12 {
             continue;

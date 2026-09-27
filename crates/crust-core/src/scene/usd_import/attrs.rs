@@ -7,7 +7,7 @@ use openusd::sdf;
 use openusd::usd::Prim;
 use tracing::warn;
 
-use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
+use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
 
 use super::time::eval_time;
 
@@ -18,9 +18,9 @@ use super::time::eval_time;
 /// `crust:rayMask` — which ray categories see this geometry (bit 0 camera,
 /// bit 1 shadow, bit 2 indirect; default: all). E.g. `crust:rayMask = 6`
 /// makes a light-blocker invisible to the camera.
-pub(super) fn prim_ray_mask(prim: &Prim) -> u32 {
+pub(super) fn prim_ray_mask(prim: &Prim) -> RayMask {
     custom_i32(prim, "crust:rayMask")
-        .map(|m| m as u32)
+        .map(|m| RayMask(m as u32))
         .unwrap_or(MASK_ALL)
 }
 
@@ -30,12 +30,12 @@ pub(super) fn prim_ray_mask(prim: &Prim) -> u32 {
 /// it, so occlusion and the bounce side of MIS are unchanged.
 /// `crust:light:cameraVisible = true` opts the surface back in (classic
 /// Cornell-box look); an authored `crust:rayMask` wins outright.
-pub(super) fn light_ray_mask(prim: &Prim) -> u32 {
+pub(super) fn light_ray_mask(prim: &Prim) -> RayMask {
     if let Some(m) = custom_i32(prim, "crust:rayMask") {
-        return m as u32;
+        return RayMask(m as u32);
     }
     let visible = custom_bool(prim, "crust:light:cameraVisible").unwrap_or(false);
-    MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { 0 }
+    MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { RayMask::NONE }
 }
 
 /// `crust:motion:translate` — a world-space translation the prim moves

@@ -7,7 +7,7 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, SceneBuilder};
+use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
 use glam::Vec3A;
 use std::sync::Arc;
 
@@ -412,7 +412,7 @@ impl WorldBuilder {
         &mut self,
         geometry: Geometry,
         material: Arc<dyn Material>,
-        mask: u32,
+        mask: RayMask,
     ) -> u32 {
         self.attach_labelled(geometry, material, mask, InstanceHitId::Own)
     }
@@ -426,7 +426,7 @@ impl WorldBuilder {
         &mut self,
         geometry: Geometry,
         material: Arc<dyn Material>,
-        mask: u32,
+        mask: RayMask,
         label: InstanceHitId,
     ) -> u32 {
         let id = self.rt.attach_labelled(geometry, mask, label);
@@ -501,7 +501,7 @@ impl WorldBuilder {
     ///
     /// A slot never filled in commits to zero primitives: harmless, just
     /// invisible.
-    pub fn reserve_slot(&mut self, material: Arc<dyn Material>, mask: u32) -> u32 {
+    pub fn reserve_slot(&mut self, material: Arc<dyn Material>, mask: RayMask) -> u32 {
         self.attach_masked(SceneBuilder::empty_geometry(), material, mask)
     }
 

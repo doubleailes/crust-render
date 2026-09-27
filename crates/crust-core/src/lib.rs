@@ -76,7 +76,7 @@ pub use lux::{
 pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};
-pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone};
+pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask};
 pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets, UsdImportOptions};

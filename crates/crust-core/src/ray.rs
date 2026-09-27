@@ -1,7 +1,7 @@
 use crate::medium::Medium;
 use glam::Vec3A;
 
-pub use crust_rt::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW};
+pub use crust_rt::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
 
 /// The ray's texture-filtering footprint, as a cone about its axis.
 ///
@@ -104,7 +104,7 @@ impl Ray {
 
     /// Same ray with the visibility mask replaced.
     #[must_use = "returns a new ray; the original is unchanged"]
-    pub fn with_mask(mut self, mask: u32) -> Ray {
+    pub fn with_mask(mut self, mask: RayMask) -> Ray {
         self.rt.mask = mask;
         self
     }
@@ -141,7 +141,7 @@ impl Ray {
         self.rt.time
     }
 
-    pub fn mask(&self) -> u32 {
+    pub fn mask(&self) -> RayMask {
         self.rt.mask
     }
 

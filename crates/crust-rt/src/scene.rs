@@ -8,7 +8,7 @@ use crate::prim::{
     CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, PrimHit,
     PrimNode, SpherePrim, TrianglePrim, transformed_aabb,
 };
-use crate::ray::{MASK_ALL, Ray};
+use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
 
@@ -188,7 +188,7 @@ pub enum InstanceHitId {
 /// [`SceneBuilder::commit`] (Embree's `rtcCommitScene`).
 #[derive(Default)]
 pub struct SceneBuilder {
-    geoms: Vec<(Geometry, u32, InstanceHitId)>,
+    geoms: Vec<(Geometry, RayMask, InstanceHitId)>,
 }
 
 impl SceneBuilder {
@@ -203,7 +203,7 @@ impl SceneBuilder {
     }
 
     /// Attaches a geometry visible only to ray categories in `mask`.
-    pub fn attach_masked(&mut self, geometry: Geometry, mask: u32) -> u32 {
+    pub fn attach_masked(&mut self, geometry: Geometry, mask: RayMask) -> u32 {
         self.attach_labelled(geometry, mask, InstanceHitId::Own)
     }
 
@@ -214,7 +214,12 @@ impl SceneBuilder {
     /// # Panics
     /// If `label` is not [`InstanceHitId::Own`] and `geometry` is not an
     /// instance — only an instance has inner hits to relabel.
-    pub fn attach_labelled(&mut self, geometry: Geometry, mask: u32, label: InstanceHitId) -> u32 {
+    pub fn attach_labelled(
+        &mut self,
+        geometry: Geometry,
+        mask: RayMask,
+        label: InstanceHitId,
+    ) -> u32 {
         assert!(
             label == InstanceHitId::Own || matches!(geometry, Geometry::Instance { .. }),
             "only an instance can relabel its hits"

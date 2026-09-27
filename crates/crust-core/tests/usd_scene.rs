@@ -413,7 +413,7 @@ fn light_geometry_camera_visibility() {
     // (x, 5, 0) meets its top at t = 2.5 and the floor at t = 5.
     let down =
         |x: f32| crust_core::Ray::new(crust_core::Vec3A::new(x, 5.0, 0.0), -crust_core::Vec3A::Y);
-    let hit_t = |x: f32, mask: u32| {
+    let hit_t = |x: f32, mask: crust_core::RayMask| {
         scene
             .world
             .intersect(&down(x).with_mask(mask), 0.001, f32::INFINITY)
