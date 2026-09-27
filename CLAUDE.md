@@ -2235,9 +2235,16 @@ textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 G
 - **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
   (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
-  imports and animates under `-f`: 14 893 geometries, 12.9 M triangles plus 9.4 M cubic
-  fur spans, 37 lights, ~2:45 to parse (see "Where import time goes"), ~30.5 GiB peak, ~38 s to render 1280x720 at
-  64 spp. Two download facts come first. The **Asset Structure** package ships every
+  imports and animates under `-f`. Frame 1004, measured 2026-09-27: 13 302 geometries,
+  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 47 lights,
+  ~3:00 to parse (see "Where import time goes"), 33.2 GiB peak, and 3:20 to render at
+  the importer defaults (640x360, 128 spp). **`docs/alab_profile.md` is the
+  `--profile` of that render**: streamed texture lookups take 89% of render thread
+  time, and the cause is contention, not work. A shared counter is bumped on every
+  lookup, and the 2-slot microcache misses 25% once a material interleaves ~5
+  textures. So 72 threads render only ~1.25x faster than 8. The earlier "~38 s at
+  1280x720 / 64 spp" figure predates textured materials. Two download facts come
+  first. The **Asset Structure** package ships every
   geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte
   placeholder layer. Without **techvar assets** merged *over* that tree, the stage
   composes to just the fur, at its rig origin. Nothing fails; every placeholder
