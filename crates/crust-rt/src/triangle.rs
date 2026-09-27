@@ -16,14 +16,54 @@ use crate::aabb::AABB;
 use crate::ray::Ray;
 use glam::{Vec3A, Vec4};
 
+/// One coordinate axis, as the Woop permutation names them.
+///
+/// An enum rather than a `usize` so every per-axis access is provably in
+/// range: `a[axis as usize]` on a `[T; 3]` compiles with no bounds check,
+/// because the discriminant can only be 0, 1 or 2, where a runtime `usize`
+/// index carried three checks into every packet test, and the scalar path's
+/// `Vec3A` index went through glam's panicking `match`. The same loads, in
+/// the same order, so both paths stay bit-identical.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Axis {
+    X = 0,
+    Y = 1,
+    Z = 2,
+}
+
+impl Axis {
+    /// The next axis cyclically: X → Y → Z → X.
+    #[inline(always)]
+    fn next(self) -> Axis {
+        match self {
+            Axis::X => Axis::Y,
+            Axis::Y => Axis::Z,
+            Axis::Z => Axis::X,
+        }
+    }
+
+    /// This axis's element of a per-axis triple.
+    #[inline(always)]
+    fn of<T: Copy>(self, a: &[T; 3]) -> T {
+        a[self as usize]
+    }
+
+    /// This axis's component of `v`.
+    #[inline(always)]
+    fn of_vec(self, v: Vec3A) -> f32 {
+        self.of(v.as_ref())
+    }
+}
+
 /// The per-ray constants of the Woop transform: which axis permutation
 /// sends the ray direction to +Z, and the shear that straightens it.
 /// Shared by every triangle a ray is tested against, so the BVH builds one
 /// per traversal and hands it to each leaf packet.
 pub(crate) struct RayShear {
-    kx: usize,
-    ky: usize,
-    kz: usize,
+    kx: Axis,
+    ky: Axis,
+    kz: Axis,
     sx: f32,
     sy: f32,
     sz: f32,
@@ -45,22 +85,23 @@ impl RayShear {
         // d.z < 0 so the winding (and edge-function signs) are preserved.
         let ad = d.abs();
         let kz = if ad.x > ad.y {
-            if ad.x > ad.z { 0 } else { 2 }
+            if ad.x > ad.z { Axis::X } else { Axis::Z }
         } else if ad.y > ad.z {
-            1
+            Axis::Y
         } else {
-            2
+            Axis::Z
         };
-        let mut kx = (kz + 1) % 3;
-        let mut ky = (kz + 2) % 3;
-        if d[kz] < 0.0 {
+        let mut kx = kz.next();
+        let mut ky = kx.next();
+        let dz = kz.of_vec(d);
+        if dz < 0.0 {
             std::mem::swap(&mut kx, &mut ky);
         }
 
         // Shear constants mapping the ray direction onto +Z.
-        let sx = d[kx] / d[kz];
-        let sy = d[ky] / d[kz];
-        let sz = 1.0 / d[kz];
+        let sx = kx.of_vec(d) / dz;
+        let sy = ky.of_vec(d) / dz;
+        let sz = 1.0 / dz;
 
         let o = ray.origin;
         RayShear {
@@ -70,9 +111,9 @@ impl RayShear {
             sx,
             sy,
             sz,
-            okx: Vec4::splat(o[kx]),
-            oky: Vec4::splat(o[ky]),
-            okz: Vec4::splat(o[kz]),
+            okx: Vec4::splat(kx.of_vec(o)),
+            oky: Vec4::splat(ky.of_vec(o)),
+            okz: Vec4::splat(kz.of_vec(o)),
             sx4: Vec4::splat(sx),
             sy4: Vec4::splat(sy),
             sz4: Vec4::splat(sz),
@@ -123,12 +164,12 @@ pub(crate) fn triangle_intersect_sheared(
     let a = v0 - origin;
     let b = v1 - origin;
     let c = v2 - origin;
-    let ax = a[kx] - sx * a[kz];
-    let ay = a[ky] - sy * a[kz];
-    let bx = b[kx] - sx * b[kz];
-    let by = b[ky] - sy * b[kz];
-    let cx = c[kx] - sx * c[kz];
-    let cy = c[ky] - sy * c[kz];
+    let ax = kx.of_vec(a) - sx * kz.of_vec(a);
+    let ay = ky.of_vec(a) - sy * kz.of_vec(a);
+    let bx = kx.of_vec(b) - sx * kz.of_vec(b);
+    let by = ky.of_vec(b) - sy * kz.of_vec(b);
+    let cx = kx.of_vec(c) - sx * kz.of_vec(c);
+    let cy = ky.of_vec(c) - sy * kz.of_vec(c);
 
     // Signed 2D edge functions; e0 is opposite v0, etc.
     let mut e0 = bx * cy - by * cx;
@@ -156,9 +197,9 @@ pub(crate) fn triangle_intersect_sheared(
 
     // Scaled hit distance; range-tested against t_min/t_max without a
     // division, minding det's sign.
-    let az = sz * a[kz];
-    let bz = sz * b[kz];
-    let cz = sz * c[kz];
+    let az = sz * kz.of_vec(a);
+    let bz = sz * kz.of_vec(b);
+    let cz = sz * kz.of_vec(c);
     let t_scaled = e0 * az + e1 * bz + e2 * cz;
     if det < 0.0 && (t_scaled > t_min * det || t_scaled < t_max * det) {
         return None;
@@ -282,15 +323,15 @@ impl Tri4 {
         let (kx, ky, kz) = (sh.kx, sh.ky, sh.kz);
 
         // Vertices relative to the ray origin, sheared into ray space.
-        let akz = self.v[0][kz] - sh.okz;
-        let bkz = self.v[1][kz] - sh.okz;
-        let ckz = self.v[2][kz] - sh.okz;
-        let ax = (self.v[0][kx] - sh.okx) - sh.sx4 * akz;
-        let ay = (self.v[0][ky] - sh.oky) - sh.sy4 * akz;
-        let bx = (self.v[1][kx] - sh.okx) - sh.sx4 * bkz;
-        let by = (self.v[1][ky] - sh.oky) - sh.sy4 * bkz;
-        let cx = (self.v[2][kx] - sh.okx) - sh.sx4 * ckz;
-        let cy = (self.v[2][ky] - sh.oky) - sh.sy4 * ckz;
+        let akz = kz.of(&self.v[0]) - sh.okz;
+        let bkz = kz.of(&self.v[1]) - sh.okz;
+        let ckz = kz.of(&self.v[2]) - sh.okz;
+        let ax = (kx.of(&self.v[0]) - sh.okx) - sh.sx4 * akz;
+        let ay = (ky.of(&self.v[0]) - sh.oky) - sh.sy4 * akz;
+        let bx = (kx.of(&self.v[1]) - sh.okx) - sh.sx4 * bkz;
+        let by = (ky.of(&self.v[1]) - sh.oky) - sh.sy4 * bkz;
+        let cx = (kx.of(&self.v[2]) - sh.okx) - sh.sx4 * ckz;
+        let cy = (ky.of(&self.v[2]) - sh.oky) - sh.sy4 * ckz;
 
         // Signed 2D edge functions; e0 is opposite v0, etc.
         let e0 = bx * cy - by * cx;
