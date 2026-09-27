@@ -29,6 +29,13 @@ impl Buffer {
         }
     }
 
+    /// The pixels, row-major (row `y` is `[y * width, (y + 1) * width)`) — what
+    /// a pass splits into disjoint rows with `par_chunks_mut` so every worker
+    /// writes its own rows, the borrow checker proving they do not overlap.
+    pub(crate) fn pixels_mut(&mut self) -> &mut [Vec3A] {
+        &mut self.data
+    }
+
     /// Sets the color of a specific pixel in the buffer.
     ///
     /// # Parameters

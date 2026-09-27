@@ -55,12 +55,19 @@ consumed as ordinary dependencies:
 1. **`main.rs`** builds a `Scene { camera, world, lights, settings, volumes }` — either from
    USD (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
 2. **`Renderer`** (`tracer/mod.rs`) drives sampling. Two entry points, both Rayon-parallel:
-   - `render_with_tiles()` — parallel over 16×16 tiles. **The CLI's default**, and
-     13–48% faster than rows on every sample measured (`bench_ab.sh`: cornellbox −27%,
-     materialx_basic −25%, teapot −19%, ptex_quads −48%, usdlux −13%): a tile is a
-     coherent, cache-friendly work unit and there is no per-row barrier.
-   - `render()` — parallel over pixels within each scanline row, rows in sequence
-     (`--scanline`).
+   - `render_with_tiles()` — parallel over 16×16 tiles. **The CLI's default**. It was
+     13–48% faster than rows when rows ran in sequence with their pixels in parallel
+     (`bench_ab.sh`: cornellbox −27%, materialx_basic −25%, teapot −19%, ptex_quads
+     −48%, usdlux −13%): a tile is a coherent, cache-friendly work unit, and the rows
+     paid a fork/join barrier each.
+   - `render()` — scanline rows as the work unit, rows in parallel (`--scanline`).
+     Each worker writes its row of the buffer and of the variance map in place through
+     `par_chunks_mut`, so there is no per-row barrier, no lock and no serial copy of
+     the image; the borrow checker proves the rows disjoint. That made it 5–14%
+     faster (min of 8 interleaved runs at 32 spp: cornellbox −5%, materialx_basic
+     −14%, ptex_quads −13.5%) and within noise of the tiles (−1.7%, −0.7%, −9.2%).
+     The tiled path still gathers its tiles serially: its copy is one pixel store
+     each, far below what timing can see.
    The two are **bit-identical**, guided renders included: the per-pixel work is the
    same, and the tiled path hands a pass's guiding training samples and its variance
    sum (both order-dependent in floating point) on in scanline order. Keep it that way —
