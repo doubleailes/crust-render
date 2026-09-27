@@ -263,6 +263,11 @@ impl Bvh {
 
     /// `(count, sum of bbox diagonals, max diagonal)` over top-level
     /// primitives — feeds [`crate::Scene::primitive_extents`].
+    #[cfg(feature = "traversal-stats")]
+    pub(crate) fn prims(&self) -> &[PrimNode] {
+        &self.prims
+    }
+
     pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
         let mut sum = 0.0f32;
         let mut max = 0.0f32;

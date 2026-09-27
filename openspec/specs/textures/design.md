@@ -367,10 +367,11 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     geometry is almost entirely prototype-based, so Ptex silently applied to none
     of it and every textured surface fell back to its constant `baseColor` — which
     for a `PtexBaseMaterial` is an unused placeholder, so the gardenias rendered
-    flat red. A part is always exactly one leaf geometry (the walk splits per bound
-    mesh; a nested instancer groups per (prototype, part)), so one table serves
-    every placement and the `prim_id` a hit reports indexes it unambiguously
-    however many instance levels it passed through.
+    flat red. A table belongs to a *slot*, which is always exactly one leaf geometry
+    (the walk splits per bound mesh, and a group only concatenates its members'
+    slots), so one table serves every placement and the `prim_id` a hit reports
+    indexes it unambiguously however many instance levels it passed through. A
+    grouped placement sets each slot's table on its own `geom_id`.
   - The host **preloads every face** into one immutable buffer by default (the streaming
     alternative is the next bullet): `PtexReader` reads from
     disk on each call (`&mut self`, pixel data uncached), and a path tracer asks from every

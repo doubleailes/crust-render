@@ -5,8 +5,8 @@
 use crate::aabb::AABB;
 use crate::bvh::Bvh;
 use crate::prim::{
-    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, PrimHit, PrimNode, SpherePrim,
-    TrianglePrim, transformed_aabb,
+    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, PrimHit,
+    PrimNode, SpherePrim, TrianglePrim, transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray};
 use glam::{Affine3A, Vec3A};
@@ -159,11 +159,36 @@ pub struct RayHit {
     pub prim_id: u32,
 }
 
+/// Which `geom_id` a hit found inside an [`Geometry::Instance`] reports.
+///
+/// By default an instance reports its *own* id and the inner ids are lost,
+/// which is all a host that maps one material per top-level geometry needs.
+/// A prototype of many parts wants more: to be placed as *one* instance
+/// (so the BVH above it sees one box per placement, not one per part) and
+/// still have a hit say which part it landed on. Embree answers with an
+/// instance-id stack beside the inner `geomID`; this answers with one id,
+/// computed as the hit passes back out through each instance level, which
+/// keeps [`RayHit`] and the host's lookup a single index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InstanceHitId {
+    /// The instance's own `geom_id` in the scene it is attached to.
+    #[default]
+    Own,
+    /// A fixed id, whatever the inner scene reported.
+    As(u32),
+    /// `base` plus the id the inner scene reported, so an inner scene whose
+    /// hits already carry `0..n` maps onto `base..base + n` here. Nests:
+    /// each level adds its own base. [`SceneBuilder::commit`] panics if
+    /// `base` plus the largest id the inner scene can report would leave
+    /// the id space, rather than let a hit wrap onto another geometry.
+    Offset(u32),
+}
+
 /// Accumulates geometries, then builds the acceleration structure once in
 /// [`SceneBuilder::commit`] (Embree's `rtcCommitScene`).
 #[derive(Default)]
 pub struct SceneBuilder {
-    geoms: Vec<(Geometry, u32)>,
+    geoms: Vec<(Geometry, u32, InstanceHitId)>,
 }
 
 impl SceneBuilder {
@@ -179,7 +204,22 @@ impl SceneBuilder {
 
     /// Attaches a geometry visible only to ray categories in `mask`.
     pub fn attach_masked(&mut self, geometry: Geometry, mask: u32) -> u32 {
-        self.geoms.push((geometry, mask));
+        self.attach_labelled(geometry, mask, InstanceHitId::Own)
+    }
+
+    /// Attaches an instance whose hits report `label` rather than the
+    /// instance's own id (see [`InstanceHitId`]). Returns the instance's own
+    /// `geom_id` all the same: it still occupies a slot.
+    ///
+    /// # Panics
+    /// If `label` is not [`InstanceHitId::Own`] and `geometry` is not an
+    /// instance — only an instance has inner hits to relabel.
+    pub fn attach_labelled(&mut self, geometry: Geometry, mask: u32, label: InstanceHitId) -> u32 {
+        assert!(
+            label == InstanceHitId::Own || matches!(geometry, Geometry::Instance { .. }),
+            "only an instance can relabel its hits"
+        );
+        self.geoms.push((geometry, mask, label));
         (self.geoms.len() - 1) as u32
     }
 
@@ -258,11 +298,14 @@ impl SceneBuilder {
         let total: usize = self
             .geoms
             .iter()
-            .map(|(g, _)| Self::prim_upper_bound(g))
+            .map(|(g, _, _)| Self::prim_upper_bound(g))
             .sum();
         let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
         let mut has_motion = false;
-        for (geom_id, (geom, mask)) in self.geoms.into_iter().enumerate() {
+        // Largest id a hit in this scene can report. Every geometry can
+        // report its own id; labels can report more (see below).
+        let mut max_hit_id = n_geoms.saturating_sub(1);
+        for (geom_id, (geom, mask, label)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
             match geom {
                 Geometry::TriangleMesh {
@@ -388,6 +431,34 @@ impl SceneBuilder {
                     // carries its own committed flag, so this stays O(1) per
                     // instance however deeply they nest.
                     has_motion |= transform_end.is_some() || scene.has_motion();
+                    let (geom_id, id_offset) = match label {
+                        InstanceHitId::Own => (geom_id, NO_ID_OFFSET),
+                        InstanceHitId::As(id) => {
+                            assert!(id != crate::INVALID_ID, "hit id {id} is reserved");
+                            max_hit_id = max_hit_id.max(id);
+                            (id, NO_ID_OFFSET)
+                        }
+                        InstanceHitId::Offset(base) => {
+                            // Checked here, once per instance, so the hit
+                            // path can add without a branch: an offset that
+                            // could carry an inner id past the id space
+                            // would otherwise wrap onto an unrelated
+                            // geometry, and a host would shade it with that
+                            // geometry's material.
+                            let top = base
+                                .checked_add(scene.max_hit_id)
+                                .filter(|&top| top != crate::INVALID_ID)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "id offset {base} + inner ids up to {} overflows the \
+                                         geom_id space",
+                                        scene.max_hit_id
+                                    )
+                                });
+                            max_hit_id = max_hit_id.max(top);
+                            (geom_id, base)
+                        }
+                    };
                     prims.push(PrimNode::Instance(Box::new(InstancePrim {
                         scene,
                         l2w: transform,
@@ -396,6 +467,7 @@ impl SceneBuilder {
                         l2w_end: transform_end,
                         bounds,
                         geom_id,
+                        id_offset,
                         mask,
                     })));
                 }
@@ -405,6 +477,7 @@ impl SceneBuilder {
             bvh: Bvh::new(prims),
             n_geoms,
             has_motion,
+            max_hit_id,
         }
     }
 }
@@ -414,6 +487,10 @@ pub struct Scene {
     bvh: Bvh,
     n_geoms: u32,
     has_motion: bool,
+    /// Largest `geom_id` a hit in this scene can report — a bound, computed
+    /// at commit, that lets an `Offset` label placing this scene be checked
+    /// once instead of on every hit.
+    max_hit_id: u32,
 }
 
 impl Scene {
@@ -441,6 +518,37 @@ impl Scene {
     /// traversal — the shadow-ray fast path (Embree's `rtcOccluded1`).
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         self.bvh.hit_any(ray, t_min, t_max)
+    }
+
+    /// What the top-level instances `ids` are: `(geom_id, world bounds,
+    /// inner top-level primitive count, how many top-level instances share
+    /// the same inner scene)`. Diagnostic for a top level that will not
+    /// cull, paired with [`crate::traversal_stats::top_level_descents`];
+    /// a linear scan, so ask once.
+    #[cfg(feature = "traversal-stats")]
+    pub fn describe_instances(
+        &self,
+        ids: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, AABB, usize, usize)> {
+        let mut sharing = std::collections::HashMap::<*const Scene, usize>::new();
+        let mut found = Vec::new();
+        for p in self.bvh.prims() {
+            if let PrimNode::Instance(inst) = p {
+                *sharing.entry(Arc::as_ptr(&inst.scene)).or_insert(0) += 1;
+                if ids.contains(&inst.geom_id) {
+                    found.push((
+                        inst.geom_id,
+                        inst.bounds,
+                        Arc::as_ptr(&inst.scene),
+                        inst.scene.primitive_count(),
+                    ));
+                }
+            }
+        }
+        found
+            .into_iter()
+            .map(|(id, b, ptr, n)| (id, b, n, sharing[&ptr]))
+            .collect()
     }
 
     /// World bounds of everything in the scene; `None` when empty.
@@ -1308,6 +1416,148 @@ mod tests {
         // The shutter-union bounding box covers both endpoints.
         let bb = scene.bounds().unwrap();
         assert!(bb.minimum.x <= -1.0 && bb.maximum.x >= 5.0);
+    }
+
+    /// A unit sphere at `x` in a one-geometry scene: a stand-in "part".
+    fn part_at(x: f32) -> Arc<Scene> {
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Sphere {
+            center: Vec3A::new(x, 0.0, 0.0),
+            radius: 0.5,
+        });
+        Arc::new(b.commit())
+    }
+
+    fn placed(scene: &Arc<Scene>, z: f32) -> Geometry {
+        Geometry::Instance {
+            scene: scene.clone(),
+            transform: Affine3A::from_translation(glam::Vec3::new(0.0, 0.0, z)),
+            transform_end: None,
+        }
+    }
+
+    /// The id a ray down +Z at `x` reports, if it hits.
+    fn id_at(scene: &Scene, x: f32) -> Option<u32> {
+        scene
+            .intersect(
+                &Ray::new(Vec3A::new(x, 0.0, -10.0), Vec3A::Z),
+                0.001,
+                f32::INFINITY,
+            )
+            .map(|h| h.geom_id)
+    }
+
+    /// The shape the importer builds for a many-part prototype: parts
+    /// labelled `As(k)` inside a group, the group placed several times under
+    /// `Offset(0)` inside a scatter, and the scatter attached at the top
+    /// level under `Offset(base)`. Every hit must come out as `base + k`,
+    /// whichever placement it landed in.
+    #[test]
+    fn labelled_instances_compose_offsets_through_nesting() {
+        let mut group = SceneBuilder::new();
+        for k in 0..3u32 {
+            // Attached out of order so a part's own id is never its label.
+            group.attach_labelled(
+                placed(&part_at(k as f32 * 2.0), 0.0),
+                MASK_ALL,
+                InstanceHitId::As(2 - k),
+            );
+        }
+        let group = Arc::new(group.commit());
+
+        let mut scatter = SceneBuilder::new();
+        for z in [0.0, 5.0] {
+            scatter.attach_labelled(placed(&group, z), MASK_ALL, InstanceHitId::Offset(0));
+        }
+        let scatter = Arc::new(scatter.commit());
+
+        let mut top = SceneBuilder::new();
+        let other = top.attach(Geometry::Sphere {
+            center: Vec3A::new(-5.0, 0.0, 0.0),
+            radius: 0.5,
+        });
+        let base = 10;
+        let own = top.attach_labelled(placed(&scatter, 0.0), MASK_ALL, InstanceHitId::Offset(base));
+        let top = top.commit();
+
+        assert_eq!(own, 1, "a labelled instance still takes its own slot");
+        assert_eq!(id_at(&top, -5.0), Some(other));
+        assert_eq!(id_at(&top, 0.0), Some(base + 2));
+        assert_eq!(id_at(&top, 2.0), Some(base + 1));
+        assert_eq!(id_at(&top, 4.0), Some(base));
+        assert_eq!(id_at(&top, 1.0), None);
+    }
+
+    /// `As` overrides the inner id outright, and `Own` still reports the
+    /// instance's slot even when what it places forwards.
+    #[test]
+    fn as_and_own_labels_override_inner_ids() {
+        let mut inner = SceneBuilder::new();
+        inner.attach_labelled(
+            placed(&part_at(0.0), 0.0),
+            MASK_ALL,
+            InstanceHitId::Offset(7),
+        );
+        let inner = Arc::new(inner.commit());
+
+        let mut b = SceneBuilder::new();
+        let own = b.attach(placed(&inner, 0.0));
+        let scene = b.commit();
+        assert_eq!(id_at(&scene, 0.0), Some(own));
+
+        let mut b = SceneBuilder::new();
+        b.attach_labelled(placed(&inner, 0.0), MASK_ALL, InstanceHitId::As(42));
+        assert_eq!(id_at(&b.commit(), 0.0), Some(42));
+    }
+
+    /// An offset that could carry an inner id past the id space is refused
+    /// at commit: on the hit path it would wrap onto an unrelated id, and a
+    /// host would shade the hit with that geometry's material.
+    #[test]
+    #[should_panic(expected = "overflows the geom_id space")]
+    fn an_offset_that_could_overflow_is_refused_at_commit() {
+        let mut inner = SceneBuilder::new();
+        inner.attach_labelled(placed(&part_at(0.0), 0.0), MASK_ALL, InstanceHitId::As(10));
+        let inner = Arc::new(inner.commit());
+        let mut b = SceneBuilder::new();
+        b.attach_labelled(
+            placed(&inner, 0.0),
+            MASK_ALL,
+            InstanceHitId::Offset(u32::MAX - 5),
+        );
+        b.commit();
+    }
+
+    /// The bound is exact enough to accept the largest offset that fits.
+    #[test]
+    fn the_largest_offset_that_fits_is_accepted() {
+        let mut inner = SceneBuilder::new();
+        inner.attach_labelled(placed(&part_at(0.0), 0.0), MASK_ALL, InstanceHitId::As(10));
+        let inner = Arc::new(inner.commit());
+        let mut b = SceneBuilder::new();
+        let base = u32::MAX - 11;
+        b.attach_labelled(placed(&inner, 0.0), MASK_ALL, InstanceHitId::Offset(base));
+        assert_eq!(id_at(&b.commit(), 0.0), Some(base + 10));
+    }
+
+    #[test]
+    #[should_panic(expected = "only an instance can relabel")]
+    fn only_instances_take_labels() {
+        SceneBuilder::new().attach_labelled(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            MASK_ALL,
+            InstanceHitId::As(3),
+        );
+    }
+
+    /// The forwarding field sits in padding: an island-scale scene holds
+    /// tens of millions of `InstancePrim`s, so a byte here is gigabytes.
+    #[test]
+    fn instance_prim_is_not_grown_by_forwarding() {
+        assert_eq!(std::mem::size_of::<InstancePrim>(), 240);
     }
 
     #[test]

@@ -6,16 +6,22 @@
 //! currency is a [`ProtoPart`]: one leaf geometry of the prototype, held as
 //! a committed kernel scene in its own local space.
 //!
-//! The split into parts (rather than one scene per prototype) exists
-//! because `World` maps materials per top-level geometry: a prototype whose
-//! subtree binds two materials has to become two instances, or one of the
-//! materials would be lost. Instances are cheap — a transform and a
-//! pointer — so this costs a little top-level BVH and buys correct shading.
+//! `World` maps materials per top-level geometry, so a hit has to say which
+//! part it landed on. A part therefore carries one *slot* per geometry it
+//! can report — its material and texture tables — and a part of several
+//! slots is a *group*: one committed scene whose hits are labelled `0..n`
+//! (`crust_rt::InstanceHitId`), placed as one instance and given `n`
+//! consecutive `geom_id`s. That keeps a many-part prototype one box in the
+//! BVH above it. It used to be one instance per part, which is harmless for
+//! a handful of parts and ruinous for a scatter of trees of 16 181 branch
+//! meshes each: every part then spans the whole scatter, and the Moana
+//! island's isDunesB put 64 724 identical boxes over its dune field
+//! (`docs/moana_profile.md`).
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use crust_rt::{Geometry, Scene as RtScene, SceneBuilder as RtSceneBuilder};
+use crust_rt::{Geometry, InstanceHitId, Scene as RtScene, SceneBuilder as RtSceneBuilder};
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
@@ -42,32 +48,84 @@ use super::{ImportCaches, is_invisible, non_render_purpose, prim_at};
 /// above any plausible authoring depth.
 const MAX_INSTANCE_NESTING: usize = 8;
 
-/// One leaf geometry of a prototype: a committed kernel scene in its own
-/// local space, the transform placing it relative to the prototype root,
-/// and the material and visibility mask authored on it.
+/// What a hit on one geometry of a [`ProtoPart`] resolves to: the material
+/// and texture tables `World` keys by `geom_id`.
+#[derive(Clone)]
+pub(super) struct PartSlot {
+    material: Arc<dyn Material>,
+    /// Triangle-to-source-face table, when this slot's material samples a
+    /// per-face texture.
+    ///
+    /// A slot is always exactly one leaf geometry — the walk splits per bound
+    /// mesh — so one table serves every placement of it, and the `prim_id` a
+    /// hit reports indexes that table unambiguously however many levels of
+    /// instancing it passed through (the kernel forwards the innermost
+    /// `prim_id` unchanged).
+    faces: Option<Arc<FaceMap>>,
+    /// Per-triangle texture coordinates, when this slot's material reads
+    /// them. Carried on the same terms as `faces`, and — like every instanced
+    /// placement — without tangents: the table is the prototype's and each
+    /// placement transforms it differently. See [`UvMap::tangents`].
+    uvs: Option<Arc<UvMap>>,
+    /// Uniform scale from the slot's own geometry frame, which its tables'
+    /// densities are in, to the part's frame. 1 for a leaf part; inside a
+    /// group, the member's placement. Nested *instancer* placements are not
+    /// folded in (they differ per placement against one table), so such
+    /// geometry filters against the outer scale — see the texture filtering
+    /// gaps in openspec/specs/textures/design.md.
+    scale: f32,
+}
+
+/// A piece of a prototype, in the prototype root's frame: a committed
+/// kernel scene in its own local space, the transform placing it relative
+/// to the prototype root, its visibility mask, and what its hits resolve to.
+///
+/// With one slot it is a leaf — one bound geometry — and every hit in
+/// `scene` is that slot. With several it is a group: `scene` labels its hits
+/// with the slot index, and placing it takes as many `geom_id`s.
 #[derive(Clone)]
 pub(super) struct ProtoPart {
     pub(super) scene: Arc<RtScene>,
     /// Prototype-root-relative placement. An instance's world transform is
     /// composed onto the left of this.
     pub(super) local: GMat4,
-    pub(super) material: Arc<dyn Material>,
     pub(super) mask: u32,
-    /// Triangle-to-source-face table, when this part's material samples a
-    /// per-face texture.
-    ///
-    /// A part is always exactly one leaf geometry — the walk splits per bound
-    /// mesh, and a nested instancer groups its output per (prototype, part) —
-    /// so one table serves every placement of it, and the `prim_id` a hit
-    /// reports indexes that table unambiguously however many levels of
-    /// instancing it passed through (the kernel forwards the innermost
-    /// `prim_id` unchanged).
-    pub(super) faces: Option<Arc<FaceMap>>,
-    /// Per-triangle texture coordinates, when this part's material reads
-    /// them. Carried on the same terms as `faces`, and — like every instanced
-    /// placement — without tangents: the table is the prototype's and each
-    /// placement transforms it differently. See [`UvMap::tangents`].
-    pub(super) uvs: Option<Arc<UvMap>>,
+    pub(super) slots: Arc<[PartSlot]>,
+}
+
+impl ProtoPart {
+    /// One bound geometry with its material and tables.
+    fn leaf(
+        scene: Arc<RtScene>,
+        local: GMat4,
+        mask: u32,
+        material: Arc<dyn Material>,
+        faces: Option<Arc<FaceMap>>,
+        uvs: Option<Arc<UvMap>>,
+    ) -> Self {
+        ProtoPart {
+            scene,
+            local,
+            mask,
+            slots: Arc::new([PartSlot {
+                material,
+                faces,
+                uvs,
+                scale: 1.0,
+            }]),
+        }
+    }
+
+    /// How an instance of this part labels its hits when its first slot is
+    /// numbered `first`: a group forwards the inner index on top of it, a
+    /// leaf reports `first` whatever its scene says.
+    fn label(&self, first: u32) -> InstanceHitId {
+        if self.slots.len() > 1 {
+            InstanceHitId::Offset(first)
+        } else {
+            InstanceHitId::As(first)
+        }
+    }
 }
 
 /// Walks a prototype subtree and builds its [`ProtoPart`]s, in the
@@ -189,14 +247,14 @@ pub(super) fn collect_proto_parts(
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();
                 pending_meshes.push((parts.len(), slot));
-                parts.push(ProtoPart {
-                    scene: placeholder_scene(),
-                    local: this_local,
-                    material,
+                parts.push(ProtoPart::leaf(
+                    placeholder_scene(),
+                    this_local,
                     mask,
+                    material,
                     faces,
                     uvs,
-                });
+                ));
             }
         } else if let Ok(Some(sphere)) = UsdSphere::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
@@ -210,14 +268,14 @@ pub(super) fn collect_proto_parts(
                 center: Vec3A::ZERO,
                 radius,
             });
-            parts.push(ProtoPart {
-                scene: Arc::new(b.commit()),
-                local: this_local,
-                material,
+            parts.push(ProtoPart::leaf(
+                Arc::new(b.commit()),
+                this_local,
                 mask,
-                faces: None,
-                uvs: None,
-            });
+                material,
+                None,
+                None,
+            ));
         } else if let Ok(Some(curves)) = UsdBasisCurves::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
             if let Some((segments, cubic_segments)) = curve_segments(&prim, &curves) {
@@ -230,14 +288,14 @@ pub(super) fn collect_proto_parts(
                         segments: cubic_segments,
                     });
                 }
-                parts.push(ProtoPart {
-                    scene: Arc::new(b.commit()),
-                    local: this_local,
-                    material,
+                parts.push(ProtoPart::leaf(
+                    Arc::new(b.commit()),
+                    this_local,
                     mask,
-                    faces: None,
-                    uvs: None,
-                });
+                    material,
+                    None,
+                    None,
+                ));
             }
         } else if custom_token(&prim, "crust:volume:type").is_some() {
             // Volumes live outside the surface BVH entirely (their bounds
@@ -290,13 +348,20 @@ fn placeholder_scene() -> Arc<RtScene> {
     Arc::clone(EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit())))
 }
 
-/// Expands a `PointInstancer` found *inside* a prototype into parts.
+/// Expands a `PointInstancer` found *inside* a prototype into one part.
 ///
-/// One part per prototype-part of the nested instancer, each holding a
-/// committed sub-scene of that part placed once per nested instance. The
-/// grouping is by material, not by instance, because `World` resolves
-/// materials from the top-level `geom_id`: everything inside one part must
-/// therefore share a material.
+/// Each of its prototypes is grouped into a single scene ([`group_parts`]),
+/// and the part is a scene of those groups, placed once per nested instance —
+/// so the BVH over it sees one box per placement, which is what makes a
+/// scatter cull. Hits come out labelled by slot, the prototypes' slots laid
+/// end to end.
+///
+/// It used to be the other way round: one part per (prototype, part), each
+/// a scene of that one piece placed everywhere, because `World` could only
+/// tell parts apart by top-level instance. Each such part spans the whole
+/// scatter, so a scatter of many-part prototypes became that many identical
+/// boxes — 64 724 of them over the Moana island's dunes, 99% of a render's
+/// instance descents (`docs/moana_profile.md`).
 fn nested_instancer_parts(
     stage: &Stage,
     prim: &Prim,
@@ -309,53 +374,170 @@ fn nested_instancer_parts(
     let Some(layout) = read_instancer(prim, instancer) else {
         return Vec::new();
     };
-    let proto_parts = instancer_proto_parts(stage, &layout, caches, depth);
+    let groups: Vec<Option<ProtoPart>> = layout
+        .targets
+        .iter()
+        .map(|target| prototype_group(stage, target, caches, depth))
+        .collect();
 
-    // Group placements by (prototype, part), so each output part collects
-    // every placement that draws that one piece of geometry.
-    let mut out: Vec<ProtoPart> = Vec::new();
-    for (k, parts) in proto_parts.iter().enumerate() {
-        for part in parts.iter() {
-            let mut sub = RtSceneBuilder::new();
-            let mut placed = 0usize;
-            for &(target, xf) in layout.placements.iter().filter(|(t, _)| *t == k) {
-                let _ = target;
-                let placement = xf * part.local;
-                if placement.determinant().abs() < 1e-12 {
-                    continue; // zero scale: the "hide this instance" idiom
-                }
-                sub.attach_masked(
-                    Geometry::Instance {
-                        scene: part.scene.clone(),
-                        transform: Affine3A::from_mat4(placement),
-                        transform_end: None,
-                    },
-                    part.mask,
-                );
-                placed += 1;
-            }
-            if placed == 0 {
-                continue;
-            }
-            out.push(ProtoPart {
-                scene: Arc::new(sub.commit()),
-                local,
-                material: part.material.clone(),
-                mask,
-                faces: part.faces.clone(),
-                uvs: part.uvs.clone(),
-            });
+    // The placements that draw something: a prototype with no geometry, or a
+    // zero-scale placement (the "hide this instance" idiom), draws nothing.
+    let drawn: Vec<(usize, GMat4)> = layout
+        .placements
+        .iter()
+        .filter_map(|&(k, xf)| {
+            let placement = xf * groups[k].as_ref()?.local;
+            (placement.determinant().abs() >= 1e-12).then_some((k, placement))
+        })
+        .collect();
+
+    // Slots only for the prototypes something actually draws — every slot is
+    // reserved again at each placement of this part, so a prototype placed
+    // only by hidden entries would cost ids no hit can reach — in prototype
+    // order so the layout is independent of placement order.
+    let mut first: Vec<Option<u32>> = vec![None; groups.len()];
+    for &(k, _) in &drawn {
+        first[k] = Some(0);
+    }
+    let mut slots: Vec<PartSlot> = Vec::new();
+    for (k, group) in groups.iter().enumerate() {
+        if let (Some(f), Some(g)) = (first[k].as_mut(), group) {
+            *f = slots.len() as u32;
+            slots.extend(g.slots.iter().cloned());
         }
     }
 
+    let mut sub = RtSceneBuilder::new();
+    sub.reserve(drawn.len());
+    for &(k, placement) in &drawn {
+        let (Some(g), Some(f)) = (&groups[k], first[k]) else {
+            unreachable!("a drawn placement has a group and a slot range");
+        };
+        sub.attach_labelled(
+            Geometry::Instance {
+                scene: g.scene.clone(),
+                transform: Affine3A::from_mat4(placement),
+                transform_end: None,
+            },
+            g.mask,
+            g.label(f),
+        );
+    }
+
     debug!(
-        "Expanded nested PointInstancer at {} ({} instances -> {} part(s))",
+        "Expanded nested PointInstancer at {} ({} instances of {} prototype(s) -> {} slot(s))",
         prim.path(),
         layout.placements.len(),
-        out.len()
+        layout.targets.len(),
+        slots.len()
     );
-    out
+    if sub.count() == 0 {
+        return Vec::new();
+    }
+    vec![ProtoPart {
+        scene: Arc::new(sub.commit()),
+        local,
+        mask,
+        slots: slots.into(),
+    }]
 }
+
+/// Puts a prototype's parts into one scene, so it can be placed as one
+/// instance: each part becomes a member instance at its prototype-relative
+/// transform, labelled with the index of its first slot, and the group's
+/// slots are the members' laid end to end. `None` when nothing is left.
+///
+/// A single part is returned as it is — grouping it would only add a level
+/// of instancing.
+fn group_parts(parts: &[ProtoPart]) -> Option<ProtoPart> {
+    if let [only] = parts {
+        return Some(only.clone());
+    }
+    let mut b = RtSceneBuilder::new();
+    b.reserve(parts.len());
+    let mut slots: Vec<PartSlot> = Vec::new();
+    let mut mask = 0;
+    for part in parts {
+        if part.local.determinant().abs() < 1e-12 {
+            continue;
+        }
+        let local = Affine3A::from_mat4(part.local);
+        b.attach_labelled(
+            Geometry::Instance {
+                scene: part.scene.clone(),
+                transform: local,
+                transform_end: None,
+            },
+            part.mask,
+            part.label(slots.len() as u32),
+        );
+        let scale = placement_scale(&local);
+        slots.extend(part.slots.iter().map(|slot| PartSlot {
+            scale: slot.scale * scale,
+            ..slot.clone()
+        }));
+        // A ray enters the group if any member could take it; each member's
+        // own mask then gates it inside.
+        mask |= part.mask;
+    }
+    if slots.is_empty() {
+        return None;
+    }
+    Some(ProtoPart {
+        scene: Arc::new(b.commit()),
+        local: GMat4::IDENTITY,
+        mask,
+        slots: slots.into(),
+    })
+}
+
+/// A prototype as one part ([`group_parts`]), from the cache or freshly
+/// built.
+fn prototype_group(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+) -> Option<ProtoPart> {
+    let key = (caches.epoch, proto_path.to_string());
+    if let Some(group) = caches.groups.get(&key) {
+        return group.clone();
+    }
+    let parts = prototype_parts(stage, proto_path, caches, depth);
+    let group = group_parts(&parts);
+    caches.groups.insert(key, group.clone());
+    group
+}
+
+/// The parts a top-level placement of `proto_path` attaches: the prototype
+/// grouped into one instance when it has at least
+/// [`TOP_LEVEL_GROUP_MIN_PARTS`] parts, else its parts one instance each.
+fn placed_parts(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> Arc<Vec<ProtoPart>> {
+    let parts = prototype_parts(stage, proto_path, caches, 0);
+    if parts.len() < TOP_LEVEL_GROUP_MIN_PARTS {
+        return parts;
+    }
+    Arc::new(
+        prototype_group(stage, proto_path, caches, 0)
+            .into_iter()
+            .collect(),
+    )
+}
+
+/// Parts from which a top-level placement is grouped into one instance.
+///
+/// Grouping costs every ray that enters the placement one more transform,
+/// which a prototype of a few parts does not repay: its parts' boxes at the
+/// top level are few and already local to the placement. A prototype of
+/// thousands of parts — a Moana bay cedar is 16 181 — puts that many boxes
+/// into the root BVH per placement. The threshold is a round number between
+/// the two, not a measured optimum; nested instancers group always, since
+/// there each ungrouped part spans the whole scatter.
+const TOP_LEVEL_GROUP_MIN_PARTS: usize = 64;
 
 /// Imports one natively-instanced prim (`instanceable = true` plus a
 /// composition arc) by placing its shared prototype's parts.
@@ -373,16 +555,20 @@ pub(super) fn emit_native_instance(
     world_xf: GMat4,
     caches: &mut ImportCaches<'_>,
 ) {
-    let parts = prototype_parts(stage, proto_path, caches, 0);
-    debug!(
-        "Instance {} uses prototype {proto_path} ({} part(s))",
-        prim.path(),
-        parts.len()
-    );
+    let parts = placed_parts(stage, proto_path, caches);
+    let first = world.count();
     attach_proto_parts(world, &parts, world_xf, "native instance");
+    debug!(
+        "Instance {} uses prototype {proto_path} ({} instance(s), geom ids {first}..{})",
+        prim.path(),
+        parts.len(),
+        world.count()
+    );
 }
 
-/// Attaches every part of a prototype at `placement`, one instance each.
+/// Attaches every part of a prototype at `placement`, one instance each,
+/// and returns how many kernel instances that was. A group's instance takes
+/// one `geom_id` per slot, so the ids consumed can exceed the count.
 /// Non-invertible placements are skipped: the kernel's instance transform
 /// must be invertible, and a zero scale is a common "hide this instance"
 /// idiom rather than an error.
@@ -399,31 +585,47 @@ fn attach_proto_parts(
             debug!("{what}: non-invertible instance transform — skipped");
             continue;
         }
-        let geom_id = world.attach_masked(
+        let xf = Affine3A::from_mat4(xf);
+        // A leaf reports its own id; a group forwards its slot index on top
+        // of the first of the consecutive ids its slots take.
+        let label = if part.slots.len() > 1 {
+            InstanceHitId::Offset(world.count() as u32)
+        } else {
+            InstanceHitId::Own
+        };
+        let geom_id = world.attach_labelled(
             Geometry::Instance {
                 scene: part.scene.clone(),
-                transform: Affine3A::from_mat4(xf),
+                transform: xf,
                 transform_end: None,
             },
-            part.material.clone(),
+            part.slots[0].material.clone(),
             part.mask,
+            label,
         );
-        // An instance transforms the ray, not the triangles, so the winding —
-        // and with it the barycentric order — is the prototype's own: no swap.
-        if let Some(map) = &part.faces {
-            world.set_face_map(geom_id, map.clone(), false);
-        }
-        if let Some(map) = &part.uvs {
-            world.set_uv_map(geom_id, map.clone(), false);
+        for slot in &part.slots[1..] {
+            world.reserve_slot(slot.material.clone(), part.mask);
         }
         // `part.local` is already folded in, so this is the scale from the
-        // prototype's own frame — the frame the shared densities are in — to
-        // world. A prototype containing *nested* instances is the exception:
-        // the inner placements' scales live inside the committed kernel scene
-        // and are invisible here, so such geometry filters against the outer
-        // scale alone. See the texture filtering gaps in
-        // openspec/specs/textures/design.md.
-        world.set_placement_scale(geom_id, placement_scale(&Affine3A::from_mat4(xf)));
+        // prototype's own frame to world; each slot adds its own inside the
+        // part. Geometry under *nested* instancer placements is the
+        // exception: those scales live inside the committed kernel scene and
+        // differ per placement, so it filters against the outer scale alone.
+        // See the texture filtering gaps in openspec/specs/textures/design.md.
+        let scale = placement_scale(&xf);
+        for (i, slot) in part.slots.iter().enumerate() {
+            let id = geom_id + i as u32;
+            // An instance transforms the ray, not the triangles, so the
+            // winding — and with it the barycentric order — is the
+            // prototype's own: no swap.
+            if let Some(map) = &slot.faces {
+                world.set_face_map(id, map.clone(), false);
+            }
+            if let Some(map) = &slot.uvs {
+                world.set_uv_map(id, map.clone(), false);
+            }
+            world.set_placement_scale(id, scale * slot.scale);
+        }
         attached += 1;
     }
     attached
@@ -554,21 +756,6 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
     })
 }
 
-/// The parts of each of an instancer's prototypes, built once and memoized
-/// by path.
-fn instancer_proto_parts(
-    stage: &Stage,
-    layout: &InstancerLayout,
-    caches: &mut ImportCaches<'_>,
-    depth: usize,
-) -> Vec<Arc<Vec<ProtoPart>>> {
-    layout
-        .targets
-        .iter()
-        .map(|target| prototype_parts(stage, target, caches, depth))
-        .collect()
-}
-
 /// A prototype's parts, from the cache or freshly built.
 fn prototype_parts(
     stage: &Stage,
@@ -620,17 +807,25 @@ pub(super) fn emit_point_instancer(
     let Some(layout) = read_instancer(prim, instancer) else {
         return;
     };
-    let proto_parts = instancer_proto_parts(stage, &layout, caches, 0);
+    let proto_parts: Vec<Arc<Vec<ProtoPart>>> = layout
+        .targets
+        .iter()
+        .map(|target| placed_parts(stage, target, caches))
+        .collect();
 
     // A dense scatter can place millions of instances in this one call;
     // reserving the exact total up front avoids both the doubling-copy
     // cost and the over-allocation of growing the geometry table
     // incrementally (see `WorldBuilder::reserve`).
-    let part_counts: Vec<usize> = proto_parts.iter().map(|p| p.len()).collect();
+    let part_counts: Vec<usize> = proto_parts
+        .iter()
+        .map(|parts| parts.iter().map(|p| p.slots.len()).sum())
+        .collect();
     let total_geometries: usize = layout.placements.iter().map(|&(k, _)| part_counts[k]).sum();
     world.reserve(total_geometries);
 
     let mut attached = 0usize;
+    let first = world.count();
     for &(k, xf) in &layout.placements {
         attached += attach_proto_parts(
             world,
@@ -641,11 +836,12 @@ pub(super) fn emit_point_instancer(
     }
 
     debug!(
-        "Imported PointInstancer at {} ({} instances of {} prototype(s), {} geometries attached{})",
+        "Imported PointInstancer at {} ({} instances of {} prototype(s): {} kernel instances attached, geom ids {first}..{}{})",
         prim.path(),
         layout.placements.len(),
         layout.targets.len(),
         attached,
+        world.count(),
         if layout.hidden > 0 {
             format!(", {} hidden by invisibleIds", layout.hidden)
         } else {

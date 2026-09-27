@@ -19,13 +19,22 @@ curve segments, and
 instances of committed scenes, each with a per-geometry visibility mask, and
 SHALL report hits as plain `Copy` values carrying `geom_id`, `prim_id`, the hit
 distance and barycentrics. An instanced hit SHALL report the instance's
-top-level `geom_id` with the inner `prim_id`.
+top-level `geom_id` with the inner `prim_id`, unless the instance was attached
+with an `InstanceHitId` label: `As(id)` SHALL report `id`, and `Offset(base)`
+SHALL report `base` plus the id the inner scene reported, composing through
+nesting.
 
 #### Scenario: A ray hits an instanced mesh
 
 - **WHEN** a ray hits a triangle of a mesh placed through an `Instance`
 - **THEN** the hit carries the instance's `geom_id` and the triangle's index
   within the inner scene as `prim_id`
+
+#### Scenario: A labelled instance forwards which part was hit
+
+- **WHEN** a scene of parts labelled `As(0..n)` is placed through an instance
+  attached with `Offset(base)`, and a ray hits part `k`
+- **THEN** the hit carries `geom_id = base + k` and the part's inner `prim_id`
 
 #### Scenario: A mask hides a geometry from a ray category
 

@@ -7,7 +7,7 @@
 use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
-use crust_rt::{AABB, Geometry, MASK_ALL, SceneBuilder};
+use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, SceneBuilder};
 use glam::Vec3A;
 use std::sync::Arc;
 
@@ -414,7 +414,22 @@ impl WorldBuilder {
         material: Arc<dyn Material>,
         mask: u32,
     ) -> u32 {
-        let id = self.rt.attach_masked(geometry, mask);
+        self.attach_labelled(geometry, material, mask, InstanceHitId::Own)
+    }
+
+    /// Attaches an instance whose hits report `label` rather than its own
+    /// id — see `crust_rt::InstanceHitId`. `material` is bound to the
+    /// instance's own id; an `Offset` label that reaches further ids needs
+    /// them claimed too (with [`WorldBuilder::reserve_slot`]), since those
+    /// ids are what hits will carry and what the material table is read at.
+    pub fn attach_labelled(
+        &mut self,
+        geometry: Geometry,
+        material: Arc<dyn Material>,
+        mask: u32,
+        label: InstanceHitId,
+    ) -> u32 {
+        let id = self.rt.attach_labelled(geometry, mask, label);
         self.materials.push(material);
         self.faces.push(SideTables::default());
         debug_assert_eq!(id as usize + 1, self.materials.len());
@@ -644,6 +659,15 @@ impl World {
     /// [`crust_rt::Scene::primitive_extents`].
     pub fn primitive_extents(&self) -> (usize, f32, f32, f32) {
         self.scene.primitive_extents()
+    }
+
+    /// See [`crust_rt::Scene::describe_instances`].
+    #[cfg(feature = "traversal-stats")]
+    pub fn describe_instances(
+        &self,
+        ids: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, crust_rt::AABB, usize, usize)> {
+        self.scene.describe_instances(ids)
     }
 
     /// Does anything move over the shutter interval — see

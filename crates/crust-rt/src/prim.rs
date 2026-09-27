@@ -401,9 +401,19 @@ pub(crate) struct InstancePrim {
     /// gigabytes for a field none of them use.
     pub l2w_end: Option<Box<Affine3A>>,
     pub bounds: AABB,
+    /// What a hit inside reports when `id_offset` is [`NO_ID_OFFSET`]: the
+    /// instance's own id, or the id [`crate::InstanceHitId::As`] asked for.
     pub geom_id: u32,
+    /// [`crate::InstanceHitId::Offset`]'s base, added to the inner hit's id;
+    /// [`NO_ID_OFFSET`] when the instance reports `geom_id` instead. Fits in
+    /// the padding the 16-byte-aligned transforms already leave, so
+    /// forwarding costs no resident memory (pinned by a test).
+    pub id_offset: u32,
     pub mask: u32,
 }
+
+/// [`InstancePrim::id_offset`] for an instance that does not forward.
+pub(crate) const NO_ID_OFFSET: u32 = u32::MAX;
 
 /// Element-wise linear interpolation of two affine transforms. Every
 /// interpolated point stays inside the convex hull of its endpoint
@@ -489,16 +499,25 @@ impl Prim for InstancePrim {
         // Attribute the nested traversal to the instance level, so
         // top-level and instanced work can be told apart.
         #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::note_descent(self.geom_id);
+        #[cfg(feature = "traversal-stats")]
         crate::bvh::stats::enter_instance();
         let inner = self.scene.intersect_outward(&local, t_min, t_max);
         #[cfg(feature = "traversal-stats")]
         crate::bvh::stats::leave_instance();
         let mut hit = inner?;
         hit.outward = (normal_mat * hit.outward).normalize();
-        // The hit is attributed to the *instance's* geometry id: the
-        // application maps materials per top-level geometry. The inner
-        // primitive index is kept.
-        hit.geom_id = self.geom_id;
+        // The hit is attributed to the *instance's* geometry id — the
+        // application maps materials per top-level geometry — unless the
+        // instance forwards the inner id under an offset (a prototype of
+        // many parts placed as one instance). The inner primitive index is
+        // kept either way.
+        hit.geom_id = if self.id_offset == NO_ID_OFFSET {
+            self.geom_id
+        } else {
+            // Cannot overflow: commit refuses an offset that could.
+            self.id_offset + hit.geom_id
+        };
         Some(hit)
     }
 
@@ -507,6 +526,8 @@ impl Prim for InstancePrim {
             return false;
         }
         let (w2l, _) = self.transforms_at(ray.time);
+        #[cfg(feature = "traversal-stats")]
+        crate::bvh::stats::note_descent(self.geom_id);
         #[cfg(feature = "traversal-stats")]
         crate::bvh::stats::enter_instance();
         let occluded = self.scene.occluded(&self.to_local(ray, &w2l), t_min, t_max);
