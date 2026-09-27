@@ -191,17 +191,20 @@ impl WideNode {
     }
 }
 
+/// A finished tree. Its tables are boxed slices, not `Vec`s: it is immutable, and
+/// a box can neither grow nor hold capacity slack the memory footprint would
+/// have to count.
 pub(crate) struct Bvh {
-    wide: Vec<WideNode>,
+    wide: Box<[WideNode]>,
     /// Leaf payloads, indexed by a leaf lane's `child`.
-    leaves: Vec<Leaf>,
+    leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf.
-    packets: Vec<Tri4>,
+    packets: Box<[Tri4]>,
     /// The one-at-a-time primitives of each leaf; spatial splits may list a
     /// primitive in more than one leaf.
-    indices: Vec<u32>,
+    indices: Box<[u32]>,
     /// The primitives, stored once each, in input order.
-    prims: Vec<PrimNode>,
+    prims: Box<[PrimNode]>,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
 }
@@ -248,11 +251,11 @@ impl Bvh {
         };
 
         Bvh {
-            wide,
-            leaves: collected.leaves,
-            packets: collected.packets,
-            indices: collected.indices,
-            prims,
+            wide: wide.into_boxed_slice(),
+            leaves: collected.leaves.into_boxed_slice(),
+            packets: collected.packets.into_boxed_slice(),
+            indices: collected.indices.into_boxed_slice(),
+            prims: prims.into_boxed_slice(),
             root_bbox,
         }
     }
@@ -305,12 +308,12 @@ impl Bvh {
         visited: &mut std::collections::HashSet<usize>,
         acc: &mut crate::scene::MemoryFootprint,
     ) {
-        use std::mem::size_of;
-        acc.prim_nodes += self.prims.capacity() * size_of::<PrimNode>();
-        acc.bvh_nodes += self.wide.capacity() * size_of::<WideNode>();
-        acc.leaves += self.leaves.capacity() * size_of::<Leaf>();
-        acc.packets += self.packets.capacity() * size_of::<Tri4>();
-        acc.indices += self.indices.capacity() * size_of::<u32>();
+        use std::mem::size_of_val;
+        acc.prim_nodes += size_of_val(&*self.prims);
+        acc.bvh_nodes += size_of_val(&*self.wide);
+        acc.leaves += size_of_val(&*self.leaves);
+        acc.packets += size_of_val(&*self.packets);
+        acc.indices += size_of_val(&*self.indices);
         for p in &self.prims {
             match p {
                 PrimNode::Instance(i) => {

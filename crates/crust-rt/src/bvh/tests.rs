@@ -349,13 +349,28 @@ fn collapse_widens_the_tree() {
 /// footprint counts their capacity, so none of them may keep slack: the
 /// node vector used to reserve one wide node per binary leaf, three times
 /// what a 4-wide tree uses and seven times an 8-wide one.
+///
+/// The finished `Bvh` boxes its tables, so slack cannot survive there; what
+/// this pins is that `collapse` does not allocate it in the first place —
+/// boxing an over-reserved vector would copy it, at the build's peak memory.
 #[test]
 fn collapsed_tables_hold_no_spare_capacity() {
-    for bvh in [Bvh::new(sphere_grid(6)), Bvh::new(diagonal_shards(40))] {
-        assert_eq!(bvh.wide.capacity(), bvh.wide.len());
-        assert_eq!(bvh.leaves.capacity(), bvh.leaves.len());
-        assert_eq!(bvh.packets.capacity(), bvh.packets.len());
-        assert_eq!(bvh.indices.capacity(), bvh.indices.len());
+    for prims in [sphere_grid(6), diagonal_shards(40)] {
+        let refs: Vec<PrimRef> = prims
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PrimRef {
+                bbox: p.bbox(),
+                idx: i as u32,
+            })
+            .collect();
+        let root = union_all(&refs);
+        let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
+        let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+        assert_eq!(wide.capacity(), wide.len());
+        assert_eq!(collected.leaves.capacity(), collected.leaves.len());
+        assert_eq!(collected.packets.capacity(), collected.packets.len());
+        assert_eq!(collected.indices.capacity(), collected.indices.len());
     }
 }
 
