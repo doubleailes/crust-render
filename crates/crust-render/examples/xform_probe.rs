@@ -1,6 +1,6 @@
 //! Diagnostic: does openusd compose a multi-op `xformOpOrder` stack correctly?
 //!
-//! `usd_import.rs` composes `xformOp:*` attributes itself (`compose_xform_ops`)
+//! `scene/usd_import/xform.rs` composes `xformOp:*` attributes itself (`compose_xform_ops`)
 //! because openusd 0.5.0 got the order wrong — the authored translate came back
 //! multiplied by the scale, which rendered `samples/cornellbox.usda` as floating
 //! objects. That local composer is only worth keeping while the bug is real, so
