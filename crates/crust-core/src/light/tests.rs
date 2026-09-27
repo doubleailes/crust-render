@@ -310,3 +310,43 @@ fn find_by_geom_matches_by_id() {
     assert!(lights.find_by_geom(7).is_some());
     assert!(lights.find_by_geom(8).is_none());
 }
+
+/// An escaping ray asks only the lights at infinity, and must get exactly
+/// what asking every light would: the same lights with the same pick
+/// probabilities, in list order, under both uniform and power selection.
+#[test]
+fn infinite_at_is_iter_at_filtered_to_escaped() {
+    let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
+    let mut lights = LightList::new();
+    let area = |c: f32, id: u32| {
+        Arc::new(AreaLight::new(
+            Box::new(SphereShape {
+                center: Vec3A::new(c, 0.0, 0.0),
+                radius: 1.0,
+            }),
+            mat.clone(),
+            id,
+        ))
+    };
+    lights.add(area(0.0, 0));
+    lights.add(Arc::new(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0)));
+    lights.add(area(3.0, 1));
+    lights.add(Arc::new(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY)));
+    for selection in [LightSelection::Uniform, LightSelection::Power] {
+        lights.select_by(selection);
+        let from = Vec3A::new(0.0, 5.0, 0.0);
+        let dir = Vec3A::Y;
+        let every: Vec<(usize, f32)> = lights
+            .iter_at(from)
+            .enumerate()
+            .filter(|(_, (l, _))| l.escaped(from, dir).is_some())
+            .map(|(i, (_, pmf))| (i, pmf))
+            .collect();
+        let infinite: Vec<f32> = lights.infinite_at(from).map(|(_, pmf)| pmf).collect();
+        assert_eq!(every.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(every.iter().map(|&(_, p)| p).collect::<Vec<_>>(), infinite);
+        for (light, _) in lights.iter() {
+            assert_eq!(light.at_infinity(), light.escaped(from, dir).is_some());
+        }
+    }
+}

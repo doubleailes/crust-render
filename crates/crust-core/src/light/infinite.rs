@@ -129,6 +129,10 @@ impl Light for DistantLight {
             .then(|| (self.radiance(), self.cone_pdf()))
     }
 
+    fn at_infinity(&self) -> bool {
+        true
+    }
+
     /// At infinity: no finite power (see [`Light::power`]).
     fn power(&self) -> Option<f32> {
         None
@@ -239,6 +243,10 @@ impl Light for DomeLight {
     fn escaped(&self, _from: Vec3A, direction: Vec3A) -> Option<(Vec3A, f32)> {
         // A dome covers every direction, so every escaping ray finds it.
         Some((self.radiance_toward(direction), self.pdf_toward(direction)))
+    }
+
+    fn at_infinity(&self) -> bool {
+        true
     }
 
     /// At infinity: no finite power (see [`Light::power`]).

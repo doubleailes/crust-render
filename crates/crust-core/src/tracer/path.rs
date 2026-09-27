@@ -361,7 +361,8 @@ fn escaped_emission(
     let mut covered = false;
     let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
     // The pmf at the vertex the escaping ray left: the one its NEE picked with.
-    for (light, pmf) in lights.iter_at(from) {
+    // Only lights at infinity can answer `escaped`; the rest are skipped.
+    for (light, pmf) in lights.infinite_at(from) {
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
             continue;
         };
