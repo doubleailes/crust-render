@@ -25,6 +25,7 @@ mod light_cache;
 mod lux;
 mod material;
 mod medium;
+mod pdf;
 /// The opt-in render profile (`--profile`): per-section thread time inside
 /// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
@@ -72,6 +73,7 @@ pub use lux::{
 };
 pub use material::*;
 pub use medium::Medium;
+pub use pdf::{InvPdfArea, PdfSolidAngle};
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone};
 pub use rt_world::{FaceMap, FanSlice, UvMap, World, WorldBuilder, WorldHit};
 pub use scene::Scene;

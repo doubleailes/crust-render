@@ -820,7 +820,7 @@ fn a_rect_light_is_two_triangles_and_one_light() {
         .expect("reachable");
     assert!(s.direction.z > 0.99);
     assert!(
-        s.pdf.is_finite() && s.pdf < 1e3,
+        s.pdf.get().is_finite() && s.pdf.get() < 1e3,
         "the emitting side faces the point"
     );
 }
@@ -910,11 +910,11 @@ fn assert_mis_sides_agree(scene: &Scene, from: Vec3A) -> usize {
         );
         if s.radiance.max_element() > 0.0 {
             lit += 1;
-            let pdf = light.pdf_at_point(from, hit.rec.p);
+            let pdf = light.pdf_at_point(from, hit.rec.p).map_or(0.0, |p| p.get());
             assert!(
-                (pdf - s.pdf).abs() <= 2e-3 * s.pdf,
+                (pdf - s.pdf.get()).abs() <= 2e-3 * s.pdf.get(),
                 "bounce pdf {pdf} vs NEE pdf {}",
-                s.pdf
+                s.pdf.get()
             );
         }
     }

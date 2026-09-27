@@ -29,12 +29,18 @@
   two-sided emitter keeps NEE from behind and from inside a sphere). Where the
   density is not finite (edge-on, degenerate) `AreaLight` **refuses** the point on
   both sides, pbrt-v4's way: `sample_li` returns `None` and `pdf_at_point` returns
-  **0**, which `bounce_emission_weight` reads as "NEE never delivers this" and gives
+  **`None`**, which `bounce_emission_weight` reads as "NEE never delivers this" and gives
   `SamplingStrategy::unopposed_weight` (1 for every strategy, `light` included —
   the same weight every no-competitor branch there and in `escaped_emission` takes).
   It used to add `1e-4` to that denominator instead, an NEE bias of
   `1 + 1e-4/(cos θ_l · A)` (+12.7% measured on a 1.3e-3 m² disk,
   `docs/light_sampling.md` §3.10); do not reintroduce a finite stand-in.
+  The refusal is a type: light densities are `PdfSolidAngle` (`crust-core/src/pdf.rs`),
+  whose `new` refuses anything not finite and positive, the area density is an
+  `InvPdfArea` whose `to_solid_angle` is the one conversion, and the MIS weights take
+  nothing but `PdfSolidAngle`s. A dome's `escaped` answers `None` for the pdf of a
+  direction its map gives no density (a black texel), which `escaped_emission` takes
+  unopposed, the same rule as a refused point.
   A shape with a better strategy than area sampling implements
   **`LightShape::sample_solid_angle` / `solid_angle_pdf`** (default `None`, meaning
   "sample me by area"): a point plus its *solid-angle* pdf as seen from the shading

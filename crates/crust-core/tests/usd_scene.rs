@@ -1165,10 +1165,11 @@ fn infinite_lights_are_found_by_escaping_rays() {
         let (_, pdf) = light
             .escaped(crust_core::Vec3A::ZERO, s.direction)
             .expect("sample_li produced a direction escaped() does not cover");
+        let pdf = pdf.expect("NEE sampled this direction").get();
         assert!(
-            (pdf - s.pdf).abs() <= 1e-3 * s.pdf.max(pdf),
+            (pdf - s.pdf.get()).abs() <= 1e-3 * s.pdf.get().max(pdf),
             "MIS sides disagree: sample_li {} vs escaped {}",
-            s.pdf,
+            s.pdf.get(),
             pdf
         );
     }

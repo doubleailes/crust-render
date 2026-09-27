@@ -217,7 +217,10 @@ pub(crate) fn train(
                                 let Some(ls) = light.sample_li(p, d[0], d[1]) else {
                                     continue;
                                 };
-                                if ls.radiance == Vec3A::ZERO || ls.pdf.is_nan() || ls.pdf <= 0.0 {
+                                if ls.radiance == Vec3A::ZERO
+                                    || ls.pdf.get().is_nan()
+                                    || ls.pdf.get() <= 0.0
+                                {
                                     continue;
                                 }
                                 let Some((f, _)) = sp.eval(&ray, ls.direction) else {
@@ -233,7 +236,7 @@ pub(crate) fn train(
                                 if world.occluded(&shadow, 0.001, ls.distance - 0.001) {
                                     continue;
                                 }
-                                let e = utils::luminance(c) / ls.pdf;
+                                let e = utils::luminance(c) / ls.pdf.get();
                                 if e.is_finite() {
                                     sum += e;
                                 }

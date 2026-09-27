@@ -3,6 +3,7 @@
 
 use crate::LightSelection;
 use crate::filter::PixelFilter;
+use crate::pdf::PdfSolidAngle;
 
 /// The indirect clamp a render gets unless the stage (`crust:indirectClamp`)
 /// or the host (`--indirect-clamp`) says otherwise — see
@@ -49,7 +50,11 @@ impl SamplingStrategy {
 
     /// Weight of a light-sampled (NEE) contribution, given the competing
     /// bounce strategy's density toward the same direction.
-    pub fn light_weight(self, light_pdf: f32, bounce_pdf: f32) -> f32 {
+    ///
+    /// Both densities are [`PdfSolidAngle`]s: a light's and a bounce's pdf
+    /// are only comparable in the same measure.
+    pub fn light_weight(self, light_pdf: PdfSolidAngle, bounce_pdf: PdfSolidAngle) -> f32 {
+        let (light_pdf, bounce_pdf) = (light_pdf.get(), bounce_pdf.get());
         match self {
             SamplingStrategy::PowerMis => utils::power_heuristic(light_pdf, bounce_pdf),
             SamplingStrategy::BalanceMis => utils::balance_heuristic(light_pdf, bounce_pdf),
@@ -77,7 +82,8 @@ impl SamplingStrategy {
     /// Weight of bounce-hit emission on a light that NEE could also have
     /// sampled with density `light_pdf`. Mirror of [`Self::light_weight`]:
     /// for every strategy the two weights sum to one.
-    pub fn bounce_weight(self, bounce_pdf: f32, light_pdf: f32) -> f32 {
+    pub fn bounce_weight(self, bounce_pdf: PdfSolidAngle, light_pdf: PdfSolidAngle) -> f32 {
+        let (bounce_pdf, light_pdf) = (bounce_pdf.get(), light_pdf.get());
         match self {
             SamplingStrategy::PowerMis => utils::power_heuristic(bounce_pdf, light_pdf),
             SamplingStrategy::BalanceMis => utils::balance_heuristic(bounce_pdf, light_pdf),

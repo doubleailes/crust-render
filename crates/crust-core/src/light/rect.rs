@@ -4,6 +4,7 @@
 use glam::{DVec2, DVec3, Vec3, Vec3A};
 
 use super::shape::LightShape;
+use crate::pdf::PdfSolidAngle;
 
 /// Rectangular light surface (UsdLux `RectLight`): the parallelogram
 /// `origin + u·edge_u + v·edge_v`, emitting from the side its `normal`
@@ -212,8 +213,11 @@ impl SphericalRect {
         })
     }
 
-    pub(super) fn pdf(&self) -> f32 {
-        (1.0 / self.solid_angle) as f32
+    /// Uniform over the solid angle. Finite and positive: a rectangle is only
+    /// sampled this way with a solid angle in
+    /// `[MIN_SPHERICAL_RECT_SR, MAX_SPHERICAL_RECT_SR]`.
+    pub(super) fn pdf(&self) -> PdfSolidAngle {
+        PdfSolidAngle::from_measure((1.0 / self.solid_angle) as f32)
     }
 
     /// The rectangle's own `(s, t) ∈ [0, 1]²` of a point uniform in the solid
@@ -277,13 +281,13 @@ impl LightShape for RectShape {
     /// the map's local coordinates, so it lies on the light exactly as an
     /// area sample does — on the triangles a bounce ray hits, and at the
     /// texel a textured card looks up.
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, f32)> {
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
         let rect = self.spherical_rect(from)?;
         let (s, t) = rect.sample(u as f64, v as f64);
         Some((self.sample_point(s as f32, t as f32), rect.pdf()))
     }
 
-    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<f32> {
+    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
         self.spherical_rect(from).map(|rect| rect.pdf())
     }
 }

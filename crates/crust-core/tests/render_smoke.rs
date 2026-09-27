@@ -5,8 +5,9 @@
 use crust_core::rt::Geometry;
 use crust_core::{
     AreaLight, Buffer, Camera, DistantLight, DomeLight, Emissive, LightList, LightSelection,
-    MASK_INDIRECT, MASK_SHADOW, OpenPBR, PathSampler, PixelFilter, Ray, RenderSettings, Renderer,
-    SamplingStrategy, Scene, SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
+    MASK_INDIRECT, MASK_SHADOW, OpenPBR, PathSampler, PdfSolidAngle, PixelFilter, Ray,
+    RenderSettings, Renderer, SamplingStrategy, Scene, SphereShape, Vec3A, Volumes, WorldBuilder,
+    ray_color,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,7 +112,11 @@ fn sampling_strategies_partition_unity_for_every_pair() {
         SamplingStrategy::BsdfOnly,
     ] {
         for (a, b) in [(1.0f32, 1.0f32), (0.1, 7.0), (50.0, 0.5)] {
-            let sum = s.light_weight(a, b) + s.bounce_weight(b, a);
+            let (pa, pb) = (
+                PdfSolidAngle::new(a).unwrap(),
+                PdfSolidAngle::new(b).unwrap(),
+            );
+            let sum = s.light_weight(pa, pb) + s.bounce_weight(pb, pa);
             assert!(approx(sum, 1.0, 1e-4), "{s:?} ({a},{b}) = {sum}");
         }
     }
