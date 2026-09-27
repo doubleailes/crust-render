@@ -480,7 +480,7 @@ consumed as ordinary dependencies:
   (the renderer's, aliased `crust_core::PathSampler`), `LatticeSampler`, `PmjSampler`, and
   their blue-noise variants `SobolBnSampler`/`LatticeBnSampler`/`PmjBnSampler` (optimised
   tables bundled as LE binary blobs in `src/data/`). Depended on by `crust-core`
-  (materials, `guiding/`, `volume.rs`, `tracer.rs`) for every stochastic draw. Idiomatic
+  (materials, `guiding/`, `volume.rs`, `tracer/path.rs`) for every stochastic draw. Idiomatic
   divergences from the C++: the caller-allocated `void*` cache (a GPU concern) becomes a
   lazy process-global, keeping every `Sampler<T>` a small `Copy + Send` value.
   **Performance, as of 0.2.4:** Sobol draws were 16–24% of a render here (callgrind,
@@ -509,7 +509,7 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
 
 1. **`main.rs`** builds a `Scene { camera, world, lights, settings, volumes }` — either from
    USD (`Scene::from_usd`) or the procedural fallback (`world::simple_scene` + `get_settings`).
-2. **`Renderer`** (`tracer.rs`) drives sampling. Two entry points, both Rayon-parallel:
+2. **`Renderer`** (`tracer/mod.rs`) drives sampling. Two entry points, both Rayon-parallel:
    - `render_with_tiles()` — parallel over 16×16 tiles. **The CLI's default**, and
      13–48% faster than rows on every sample measured (`bench_ab.sh`: cornellbox −27%,
      materialx_basic −25%, teapot −19%, ptex_quads −48%, usdlux −13%): a tile is a
@@ -527,7 +527,7 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
    is triangle at radius 1.0; box at radius 0.5 reproduces the historical in-pixel
    jitter bit-identically (`--filter box` when comparing against pre-filter
    renders). Mitchell is the only kind with negative weights.
-3. **`trace_path()`** (`tracer.rs`, public wrapper `ray_color()`) is the integrator — an
+3. **`trace_path()`** (`tracer/path.rs`, public wrapper `ray_color()`) is the integrator — an
    **iterative** path tracer in two passes: a forward walk that traces one segment per
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
    records into the radiance estimate and emits guiding training samples (which need
@@ -686,7 +686,7 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   and Adobe's `openpbr-bsdf` reference — the item-by-item alignment record (with the
   remaining gaps, e.g. no LUT-based multiple-scattering compensation and no random-walk
   SSS entry) is `docs/openpbr_reference_alignment.md`.
-- **`Light`** (`light.rs`) — `sample_point`/`pdf`/`emission`/`material`. The one
+- **`Light`** (`light/`) — `sample_point`/`pdf`/`emission`/`material`. The one
   implementation is **`AreaLight`**: a `LightShape` (pure emitting geometry —
   `SphereShape`, `RectShape`, and `AffineShape`, a unit sphere / disk / tube under any
   invertible affine) paired with the `Arc<Emissive>` its scene geometry carries.
@@ -840,13 +840,13 @@ material types, `simple_scene`, `get_settings`). Prefer importing from `crust_co
   at full weight.
 
 Sampling goes through the **`openqmc`** crate's native domain-tree API (see the workspace
-layout above). The integrator (`tracer.rs`) threads the sampler *by value* — no stateful
+layout above). The integrator (`tracer/path.rs`) threads the sampler *by value* — no stateful
 `&mut dyn Sampler`: `render_pixel` builds a root `PathSampler::new(x, y, frame, index)` per
 sample (with an extra `new_domain(tile)` so images wider/taller than 256 stay decorrelated,
 since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a `K_CAMERA`
 domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
 and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
-…, keys defined atop `tracer.rs`); materials draw one 4D block from the `SobolSampler` domain
+…, keys defined atop `tracer/path.rs`); materials draw one 4D block from the `SobolSampler` domain
 they are handed. Unbounded/incidental draws — Russian roulette, volume delta-tracking,
 carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
@@ -1267,7 +1267,7 @@ Schema mapping:
     is the larger graph (140 ops, 8 lobes, 7 textures over 6 UDIM tiles, 1.06 M
     baked triangles) and the one that layers a `sheen_bsdf`, so it is what
     exercises the fuzz pool; both import with no unsupported nodes.
-- **UV textures** (`texture.rs`, host decoder in `crust-assets/src/uv_texture.rs`) —
+- **UV textures** (`texture.rs`, host decoder in `crust-assets/src/uv_texture/`) —
   the chart a `primvars:st` primvar carries, as opposed to Ptex's per-face
   parameterisation. `Texture2D` is `crust_mtlx::Texture` re-exported — the
   standalone reader has to name the sampler it consumes and crust-core adopts
@@ -1915,10 +1915,10 @@ Schema mapping:
   `crust:indirectClamp` float). Missing attrs
   fall back to defaults (128 spp, depth 32, 640×360, power MIS, power light selection,
   triangle filter at radius 1.0, indirect clamp 10) defined as consts at the top of the file
-  (the clamp's in `tracer.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
+  (the clamp's in `tracer/settings.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
   **`crust:indirectClamp`** is the one biased setting: it caps each camera sample's
   *indirect* light (everything past the primary vertex's continuation) at the value in
-  its largest channel, scaling the colour whole (`tracer.rs`, `clamp_indirect`). Direct
+  its largest channel, scaling the colour whole (`tracer/path.rs`, `clamp_indirect`). Direct
   light is never touched — the primary vertex's NEE, its emission, and what its bounce
   finds, an emitter *or an escape to a dome or sun* — because clamping one MIS half and
   not the other would bias the pair; the escape case is why the clamp only engages when

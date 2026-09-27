@@ -90,7 +90,7 @@ against the same mechanism.
 - `crates/crust-core/src/scene/usd_import/`: `preview_surface_openpbr`,
   `disney_to_openpbr`, `decode_crust_openpbr`, and the existing `srgb_to_linear`
   helper.
-- `crates/crust-core/src/material/openpbr.rs`: **not** affected — the `OpenPBR`
+- `crates/crust-core/src/material/openpbr/`: **not** affected — the `OpenPBR`
   struct's field types stay as they are. Enforcement lives at the importer
   boundary instead, keeping this change out of the `materials` capability and
   away from every BRDF read site.

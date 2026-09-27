@@ -44,7 +44,7 @@ interchangeable:
 | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
 | **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
-| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture.rs`, `to_linear_table`) |
+| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture/`, `to_linear_table`) |
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
 *separate* colour spaces, and [`ColorSpace::from_mtlx`][cs] maps them onto
@@ -55,7 +55,7 @@ exponent is not 2.4-ish at all. The primaries in those two names are Rec.709,
 which is the space crust already works in, so only the curve differs; a tag
 naming *different* primaries (`acescg`, `g22_ap1`) is deliberately left as
 `Raw` rather than decoded with the wrong gamut. Pinned by the decode tests in
-`crust-assets/src/uv_texture.rs` and the tag-mapping tests in
+`crust-assets/src/uv_texture/` and the tag-mapping tests in
 `crust-core/src/texture.rs`.
 
 [cs]: ../crates/crust-core/src/texture.rs
@@ -171,15 +171,15 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
 | Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` | flat 2.2 | ✅ intentional (island convention) |
-| UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture.rs` (`to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
-| UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture.rs` | flat 2.2 | ✅ correct per MaterialX |
-| UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture.rs` | flat 1.8 | ✅ correct per MaterialX |
-| UV texture, any other tag or none | `crust-assets/src/uv_texture.rs` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
-| `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import/preview.rs` (`preview_uv_input`) → `uv_texture.rs` | piecewise sRGB | ✅ correct per the node set |
+| UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
+| UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
+| UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |
+| UV texture, any other tag or none | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
+| `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import/preview.rs` (`preview_uv_input`) → `uv_texture/` | piecewise sRGB | ✅ correct per the node set |
 | `UsdUVTexture`, `sourceColorSpace = "raw"` | same | none (pass-through) | ✅ correct per the node set |
 | `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for 8-bit RGB/RGBA, none otherwise | ✅ the UsdUVTexture rule (Hydra's) — note the default is `auto`, **not** raw as in MaterialX |
-| Preloaded `.exr` UV texture | `crust-assets/src/uv_texture.rs` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
-| MaterialX emission `image`, untagged | `crust-assets/src/uv_texture.rs` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
+| Preloaded `.exr` UV texture | `crust-assets/src/uv_texture/` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
+| MaterialX emission `image`, untagged | `crust-assets/src/uv_texture/` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
 | LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
@@ -206,8 +206,8 @@ plausible-looking bug rather than an obvious one.
 
 | Reduction | Where | Space | Why |
 | --- | --- | --- | --- |
-| **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture.rs`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
-| **Mip levels** | `uv_texture.rs`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
+| **`CRUST_TEX_MAX` cap** | `crust-assets/src/uv_texture/`, `decode_tile` | the file's own encoding | It is a *resize*, not a filter: the capped tile should look like the DCC's preview of the same file, which is also computed on encoded bytes. |
+| **Mip levels** | `uv_texture/`, `Tile::build_pyramid` | **linear**, re-encoded through the colour space's inverse curve | It *is* a filter — it stands in for integrating light over a pixel's footprint — and summing display-encoded values is not summing light. |
 | **Ptex mip levels (preloaded)** | `crust-assets/src/ptex_texture.rs`, in `open_with` | **linear** (already decoded) | Same reason; no round trip needed, since the base is decoded to linear `f32` at load and reduced from there. |
 | **Ptex mip levels (`.ptx` on disk)** | the file's writer, read back by `ptex_stream.rs` | the file's own encoding | Not crust's choice — the levels were reduced before crust ever saw the file, and crust decodes Ptex by 2.2 afterwards. So it is the mismatch the row below refuses, and streaming such a texture is declined by default (`CRUST_PTEX_STREAM_MIPSPACE`). |
 | **`.tx` mip levels (TIFF backing)** | `crust-assets/src/tiled/write.rs` | **linear**, re-encoded | The same `reduce_half` as the in-memory pyramid — literally the same function, so a streamed render and a preloaded one cannot drift apart. |
@@ -265,7 +265,7 @@ pyramid costs a third of the base rather than four times it. The re-encode uses
 `gamma()`, so adding a colour space is a compile error there instead of a
 silent fall-through to `Raw`.
 
-[enc]: ../crates/crust-assets/src/uv_texture.rs
+[enc]: ../crates/crust-assets/src/uv_texture/
 
 ## Scalar inputs are never converted
 

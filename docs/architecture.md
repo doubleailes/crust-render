@@ -98,8 +98,8 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | `AssetLoader` | `crust-core/src/scene.rs` | `crust_assets::FileAssets`, `NoAssets` | the host decodes; returning `None` means "fall back", never an error |
 | `Texture2D` (= `crust_mtlx::Texture`), `PtexTexture` | `crust-mtlx/src/texture.rs`, `crust-core/src/texture.rs` | `UvTexture`, `StreamingTexture`, `PtexColor`, `PtexStream` | linear values out; unwrapped UVs in (UDIM addressing is the host's) |
 | `Material` | `crust-core/src/material/material.rs` | `OpenPBR`, `Emissive`, `MtlxMaterial`, `PreviewSurface` | `resolve` once per vertex → `ShadingPoint`; `eval` returning `None` must not depend on `wi` |
-| `Light`, `LightShape` | `crust-core/src/light.rs` | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
-| `ProgressCallback` | `crust-core/src/tracer.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
+| `Light`, `LightShape` | `crust-core/src/light/` (`mod.rs`, `shape.rs`) | `AreaLight`, `DistantLight`, `DomeLight`; sphere / rect / affine shapes | NEE and the bounce side must compute the same density for the same point |
+| `ProgressCallback` | `crust-core/src/tracer/mod.rs` | the CLI's `indicatif` bar | called with `(done, total)`; the engine never prints |
 | `RenderStats`, `profile::Section` | `crust-core/src/stats.rs`, `profile.rs` | — | counters always on, timers per phase; `--profile` sections compile away when off |
 
 ## `crust-core` module map
@@ -109,9 +109,9 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv.rs` (OpenSubdiv refinement) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| integrator | `tracer.rs` (`Renderer`, `RenderSettings`, `trace_path`, MIS strategies), `filter.rs` (pixel filter importance sampling), `buffer.rs` |
-| materials | `material/openpbr.rs` (the übershader), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX adapter), `preview_surface.rs`, `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
-| lights | `light.rs` (shapes, lights, `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
+| integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
+| materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX adapter), `preview_surface.rs`, `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
+| lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
 | textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`) |
@@ -151,10 +151,10 @@ documented alternative. Booleans read `=0` as "off" unless noted.
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every subdivision cage unrefined |
 | `CRUST_MTLX_OPT` | on | `material/materialx.rs` | `0`: skip constant folding / hoisting / pruning (bit-identical) |
 | `CRUST_SHADER_JIT` | on | `material/materialx.rs` | `0`: interpret MaterialX programs instead of JIT (bit-identical) |
-| `CRUST_RAY_CONES` | on | `tracer.rs` | `0`: zero every texture footprint (finest mip always) |
+| `CRUST_RAY_CONES` | on | `tracer/path.rs` | `0`: zero every texture footprint (finest mip always) |
 | `CRUST_TEX` | on | `crust-assets/lib.rs` | `0`: decline every UV texture (surfaces use constants) |
-| `CRUST_TEX_MAX` | 1024 | `crust-assets/uv_texture.rs` | preloaded tile edge cap, pixels |
-| `CRUST_TEX_MIP` | on | `crust-assets/uv_texture.rs` | `0`: no mip pyramid on UV textures |
+| `CRUST_TEX_MAX` | 1024 | `crust-assets/uv_texture/` | preloaded tile edge cap, pixels |
+| `CRUST_TEX_MIP` | on | `crust-assets/uv_texture/` | `0`: no mip pyramid on UV textures |
 | `CRUST_TEX_STREAM` | on | `crust-assets/lib.rs` | `0`: preload even when a `.tx` exists |
 | `CRUST_TEX_CACHE_MB` | 1024 | `crust-assets/tiled/cache.rs` | `.tx` tile cache budget |
 | `CRUST_PTEX` | on | `crust-assets/lib.rs` | `0`: decline every Ptex texture |
@@ -195,37 +195,46 @@ Paid down in the 2026-09-27 architecture pass (no rendered output changed):
   state stay in `mod.rs`.
 - Dead code removed: the unused `random_scene`, the `rand`-backed helpers in
   `utils` (and with them the `rand` dependency), `utils::clamp`, and two dead
-  helpers in `openpbr.rs`; test-only helpers moved under `#[cfg(test)]`.
+  helpers in `openpbr`; test-only helpers moved under `#[cfg(test)]`.
 - Unused `serde` dependency and glam's `serde` feature removed.
 - Three copies of Rec.709 luminance merged into `utils::luminance`; the CLI's
   sRGB encoder now calls `crust_assets::linear_to_srgb`.
 - Stale comments corrected (`unsafe_code` policy, the opensubdiv dependency, a
   doc comment that had drifted onto the wrong function), and line-number
   references in `docs/color_management.md` replaced by function names.
+- The next five largest files split the same way, each into a module
+  directory with its tests in their own file and every public path kept by
+  re-export: `material/openpbr/` (lobes, transmission), `tracer/` (settings,
+  path), `light/` (shape, rect, area, infinite, list), `crust-rt`'s `bvh/`
+  (build, collapse, stats) and `crust-assets`'s `uv_texture/` (tile, udim,
+  decode, mip). Verified codegen-neutral, not just output-neutral: under
+  callgrind every hot function (`Bvh::hit`, `render_pixel`,
+  `scatter_resolved`, `eval_all`, `pdf_all`) executes the same instruction
+  count to the unit on cornellbox and materialx_basic.
 
 Still open, roughly in order of payoff:
 
-1. **Large files with clean seams.** `material/openpbr.rs` (2 700 lines, half
-   of it tests), `tracer.rs` (2 200: `Renderer`, `RenderSettings` and the path
-   integrator are separable), `light.rs` (1 800: shapes / lights / `LightList`),
-   `crust-rt/src/bvh.rs` (1 850: build vs traversal) and
-   `crust-assets/src/uv_texture.rs` (1 500). The integrator is
-   inlining-sensitive (see `profile.rs`'s monomorphisation notes), so split it
-   with a callgrind before/after, not by eye.
-2. **`CLAUDE.md` is 2 400 lines.** It is accurate and full of hard-won
+1. **`CLAUDE.md` is 2 400 lines.** It is accurate and full of hard-won
    measurements, but it mixes a contributor guide, a changelog and design
    records. Moving the per-feature histories into `docs/` topic files and
    leaving `CLAUDE.md` as rules + pointers would make it usable again.
-3. **Environment parsing is hand-rolled per variable.** The convention is
+2. **Environment parsing is hand-rolled per variable.** The convention is
    consistent (`=0` off), but budget parsing warns on bad input in some places
    and not others (`CRUST_TEX_MAX` is silent), and crust-core caches its flags
    in `OnceLock`s while crust-assets re-reads per call.
-4. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
+3. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
    trait any more (the file holds `HitRecord`), and `aabb.rs` only re-exports
    the kernel's type.
-5. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
+4. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
    `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
-   way the importer now does.
+   way the importer now does. The largest source files left are
+   `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
+   (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
+5. **Hot-path splits need a callgrind, not an eye.** Any further move inside
+   `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
+   instruction comparison above: the integrator is monomorphised on
+   `PROFILE` and some helpers are `inline(always)` for measured reasons
+   (`profile.rs`).
 
 ## Further reading
 

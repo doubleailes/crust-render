@@ -1,7 +1,7 @@
 # OpenPBR reference alignment
 
 This document records the alignment work done on `crust-core`'s OpenPBR
-übershader (`crates/crust-core/src/material/openpbr.rs` +
+übershader (`crates/crust-core/src/material/openpbr/` +
 `material/brdf.rs` + `medium.rs`) against the two public references:
 
 - **MaterialX nodegraph** — the normative surface-shader graph shipped with
@@ -197,4 +197,4 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   thin-walled transmission (Adobe documents the same limitation).
 
 Every item above is test-pinned where implemented; the shader's regression
-suite lives in `openpbr.rs` (`cargo test -p crust-core`).
+suite lives in `openpbr/` (`cargo test -p crust-core`).

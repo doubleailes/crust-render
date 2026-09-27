@@ -17,7 +17,7 @@ code (from investigation, not restated in full):
   (piecewise sRGB for LDR, linear pass-through for `.hdr`/EXR) and is not
   broken; it is a candidate to consume the same shared primitive, not a
   target of the bug fix.
-- `OpenPBR` (`crust-core/src/material/openpbr.rs`) stores every field as
+- `OpenPBR` (`crust-core/src/material/openpbr/`) stores every field as
   plain `Vec3A` (colors) or `f32` (scalars) — the `Vec3A`/`f32` type
   difference already prevents a scalar from being decoded as a color (decode
   functions take `Vec3A`), so the actual, real gap is the opposite direction:

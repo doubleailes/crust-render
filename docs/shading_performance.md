@@ -29,7 +29,7 @@ Both do this work on **every** `Material` call. The comment on
 
 ### How many times a vertex is shaded
 
-At one vertex of an unguided path (`tracer.rs`):
+At one vertex of an unguided path (`tracer/`):
 
 | Call | Site | Graph runs |
 |---|---|---|
