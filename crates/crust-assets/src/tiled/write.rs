@@ -23,8 +23,9 @@
 //! bytes exactly fill the tile), and it is the compression `maketx` defaults to
 //! anyway.
 
-use crate::uv_texture::{encode_fn, reduce_half, to_linear_table};
-use crust_core::ColorSpace;
+use crate::TransferCurve;
+use crate::uv_texture::reduce_half;
+use crust_core::ResolvedColorSpace;
 use std::io::{self, Write};
 use std::path::Path;
 use tiff::tags::Tag;
@@ -54,7 +55,7 @@ pub fn write_tx(
     src: &[u8],
     width: usize,
     height: usize,
-    space: ColorSpace,
+    space: ResolvedColorSpace,
 ) -> io::Result<Vec<(usize, usize)>> {
     if width == 0 || height == 0 {
         return Err(io::Error::new(
@@ -70,8 +71,8 @@ pub fn write_tx(
         ));
     }
 
-    let to_linear = to_linear_table(space);
-    let encode = encode_fn(space);
+    let to_linear = space.to_linear_table();
+    let encode = space.encode_fn();
 
     // Every level materialised up front rather than streamed. The pyramid is
     // 4/3 of the source, which for anything a `.tx` is worth writing for is
@@ -102,21 +103,18 @@ pub fn write_tx(
 
 /// The `ImageDescription` string recording which colour space a file's mip
 /// chain was reduced in. Parsed back by [`crate::tiled::mip_space`].
-pub(crate) fn mip_space_tag(space: ColorSpace) -> String {
+pub(crate) fn mip_space_tag(space: ResolvedColorSpace) -> String {
     format!("crust:mipspace={}", space_name(space))
 }
 
 /// The stable spelling of a colour space in a `.tx`. Matched on the variant so
 /// a new one is a compile error here rather than a silently unlabelled file.
-pub(crate) fn space_name(space: ColorSpace) -> &'static str {
+pub(crate) fn space_name(space: ResolvedColorSpace) -> &'static str {
     match space {
-        ColorSpace::Srgb => "srgb_texture",
-        ColorSpace::Gamma22 => "g22_rec709",
-        ColorSpace::Gamma18 => "g18_rec709",
-        ColorSpace::Raw => "raw",
-        // Never written: a conversion resolves `Auto` against its source
-        // first. Spelled distinctly so an unresolved one matches no file.
-        ColorSpace::Auto => "auto",
+        ResolvedColorSpace::Srgb => "srgb_texture",
+        ResolvedColorSpace::Gamma22 => "g22_rec709",
+        ResolvedColorSpace::Gamma18 => "g18_rec709",
+        ResolvedColorSpace::Raw => "raw",
     }
 }
 
@@ -128,7 +126,7 @@ fn write_level<W: Write + io::Seek>(
     w: usize,
     h: usize,
     level: usize,
-    space: ColorSpace,
+    space: ResolvedColorSpace,
 ) -> io::Result<()> {
     let across = w.div_ceil(TILE_EDGE);
     let down = h.div_ceil(TILE_EDGE);

@@ -148,7 +148,7 @@ impl ColorSpace {
     }
 
     /// Resolves [`ColorSpace::Auto`] against the file's pixel format; every
-    /// other space is returned unchanged.
+    /// other space is returned as its resolved twin.
     ///
     /// The UsdUVTexture rule, which Hydra implements: absent colour metadata
     /// in the file, an **8-bit image with three or four channels** is sRGB and
@@ -156,22 +156,76 @@ impl ColorSpace {
     /// greyscale roughness PNG stays raw while an RGB albedo PNG decodes, and
     /// an EXR is linear. crust reads no in-file colour metadata, which the
     /// rule permits (it is consulted first "if present").
-    pub fn resolve_auto(self, eight_bit: bool, channels: u8) -> ColorSpace {
-        match self {
-            ColorSpace::Auto if eight_bit && (channels == 3 || channels == 4) => ColorSpace::Srgb,
-            ColorSpace::Auto => ColorSpace::Raw,
-            other => other,
+    pub fn resolve_auto(self, eight_bit: bool, channels: u8) -> ResolvedColorSpace {
+        match self.resolved() {
+            Some(space) => space,
+            None if eight_bit && (channels == 3 || channels == 4) => ResolvedColorSpace::Srgb,
+            None => ResolvedColorSpace::Raw,
         }
     }
+
+    /// The space already decided, when it is — `None` for
+    /// [`ColorSpace::Auto`], which only a file can decide.
+    pub fn resolved(self) -> Option<ResolvedColorSpace> {
+        match self {
+            ColorSpace::Srgb => Some(ResolvedColorSpace::Srgb),
+            ColorSpace::Gamma22 => Some(ResolvedColorSpace::Gamma22),
+            ColorSpace::Gamma18 => Some(ResolvedColorSpace::Gamma18),
+            ColorSpace::Raw => Some(ResolvedColorSpace::Raw),
+            ColorSpace::Auto => None,
+        }
+    }
+}
+
+/// A [`ColorSpace`] with `Auto` decided: the transfer curve a decoder actually
+/// applies.
+///
+/// A separate type rather than a promise in a comment. `Auto` "never reaches
+/// a lookup", but while the resolved space was a `ColorSpace` too, every
+/// decoder still had to answer for it (`Raw | Auto => …`), and a stored space
+/// could not say whether it had been resolved. Everything past the open —
+/// decode tables, mip re-encoding, `.tx` markers, the load report — holds
+/// this, so an unresolved space cannot get there.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ResolvedColorSpace {
+    /// [`ColorSpace::Srgb`].
+    Srgb,
+    /// [`ColorSpace::Gamma22`].
+    Gamma22,
+    /// [`ColorSpace::Gamma18`].
+    Gamma18,
+    /// [`ColorSpace::Raw`].
+    Raw,
+}
+
+impl ResolvedColorSpace {
+    /// Every resolved space, for matching a recorded name back to one.
+    pub const ALL: [ResolvedColorSpace; 4] = [
+        ResolvedColorSpace::Srgb,
+        ResolvedColorSpace::Gamma22,
+        ResolvedColorSpace::Gamma18,
+        ResolvedColorSpace::Raw,
+    ];
 
     /// The exponent of this space's power law, for the two spaces that are
     /// one. `None` for the piecewise sRGB curve and for raw data, neither of
     /// which is a plain `powf`.
     pub fn gamma(self) -> Option<f32> {
         match self {
-            ColorSpace::Gamma22 => Some(2.2),
-            ColorSpace::Gamma18 => Some(1.8),
-            ColorSpace::Srgb | ColorSpace::Raw | ColorSpace::Auto => None,
+            ResolvedColorSpace::Gamma22 => Some(2.2),
+            ResolvedColorSpace::Gamma18 => Some(1.8),
+            ResolvedColorSpace::Srgb | ResolvedColorSpace::Raw => None,
+        }
+    }
+}
+
+impl From<ResolvedColorSpace> for ColorSpace {
+    fn from(space: ResolvedColorSpace) -> ColorSpace {
+        match space {
+            ResolvedColorSpace::Srgb => ColorSpace::Srgb,
+            ResolvedColorSpace::Gamma22 => ColorSpace::Gamma22,
+            ResolvedColorSpace::Gamma18 => ColorSpace::Gamma18,
+            ResolvedColorSpace::Raw => ColorSpace::Raw,
         }
     }
 }
@@ -189,7 +243,7 @@ pub use crust_mtlx::{Texture as Texture2D, TextureRef};
 
 #[cfg(test)]
 mod color_space_tests {
-    use super::ColorSpace;
+    use super::{ColorSpace, ResolvedColorSpace};
 
     #[test]
     fn materialx_gamma_tags_are_not_srgb() {
@@ -223,10 +277,10 @@ mod color_space_tests {
 
     #[test]
     fn only_the_power_law_spaces_report_a_gamma() {
-        assert_eq!(ColorSpace::Gamma22.gamma(), Some(2.2));
-        assert_eq!(ColorSpace::Gamma18.gamma(), Some(1.8));
-        assert_eq!(ColorSpace::Srgb.gamma(), None);
-        assert_eq!(ColorSpace::Raw.gamma(), None);
+        assert_eq!(ResolvedColorSpace::Gamma22.gamma(), Some(2.2));
+        assert_eq!(ResolvedColorSpace::Gamma18.gamma(), Some(1.8));
+        assert_eq!(ResolvedColorSpace::Srgb.gamma(), None);
+        assert_eq!(ResolvedColorSpace::Raw.gamma(), None);
     }
 
     #[test]
@@ -241,13 +295,24 @@ mod color_space_tests {
     #[test]
     fn auto_resolves_by_pixel_format() {
         let a = ColorSpace::Auto;
-        assert_eq!(a.resolve_auto(true, 3), ColorSpace::Srgb);
-        assert_eq!(a.resolve_auto(true, 4), ColorSpace::Srgb);
-        assert_eq!(a.resolve_auto(true, 1), ColorSpace::Raw);
-        assert_eq!(a.resolve_auto(true, 2), ColorSpace::Raw);
-        assert_eq!(a.resolve_auto(false, 3), ColorSpace::Raw);
+        assert_eq!(a.resolve_auto(true, 3), ResolvedColorSpace::Srgb);
+        assert_eq!(a.resolve_auto(true, 4), ResolvedColorSpace::Srgb);
+        assert_eq!(a.resolve_auto(true, 1), ResolvedColorSpace::Raw);
+        assert_eq!(a.resolve_auto(true, 2), ResolvedColorSpace::Raw);
+        assert_eq!(a.resolve_auto(false, 3), ResolvedColorSpace::Raw);
         // An explicit space is never second-guessed by the file.
-        assert_eq!(ColorSpace::Raw.resolve_auto(true, 3), ColorSpace::Raw);
-        assert_eq!(ColorSpace::Srgb.resolve_auto(false, 1), ColorSpace::Srgb);
+        assert_eq!(
+            ColorSpace::Raw.resolve_auto(true, 3),
+            ResolvedColorSpace::Raw
+        );
+        assert_eq!(
+            ColorSpace::Srgb.resolve_auto(false, 1),
+            ResolvedColorSpace::Srgb
+        );
+        // Every explicit space resolves to itself, and back.
+        for r in ResolvedColorSpace::ALL {
+            assert_eq!(ColorSpace::from(r).resolved(), Some(r));
+        }
+        assert_eq!(a.resolved(), None);
     }
 }

@@ -44,7 +44,7 @@ interchangeable:
 | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
 | **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex texels (`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`); UV textures tagged `g22_rec709` |
-| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/uv_texture/`, `to_linear_table`) |
+| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/lib.rs`, `TransferCurve::to_linear_table`) |
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
 *separate* colour spaces, and [`ColorSpace::from_mtlx`][cs] maps them onto
@@ -171,7 +171,7 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
 | Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` | flat 2.2 | ✅ intentional (island convention) |
-| UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
+| UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`TransferCurve::to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |
 | UV texture, any other tag or none | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
@@ -261,11 +261,13 @@ UV mip levels are stored back as `u8` in the file's own encoding rather than
 as linear `f32`, so the lookup's `u8`-indexed decode table is unchanged and the
 pyramid costs a third of the base rather than four times it. The re-encode uses
 `linear_to_srgb` or the matching inverse power law, chosen by
-[`encode_fn`][enc] — matched on the `ColorSpace` variant rather than on
-`gamma()`, so adding a colour space is a compile error there instead of a
-silent fall-through to `Raw`.
+[`TransferCurve::encode_fn`][enc] — matched on the `ResolvedColorSpace`
+variant rather than on `gamma()`, so adding a colour space is a compile error
+there instead of a silent fall-through to `Raw`. Every curve takes a
+`ResolvedColorSpace`, which has no `Auto`: `ColorSpace::resolve_auto` is the
+only way from the requested space to one a decoder can apply.
 
-[enc]: ../crates/crust-assets/src/uv_texture/
+[enc]: ../crates/crust-assets/src/lib.rs
 
 ## Scalar inputs are never converted
 

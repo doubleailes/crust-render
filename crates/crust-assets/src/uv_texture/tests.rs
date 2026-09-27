@@ -124,20 +124,24 @@ fn the_two_tokens_spell_the_same_grid() {
     assert_eq!(TileToken::detect("a.png"), None);
 }
 
-fn at(space: ColorSpace, encoded: u8) -> f32 {
-    to_linear_table(space)[encoded as usize]
+fn at(space: ResolvedColorSpace, encoded: u8) -> f32 {
+    space.to_linear_table()[encoded as usize]
 }
 
 #[test]
 fn gamma_tables_are_pure_power_laws() {
     for encoded in [0u8, 3, 13, 26, 128, 255] {
         let c = encoded as f32 / 255.0;
-        assert!((at(ColorSpace::Gamma22, encoded) - c.powf(2.2)).abs() < 1e-7);
-        assert!((at(ColorSpace::Gamma18, encoded) - c.powf(1.8)).abs() < 1e-7);
+        assert!((at(ResolvedColorSpace::Gamma22, encoded) - c.powf(2.2)).abs() < 1e-7);
+        assert!((at(ResolvedColorSpace::Gamma18, encoded) - c.powf(1.8)).abs() < 1e-7);
     }
     // Both curves are anchored: black stays black, white stays white, so
     // a fully-lit albedo keeps its exposure whichever tag it carries.
-    for space in [ColorSpace::Gamma22, ColorSpace::Gamma18, ColorSpace::Srgb] {
+    for space in [
+        ResolvedColorSpace::Gamma22,
+        ResolvedColorSpace::Gamma18,
+        ResolvedColorSpace::Srgb,
+    ] {
         assert_eq!(at(space, 0), 0.0);
         assert!((at(space, 255) - 1.0).abs() < 1e-6);
     }
@@ -148,11 +152,17 @@ fn gamma_22_is_not_the_srgb_curve_in_the_shadows() {
     // The regression this pins. `g22_rec709` used to decode through the
     // piecewise sRGB curve, whose linear toe lifts near-black by an order
     // of magnitude — an albedo of 0.01 encoded reads 19x too bright.
-    let (srgb, g22) = (at(ColorSpace::Srgb, 3), at(ColorSpace::Gamma22, 3));
+    let (srgb, g22) = (
+        at(ResolvedColorSpace::Srgb, 3),
+        at(ResolvedColorSpace::Gamma22, 3),
+    );
     assert!(srgb > g22 * 10.0, "srgb {srgb} vs gamma22 {g22}");
     // And converges in the midtones, which is why the bug is invisible
     // on a look-dev turntable and only shows up in dark albedo.
-    let (srgb, g22) = (at(ColorSpace::Srgb, 128), at(ColorSpace::Gamma22, 128));
+    let (srgb, g22) = (
+        at(ResolvedColorSpace::Srgb, 128),
+        at(ResolvedColorSpace::Gamma22, 128),
+    );
     assert!((srgb - g22).abs() < 0.005, "srgb {srgb} vs gamma22 {g22}");
 }
 
@@ -162,12 +172,12 @@ fn gamma_18_is_brighter_than_both_across_the_range() {
     // strictly inside [0,1] — the error is not confined to the toe.
     for encoded in [13u8, 64, 128, 200] {
         let (g18, g22) = (
-            at(ColorSpace::Gamma18, encoded),
-            at(ColorSpace::Gamma22, encoded),
+            at(ResolvedColorSpace::Gamma18, encoded),
+            at(ResolvedColorSpace::Gamma22, encoded),
         );
         assert!(g18 > g22, "at {encoded}: g18 {g18} !> g22 {g22}");
         assert!(
-            g18 > at(ColorSpace::Srgb, encoded),
+            g18 > at(ResolvedColorSpace::Srgb, encoded),
             "at {encoded}: g18 {g18}"
         );
     }
@@ -176,7 +186,7 @@ fn gamma_18_is_brighter_than_both_across_the_range() {
 #[test]
 fn raw_is_the_identity() {
     for encoded in [0u8, 1, 77, 255] {
-        assert_eq!(at(ColorSpace::Raw, encoded), encoded as f32 / 255.0);
+        assert_eq!(at(ResolvedColorSpace::Raw, encoded), encoded as f32 / 255.0);
     }
 }
 
@@ -193,13 +203,13 @@ fn reds(level: &[u8]) -> Vec<u8> {
 /// Reduces one row under `Raw`, where the decode table and `encode` are
 /// the identity and a level is its own u8 values back.
 fn reduce_row(values: &[u8]) -> Vec<u8> {
-    let table = to_linear_table(ColorSpace::Raw);
+    let table = ResolvedColorSpace::Raw.to_linear_table();
     let (out, w, h) = reduce_half(
         &grey(values),
         values.len(),
         1,
         &table,
-        encode_fn(ColorSpace::Raw),
+        ResolvedColorSpace::Raw.encode_fn(),
     );
     assert_eq!((w, h), (values.len().div_ceil(2), 1));
     reds(&out)
@@ -262,8 +272,8 @@ fn an_odd_level_preserves_the_mean() {
 fn an_even_axis_reduces_exactly_as_it_did() {
     let (sw, sh) = (8usize, 6usize);
     let src: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 7 % 251) as u8).collect();
-    let table = to_linear_table(ColorSpace::Srgb);
-    let encode = encode_fn(ColorSpace::Srgb);
+    let table = ResolvedColorSpace::Srgb.to_linear_table();
+    let encode = ResolvedColorSpace::Srgb.encode_fn();
     let (got, w, h) = reduce_half(&src, sw, sh, &table, encode);
     assert_eq!((w, h), (4, 3));
     for y in 0..h {
@@ -299,8 +309,8 @@ fn the_two_reducers_agree_on_an_odd_level() {
         &bytes,
         sw,
         sh,
-        &to_linear_table(ColorSpace::Raw),
-        encode_fn(ColorSpace::Raw),
+        &ResolvedColorSpace::Raw.to_linear_table(),
+        ResolvedColorSpace::Raw.encode_fn(),
     );
     let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh);
     assert_eq!((w, h), (lw, lh), "the two disagree on level size");
@@ -367,7 +377,7 @@ fn an_exr_preloads_at_full_float_precision_and_range() {
     assert!(tex.is_float());
     assert_eq!(
         tex.color_space(),
-        ColorSpace::Raw,
+        ResolvedColorSpace::Raw,
         "auto on a float file is raw"
     );
     assert_eq!(tex.bytes(), 2 * 3 * 4);
@@ -436,11 +446,11 @@ fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
         .expect("write png");
 
     let t = UvTexture::open(&rgb, ColorSpace::Auto).expect("loads");
-    assert_eq!(t.color_space(), ColorSpace::Srgb);
+    assert_eq!(t.color_space(), ResolvedColorSpace::Srgb);
     assert!((t.eval(0.5, 0.5, 0.0)[0] - crate::srgb_to_linear(128.0 / 255.0)).abs() < 1e-6);
 
     let t = UvTexture::open(&grey, ColorSpace::Auto).expect("loads");
-    assert_eq!(t.color_space(), ColorSpace::Raw);
+    assert_eq!(t.color_space(), ResolvedColorSpace::Raw);
     assert_eq!(t.eval(0.5, 0.5, 0.0)[0], 128.0 / 255.0);
 }
 

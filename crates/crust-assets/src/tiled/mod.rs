@@ -314,7 +314,8 @@ mod tests {
             })
             .collect();
 
-        let levels = write_tx(&path, &src, w, h, crust_core::ColorSpace::Srgb).expect("write .tx");
+        let levels =
+            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::Srgb).expect("write .tx");
         // 150x100 -> 75x50 -> 38x25 -> 19x13 -> 10x7 -> 5x4 -> 3x2 -> 2x1 -> 1x1
         assert_eq!(levels.len(), 9, "{levels:?}");
         assert_eq!(levels[0], (w, h));
@@ -413,7 +414,8 @@ mod tests {
                 ]
             })
             .collect();
-        let levels = write_tx(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+        let levels =
+            write_tx(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw).expect("write");
 
         let tf = TiledFile::open(&path).expect("open");
         assert_eq!(tf.tile_edge(), TILE_EDGE);
@@ -516,8 +518,8 @@ mod tests {
             })
             .collect();
 
-        let levels =
-            write_tx_exr(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write exr");
+        let levels = write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw)
+            .expect("write exr");
         // Same `div_ceil` chain as the TIFF writer: 150x100 down to 1x1.
         assert_eq!(levels.len(), 9, "{levels:?}");
         assert_eq!(levels[0], (w, h));
@@ -599,7 +601,8 @@ mod tests {
             6.0, 6.0, 6.0, //
             8.0, 8.0, 8.0,
         ];
-        let levels = write_tx_exr(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+        let levels =
+            write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw).expect("write");
         assert_eq!(levels, vec![(2, 2), (1, 1)]);
 
         let tf = TiledFile::open(&path).expect("open");

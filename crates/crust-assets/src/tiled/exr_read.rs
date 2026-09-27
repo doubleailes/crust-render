@@ -413,7 +413,7 @@ mod tests {
                 [x * 0.5, y * 0.25, 3.0]
             })
             .collect();
-        write_tx_exr(&path, &src, w, h, crust_core::ColorSpace::Raw).expect("write");
+        write_tx_exr(&path, &src, w, h, crust_core::ResolvedColorSpace::Raw).expect("write");
         path
     }
 

@@ -52,7 +52,8 @@ pub use ptex_texture::{
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
 
 use crust_core::{
-    AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture, Texture2D,
+    AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
+    ResolvedColorSpace, Texture2D,
 };
 use std::path::Path;
 use std::time::Instant;
@@ -73,24 +74,6 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// One encoded sample, in `space`, as linear light.
-///
-/// The scalar form of the 256-entry table the texture decoders build. It exists
-/// for the one caller that has samples rather than bytes — the `.tx` converter,
-/// which must linearise a display-encoded source *once* before writing it to a
-/// float file that has no transfer curve of its own. Defined here so that
-/// caller cannot invent a second sRGB curve.
-#[inline]
-pub fn to_linear(space: ColorSpace, encoded: f32) -> f32 {
-    match space.gamma() {
-        Some(g) => encoded.max(0.0).powf(g),
-        None => match space {
-            ColorSpace::Srgb => srgb_to_linear(encoded),
-            _ => encoded,
-        },
-    }
-}
-
 /// The inverse of [`srgb_to_linear`]: linear `[0, 1]` back to display-encoded.
 ///
 /// Needed only to re-encode a mip level after averaging its parents in linear
@@ -104,6 +87,77 @@ pub fn linear_to_srgb(c: f32) -> f32 {
         c * 12.92
     } else {
         1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The transfer curves of a resolved colour space, as its methods.
+///
+/// They were free functions taking a `ColorSpace`, which left each one to
+/// answer for `Auto` (as raw) and let a caller hand them a space nobody had
+/// resolved. On [`ResolvedColorSpace`] there is no `Auto` to answer for, and
+/// the curves are found where the space is.
+pub trait TransferCurve: Copy {
+    /// One encoded sample as linear light.
+    ///
+    /// The scalar form of [`TransferCurve::to_linear_table`], for callers that
+    /// have samples rather than bytes — the `.tx` converter, which must
+    /// linearise a display-encoded source *once* before writing it to a float
+    /// file that has no transfer curve of its own. Defined here so no caller
+    /// can invent a second sRGB curve.
+    fn to_linear(self, encoded: f32) -> f32;
+
+    /// The curve that re-encodes a linear value back to this space — the
+    /// inverse of [`TransferCurve::to_linear_table`], used only when
+    /// averaging a mip level.
+    ///
+    /// A function rather than a table because the input is a continuous
+    /// average, not one of 256 stored values; it runs once per texel of
+    /// levels 1 and up, which is a third of the base and only at load.
+    fn encode_fn(self) -> fn(f32) -> f32;
+
+    /// The 256-entry decode table.
+    ///
+    /// The files are 8-bit, so every possible stored value is one of 256 —
+    /// the transfer function is evaluated once per level at load rather than
+    /// per texel fetch, and nothing recovers precision that was never in the
+    /// file.
+    ///
+    /// The three curves are deliberately distinct. MaterialX's `g22_rec709`
+    /// and `g18_rec709` are pure power laws; sRGB's EOTF is piecewise, with a
+    /// linear toe that keeps near-black values well above the power law (up
+    /// to 19x at 0.01 — `docs/color_management.md` tabulates it). Collapsing
+    /// them into one curve is wrong in the shadows for 2.2 and wrong
+    /// everywhere for 1.8.
+    fn to_linear_table(self) -> [f32; 256] {
+        let mut table = [0.0f32; 256];
+        for (i, v) in table.iter_mut().enumerate() {
+            *v = self.to_linear(i as f32 / 255.0);
+        }
+        table
+    }
+}
+
+impl TransferCurve for ResolvedColorSpace {
+    #[inline]
+    fn to_linear(self, encoded: f32) -> f32 {
+        match self {
+            ResolvedColorSpace::Srgb => srgb_to_linear(encoded),
+            ResolvedColorSpace::Gamma22 => encoded.max(0.0).powf(2.2),
+            ResolvedColorSpace::Gamma18 => encoded.max(0.0).powf(1.8),
+            ResolvedColorSpace::Raw => encoded,
+        }
+    }
+
+    fn encode_fn(self) -> fn(f32) -> f32 {
+        // Matched on the variant rather than on `gamma()`, so a new colour
+        // space is a compile error here instead of silently taking the `Raw`
+        // arm and storing linear values in a display-encoded table.
+        match self {
+            ResolvedColorSpace::Srgb => linear_to_srgb,
+            ResolvedColorSpace::Gamma22 => |c: f32| c.max(0.0).powf(1.0 / 2.2),
+            ResolvedColorSpace::Gamma18 => |c: f32| c.max(0.0).powf(1.0 / 1.8),
+            ResolvedColorSpace::Raw => |c: f32| c,
+        }
     }
 }
 

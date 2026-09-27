@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use crust_core::ColorSpace;
+use crust_core::ResolvedColorSpace;
+
+use crate::TransferCurve;
 
 use crate::error::AssetError;
 
@@ -19,7 +21,7 @@ use super::tile::Tile;
 /// as fixed-pattern noise that no amount of spp removes.
 ///
 /// Also returns the source's pixel format as `(eight_bit, channels)` — what
-/// [`ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
+/// [`crust_core::ColorSpace::resolve_auto`] asks about, and gone once `to_rgb8` has run.
 pub(super) fn decode_tile(
     path: &Path,
     number: u32,
@@ -95,15 +97,15 @@ pub(super) fn decode_exr_tile(
     path: &Path,
     number: u32,
     max_edge: usize,
-    space: ColorSpace,
+    space: ResolvedColorSpace,
 ) -> Result<Tile<f32>, AssetError> {
     let (mut src, sw, sh) = crate::environment::try_read_exr_rgb(path)?;
     if sw == 0 || sh == 0 {
         return Err(AssetError::unusable(path, "zero-sized image"));
     }
-    if space != ColorSpace::Raw {
+    if space != ResolvedColorSpace::Raw {
         for c in &mut src {
-            *c = crate::to_linear(space, *c);
+            *c = space.to_linear(*c);
         }
     }
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);

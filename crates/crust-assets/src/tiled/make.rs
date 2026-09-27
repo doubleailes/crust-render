@@ -11,7 +11,9 @@
 //! texel for texel (see "Streaming textures" in
 //! `openspec/specs/textures/design.md`).
 
-use crust_core::ColorSpace;
+use crust_core::{ColorSpace, ResolvedColorSpace};
+
+use crate::TransferCurve;
 
 use crate::error::AssetError;
 use std::path::{Path, PathBuf};
@@ -41,9 +43,9 @@ pub struct MadeTx {
     pub dst: PathBuf,
     /// `"half, exr"` or `"8-bit, tiff"`.
     pub kind: &'static str,
-    /// The space recorded in the file (`crust:mipspace`), with
-    /// [`ColorSpace::Auto`] resolved against the source.
-    pub space: ColorSpace,
+    /// The space recorded in the file (`crust:mipspace`), resolved against
+    /// the source.
+    pub space: ResolvedColorSpace,
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// The source holds values above 1.0 that a TIFF backing clipped.
@@ -137,10 +139,10 @@ pub fn make_tx(
         // EXR has no transfer curve, so the decode happens once, here, and
         // the space is recorded as the one the file is to be bound with.
         let linear: Vec<f32> = match &source {
-            Source::Floats(v) => v.iter().map(|&s| crate::to_linear(space, s)).collect(),
+            Source::Floats(v) => v.iter().map(|&s| space.to_linear(s)).collect(),
             Source::Bytes(v) => v
                 .iter()
-                .map(|&b| crate::to_linear(space, b as f32 / 255.0))
+                .map(|&b| space.to_linear(b as f32 / 255.0))
                 .collect(),
         };
         super::write_tx_exr(dst, &linear, w, h, space).map_err(AssetError::io(dst))?;
@@ -265,7 +267,11 @@ mod tests {
             make_tx_atomic(&src, ColorSpace::Auto, TxFormat::FromSampleType).expect("converts");
         assert_eq!(made.dst, dir.join("a.tx"));
         assert_eq!(made.kind, "8-bit, tiff");
-        assert_eq!(made.space, ColorSpace::Srgb, "auto on 8-bit RGB is sRGB");
+        assert_eq!(
+            made.space,
+            ResolvedColorSpace::Srgb,
+            "auto on 8-bit RGB is sRGB"
+        );
         let names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -291,7 +297,7 @@ mod tests {
         exr::prelude::write_rgb_file(&src, 4, 4, |_, _| (0.02f32, 0.5f32, 0.9f32)).expect("exr");
         let by_type = make_tx_atomic(&src, ColorSpace::Auto, TxFormat::FromSampleType).expect("ok");
         assert_eq!(by_type.kind, "half, exr");
-        assert_eq!(by_type.space, ColorSpace::Raw);
+        assert_eq!(by_type.space, ResolvedColorSpace::Raw);
         // `maketx`'s own default would have narrowed it to 8 bits.
         let by_range = make_tx(
             &src,

@@ -49,7 +49,9 @@
 
 use std::path::Path;
 
-use crust_core::{ColorSpace, Texture2D};
+use crust_core::{ColorSpace, ResolvedColorSpace, Texture2D};
+
+use crate::TransferCurve;
 use tracing::warn;
 
 use crate::error::AssetError;
@@ -66,7 +68,7 @@ pub(crate) use udim::udim_number;
 
 use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
 
-pub(crate) use mip::{encode_fn, reduce_half, reduce_half_linear, to_linear_table};
+pub(crate) use mip::{reduce_half, reduce_half_linear};
 pub(crate) use udim::expand_token;
 
 /// The decoded tiles, in whichever sample type the file warranted.
@@ -85,9 +87,9 @@ pub struct UvTexture {
     /// colour-space decision is made once at load and the lookup does not
     /// branch on it. Unused by an `f32` tile.
     to_linear: [f32; 256],
-    /// The colour space the texels were decoded under, with
-    /// [`ColorSpace::Auto`] already resolved against the file.
-    space: ColorSpace,
+    /// The colour space the texels were decoded under, resolved against the
+    /// file.
+    space: ResolvedColorSpace,
     /// Representative tile size, for the load message.
     width: usize,
     height: usize,
@@ -224,11 +226,12 @@ impl UvTexture {
         } else {
             tiles.push(decode(path, udim_number(0, 0))?);
         }
-        let space = resolved.unwrap_or(space);
+        // Some whenever a tile decoded, and one always has by here.
+        let space = resolved.unwrap_or_else(|| space.resolve_auto(false, 0));
 
-        let to_linear = to_linear_table(space);
+        let to_linear = space.to_linear_table();
         if mip {
-            let encode = encode_fn(space);
+            let encode = space.encode_fn();
             for t in &mut tiles {
                 t.build_pyramid(&to_linear, encode);
             }
@@ -296,7 +299,7 @@ impl UvTexture {
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
         Ok(UvTexture {
             storage: Storage::F32(tiles),
-            to_linear: to_linear_table(ColorSpace::Raw),
+            to_linear: ResolvedColorSpace::Raw.to_linear_table(),
             space,
             width,
             height,
@@ -342,8 +345,8 @@ impl UvTexture {
         matches!(self.storage, Storage::F32(_))
     }
 
-    /// The colour space the texels were decoded under, `Auto` resolved.
-    pub fn color_space(&self) -> ColorSpace {
+    /// The colour space the texels were decoded under.
+    pub fn color_space(&self) -> ResolvedColorSpace {
         self.space
     }
 

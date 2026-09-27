@@ -2,8 +2,6 @@
 //! (`tiled/write.rs`, `tiled/exr_write.rs`): an odd axis is an area-weighted
 //! resample, an even one an exact 2x2 box.
 
-use crust_core::ColorSpace;
-
 /// Which source texels one destination texel of an axis reduction covers, and
 /// how much of each it covers.
 ///
@@ -196,43 +194,4 @@ pub(crate) fn reduce_half_linear(src: &[f32], sw: usize, sh: usize) -> (Vec<f32>
         }
     }
     (pixels, w, h)
-}
-
-/// The transfer function that re-encodes a linear value back to the file's
-/// own space — the inverse of [`to_linear_table`], used only when averaging a
-/// mip level.
-///
-/// A function rather than a table because the input is a continuous average,
-/// not one of 256 stored values; it runs once per texel of levels 1 and up,
-/// which is a third of the base and only at load.
-pub(crate) fn encode_fn(space: ColorSpace) -> fn(f32) -> f32 {
-    // Matched on the variant rather than on `gamma()`, so a new colour space
-    // is a compile error here instead of silently taking the `Raw` arm and
-    // storing linear values in a display-encoded table.
-    match space {
-        ColorSpace::Srgb => crate::linear_to_srgb,
-        ColorSpace::Gamma22 => |c: f32| c.max(0.0).powf(1.0 / 2.2),
-        ColorSpace::Gamma18 => |c: f32| c.max(0.0).powf(1.0 / 1.8),
-        // `Auto` is resolved before a pyramid is built; unresolved, it is raw.
-        ColorSpace::Raw | ColorSpace::Auto => |c: f32| c,
-    }
-}
-
-/// The 256-entry decode table for one colour space.
-///
-/// The files are 8-bit, so every possible stored value is one of 256 — the
-/// transfer function is evaluated once per level at load rather than per
-/// texel fetch, and nothing recovers precision that was never in the file.
-///
-/// The three curves are deliberately distinct. MaterialX's `g22_rec709` and
-/// `g18_rec709` are pure power laws; sRGB's EOTF is piecewise, with a linear
-/// toe that keeps near-black values well above the power law (up to 19x at
-/// 0.01 — `docs/color_management.md` tabulates it). Collapsing them into one
-/// curve is wrong in the shadows for 2.2 and wrong everywhere for 1.8.
-pub(crate) fn to_linear_table(space: ColorSpace) -> [f32; 256] {
-    let mut table = [0.0f32; 256];
-    for (i, v) in table.iter_mut().enumerate() {
-        *v = crate::to_linear(space, i as f32 / 255.0);
-    }
-    table
 }

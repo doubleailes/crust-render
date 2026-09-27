@@ -129,7 +129,8 @@
     - **`sourceColorSpace` defaults to `auto`, not raw**, which is the opposite of
       MaterialX's default and why `ColorSpace::from_usd` is separate from
       `from_mtlx`. `ColorSpace::Auto` crosses the seam unresolved, and the host settles it
-      against the file (`resolve_auto`). By the UsdUVTexture rule, 8-bit RGB/RGBA is sRGB
+      against the file (`resolve_auto`, which returns a `ResolvedColorSpace` — the type every
+      decoder, `.tx` marker and load report holds, and which has no `Auto`). By the UsdUVTexture rule, 8-bit RGB/RGBA is sRGB
       and anything else is raw. So a greyscale roughness PNG stays raw and an EXR is
       linear.
     - **A texture that does not load reads the node's `fallback`, unscaled** (the spec),
