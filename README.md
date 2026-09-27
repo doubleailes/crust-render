@@ -350,7 +350,7 @@ elements (foliage, ocean, terrain, dressed sets) totaling billions of triangles 
 instances are expanded. Crust imports `usd/island.usda` directly, with no preprocessing,
 flattening, or format conversion, and renders it end to end.
 
-Measured numbers from that import (see `CLAUDE.md` for the full breakdown):
+Measured numbers from that import (see `openspec/specs/usd-scene-import/design.md` for the full breakdown):
 
 - **3,151,850** geometries composing to **21,904,388** top-level BVH primitives, importing
   in ~6m18s (of which ~4m45s is USD traversal) at a **~47.6 GiB** peak.
@@ -429,8 +429,8 @@ comparison; [`docs/architecture.md`](docs/architecture.md#environment-switches) 
 
 ### Known limitations
 
-Documented gaps rather than silent ones — see `CLAUDE.md`'s "Known incomplete work" for
-the full, per-feature detail and workarounds:
+Documented gaps rather than silent ones — see the "Known gaps" sections of each
+`openspec/specs/*/design.md` for the full, per-feature detail and workarounds:
 
 - **No GPU path.** Everything runs on the CPU, parallelized with Rayon; there is no
   wavefront/GPU renderer and no coherent ray-packet traversal.

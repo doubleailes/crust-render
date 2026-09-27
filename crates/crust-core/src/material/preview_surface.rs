@@ -328,7 +328,7 @@ impl PreviewSurface {
     /// The `OpenPBR` this surface reduces to at a hit, and the shading normal
     /// its normal map produces. Public for the tests and probes, which check
     /// the numbers rather than a render (see "Verified in numbers" in
-    /// `CLAUDE.md`).
+    /// `openspec/specs/materials/design.md`).
     pub fn probe(&self, rec: &HitRecord) -> (OpenPBR, Vec3A) {
         let mut params = self.base.clone();
         for (target, input) in &self.inputs {

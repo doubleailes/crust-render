@@ -282,5 +282,5 @@ toward single-ray queries for incoherent workloads.
 - [Embree releases](https://github.com/RenderKit/embree/releases/) — 4.4.0 latest release
 - [Embree CHANGELOG](https://github.com/RenderKit/embree/blob/master/CHANGELOG.md)
 - This repository: `crates/crust-core/src/{bvh,hittable,tracer,volume}.rs`,
-  `crates/crust-core/src/primitives/`, `CLAUDE.md`,
+  `crates/crust-core/src/primitives/`, `openspec/specs/intersection-kernel/design.md`,
   `docs/openpbr_reference_alignment.md`

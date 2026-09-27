@@ -3,9 +3,10 @@
 This document is the map: which crate owns what, how a render flows through
 them, where the extension seams are, and which invariants cross module
 boundaries. It deliberately stays short on *why* a given algorithm was chosen —
-that reasoning, with its measurements, lives beside the code and in the
-topic documents listed at the end. `CLAUDE.md` is the long-form, per-feature
-record; this is the page to read first.
+that reasoning, with its measurements, lives beside the code, in the
+per-capability design records (`openspec/specs/*/design.md`) and in the topic
+documents listed at the end. `CLAUDE.md` is the short contributor guide; this is
+the page to read first.
 
 ## Crates
 
@@ -166,7 +167,7 @@ documented alternative. Booleans read `=0` as "off" unless noted.
 | `CRUST_PTEX_STREAM_MIN_MB` | 8 | `crust-assets/ptex_stream.rs` | files smaller than this preload even when streaming |
 | `CRUST_PTEX_STREAM_MIPSPACE` | `linear` | `crust-assets/ptex_stream.rs` | `file`: accept the file's own mip chain (otherwise a mipmapped `.ptx` preloads) |
 
-Adding a switch: give it a line here and in `CLAUDE.md`, parse it next to the
+Adding a switch: give it a line here, parse it next to the
 code it controls, and make the "off" side the behaviour it replaced so the
 switch is an honest A/B.
 
@@ -212,26 +213,26 @@ Paid down in the 2026-09-27 architecture pass (no rendered output changed):
   callgrind every hot function (`Bvh::hit`, `render_pixel`,
   `scatter_resolved`, `eval_all`, `pdf_all`) executes the same instruction
   count to the unit on cornellbox and materialx_basic.
+- `CLAUDE.md` cut from 2 400 lines to a short contributor guide; the
+  per-feature design records, measurements and known gaps moved verbatim into
+  `openspec/specs/<capability>/design.md` (three new capabilities:
+  `intersection-kernel`, `lighting`, `textures`).
 
 Still open, roughly in order of payoff:
 
-1. **`CLAUDE.md` is 2 400 lines.** It is accurate and full of hard-won
-   measurements, but it mixes a contributor guide, a changelog and design
-   records. Moving the per-feature histories into `docs/` topic files and
-   leaving `CLAUDE.md` as rules + pointers would make it usable again.
-2. **Environment parsing is hand-rolled per variable.** The convention is
+1. **Environment parsing is hand-rolled per variable.** The convention is
    consistent (`=0` off), but budget parsing warns on bad input in some places
    and not others (`CRUST_TEX_MAX` is silent), and crust-core caches its flags
    in `OnceLock`s while crust-assets re-reads per call.
-3. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
+2. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
    trait any more (the file holds `HitRecord`), and `aabb.rs` only re-exports
    the kernel's type.
-4. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
+3. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
    `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
    way the importer now does. The largest source files left are
    `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
    (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
-5. **Hot-path splits need a callgrind, not an eye.** Any further move inside
+4. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
    `PROFILE` and some helpers are `inline(always)` for measured reasons
@@ -241,7 +242,8 @@ Still open, roughly in order of payoff:
 
 | topic | document |
 |-------|----------|
-| every feature in depth, with measurements and history | `CLAUDE.md` |
+| contributor rules, commands, measuring a change | `CLAUDE.md` |
+| every feature in depth, with measurements, history and known gaps | `openspec/specs/*/design.md` |
 | light sampling survey, roadmap and baselines | `docs/light_sampling.md` |
 | shading cost and the MaterialX JIT plan | `docs/shading_performance.md` |
 | colour space of every input | `docs/color_management.md` |

@@ -132,7 +132,7 @@ for zero enforcement benefit.
 documented `ColorSpace` choices rather than unifying them.**
 
 `PxrDisneyBsdf.baseColor` and Ptex color textures both keep flat
-`ColorSpace::Gamma(2.2)`, not `ColorSpace::Srgb`, because (per `CLAUDE.md`)
+`ColorSpace::Gamma(2.2)`, not `ColorSpace::Srgb`, because (per `openspec/specs/textures/design.md`)
 this specifically matches the Moana island's `PxrColorCorrect` gamma-1/2.2
 node and `HwPtexTexture_1`'s `sourceColorSpace = "sRGB"` authoring —
 switching either to the piecewise EOTF would be a small but real numerical

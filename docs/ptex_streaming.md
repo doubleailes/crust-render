@@ -502,7 +502,7 @@ and the rendered one cannot be checked against different bytes.
 - **No single-flight on a miss**, inherited from the reader: two workers can
   decode the same tile at once. Bounded by the thread count.
 - **No cross-face filtering**, unchanged from preloading — see the filtering
-  caveats in CLAUDE.md. Streaming neither helps nor hurts it.
+  gaps in `openspec/specs/textures/design.md`. Streaming neither helps nor hurts it.
 - **A `crust:openpbr` material still cannot bind Ptex at all**, streamed or
   not: `inputs:surfaceMap` is consulted only for `UsdPreviewSurface` and
   `PxrDisneyBsdf`. Unrelated to residency, found while writing the sample

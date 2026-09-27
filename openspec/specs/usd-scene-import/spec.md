@@ -114,28 +114,23 @@ geometry without a resolvable bound material falls back to a default grey `OpenP
 
 ### Requirement: Light schema mapping
 
-The importer SHALL map `UsdLuxSphereLight` to an `Emissive` sphere that is both a
-light and visible geometry, and `UsdLuxRectLight` to two emissive triangles
-plus an `AreaLight(RectShape)` (local XY plane, emitting along -Z per UsdLux —
-effectively one-sided). Other lux schemas (`DiskLight`, `DistantLight`,
-`DomeLight`, `CylinderLight`) SHALL warn once and be skipped.
+The importer SHALL map every `UsdLux` light it reads — `SphereLight`,
+`RectLight`, `DiskLight`, `CylinderLight`, `DistantLight` and `DomeLight` — onto
+the lights defined by the `lighting` capability, with UsdLux units, `normalize`,
+colour temperature and `ShapingAPI` honoured as that capability states.
+`PortalLight`, mesh lights, light filters and light linking SHALL NOT be read.
 
-#### Scenario: Sphere light
+#### Scenario: Area light
 
-- **WHEN** a `UsdLuxSphereLight` prim is traversed
-- **THEN** it becomes an emissive sphere added to both the light list and the world
+- **WHEN** a `UsdLuxRectLight`, `SphereLight`, `DiskLight` or `CylinderLight`
+  prim is traversed
+- **THEN** it becomes an entry in the light list and emitting geometry in the
+  world
 
-#### Scenario: Rect light
+#### Scenario: Infinite light
 
-- **WHEN** a `UsdLuxRectLight` prim is traversed
-- **THEN** it becomes two emissive triangles added to both the light list and
-  the world
-
-#### Scenario: Unsupported lux light
-
-- **WHEN** a `DiskLight`, `DistantLight`, `DomeLight`, or `CylinderLight` prim
-  is traversed
-- **THEN** a warning is emitted and the light is skipped
+- **WHEN** a `UsdLuxDistantLight` or `UsdLuxDomeLight` prim is traversed
+- **THEN** it becomes a light-list entry with no scene geometry
 
 ### Requirement: Volume region import
 

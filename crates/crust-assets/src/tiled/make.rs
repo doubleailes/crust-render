@@ -8,7 +8,8 @@
 //! The mip filter is the one thing that cannot be delegated to OIIO's
 //! `maketx`: levels are reduced by the same `reduce_half` / `reduce_half_linear`
 //! as the in-memory pyramid, so a streamed render and a preloaded one agree
-//! texel for texel (see "Streaming textures" in `CLAUDE.md`).
+//! texel for texel (see "Streaming textures" in
+//! `openspec/specs/textures/design.md`).
 
 use crust_core::ColorSpace;
 use std::path::{Path, PathBuf};

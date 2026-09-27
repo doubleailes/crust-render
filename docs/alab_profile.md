@@ -24,8 +24,8 @@ cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM --profil
 - **Settings:** the stage authors no `crust:` render settings, so the importer
   defaults apply: 640×360, 128 spp, depth 32, adaptive (min 32), power MIS, power
   light selection, triangle filter, indirect clamp 10.
-- **Assets:** the techvar assets are merged over `fragment/` (see "ALab gaps" in
-  `CLAUDE.md`). Every ALab texture is a tiled mip EXR, so all 5 722 of them
+- **Assets:** the techvar assets are merged over `fragment/` (see "Known gaps: ALab" in
+  `openspec/specs/usd-scene-import/design.md`). Every ALab texture is a tiled mip EXR, so all 5 722 of them
   stream through the `.tx` cache and none is preloaded.
 
 ## The run
@@ -43,7 +43,7 @@ cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM --profil
 
 The render is 52% of the run and the import 48%. Nearly all of the import is
 openusd composition during the traversal (see "Where import time goes" in
-`CLAUDE.md`). Peak memory is reached during the traversal, and the render adds
+`openspec/specs/usd-scene-import/design.md`). Peak memory is reached during the traversal, and the render adds
 only 0.2 GiB on top.
 
 A second, profiled run measured Render at 2:52.9 and Traverse at 2:39.2, *faster*
