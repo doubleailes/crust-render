@@ -130,6 +130,24 @@ impl Val {
     }
 }
 
+/// Lane-wise arithmetic with `float` broadcasting — [`Val::zip`] with the
+/// operator, so an expression reads as arithmetic and the operand order stays
+/// exactly what it says (the JIT is pinned bit for bit against this).
+macro_rules! lanewise {
+    ($($trait:ident $method:ident $op:tt),*) => {$(
+        impl std::ops::$trait for Val {
+            type Output = Val;
+
+            #[inline]
+            fn $method(self, other: Val) -> Val {
+                self.zip(other, |x, y| x $op y)
+            }
+        }
+    )*};
+}
+
+lanewise!(Add add +, Sub sub -, Mul mul *);
+
 impl From<glam::Vec3A> for Val {
     fn from(v: glam::Vec3A) -> Val {
         Val::vec3(v.x, v.y, v.z)
