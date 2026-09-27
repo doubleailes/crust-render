@@ -14,13 +14,23 @@
 //! are, whether they are all transmissive, and how close the last one sits to
 //! the light.
 //!
+//! Pick probabilities are the ones the render would use. The scene is
+//! assembled into a `Renderer`, so `learned` selection trains its cache exactly
+//! as a render does. The weighted totals use each receiver's own pmf, since
+//! under `learned` it varies by position. `--light-selection` overrides the
+//! scene's, to compare strategies on the same receivers.
+//!
 //! ```sh
 //! cargo run --release -p crust-render --example light_occlusion -- \
-//!     scene.usda [--frame F] [--camera /path] [--grid 160x90] [--samples 4]
+//!     scene.usda [--frame F] [--camera /path] [--grid 160x90] [--samples 4] \
+//!     [--light-selection power|uniform|learned]
 //! ```
 
 use crust_assets::FileAssets;
-use crust_core::{MASK_SHADOW, Material, Ray, ShadingPoint, UsdImportOptions, Vec3A, World};
+use crust_core::{
+    LightSelection, MASK_SHADOW, Material, Ray, Renderer, ShadingPoint, UsdImportOptions, Vec3A,
+    World,
+};
 use std::path::PathBuf;
 
 /// How one light sample ended, in the integrator's test order.
@@ -37,8 +47,20 @@ enum Outcome {
     Visible,
     /// Occluded, and every blocker is transmissive.
     GlassOnly,
-    /// Occluded by at least one opaque surface.
+    /// Occluded by at least one opaque surface, or by more surfaces than the
+    /// walk follows (`MAX_CROSSINGS`), which cannot be shown to be glass.
     Opaque,
+}
+
+impl Outcome {
+    const ALL: [Outcome; 6] = [
+        Outcome::Unreachable,
+        Outcome::Backfacing,
+        Outcome::BelowHorizon,
+        Outcome::Visible,
+        Outcome::GlassOnly,
+        Outcome::Opaque,
+    ];
 }
 
 #[derive(Default, Clone)]
@@ -50,13 +72,20 @@ struct PerLight {
     visible: u64,
     glass_only: u64,
     opaque: u64,
-    /// Occluded samples whose last blocker lies within `ENCLOSED` of the light
+    /// Occluded samples toward a light at a finite distance: the denominator
+    /// of `enclosed` and `local`, which a light at infinity has no length for.
+    occluded_finite: u64,
+    /// Of those, the ones whose last blocker lies within `ENCLOSED` of the light
     /// (relative to the shadow ray's length): the light's own fixture.
     enclosed: u64,
-    /// Occluded samples whose first blocker lies within `ENCLOSED` of the
+    /// Of those, the ones whose first blocker lies within `ENCLOSED` of the
     /// receiver: the receiver's own cavity.
     local: u64,
     crossings: u64,
+    /// Occluded samples whose walk hit `MAX_CROSSINGS` before the light.
+    truncated: u64,
+    /// Summed pick probability over receivers, for the mean pmf column.
+    pmf_sum: f64,
 }
 
 /// "Near", as a fraction of the shadow ray's length.
@@ -79,8 +108,10 @@ fn transmissive(mat: &dyn Material, ray: &Ray, hit: &crust_core::HitRecord) -> b
 }
 
 /// Walks every surface between `from` and `dist` along `dir`, returning
-/// (crossings, all transmissive, first t, last t).
-fn walk(world: &World, from: Vec3A, dir: Vec3A, dist: f32) -> (usize, bool, f32, f32) {
+/// (crossings, all transmissive, first t, last t, truncated). `truncated` means
+/// the walk stopped at `MAX_CROSSINGS` with surfaces still ahead, so "all
+/// transmissive" covers only the ones it saw.
+fn walk(world: &World, from: Vec3A, dir: Vec3A, dist: f32) -> (usize, bool, f32, f32, bool) {
     let ray = Ray::new(from, dir).with_mask(MASK_SHADOW);
     let (mut t0, mut n, mut glass) = (0.001f32, 0, true);
     let (mut first, mut last) = (f32::NAN, f32::NAN);
@@ -98,7 +129,8 @@ fn walk(world: &World, from: Vec3A, dir: Vec3A, dist: f32) -> (usize, bool, f32,
         // again by rounding.
         t0 = h.rec.t + 1e-4 * (1.0 + h.rec.t);
     }
-    (n, glass, first, last)
+    let truncated = n == MAX_CROSSINGS && world.intersect(&ray, t0, dist - 0.001).is_some();
+    (n, glass, first, last, truncated)
 }
 
 /// A small counter-based hash, so the probe needs no RNG dependency.
@@ -116,15 +148,36 @@ fn main() {
     let Some(path) = args.next().map(PathBuf::from) else {
         eprintln!(
             "usage: light_occlusion <scene.usd[a]> [--frame F] [--camera /path] \
-             [--grid WxH] [--samples N]"
+             [--grid WxH] [--samples N] [--light-selection power|uniform|learned]"
         );
         std::process::exit(2);
     };
     let (mut frame, mut camera, mut grid, mut per) = (None, None, (160usize, 90usize), 4u64);
+    let mut selection = None;
     while let Some(flag) = args.next() {
         let value = args.next().unwrap_or_default();
         match flag.as_str() {
-            "--frame" => frame = value.parse::<f64>().ok(),
+            "--frame" => match value.parse::<f64>() {
+                // A typo must not silently probe the stage's default time.
+                Ok(f) if f.is_finite() => frame = Some(f),
+                _ => {
+                    eprintln!("--frame {value:?} is not a finite number");
+                    std::process::exit(2);
+                }
+            },
+            "--light-selection" => {
+                selection = Some(match value.as_str() {
+                    "power" => LightSelection::Power,
+                    "uniform" => LightSelection::Uniform,
+                    "learned" => LightSelection::Learned,
+                    other => {
+                        eprintln!(
+                            "--light-selection {other:?}: expected power | uniform | learned"
+                        );
+                        std::process::exit(2);
+                    }
+                })
+            }
             "--camera" => camera = Some(value),
             "--grid" => {
                 let (w, h) = value.split_once('x').expect("--grid WxH");
@@ -151,18 +204,26 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut lights = scene.lights;
-    lights.select_by(scene.settings.light_selection());
-    let world = &scene.world;
-    let list: Vec<_> = lights.iter().map(|(l, pmf)| (l.clone(), pmf)).collect();
+    // Through a `Renderer`, so the selection (a learned cache included) is
+    // built exactly as a render builds it.
+    let settings = match selection {
+        Some(s) => scene.settings.with_light_selection(s),
+        None => scene.settings,
+    };
+    let r = Renderer::new(scene.camera, scene.world, scene.lights, settings);
+    let (world, lights) = (&r.world, &r.lights);
+    let list = lights.lights();
     let mut stats = vec![PerLight::default(); list.len()];
     let mut receivers = 0u64;
+    // Expected NEE outcome, as a sum of each sample's pick probability at its
+    // own receiver; normalised once the receivers are counted.
+    let mut expect = [0.0f64; 6];
 
     let (gw, gh) = grid;
     for j in 0..gh {
         for i in 0..gw {
             let (u, v) = ((i as f32 + 0.5) / gw as f32, (j as f32 + 0.5) / gh as f32);
-            let ray = scene.camera.get_ray(u, v, [0.5, 0.5], 0.0);
+            let ray = r.camera.get_ray(u, v, [0.5, 0.5], 0.0);
             let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) else {
                 continue;
             };
@@ -170,8 +231,10 @@ fn main() {
             let cos = ray.direction().normalize().dot(hit.rec.normal).abs();
             let sp = ShadingPoint::new(hit.mat, &ray, &hit.rec, cos);
             let p = hit.rec.p;
-            for (k, (light, _)) in list.iter().enumerate() {
+            for (k, light) in list.iter().enumerate() {
                 let s = &mut stats[k];
+                let pmf = lights.pmf_at(p, k) as f64;
+                s.pmf_sum += pmf;
                 for n in 0..per {
                     let seed = ((j * gw + i) as u64) << 24 | (k as u64) << 8 | n;
                     let (a, b) = (hash01(seed * 2 + 1), hash01(seed * 2 + 2));
@@ -189,20 +252,24 @@ fn main() {
                             } else if !world.occluded(&shadow, 0.001, ls.distance - 0.001) {
                                 Outcome::Visible
                             } else {
-                                let d = if ls.distance.is_finite() {
-                                    ls.distance
-                                } else {
-                                    1e7
-                                };
-                                let (n, glass, first, last) = walk(world, p, ls.direction, d);
+                                // A light at infinity is walked to a far bound,
+                                // but has no length to measure "near" against.
+                                let finite = ls.distance.is_finite();
+                                let d = if finite { ls.distance } else { 1e7 };
+                                let (n, glass, first, last, truncated) =
+                                    walk(world, p, ls.direction, d);
                                 s.crossings += n as u64;
-                                if last > (1.0 - ENCLOSED) * d {
-                                    s.enclosed += 1;
+                                s.truncated += truncated as u64;
+                                if finite {
+                                    s.occluded_finite += 1;
+                                    if last > (1.0 - ENCLOSED) * d {
+                                        s.enclosed += 1;
+                                    }
+                                    if first < ENCLOSED * d {
+                                        s.local += 1;
+                                    }
                                 }
-                                if first < ENCLOSED * d {
-                                    s.local += 1;
-                                }
-                                if glass {
+                                if glass && !truncated {
                                     Outcome::GlassOnly
                                 } else {
                                     Outcome::Opaque
@@ -210,6 +277,8 @@ fn main() {
                             }
                         }
                     };
+                    let slot = Outcome::ALL.iter().position(|&o| o == outcome).unwrap();
+                    expect[slot] += pmf / per as f64;
                     match outcome {
                         Outcome::Unreachable => s.unreachable += 1,
                         Outcome::Backfacing => s.backfacing += 1,
@@ -224,9 +293,21 @@ fn main() {
     }
 
     let pct = |n: u64, d: u64| 100.0 * n as f64 / d.max(1) as f64;
+    // "n/a" rather than 0.0 where there is nothing to divide: no occluded
+    // sample toward a finite light.
+    let pct_or_na = |n: u64, d: u64| {
+        if d == 0 {
+            format!("{:>6}", "n/a")
+        } else {
+            format!("{:>6.1}", pct(n, d))
+        }
+    };
     println!(
-        "{receivers} receivers ({gw}x{gh} grid), {per} samples per light per receiver\n\
-         outcomes as % of that light's samples; 'encl' / 'local' as % of its occluded samples\n"
+        "{receivers} receivers ({gw}x{gh} grid), {per} samples per light per receiver, \
+         selection {:?}\n\
+         outcomes as % of that light's samples; 'encl' / 'local' as % of its occluded \
+         samples toward a finite light; pmf is the mean over receivers\n",
+        lights.selection()
     );
     println!(
         "{:>3} {:<16} {:>6} | {:>6} {:>6} {:>6} {:>6} | {:>6} {:>6} | {:>6} {:>6} {:>5}",
@@ -243,46 +324,40 @@ fn main() {
         "local",
         "cross"
     );
-    // Expected NEE outcome: each light weighted by how often NEE picks it.
-    let mut expect = [0.0f64; 6];
-    for (k, (light, pmf)) in list.iter().enumerate() {
+    let mut truncated = 0u64;
+    for (k, light) in list.iter().enumerate() {
         let s = &stats[k];
         let occ = s.glass_only + s.opaque;
+        truncated += s.truncated;
         println!(
-            "{:>3} {:<16} {:>6.3} | {:>6.1} {:>6.1} {:>6.1} {:>6.1} | {:>6.1} {:>6.1} | {:>6.1} {:>6.1} {:>5.1}",
+            "{:>3} {:<16} {:>6.3} | {:>6.1} {:>6.1} {:>6.1} {:>6.1} | {:>6.1} {:>6.1} | {} {} {:>5.1}",
             k,
             light.kind(),
-            pmf,
+            s.pmf_sum / receivers.max(1) as f64,
             pct(s.unreachable, s.samples),
             pct(s.backfacing, s.samples),
             pct(s.below, s.samples),
             pct(s.visible, s.samples),
             pct(s.glass_only, s.samples),
             pct(s.opaque, s.samples),
-            pct(s.enclosed, occ),
-            pct(s.local, occ),
+            pct_or_na(s.enclosed, s.occluded_finite),
+            pct_or_na(s.local, s.occluded_finite),
             s.crossings as f64 / occ.max(1) as f64,
         );
-        let f = |n: u64| *pmf as f64 * n as f64 / s.samples.max(1) as f64;
-        for (e, n) in expect.iter_mut().zip([
-            s.unreachable,
-            s.backfacing,
-            s.below,
-            s.visible,
-            s.glass_only,
-            s.opaque,
-        ]) {
-            *e += f(n);
-        }
     }
+    let e: Vec<f64> = expect
+        .iter()
+        .map(|&x| 100.0 * x / receivers.max(1) as f64)
+        .collect();
     println!(
         "\nNEE, weighted by pick probability: unreachable {:.1}%  backfacing {:.1}%  \
          below horizon {:.1}%  VISIBLE {:.1}%  glass-only {:.1}%  opaque {:.1}%",
-        100.0 * expect[0],
-        100.0 * expect[1],
-        100.0 * expect[2],
-        100.0 * expect[3],
-        100.0 * expect[4],
-        100.0 * expect[5],
+        e[0], e[1], e[2], e[3], e[4], e[5],
     );
+    if truncated > 0 {
+        println!(
+            "{truncated} occluded samples crossed more than {MAX_CROSSINGS} surfaces; \
+             counted as opaque"
+        );
+    }
 }
