@@ -63,10 +63,10 @@ pub(crate) struct SubdivRequest<'a> {
 /// inside that face's unit square (Ptex convention: `v0=(0,0) v1=(1,0)
 /// v2=(1,1) v3=(0,1)`).
 pub(crate) struct SubdivFaces {
-    /// `u32::MAX` marks a face with no Ptex-addressable ancestor (its cage
-    /// face was not a quad — Ptex subfaces are out of scope, matching the
+    /// `None` for a face with no Ptex-addressable ancestor (its cage face
+    /// was not a quad — Ptex subfaces are out of scope, matching the
     /// unsubdivided importer's treatment of n-gons).
-    pub base_face: Vec<u32>,
+    pub base_face: Vec<Option<u32>>,
     /// Corner UVs of the refined quad, in `face_vertices` order.
     pub corner_uvs: Vec<[[f32; 2]; 4]>,
 }
@@ -185,11 +185,10 @@ pub(crate) fn subdivide(
                 *f = refinement.child_face_parent_face(*f as usize);
             }
         }
-        for f in &mut base_face {
-            if counts[*f as usize] != 4 {
-                *f = u32::MAX;
-            }
-        }
+        let base_face: Vec<Option<u32>> = base_face
+            .into_iter()
+            .map(|f| (counts[f as usize] == 4).then_some(f))
+            .collect();
 
         // Sub-face corner UVs: refine the synthetic channel the same way the
         // positions were refined, then read each face's four values.
@@ -575,7 +574,7 @@ mod tests {
         // Children of one parent are contiguous and in corner order, so the
         // base_face map is 4 children per cage face...
         for (child, &base) in faces.base_face.iter().enumerate() {
-            assert_eq!(base, (child / 4) as u32);
+            assert_eq!(base, Some((child / 4) as u32));
         }
         // ...and each cage face's four children tile its unit square: every
         // child covers a quarter, together they cover the whole, and every
@@ -627,7 +626,7 @@ mod tests {
         let out = subdivide(&points, &counts, &indices, &req).unwrap();
         let faces = out.faces.unwrap();
         assert_eq!(faces.base_face.len(), 8, "5 + 3 children");
-        assert!(faces.base_face.iter().all(|&f| f == u32::MAX));
+        assert!(faces.base_face.iter().all(Option::is_none));
     }
 
     #[test]
