@@ -34,7 +34,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
                     v0: v[i],
                     v1: v[j],
                     v2: v[k],
-                    normals: None,
+                    normals: crate::prim::NO_NORMALS,
                     geom_id: 0,
                     prim_id: id,
                     mask: MASK_ALL,
@@ -58,7 +58,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
 /// it fails and says the trade-off has changed.
 #[test]
 fn eight_wide_packets_would_not_reduce_vector_rounds() {
-    let bvh = Bvh::new(uv_sphere_prims(80, 40));
+    let bvh = Bvh::new(uv_sphere_prims(80, 40), Vec::new());
     let per_leaf: Vec<usize> = bvh
         .leaves
         .iter()

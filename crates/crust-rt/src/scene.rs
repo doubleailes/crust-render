@@ -5,8 +5,8 @@
 use crate::aabb::AABB;
 use crate::bvh::Bvh;
 use crate::prim::{
-    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, PrimHit,
-    PrimNode, SpherePrim, TrianglePrim, transformed_aabb,
+    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, NO_NORMALS,
+    PrimHit, PrimNode, SpherePrim, TrianglePrim, VertexNormals, transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Affine3A, Vec3A};
@@ -43,6 +43,8 @@ pub struct MemoryFootprint {
     pub packets: usize,
     /// Leaf primitive indices.
     pub indices: usize,
+    /// Per-vertex shading normals of the triangles that carry them.
+    pub vertex_normals: usize,
 }
 
 impl MemoryFootprint {
@@ -53,6 +55,7 @@ impl MemoryFootprint {
             + self.leaves
             + self.packets
             + self.indices
+            + self.vertex_normals
     }
 }
 
@@ -307,6 +310,7 @@ impl SceneBuilder {
             .map(|(g, _, _)| Self::prim_upper_bound(g))
             .sum();
         let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
+        let mut vertex_normals: Vec<VertexNormals> = Vec::new();
         let mut has_motion = false;
         // Largest id a hit in this scene can report. Every geometry can
         // report its own id; labels can report more (see below).
@@ -325,10 +329,16 @@ impl SceneBuilder {
                         if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
                             continue;
                         }
-                        let tri_normals = normals.as_ref().and_then(|ns| {
-                            (i0 < ns.len() && i1 < ns.len() && i2 < ns.len())
-                                .then(|| [ns[i0], ns[i1], ns[i2]])
-                        });
+                        let tri_normals = normals
+                            .as_ref()
+                            .and_then(|ns| {
+                                (i0 < ns.len() && i1 < ns.len() && i2 < ns.len())
+                                    .then(|| [ns[i0], ns[i1], ns[i2]])
+                            })
+                            .map_or(NO_NORMALS, |n| {
+                                vertex_normals.push(n);
+                                (vertex_normals.len() - 1) as u32
+                            });
                         prims.push(PrimNode::Triangle(TrianglePrim {
                             v0: vertices[i0],
                             v1: vertices[i1],
@@ -480,7 +490,7 @@ impl SceneBuilder {
             }
         }
         Scene {
-            bvh: Bvh::new(prims),
+            bvh: Bvh::new(prims, vertex_normals),
             n_geoms,
             has_motion,
             max_hit_id,

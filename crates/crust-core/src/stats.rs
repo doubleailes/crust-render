@@ -703,6 +703,7 @@ impl fmt::Display for RenderStats {
             for (label, bytes) in [
                 ("primitive nodes", fp.prim_nodes),
                 ("boxed primitives", fp.boxed_prims),
+                ("vertex normals", fp.vertex_normals),
                 ("BVH nodes", fp.bvh_nodes),
                 ("triangle packets", fp.packets),
                 ("leaf indices", fp.indices),
