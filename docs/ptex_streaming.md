@@ -153,8 +153,10 @@ refusal is the conservative half and the opt-in is the measured one.
 
 ## Four microcache slots, not two
 
-`tiled::cache`'s per-thread microcache keeps two entries and measured 98.6% of
-8.7 M lookups never reaching a lock. The Ptex one keeps **four**, and the
+`tiled::cache`'s per-thread microcache kept two entries and measured 98.6% of
+8.7 M lookups never reaching a lock (it is now set-associative by file, 16 x 4,
+because a production material interleaves several textures; see
+`docs/alab_profile.md`). The Ptex one keeps **four**, and the
 difference is measured rather than inherited.
 
 A `.tx` is one tile grid over the whole texture, so a bilinear tap straddling a

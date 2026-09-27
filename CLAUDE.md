@@ -1382,15 +1382,35 @@ Schema mapping:
     both carry internal `unsafe`, and the whole workspace is
     `forbid(unsafe_code)` (`crust-core` is `deny`, for one test-only
     `GlobalAlloc`; `crust-jit` is `deny`, for calling generated code).
-  - **Three tiers, and the top one does the work.** A per-thread two-entry
-    microcache, then 64 sharded maps, then a decode. Measured on the alias
-    scene: **98.6% of 8.7 M lookups never reach a lock**, because a bilinear tap
-    reads one tile four times and trilinear alternates between two levels —
-    which is why there are two slots and not one. It also means the lookup path
-    itself, not contention, is what to optimise: `with_tile` hands the tile to a
-    closure rather than returning an `Arc`, because one refcount pair per texel
-    was the difference between streaming costing 4x a preloaded render and
-    costing 2x.
+  - **Three tiers, and the top one does the work.** A per-thread microcache,
+    then 64 sharded maps, then a decode. Measured on the alias scene: **98.6% of
+    8.7 M lookups never reach a lock**, because a bilinear tap reads one tile
+    four times and trilinear alternates between two levels. `with_tile` hands the
+    tile to a closure rather than returning an `Arc`, because one refcount pair
+    per texel was the difference between streaming costing 4x a preloaded render
+    and costing 2x.
+  - **Nothing on the lookup path may write memory another thread reads.** This
+    one was learned on ALab (`docs/alab_profile.md`), where texture lookups were
+    89% of render time and 72 threads rendered ~1.25x faster than 8. There were
+    two causes, and each fix is load-bearing:
+    - **The per-lookup counters are striped** (`StripedCounter`: 128
+      cache-line-aligned slots, one per thread, summed at report time). A plain
+      `AtomicU64` bumped on each of 3.3 G lookups was one line bouncing between
+      72 cores, and alone it was most of the cost. Ptex's `PtexStream` counters
+      take the same type for the same reason (not measured there).
+    - **The microcache is set-associative by file**: 16 sets x 4 ways, where it
+      used to be 2 slots shared by every texture. That was OIIO's number, and
+      right for one texture per shading point. An ALab material interleaves ~5,
+      so each `eval` found the previous texture's tiles and missed at both
+      levels. That was a 25% miss rate, every miss a shard lock.
+    Result (`bench_ab.sh`, min / mean): ALab at 32 spp, Render
+    **45.1 / 47.1 s -> 6.34 / 6.63 s (-85.9%)**. Texture went 23.4 -> 1.57 us
+    per `eval`, and microcache hits 74.9% -> 84.9%. The single-texture alias
+    scene went **0.743 -> 0.081 s (-89%)**: its microcache already hit 98.6%,
+    so the shared counter alone was ~90% of that render. `materialx_basic`
+    (preloaded) and cornellbox are unchanged, and images are bit-identical. The cost is up to 64 tiles per thread held outside the
+    budget, 108 MiB at 72 threads for `half` tiles. A shard hit also sets `used`
+    only when it is clear, so a hot tile is not rewritten on every hit.
   - **The second backing must cost the first one nothing, and twice it did
     not.** `bench_ab` against the pre-EXR binary on the 8-UDIM alias scene said
     **+21%** on an 8-bit streamed render — a path that gains nothing from HDR
