@@ -46,10 +46,10 @@
 //! [`crate::AssetLoader`] seam and comes back as a [`crate::Texture2D`]
 //! sampler.
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
+use crate::material::OpenPBR;
 use crate::material::brdf::alpha_to_roughness;
-use crate::material::{Material, OpenPBR, ScatterSample};
+use crate::material::pattern::PatternMaterial;
 use crate::ray::Ray;
 use crust_mtlx::{
     Flattened, LobeKind, Program, ShadeCtx, TextureLoader, Val, reflectivity_from_ior,
@@ -120,21 +120,6 @@ thread_local! {
 }
 
 impl MtlxMaterial {
-    /// Evaluates the graph at a hit and hands the resulting OpenPBR to `f`.
-    ///
-    /// Every call runs the graph. The integrator does not come through here:
-    /// it asks [`Material::resolve`] once per vertex and queries the result,
-    /// so this serves the direct `Material` methods (tests, probes).
-    fn shade<R>(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-        f: impl FnOnce(&OpenPBR, &HitRecord) -> R,
-    ) -> R {
-        let (params, rec) = self.run(r_in, rec);
-        f(&params, &rec)
-    }
-
     /// Whether the graph can emit at all: an EDF, or an emissive base.
     fn can_emit(&self) -> bool {
         !self.flat.emission.is_empty() || self.base.emission_luminance > 0.0
@@ -181,76 +166,26 @@ impl MtlxMaterial {
     }
 }
 
-impl Material for MtlxMaterial {
-    fn kind(&self) -> &'static str {
+impl PatternMaterial for MtlxMaterial {
+    fn pattern_kind(&self) -> &'static str {
         "MaterialX"
     }
 
-    fn scatter_importance(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-        sampler: PathSampler,
-    ) -> Option<ScatterSample> {
-        self.shade(r_in, rec, |m, rec| m.scatter_importance(r_in, rec, sampler))
+    fn run(&self, r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord) {
+        MtlxMaterial::run(self, r_in, rec)
     }
 
-    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
-        self.shade(r_in, rec, |m, rec| m.eval(r_in, rec, wi))
+    /// An EDF, or an emissive base. Whether the graph has an EDF at all is
+    /// known at compile time, so the non-emissive case — every MaterialX
+    /// material shipped today, the two DPEL assets included — never runs its
+    /// graph for emission: the teapot's ~50-op program and the lion's 140-op
+    /// one would otherwise run an extra time per path vertex to be told the
+    /// answer is zero.
+    fn can_emit(&self) -> bool {
+        MtlxMaterial::can_emit(self)
     }
 
-    fn resolve(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-        cos_theta_o: f32,
-    ) -> Option<crate::material::Resolution> {
-        let (params, rec) = self.run(r_in, rec);
-        // `emitted_at`'s answer, from the run already made rather than a
-        // second one; see there for the gate and for `cos_theta_o`.
-        let emitted = if self.can_emit() {
-            params.emitted_directional(cos_theta_o)
-        } else {
-            Vec3A::ZERO
-        };
-        Some(crate::material::Resolution {
-            bsdf: params.into_resolved(&rec),
-            rec,
-            emitted,
-        })
-    }
-
-    fn uses_uv(&self) -> bool {
-        // Unconditionally true rather than "does the program hold a texture":
-        // a graph with no `image` node can still carry a `normalmap` over a
-        // constant, or a `texcoord`-driven procedural, and both need the
-        // chart. The cost of an unnecessary table is bounded; shading a
-        // textured surface at (0, 0) everywhere is not obviously wrong on
-        // screen, which is the failure worth avoiding.
-        true
-    }
-
-    fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
-        // The integrator asks this of *every* surface hit, so the non-emissive
-        // case — which is every MaterialX material shipped today, the two DPEL
-        // assets included — must not evaluate the graph. Without this early
-        // out the teapot would run its ~50-op program, and the lion its
-        // 140-op one, an extra time per path vertex to be told the answer is
-        // zero. Whether the graph has an EDF at all is known at compile time,
-        // so this is the same kind of structural gate as `uses_uv`.
-        if !self.can_emit() {
-            return Vec3A::ZERO;
-        }
-        // `cos_theta_o` is used as the tracer measured it, against the
-        // ray-facing geometric normal, rather than recomputed against any
-        // normal the graph produces: the coat slab emission passes through
-        // belongs to the geometric interface, and letting a normal map
-        // perturb its Fresnel falloff would make emission flicker at pixel
-        // scale for nothing.
-        self.shade(r_in, rec, |m, _| m.emitted_directional(cos_theta_o))
-    }
-
-    fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+    fn pattern_make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         // No graph evaluation: `make_ray` only decides whether the ray carries
         // an interior medium, and this reduction never produces a
         // transmissive OpenPBR (MaterialX transmission maps to no lobe here).

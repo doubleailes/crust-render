@@ -35,9 +35,9 @@
 //! texture's alpha (the host samplers return opaque RGB, so `outputs:a` reads
 //! 1.0 before `scale`/`bias`).
 
-use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::{Material, OpenPBR, ScatterSample};
+use crate::material::pattern::PatternMaterial;
+use crate::material::{Material, OpenPBR};
 use crate::ray::Ray;
 use crate::texture::TextureRef;
 use glam::Vec3A;
@@ -329,12 +329,29 @@ impl PreviewSurface {
     /// its normal map produces. Public for the tests and probes, which check
     /// the numbers rather than a render (see "Verified in numbers" in
     /// `openspec/specs/materials/design.md`).
+    #[inline(always)]
     pub fn probe(&self, rec: &HitRecord) -> (OpenPBR, Vec3A) {
+        (self.probe_params(rec), self.shading_normal(rec))
+    }
+
+    /// [`PreviewSurface::probe`] as the BSDF shades it: the parameters, and
+    /// the record with the shading normal applied.
+    #[inline(always)]
+    fn shaded(&self, rec: &HitRecord) -> (OpenPBR, HitRecord) {
+        let (params, normal) = self.probe(rec);
+        let mut rec = *rec;
+        rec.normal = normal;
+        (params, rec)
+    }
+
+    /// [`PreviewSurface::probe`]'s parameters alone, without the normal map.
+    #[inline(always)]
+    fn probe_params(&self, rec: &HitRecord) -> OpenPBR {
         let mut params = self.base.clone();
         for (target, input) in &self.inputs {
             target.apply(input, input.sample(rec), &mut params);
         }
-        (params, self.shading_normal(rec))
+        params
     }
 
     /// The normal-mapped shading normal, or `rec.normal` when there is none —
@@ -362,34 +379,29 @@ impl PreviewSurface {
             rec.normal
         }
     }
-
-    fn shade<R>(&self, rec: &HitRecord, f: impl FnOnce(&OpenPBR, &HitRecord) -> R) -> R {
-        let (params, normal) = self.probe(rec);
-        let mut rec = *rec;
-        rec.normal = normal;
-        f(&params, &rec)
-    }
 }
 
-impl Material for PreviewSurface {
-    fn kind(&self) -> &'static str {
+impl PatternMaterial for PreviewSurface {
+    fn pattern_kind(&self) -> &'static str {
         "UsdPreviewSurface (textured)"
     }
 
-    fn scatter_importance(
-        &self,
-        r_in: &Ray,
-        rec: &HitRecord,
-        sampler: PathSampler,
-    ) -> Option<ScatterSample> {
-        self.shade(rec, |m, rec| m.scatter_importance(r_in, rec, sampler))
+    #[inline(always)]
+    fn run(&self, _r_in: &Ray, rec: &HitRecord) -> (OpenPBR, HitRecord) {
+        self.shaded(rec)
     }
 
-    fn eval(&self, r_in: &Ray, rec: &HitRecord, wi: Vec3A) -> Option<(Vec3A, f32)> {
-        self.shade(rec, |m, rec| m.eval(r_in, rec, wi))
+    fn can_emit(&self) -> bool {
+        PreviewSurface::can_emit(self)
     }
 
-    fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+    /// Emission reads no normal: the textures alone, without the normal
+    /// map's lookup.
+    fn emission_params(&self, _r_in: &Ray, rec: &HitRecord) -> OpenPBR {
+        self.probe_params(rec)
+    }
+
+    fn pattern_make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
         // Decides whether a guided direction crosses the interface, which
         // hangs on `transmission_weight` and on the side of the *shading*
         // normal `wi` lies: a textured `opacity`, or a normal map over a
@@ -398,76 +410,30 @@ impl Material for PreviewSurface {
         // the origin offset and medium tag a BSDF-sampled one gets. Otherwise
         // the constants answer.
         if self.ray_reads_hit {
-            self.shade(rec, |m, rec| m.make_ray(rec, wi))
+            let (params, rec) = self.shaded(rec);
+            params.make_ray(&rec, wi)
         } else {
             self.base.make_ray(rec, wi)
         }
     }
 
-    fn face_texture(&self) -> Option<&dyn crate::PtexTexture> {
+    fn pattern_face_texture(&self) -> Option<&dyn crate::PtexTexture> {
         // A `surfaceMap` Ptex rides on the base, as on an untextured surface.
         // Where both are bound, the Ptex lookup inside `OpenPBR` runs after the
         // UV inputs and wins for `base_color`.
         self.base.face_texture()
     }
 
-    fn uses_uv(&self) -> bool {
-        true
-    }
-
-    fn resolve(
-        &self,
-        _r_in: &Ray,
-        rec: &HitRecord,
-        cos_theta_o: f32,
-    ) -> Option<crate::material::Resolution> {
-        let (params, normal) = self.probe(rec);
-        // `emitted_at`'s answer from the same probe, before Ptex is applied.
-        let emitted = if self.can_emit() {
-            params.emitted_directional(cos_theta_o)
-        } else {
-            Vec3A::ZERO
-        };
-        let mut rec = *rec;
-        rec.normal = normal;
-        Some(crate::material::Resolution {
-            bsdf: params.into_resolved(&rec),
-            rec,
-            emitted,
-        })
-    }
-
-    fn uv_primvar(&self) -> Option<&str> {
+    fn pattern_uv_primvar(&self) -> Option<&str> {
         self.uv_primvar.as_deref()
     }
 
-    fn emitted(&self) -> Vec3A {
-        // Hit-free, so it cannot see a textured emission; zero then, and the
-        // hit-aware `emitted_at` answers instead. Nothing in the light list is
-        // built from a preview surface, which is what makes that sound (see
-        // `Material::emitted_at`).
-        if self.emission_textured {
-            Vec3A::ZERO
-        } else {
-            self.base.emitted()
-        }
-    }
-
-    fn emitted_directional(&self, cos_theta_o: f32) -> Vec3A {
-        if self.emission_textured {
-            Vec3A::ZERO
-        } else {
-            self.base.emitted_directional(cos_theta_o)
-        }
-    }
-
-    fn emitted_at(&self, _r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
-        // Asked of every surface hit: a surface that cannot emit must not
-        // sample its textures to find that out.
-        if !self.can_emit() {
-            return Vec3A::ZERO;
-        }
-        self.probe(rec).0.emitted_directional(cos_theta_o)
+    /// Hit-free, so it cannot see a textured emission; none then, and the
+    /// hit-aware `emitted_at` answers instead. Nothing in the light list is
+    /// built from a preview surface, which is what makes that sound (see
+    /// `Material::emitted_at`).
+    fn constant_emission(&self) -> Option<&OpenPBR> {
+        (!self.emission_textured).then_some(&self.base)
     }
 }
 
