@@ -353,6 +353,12 @@
 
 ## Known gaps: MaterialX
 
+- **No surface-shader nodes.** `standard_surface`, `open_pbr_surface` and
+  `gltf_pbr` have no reduction: only standalone BSDF graphs are read, so a
+  document whose surface is one of those renders with the fallback material.
+  That is every material in the Material Fidelity suite (826 of 826), whose
+  full-run baseline, harness and missing-pattern-node list are in
+  `docs/material_fidelity.md` (`scripts/material_fidelity/`).
 - **MaterialX caveats.** The BSDF reduction projects a layered MaterialX stack
   onto one OpenPBR lobe set. Two stacked dielectrics survive (the upper one is
   the coat), but a *third* is averaged into the coat's roughness, a coat's
