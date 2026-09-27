@@ -113,7 +113,13 @@ impl GuidingField {
 
     /// Splat a training pass's samples and adapt the tree resolution.
     /// `next_iteration` is the 1-based index of the pass about to start.
-    pub fn update(&mut self, samples: &[SampleData], next_iteration: u32) {
+    /// Takes any iterator of samples, so a pass's training samples can be
+    /// read in scanline order straight out of the buffers the workers filled.
+    pub fn update<'a>(
+        &mut self,
+        samples: impl IntoIterator<Item = &'a SampleData>,
+        next_iteration: u32,
+    ) {
         for s in samples {
             self.tree.record(s.pos, dir_to_canonical(s.dir), s.radiance);
         }
