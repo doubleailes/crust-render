@@ -453,7 +453,7 @@ impl OpenPBR {
             let (scattered, throughput, pdf) = sample_transmission_thin(self, r_in, rec);
             // Divide by the lobe-selection probability so the mixture
             // estimator stays unbiased.
-            let p_select = pmf.p_transmission.max(1e-4);
+            let p_select = pmf[Lobe::Transmission].max(1e-4);
             return Some(ScatterSample {
                 ray: scattered,
                 value: throughput / p_select,

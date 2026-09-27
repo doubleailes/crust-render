@@ -45,7 +45,8 @@ impl Frame {
 /// and sampling, only Fresnel differs). Coat is its own lobe because it
 /// has its own IOR and roughness. Transmission handles refraction through a
 /// transmissive dielectric interior.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub(super) enum Lobe {
     Diffuse,
     Specular,
@@ -54,12 +55,29 @@ pub(super) enum Lobe {
     Transmission,
 }
 
-pub(super) struct LobePmf {
-    pub(super) p_diffuse: f32,
-    pub(super) p_specular: f32,
-    pub(super) p_coat: f32,
-    pub(super) p_fuzz: f32,
-    pub(super) p_transmission: f32,
+impl Lobe {
+    /// Every lobe, in selection order: [`LobePmf::pick`]'s CDF runs over
+    /// them in this order.
+    pub(super) const ALL: [Lobe; 5] = [
+        Lobe::Diffuse,
+        Lobe::Specular,
+        Lobe::Coat,
+        Lobe::Fuzz,
+        Lobe::Transmission,
+    ];
+}
+
+/// The probability of selecting each [`Lobe`], indexed by it — one slot per
+/// variant, so adding a lobe cannot leave the pmf without an entry for it.
+pub(super) struct LobePmf([f32; Lobe::ALL.len()]);
+
+impl std::ops::Index<Lobe> for LobePmf {
+    type Output = f32;
+
+    #[inline(always)]
+    fn index(&self, lobe: Lobe) -> &f32 {
+        &self.0[lobe as usize]
+    }
 }
 
 impl LobePmf {
@@ -123,33 +141,29 @@ impl LobePmf {
         };
 
         let total = w_diffuse + w_specular + w_coat + w_fuzz + w_transmission;
-        Self {
-            p_diffuse: w_diffuse / total,
-            p_specular: w_specular / total,
-            p_coat: w_coat / total,
-            p_fuzz: w_fuzz / total,
-            p_transmission: w_transmission / total,
-        }
+        // In `Lobe::ALL` order.
+        Self([
+            w_diffuse / total,
+            w_specular / total,
+            w_coat / total,
+            w_fuzz / total,
+            w_transmission / total,
+        ])
     }
 
+    /// The lobe whose slice of the CDF `u` falls in; the last lobe takes
+    /// whatever rounding leaves above the running sum.
     pub(super) fn pick(&self, u: f32) -> Lobe {
-        let mut acc = self.p_diffuse;
-        if u < acc {
-            return Lobe::Diffuse;
+        let (last, rest) = Lobe::ALL.split_last().expect("five lobes");
+        // `0.0 + p` is `p` exactly, so this is the running sum it always was.
+        let mut acc = 0.0;
+        for &lobe in rest {
+            acc += self[lobe];
+            if u < acc {
+                return lobe;
+            }
         }
-        acc += self.p_specular;
-        if u < acc {
-            return Lobe::Specular;
-        }
-        acc += self.p_coat;
-        if u < acc {
-            return Lobe::Coat;
-        }
-        acc += self.p_fuzz;
-        if u < acc {
-            return Lobe::Fuzz;
-        }
-        Lobe::Transmission
+        *last
     }
 }
 
@@ -510,7 +524,7 @@ pub(super) fn pdf_all(
         if !transmission_is_continuous(m) {
             return 0.0;
         }
-        return pmf.p_transmission * eval_transmission(m, v_local, l_local, entering).1;
+        return pmf[Lobe::Transmission] * eval_transmission(m, v_local, l_local, entering).1;
     }
     let h_local = (v_local + l_local).normalize();
 
@@ -531,8 +545,8 @@ pub(super) fn pdf_all(
     // change the image — see the note in `from_params`.
     let pdf_coat = pdf_vndf_ggx_aniso_local(v_local, h_local, ax_coat, ay_coat);
 
-    pmf.p_diffuse * pdf_cosine
-        + pmf.p_specular * pdf_specular
-        + pmf.p_coat * pdf_coat
-        + pmf.p_fuzz * pdf_cosine
+    pmf[Lobe::Diffuse] * pdf_cosine
+        + pmf[Lobe::Specular] * pdf_specular
+        + pmf[Lobe::Coat] * pdf_coat
+        + pmf[Lobe::Fuzz] * pdf_cosine
 }
