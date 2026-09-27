@@ -559,6 +559,15 @@
       −69 (the same finite guard, the reference's constant);
     - `artistic_ior` blended the IOR as `x + (y − x)·t`, which at the default
       white edge leaves `n_max`'s rounding (~70) in `n_min`: 7e-5 relative.
+    Rendered, the fixes move three sample scenes, all through the
+    `artistic_ior` blend: `check_images.sh` (16 spp, old binary against new)
+    finds every other scene bit-identical, and restoring the old blend alone
+    makes those three bit-identical too. Each holds a metal whose conductor is
+    an `artistic_ior` — `materialx_basic`'s dirtied metal (6.6% of pixels, at
+    most 1.5e-7 absolute, relmse 4e-16) and the metal `standard_surface`s of
+    `materialx_cutout` (19%, 1.7e-5, 1.5e-14) and `materialx_surfaces`
+    (7.6%, 4.6e-5, 1.5e-15) — the blend's rounding. The DPEL teapot and lion
+    render identically.
     What still differs is six guards, each a rule in the test's `deviation()`
     that names the one input condition it applies to (91 lanes in all):
     a zero divisor in `divide` gives 0 and an empty `remap` input range gives
