@@ -18,7 +18,7 @@
 //! four times running and trilinear doubles that, so the great majority of
 //! lookups should never reach a lock at all:
 //!
-//! 1. a per-thread two-entry microcache ([`with_tile`]), the same
+//! 1. a per-thread set-associative microcache ([`with_tile`]), the same
 //!    `thread_local!` idiom the MaterialX evaluator already uses for its value
 //!    stack;
 //! 2. a sharded map, one `Mutex` per shard;
@@ -42,6 +42,75 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// residual contention is lower; it is a power of two so the shard index is a
 /// mask rather than a modulo.
 const SHARDS: usize = 64;
+
+/// Counter stripes: one cache line each, so each thread increments its own.
+/// A power of two above any core count crust has run on (72), so two threads
+/// share a stripe only past 128.
+const STRIPES: usize = 128;
+
+/// One stripe, alone on its cache line. 128 rather than 64 bytes because the
+/// adjacent-line prefetcher on Intel parts pulls lines in pairs, so two stripes
+/// on neighbouring 64-byte lines would still bounce together.
+#[repr(align(128))]
+#[derive(Debug, Default)]
+struct Stripe(AtomicU64);
+
+/// A counter bumped from every render thread on the texel path.
+///
+/// **Why it is striped.** Profiling ALab (`docs/alab_profile.md`) found one
+/// plain `AtomicU64` here costing more than the lookups it counted: at 3.3 G
+/// lookups a frame on 72 threads, every increment moved the same cache line
+/// between cores, and 72 threads rendered only ~1.25x faster than 8. Each
+/// thread now increments its own line, and the reader sums them. The count is
+/// still exact; only reading it costs more, and that happens once per report.
+#[derive(Debug)]
+pub struct StripedCounter {
+    stripes: Box<[Stripe]>,
+}
+
+impl Default for StripedCounter {
+    fn default() -> Self {
+        StripedCounter {
+            stripes: (0..STRIPES).map(|_| Stripe::default()).collect(),
+        }
+    }
+}
+
+impl StripedCounter {
+    #[inline]
+    pub fn add(&self, n: u64) {
+        self.stripes[thread_stripe()]
+            .0
+            .fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The exact total. Not a snapshot while threads are still counting, like
+    /// any relaxed counter, but reports read it after the render.
+    pub fn load(&self) -> u64 {
+        self.stripes
+            .iter()
+            .map(|s| s.0.load(Ordering::Relaxed))
+            .sum()
+    }
+}
+
+/// This thread's stripe, assigned round-robin on first use.
+#[inline]
+fn thread_stripe() -> usize {
+    thread_local! {
+        static STRIPE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    }
+    STRIPE.with(|s| {
+        let v = s.get();
+        if v != usize::MAX {
+            return v;
+        }
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let v = NEXT.fetch_add(1, Ordering::Relaxed) % STRIPES;
+        s.set(v);
+        v
+    })
+}
 
 /// Default cache budget, matching OIIO's own 1 GB.
 pub const DEFAULT_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
@@ -239,9 +308,12 @@ struct Entry {
 /// reports the same three for the same reason.
 #[derive(Debug, Default)]
 pub struct CacheStats {
-    pub micro_hits: AtomicU64,
-    pub hits: AtomicU64,
-    pub misses: AtomicU64,
+    /// The three bumped per lookup are striped (see [`StripedCounter`]); the
+    /// rest move only on a decode or an eviction, which is rare enough that a
+    /// shared atomic costs nothing.
+    pub micro_hits: StripedCounter,
+    pub hits: StripedCounter,
+    pub misses: StripedCounter,
     /// Successful tile decodes. Every one is either a tile's first, a
     /// re-read after eviction, or a concurrent double fill; `counters()`
     /// separates the three by subtraction rather than by counting them
@@ -415,9 +487,9 @@ impl TileCache {
             loaded_tiles: s.decoded.load(Ordering::Relaxed),
             resident_bytes: self.resident(),
             total_bytes,
-            micro_hits: s.micro_hits.load(Ordering::Relaxed),
-            hits: s.hits.load(Ordering::Relaxed),
-            misses: s.misses.load(Ordering::Relaxed),
+            micro_hits: s.micro_hits.load(),
+            hits: s.hits.load(),
+            misses: s.misses.load(),
             // Exact, and free of the race an independently counted version
             // had: every successful decode is a first read, a re-read after
             // eviction, or a double fill, and the other two are counted
@@ -458,14 +530,18 @@ impl TileCache {
     pub fn get(&self, id: TileId) -> Option<Arc<Tile>> {
         if let Some(shard) = lock(self.shard(&id)).and_then(|mut m| {
             m.get_mut(&id).map(|e| {
-                e.used = true;
+                // Only when clear: a hit on a hot tile is otherwise a store
+                // to memory every thread reading that tile has cached.
+                if !e.used {
+                    e.used = true;
+                }
                 e.tile.clone()
             })
         }) {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            self.stats.hits.add(1);
             return Some(shard);
         }
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        self.stats.misses.add(1);
         self.page_in(id)
     }
 
@@ -629,23 +705,54 @@ fn lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// The per-thread microcache's slots: the two most recent `(key, tile)` pairs,
-/// keyed by the owning cache's [`TileCache::id`] as well as the tile.
-type MicroSlots = [Option<((u32, TileId), Arc<Tile>)>; 2];
+/// Sets in the per-thread microcache. A file's tiles all land in one set, so
+/// this is roughly how many textures a thread can interleave before they start
+/// evicting each other: an ALab material samples ~5 per shading point, and
+/// consecutive shading points on one thread are often different materials.
+/// Measured on ALab at 72 threads: 8 sets hit 81.2%, 16 sets 84.9% (the old
+/// two shared slots, 74.9%), for Texture 1.76 -> 1.57 us per `eval`.
+const MICRO_SETS: usize = 16;
+/// Ways per set: a trilinear tap reads two levels, and a footprint straddling
+/// a tile edge doubles that.
+const MICRO_WAYS: usize = 4;
+
+type MicroSlot = Option<((u32, TileId), Arc<Tile>)>;
+const EMPTY_WAYS: [MicroSlot; MICRO_WAYS] = [const { None }; MICRO_WAYS];
+/// The per-thread microcache: `MICRO_SETS` sets of `MICRO_WAYS` `(key, tile)`
+/// pairs, newest first within a set, keyed by the owning cache's
+/// [`TileCache::id`] as well as the tile.
+type MicroSlots = [[MicroSlot; MICRO_WAYS]; MICRO_SETS];
 
 thread_local! {
-    /// The two most recently used tiles, per thread.
+    /// The most recently used tiles, per thread and per texture.
     ///
     /// The highest-leverage part of the whole cache and the cheapest: a
     /// bilinear tap reads one tile up to four times in a row and trilinear
     /// doubles that, so this absorbs most lookups before any lock is touched.
-    /// OIIO keeps exactly two for the same reason and tracks its miss rate
-    /// separately; so does [`CacheStats::micro_hits`].
     ///
-    /// Two rather than one because trilinear alternates between two levels,
-    /// and one entry would thrash on every other tap.
+    /// **Set-associative by file**, because it used to be two slots shared by
+    /// every texture — OIIO's number, and right for a scene with one texture
+    /// per shading point (98.6% hits on the alias plane). A production
+    /// material interleaves several: on ALab each `eval` found both slots
+    /// holding the *previous* texture's tiles and missed on its first tap at
+    /// each level, a 25% miss rate that sent a quarter of 3.3 G lookups to the
+    /// shard mutexes (`docs/alab_profile.md`). Hashing the file to a set keeps
+    /// each texture's recent tiles out of the others' way, and a lookup still
+    /// scans only `MICRO_WAYS` keys.
+    ///
+    /// Tiles held here are outside the budget: at most `MICRO_SETS *
+    /// MICRO_WAYS` = 64 tiles a thread, 1.5 MiB of `half` 64x64 tiles, so
+    /// 108 MiB on 72 threads against the 1 GiB default (half that for `u8`).
     static MICRO: std::cell::RefCell<MicroSlots> =
-        const { std::cell::RefCell::new([None, None]) };
+        const { std::cell::RefCell::new([EMPTY_WAYS; MICRO_SETS]) };
+}
+
+/// The microcache set a key lives in. Files are interned with consecutive
+/// indices, so the low bits already spread a material's textures; the cache id
+/// is mixed in so two caches' file 0 do not share a set.
+#[inline]
+fn micro_set(key: &(u32, TileId)) -> usize {
+    (key.1.file as usize).wrapping_add((key.0 as usize).wrapping_mul(5)) % MICRO_SETS
 }
 
 /// Reads `id` through the per-thread microcache and hands the tile to `f`.
@@ -653,7 +760,7 @@ thread_local! {
 /// Takes a closure rather than returning the `Arc` on purpose. A texel fetch
 /// is the hottest thing in a textured render — 8.7 M of them in a 640x360
 /// frame at 4 spp — and returning a handle means an atomic refcount increment
-/// and decrement on *every one*, even the 98.6% that hit this thread's own two
+/// and decrement on *every one*, even the 98.6% that hit this thread's own
 /// slots and never touch a lock. Measured, that was the difference between a
 /// streamed render costing 4x a preloaded one and costing 1.3x: the cache
 /// itself was never the bottleneck, the `Arc` traffic was.
@@ -671,16 +778,18 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     // The index is found first so the closure is called exactly once, which
     // is what lets this stay `FnOnce` and stay safe.
     let key = (cache.id, id);
+    let set = micro_set(&key);
     let hit = MICRO.with(|m| {
         let slots = m.borrow();
-        let idx = slots
+        let ways = &slots[set];
+        let idx = ways
             .iter()
             .position(|s| matches!(s, Some((k, _)) if *k == key))?;
-        let (_, tile) = slots[idx].as_ref()?;
+        let (_, tile) = ways[idx].as_ref()?;
         Some(f.take()?(tile))
     });
     if let Some(r) = hit {
-        cache.stats.micro_hits.fetch_add(1, Ordering::Relaxed);
+        cache.stats.micro_hits.add(1);
         return Some(r);
     }
     // Miss: the borrow above is released before this, because `cache.get` can
@@ -689,10 +798,11 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     let r = f.take()?(&tile);
     MICRO.with(|m| {
         let mut slots = m.borrow_mut();
-        // Newest in front; the displaced entry becomes the second slot. Two
-        // entries make this a swap rather than a policy.
-        slots[1] = slots[0].take();
-        slots[0] = Some((key, tile));
+        // Newest in front; the oldest way falls off the end. FIFO rather than
+        // LRU: promoting on a hit would make every hit a write.
+        let ways = &mut slots[set];
+        ways.rotate_right(1);
+        ways[0] = Some((key, tile));
     });
     Some(r)
 }
@@ -703,7 +813,7 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
 /// is about to drop, and a stale hit would answer from the wrong cache.
 #[cfg(test)]
 pub fn clear_microcache() {
-    MICRO.with(|m| *m.borrow_mut() = [None, None]);
+    MICRO.with(|m| *m.borrow_mut() = [EMPTY_WAYS; MICRO_SETS]);
 }
 
 #[cfg(test)]
@@ -974,6 +1084,71 @@ mod tests {
 
         clear_microcache();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A production material samples several textures per shading point, one
+    /// after another, each at two levels. With the old two slots shared by all
+    /// textures, every texture's first tap found the previous texture's tiles
+    /// and missed — 25% of lookups on ALab. Each texture must keep its own.
+    #[test]
+    fn interleaved_textures_do_not_evict_each_other() {
+        clear_microcache();
+        let path = fixture("micro_interleave", 256, 256);
+        let cache = TileCache::new(64 * 1024 * 1024);
+        // Five textures, as an ALab material has.
+        let files: Vec<u32> = (0..5)
+            .map(|_| {
+                cache
+                    .intern(TiledFile::open(&path).expect("open"))
+                    .expect("intern")
+            })
+            .collect();
+        let taps = |cache: &TileCache| {
+            for &file in &files {
+                for level in 0..2 {
+                    let id = TileId {
+                        file,
+                        level,
+                        tile: 0,
+                    };
+                    with_tile(cache, id, |t| t.width).expect("tile");
+                }
+            }
+        };
+        taps(&cache); // warm: every tile once
+        let base = cache.counters();
+        for _ in 0..3 {
+            taps(&cache);
+        }
+        let now = cache.counters();
+        assert_eq!(
+            now.micro_hits - base.micro_hits,
+            3 * 5 * 2,
+            "every tap a microcache hit"
+        );
+        assert_eq!(now.hits, base.hits, "no lookup reached a shard");
+
+        clear_microcache();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Striping must not lose counts: each thread increments its own line and
+    /// the reader sums them, so the total is exact however many threads ran —
+    /// including more threads than stripes, which share one.
+    #[test]
+    fn striped_counter_is_exact_across_threads() {
+        let c = StripedCounter::default();
+        let threads = STRIPES + 7;
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        c.add(1);
+                    }
+                });
+            }
+        });
+        assert_eq!(c.load(), threads as u64 * 1000);
     }
 
     /// Nothing about a broken file may panic — `Texture2D::eval` forbids it and

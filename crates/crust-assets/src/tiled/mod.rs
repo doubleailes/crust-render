@@ -46,7 +46,8 @@ mod stream;
 mod write;
 
 pub use cache::{
-    CacheCounters, DEFAULT_BUDGET_BYTES, Tile, TileCache, TileData, TileId, with_tile,
+    CacheCounters, DEFAULT_BUDGET_BYTES, StripedCounter, Tile, TileCache, TileData, TileId,
+    with_tile,
 };
 pub use exr_write::write_tx_exr;
 pub use make::{MadeTx, TxFormat, is_ptex, make_tx, make_tx_atomic, tx_is_stale, tx_sibling};

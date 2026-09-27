@@ -409,8 +409,12 @@ pub struct PtexStream {
     /// beside it.
     micro_max: usize,
     fallback: Vec3A,
-    micro_hits: AtomicU64,
-    reader_lookups: AtomicU64,
+    /// Striped for the reason the `.tx` cache's are (see
+    /// [`crate::tiled::StripedCounter`]): bumped on every texel fetch from
+    /// every thread, so a plain atomic is one cache line all of them contend
+    /// on.
+    micro_hits: crate::tiled::StripedCounter,
+    reader_lookups: crate::tiled::StripedCounter,
 }
 
 impl PtexStream {
@@ -479,16 +483,16 @@ impl PtexStream {
             micro_max,
             reader,
             fallback: Vec3A::splat(0.5),
-            micro_hits: AtomicU64::new(0),
-            reader_lookups: AtomicU64::new(0),
+            micro_hits: Default::default(),
+            reader_lookups: Default::default(),
         })
     }
 
     /// Cache and microcache counters, for the load-time and `--stats` report.
     pub fn stats(&self) -> StreamStats {
         StreamStats {
-            micro_hits: self.micro_hits.load(Ordering::Relaxed),
-            reader_lookups: self.reader_lookups.load(Ordering::Relaxed),
+            micro_hits: self.micro_hits.load(),
+            reader_lookups: self.reader_lookups.load(),
             cache: self.reader.cache_stats(),
         }
     }
@@ -641,13 +645,13 @@ impl PtexStream {
             Some(f.take()?(data))
         });
         if let Some(r) = hit {
-            self.micro_hits.fetch_add(1, Ordering::Relaxed);
+            self.micro_hits.add(1);
             return Some(r);
         }
         // Miss. The borrow above is released before this: `get_tile` takes
         // the reader's mutex and may read and inflate, and must not run under
         // a thread-local borrow.
-        self.reader_lookups.fetch_add(1, Ordering::Relaxed);
+        self.reader_lookups.add(1);
         let data = self
             .reader
             .get_tile(id.face as usize, res, id.tile as usize)
