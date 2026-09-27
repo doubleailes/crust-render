@@ -104,7 +104,7 @@ sharing and costs every entering ray a transform plus a cold descent into a
 second tree — dropping it took instance descents from 3.85 to 0.13 per camera
 ray on `samples/cornellbox.usda`.
 `UsdGeomBasisCurves` import as **round curve segments** (sphere-swept cones;
-cubic bezier/bspline/catmullRom spans flatten to polylines) — see
+cubic bezier/bspline/catmullRom spans stay cubic and are subdivided per ray) — see
 `samples/curves.usda`. Two per-prim extras:
 
 - `crust:motion:translate = (x, y, z)` — **transform motion blur**: the prim

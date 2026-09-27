@@ -65,10 +65,11 @@
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
   linearly (no deformation blur, no quaternion motion — a large shutter rotation bows
-  slightly, but the union-of-endpoints bbox stays conservative). Curve import flattens
-  cubic spans to polylines (no exact cubic intersector) and lerps widths across a span in
-  parameter; the rounded-cone can report an interior sphere surface for rays *starting
-  inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
+  slightly, but the union-of-endpoints bbox stays conservative). Cubic curve spans are
+  kept as cubic primitives (converted to Bézier control points) and adaptively
+  subdivided per ray query into rounded cones (`crust_rt::curve::cubic_curve_intersect`),
+  so they are not stored as polylines; widths lerp across a span in parameter; the
+  rounded-cone can report an interior sphere surface for rays *starting inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
   points/topology *and* material binding. Emissive curves/instances are not light-list
   entries (BSDF-sampled only, like emissive volumes).
   Baking single-placement meshes (above) leaves *resident* memory unchanged — the same

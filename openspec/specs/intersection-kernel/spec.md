@@ -14,7 +14,8 @@ behind it are in `design.md`.
 ### Requirement: Embree-shaped geometry API
 
 The kernel SHALL accept triangle meshes (with optional per-vertex shading
-normals), analytic spheres, disks and open cylinders, round curve segments, and
+normals), analytic spheres, disks and open cylinders, round (linear) and cubic
+curve segments, and
 instances of committed scenes, each with a per-geometry visibility mask, and
 SHALL report hits as plain `Copy` values carrying `geom_id`, `prim_id`, the hit
 distance and barycentrics. An instanced hit SHALL report the instance's
@@ -67,11 +68,13 @@ placement SHALL be interpolated per ray from the ray's time.
 
 ### Requirement: Known gaps
 
-The kernel SHALL be documented as lacking: deformation motion blur, exact cubic
-curve intersection (cubic spans are flattened to polylines), vector widths above
-128 bits, and SIMD packets for non-triangle primitives.
+The kernel SHALL be documented as lacking: deformation motion blur, quaternion
+(rotation-exact) motion, vector widths above 128 bits, and SIMD packets for
+non-triangle primitives.
 
 #### Scenario: A cubic curve is imported
 
 - **WHEN** a cubic `BasisCurves` prim is imported
-- **THEN** each span is intersected as a polyline of round cone segments
+- **THEN** each span is kept as one cubic segment, and a query adaptively
+  subdivides it into rounded cones only as deep as that ray's bounds tests
+  require

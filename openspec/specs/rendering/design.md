@@ -84,7 +84,10 @@ consumed as ordinary dependencies:
      bounce-hit emission on light-list lights dropped) and `bsdf` (no shadow rays,
      bounce emission at full weight). All four are unbiased — the strategy's
      `light_weight`/`bounce_weight` pair is a partition of unity (pinned by a unit
-     test); route BOTH sides of any new weight through the strategy or emission gets
+     test) — with the indirect clamp off: the default `crust:indirectClamp` of 10
+     biases every strategy alike, and `--indirect-clamp 0` restores the unbiased
+     estimator (see "Volumes, frame, camera and render settings" in
+     `openspec/specs/usd-scene-import/design.md`); route BOTH sides of any new weight through the strategy or emission gets
      double-counted. `utils` now has both `balance_heuristic` (true `a/(a+b)` —
      historically this name computed the power formula) and `power_heuristic`
      (`a²/(a²+b²)`). `samples/veach_mis.usda` is the classic Veach comparison scene.

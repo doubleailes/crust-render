@@ -242,10 +242,15 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     four times and trilinear alternates between two levels. `with_tile` hands the
     tile to a closure rather than returning an `Arc`, because one refcount pair
     per texel was the difference between streaming costing 4x a preloaded render
-    and costing 2x.
+    and costing 2x (sequential timings, not an interleaved `bench_ab.sh` run — a
+    ratio this size is far outside the ~15% noise band, but treat the exact
+    figures as approximate).
   - **Nothing on the lookup path may write memory another thread reads.** This
     one was learned on ALab (`docs/alab_profile.md`), where texture lookups were
-    89% of render time and 72 threads rendered ~1.25x faster than 8. There were
+    89% of render time and 72 threads rendered an estimated ~1.25x faster than 8
+    (two `--profile` runs, 72 threads at 32 spp and 8 threads at 8 spp scaled to 32 —
+    an extrapolation, not an interleaved `bench_ab.sh` measurement; it shows the
+    scaling was poor, not by exactly how much). There were
     two causes, and each fix is load-bearing:
     - **The per-lookup counters are striped** (`StripedCounter`: 128
       cache-line-aligned slots, one per thread, summed at report time). A plain
@@ -448,7 +453,8 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     included — so with a pyramid on, `CRUST_PTEX_STREAM=1` by itself now streams nothing.
     That is deliberate, and the lever is one variable. The fix that would retire both
     gates is a reader that reduces in a declared working space: building the linear chain
-    here would need a second pyramid cache (the design "Known incomplete work" ruled out)
+    here would need a second pyramid cache (the design "Known gaps: texture residency" below
+    rules out)
     *and* a level-0 read to answer a coarse lookup, which defeats streaming exactly where
     the island uses it.
     **`CRUST_PTEX_CACHE_MB` is the render's budget, not a file's**, and that takes work
@@ -592,8 +598,11 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   the file's chain. Retiring both gates needs the reduction to happen in the reader,
   against a declared working space — not a second pyramid cache here, which would also
   have to read level 0 to answer a coarse lookup. `PtexColor` remains the default and
-  the oracle. Ptex is still 8-bit
-  through both backends, so an HDR `.ptx` gains nothing from either. Filtering across
+  the oracle. Both backends decode `uint8`, `uint16`, `half` and `float` Ptex
+  samples at full range (no clip above 1.0), but both then apply the display
+  decode `powf(2.2)` to every `.ptx` unconditionally: there is no per-texture
+  colour space, so a linear HDR `.ptx` is decoded as though it were display-encoded
+  — and the streamed `u8` LUT fast path only covers 8-bit files. Filtering across
   face boundaries is still not attempted (see the filtering caveats), and the streaming
   path does not change that. Cost on the worst case (`samples/ptex_quads.usda`, two
   textured planes filling frame): ~2.8x the preloaded render, against ~2x for the UV

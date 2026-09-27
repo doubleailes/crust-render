@@ -33,8 +33,9 @@
   Cranelift's `fmin` — `normalize`, `normalmap`, dot products, and any op whose
   operand width is only known at run time) calls back into the interpreter's
   own step, `Program::apply_op`. `tests/jit.rs` compares every slot bitwise.
-  **The one crate that is not `forbid(unsafe_code)`**: `deny`, with four
-  audited blocks (the code-pointer transmute, the two host callbacks' raw
+  **Not `forbid(unsafe_code)`** but `deny`, as `crust-core` is too (for its
+  one test-only `GlobalAlloc`); it is the only crate with `unsafe` in
+  production code, in four audited blocks (the code-pointer transmute, the two host callbacks' raw
   pointers, and freeing the code in `Drop`). A `JitProgram` owns its
   `JITModule` (in a `Mutex`, since the module is `Send` but not `Sync`) and
   frees it on drop — cranelift-jit would otherwise leak the code, which a host
