@@ -570,6 +570,10 @@ impl Material for OpenPBR {
         self.base_color_ptex.as_ref().map(|t| &*t.0)
     }
 
+    fn as_openpbr(&self) -> Option<&OpenPBR> {
+        Some(self)
+    }
+
     fn resolve(
         &self,
         _r_in: &Ray,

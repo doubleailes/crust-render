@@ -121,6 +121,15 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// This material as a plain [`OpenPBR`], when it is one — the
+    /// integrator's static fast path. Where [`Material::resolve`] says there is
+    /// no per-hit work, a [`ShadingPoint`] over an `OpenPBR` queries it through
+    /// its concrete methods instead of four or five virtual calls per vertex.
+    /// Only `OpenPBR` overrides it; the answers are the same code either way.
+    fn as_openpbr(&self) -> Option<&OpenPBR> {
+        None
+    }
+
     /// Builds the continuation ray for an externally chosen direction `wi`
     /// (e.g. drawn from the guiding field). Materials that tag rays with an
     /// interior medium on transmission must do the same here, so a guided
@@ -299,6 +308,8 @@ pub struct ShadingPoint<'a> {
 enum Resolved<'a> {
     /// No per-hit work: queries go to the material with the hit's record.
     Material(&'a dyn Material),
+    /// No per-hit work on a plain `OpenPBR`: queried in place, statically.
+    Plain(&'a OpenPBR),
     /// The material's resolved `OpenPBR`, queried with the record `resolve`
     /// returned.
     OpenPBR(ResolvedOpenPBR),
@@ -314,10 +325,18 @@ impl<'a> ShadingPoint<'a> {
                 emitted: r.emitted,
                 bsdf: Resolved::OpenPBR(r.bsdf),
             },
-            None => ShadingPoint {
-                rec: *rec,
-                emitted: mat.emitted_at(r_in, rec, cos_theta_o),
-                bsdf: Resolved::Material(mat),
+            None => match mat.as_openpbr() {
+                // `OpenPBR`'s `emitted_at` is the default, `emitted_directional`.
+                Some(m) => ShadingPoint {
+                    rec: *rec,
+                    emitted: m.emitted_directional(cos_theta_o),
+                    bsdf: Resolved::Plain(m),
+                },
+                None => ShadingPoint {
+                    rec: *rec,
+                    emitted: mat.emitted_at(r_in, rec, cos_theta_o),
+                    bsdf: Resolved::Material(mat),
+                },
             },
         }
     }
@@ -332,6 +351,9 @@ impl<'a> ShadingPoint<'a> {
     pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),
+            // No per-hit work means no Ptex at this hit, which is exactly when
+            // `OpenPBR::scatter_importance` runs `scatter_resolved` on itself.
+            Resolved::Plain(m) => m.scatter_resolved(r_in, &self.rec, sampler),
             Resolved::OpenPBR(m) => m.scatter(r_in, &self.rec, sampler),
         }
     }
@@ -340,6 +362,7 @@ impl<'a> ShadingPoint<'a> {
     pub fn eval(&self, r_in: &Ray, wi: Vec3A) -> Option<(Vec3A, f32)> {
         match &self.bsdf {
             Resolved::Material(m) => m.eval(r_in, &self.rec, wi),
+            Resolved::Plain(m) => m.eval_resolved(r_in, &self.rec, wi),
             Resolved::OpenPBR(m) => m.eval(r_in, &self.rec, wi),
         }
     }
@@ -348,6 +371,7 @@ impl<'a> ShadingPoint<'a> {
     pub fn make_ray(&self, wi: Vec3A) -> Ray {
         match &self.bsdf {
             Resolved::Material(m) => m.make_ray(&self.rec, wi),
+            Resolved::Plain(m) => Material::make_ray(*m, &self.rec, wi),
             Resolved::OpenPBR(m) => m.make_ray(&self.rec, wi),
         }
     }
