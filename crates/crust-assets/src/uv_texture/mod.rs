@@ -97,7 +97,7 @@ pub struct UvTexture {
 ///
 /// 1024 rather than full resolution for the reason in the module note above.
 /// It is a *cap*, not a resize: a smaller tile is kept as authored.
-pub const DEFAULT_MAX_EDGE: usize = 1024;
+pub const DEFAULT_MAX_EDGE: usize = crust_core::config::DEFAULT_TEX_MAX;
 
 /// The edge cap actually in effect, `CRUST_TEX_MAX` included.
 ///
@@ -108,11 +108,7 @@ pub const DEFAULT_MAX_EDGE: usize = 1024;
 ///
 /// [`max_log2_from_env`]: crate::max_log2_from_env
 pub fn max_edge_from_env() -> usize {
-    std::env::var("CRUST_TEX_MAX")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v >= 1)
-        .unwrap_or(DEFAULT_MAX_EDGE)
+    crust_core::config().tex_max.get()
 }
 
 /// Are mip pyramids built? `CRUST_TEX_MIP=0` keeps each tile at its single
@@ -121,7 +117,7 @@ pub fn max_edge_from_env() -> usize {
 /// A/B for "did the pyramid change this, or did the footprint?", paired with
 /// `CRUST_RAY_CONES=0` on the other side.
 fn mip_enabled() -> bool {
-    std::env::var("CRUST_TEX_MIP").as_deref() != Ok("0")
+    crust_core::config().tex_mip
 }
 
 impl UvTexture {
@@ -142,8 +138,18 @@ impl UvTexture {
     /// probe — does not have to mutate a process-global the rest of the
     /// program is reading.
     pub fn open_with(path: &Path, space: ColorSpace, mip: bool) -> Option<UvTexture> {
-        let max_edge = max_edge_from_env();
+        UvTexture::open_capped(path, space, mip, max_edge_from_env())
+    }
 
+    /// [`UvTexture::open_with`] with the `CRUST_TEX_MAX` edge cap passed in
+    /// too: what [`FileAssets`](crate::FileAssets) calls with its own
+    /// [`Config`](crust_core::Config).
+    pub fn open_capped(
+        path: &Path,
+        space: ColorSpace,
+        mip: bool,
+        max_edge: usize,
+    ) -> Option<UvTexture> {
         let name = path.to_string_lossy().into_owned();
         let token = TileToken::detect(&name);
         // Decided by the name, not per tile: a UDIM set is one format, and

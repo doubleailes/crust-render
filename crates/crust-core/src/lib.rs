@@ -14,6 +14,7 @@
 mod aabb;
 mod buffer;
 mod camera;
+pub mod config;
 mod environment;
 mod error;
 mod filter;
@@ -54,6 +55,7 @@ pub use crust_rt as rt;
 pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
+pub use config::{Config, PtexMipSpace, config};
 pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};

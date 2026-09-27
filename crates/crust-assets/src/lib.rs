@@ -111,6 +111,10 @@ pub fn linear_to_srgb(c: f32) -> f32 {
 /// `ptex-rs`. LDR pixels are un-gamma'd to linear, since the renderer works
 /// in linear light and an sRGB-encoded sky would be noticeably wrong.
 pub struct FileAssets {
+    /// The `CRUST_*` switches this loader obeys: [`crust_core::config()`]
+    /// unless constructed [`FileAssets::with_config`]. Every texture-policy
+    /// decision below reads it, never the environment.
+    config: crust_core::Config,
     /// The tile cache every streaming texture shares. Present whether or not
     /// streaming is on, so the counters can be reported either way — an empty
     /// one costs 64 empty maps.
@@ -228,9 +232,17 @@ impl Default for FileAssets {
 }
 
 impl FileAssets {
+    /// A loader under the process's switches ([`crust_core::config()`]).
     pub fn new() -> FileAssets {
-        let streaming = std::env::var("CRUST_TEX_STREAM").as_deref() != Ok("0");
-        let budget = tiled::TileCache::budget_from_env();
+        FileAssets::with_config(crust_core::config().clone())
+    }
+
+    /// A loader under `config` rather than the process environment — how a
+    /// test or probe compares both sides of a switch without mutating a
+    /// process-global the rest of the program is reading.
+    pub fn with_config(config: crust_core::Config) -> FileAssets {
+        let streaming = config.tex_stream;
+        let budget = tiled::TileCache::budget_of(&config);
         // DEBUG, not INFO: this is the default now, and a default render's
         // INFO lines are the four that do not scale with anything.
         if streaming {
@@ -240,12 +252,12 @@ impl FileAssets {
                 budget as f64 / (1024.0 * 1024.0)
             );
         }
-        let ptex_streaming = ptex_stream::stream_enabled();
-        let ptex_mip_space = ptex_stream::mip_space_from_env();
+        let ptex_streaming = config.ptex_stream;
+        let ptex_mip_space = config.ptex_mip_space;
         if ptex_streaming {
             info!(
                 "Streaming Ptex with a {:.0} MiB cache",
-                ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0)
+                ptex_stream::budget_bytes(&config) as f64 / (1024.0 * 1024.0)
             );
             // Said at construction rather than per texture, because under
             // the default policy it is the line that explains a render where
@@ -269,15 +281,16 @@ impl FileAssets {
         debug!(
             "Texture residency: UV {} (CRUST_TEX_MAX={}), Ptex {} (CRUST_PTEX_MAX_LOG2={})",
             if streaming { "streaming" } else { "preloaded" },
-            uv_texture::max_edge_from_env(),
+            config.tex_max,
             if ptex_streaming {
                 "streaming"
             } else {
                 "preloaded"
             },
-            max_log2_from_env(),
+            config.ptex_max_log2.unwrap_or(DEFAULT_MAX_LOG2),
         );
         FileAssets {
+            config,
             cache: std::sync::Arc::new(tiled::TileCache::new(budget)),
             streaming,
             auto_tx: false,
@@ -482,7 +495,7 @@ impl FileAssets {
         // `ptex_stream::micro_reserve`. `n * (x / n) <= x` because integer
         // division floors, so readers plus microcaches are still at or under
         // what was asked for, whatever the count.
-        let share = Self::ptex_reader_total() / streams.len();
+        let share = self.ptex_reader_total() / streams.len();
         for s in &streams {
             s.set_budget(share);
         }
@@ -494,8 +507,8 @@ impl FileAssets {
     /// the whole budget is still within it, and refusing to stream anything
     /// at all would make a small budget mean "no streaming" rather than "a
     /// small cache".
-    fn max_streams() -> usize {
-        (Self::ptex_reader_total() / MIN_PTEX_SHARE).max(1)
+    fn max_streams(&self) -> usize {
+        (self.ptex_reader_total() / MIN_PTEX_SHARE).max(1)
     }
 
     /// The render's Ptex budget less the thread-local microcaches' share.
@@ -503,9 +516,20 @@ impl FileAssets {
     /// What is left for the readers, and the number every division below is
     /// against — so the two halves of Ptex residency sum to the configured
     /// total rather than the readers alone matching it.
-    fn ptex_reader_total() -> usize {
-        let total = ptex_stream::cache_budget_from_env();
+    fn ptex_reader_total(&self) -> usize {
+        let total = self.ptex_budget();
         total - ptex_stream::micro_reserve(total)
+    }
+
+    /// The preloading backend's per-face cap: `CRUST_PTEX_MAX_LOG2`, or
+    /// [`DEFAULT_MAX_LOG2`] when it is unset.
+    fn preload_max_log2(&self) -> i8 {
+        self.config.ptex_max_log2.unwrap_or(DEFAULT_MAX_LOG2)
+    }
+
+    /// The render's whole Ptex budget, `CRUST_PTEX_CACHE_MB`, in bytes.
+    fn ptex_budget(&self) -> usize {
+        ptex_stream::budget_bytes(&self.config)
     }
 
     /// Streamed textures opened so far. Callers hold the lock.
@@ -527,8 +551,7 @@ impl FileAssets {
             // Process-wide rather than per texture: one set of slots per
             // thread serves every stream, keyed by texture id.
             micro_retained_bytes: ptex_stream::micro_retained_bytes(),
-            micro_reserve_bytes: ptex_stream::micro_reserve(ptex_stream::cache_budget_from_env())
-                as u64,
+            micro_reserve_bytes: ptex_stream::micro_reserve(self.ptex_budget()) as u64,
             ..Default::default()
         };
         for h in opened.iter() {
@@ -691,7 +714,7 @@ impl AssetLoader for FileAssets {
         // Same A/B switch as CRUST_PTEX, for the same reason: with every
         // texture declined a MaterialX surface renders on its constant
         // inputs, which is how you tell a wrong chart from a wrong material.
-        if std::env::var("CRUST_TEX").as_deref() == Ok("0") {
+        if !self.config.tex {
             debug!("CRUST_TEX=0: ignoring {}", path.display());
             return None;
         }
@@ -722,7 +745,8 @@ impl AssetLoader for FileAssets {
             );
         }
         let started = Instant::now();
-        let loaded = UvTexture::open(path, space)?;
+        let loaded =
+            UvTexture::open_capped(path, space, self.config.tex_mip, self.config.tex_max.get())?;
         {
             use std::sync::atomic::Ordering::Relaxed;
             self.preloaded_textures.fetch_add(1, Relaxed);
@@ -780,7 +804,7 @@ impl AssetLoader for FileAssets {
         // so the same scene renders on its constant `baseColor` fallback. That
         // is how you tell "the Ptex lookup is wrong" from "the material or the
         // lighting is wrong", since both show up as an off-colour surface.
-        if std::env::var("CRUST_PTEX").as_deref() == Ok("0") {
+        if !self.config.ptex {
             debug!("CRUST_PTEX=0: ignoring {}", path.display());
             return None;
         }
@@ -801,7 +825,7 @@ impl AssetLoader for FileAssets {
         // caches nothing. Preloading is the honest answer to both.
         let room = {
             let opened = self.ptex.lock().unwrap_or_else(|e| e.into_inner());
-            Self::streamed_count(&opened) < Self::max_streams()
+            Self::streamed_count(&opened) < self.max_streams()
         };
         if self.ptex_streaming && !room {
             why = PreloadReason::BudgetFull;
@@ -809,13 +833,13 @@ impl AssetLoader for FileAssets {
                 "Ptex {}: the {:.0} MiB budget already has {} readers, its most \
                  at {:.0} MiB each — preloading this one instead",
                 path.display(),
-                ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
-                Self::max_streams(),
+                self.ptex_budget() as f64 / (1024.0 * 1024.0),
+                self.max_streams(),
                 MIN_PTEX_SHARE as f64 / (1024.0 * 1024.0),
             );
         }
         if self.ptex_streaming && room {
-            match PtexStream::open(path) {
+            match PtexStream::open_config(path, &self.config) {
                 Ok(tex) => {
                     // Admission. Opening read headers only, so this costs a
                     // seek and answers exactly: a texture that would preload
@@ -823,12 +847,13 @@ impl AssetLoader for FileAssets {
                     // cheaper resident than streamed. See
                     // `DEFAULT_STREAM_MIN_MB` for the island distribution that
                     // makes this necessary rather than tidy.
-                    let would = tex.preload_bytes(max_log2_from_env());
-                    let floor = ptex_stream::stream_min_bytes_from_env();
+                    let would = tex.preload_bytes(self.preload_max_log2());
+                    let floor = self.config.ptex_stream_min_mb * 1024 * 1024;
                     if would < floor {
                         why = PreloadReason::TooSmall;
                         debug!(
-                            "Ptex {} would preload in {:.2} MiB, under the {:.0} MiB                              streaming floor — preloading it instead",
+                            "Ptex {} would preload in {:.2} MiB, under the {:.0} MiB \
+                             streaming floor — preloading it instead",
                             path.display(),
                             would as f64 / (1024.0 * 1024.0),
                             floor as f64 / (1024.0 * 1024.0),
@@ -874,7 +899,7 @@ impl AssetLoader for FileAssets {
                             PtexTexture::num_faces(tex.as_ref()),
                             started.elapsed(),
                             opened.len(),
-                            ptex_stream::cache_budget_from_env() as f64 / (1024.0 * 1024.0),
+                            self.ptex_budget() as f64 / (1024.0 * 1024.0),
                         );
                         return Some(tex);
                     }
@@ -888,7 +913,7 @@ impl AssetLoader for FileAssets {
                 }
             }
         }
-        match PtexColor::open(path) {
+        match PtexColor::open_with(path, self.config.ptex_mip, self.preload_max_log2()) {
             Ok(tex) => {
                 debug!(
                     "Loaded Ptex {} ({} faces, {:.1} MiB resident) in {:?}",

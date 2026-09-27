@@ -136,8 +136,9 @@ logged per ray, pixel or sample. `--stats` output is an event on `STATS_TARGET`,
 `-l` cannot silence. Details: `openspec/specs/cli/design.md` § Logging.
 
 **Environment switches** exist to A/B an optimization against the behaviour it replaced.
-Adding one: a row in `docs/architecture.md` § Environment switches, parse it next to the
-code it controls, and make the "off" side the old behaviour so the A/B is honest.
+Adding one: a field on `crust_core::Config` (`crust-core/src/config.rs`, the only place
+the environment is read), a row in `docs/architecture.md` § Environment switches, and
+make the "off" side the old behaviour so the A/B is honest.
 
 **Unbiased measurements** need `--indirect-clamp 0`: the default firefly clamp (10) is the
 one biased setting. Record goldens with the same setting on both sides of an A/B.

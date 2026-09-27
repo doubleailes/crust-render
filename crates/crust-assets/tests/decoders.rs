@@ -318,7 +318,7 @@ fn non_finite_coordinates_do_not_panic() {
 fn default_ptex_cap_is_used_without_the_env_override() {
     // The test process does not set CRUST_PTEX_MAX_LOG2, so the default
     // (32x32) applies.
-    if std::env::var("CRUST_PTEX_MAX_LOG2").is_err() {
+    if crust_core::config().ptex_max_log2.is_none() {
         assert_eq!(max_log2_from_env(), DEFAULT_MAX_LOG2);
         assert_eq!(DEFAULT_MAX_LOG2, 5);
     }

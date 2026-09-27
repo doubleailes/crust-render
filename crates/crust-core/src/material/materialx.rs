@@ -283,8 +283,7 @@ pub struct Loaded {
 /// or pruned — which is the reference the optimised program is pinned
 /// against, and must render bit-identically to it.
 fn optimize_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("CRUST_MTLX_OPT").as_deref() != Ok("0"))
+    crate::config().mtlx_opt
 }
 
 /// Is the shader JIT on? `CRUST_SHADER_JIT=0` runs every MaterialX program on
@@ -292,8 +291,7 @@ fn optimize_enabled() -> bool {
 /// change to either.
 #[cfg(feature = "jit")]
 fn jit_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("CRUST_SHADER_JIT").as_deref() != Ok("0"))
+    crate::config().shader_jit
 }
 
 /// Builds a material from a `.mtlx` file.

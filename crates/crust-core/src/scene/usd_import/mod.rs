@@ -130,7 +130,7 @@ const MIN_STREAM_CHUNKS: usize = 4;
 fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
     // Escape hatch, and the way to A/B the two import paths against each
     // other on one scene: `CRUST_STREAM_IMPORT=0` forces a single stage.
-    if std::env::var("CRUST_STREAM_IMPORT").is_ok_and(|v| v == "0") {
+    if !crate::config().stream_import {
         debug!("Streaming import disabled by CRUST_STREAM_IMPORT=0");
         return Vec::new();
     }

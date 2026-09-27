@@ -62,7 +62,7 @@ const MAX_SUBDIV_LEVEL: i32 = 6;
 /// subdivision artifact from a material or lighting one, like
 /// `CRUST_MESH_BAKE`.
 pub(super) fn subdiv_level(prim: &Prim) -> u32 {
-    if std::env::var("CRUST_SUBDIV").as_deref() == Ok("0") {
+    if !crate::config().subdiv {
         return 0;
     }
     let level = custom_i32(prim, "crust:subdivisionLevel").unwrap_or(0);
