@@ -498,9 +498,9 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         Op::Binary { op, a, b } => {
             let (a, b) = (g(*a), g(*b));
             match op {
-                BinOp::Add => a.zip(b, |x, y| x + y),
-                BinOp::Sub => a.zip(b, |x, y| x - y),
-                BinOp::Mul => a.zip(b, |x, y| x * y),
+                BinOp::Add => a + b,
+                BinOp::Sub => a - b,
+                BinOp::Mul => a * b,
                 // A zero divisor is a real possibility in these
                 // graphs (`1 / transmittance` with a black channel),
                 // and an infinity survives every later multiply.
@@ -518,8 +518,7 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         Op::Mix { fg, bg, m } => {
             let (fg, bg, m) = (g(*fg), g(*bg), g(*m));
             let inv = m.map(|x| 1.0 - x);
-            bg.zip(inv, |b, t| b * t)
-                .zip(fg.zip(m, |f, t| f * t), |a, b| a + b)
+            bg * inv + fg * m
         }
         Op::Clamp { a, low, high } => {
             let (a, lo, hi) = (g(*a), g(*low), g(*high));
@@ -527,9 +526,7 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         }
         Op::Contrast { a, amount, pivot } => {
             let (a, amt, piv) = (g(*a), g(*amount), g(*pivot));
-            a.zip(piv, |x, p| x - p)
-                .zip(amt, |x, m| x * m)
-                .zip(piv, |x, p| x + p)
+            (a - piv) * amt + piv
         }
         Op::Remap {
             a,
@@ -539,14 +536,10 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             out_high,
         } => {
             let (a, il, ih, ol, oh) = (g(*a), g(*in_low), g(*in_high), g(*out_low), g(*out_high));
-            let t = a
-                .zip(il, |x, l| x - l)
-                .zip(ih.zip(il, |h, l| h - l), |x, d| {
-                    if d.abs() > 1e-20 { x / d } else { 0.0 }
-                });
-            ol.zip(oh.zip(ol, |h, l| h - l).zip(t, |d, t| d * t), |l, x| l + x)
+            let t = (a - il).zip(ih - il, |x, d| if d.abs() > 1e-20 { x / d } else { 0.0 });
+            ol + (oh - ol) * t
         }
-        Op::Invert { a, amount } => g(*amount).zip(g(*a), |m, x| m - x),
+        Op::Invert { a, amount } => g(*amount) - g(*a),
         Op::Convert { a, arity } => g(*a).with_arity(*arity),
         Op::Extract { a, index } => Val::float(g(*a).v[(*index).min(3)]),
         Op::Combine3 { a, b, c } => Val::vec3(g(*a).x(), g(*b).x(), g(*c).x()),
@@ -567,8 +560,8 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         }
         Op::Smoothstep { a, low, high } => {
             let (a, lo, hi) = (g(*a), g(*low), g(*high));
-            a.zip(lo, |x, l| x - l)
-                .zip(hi.zip(lo, |h, l| h - l), |x, d| {
+            (a - lo)
+                .zip(hi - lo, |x, d| {
                     if d.abs() > 1e-20 {
                         (x / d).clamp(0.0, 1.0)
                     } else {
