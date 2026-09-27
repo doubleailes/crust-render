@@ -216,6 +216,36 @@ The streaming *design* (bounded budget, clock eviction, three tiers) is not what
 is wrong. The top tier was sized for a workload with one texture per shading
 point, and its bookkeeping writes to memory shared by all threads.
 
+## Outcome: fixes 1–3 landed
+
+The first three fixes above landed together (`tex-cache-contention`):
+- per-lookup counters are `StripedCounter`s, one cache line per thread;
+- the microcache is set-associative by file, 16 sets × 4 ways;
+- a shard hit sets `used` only when it is clear.
+
+Measured with `bench_ab.sh` against the binary profiled here (Render, min / mean):
+
+| scene | before | after | Δ |
+|---|---|---|---|
+| ALab frame 1004, 32 spp | 45.1 / 47.1 s | 6.34 / 6.63 s | −85.9% |
+| alias plane (one streamed texture) | 0.743 / 0.822 s | 0.081 / 0.085 s | −89% |
+| materialx_basic (preloaded) | 0.261 / 0.266 s | 0.261 / 0.266 s | 0 |
+
+The re-profile (fix 4), at 72 threads and 32 spp:
+- Texture falls from 23.38 to 1.57 µs per `eval`, and from 88.7% to 41% of
+  thread time; Trace is now 34.5%.
+- Microcache hits rise from 74.9% to 84.9% (8 sets measured 81.2%).
+- Images are bit-identical.
+
+The alias plane is the telling row. Its microcache already hit 98.6% of
+lookups, so the shared counter by itself was about 90% of that render. The
+counter, not the miss rate, was the main cause.
+
+What remains: 15% of lookups still reach the shard mutexes, and consecutive
+shading points on one thread are often different materials, which no per-thread
+cache absorbs. The light-sampling finding above is untouched and is now the
+larger share of what a frame costs in noise.
+
 ## Reproducing the scaling pair
 
 ```bash
