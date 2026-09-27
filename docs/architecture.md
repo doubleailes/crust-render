@@ -249,6 +249,7 @@ Still open, roughly in order of payoff:
 | colour space of every input | `docs/color_management.md` |
 | Ptex streaming design and figures | `docs/ptex_streaming.md` |
 | SIMD audit | `docs/simd.md` |
+| Rust idioms audit: dispatch, type-level invariants, zero-cost, ownership | `docs/rust_leverage.md` |
 | kernel vs Embree | `docs/embree_comparison.md` |
 | OpenPBR formula alignment | `docs/openpbr_reference_alignment.md` |
 | ALab render profile | `docs/alab_profile.md` |
