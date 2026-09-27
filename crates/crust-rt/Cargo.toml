@@ -16,6 +16,13 @@ path = "src/lib.rs"
 # trust the *counts* from a feature-on build and the *timings* from a
 # feature-off one, never both from the same run.
 traversal-stats = []
+# 8-wide BVH nodes on `std::simd::f32x8` instead of 4-wide on glam's `Vec4`.
+# **Nightly only** (`portable_simd` is unstable): a stable toolchain rejects it
+# with E0554. An experiment, not a default — build with
+# `cargo +nightly ... --features bvh8`, ideally under
+# `RUSTFLAGS='-C target-cpu=x86-64-v3'` so an f32x8 is one AVX register rather
+# than two SSE halves. See docs/simd.md, "BVH8 on nightly".
+bvh8 = []
 
 [dependencies]
 glam.workspace = true

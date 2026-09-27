@@ -73,8 +73,9 @@ number* of vector rounds with half the lanes idle. This is pinned by
 retune makes leaves big enough to change the answer.
 
 That leaves **BVH8 nodes** — 8 child boxes per vector round, and roughly half
-the tree depth — as the one remaining place where 256-bit vectors would pay.
-It is not implemented; see "Not done".
+the tree depth — as the one remaining place where 256-bit vectors could pay.
+It now exists as a nightly-only experiment, and **it measured slower**; see
+"BVH8 on nightly" below.
 
 ## The two kinds of SIMD in a ray tracer
 
@@ -303,12 +304,86 @@ different bytes for identical pixels. Use `exr_diff`.
 - Stich, Friedrich & Dietrich, *Spatial Splits in Bounding Volume
   Hierarchies* (2009) — the build the packets hang off.
 
+## BVH8 on nightly (`bvh8` feature)
+
+The one argument for moving crust to nightly was `std::simd`: an 8-wide slab
+test in safe, portable code, without `core::arch` `unsafe` or a new
+dependency. So it was built as an opt-in feature rather than a toolchain
+switch, and measured before anything else moved.
+
+```bash
+# Needs nightly (portable_simd, rust-lang/rust#86656). Stable rejects the
+# feature with E0554, which is the intended failure.
+cargo +nightly test -p crust-rt --features bvh8
+RUSTFLAGS='-C target-cpu=x86-64-v3' \
+    cargo +nightly run --release -p crust-rt --example ray_throughput --features bvh8
+RUSTFLAGS='-C target-cpu=x86-64-v3' \
+    cargo +nightly build --release -p crust-render --features bvh8
+```
+
+**What it is.** The traversal, collapse and tests are written against a
+`LANES` constant; `bvh/lanes4.rs` (default: glam `Vec4`, stable) and
+`bvh/lanes8.rs` (`bvh8`: `std::simd::f32x8`) each supply the lane vector
+type, the pre-splatted `RaySlab`, and the slab test returning `(hit mask,
+entry distances)`. The node grows from 128 to 256 bytes (six `f32x8`s,
+eight child indices); leaves and `Tri4` packets are unchanged, because the
+occupancy data above rules out wider packets. `forbid(unsafe_code)` still
+holds: `std::simd` is safe code.
+
+**Correctness.** Images are **bit-identical** to BVH4: cornellbox,
+veach_mis and `gen_stress_scene.py`'s scene at 16 spp, 0 differing pixels
+(`exr_diff`). The per-lane arithmetic is the 4-wide test's operation for
+operation, and `safe_inv3` keeps it NaN-free, so `simd_min`/`simd_max`
+agree with `minps`/`maxps`; closest-hit selection does not depend on
+visit order except for exact ties, and none occurred. All `crust-rt`
+tests pass under the feature.
+
+**The default path did not pay for it.** Refactoring BVH4 behind `LANES`
+changed its instruction count by −0.3% in `ray_throughput` under callgrind
+(`hit_any` identical to the instruction, `hit` −0.6%).
+
+**Measured** (4-core Xeon @ 2.10 GHz with AVX2/AVX-512, both sides built by
+the same nightly at `-C target-cpu=x86-64-v3`, so the only difference is
+the node width; ten interleaved rounds of `ray_throughput`, ms):
+
+| scene / query | BVH4 min / mean | BVH8 min / mean | Δ min | Δ mean |
+| --- | --- | --- | --- | --- |
+| `tri_spheres intersect` | 2.149 / 2.408 | 2.560 / 2.697 | +19.1% | +12.0% |
+| `tri_spheres occluded` | 1.288 / 1.500 | 1.451 / 1.544 | +12.7% | +3.0% |
+| `sphere_grid intersect` | 0.884 / 1.088 | 1.174 / 1.234 | +32.8% | +13.3% |
+| `sphere_grid occluded` | 0.593 / 0.727 | 0.735 / 0.774 | +23.9% | +6.4% |
+| `instances intersect` | 2.026 / 2.442 | 2.768 / 2.787 | +36.6% | +14.1% |
+| `instances occluded` | 1.321 / 1.602 | 1.474 / 1.572 | +11.6% | −1.9% |
+
+`traversal_probe` explains it: BVH8 visits **7–36% fewer nodes** per ray
+(instanced trees typically 12 → 9), but each visit loads four cache lines
+instead of two and sorts up to eight hit lanes instead of four. A ~25% cut
+in visits does not repay a node that costs close to twice as much. Closest-
+hit suffers most, because the near-to-far ordering is where the extra lanes
+cost; occlusion, which never sorts, is nearly a wash.
+
+End to end (`bench_ab.sh`, 16 spp, `x86-64-v3` both sides) the difference
+is **inside the noise**: stress scene −6.7% in one order and +0.7% with A
+and B swapped, cornellbox and veach_mis ±3%. That is the shading-bound
+samples hiding the kernel, as the "Not done" notes predicted, not BVH8
+helping.
+
+**Verdict.** Not worth a nightly toolchain. The feature stays as the
+experiment's record and as a starting point: the literature's BVH8 wins
+(Embree; Ylitie et al. 2017) come from *compressed* nodes (quantised child
+bounds, so an 8-wide node fits the bytes a 4-wide one does) and from
+cheaper lane ordering, neither of which is a `std::simd` question. Revisit
+with those, and on a traversal-bound workload, before revisiting the
+toolchain. CI builds and tests the feature on a pinned nightly as a
+non-blocking job, so the experiment keeps compiling.
+
 ## Not done
 
-- **BVH8 (8-wide) nodes.** The one place 256-bit vectors would still pay:
-  eight child boxes per vector round and roughly half the tree depth. Note
-  `Tri8` packets are ruled out by the occupancy data above — this is about
-  nodes only.
+- **BVH8 (8-wide) nodes, done right.** A straightforward `f32x8` BVH8 now
+  exists behind the nightly `bvh8` feature and is 12–37% *slower* in the
+  kernel (see "BVH8 on nightly" above). What is not done is the version that
+  could win: compressed/quantised 8-wide nodes. Note `Tri8` packets are
+  ruled out by the occupancy data above — this is about nodes only.
 
   Re-measure before starting. The traversal counters previously said node
   visits were the cost and pointed at widening (or compressing) the node — but

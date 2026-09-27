@@ -13,8 +13,10 @@
 //!
 //! The binary tree is then collapsed into 4-wide SoA nodes whose slab
 //! tests run on `Vec4` lanes, with the lane verdicts extracted as a bitmask
-//! rather than read back one at a time. Each leaf's payload lands in the
-//! separate `leaves` table — which keeps [`WideNode`] at two cache lines —
+//! rather than read back one at a time. (With the nightly-only `bvh8`
+//! feature the nodes are 8 wide on `std::simd::f32x8` instead — see
+//! `lanes8.rs`; everything below is written against [`LANES`].) Each leaf's
+//! payload lands in the separate `leaves` table — which keeps [`WideNode`] at two cache lines —
 //! and its triangles are packed into 4-wide [`Tri4`] packets so a leaf
 //! intersects four triangles per vector round; everything else (spheres,
 //! curves, instances) keeps a scalar index in `indices`.
@@ -25,7 +27,7 @@
 
 use build::{build_subtree, surface_area, union_all};
 use collapse::{LeafData, collapse};
-use glam::{Vec3A, Vec4};
+use glam::Vec3A;
 
 use crate::aabb::AABB;
 use crate::prim::{PrimHit, PrimNode, TrianglePrim};
@@ -55,6 +57,15 @@ macro_rules! tstat {
 
 mod build;
 mod collapse;
+#[cfg(not(feature = "bvh8"))]
+mod lanes4;
+#[cfg(feature = "bvh8")]
+mod lanes8;
+#[cfg(not(feature = "bvh8"))]
+use lanes4::{LANES, Lanes, RaySlab, splat};
+#[cfg(feature = "bvh8")]
+use lanes8::{LANES, Lanes, RaySlab, splat};
+
 /// Leaves are forced at this depth so the traversal stack can never
 /// overflow; SAH partitions are otherwise free to be arbitrarily uneven.
 const MAX_DEPTH: usize = 60;
@@ -99,30 +110,31 @@ struct Node {
 const EMPTY_LANE: u32 = u32::MAX;
 
 /// Lane-validity bits of [`WideNode::flags`] (bit `k` = lane `k` holds a
-/// real child) and leaf bits (bit `4 + k` = that child is a leaf).
-const VALID_MASK: u32 = 0b1111;
-const LEAF_SHIFT: u32 = 4;
+/// real child) and leaf bits (bit `LANES + k` = that child is a leaf).
+const VALID_MASK: u32 = (1 << LANES) - 1;
+const LEAF_SHIFT: u32 = LANES as u32;
 
-/// A 4-wide BVH node in SoA layout: lane `k` of each `Vec4` holds child
-/// `k`'s slab bounds, so one round of vector min/max tests all four child
-/// boxes against the ray at once (Embree's BVH4 idea).
+/// A [`LANES`]-wide BVH node in SoA layout: lane `k` of each vector holds
+/// child `k`'s slab bounds, so one round of vector min/max tests every child
+/// box against the ray at once (Embree's BVH4 / BVH8 idea).
 ///
-/// Exactly 128 bytes (two cache lines): six `Vec4`s, one child index per
-/// lane, and the flag nibbles. The leaf payload — how many primitives, and
-/// where their SIMD packets live — sits in the separate [`Leaf`] table
+/// At the default width exactly 128 bytes (two cache lines): six `Vec4`s,
+/// one child index per lane, and the flag nibbles; 256 bytes under `bvh8`.
+/// The leaf payload — how many primitives, and where their SIMD packets
+/// live — sits in the separate [`Leaf`] table
 /// rather than in the node, which is what keeps the node this small.
 struct WideNode {
-    bmin_x: Vec4,
-    bmin_y: Vec4,
-    bmin_z: Vec4,
-    bmax_x: Vec4,
-    bmax_y: Vec4,
-    bmax_z: Vec4,
+    bmin_x: Lanes,
+    bmin_y: Lanes,
+    bmin_z: Lanes,
+    bmax_x: Lanes,
+    bmax_y: Lanes,
+    bmax_z: Lanes,
     /// Leaf lane: index into the BVH's `leaves`. Internal lane: index into
     /// `wide`. Unused lane: [`EMPTY_LANE`].
-    child: [u32; 4],
-    /// Bits 0..4: lane `k` holds a real child. Bits 4..8: that child is a
-    /// leaf.
+    child: [u32; LANES],
+    /// Bits `0..LANES`: lane `k` holds a real child. Bits `LANES..2·LANES`:
+    /// that child is a leaf.
     ///
     /// The validity bits exist because unused lanes carry +INF/+INF
     /// bounds, which *usually* fail the slab test but not always: for
@@ -146,14 +158,15 @@ struct Leaf {
 
 impl WideNode {
     fn empty() -> Self {
+        let inf = splat(f32::INFINITY);
         WideNode {
-            bmin_x: Vec4::INFINITY,
-            bmin_y: Vec4::INFINITY,
-            bmin_z: Vec4::INFINITY,
-            bmax_x: Vec4::INFINITY,
-            bmax_y: Vec4::INFINITY,
-            bmax_z: Vec4::INFINITY,
-            child: [EMPTY_LANE; 4],
+            bmin_x: inf,
+            bmin_y: inf,
+            bmin_z: inf,
+            bmax_x: inf,
+            bmax_y: inf,
+            bmax_z: inf,
+            child: [EMPTY_LANE; LANES],
             flags: 0,
         }
     }
@@ -384,20 +397,15 @@ impl Bvh {
         while let Some(node_idx) = stack.pop() {
             tstat!(NODES_VISITED, 1);
             let node = &self.wide[node_idx as usize];
-            let (tnear, tfar) = rs.slab4(node, closest);
-
-            // One vector compare + one movmskps gives all four lane
-            // verdicts as a nibble; the validity bits drop unused lanes.
-            let mut mask = tnear.cmple(tfar).bitmask() & node.flags & VALID_MASK;
+            let (mut mask, tn) = rs.slab(node, closest);
             if mask == 0 {
                 continue;
             }
 
-            // Hit lanes, insertion-sorted near-to-far (≤ 4 entries). The
-            // distances are read from one spilled copy of the vector
+            // Hit lanes, insertion-sorted near-to-far (≤ LANES entries).
+            // The distances are read from one spilled copy of the vector
             // rather than re-extracting a lane at a time.
-            let tn = tnear.to_array();
-            let mut order = [(0f32, 0usize); 4];
+            let mut order = [(0f32, 0usize); LANES];
             let mut n_hit = 0;
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
@@ -520,8 +528,7 @@ impl Bvh {
 
         while let Some(node_idx) = stack.pop() {
             let node = &self.wide[node_idx as usize];
-            let (tnear, tfar) = rs.slab4(node, t_max);
-            let mut mask = tnear.cmple(tfar).bitmask() & node.flags & VALID_MASK;
+            let (mut mask, _) = rs.slab(node, t_max);
             while mask != 0 {
                 let l = mask.trailing_zeros() as usize;
                 mask &= mask - 1;
@@ -678,60 +685,6 @@ impl TraversalStack {
             // the spill, so this side is never empty when we take it.
             self.spill.pop()
         }
-    }
-}
-
-/// The ray, pre-broadcast into the SoA layout the 4-wide slab test wants.
-/// Built once per traversal: the six splats and the reciprocal used to be
-/// recomputed for every visited node, which is pure overhead in a loop
-/// that visits tens of nodes per ray.
-struct RaySlab {
-    ox: Vec4,
-    oy: Vec4,
-    oz: Vec4,
-    ix: Vec4,
-    iy: Vec4,
-    iz: Vec4,
-    t_min: Vec4,
-}
-
-impl RaySlab {
-    #[inline]
-    fn new(ray: &Ray, t_min: f32) -> Self {
-        let o = ray.origin;
-        let inv = safe_inv3(ray.dir);
-        RaySlab {
-            ox: Vec4::splat(o.x),
-            oy: Vec4::splat(o.y),
-            oz: Vec4::splat(o.z),
-            ix: Vec4::splat(inv.x),
-            iy: Vec4::splat(inv.y),
-            iz: Vec4::splat(inv.z),
-            t_min: Vec4::splat(t_min),
-        }
-    }
-
-    /// The 4-lane slab test: entry/exit distances for all four child boxes
-    /// of `node` at once. A lane hits iff `tnear[l] <= tfar[l]`.
-    #[inline]
-    fn slab4(&self, node: &WideNode, t_max: f32) -> (Vec4, Vec4) {
-        let t0x = (node.bmin_x - self.ox) * self.ix;
-        let t1x = (node.bmax_x - self.ox) * self.ix;
-        let t0y = (node.bmin_y - self.oy) * self.iy;
-        let t1y = (node.bmax_y - self.oy) * self.iy;
-        let t0z = (node.bmin_z - self.oz) * self.iz;
-        let t1z = (node.bmax_z - self.oz) * self.iz;
-        let tnear = t0x
-            .min(t1x)
-            .max(t0y.min(t1y))
-            .max(t0z.min(t1z))
-            .max(self.t_min);
-        let tfar = t0x
-            .max(t1x)
-            .min(t0y.max(t1y))
-            .min(t0z.max(t1z))
-            .min(Vec4::splat(t_max));
-        (tnear, tfar)
     }
 }
 

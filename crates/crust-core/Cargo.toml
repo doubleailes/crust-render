@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [features]
 # Forwards crust-rt's traversal counters; see that crate's feature.
 traversal-stats = ["crust-rt/traversal-stats"]
+# Forwards crust-rt's nightly-only 8-wide BVH nodes; see that crate's feature.
+bvh8 = ["crust-rt/bvh8"]
 # Compile MaterialX programs to machine code with Cranelift (crust-jit, the
 # workspace's one crate with `unsafe` outside tests). Off here and on in
 # the renderer, so the engine library carries no JIT unless a host asks;

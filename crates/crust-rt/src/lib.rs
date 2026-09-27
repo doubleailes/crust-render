@@ -34,6 +34,9 @@
 //! `docs/simd.md` records for stopping at 128-bit vectors rather than reaching
 //! for `core::arch` intrinsics.
 #![forbid(unsafe_code)]
+// The one nightly opt-in: `bvh8` widens the BVH nodes with `std::simd`.
+// Still safe code, so `forbid(unsafe_code)` holds under it too.
+#![cfg_attr(feature = "bvh8", feature(portable_simd))]
 
 #[cfg(feature = "traversal-stats")]
 pub use bvh::stats as traversal_stats;

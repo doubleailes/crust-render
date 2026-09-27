@@ -287,9 +287,18 @@ fn hit_any_matches_hit() {
 /// was moved into a side table precisely so the node still fits two
 /// cache lines. Growing it would silently cost traversal bandwidth.
 #[test]
+#[cfg(not(feature = "bvh8"))]
 fn wide_node_is_two_cache_lines() {
     assert_eq!(std::mem::size_of::<WideNode>(), 128);
     assert_eq!(std::mem::align_of::<WideNode>(), 16);
+}
+
+/// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
+#[test]
+#[cfg(feature = "bvh8")]
+fn wide8_node_is_four_cache_lines() {
+    assert_eq!(std::mem::size_of::<WideNode>(), 256);
+    assert_eq!(std::mem::align_of::<WideNode>(), 32);
 }
 
 /// Parallel subtree builds must not change the tree: the same input
@@ -322,7 +331,7 @@ fn collapse_widens_the_tree() {
     let n_leaf_slots: usize = bvh
         .wide
         .iter()
-        .map(|w| (0..4).filter(|&l| w.is_leaf(l)).count())
+        .map(|w| (0..LANES).filter(|&l| w.is_leaf(l)).count())
         .sum();
     assert!(n_leaf_slots > 0);
     assert_eq!(n_leaf_slots, bvh.leaves.len());
