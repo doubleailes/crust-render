@@ -1,6 +1,7 @@
 //! Reading one tile off disk: LDR images through `image`, EXR at `f32`, and
 //! the `CRUST_TEX_MAX` box reduction.
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use crust_core::ResolvedColorSpace;
@@ -25,7 +26,7 @@ use super::tile::Tile;
 pub(super) fn decode_tile(
     path: &Path,
     number: u32,
-    max_edge: usize,
+    max_edge: NonZeroUsize,
 ) -> Result<(Tile<u8>, (bool, u8)), AssetError> {
     let mut reader = image::ImageReader::open(path)
         .map_err(AssetError::io(path))?
@@ -45,6 +46,7 @@ pub(super) fn decode_tile(
     if sw == 0 || sh == 0 {
         return Err(AssetError::unusable(path, "zero-sized image"));
     }
+    let max_edge = max_edge.get();
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
         return Ok((Tile::unmipped(number, img.into_raw(), sw, sh), format));
@@ -96,7 +98,7 @@ pub(super) fn decode_tile(
 pub(super) fn decode_exr_tile(
     path: &Path,
     number: u32,
-    max_edge: usize,
+    max_edge: NonZeroUsize,
     space: ResolvedColorSpace,
 ) -> Result<Tile<f32>, AssetError> {
     let (mut src, sw, sh) = crate::environment::try_read_exr_rgb(path)?;
@@ -108,6 +110,7 @@ pub(super) fn decode_exr_tile(
             *c = space.to_linear(*c);
         }
     }
+    let max_edge = max_edge.get();
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {
         return Ok(Tile::unmipped(number, src, sw, sh));

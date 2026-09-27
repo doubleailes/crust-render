@@ -803,12 +803,8 @@ impl AssetLoader for FileAssets {
             );
         }
         let started = Instant::now();
-        let loaded = match UvTexture::try_open_capped(
-            path,
-            space,
-            self.config.tex_mip,
-            self.config.tex_max.get(),
-        ) {
+        let (mip, max_edge) = (self.config.tex_mip, self.config.tex_max);
+        let loaded = match UvTexture::try_open_capped(path, space, mip, max_edge) {
             Ok(t) => t,
             Err(e) => {
                 // The one place a texture failure becomes the seam's `None`,

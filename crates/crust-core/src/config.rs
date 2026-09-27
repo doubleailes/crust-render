@@ -182,7 +182,7 @@ impl Config {
     /// The switches as the process environment sets them. Warns (once per
     /// call) for every value it cannot read, and uses the default for it.
     pub fn from_env() -> Config {
-        Config::from_lookup(|name| std::env::var(name).ok())
+        Config::from_lookup(|name| present(std::env::var_os(name)))
     }
 
     /// The switches as `lookup` answers for each variable name — the
@@ -306,6 +306,15 @@ pub fn env_parse<T: FromStr + std::fmt::Display>(
     }
 }
 
+/// A variable as the parsers see it: `None` only when it is unset. A value
+/// that is not Unicode is still *set* — `std::env::var(..).ok()` would
+/// collapse it into unset and skip the warning — so it is converted lossily:
+/// the U+FFFD that replaces its invalid bytes is in no accepted value, which
+/// sends it down the parser's warn-and-default path like any other bad value.
+fn present(value: Option<std::ffi::OsString>) -> Option<String> {
+    value.map(|v| v.to_string_lossy().into_owned())
+}
+
 static CONFIG: LazyLock<Config> = LazyLock::new(Config::from_env);
 
 /// The process's switches, read from the environment on first use and fixed
@@ -317,6 +326,22 @@ pub fn config() -> &'static Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A set but non-Unicode value is a bad value, not an unset one: it
+    /// reaches the parsers (which warn) and falls back to the default.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_value_is_set_and_refused() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(vec![b'1', 0xff]);
+        let seen = present(Some(raw)).expect("a set variable is present");
+        assert!(seen.contains('\u{FFFD}'));
+        assert_eq!(present(None), None);
+        let c = Config::from_lookup(|name| (name == "CRUST_MESH_BAKE").then(|| seen.clone()));
+        assert_eq!(c.mesh_bake, Config::default().mesh_bake);
+        let c = Config::from_lookup(|name| (name == "CRUST_TEX_MAX").then(|| seen.clone()));
+        assert_eq!(c.tex_max, Config::default().tex_max);
+    }
 
     fn with(vars: &[(&str, &str)]) -> Config {
         let vars: Vec<(String, String)> = vars
