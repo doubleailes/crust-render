@@ -19,6 +19,7 @@ use crate::pdf::PdfSolidAngle;
 /// `cos θ_l / r²` that varies by orders of magnitude across it. Area
 /// sampling remains the fallback wherever the map does not apply or does not
 /// pay — see [`RectShape::spherical_rect`].
+#[derive(Clone)]
 pub struct RectShape {
     pub origin: Vec3A,
     pub edge_u: Vec3A,

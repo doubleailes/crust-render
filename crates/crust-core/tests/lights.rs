@@ -1115,7 +1115,7 @@ fn empty_light_list_picks_nothing() {
 fn light_list_picks_uniformly_by_index() {
     let mut l = LightList::new();
     for id in 0..4 {
-        l.add(Arc::new(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, id)));
+        l.add(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, id));
     }
     assert_eq!(l.count(), 4);
     assert_eq!(l.selection(), LightSelection::Uniform);
@@ -1207,10 +1207,10 @@ fn textured_light_power_uses_the_mean_texel() {
 #[test]
 fn power_selection_picks_by_power_defensively() {
     let mut l = LightList::new();
-    l.add(Arc::new(rect_light(1.0, None, 10)));
-    l.add(Arc::new(rect_light(0.0, None, 11))); // emits nothing
-    l.add(Arc::new(rect_light(3.0, None, 12)));
-    l.add(Arc::new(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY)));
+    l.add(rect_light(1.0, None, 10));
+    l.add(rect_light(0.0, None, 11)); // emits nothing
+    l.add(rect_light(3.0, None, 12));
+    l.add(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY));
     l.select_by(LightSelection::Power);
     assert_eq!(l.selection(), LightSelection::Power);
     // Three lights can be picked: the dome gets 1/3, and the two lit rects
@@ -1264,7 +1264,7 @@ fn power_selection_picks_by_power_defensively() {
 fn uniform_density_is_the_historical_division() {
     let mut l = LightList::new();
     for id in 0..3 {
-        l.add(Arc::new(rect_light(1.0, None, id)));
+        l.add(rect_light(1.0, None, id));
     }
     let x = 0.7f32;
     assert_eq!(
@@ -1278,8 +1278,8 @@ fn uniform_density_is_the_historical_division() {
 #[test]
 fn light_selection_falls_back_to_uniform() {
     let mut l = LightList::new();
-    l.add(Arc::new(rect_light(1.0, None, 0)));
-    l.add(Arc::new(rect_light(9.0, None, 1)));
+    l.add(rect_light(1.0, None, 0));
+    l.add(rect_light(9.0, None, 1));
     l.select_by(LightSelection::Uniform);
     assert_eq!(l.selection(), LightSelection::Uniform);
     assert_eq!(l.pmf(1), 0.5);
@@ -1288,13 +1288,13 @@ fn light_selection_falls_back_to_uniform() {
     // ½ · ½ even + ½ · 0.9 by power.
     assert!(approx(l.pmf(1), 0.7, 1e-6));
     // Adding a light invalidates the table built over the old list.
-    l.add(Arc::new(rect_light(1.0, None, 2)));
+    l.add(rect_light(1.0, None, 2));
     assert_eq!(l.selection(), LightSelection::Uniform);
     assert!(approx(l.pmf(2), 1.0 / 3.0, 1e-6));
 
     let mut dark = LightList::new();
-    dark.add(Arc::new(rect_light(0.0, None, 0)));
-    dark.add(Arc::new(rect_light(0.0, None, 1)));
+    dark.add(rect_light(0.0, None, 0));
+    dark.add(rect_light(0.0, None, 1));
     dark.select_by(LightSelection::Power);
     assert_eq!(dark.selection(), LightSelection::Uniform);
     assert_eq!(dark.pmf(0), 0.5);
@@ -1303,9 +1303,9 @@ fn light_selection_falls_back_to_uniform() {
 #[test]
 fn light_list_finds_lights_by_geometry_id() {
     let mut l = LightList::new();
-    l.add(Arc::new(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 12)));
-    l.add(Arc::new(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0)));
-    l.add(Arc::new(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 40)));
+    l.add(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 12));
+    l.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
+    l.add(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 40));
     assert!(l.find_by_geom(12).is_some());
     assert!(l.find_by_geom(40).is_some());
     assert!(
@@ -1318,7 +1318,7 @@ fn light_list_finds_lights_by_geometry_id() {
 #[test]
 fn light_list_exposes_its_vector() {
     let mut l = LightList::new();
-    l.add(Arc::new(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY)));
+    l.add(DomeLight::new(Vec3A::ONE, None, Mat3A::IDENTITY));
     assert_eq!(l.lights().len(), 1);
     assert!(l.lights()[0].geom_id().is_none());
 }

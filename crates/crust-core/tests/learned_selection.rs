@@ -7,9 +7,9 @@
 
 use crust_core::rt::Geometry;
 use crust_core::{
-    AreaLight, Buffer, Camera, Emissive, LightList, LightSelection, MASK_INDIRECT, MASK_SHADOW,
-    OpenPBR, PathSampler, Ray, RenderSettings, Renderer, SamplingStrategy, SphereShape, Vec3A,
-    Volumes, WorldBuilder, ray_color,
+    AreaLight, Buffer, Camera, Emissive, Light, LightList, LightSelection, MASK_INDIRECT,
+    MASK_SHADOW, OpenPBR, PathSampler, Ray, RenderSettings, Renderer, SamplingStrategy,
+    SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -54,14 +54,14 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
             emitter.clone(),
             MASK_SHADOW | MASK_INDIRECT,
         );
-        lights.add(Arc::new(AreaLight::new(
+        lights.add(AreaLight::new(
             SphereShape {
                 center,
                 radius: 0.3,
             },
             emitter,
             id,
-        )));
+        ));
     }
     let mut by_power = LightList::new();
     for l in lights.lights() {
@@ -115,14 +115,14 @@ fn a_sealed_light_is_learned_down_to_the_defensive_share() {
                 pmf,
                 r.lights.pmf_at(
                     p,
-                    if Arc::ptr_eq(light, &r.lights.lights()[0]) {
+                    if std::ptr::eq(light, &r.lights.lights()[0]) {
                         0
                     } else {
                         1
                     }
                 )
             );
-            Arc::ptr_eq(light, &r.lights.lights()[1])
+            std::ptr::eq(light, &r.lights.lights()[1])
         })
         .count();
     assert!((picked_sealed as f32 / n as f32 - sealed).abs() < 1e-3);
@@ -215,14 +215,14 @@ fn one_light_learns_nothing() {
         emitter.clone(),
     );
     let mut lights = LightList::new();
-    lights.add(Arc::new(AreaLight::new(
+    lights.add(AreaLight::new(
         SphereShape {
             center: VISIBLE,
             radius: 0.3,
         },
         emitter,
         id,
-    )));
+    ));
     let camera = Camera::new(
         Vec3A::new(0.0, 5.0, 7.0),
         Vec3A::ZERO,

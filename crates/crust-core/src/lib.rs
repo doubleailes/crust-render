@@ -65,8 +65,9 @@ pub use glam::{Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::{FaceHit, HitRecord};
 pub use light::{
-    AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, Light, LightList, LightSample,
-    LightSelection, LightShape, RectShape, SphereShape, UnitShape, projected_cone_solid_angle,
+    AffineShape, AreaLight, AreaShape, DistantLight, DomeLight, Light, LightKind, LightList,
+    LightSample, LightSelection, LightShape, RectShape, SphereShape, UnitShape,
+    projected_cone_solid_angle,
 };
 pub use lux::{
     IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb, distant_illuminance,

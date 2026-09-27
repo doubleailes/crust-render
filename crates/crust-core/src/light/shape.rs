@@ -142,6 +142,7 @@ impl SubtendedCone {
 /// facing away — every one of them a shadow ray the sphere itself occludes —
 /// and weights the rest by a `cos/r²` that blows up at the silhouette. From
 /// inside, where there is no cone, it falls back to area sampling.
+#[derive(Clone)]
 pub struct SphereShape {
     pub center: Vec3A,
     pub radius: f32,
@@ -269,6 +270,7 @@ impl UnitShape {
 /// affine map `M` scales the area element at a point with unit local normal
 /// `n` by `|det M| · |M⁻ᵀ n|`. For a disk that factor is constant, so the
 /// sampling is uniform after all.
+#[derive(Clone)]
 pub struct AffineShape {
     pub(super) unit: UnitShape,
     pub(super) light_to_world: Affine3A,

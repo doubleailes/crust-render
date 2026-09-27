@@ -2,11 +2,10 @@
 //! defensive power, or the learned per-cell table.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use glam::Vec3A;
 
-use super::Light;
+use super::{Light, LightKind};
 use crate::pdf::PdfSolidAngle;
 
 /// How NEE chooses which light to sample at a vertex (`crust:lightSelection`,
@@ -77,7 +76,7 @@ pub struct LightList {
     /// vector, and a light pushed past it would be sampled by NEE yet
     /// unattributed on the bounce side. Read it through
     /// [`LightList::lights`].
-    pub(super) lights: Vec<Arc<dyn Light>>,
+    pub(super) lights: Vec<LightKind>,
     /// Per-light selection probability, empty while the selection is
     /// uniform — [`LightList::select_by`] fills it.
     pub(super) pmf: Vec<f32>,
@@ -120,7 +119,8 @@ impl LightList {
     /// Adds a light source. The selection falls back to uniform until the
     /// next [`LightList::select_by`], since a table built over the old list
     /// would describe the wrong one.
-    pub fn add(&mut self, light: Arc<dyn Light>) {
+    pub fn add(&mut self, light: impl Into<LightKind>) {
+        let light = light.into();
         if let Some(id) = light.geom_id() {
             self.by_geom.insert(id, self.lights.len());
         }
@@ -257,7 +257,7 @@ impl LightList {
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it
     /// was picked. `None` only for an empty list.
-    pub fn pick(&self, u: f32) -> Option<(&Arc<dyn Light>, f32)> {
+    pub fn pick(&self, u: f32) -> Option<(&LightKind, f32)> {
         let n = self.lights.len();
         if n == 0 {
             return None;
@@ -277,7 +277,7 @@ impl LightList {
     /// selection probability. Used by the integrator to attribute a
     /// bounce-hit emissive surface to its light for MIS; emissive geometry
     /// with no light-list entry returns `None`.
-    pub fn find_by_geom(&self, geom_id: u32) -> Option<(&Arc<dyn Light>, f32)> {
+    pub fn find_by_geom(&self, geom_id: u32) -> Option<(&LightKind, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((&self.lights[index], self.pmf(index)))
     }
@@ -285,7 +285,7 @@ impl LightList {
     /// [`LightList::pick`] for a vertex at `p`: under a learned selection, from
     /// the distribution of the cell holding `p`; otherwise exactly `pick`.
     #[inline]
-    pub fn pick_at(&self, p: Vec3A, u: f32) -> Option<(&Arc<dyn Light>, f32)> {
+    pub fn pick_at(&self, p: Vec3A, u: f32) -> Option<(&LightKind, f32)> {
         match self.cache.as_ref().and_then(|c| c.lookup(p)) {
             Some((pmf, cdf)) => {
                 let index = cdf.partition_point(|&c| c <= u).min(self.lights.len() - 1);
@@ -307,13 +307,13 @@ impl LightList {
 
     /// [`LightList::find_by_geom`] with the pick probability of a vertex at
     /// `p`: the bounce-side half of [`LightList::pick_at`].
-    pub fn find_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(&Arc<dyn Light>, f32)> {
+    pub fn find_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(&LightKind, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((&self.lights[index], self.pmf_at(p, index)))
     }
 
     /// [`LightList::iter`] with the pick probabilities of a vertex at `p`.
-    pub fn iter_at(&self, p: Vec3A) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+    pub fn iter_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
         let table = self.cache.as_ref().and_then(|c| c.lookup(p)).map(|t| t.0);
         self.lights.iter().enumerate().map(move |(index, light)| {
             (
@@ -330,7 +330,7 @@ impl LightList {
     /// same order: what an escaping ray needs. A finite light's
     /// [`Light::escaped`] is `None` by contract, so skipping it changes
     /// nothing but the number of virtual calls.
-    pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+    pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
         let table = if self.infinite.is_empty() {
             None
         } else {
@@ -349,7 +349,7 @@ impl LightList {
     }
 
     /// Every light with its selection probability.
-    pub fn iter(&self) -> impl Iterator<Item = (&Arc<dyn Light>, f32)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&LightKind, f32)> {
         self.lights
             .iter()
             .enumerate()
@@ -357,7 +357,7 @@ impl LightList {
     }
 
     /// The lights, in the order they were added.
-    pub fn lights(&self) -> &[Arc<dyn Light>] {
+    pub fn lights(&self) -> &[LightKind] {
         &self.lights
     }
 

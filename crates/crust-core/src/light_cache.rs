@@ -37,7 +37,7 @@
 //!   any pass starts. So tiled and scanline renders stay bit-identical.
 
 use crate::camera::Camera;
-use crate::light::LightList;
+use crate::light::{Light, LightList};
 use crate::material::ShadingPoint;
 use crate::ray::{MASK_INDIRECT, MASK_SHADOW, Ray};
 use crate::rt_world::World;

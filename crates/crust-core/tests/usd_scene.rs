@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crust_core::{Ray, Scene, Vec3A};
+use crust_core::{Light, Ray, Scene, Vec3A};
 use openusd::sdf;
 use openusd::usd::{PrimPredicate, Stage};
 use openusd_schemas::shade::{Material as UsdMaterial, MaterialBindingAPI, TerminalSource};
