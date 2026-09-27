@@ -40,5 +40,6 @@
       guards, how to build OSL for it; its coverage limits under Known gaps.
 - [x] 4.2 `CLAUDE.md` command list, `docs/architecture.md` § Tests and
       verification, `openspec/specs/cli/design.md` cookbook.
-- [ ] 4.3 `scripts/check_images.sh` over the sample scenes, old binary against
-      new, to see which renders move.
+- [x] 4.3 `scripts/check_images.sh` over the sample scenes, old binary against
+      new, to see which renders move: `materialx_basic`, `materialx_cutout`
+      and `materialx_surfaces`, by ≤ 4.6e-5, all from the `artistic_ior` blend.
