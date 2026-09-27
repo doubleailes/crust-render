@@ -91,10 +91,10 @@ pub fn ray_color(
 /// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
 /// footprint to zero, which makes every texture point-sample its finest level
 /// — the A/B that separates "the mip pyramids changed the image" from "the
-/// footprints did". Read once: this is consulted per camera ray.
+/// footprints did". Consulted per camera ray, so it reads the parsed
+/// [`crate::config()`], never the environment.
 pub(super) fn ray_cones_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("CRUST_RAY_CONES").as_deref() != Ok("0"))
+    crate::config().ray_cones
 }
 
 // `inline(always)`, as is `escaped_emission`: each is called once per

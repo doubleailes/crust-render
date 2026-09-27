@@ -41,7 +41,7 @@ pub const DEFAULT_MAX_LOG2: i8 = 5;
 /// cap can come *down*: the island at a 16x16 base plus a full pyramid is
 /// ~2.45 GiB against 4.58 GiB flat at 32x32, and filters better at distance.
 pub(crate) fn mip_enabled() -> bool {
-    std::env::var("CRUST_PTEX_MIP").as_deref() != Ok("0")
+    crust_core::config().ptex_mip
 }
 
 /// Mip levels a `w`x`h` face holds: halve both axes until both reach one.
@@ -467,12 +467,14 @@ pub fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
     }
 }
 
-/// `CRUST_PTEX_MAX_LOG2`, validated, or [`DEFAULT_MAX_LOG2`].
+/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`], or
+/// [`DEFAULT_MAX_LOG2`].
 pub fn max_log2_from_env() -> i8 {
     max_log2_from_env_opt().unwrap_or(DEFAULT_MAX_LOG2)
 }
 
-/// `CRUST_PTEX_MAX_LOG2`, validated, or `None` when it is not set.
+/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`] (validated
+/// there, to `0..=14`), or `None` when it is not set.
 ///
 /// The preloading path has no use for the distinction — an absent cap there
 /// means the default one, since preloading a production `.ptx` uncapped is
@@ -482,18 +484,7 @@ pub fn max_log2_from_env() -> i8 {
 /// still one function, so the validation and the warning cannot diverge
 /// between the two backends.
 pub fn max_log2_from_env_opt() -> Option<i8> {
-    let v = std::env::var("CRUST_PTEX_MAX_LOG2").ok()?;
-    match v.parse::<i8>() {
-        // Ptex resolutions are log2-encoded in an i8; 14 is 16384, well past
-        // any authored face.
-        Ok(n) if (0..=14).contains(&n) => Some(n),
-        _ => {
-            tracing::warn!(
-                "CRUST_PTEX_MAX_LOG2={v} is not an integer in 0..=14 — using the default"
-            );
-            None
-        }
-    }
+    crust_core::config().ptex_max_log2
 }
 
 #[cfg(test)]

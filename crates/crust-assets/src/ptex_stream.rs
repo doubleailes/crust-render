@@ -32,7 +32,7 @@
 //! the docs on [`MipSpace`] for the one place they cannot agree — and what
 //! is refused rather than documented as a result.
 
-use crate::{max_log2_from_env_opt, read_channel};
+use crate::read_channel;
 use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -44,28 +44,22 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// caller that has not thought about it; a renderer has, and a path tracer
 /// asks for texels from every worker in an order nothing can predict, so the
 /// working set is the frame rather than a locality window.
-pub const DEFAULT_CACHE_MB: usize = 1024;
+pub const DEFAULT_CACHE_MB: usize = crust_core::config::DEFAULT_CACHE_MB;
 
-/// `CRUST_PTEX_CACHE_MB`, validated, as a byte count.
+/// `CRUST_PTEX_CACHE_MB` as parsed into [`crust_core::config()`], as a byte
+/// count.
 pub fn cache_budget_from_env() -> usize {
-    let mb = match std::env::var("CRUST_PTEX_CACHE_MB") {
-        Ok(v) => match v.parse::<usize>() {
-            Ok(n) if n > 0 => n,
-            _ => {
-                tracing::warn!(
-                    "CRUST_PTEX_CACHE_MB={v} is not a positive integer — using {DEFAULT_CACHE_MB}"
-                );
-                DEFAULT_CACHE_MB
-            }
-        },
-        Err(_) => DEFAULT_CACHE_MB,
-    };
-    mb * 1024 * 1024
+    budget_bytes(crust_core::config())
+}
+
+/// [`cache_budget_from_env`] for a given configuration.
+pub fn budget_bytes(config: &crust_core::Config) -> usize {
+    config.ptex_cache_mb.get() * 1024 * 1024
 }
 
 /// Is the streaming backend on? `CRUST_PTEX_STREAM=1` turns it on.
 pub fn stream_enabled() -> bool {
-    std::env::var("CRUST_PTEX_STREAM").as_deref() == Ok("1")
+    crust_core::config().ptex_stream
 }
 
 /// Default admission threshold: a texture streams only if **preloading** it
@@ -97,78 +91,23 @@ pub fn stream_enabled() -> bool {
 ///
 /// `CRUST_PTEX_STREAM_MIN_MB` overrides it; `0` admits everything, which is
 /// what reproduces the even-split behaviour for comparison.
-pub const DEFAULT_STREAM_MIN_MB: usize = 8;
+pub const DEFAULT_STREAM_MIN_MB: usize = crust_core::config::DEFAULT_PTEX_STREAM_MIN_MB;
 
-/// `CRUST_PTEX_STREAM_MIN_MB`, validated, as a byte count. See
-/// [`DEFAULT_STREAM_MIN_MB`].
+/// `CRUST_PTEX_STREAM_MIN_MB` as parsed into [`crust_core::config()`], as a
+/// byte count. See [`DEFAULT_STREAM_MIN_MB`].
 pub fn stream_min_bytes_from_env() -> usize {
-    let mb = match std::env::var("CRUST_PTEX_STREAM_MIN_MB") {
-        Ok(v) => match v.parse::<usize>() {
-            Ok(n) => n,
-            Err(_) => {
-                tracing::warn!(
-                    "CRUST_PTEX_STREAM_MIN_MB={v} is not an integer — using \
-                     {DEFAULT_STREAM_MIN_MB}"
-                );
-                DEFAULT_STREAM_MIN_MB
-            }
-        },
-        Err(_) => DEFAULT_STREAM_MIN_MB,
-    };
-    mb * 1024 * 1024
+    crust_core::config().ptex_stream_min_mb * 1024 * 1024
 }
 
-/// Which mip chain a streamed texture is allowed to read.
-///
-/// **The chain is where the two backends part company, and the project's own
-/// standard for that is refusal rather than a footnote.** A `.tx` records
-/// the colour space its levels were reduced in (`crust:mipspace`) and a
-/// mismatch is refused outright, for the reason the mismatch is dangerous:
-/// level 0 stays perfectly correct and every coarser level is wrong, so it
-/// shows up only under minification and looks exactly like a filtering bug.
-///
-/// A `.ptx` has no such marker and needs none — the answer is known. Crust
-/// binds Ptex colour as display-encoded and decodes it by 2.2
-/// ([`decode_sample`]), while a `.ptx`'s stored levels were reduced in the
-/// file's own encoding. That is the mismatch, always, so the default is
-/// [`MipSpace::Linear`]: a texture that would read a curve-decoded chain is
-/// declined and preloaded, where [`PtexColor`](crate::PtexColor) builds the
-/// pyramid in linear light from the decoded base.
-///
-/// [`MipSpace::File`] is the opt-in that takes the file's chain instead. It
-/// is what every production Ptex cache does and what the measured residency
-/// figures in `docs/ptex_streaming.md` were taken with, so it is a real mode
-/// and not a debug switch — but it is a render that trades a known bias
-/// (darker minified texture, up to 0.147 on the tiled fixture) for the
-/// memory, and that trade is the operator's to make rather than the
-/// default.
-///
-/// The cost of the default is worth stating plainly: with the mip pyramid on
-/// — which it is unless `CRUST_PTEX_MIP=0` — every mipmapped `.ptx` preloads,
-/// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
-/// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
-/// comes back.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum MipSpace {
-    /// Refuse a chain reduced in the file's encoding; preload such a texture.
-    #[default]
-    Linear,
-    /// Accept the file's own chain, bias and all.
-    File,
-}
+/// Which mip chain a streamed texture is allowed to read — the reasoning is
+/// on [`crust_core::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
+/// into.
+pub use crust_core::PtexMipSpace as MipSpace;
 
-/// `CRUST_PTEX_STREAM_MIPSPACE`, validated. See [`MipSpace`].
+/// `CRUST_PTEX_STREAM_MIPSPACE` as parsed into [`crust_core::config()`]. See
+/// [`MipSpace`].
 pub fn mip_space_from_env() -> MipSpace {
-    match std::env::var("CRUST_PTEX_STREAM_MIPSPACE").as_deref() {
-        Ok("file") => MipSpace::File,
-        Ok("linear") | Err(_) => MipSpace::Linear,
-        Ok(v) => {
-            tracing::warn!(
-                "CRUST_PTEX_STREAM_MIPSPACE={v} is not `linear` or `file` — using `linear`"
-            );
-            MipSpace::Linear
-        }
-    }
+    crust_core::config().ptex_mip_space
 }
 
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
@@ -418,19 +357,24 @@ pub struct PtexStream {
 }
 
 impl PtexStream {
-    /// Opens `path` for streaming, reading the budget and caps from the
-    /// environment.
+    /// Opens `path` for streaming, with the budget and caps of
+    /// [`crust_core::config()`].
     ///
     /// `Err` carries a message suitable for a warning; the caller falls back
     /// to preloading rather than failing the render.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let total = cache_budget_from_env();
+        PtexStream::open_config(path, crust_core::config())
+    }
+
+    /// [`PtexStream::open`] with the budget and caps of `config`.
+    pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, String> {
+        let total = budget_bytes(config);
         PtexStream::open_with(
             path,
             total,
             micro_slot_max(total),
-            max_log2_from_env_opt(),
-            crate::ptex_texture::mip_enabled(),
+            config.ptex_max_log2,
+            config.ptex_mip,
         )
     }
 

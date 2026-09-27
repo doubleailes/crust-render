@@ -51,6 +51,27 @@ fn a_tx_beside_the_texture_is_used_without_any_flag() {
     );
 }
 
+/// The `CRUST_TEX_STREAM=0` and `CRUST_TEX=0` sides of the same scene,
+/// reached through a `Config` rather than the environment: the preload path
+/// reads the png, and a declined texture is no texture.
+#[test]
+fn a_config_passed_in_decides_the_backend() {
+    let dir = scratch("config");
+    let src = dir.join("a.png");
+    png(&src, [255, 0, 0]);
+    decoy_tx(&dir, &dir.join("a.tx"), [0, 0, 255]);
+    let preload = FileAssets::with_config(crust_core::Config {
+        tex_stream: false,
+        ..Default::default()
+    });
+    assert_eq!(red_at(&preload, &src, 0.5), 1.0, "the png answered");
+    let declined = FileAssets::with_config(crust_core::Config {
+        tex: false,
+        ..Default::default()
+    });
+    assert!(declined.load_texture(&src, ColorSpace::Raw).is_none());
+}
+
 #[test]
 fn an_incomplete_udim_set_of_tx_preloads_instead_of_streaming_holes() {
     let dir = scratch("partial");

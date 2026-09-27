@@ -144,7 +144,18 @@ other. The pairs:
 
 Every switch exists to A/B one optimization against the behaviour it
 replaced; with the switch set, the result is either bit-identical or the
-documented alternative. Booleans read `=0` as "off" unless noted.
+documented alternative.
+
+All of them are parsed once, in `crust-core/src/config.rs`, into the typed
+`Config` that `crust_core::config()` returns (the "owner" column is the code
+that obeys the field). Booleans share one grammar: `0`/`false`/`off`/`no` is
+off, `1`/`true`/`on`/`yes` is on, and anything else warns once and keeps the
+default. (Before the typed layer only the exact string `0` turned a default-on
+switch off, and only `1` turned `CRUST_PTEX_STREAM` on; the other spellings
+are the one behaviour change.) Numbers are validated by their type and warn
+once on a bad value — `CRUST_TEX_MAX` used to fall back silently. A test or
+probe that needs another setting builds a `Config` and passes it
+(`FileAssets::with_config`) instead of mutating the environment.
 
 | variable | default | owner | effect |
 |----------|---------|-------|--------|
@@ -167,9 +178,8 @@ documented alternative. Booleans read `=0` as "off" unless noted.
 | `CRUST_PTEX_STREAM_MIN_MB` | 8 | `crust-assets/ptex_stream.rs` | files smaller than this preload even when streaming |
 | `CRUST_PTEX_STREAM_MIPSPACE` | `linear` | `crust-assets/ptex_stream.rs` | `file`: accept the file's own mip chain (otherwise a mipmapped `.ptx` preloads) |
 
-Adding a switch: give it a line here, parse it next to the
-code it controls, and make the "off" side the behaviour it replaced so the
-switch is an honest A/B.
+Adding a switch: give it a field on `Config` and a line here, and make the
+"off" side the behaviour it replaced so the switch is an honest A/B.
 
 ## Tests and verification
 
@@ -218,21 +228,21 @@ Paid down in the 2026-09-27 architecture pass (no rendered output changed):
   `openspec/specs/<capability>/design.md` (three new capabilities:
   `intersection-kernel`, `lighting`, `textures`).
 
+Paid down since, from `docs/rust_leverage.md`: environment parsing is one
+typed `Config` (`crust-core/src/config.rs`) instead of nineteen hand-rolled
+reads, some cached and some re-read per prim or texture open.
+
 Still open, roughly in order of payoff:
 
-1. **Environment parsing is hand-rolled per variable.** The convention is
-   consistent (`=0` off), but budget parsing warns on bad input in some places
-   and not others (`CRUST_TEX_MAX` is silent), and crust-core caches its flags
-   in `OnceLock`s while crust-assets re-reads per call.
-2. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
+1. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
    trait any more (the file holds `HitRecord`), and `aabb.rs` only re-exports
    the kernel's type.
-3. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
+2. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
    `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
    way the importer now does. The largest source files left are
    `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
    (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
-4. **Hot-path splits need a callgrind, not an eye.** Any further move inside
+3. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
    `PROFILE` and some helpers are `inline(always)` for measured reasons

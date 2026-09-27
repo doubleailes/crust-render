@@ -468,7 +468,7 @@ pub(super) fn flush_meshes(
     meshes: &mut MeshArena,
     pending: Vec<MeshPlacement>,
 ) {
-    let bake_enabled = std::env::var("CRUST_MESH_BAKE").as_deref() != Ok("0");
+    let bake_enabled = crate::config().mesh_bake;
     let mut baked = 0usize;
     let mut instanced = 0usize;
 
