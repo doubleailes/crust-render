@@ -109,6 +109,10 @@ impl Emissive {
 }
 
 impl Material for Emissive {
+    fn kind(&self) -> &'static str {
+        "Emissive"
+    }
+
     fn emitted(&self) -> Vec3A {
         self.color
     }

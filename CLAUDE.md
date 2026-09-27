@@ -34,6 +34,7 @@ cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles 
 # --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
 #   else the first camera found -- a wrong path errors and lists the stage's cameras),
 # --stats (per-phase profile + scene statistics),
+# --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --auto-tx (convert UV textures to a .tx beside the original on first use)
 
 # Keep a full record of a render. The file gets the same events as the terminal
@@ -48,6 +49,10 @@ cargo run --release -- -i samples/animation.usda -f 5 -o frame.0005.exr
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- -i samples/curves.usda --stats
+# ...and inside the render: Trace vs EvalBsdfs vs Texture vs SurfaceLighting,
+# flat / by category / by execution tree. Costs render time (~15-20%, printed
+# with the report), so never take a Render time from a --profile run.
+cargo run --release -- -i samples/materialx_basic.usda --profile
 
 # Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
 cargo test
@@ -389,13 +394,43 @@ Seven crates under `crates/`:
   **`stats.rs`** collects per-phase timings and scene counts (`RenderStats`,
   inspired by Guerilla Render's "Profiling And Statistics"): the importer fills
   in its own phases and the counters onto `Scene::stats`, the host appends
-  render/output phases, and the report prints three blocks — statistics, profile
-  by execution tree, profile by time. Collection is one `Instant` per *phase*,
-  never per ray, so it costs nothing in the integrator and is always on; only
+  render/output phases, and the report prints the statistics (scene, allocated
+  materials and lights by kind, kernel memory), ray statistics (primary / bounce
+  / shadow rays, shadow rays per shading point, average and adaptive samples per
+  pixel, how paths ended — the four endings sum to the primary rays), textures
+  (Guerilla's total / loaded / still-in-cache memory and loaded / unloaded
+  tiles, plus preloaded UV textures), Ptex, then phases by execution tree and by
+  time. Collection is one `Instant` per *phase* plus integer counters, never a
+  timer per ray, so it costs nothing in the integrator and is always on; only
   printing is gated (`--stats`). Two primitive views are reported because for an
   instanced scene they answer different questions: `top_level` is what the root
   BVH traverses, `unique` descends into instances counting each distinct
   prototype **once** and is therefore what occupies memory.
+  **`profile.rs`** is the other half of Guerilla's page, the *Render Profile*:
+  named `Section`s (`MainLoop`, `GeneratePrimary`, `Trace`, `Occlusion`,
+  `Volume`, `EvalBsdfs`, `RunShader`, `Texture`, `TextureLoad`,
+  `SurfaceLighting`, `VolumeLighting`, `Bounce`, `Contributions`) in four
+  categories, recorded per thread into a call tree and merged by
+  `profile::flush()` once per tile (per pixel in scanline mode), reported flat,
+  by category and by execution tree with Guerilla's `local` / `total` / `glob.`
+  columns, in **thread** time. Opt-in via `--profile` because it is not free:
+  ~56 ns per section, 15-20% of render, printed with the report as an estimate
+  and charged to the parents' local time. **Off, it must cost nothing, and
+  that took two fixes**: a per-section runtime check cost +2.5% instructions on
+  cornellbox (the guard's drop glue was an out-of-line call, and the recording
+  code pushed `trace_path` out of line), so the integrator is **monomorphised**
+  on `const PROFILE: bool` — `render_pass` reads the switch once and dispatches
+  to `render_pixel::<true|false>`, and `profile::scope_if::<false>` compiles
+  away. The second copy then stopped LLVM inlining `sample_bounce_direction`
+  and `escaped_emission` (+1.1%), which are `inline(always)` for that reason.
+  Net with profiling off: +0.18% instructions on cornellbox (the new counters),
+  +0.48% on `materialx_basic` (the host's `Texture` / `RunShader` sections,
+  which cannot take the const and keep a runtime check), `bench_ab` within
+  noise on four scenes, images bit-identical with and without `--profile`.
+  `tests/profile.rs` pins that each section's call count equals the matching
+  `RayStats` counter (MainLoop = pixels, Trace = closest-hit, Occlusion = shadow
+  rays, EvalBsdfs = surface vertices) and that the local times partition the
+  thread time.
 - **`crust-assets`** (lib name `crust_assets`) — the host side of
   `crust_core::AssetLoader` for a program that reads files: `FileAssets`
   implements the trait over `exr`, `image` and `ptex-rs`, and the decoders

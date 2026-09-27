@@ -146,6 +146,10 @@ pub struct FileAssets {
     /// Every Ptex texture opened, so the render can be reported on and — for
     /// the streamed ones — re-budgeted as more arrive. See [`PtexHandle`].
     ptex: std::sync::Mutex<Vec<PtexHandle>>,
+    /// UV textures that took the preload path, and the bytes they hold —
+    /// the half of texture residency the tile cache cannot see.
+    preloaded_textures: std::sync::atomic::AtomicU64,
+    preloaded_texture_bytes: std::sync::atomic::AtomicU64,
 }
 
 /// Which streaming candidate [`FileAssets::open_streaming`] may open.
@@ -283,6 +287,8 @@ impl FileAssets {
             ptex_streaming,
             ptex_mip_space,
             ptex: std::sync::Mutex::new(Vec::new()),
+            preloaded_textures: std::sync::atomic::AtomicU64::new(0),
+            preloaded_texture_bytes: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -563,8 +569,15 @@ impl FileAssets {
     /// the host pushes its numbers in — exactly as `main.rs` already assigns
     /// `stats.rays` from what the renderer handed back.
     pub fn texture_cache_stats(&self) -> crust_core::TextureCacheStats {
+        use std::sync::atomic::Ordering::Relaxed;
         let c = self.cache.counters();
         crust_core::TextureCacheStats {
+            files: c.files,
+            loaded_tiles: c.loaded_tiles,
+            resident_bytes: c.resident_bytes,
+            total_bytes: c.total_bytes,
+            preloaded: self.preloaded_textures.load(Relaxed),
+            preloaded_bytes: self.preloaded_texture_bytes.load(Relaxed),
             micro_hits: c.micro_hits,
             hits: c.hits,
             misses: c.misses,
@@ -710,6 +723,12 @@ impl AssetLoader for FileAssets {
         }
         let started = Instant::now();
         let loaded = UvTexture::open(path, space)?;
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.preloaded_textures.fetch_add(1, Relaxed);
+            self.preloaded_texture_bytes
+                .fetch_add(loaded.bytes() as u64, Relaxed);
+        }
         // The space *resolved* against the file, not the one asked for: under
         // UsdUVTexture's `auto` the two differ, and the resolved one is what
         // answers "why is this map darker than expected".

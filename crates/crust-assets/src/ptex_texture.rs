@@ -296,6 +296,7 @@ impl PtexColor {
 
 impl PtexTexture for PtexColor {
     fn eval(&self, face_id: u32, u: f32, v: f32, width: f32) -> Vec3A {
+        let _p = crust_core::profile::scope(crust_core::profile::Section::Texture);
         let Some(f) = self.faces.get(face_id as usize) else {
             return self.fallback;
         };

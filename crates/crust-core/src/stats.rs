@@ -11,8 +11,14 @@
 //! scene holds.
 //!
 //! Collection is deliberately cheap and coarse: one `Instant` per phase,
-//! never per ray. Nothing here touches the integrator's inner loop, so
-//! measuring costs the same whether or not the report is printed.
+//! never per ray, plus integer counters ([`RayStats`]) the integrator bumps
+//! in registers it already holds. So `--stats` costs the same whether or
+//! not the report is printed, and its Render phase stays comparable between
+//! runs — which `bench_ab.sh` relies on.
+//!
+//! Timing *inside* the render — Guerilla's "Render Profile" — cannot be that
+//! cheap, so it lives in [`crate::profile`] behind `--profile`, and is only
+//! printed here (after the phases, since it zooms into one of them).
 
 use std::fmt;
 use std::time::Duration;
@@ -151,6 +157,28 @@ pub struct RayStats {
     /// Paths that ended by exhausting `max_depth` — if this is ~0, the
     /// depth ceiling is not what a render is paying for.
     pub ended_depth: u64,
+    /// Paths that ended because the material sampled no continuation — an
+    /// absorbed or below-the-horizon sample. Roulette kills are `rr_killed`.
+    pub ended_absorbed: u64,
+    /// Of `vertices`: scatter events inside a volume region, and inside a
+    /// carried medium (subsurface / glass interiors). The rest are surfaces.
+    pub volume_scatters: u64,
+    pub medium_scatters: u64,
+    /// Light samples drawn by next-event estimation that reached a light
+    /// (`sample_li` answered). A shadow ray follows only when the connection
+    /// can carry something, so `light_samples - shadow_rays` is the NEE work
+    /// the cheap tests saved.
+    pub light_samples: u64,
+    /// Shadow rays the occlusion query found blocked.
+    pub shadow_occluded: u64,
+    /// Adaptive sampling, over the pixels of adaptive passes only: pixels,
+    /// samples they took, how many stopped before the full budget, and the
+    /// fewest and most any pixel took.
+    pub adaptive_pixels: u64,
+    pub adaptive_samples: u64,
+    pub early_stopped: u64,
+    pub spp_min: u32,
+    pub spp_max: u32,
 }
 
 impl RayStats {
@@ -175,8 +203,46 @@ impl RayStats {
         self.rr_killed as f64 / self.rr_tested as f64
     }
 
+    /// Shaded surface vertices — `vertices` less the volume and medium
+    /// scatters.
+    pub fn surface_vertices(&self) -> u64 {
+        self.vertices - self.volume_scatters - self.medium_scatters
+    }
+
+    /// Closest-hit queries that were not camera rays: bounces.
+    pub fn bounce_rays(&self) -> u64 {
+        self.closest_hit.saturating_sub(self.camera_rays)
+    }
+
+    /// Guerilla's "shadow rays / shading point": usually well under 5, and a
+    /// much larger figure means NEE is doing more per vertex than intended.
+    pub fn shadow_rays_per_vertex(&self) -> f64 {
+        match self.vertices {
+            0 => 0.0,
+            n => self.shadow_rays as f64 / n as f64,
+        }
+    }
+
     /// Sums another unit's counters into this one.
     pub fn merge(&mut self, o: &RayStats) {
+        // Min over pixels actually counted: a unit with no adaptive pixel has
+        // `spp_min == 0`, which is not a pixel that took zero samples.
+        if o.adaptive_pixels > 0 {
+            self.spp_min = if self.adaptive_pixels == 0 {
+                o.spp_min
+            } else {
+                self.spp_min.min(o.spp_min)
+            };
+        }
+        self.spp_max = self.spp_max.max(o.spp_max);
+        self.adaptive_pixels += o.adaptive_pixels;
+        self.adaptive_samples += o.adaptive_samples;
+        self.early_stopped += o.early_stopped;
+        self.ended_absorbed += o.ended_absorbed;
+        self.volume_scatters += o.volume_scatters;
+        self.medium_scatters += o.medium_scatters;
+        self.light_samples += o.light_samples;
+        self.shadow_occluded += o.shadow_occluded;
         self.camera_rays += o.camera_rays;
         self.closest_hit += o.closest_hit;
         self.shadow_rays += o.shadow_rays;
@@ -236,6 +302,14 @@ pub struct RenderStats {
     /// Ptex residency; empty unless the scene bound a `.ptx`. Pushed by the
     /// host for the same reason `textures` is.
     pub ptex: PtexCacheStats,
+    /// Distinct materials by kind ("allocated materials"), and lights by
+    /// kind. Filled by the host from the committed `World` / `LightList`
+    /// (see [`RenderStats::inventory_from`]), so the procedural fallback
+    /// reports them as well as a USD stage.
+    pub materials: Vec<(&'static str, usize)>,
+    pub light_kinds: Vec<(&'static str, usize)>,
+    /// The per-section render profile, when `--profile` asked for one.
+    pub profile: Option<crate::profile::RenderProfile>,
 }
 
 /// What Ptex cost over a render, under whichever backend ran.
@@ -345,6 +419,20 @@ pub struct TextureCacheStats {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
+    /// Streamed files registered with the cache.
+    pub files: u64,
+    /// Tiles decoded from disk ("loaded tiles"); `evictions` is the
+    /// "unloaded tiles" beside it. The same order of magnitude means the
+    /// cache purged and re-read repeatedly to fit.
+    pub loaded_tiles: u64,
+    /// Held by the cache when the render ended ("still in cache").
+    pub resident_bytes: u64,
+    /// The streamed files' whole mip chains — what preloading them would
+    /// have cost ("total memory").
+    pub total_bytes: u64,
+    /// UV textures that took the preload path instead, and their bytes.
+    pub preloaded: u64,
+    pub preloaded_bytes: u64,
 }
 
 impl TextureCacheStats {
@@ -361,7 +449,7 @@ impl TextureCacheStats {
     }
 
     fn is_empty(&self) -> bool {
-        self.lookups() == 0
+        self.lookups() == 0 && self.preloaded == 0
     }
 }
 
@@ -395,6 +483,19 @@ impl RenderStats {
             rss_end: mem.rss,
             peak_end: mem.peak,
         });
+    }
+
+    /// The top-level "Render" phase, if the host recorded one.
+    fn render_phase(&self) -> Option<&Phase> {
+        self.phases
+            .iter()
+            .find(|p| p.depth == 0 && p.name == "Render")
+    }
+
+    /// Records the material and light breakdowns of what will render.
+    pub fn inventory_from(&mut self, world: &crate::World, lights: &crate::LightList) {
+        self.materials = world.material_breakdown();
+        self.light_kinds = lights.kind_breakdown();
     }
 
     /// Total of the top-level phases. Sub-phases are skipped: their time is
@@ -458,7 +559,7 @@ pub fn current_memory_bytes() -> Option<u64> {
 }
 
 /// `1234567` → `1 234 567`, so seven-digit primitive counts stay readable.
-fn thousands(n: usize) -> String {
+pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -470,7 +571,7 @@ fn thousands(n: usize) -> String {
     out
 }
 
-fn human_bytes(bytes: u64) -> String {
+pub(crate) fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = bytes as f64;
     let mut unit = 0;
@@ -487,7 +588,7 @@ fn human_bytes(bytes: u64) -> String {
 
 /// `01:23.4` for anything over a minute, `1.234s` below — long renders and
 /// millisecond phases both land in the same column.
-fn human_duration(d: Duration) -> String {
+pub(crate) fn human_duration(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs >= 60.0 {
         let mins = (secs / 60.0).floor();
@@ -555,7 +656,20 @@ impl fmt::Display for RenderStats {
             breakdown("primitives in memory", &s.unique)?;
         }
 
+        // Distinct materials ("allocated materials"): geometries that share
+        // one material are one allocation, so this is well under
+        // `geometries` on any stage that binds by hierarchy.
+        if !self.materials.is_empty() {
+            let n: usize = self.materials.iter().map(|(_, n)| n).sum();
+            writeln!(f, "  {:<28} {}", "allocated materials", thousands(n))?;
+            for (kind, n) in &self.materials {
+                writeln!(f, "    {:<26} {}", kind, thousands(*n))?;
+            }
+        }
         writeln!(f, "  {:<28} {}", "lights", thousands(s.lights))?;
+        for (kind, n) in &self.light_kinds {
+            writeln!(f, "    {:<26} {}", kind, thousands(*n))?;
+        }
         if s.volumes > 0 {
             writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;
         }
@@ -591,52 +705,24 @@ impl fmt::Display for RenderStats {
         // -- Ray statistics -------------------------------------------
         let r = &self.rays;
         if !r.is_empty() {
+            let count = |n: u64| thousands(n as usize);
+            let share = |n: u64, of: u64| 100.0 * n as f64 / of.max(1) as f64;
             writeln!(f, "{rule}")?;
             writeln!(f, "Ray Statistics")?;
             writeln!(f, "{rule}")?;
+            writeln!(f, "  {:<28} {}", "primary rays", count(r.camera_rays))?;
+            writeln!(f, "  {:<28} {}", "bounce rays", count(r.bounce_rays()))?;
             writeln!(
                 f,
-                "  {:<28} {}",
-                "camera rays",
-                thousands(r.camera_rays as usize)
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "closest-hit queries",
-                thousands(r.closest_hit as usize)
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
+                "  {:<28} {} ({:.1}% occluded)",
                 "shadow rays",
-                thousands(r.shadow_rays as usize)
+                count(r.shadow_rays),
+                share(r.shadow_occluded, r.shadow_rays)
             )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "total ray queries",
-                thousands(r.total_rays() as usize)
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "vertices shaded",
-                thousands(r.vertices as usize)
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {:.2}",
-                "mean path length",
-                r.mean_path_length()
-            )?;
+            writeln!(f, "  {:<28} {}", "total ray queries", count(r.total_rays()))?;
             // Throughput needs the render phase alone, not the whole run:
             // dividing by total would credit rays to time spent parsing.
-            if let Some(render) = self
-                .phases
-                .iter()
-                .find(|p| p.depth == 0 && p.name == "Render")
-            {
+            if let Some(render) = self.render_phase() {
                 let secs = render.duration.as_secs_f64();
                 if secs > 0.0 {
                     // Scale the unit: a pathological scene can sit near a
@@ -659,57 +745,158 @@ impl fmt::Display for RenderStats {
                     )?;
                 }
             }
+
+            writeln!(f, "  {:<28} {}", "shading points", count(r.vertices))?;
+            for (label, n) in [
+                ("surfaces", r.surface_vertices()),
+                ("volume scatters", r.volume_scatters),
+                ("medium scatters", r.medium_scatters),
+            ] {
+                if n > 0 {
+                    writeln!(
+                        f,
+                        "    {:<26} {} ({:.1}%)",
+                        label,
+                        count(n),
+                        share(n, r.vertices)
+                    )?;
+                }
+            }
+            // Guerilla's "shadow rays / shading point": normally well under
+            // 5, and crust casts at most one per vertex, so this is also the
+            // fraction of vertices whose light sample survived the cheap
+            // tests (radiance, BSDF) and was worth a shadow ray.
+            writeln!(
+                f,
+                "  {:<28} {:.3}",
+                "shadow rays / shading point",
+                r.shadow_rays_per_vertex()
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {} ({:.1}% cast a shadow ray)",
+                "light samples",
+                count(r.light_samples),
+                share(r.shadow_rays, r.light_samples)
+            )?;
+            writeln!(
+                f,
+                "  {:<28} {:.2}",
+                "mean path length",
+                r.mean_path_length()
+            )?;
+
+            let pixels = (self.image.width * self.image.height) as u64;
+            if pixels > 0 {
+                // Over every pass, training included — the samples the
+                // render actually paid for, not the budget it was given.
+                writeln!(
+                    f,
+                    "  {:<28} {:.2}",
+                    "average samples / pixel",
+                    r.camera_rays as f64 / pixels as f64
+                )?;
+            }
+            if r.adaptive_pixels > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {} of {} pixels ({:.1}%)",
+                    "adaptive: stopped early",
+                    count(r.early_stopped),
+                    count(r.adaptive_pixels),
+                    share(r.early_stopped, r.adaptive_pixels)
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} min {} / mean {:.1} / max {}",
+                    "adaptive: samples / pixel",
+                    r.spp_min,
+                    r.adaptive_samples as f64 / r.adaptive_pixels as f64,
+                    r.spp_max
+                )?;
+            }
             writeln!(
                 f,
                 "  {:<28} {} of {} ({:.1}%)",
                 "roulette kills",
-                thousands(r.rr_killed as usize),
-                thousands(r.rr_tested as usize),
+                count(r.rr_killed),
+                count(r.rr_tested),
                 100.0 * r.rr_kill_rate()
             )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "paths ended: escaped",
-                thousands(r.ended_escaped as usize)
-            )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "paths ended: depth cap",
-                thousands(r.ended_depth as usize)
-            )?;
+            // Every path ends exactly one way, so these four sum to the
+            // primary rays — a quick check that the counters are honest.
+            let ended = r.ended_escaped + r.ended_absorbed + r.rr_killed + r.ended_depth;
+            writeln!(f, "  {:<28} {}", "paths ended", count(ended))?;
+            for (label, n) in [
+                ("escaped", r.ended_escaped),
+                ("absorbed", r.ended_absorbed),
+                ("roulette", r.rr_killed),
+                ("depth cap", r.ended_depth),
+            ] {
+                writeln!(
+                    f,
+                    "    {:<26} {} ({:.1}%)",
+                    label,
+                    count(n),
+                    share(n, ended)
+                )?;
+            }
         }
 
-        // -- Texture cache ---------------------------------------------
+        // -- Textures --------------------------------------------------
         let t = &self.textures;
         if !t.is_empty() {
+            let count = |n: u64| thousands(n as usize);
             writeln!(f, "{rule}")?;
-            writeln!(f, "Texture Cache")?;
+            writeln!(f, "Textures")?;
             writeln!(f, "{rule}")?;
-            writeln!(f, "  {:<28} {}", "lookups", thousands(t.lookups() as usize))?;
+            // The half of residency the cache cannot see: UV textures with no
+            // `.tx`, held whole for the render.
+            if t.preloaded > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {} ({})",
+                    "preloaded textures",
+                    count(t.preloaded),
+                    human_bytes(t.preloaded_bytes)
+                )?;
+            }
+        }
+        if t.lookups() > 0 {
+            let count = |n: u64| thousands(n as usize);
+            let share = |n: u64| 100.0 * n as f64 / t.lookups().max(1) as f64;
+            writeln!(f, "  {:<28} {}", "streamed files", count(t.files))?;
+            // Guerilla's texture memory triple. `total` is what preloading
+            // would have held; `loaded` what was actually read (larger than
+            // `still in cache` by whatever was evicted); `still in cache` is
+            // what is resident now. loaded >> still in cache, with unloaded
+            // tiles of the same order as loaded tiles, means the budget is
+            // below the working set and the cache purged to fit.
+            writeln!(f, "  {:<28} {}", "total memory", human_bytes(t.total_bytes))?;
+            // Every decode counts, so this can exceed `total memory` with no
+            // eviction at all: many workers first touching the same small
+            // tiles decode them concurrently. Say so, or it reads as a bug.
+            let rereads = t.redundant + t.raced;
             writeln!(
                 f,
-                "  {:<28} {} ({:.1}%)",
-                "  thread microcache hits",
-                thousands(t.micro_hits as usize),
-                100.0 * t.micro_hits as f64 / t.lookups().max(1) as f64
+                "  {:<28} {}{}",
+                "loaded memory",
+                human_bytes(t.bytes_read),
+                if rereads > 0 {
+                    format!(
+                        " (incl. {} tile(s) decoded more than once)",
+                        thousands(rereads as usize)
+                    )
+                } else {
+                    String::new()
+                }
             )?;
             writeln!(
                 f,
-                "  {:<28} {} ({:.1}%)",
-                "  cache hits",
-                thousands(t.hits as usize),
-                100.0 * t.hits as f64 / t.lookups().max(1) as f64
+                "  {:<28} {}",
+                "still in cache",
+                human_bytes(t.resident_bytes)
             )?;
-            writeln!(
-                f,
-                "  {:<28} {} ({:.1}%)",
-                "  misses (read from disk)",
-                thousands(t.misses as usize),
-                100.0 * t.misses as f64 / t.lookups().max(1) as f64
-            )?;
-            writeln!(f, "  {:<28} {:.2}%", "hit rate", 100.0 * t.hit_rate())?;
             writeln!(
                 f,
                 "  {:<28} {} / {}",
@@ -717,18 +904,31 @@ impl fmt::Display for RenderStats {
                 human_bytes(t.peak_bytes),
                 human_bytes(t.budget_bytes)
             )?;
+            writeln!(f, "  {:<28} {}", "loaded tiles", count(t.loaded_tiles))?;
+            writeln!(f, "  {:<28} {}", "unloaded tiles", count(t.evictions))?;
+            writeln!(f, "  {:<28} {}", "lookups", count(t.lookups()))?;
             writeln!(
                 f,
-                "  {:<28} {}",
-                "read from disk",
-                human_bytes(t.bytes_read)
+                "    {:<26} {} ({:.1}%)",
+                "thread microcache hits",
+                count(t.micro_hits),
+                share(t.micro_hits)
             )?;
             writeln!(
                 f,
-                "  {:<28} {}",
-                "evictions",
-                thousands(t.evictions as usize)
+                "    {:<26} {} ({:.1}%)",
+                "cache hits",
+                count(t.hits),
+                share(t.hits)
             )?;
+            writeln!(
+                f,
+                "    {:<26} {} ({:.1}%)",
+                "misses (read from disk)",
+                count(t.misses),
+                share(t.misses)
+            )?;
+            writeln!(f, "  {:<28} {:.2}%", "hit rate", 100.0 * t.hit_rate())?;
             // The line worth reading when a render is slower than it should
             // be: a tile decoded again after being evicted means the budget is
             // below the working set, which is the one thing a bigger budget
@@ -737,7 +937,7 @@ impl fmt::Display for RenderStats {
                 f,
                 "  {:<28} {}{}",
                 "re-read after eviction",
-                thousands(t.redundant as usize),
+                count(t.redundant),
                 if t.redundant > t.misses / 4 && t.misses > 0 {
                     "   (raise CRUST_TEX_CACHE_MB)"
                 } else {
@@ -749,20 +949,10 @@ impl fmt::Display for RenderStats {
             // amount of budget removes it. Reporting it as thrashing sent the
             // first measured render chasing a cache size that was 0.006% full.
             if t.raced > 0 {
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "concurrent double fills",
-                    thousands(t.raced as usize)
-                )?;
+                writeln!(f, "  {:<28} {}", "concurrent double fills", count(t.raced))?;
             }
             if t.errors > 0 {
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "tile read errors",
-                    thousands(t.errors as usize)
-                )?;
+                writeln!(f, "  {:<28} {}", "tile read errors", count(t.errors))?;
             }
         }
 
@@ -915,9 +1105,9 @@ impl fmt::Display for RenderStats {
             return Ok(());
         }
 
-        // -- Profile by execution tree ---------------------------------
+        // -- Phases by execution tree ----------------------------------
         writeln!(f, "{rule}")?;
-        writeln!(f, "Profile by execution tree")?;
+        writeln!(f, "Phases by execution tree (wall clock)")?;
         // `rss` is what the phase left resident; `peak` the high-water
         // reached by its end. peak >> rss means transient churn.
         writeln!(
@@ -948,11 +1138,11 @@ impl fmt::Display for RenderStats {
             width = NAME - 2
         )?;
 
-        // -- Profile by time -------------------------------------------
+        // -- Phases by time --------------------------------------------
         // Sub-phases are listed alongside their parents, so the column
         // does not sum to the total; the marker says which are nested.
         writeln!(f, "{rule}")?;
-        writeln!(f, "Profile by time (* = nested, counted in its parent)")?;
+        writeln!(f, "Phases by time (* = nested, counted in its parent)")?;
         writeln!(f, "{rule}")?;
         let mut by_time: Vec<&Phase> = self.phases.iter().collect();
         by_time.sort_by_key(|p| std::cmp::Reverse(p.duration));
@@ -966,6 +1156,13 @@ impl fmt::Display for RenderStats {
                 pct(p.duration),
                 width = NAME - 3
             )?;
+        }
+
+        // -- Render profile (`--profile`) --------------------------------
+        // After the phases, because it zooms into one of them: every figure
+        // below is thread time inside the Render row above.
+        if let Some(profile) = &self.profile {
+            profile.write_report(f, &rule, self.render_phase().map(|p| p.duration))?;
         }
         write!(f, "{rule}")
     }
@@ -993,8 +1190,8 @@ mod tests {
         s.record("Load assets", 1, Duration::from_millis(500));
         s.record("Trace paths", 0, Duration::from_secs(8));
         let out = s.report();
-        assert!(out.contains("Profile by execution tree"));
-        assert!(out.contains("Profile by time"));
+        assert!(out.contains("Phases by execution tree"));
+        assert!(out.contains("Phases by time"));
         // Each phase appears once per profile view. The names here are
         // deliberately distinct from the report's own headings, so a
         // heading cannot be mistaken for a phase row.
@@ -1081,6 +1278,69 @@ mod tests {
             instances: 5,
         };
         assert_eq!(c.total(), 28);
+    }
+
+    #[test]
+    fn merge_takes_min_spp_only_over_counted_pixels() {
+        let mut a = RayStats::default();
+        // A unit with no adaptive pixel must not drag the minimum to 0.
+        a.merge(&RayStats::default());
+        let unit = |min, max| RayStats {
+            adaptive_pixels: 1,
+            spp_min: min,
+            spp_max: max,
+            ..Default::default()
+        };
+        a.merge(&unit(12, 20));
+        a.merge(&RayStats::default());
+        a.merge(&unit(8, 16));
+        assert_eq!((a.spp_min, a.spp_max, a.adaptive_pixels), (8, 20, 2));
+    }
+
+    #[test]
+    fn report_prints_guerilla_style_statistics() {
+        let s = RenderStats {
+            image: ImageCounters {
+                width: 2,
+                height: 2,
+                samples_per_pixel: 4,
+                max_depth: 8,
+            },
+            rays: RayStats {
+                camera_rays: 16,
+                closest_hit: 24,
+                shadow_rays: 10,
+                shadow_occluded: 5,
+                vertices: 20,
+                light_samples: 12,
+                ended_escaped: 16,
+                ..Default::default()
+            },
+            materials: vec![("OpenPBR", 3), ("Emissive", 1)],
+            light_kinds: vec![("rect", 2)],
+            textures: TextureCacheStats {
+                preloaded: 2,
+                preloaded_bytes: 2048,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = s.report();
+        for needle in [
+            "allocated materials          4",
+            "rect                       2",
+            "bounce rays                  8",
+            "shadow rays                  10 (50.0% occluded)",
+            "shadow rays / shading point  0.500",
+            "average samples / pixel      4.00",
+            "preloaded textures           2 (2.00 KiB)",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in\n{out}");
+        }
+        // No adaptive pixels were counted, so there is no adaptive line, and
+        // no `--profile`, so no render profile.
+        assert!(!out.contains("adaptive:"));
+        assert!(!out.contains("Render profile"));
     }
 
     #[test]

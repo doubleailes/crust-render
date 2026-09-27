@@ -269,6 +269,16 @@ pub struct CacheCounters {
     pub peak_bytes: u64,
     pub errors: u64,
     pub budget_bytes: u64,
+    /// Files registered with the cache.
+    pub files: u64,
+    /// Tiles decoded from disk, first reads and re-reads alike (Guerilla's
+    /// "loaded tiles"; its "unloaded tiles" is `evictions`).
+    pub loaded_tiles: u64,
+    /// Bytes the cache holds now, at the end of the render.
+    pub resident_bytes: u64,
+    /// What every level of every registered file would hold if it were all
+    /// resident — the figure a preloading renderer would have paid.
+    pub total_bytes: u64,
 }
 
 impl CacheCounters {
@@ -296,6 +306,16 @@ struct FileSlot {
     /// Tiles this file has ever paged in, so a second page-in of the same tile
     /// can be recognised as thrashing rather than as a first read.
     seen: Mutex<std::collections::HashSet<(u8, u32)>>,
+}
+
+/// Payload bytes of a file's whole mip chain, at the width its tiles page in
+/// as: RGB `u8` for an integer file, RGB `half` for a float one.
+fn full_chain_bytes(file: &TiledFile) -> u64 {
+    let texel = if file.is_linear() { 6 } else { 3 };
+    file.levels()
+        .iter()
+        .map(|l| (l.width * l.height * texel) as u64)
+        .sum()
 }
 
 /// The cache. One per render, shared by every streaming texture in it.
@@ -384,7 +404,17 @@ impl TileCache {
                     .sum::<u64>()
             })
             .unwrap_or(0);
+        let (files, total_bytes) = lock(&self.files)
+            .map(|files| {
+                let total = files.iter().map(|f| full_chain_bytes(&f.file)).sum();
+                (files.len() as u64, total)
+            })
+            .unwrap_or((0, 0));
         CacheCounters {
+            files,
+            loaded_tiles: s.decoded.load(Ordering::Relaxed),
+            resident_bytes: self.resident(),
+            total_bytes,
             micro_hits: s.micro_hits.load(Ordering::Relaxed),
             hits: s.hits.load(Ordering::Relaxed),
             misses: s.misses.load(Ordering::Relaxed),
@@ -440,6 +470,7 @@ impl TileCache {
     }
 
     fn page_in(&self, id: TileId) -> Option<Arc<Tile>> {
+        let _p = crust_core::profile::scope(crust_core::profile::Section::TextureLoad);
         let slot = {
             let files = lock(&self.files)?;
             files.get(id.file as usize)?.clone()

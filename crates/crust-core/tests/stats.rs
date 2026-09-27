@@ -16,7 +16,7 @@ fn a_new_report_is_empty_but_well_formed() {
     let out = s.report();
     assert!(out.contains("Render Statistics"));
     assert!(
-        !out.contains("Profile by execution tree"),
+        !out.contains("Phases by execution tree"),
         "no phases, no profile"
     );
     // `Display` and `report` are the same formatter (memory is sampled
@@ -90,7 +90,7 @@ fn report_sorts_the_time_view_largest_first() {
     s.record("Beta", 0, Duration::from_secs(5));
     s.record("Gamma", 0, Duration::from_secs(3));
     let out = s.report();
-    let by_time = out.split("Profile by time").nth(1).expect("time view");
+    let by_time = out.split("Phases by time").nth(1).expect("time view");
     let pos = |n: &str| by_time.find(n).unwrap();
     assert!(
         pos("Beta") < pos("Gamma") && pos("Gamma") < pos("Alpha"),
@@ -101,7 +101,7 @@ fn report_sorts_the_time_view_largest_first() {
     s.record("Top", 0, Duration::from_secs(2));
     s.record("Sub", 1, Duration::from_secs(1));
     let out = s.report();
-    let by_time = out.split("Profile by time").nth(1).unwrap();
+    let by_time = out.split("Phases by time").nth(1).unwrap();
     assert!(by_time.contains("*Sub"));
     assert!(!by_time.contains("*Top"));
 }
@@ -202,8 +202,14 @@ fn ray_stats_derived_quantities() {
         rr_killed: 10,
         ended_escaped: 60,
         ended_depth: 5,
+        volume_scatters: 20,
+        medium_scatters: 30,
+        ..Default::default()
     };
     assert_eq!(r.total_rays(), 400);
+    assert_eq!(r.bounce_rays(), 150);
+    assert_eq!(r.surface_vertices(), 250);
+    assert!((r.shadow_rays_per_vertex() - 0.5).abs() < 1e-9);
     assert!((r.mean_path_length() - 3.0).abs() < 1e-9);
     assert!((r.rr_kill_rate() - 0.25).abs() < 1e-9);
     // Empty stats never divide by zero.
@@ -224,6 +230,16 @@ fn ray_stats_merge_adds_every_counter() {
         rr_killed: 6,
         ended_escaped: 7,
         ended_depth: 8,
+        ended_absorbed: 9,
+        volume_scatters: 1,
+        medium_scatters: 2,
+        light_samples: 3,
+        shadow_occluded: 1,
+        adaptive_pixels: 1,
+        adaptive_samples: 16,
+        early_stopped: 1,
+        spp_min: 16,
+        spp_max: 16,
     };
     let b = RayStats {
         camera_rays: 10,
@@ -234,6 +250,16 @@ fn ray_stats_merge_adds_every_counter() {
         rr_killed: 60,
         ended_escaped: 70,
         ended_depth: 80,
+        ended_absorbed: 90,
+        volume_scatters: 10,
+        medium_scatters: 20,
+        light_samples: 30,
+        shadow_occluded: 10,
+        adaptive_pixels: 2,
+        adaptive_samples: 40,
+        early_stopped: 0,
+        spp_min: 8,
+        spp_max: 32,
     };
     a.merge(&b);
     assert_eq!(a.camera_rays, 11);
@@ -244,6 +270,15 @@ fn ray_stats_merge_adds_every_counter() {
     assert_eq!(a.rr_killed, 66);
     assert_eq!(a.ended_escaped, 77);
     assert_eq!(a.ended_depth, 88);
+    assert_eq!(a.ended_absorbed, 99);
+    assert_eq!((a.volume_scatters, a.medium_scatters), (11, 22));
+    assert_eq!((a.light_samples, a.shadow_occluded), (33, 11));
+    assert_eq!(
+        (a.adaptive_pixels, a.adaptive_samples, a.early_stopped),
+        (3, 56, 1)
+    );
+    // Min and max, not sums.
+    assert_eq!((a.spp_min, a.spp_max), (8, 32));
     // Merging the empty stats is the identity.
     let before = a;
     a.merge(&RayStats::default());

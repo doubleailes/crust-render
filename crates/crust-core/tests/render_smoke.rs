@@ -263,6 +263,21 @@ fn ray_stats_count_every_camera_ray() {
     // Every camera path ends by escaping or on the emitter; none hit the
     // depth cap at depth 4 in a scene that never scatters.
     assert_eq!(stats.ended_depth, 0);
+    // ...and each ends exactly one way, which is what lets the report print
+    // the four endings as shares of the primary rays.
+    assert_eq!(
+        stats.ended_escaped + stats.ended_absorbed + stats.rr_killed + stats.ended_depth,
+        stats.camera_rays
+    );
+    assert_eq!(stats.volume_scatters + stats.medium_scatters, 0);
+    assert_eq!(stats.surface_vertices(), stats.vertices);
+    assert_eq!(stats.light_samples, 0);
+    assert_eq!(stats.bounce_rays(), stats.closest_hit - stats.camera_rays);
+    // The renderer's final pass is adaptive, so every pixel is counted, and
+    // with the threshold at 0 none stops early.
+    assert_eq!(stats.adaptive_pixels, (w * h) as u64);
+    assert_eq!(stats.early_stopped, 0);
+    assert_eq!((stats.spp_min, stats.spp_max), (spp, spp));
 }
 
 #[test]
@@ -289,6 +304,9 @@ fn adaptive_sampling_takes_fewer_camera_rays_on_a_flat_image() {
     );
     assert!(stats.camera_rays >= (w * h * 4) as u64);
     assert!(buf.get_pixel(3, 3).abs_diff_eq(Vec3A::ONE, 1e-5));
+    assert_eq!(stats.early_stopped, (w * h) as u64, "every pixel stopped");
+    assert_eq!(stats.adaptive_samples, stats.camera_rays);
+    assert!(stats.spp_min >= 4 && stats.spp_max < 64, "{stats:?}");
 }
 
 #[test]

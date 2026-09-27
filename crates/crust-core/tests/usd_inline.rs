@@ -1544,7 +1544,7 @@ fn import_fills_the_scene_counters_and_phases() {
     assert!(scene.stats.total() > std::time::Duration::ZERO);
     let report = scene.stats.report();
     assert!(report.contains("geometries"));
-    assert!(report.contains("Profile by execution tree"));
+    assert!(report.contains("Phases by execution tree"));
 }
 
 #[test]

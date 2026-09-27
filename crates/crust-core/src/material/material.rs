@@ -37,6 +37,11 @@ pub struct ScatterSample {
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
 /// Materials determine how rays interact with surfaces, including scattering and emission.
 pub trait Material: Send + Sync {
+    /// Short name for the `--stats` material breakdown.
+    fn kind(&self) -> &'static str {
+        "custom"
+    }
+
     /// Samples an outgoing direction from the material's own importance
     /// distribution.
     ///

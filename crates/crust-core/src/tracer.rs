@@ -4,6 +4,7 @@ use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
+use crate::profile::{self, Section};
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
@@ -454,6 +455,10 @@ impl Renderer {
         let pixel_count = (self.settings.width * self.settings.height) as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
+        // Read once per pass and dispatched to one of two monomorphisations
+        // of the integrator (see `profile::scope_if`), so an unprofiled
+        // render carries no trace of the profiler.
+        let profiling = profile::enabled();
         // Per *pass*, never per pixel or per ray: a guided render runs a
         // handful of these and an ordinary one exactly one, so the whole
         // block costs nothing an integrator would notice.
@@ -502,18 +507,32 @@ impl Renderer {
                     let mut scratch = PathScratch::new(self.settings.max_depth as usize);
                     for j in tile.y..tile.y + tile.height {
                         for i in tile.x..tile.x + tile.width {
-                            let (color, s, v) = self.render_pixel(
-                                i,
-                                j,
-                                &cfg,
-                                &filter,
-                                gctx,
-                                &mut scratch,
-                                &mut tile_rays,
-                            );
+                            let (color, s, v) = if profiling {
+                                self.render_pixel::<true>(
+                                    i,
+                                    j,
+                                    &cfg,
+                                    &filter,
+                                    gctx,
+                                    &mut scratch,
+                                    &mut tile_rays,
+                                )
+                            } else {
+                                self.render_pixel::<false>(
+                                    i,
+                                    j,
+                                    &cfg,
+                                    &filter,
+                                    gctx,
+                                    &mut scratch,
+                                    &mut tile_rays,
+                                )
+                            };
                             pixels.push((color, v, s));
                         }
                     }
+                    // Once per tile, and a no-op unless `--profile` is on.
+                    profile::flush();
                     if let Some(cb) = progress {
                         let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
                         *n += 1;
@@ -574,8 +593,18 @@ impl Renderer {
                         || PathScratch::new(self.settings.max_depth as usize),
                         |scratch, i| {
                             let mut px = RayStats::default();
-                            let (c, s, v) =
-                                self.render_pixel(i, j, &cfg, &filter, gctx, scratch, &mut px);
+                            let (c, s, v) = if profiling {
+                                self.render_pixel::<true>(
+                                    i, j, &cfg, &filter, gctx, scratch, &mut px,
+                                )
+                            } else {
+                                self.render_pixel::<false>(
+                                    i, j, &cfg, &filter, gctx, scratch, &mut px,
+                                )
+                            };
+                            // Per pixel here, having no work unit to hang it
+                            // on; only `--profile` pays the lock.
+                            profile::flush();
                             (c, s, v, px)
                         },
                     )
@@ -627,7 +656,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_pixel(
+    fn render_pixel<const PROFILE: bool>(
         &self,
         i: usize,
         j: usize,
@@ -637,6 +666,7 @@ impl Renderer {
         scratch: &mut PathScratch,
         stats: &mut RayStats,
     ) -> (Vec3A, Vec<SampleData>, f64) {
+        let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
         let mut sum = Vec3A::ZERO;
         // FIS weight sum (see `filter.rs`): the pixel estimate is the
         // weighted average Σwᵢ·Lᵢ / Σwᵢ. For box and triangle every wᵢ is
@@ -679,6 +709,7 @@ impl Renderer {
         });
 
         for sample in 0..cfg.spp {
+            let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
                 .new_domain(tile);
             let cam = root.new_domain(K_CAMERA).draw_sample_f32::<4>();
@@ -715,8 +746,9 @@ impl Renderer {
                 let spread = span / r.direction().length().max(1e-9);
                 r = r.with_cone(crate::RayCone { width: 0.0, spread });
             }
+            drop(primary);
             stats.camera_rays += 1;
-            let color = trace_path(
+            let color = trace_path::<PROFILE>(
                 &r,
                 &self.world,
                 &self.lights,
@@ -748,6 +780,20 @@ impl Renderer {
                     break;
                 }
             }
+        }
+
+        if cfg.adaptive {
+            stats.adaptive_pixels += 1;
+            stats.adaptive_samples += taken as u64;
+            if taken < cfg.spp {
+                stats.early_stopped += 1;
+            }
+            stats.spp_min = if stats.adaptive_pixels == 1 {
+                taken
+            } else {
+                stats.spp_min.min(taken)
+            };
+            stats.spp_max = stats.spp_max.max(taken);
         }
 
         // Unbiased variance of the pixel-mean luminance.
@@ -938,7 +984,7 @@ pub fn ray_color(
     // The one-shot entry point (benches and tests), so a scratch per call is
     // the right trade — the renderer's own paths reuse one per work unit.
     let mut scratch = PathScratch::new(depth.max(0) as usize);
-    trace_path(
+    trace_path::<false>(
         r,
         world,
         lights,
@@ -974,6 +1020,11 @@ fn ray_cones_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("CRUST_RAY_CONES").as_deref() != Ok("0"))
 }
 
+// `inline(always)`, as is `escaped_emission`: each is called once per
+// `trace_path` instance, and once the integrator was monomorphised on the
+// profiler switch LLVM stopped inlining them into either copy — +1.1%
+// instructions on cornellbox with profiling off.
+#[inline(always)]
 fn sample_bounce_direction(
     r: &Ray,
     rec: &HitRecord,
@@ -1209,6 +1260,7 @@ fn bounce_emission_weight(
 ///
 /// Returns the MIS-weighted radiance and whether any light covered the
 /// direction — the caller falls back to the sky gradient when nothing did.
+#[inline(always)]
 fn escaped_emission(
     prev: &Option<PrevVertex>,
     lights: &LightList,
@@ -1255,7 +1307,7 @@ fn escaped_emission(
 /// through every region it crosses (stochastic for heterogeneous regions,
 /// exact for homogeneous ones). MIS weights are unaffected — transmittance
 /// is part of the integrand on both strategies, not of either pdf.
-fn shadow_transmittance(
+fn shadow_transmittance<const PROFILE: bool>(
     world: &World,
     volumes: &Volumes,
     shadow_ray: &Ray,
@@ -1265,8 +1317,10 @@ fn shadow_transmittance(
 ) -> Vec3A {
     // Dedicated occlusion query: any hit in range means full shadow, so the
     // early-exit traversal beats searching for the closest hit.
+    let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
     if world.occluded(shadow_ray, 0.001, distance - 0.001) {
+        stats.shadow_occluded += 1;
         return Vec3A::ZERO;
     }
     if volumes.is_empty() {
@@ -1282,7 +1336,7 @@ fn shadow_transmittance(
 /// `brdf·cos`, and the same phase pdf as the competing bounce density that
 /// `bounce_emission_weight`'s `Phase` arm uses.
 #[allow(clippy::too_many_arguments)]
-fn volume_nee(
+fn volume_nee<const PROFILE: bool>(
     p: Vec3A,
     wi: Vec3A,
     phase: &PhaseMix,
@@ -1297,6 +1351,7 @@ fn volume_nee(
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
     }
+    let _p = profile::scope_if::<PROFILE>(Section::VolumeLighting);
     let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
     let Some((light, pmf)) = lights.pick(nee[0]) else {
         return Vec3A::ZERO;
@@ -1304,6 +1359,7 @@ fn volume_nee(
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
         return Vec3A::ZERO;
     };
+    stats.light_samples += 1;
     // As at a surface vertex: no shadow ray for a connection already known
     // to carry nothing (a one-sided light seen from behind). Bit-identical,
     // since the ray's own draws come from `K_NEE_SHADOW`.
@@ -1314,7 +1370,8 @@ fn volume_nee(
     let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
         .with_mask(crate::ray::MASK_SHADOW);
-    let tr = shadow_transmittance(world, volumes, &shadow_ray, s.distance, vertex, stats);
+    let tr =
+        shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, s.distance, vertex, stats);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
@@ -1332,7 +1389,7 @@ fn volume_nee(
 /// training samples, which need the radiance arriving from the rest of the
 /// path and therefore cannot be computed forward.
 #[allow(clippy::too_many_arguments)]
-fn trace_path(
+fn trace_path<const PROFILE: bool>(
     r: &Ray,
     world: &World,
     lights: &LightList,
@@ -1378,7 +1435,11 @@ fn trace_path(
             // attenuating through any media the final segment crosses.
             if let Some(p) = &prev {
                 stats.closest_hit += 1;
-                if let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) {
+                let hit = {
+                    let _p = profile::scope_if::<PROFILE>(Section::Trace);
+                    world.intersect(&ray, 0.001, f32::INFINITY)
+                };
+                if let Some(hit) = hit {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let mut emitted = hit.mat.emitted_at(&ray, &hit.rec, cos_o);
                     if emitted.length_squared() > 0.0 {
@@ -1399,7 +1460,10 @@ fn trace_path(
         }
 
         stats.closest_hit += 1;
-        let hit_opt = world.intersect(&ray, 0.001, f32::INFINITY);
+        let hit_opt = {
+            let _p = profile::scope_if::<PROFILE>(Section::Trace);
+            world.intersect(&ray, 0.001, f32::INFINITY)
+        };
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
         // Free-flight candidate in the carried homogeneous medium
@@ -1427,6 +1491,7 @@ fn trace_path(
                 emitted: Vec3A::ZERO,
             }
         } else {
+            let _p = profile::scope_if::<PROFILE>(Section::Volume);
             let mut rng = v.new_domain(K_VOLUME).rng();
             volumes.sample_interaction(&ray, 0.001, t_lim, &mut rng)
         };
@@ -1439,12 +1504,13 @@ fn trace_path(
                 emitted,
                 ..
             } => {
+                stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 let wi = ray.direction().normalize();
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee = volume_nee(
+                let nee = volume_nee::<PROFILE>(
                     p,
                     wi,
                     &phase,
@@ -1526,6 +1592,7 @@ fn trace_path(
 
         if t_med < t_surf {
             // === Carried-medium scatter vertex (subsurface interiors) ===
+            stats.medium_scatters += 1;
             let medium = ray.medium().expect("t_med implies a medium").clone();
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
@@ -1651,7 +1718,10 @@ fn trace_path(
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
         // scatters, so this is never wasted work.
-        let sp = ShadingPoint::new(mat, &ray, &rec, cos_o);
+        let sp = {
+            let _p = profile::scope_if::<PROFILE>(Section::EvalBsdfs);
+            ShadingPoint::new(mat, &ray, &rec, cos_o)
+        };
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
         match &prev {
@@ -1678,6 +1748,7 @@ fn trace_path(
         // the same expression for a bounce-hit light — both MIS weights must
         // describe the same strategy or emission is double-counted.
         let mut nee = Vec3A::ZERO;
+        let lighting = profile::scope_if::<PROFILE>(Section::SurfaceLighting);
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
         // `sample_li` returns `None` when the light cannot be reached from
         // this point at all — below a dome's horizon, or a degenerate
@@ -1688,6 +1759,7 @@ fn trace_path(
             .flatten()
             && let Some(ls) = light.sample_li(rec.p, nee_s[1], nee_s[2])
         {
+            stats.light_samples += 1;
             let light_dir_unit = ls.direction;
 
             // A connection carries light only if the light's radiance, the
@@ -1708,7 +1780,14 @@ fn trace_path(
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
                     .with_mask(crate::ray::MASK_SHADOW);
-                let tr = shadow_transmittance(world, volumes, &shadow_ray, ls.distance, v, stats);
+                let tr = shadow_transmittance::<PROFILE>(
+                    world,
+                    volumes,
+                    &shadow_ray,
+                    ls.distance,
+                    v,
+                    stats,
+                );
                 (tr != Vec3A::ZERO).then_some(tr)
             };
             let connection = if ls.radiance == Vec3A::ZERO {
@@ -1742,6 +1821,7 @@ fn trace_path(
                 nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf;
             }
         }
+        drop(lighting);
 
         let mut vrec = VertexRec {
             atten,
@@ -1755,7 +1835,14 @@ fn trace_path(
         };
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        if let Some(sample) = sample_bounce_direction(&ray, &rec, &sp, guiding_here, v) {
+        let bounce = {
+            let _p = profile::scope_if::<PROFILE>(Section::Bounce);
+            sample_bounce_direction(&ray, &rec, &sp, guiding_here, v)
+        };
+        if bounce.is_none() {
+            stats.ended_absorbed += 1;
+        }
+        if let Some(sample) = bounce {
             let dir = sample.ray.direction().normalize();
             // `sample.value` is the material's `brdf · |cos|` (delta lobes
             // carry their whole throughput there instead), so the estimator is
@@ -1838,6 +1925,7 @@ fn trace_path(
     // what the old recursion returned to each vertex from its continuation
     // (next vertex's emission suppressed — its MIS-weighted share enters
     // separately through `next_emit`).
+    let _gather = profile::scope_if::<PROFILE>(Section::Contributions);
     let mut radiance = terminal;
     for (index, vrec) in records.iter().enumerate().rev() {
         if let Some(t) = &vrec.train {
