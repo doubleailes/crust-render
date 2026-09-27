@@ -44,7 +44,7 @@ use crate::ray::Ray;
 use glam::Vec3A;
 use std::f32::consts::PI;
 use std::sync::Arc;
-use utils::{Lerp, align_to_normal, cosine_hemisphere};
+use utils::{cosine_hemisphere, luminance};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -317,9 +317,9 @@ impl LobePmf {
     fn from_params(m: &OpenPBR) -> Self {
         let f0_diel = f0_from_ior(m.specular_ior);
         let f0_coat = f0_from_ior(m.coat_ior);
-        let base_luma = luma(m.base_color).max(0.02);
-        let spec_luma = luma(m.specular_color).max(0.02);
-        let fuzz_luma = luma(m.fuzz_color).max(0.02);
+        let base_luma = luminance(m.base_color).max(0.02);
+        let spec_luma = luminance(m.specular_color).max(0.02);
+        let fuzz_luma = luminance(m.fuzz_color).max(0.02);
 
         // Metal reflectivity is base_color · base_weight, covered by
         // base_metalness. No `specular_weight` here, matching `eval_specular`:
@@ -327,7 +327,7 @@ impl LobePmf {
         // `specular_weight` is legitimately 0 and weighting by it would leave
         // the specular lobe essentially unsampled while `eval_all` still
         // returned its full energy — fireflies on every metal.
-        let w_metal = m.base_metalness * luma(m.base_color * m.base_weight).max(0.02);
+        let w_metal = m.base_metalness * luminance(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
@@ -363,7 +363,7 @@ impl LobePmf {
 
         // Transmission: dominant when weight is high. When enabled it
         // steals energy from the dielectric-specular / diffuse pathway.
-        let trans_luma = luma(m.transmission_color).max(0.02);
+        let trans_luma = luminance(m.transmission_color).max(0.02);
         let w_transmission = if m.transmission_weight > 0.0 {
             ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4)
         } else {
@@ -399,11 +399,6 @@ impl LobePmf {
         }
         Lobe::Transmission
     }
-}
-
-#[inline]
-fn luma(c: Vec3A) -> f32 {
-    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
 }
 
 // ---------------------------------------------------------------------------
@@ -817,7 +812,7 @@ fn dispersive_ior(n_d: f32, abbe: f32, dispersion_scale: f32) -> Vec3A {
 /// unit outward normal `n`, using relative index `eta = η_incident / η_transmitted`.
 /// Returns None on total internal reflection. (Analytic Snell reference,
 /// used by tests to cross-check the sampled BTDF directions.)
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn refract_dir(v: Vec3A, n: Vec3A, eta: f32) -> Option<Vec3A> {
     let cos_i = v.dot(n).clamp(-1.0, 1.0);
     let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
@@ -1349,20 +1344,6 @@ impl Material for OpenPBR {
         );
         uncoated * coat_passage(self, cos_theta_o) * dark
     }
-}
-
-// A tiny helper kept out of `Frame` for readability at the call sites. Same
-// spirit as `utils::align_to_normal` but with an explicit frame.
-#[inline]
-#[allow(dead_code)]
-fn align(local: Vec3A, n: Vec3A) -> Vec3A {
-    align_to_normal(local, n)
-}
-
-// Re-export the Lerp helper into scope for future coat / thin-film work.
-#[allow(dead_code)]
-fn _lerp_ping(a: f32, b: f32, t: f32) -> f32 {
-    a.lerp(b, t)
 }
 
 // ---------------------------------------------------------------------------

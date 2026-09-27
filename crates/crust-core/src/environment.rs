@@ -16,13 +16,7 @@
 //!   camera looks down, at the centre of the image.
 
 use glam::Vec3A;
-
-/// Perceptual weight used to decide where the light is. Importance
-/// sampling only needs a scalar that tracks brightness; the sampled
-/// radiance is always the full colour.
-pub(crate) fn luminance(c: Vec3A) -> f32 {
-    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
-}
+use utils::luminance;
 
 /// A piecewise-constant 1D distribution over `[0, 1)`, sampled by inverting
 /// its CDF. The building block of the 2D environment distribution: one of

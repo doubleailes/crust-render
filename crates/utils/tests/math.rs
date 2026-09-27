@@ -1,8 +1,8 @@
 //! Behavioural tests for the `utils` helpers: sampling warps, MIS heuristics
 //! and the small math conveniences the renderer leans on everywhere.
 //!
-//! The distribution checks draw from a seeded `openqmc::pcg::Rng` rather
-//! than `rand`, so a failure reproduces bit for bit.
+//! The distribution checks draw from a seeded `openqmc::pcg::Rng`, so a
+//! failure reproduces bit for bit.
 
 use glam::Vec3A;
 use openqmc::pcg::Rng;
@@ -27,15 +27,11 @@ fn degrees_to_radians_hits_the_landmarks() {
 }
 
 #[test]
-fn clamp_respects_both_bounds() {
-    assert_eq!(clamp(0.5, 0.0, 1.0), 0.5);
-    assert_eq!(clamp(-3.0, 0.0, 1.0), 0.0);
-    assert_eq!(clamp(7.0, 0.0, 1.0), 1.0);
-    assert_eq!(clamp(0.0, 0.0, 1.0), 0.0);
-    assert_eq!(clamp(1.0, 0.0, 1.0), 1.0);
-    // Negative ranges work the same way.
-    assert_eq!(clamp(-5.0, -2.0, -1.0), -2.0);
-    assert_eq!(clamp(-1.5, -2.0, -1.0), -1.5);
+fn luminance_weights_sum_to_one_and_favour_green() {
+    assert!(approx(luminance(Vec3A::ONE), 1.0, 1e-6));
+    assert_eq!(luminance(Vec3A::ZERO), 0.0);
+    assert!(luminance(Vec3A::Y) > luminance(Vec3A::X));
+    assert!(luminance(Vec3A::X) > luminance(Vec3A::Z));
 }
 
 #[test]
@@ -363,50 +359,5 @@ fn hemisphere_samples_aligned_to_a_normal_stay_on_its_side() {
         let local = cosine_hemisphere([rng.next_f32(), rng.next_f32()]);
         let world = align_to_normal(local, n);
         assert!(world.dot(n) >= -1e-5, "{world} fell below the normal {n}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The `rand`-backed helpers: only their ranges are testable.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn random_lies_in_the_unit_interval() {
-    for _ in 0..1000 {
-        let r = random();
-        assert!((0.0..1.0).contains(&r), "{r}");
-    }
-}
-
-#[test]
-fn random_range_honours_its_bounds() {
-    for _ in 0..1000 {
-        let r = random_range(-2.0, 3.0);
-        assert!((-2.0..3.0).contains(&r), "{r}");
-    }
-    let (a, b) = random2();
-    assert!((0.0..1.0).contains(&a) && (0.0..1.0).contains(&b));
-}
-
-#[test]
-fn random_vectors_honour_their_domains() {
-    for _ in 0..500 {
-        let v = random3();
-        assert!(v.min_element() >= 0.0 && v.max_element() < 1.0);
-        let r = random_range3(2.0, 4.0);
-        assert!(r.min_element() >= 2.0 && r.max_element() < 4.0);
-        assert!(approx(random_unit_vector().length(), 1.0, 1e-4));
-        let d = random_in_unit_disk();
-        assert!(d.length() < 1.0 && d.z == 0.0);
-        let c = random_cosine_direction();
-        assert!(c.z >= 0.0 && approx(c.length(), 1.0, 1e-4));
-    }
-}
-
-#[test]
-fn random_unit_sphere_points_are_inside() {
-    let mut rng = rand::rng();
-    for _ in 0..500 {
-        assert!(random_vec3_unit_sphere(&mut rng).length_squared() < 1.0);
     }
 }

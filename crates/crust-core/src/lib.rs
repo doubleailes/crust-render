@@ -6,8 +6,9 @@
 //! `GlobalAlloc`, and implementing that trait is inherently unsafe. `deny`
 //! lets that one test module opt out explicitly and visibly; `forbid` could
 //! not be overridden at all, and dropping the lint entirely would leave the
-//! claim unchecked everywhere else. Every other crate in the workspace is
-//! `forbid`.
+//! claim unchecked everywhere else. `crust-jit` is the only other crate that
+//! is `deny` rather than `forbid` (it calls generated code); every other
+//! crate in the workspace is `forbid`.
 #![deny(unsafe_code)]
 
 mod aabb;

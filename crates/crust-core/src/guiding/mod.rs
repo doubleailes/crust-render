@@ -9,12 +9,3 @@ mod field;
 mod sdtree;
 
 pub use field::{GuidingConfig, GuidingField, SampleData};
-
-use glam::Vec3A;
-
-/// Rec. 709 luminance, used to collapse radiance to the scalar flux the
-/// guiding trees store.
-#[inline]
-pub fn luminance(c: Vec3A) -> f32 {
-    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
-}

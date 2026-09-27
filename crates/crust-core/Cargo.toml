@@ -12,7 +12,7 @@ path = "src/lib.rs"
 # Forwards crust-rt's traversal counters; see that crate's feature.
 traversal-stats = ["crust-rt/traversal-stats"]
 # Compile MaterialX programs to machine code with Cranelift (crust-jit, the
-# workspace's one crate that is not `forbid(unsafe_code)`). Off here and on in
+# workspace's one crate with `unsafe` outside tests). Off here and on in
 # the renderer, so the engine library carries no JIT unless a host asks;
 # `CRUST_SHADER_JIT=0` turns it off at run time.
 jit = ["dep:crust-jit"]
@@ -29,9 +29,7 @@ openusd = { version = "0.7", default-features = false }
 # core crate in openusd 0.7 and ship separately, versioned in lockstep.
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
-# Catmull-Clark subdivision at USD import. Not published on crates.io, so a
-# git dependency; pinned to a tag because `Cargo.lock` is not checked in —
-# same reasoning as ptex-rs in crust-render.
+# Catmull-Clark subdivision at USD import.
 opensubdiv-rs = "0.1"
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.

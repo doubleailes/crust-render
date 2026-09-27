@@ -1,32 +1,16 @@
-// Constants
-
 use glam::Vec3A;
 use std::f32::consts::PI;
-// Utility functions
 
 pub fn degrees_to_radians(degrees: f32) -> f32 {
     degrees * PI / 180.0
 }
 
-pub fn random() -> f32 {
-    // Return a random real in [0.0, 1.0)
-    rand::random()
-}
-
-pub fn random_range(min: f32, max: f32) -> f32 {
-    // Return a random real in [min, max)
-    min + (max - min) * random()
-}
-
-#[allow(dead_code)]
-pub fn clamp(x: f32, min: f32, max: f32) -> f32 {
-    if x < min {
-        return min;
-    }
-    if x > max {
-        return max;
-    }
-    x
+/// Rec. 709 luminance of a linear RGB value — the scalar the renderer uses
+/// wherever a colour has to become one weight: guiding flux, light power,
+/// environment-map importance, adaptive-sampling variance, lobe selection.
+#[inline]
+pub fn luminance(c: Vec3A) -> f32 {
+    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
 }
 
 /// Veach's balance heuristic: `w_a = pdf_a / (pdf_a + pdf_b)`.
@@ -48,10 +32,6 @@ pub fn power_heuristic(pdf_a: f32, pdf_b: f32) -> f32 {
     pdf_a2 / (pdf_a2 + pdf_b2 + 1e-6)
 }
 
-pub fn random2() -> (f32, f32) {
-    (random(), random())
-}
-
 pub trait Lerp {
     fn lerp(self, b: Self, t: Self) -> Self;
 }
@@ -60,67 +40,6 @@ impl Lerp for f32 {
     fn lerp(self, b: f32, t: f32) -> f32 {
         self * (1.0 - t) + b * t
     }
-}
-
-use rand::Rng;
-
-// Function to generate a random Vec3A within a unit cube
-pub fn random_vec3_unit_cube(rng: &mut impl Rng) -> Vec3A {
-    Vec3A::new(
-        rng.random_range(-1.0..1.0),
-        rng.random_range(-1.0..1.0),
-        rng.random_range(-1.0..1.0),
-    )
-}
-
-// Function to generate a random Vec3A within a unit sphere
-pub fn random_vec3_unit_sphere(rng: &mut impl Rng) -> Vec3A {
-    loop {
-        let v = random_vec3_unit_cube(rng);
-        if v.length_squared() < 1.0 {
-            return v;
-        }
-    }
-}
-
-// Function to generate a uniformly distributed random Vec3A on the unit sphere
-// (a true random unit vector). Used for Lambertian diffuse scattering.
-pub fn random_unit_vector() -> Vec3A {
-    let mut rng = rand::rng();
-    loop {
-        let v = random_vec3_unit_cube(&mut rng);
-        let len_sq = v.length_squared();
-        // Reject points outside the unit sphere and the (near) origin to avoid
-        // dividing by zero when normalizing.
-        if (1e-12..1.0).contains(&len_sq) {
-            return v / len_sq.sqrt();
-        }
-    }
-}
-
-pub fn random_in_unit_disk() -> Vec3A {
-    loop {
-        let p = Vec3A::new(random_range(-1.0, 1.0), random_range(-1.0, 1.0), 0.0);
-        if p.length_squared() >= 1.0 {
-            continue;
-        }
-        return p;
-    }
-}
-pub fn random3() -> Vec3A {
-    Vec3A::new(random(), random(), random())
-}
-
-pub fn random_range3(min: f32, max: f32) -> Vec3A {
-    Vec3A::new(
-        random_range(min, max),
-        random_range(min, max),
-        random_range(min, max),
-    )
-}
-
-pub fn random_cosine_direction() -> Vec3A {
-    cosine_hemisphere([random(), random()])
 }
 
 /// Cosine-weighted hemisphere sample from an explicit 2D uniform pair.

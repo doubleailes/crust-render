@@ -8,11 +8,9 @@ license-file = "LICENSE"
 version = "0.3.0"
 
 [workspace.dependencies]
-serde = { version = "1.0", features = ["derive"] }
-glam = { version = "0.33.2", features = ["serde"] }
+glam = "0.33.2"
 tracing = {version = "0.1.41", default-features = false}
 exr = "1.74.2"
-rand = "0.9.2"
 # Decoder-side image formats. Declared once so `crust-assets` (which decodes)
 # and `crust-render` (which writes PNGs) resolve the same package; the
 # `hdr`/`jpeg` features are the decoder's and reach crust-render through

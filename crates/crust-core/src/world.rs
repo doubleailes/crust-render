@@ -7,7 +7,6 @@ use crate::rt_world::{World, WorldBuilder};
 use crust_rt::Geometry;
 use glam::Vec3A;
 use std::sync::Arc;
-use utils::{random_range3, random3};
 
 /// Attaches an analytic sphere with its material.
 fn add_sphere(world: &mut WorldBuilder, center: Vec3A, radius: f32, material: Arc<dyn Material>) {
@@ -37,81 +36,6 @@ fn add_sphere_light(
         material,
         geom_id,
     )));
-}
-
-#[allow(dead_code)]
-pub fn random_scene() -> (World, LightList) {
-    let mut world = WorldBuilder::new();
-    let mut lights = LightList::new();
-
-    let ground_material = Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)));
-    add_sphere(
-        &mut world,
-        Vec3A::new(0.0, -1000.0, 0.0),
-        1000.0,
-        ground_material,
-    );
-
-    for a in -11..11 {
-        for b in -11..11 {
-            let choose_mat = utils::random();
-            let center = Vec3A::new(
-                a as f32 + 0.9 * utils::random(),
-                0.2,
-                b as f32 + 0.9 * utils::random(),
-            );
-
-            if (center - Vec3A::new(4.0, 0.2, 0.0)).length() > 0.9 {
-                let sphere_material: Arc<dyn Material> = if choose_mat < 0.3 {
-                    // Diffuse
-                    Arc::new(OpenPBR::diffuse(random3() * random3()))
-                } else if choose_mat < 0.8 {
-                    // Glossy
-                    Arc::new(OpenPBR::glossy(
-                        random_range3(0.5, 1.0),
-                        utils::random_range(0.0, 0.5),
-                        utils::random_range(0.0, 1.0),
-                    ))
-                } else if choose_mat < 0.95 {
-                    // Metal
-                    Arc::new(OpenPBR::metal(
-                        random_range3(0.5, 1.0),
-                        utils::random_range(0.0, 0.5),
-                    ))
-                } else {
-                    // Glass
-                    Arc::new(OpenPBR::glass(1.5))
-                };
-                add_sphere(&mut world, center, 0.2, sphere_material);
-            }
-        }
-    }
-
-    let material1 = Arc::new(OpenPBR::glass(1.5));
-    add_sphere(&mut world, Vec3A::new(0.0, 1.0, 0.0), 1.0, material1);
-
-    let material2 = Arc::new(OpenPBR::diffuse(Vec3A::new(0.4, 0.2, 0.1)));
-    add_sphere(&mut world, Vec3A::new(-4.0, 1.0, 0.0), 1.0, material2);
-
-    let material3 = Arc::new(OpenPBR::metal(Vec3A::new(0.7, 0.6, 0.5), 0.0));
-    add_sphere(&mut world, Vec3A::new(4.0, 1.0, 0.0), 1.0, material3);
-
-    add_sphere_light(
-        &mut world,
-        &mut lights,
-        Vec3A::new(10.0, 10.0, 10.0),
-        Vec3A::new(0.0, 7.0, 0.0),
-        1.0,
-    );
-    add_sphere_light(
-        &mut world,
-        &mut lights,
-        Vec3A::new(20.0, 10.0, 7.0),
-        Vec3A::new(-4.0, 7.0, 0.0),
-        1.0,
-    );
-
-    (world.commit(), lights)
 }
 
 pub fn simple_scene() -> (World, LightList) {
