@@ -5,7 +5,7 @@
 use crust_core::{
     AffineShape, AreaLight, DistantLight, DomeLight, Emissive, EnvironmentMap, Light, LightList,
     LightSelection, LightShape, LightTexture, PdfSolidAngle, RectShape, RectTexture, Shaping,
-    SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
+    SolidAngleSampling, SphereShape, UnitShape, Vec3A, projected_cone_solid_angle,
 };
 use glam::Mat3A;
 use openqmc::pcg::Rng;

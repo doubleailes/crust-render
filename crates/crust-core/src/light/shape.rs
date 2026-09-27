@@ -7,6 +7,8 @@ use glam::{Affine3A, Mat3A, Vec3A};
 
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
+use super::rect::{RectShape, SphericalRect};
+
 /// The emitting surface of an area light, decoupled from any material: pure
 /// geometry that knows how to sample itself uniformly by area, and — where it
 /// has a better strategy — by the solid angle it subtends from a shading
@@ -37,29 +39,131 @@ pub trait LightShape: Send + Sync {
         InvPdfArea::new(self.area())
     }
 
-    /// A point on the surface as seen from `from`, sampled by a density over
-    /// the *solid angle* the shape subtends there, as `(point, pdf)` with the
-    /// pdf in solid-angle measure. `None` (the default) means the shape has no
-    /// such strategy from `from`, and [`AreaLight`](super::AreaLight) falls back to
+    /// The shape's strategy for sampling a point by the *solid angle* it
+    /// subtends from `from`, or `None` (the default) where it has none from
+    /// there, and [`AreaLight`](super::AreaLight) falls back to
     /// [`LightShape::sample_point`] by area.
     ///
-    /// Two rules make it safe to implement. Whether it answers must depend on
-    /// `from` alone — never on `u`, `v` — and [`LightShape::solid_angle_pdf`]
-    /// must answer for exactly the same `from`s with the same density, or the
-    /// two MIS sides describe different strategies and emission is
-    /// double-counted. And every point it returns must be one a ray from
-    /// `from` could hit first, i.e. on the side of the shape that faces it.
+    /// One hook for both halves of MIS: NEE draws from the sampler
+    /// ([`SolidAngleSampler::sample`]) and the bounce side asks the same
+    /// sampler its density ([`SolidAngleSampler::pdf`]), so they cannot
+    /// disagree on which `from`s the strategy covers — the decision is made
+    /// here, once, on `from` alone. What remains the implementation's to get
+    /// right: every point the sampler returns must be one a ray from `from`
+    /// could hit first, i.e. on the side of the shape that faces it.
     #[must_use]
-    fn sample_solid_angle(&self, _from: Vec3A, _u: f32, _v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
+    fn solid_angle_sampler(&self, _from: Vec3A) -> Option<SolidAngleSampler<'_>> {
         None
+    }
+}
+
+/// The two halves of a shape's solid-angle strategy, as calls: a sample and
+/// the density of a point, from the same `from`, through the one sampler
+/// [`LightShape::solid_angle_sampler`] returns. Implemented for every shape
+/// and not overridable, so neither half can answer where the other does not.
+pub trait SolidAngleSampling: LightShape {
+    /// A point on the surface as seen from `from`, sampled by the shape's
+    /// solid-angle density there, as `(point, pdf)`. `None` where the shape
+    /// has no such strategy from `from`.
+    #[must_use]
+    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
+        self.solid_angle_sampler(from).map(|s| s.sample(u, v))
     }
 
     /// The solid-angle pdf, seen from `from`, of
-    /// [`LightShape::sample_solid_angle`] having produced `p` — the bounce side
-    /// of MIS. `None` exactly when `sample_solid_angle` is.
+    /// [`SolidAngleSampling::sample_solid_angle`] having produced `p` — the
+    /// bounce side of MIS. `None` exactly when `sample_solid_angle` is.
     #[must_use]
-    fn solid_angle_pdf(&self, _from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
-        None
+    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
+        self.solid_angle_sampler(from).map(|s| s.pdf(p))
+    }
+}
+
+impl<T: LightShape + ?Sized> SolidAngleSampling for T {}
+
+/// A shape's solid-angle strategy from one shading point: what
+/// [`LightShape::solid_angle_sampler`] returns once it has decided the
+/// strategy applies there.
+#[derive(Clone, Copy)]
+pub struct SolidAngleSampler<'a>(Strategy<'a>);
+
+#[derive(Clone, Copy)]
+enum Strategy<'a> {
+    /// A round sphere, uniform over the cone it subtends.
+    Cone {
+        center: Vec3A,
+        radius: f32,
+        from: Vec3A,
+        cone: SubtendedCone,
+    },
+    /// A sphere under an affine placement: the unit sphere's cone in local
+    /// space, mapped out.
+    AffineCone {
+        shape: &'a AffineShape,
+        from_local: Vec3A,
+        cone: SubtendedCone,
+    },
+    /// A rectangle, uniform over the spherical rectangle it subtends.
+    Rect {
+        shape: &'a RectShape,
+        rect: SphericalRect,
+    },
+}
+
+impl<'a> SolidAngleSampler<'a> {
+    pub(super) fn rect(shape: &'a RectShape, rect: SphericalRect) -> Self {
+        SolidAngleSampler(Strategy::Rect { shape, rect })
+    }
+
+    /// A point on the surface from two unit random numbers, and its
+    /// solid-angle pdf.
+    #[inline(always)]
+    pub fn sample(&self, u: f32, v: f32) -> (Vec3A, PdfSolidAngle) {
+        match self.0 {
+            Strategy::Cone {
+                center,
+                radius,
+                from,
+                cone,
+            } => (point_on_cone(center, radius, from, &cone, u, v), cone.pdf()),
+            Strategy::AffineCone {
+                shape,
+                from_local,
+                cone,
+            } => {
+                let p_local = point_on_cone(Vec3A::ZERO, 1.0, from_local, &cone, u, v);
+                (
+                    shape.light_to_world.transform_point3a(p_local),
+                    shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local),
+                )
+            }
+            // The point is returned through the rectangle's own `(s, t)`
+            // rather than the map's local coordinates, so it lies on the
+            // light exactly as an area sample does — on the triangles a
+            // bounce ray hits, and at the texel a textured card looks up.
+            Strategy::Rect { shape, rect } => {
+                let (s, t) = rect.sample(u as f64, v as f64);
+                (shape.sample_point(s as f32, t as f32), rect.pdf())
+            }
+        }
+    }
+
+    /// The solid-angle pdf of [`SolidAngleSampler::sample`] having produced
+    /// `p`, a point on the surface.
+    #[inline(always)]
+    pub fn pdf(&self, p: Vec3A) -> PdfSolidAngle {
+        match self.0 {
+            Strategy::Cone { cone, .. } => cone.pdf(),
+            Strategy::AffineCone {
+                shape,
+                from_local,
+                cone,
+            } => {
+                let p_local = shape.world_to_light.transform_point3a(p);
+                shape.world_solid_angle_pdf(cone.pdf(), p_local - from_local)
+            }
+            Strategy::Rect { rect, .. } => rect.pdf(),
+        }
     }
 }
 
@@ -168,27 +272,30 @@ impl LightShape for SphereShape {
         4.0 * std::f32::consts::PI * self.radius * self.radius
     }
 
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
-        sample_sphere_cone(self.center, self.radius, from, u, v)
-    }
-
-    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
-        SubtendedCone::new(self.center, self.radius, from).map(|cone| cone.pdf())
+    #[inline(always)]
+    fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
+        let cone = SubtendedCone::new(self.center, self.radius, from)?;
+        Some(SolidAngleSampler(Strategy::Cone {
+            center: self.center,
+            radius: self.radius,
+            from,
+            cone,
+        }))
     }
 }
 
-/// A point on a sphere, uniform over the cone it subtends from `from`, and
-/// that cone's (constant) solid-angle pdf. `None` from inside the sphere.
-/// Shared by [`SphereShape`] and, in its local space, by an [`AffineShape`]
-/// sphere.
-fn sample_sphere_cone(
+/// A point on a sphere, uniform over the cone it subtends from `from`
+/// (`cone`, which [`SubtendedCone::new`] built for the same three). Shared by
+/// [`SphereShape`] and, in its local space, by an [`AffineShape`] sphere.
+#[inline]
+fn point_on_cone(
     center: Vec3A,
     radius: f32,
     from: Vec3A,
+    cone: &SubtendedCone,
     u: f32,
     v: f32,
-) -> Option<(Vec3A, PdfSolidAngle)> {
-    let cone = SubtendedCone::new(center, radius, from)?;
+) -> Vec3A {
     // A direction uniform in the cone, as its angle θ off the axis toward the
     // centre...
     let (sin2_theta, cos_theta) = cone.sample(u);
@@ -204,7 +311,7 @@ fn sample_sphere_cone(
     // α is measured from the centre toward `from`, so the point lies on the cap
     // that faces it.
     let n = utils::align_to_normal(local, (from - center).normalize()).normalize();
-    Some((center + radius * n, cone.pdf()))
+    center + radius * n
 }
 
 /// The canonical local-space shapes UsdLux defines its round lights on,
@@ -389,26 +496,18 @@ impl LightShape for AffineShape {
     /// world density is the local cone's times the solid-angle Jacobian of the
     /// direction map (see [`AffineShape::world_solid_angle_pdf`]), so unlike
     /// the round sphere's it varies across the cap.
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
-        if self.unit != UnitShape::Sphere {
-            return None;
-        }
-        let from_local = self.world_to_light.transform_point3a(from);
-        let (p_local, local_pdf) = sample_sphere_cone(Vec3A::ZERO, 1.0, from_local, u, v)?;
-        Some((
-            self.light_to_world.transform_point3a(p_local),
-            self.world_solid_angle_pdf(local_pdf, p_local - from_local),
-        ))
-    }
-
-    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
+    #[inline(always)]
+    fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
         if self.unit != UnitShape::Sphere {
             return None;
         }
         let from_local = self.world_to_light.transform_point3a(from);
         let cone = SubtendedCone::new(Vec3A::ZERO, 1.0, from_local)?;
-        let p_local = self.world_to_light.transform_point3a(p);
-        Some(self.world_solid_angle_pdf(cone.pdf(), p_local - from_local))
+        Some(SolidAngleSampler(Strategy::AffineCone {
+            shape: self,
+            from_local,
+            cone,
+        }))
     }
 }
 

@@ -10,7 +10,7 @@ use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
 
 use super::rect::RectShape;
-use super::shape::{AffineShape, LightShape, SphereShape};
+use super::shape::{AffineShape, LightShape, SolidAngleSampler, SolidAngleSampling, SphereShape};
 use super::{Light, LightSample};
 
 /// The emitting surface of an [`AreaLight`]: one of the crate's
@@ -86,14 +86,9 @@ impl LightShape for AreaShape {
         dispatch!(self, s => s.inv_pdf_area(p))
     }
 
-    #[inline]
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
-        dispatch!(self, s => s.sample_solid_angle(from, u, v))
-    }
-
-    #[inline]
-    fn solid_angle_pdf(&self, from: Vec3A, p: Vec3A) -> Option<PdfSolidAngle> {
-        dispatch!(self, s => s.solid_angle_pdf(from, p))
+    #[inline(always)]
+    fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
+        dispatch!(self, s => s.solid_angle_sampler(from))
     }
 }
 

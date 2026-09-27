@@ -14,7 +14,9 @@ pub use infinite::{DistantLight, DomeLight, projected_cone_solid_angle};
 pub use kind::LightKind;
 pub use list::{LightList, LightSelection};
 pub use rect::RectShape;
-pub use shape::{AffineShape, LightShape, SphereShape, UnitShape};
+pub use shape::{
+    AffineShape, LightShape, SolidAngleSampler, SolidAngleSampling, SphereShape, UnitShape,
+};
 
 /// One sampled connection from a shading point to a light: where to aim
 /// the shadow ray, how far it must reach, the radiance arriving from that

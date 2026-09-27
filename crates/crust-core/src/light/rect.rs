@@ -3,7 +3,7 @@
 
 use glam::{DVec2, DVec3, Vec3, Vec3A};
 
-use super::shape::LightShape;
+use super::shape::{LightShape, SolidAngleSampler};
 use crate::pdf::PdfSolidAngle;
 
 /// Rectangular light surface (UsdLux `RectLight`): the parallelogram
@@ -112,9 +112,9 @@ impl RectShape {
     /// where it is area-sampled instead: a sheared parallelogram (the map
     /// needs a true rectangle); a shading point on or behind the emitting
     /// side, from which a one-sided light emits nothing anyway; and a solid
-    /// angle outside `[MIN_SPHERICAL_RECT_SR, MAX_SPHERICAL_RECT_SR]`. Both
-    /// [`LightShape`] hooks construct it here, which is what makes them
-    /// answer for exactly the same `from`s.
+    /// angle outside `[MIN_SPHERICAL_RECT_SR, MAX_SPHERICAL_RECT_SR]`. Its
+    /// [`LightShape::solid_angle_sampler`] is built from it, so both MIS
+    /// halves answer for exactly the same `from`s.
     pub(super) fn spherical_rect(&self, from: Vec3A) -> Option<SphericalRect> {
         let frame = self.frame.as_ref()?;
         let d = frame.origin - DVec3::from(Vec3::from(from));
@@ -278,17 +278,9 @@ impl LightShape for RectShape {
         self.edge_u.cross(self.edge_v).length()
     }
 
-    /// The point is returned through the rectangle's own `(s, t)` rather than
-    /// the map's local coordinates, so it lies on the light exactly as an
-    /// area sample does — on the triangles a bounce ray hits, and at the
-    /// texel a textured card looks up.
-    fn sample_solid_angle(&self, from: Vec3A, u: f32, v: f32) -> Option<(Vec3A, PdfSolidAngle)> {
-        let rect = self.spherical_rect(from)?;
-        let (s, t) = rect.sample(u as f64, v as f64);
-        Some((self.sample_point(s as f32, t as f32), rect.pdf()))
-    }
-
-    fn solid_angle_pdf(&self, from: Vec3A, _p: Vec3A) -> Option<PdfSolidAngle> {
-        self.spherical_rect(from).map(|rect| rect.pdf())
+    #[inline(always)]
+    fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {
+        self.spherical_rect(from)
+            .map(|rect| SolidAngleSampler::rect(self, rect))
     }
 }
