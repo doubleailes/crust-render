@@ -4,12 +4,82 @@ An audit of how crust uses what Rust is good at — traits and monomorphisation,
 zero-cost abstractions, the type system as a proof checker, ownership-checked
 concurrency — and where it could use more of it. Written 2026-09-27 against
 the tree after the architecture pass (`docs/architecture.md` § Technical debt
-register). Nothing here has been implemented; every proposal names the check
-that has to pass before it lands.
+register). Every proposal names the check that had to pass before it landed;
+what was done, declined or left, with the measurements, is in
+[Status](#status-implemented-2026-09-27). The sections below are the audit as
+written, so their descriptions of "the current code" are of the tree before it.
 
 References are by file and function name, not line number (the convention
 `docs/color_management.md` adopted, so this page does not rot with every edit).
 Paths are relative to `crates/`.
+
+## Status (implemented 2026-09-27)
+
+Every item in the recommended order was carried out on the branch
+`claude/rust-leverage-plan-phy9zw`, one commit per change, each landing only
+after `cargo fmt` / `clippy -D warnings` / the workspace tests, and — unless
+the row says otherwise — `check_images.sh`-style 16 spp renders of **every
+sample bit-identical** to the pre-branch goldens. Instruction counts are
+callgrind at 2 spp, one thread; wall clock is `bench_ab.sh`-style
+interleaving. Proposals that were measured and turned down are listed too,
+with the number that turned them down, so the next audit does not repeat
+them.
+
+| # | change | § | result |
+|---|--------|---|--------|
+| 1 | `EvalTimeScope: !Send` | 2.5 | done (`PhantomData<*const ()>`) |
+| 2 | `#[must_use]` on builders, queries, samplers | 2.8 | done |
+| 3 | escaped rays loop over the lights at infinity only | 1.2 | done: usdlux −3.1%, veach_mis −2.0% instructions |
+| 4 | interior medium built once per material | 4.1 | done: openpbr_showcase −0.29% |
+| 5 | typed `Config` for every `CRUST_*` | 6 | done; each switch A/B'd old ↔ new binary, bit-identical. Booleans now accept `0/false/off/no` and `1/true/on/yes`, and warn on anything else |
+| 6 | `PdfSolidAngle` / `InvPdfArea` at the light seam | 2.1 | done: ±0.02%, domelight +0.35% (the map pdf is now validated on both MIS sides) |
+| 7 | `enum AreaShape` | 1.1 | done: veach_mis −0.76%, usdlux −0.70% |
+| 8 | one `trilinear<S: MipSource>` for the four backends | 5.2 | done: usdpreview_textured −0.49%, ptex_quads +0.14%; streamed ↔ preloaded bitwise tests pass |
+| 9 | `PatternMaterial` blanket `Material` impl | 5.1 | done: usdpreview_textured −0.43% |
+| 10 | `ResolvedOpenPBR` + `tests/resolve.rs` (bitwise, every material kind) | 2.3 | done: ±0.03% |
+| 11 | `Medium: Copy`, carried by value in `Ray` | 4.2 | done: instructions flat; wall clock on 4 threads within noise — the contention it removes needs many threads on one glass |
+| 12 | `Axis` enum in the shear permutation | 3.1 | done: cornellbox −0.82% (`Bvh::hit` −2.3%), instancing −1.38%; `test_simd_matrix.sh` passes |
+| 13 | `FromStr` / `Display` from one name table (`named!`) | 5.3 | done; the CLI builds its clap values from the same table |
+| 14 | untextured `OpenPBR` queried statically in `ShadingPoint` | 1.4 | done: cornellbox −0.88%, openpbr_showcase −1.18% |
+| 15 | scanline rows rendered in parallel, written in place | 4.3 | done: cornellbox −5.0%, materialx_basic −14.0%, ptex_quads −13.5% wall clock (min of 8) |
+| 16 | the rest, below | — | — |
+
+Item 16, by section:
+
+| § | change | result |
+|---|--------|--------|
+| 1.3 | `LightList` holds `enum LightKind` | done: usdlux −0.34%, others ±0.05% |
+| 2.2 | one `LightShape::solid_angle_sampler(from)` for both MIS halves | done: +0.03 to +0.05% once `inline(always)` (plain `inline`: `sample_li` +6%) |
+| 2.4 | `ResolvedColorSpace` (no `Auto`) past the open; transfer curves as `TransferCurve` methods | done. `RawColor3` at the colour-attribute readers (`docs/color_management.md` gaps 1–2) is **not** done |
+| 2.6 | `Option<FaceHit>`; `indirect_clamp: Option<f32>`; `Cell<Option<usize>>` stripe; subdivision `base_face: Vec<Option<u32>>` | done; ptex_quads −1.0% with `OpenPBR::shaded` `inline(always)` |
+| 2.7 | `RayMask` newtype | done: ±0.007% |
+| 2.7 | `WideNode::child(l) -> Child { Node, Leaf }` | **declined**: `Bvh::hit` +0.74% with `inline` or `inline(always)` |
+| 2.7 | `GeomId` / `PrimId` | **not done**: it changes every geometry-keyed table in crust-core; a pass of its own |
+| 3.2 | `& 3` on `trailing_zeros` lane indices | **declined**: `Bvh::hit` +0.7% |
+| 3.3 | hoist the per-packet shear `expect` | **declined**: +0.5%; LLVM already hoists it |
+| 3.4 | `Box<[T]>` for the finished BVH tables | done |
+| 3.4 | `WideNode` `repr(C, align(64))` | **declined**: no gain in or out of cache (`ray_throughput --large`: −3.0% to +4.8% across scenes, noise) |
+| 3.4 | triangle shading normals in a side table | done: `PrimNode` 128 → 80 bytes, cornellbox kernel memory −22%; +0.5 to +1.0% instructions (`Bvh::hit`); `ray_throughput --large` −0.2 to −5.8% |
+| 3.5 | check "no FMA contraction" directly | done, at the IR level: `test_simd_matrix.sh` fails on any `contract` / fast-math flag or `llvm.fmuladd` in crust-rt. The suggested `vfmadd` grep would fail spuriously — **glam fuses `cross` on purpose** under `+fma`, so FMA builds shade slightly different normals from SSE2 ones (`docs/simd.md`) |
+| 4.4 | guiding samples appended in place, `update` takes an iterator | done: cornellbox_guided −19.5% wall clock |
+| 4.5 | Ptex `MICRO_BYTES` as a `StripedCounter` | done. The `.tx` shard `RwLock` and the `files` list are left until contention is measured, as the file header asks |
+| 4.6 | parallel USD import | **not started** (large; the `MeshKey` `Arc`-address hazard stands) |
+| 4.7 | `inputs:` names as literals; `MeshSource` moved, not cloned | done. Interned cache keys **not done** |
+| 4.8 | in-place BVH build | **not done** |
+| 4.9 | `SyncWrapper` for the JIT module | **declined**: it needs an `unsafe impl Sync`, and adding `unsafe` is a project decision (`CLAUDE.md`); the `Mutex` is uncontended |
+| 5.4 | `Val` arithmetic operators; `LobePmf` indexed by `Lobe` | done: openpbr_showcase −0.14% |
+| 5.5 | one `stats::breakdown` | done |
+| 7 | `Error::source`, `AssetError` logged once as `WARN` at the seam, `main -> ExitCode`, CLI numbers validated at parse | done |
+
+Found on the way, not caused by this work:
+
+- `guided_tiles_and_rows_are_bit_identical` failed about 2 runs in 100 on the
+  pre-branch tree (a guiding pass decision reads wall-clock time); after item
+  4.4 it passed 100 of 100, but the time dependence is still there.
+- `CRUST_MESH_BAKE=0` is not bit-identical, although `docs/architecture.md`
+  listed it so: an instanced mesh is intersected in local space, and 348
+  (pre-branch) / 391 (now) of cornellbox's pixels differ in the last ulp at
+  16 spp, relmse 4e-18. Rounding, not a bug; the table now says so.
 
 ## Summary
 
