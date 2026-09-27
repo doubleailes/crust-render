@@ -63,6 +63,13 @@ cargo bench -p crust-rt              # kernel traversal: intersect/occluded over
 
 # Perf probes (better than criterion for kernel A/B: min-of-N, not a drifting mean)
 cargo run --release -p crust-rt --example ray_throughput          # Mray/s per scene & query
+# ...out of cache (8 M-triangle soup + 2 M-instance field, ~3 GiB, tens of seconds);
+# built with --features traversal-stats it also prints nodes/leaves per ray:
+cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
+# Nightly-only experiment: 8-wide BVH nodes on std::simd (see docs/simd.md, "BVH8 on
+# nightly"; stable rejects the feature with E0554 by design):
+cargo +nightly test -p crust-rt --features bvh8
+RUSTFLAGS='-C target-cpu=x86-64-v3' cargo +nightly run --release -p crust-rt --example ray_throughput --features bvh8
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did the image change?
 cargo run --release -p crust-mtlx --example mtlx_bench -- lion_ldX.mtlx   # ns per MaterialX program run
 cargo run --release -p crust-jit --example jit_bench -- lion_ldX.mtlx      # ...interpreter vs JIT

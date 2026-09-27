@@ -59,7 +59,8 @@
   `simd_matches_scalar_bitwise`); change one and you must change the other.
   `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
   while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
-  the measurements, and why `std::simd` is not used (nightly-only on stable).
+  the measurements, and why `std::simd` is not used by default (nightly-only; the
+  opt-in `bvh8` experiment below is the one place it is).
 
 ## Known gaps: geometry and acceleration
 
@@ -100,10 +101,30 @@
   *enabling* AVX2 codegen is worth 2–4% (LLVM cannot widen a 4-lane algorithm), and
   8-wide leaf packets would buy exactly nothing because no leaf holds more than 4
   triangles — pinned by `eight_wide_packets_would_not_reduce_vector_rounds`. **BVH8
-  nodes** are the one place 256-bit vectors would still pay, and that is a project
-  decision, not just an optimization: reaching 256 bits at *runtime* needs `unsafe`
-  `core::arch` intrinsics (against this crate's "100% safe Rust" claim), a new
-  dependency (`wide`/`multiversion`), or a non-distributable `-C target-cpu`.
+  nodes** were the one place 256-bit vectors might pay, and were **tried**: crust-rt's
+  nightly-only **`bvh8`** feature (forwarded by crust-core and crust-render) swaps
+  `bvh/lanes4.rs` (glam `Vec4`) for `bvh/lanes8.rs` (`std::simd::f32x8`) behind a
+  `LANES` constant, safe code throughout. Images are bit-identical, node visits fall
+  7–36%, and on in-cache trees the kernel is still **12–37% slower**
+  (`ray_throughput`, min-of-10, same nightly, `x86-64-v3` both sides): a 256-byte node
+  and an 8-lane sort cost more than the visits saved. End to end it is within noise.
+  **Out of cache the answer flips** (`ray_throughput -- --large`, trees of 0.8–1.7 GiB
+  against a 260 MiB L3): an 8 M-triangle soup traces **18–25% faster** with BVH8 (node
+  visits −38%, latency-bound at ~140 ns a node), while a 2 M-instance field is 5–9%
+  slower because most of its time is in small prototype trees that fit in cache.
+  8-wide nodes cost 0.4–3% more kernel memory. So the width wants choosing *per tree
+  by size* at `commit()`, which needs both widths compiled in rather than a `cfg`; that
+  is a refactor, not a toolchain question, and crust stays on stable. The feature is
+  kept as the record and a starting point, and CI builds it on a pinned nightly without
+  gating on it (`docs/simd.md`, "BVH8 on nightly"). Reaching 256 bits on stable still
+  needs `unsafe` `core::arch` intrinsics (against this crate's "100% safe Rust" claim),
+  a new dependency (`wide`/`multiversion`), or a non-distributable `-C target-cpu`.
+  **The collapsed tables hold no spare capacity.** `collapse()` used to reserve one
+  wide node per binary leaf — three times what a BVH4 needs, seven times a BVH8 — and
+  `Bvh::accumulate_footprint` counts capacity, so the slack was both resident and
+  reported. Reserving for `LANES` and trimming all four tables after the build cut the
+  default BVH4's kernel memory 11–21% on the `--large` scenes; pinned by
+  `collapsed_tables_hold_no_spare_capacity`.
   Also: only *triangles* pack — sphere, curve and instance leaves still run scalar (no
   `Sphere4`); rays are traced one at a time, so there is no coherent ray-packet tracing
   (that needs the integrator restructured, not just the kernel); and the checked-in
