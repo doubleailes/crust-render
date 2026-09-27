@@ -31,9 +31,9 @@ transmittance along the ray. For a light whose shadow set is restricted,
 bounce-side emission at non-delta vertices SHALL NOT be collected (NEE carries
 the light alone there), so the estimator stays unbiased. At delta vertices, the
 bounce SHALL keep full weight and see the light through the real occluders.
-If a scene needs more distinct shadow classes than the renderer can encode, the
-lights beyond the limit SHALL be refused with a warning and shadowed by every
-occluder.
+If a light's shadow set cannot be encoded, the light SHALL be refused with a
+warning and shadowed by every occluder, including geometry whose class the
+renderer could not encode individually.
 
 #### Scenario: An excluded occluder casts no shadow
 
@@ -58,6 +58,13 @@ bit-identical to the renderer without linking support.
 - **WHEN** `scripts/check_images.sh check` runs over the checked-in samples, none
   of which author links
 - **THEN** it reports no difference
+
+#### Scenario: Authored high ray-mask bits without links
+
+- **WHEN** a prim authors a `crust:rayMask` with bits 3–31 set and no light
+  authors a restricted `lightLink` or `shadowLink`
+- **THEN** its geometry mask is used exactly as authored, and the image is
+  bit-identical to the renderer without linking support
 
 ## MODIFIED Requirements
 

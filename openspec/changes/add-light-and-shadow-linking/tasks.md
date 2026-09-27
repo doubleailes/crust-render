@@ -30,17 +30,24 @@
 
 ## 3. Shadow linking (`tracer/`, `usd_import/attrs.rs`)
 
-- [ ] 3.1 Encode shadow classes in ray-mask bits 3–31 (class 0 = `MASK_SHADOW`).
-      Reserve those bits in `crust:rayMask` (mask them off and `WARN`), and make
-      sure instance prototypes keep every class bit.
+- [ ] 3.1 Only when some light authors a restricted `shadowLink`, encode shadow
+      classes in the geometry mask. Class 0 keeps `MASK_SHADOW`; every other
+      shadow caster clears it and carries exactly one bit: 3–30 for the 28
+      allocated classes, 31 for overflow. Rewrite an authored `crust:rayMask`'s
+      bits 3–31 then, with one `WARN` per scene. Leave every mask untouched when no
+      shadow link exists. Make sure instance prototypes keep every class bit.
 - [ ] 3.2 Build each light's shadow-ray mask, and pass it through the surface NEE,
       `volume_nee` and `shadow_transmittance` steps and the `light_cache` rays.
-- [ ] 3.3 Refuse, with a `WARN`, lights whose sets need more than 29 classes;
-      their shadows fall back to every occluder.
+- [ ] 3.3 Refuse, with a `WARN`, restricted lights that include some overflow
+      classes but not others; they fall back to the unrestricted mask
+      (`MASK_SHADOW | bits 3–31`), which every shadow caster matches.
 - [ ] 3.4 For restricted-shadow lights, make NEE weight 1 and bounce emission 0 at
       non-delta vertices, and keep full bounce weight at delta vertices.
 - [ ] 3.5 Tests: an excluded occluder casts no NEE shadow, an excluded volume does
       not attenuate, and NEE and BSDF estimates agree for a restricted light.
+      Also test that an overflow-class geometry blocks both an unrestricted ray and
+      a refused light's fallback ray, and that a scene authoring `crust:rayMask`
+      bits 3–31 without links keeps its masks unchanged.
 
 ## 4. Sample, verification and documentation
 
@@ -59,5 +66,5 @@
       mirrors).
 - [ ] 4.5 Follow-ups, scoped separately: per-class pick renormalisation (a
       `density` / `pmf` pair change), a Cycles-style extra ray to restore MIS for
-      shadow-linked lights, and a per-ray occluder filter in `crust-rt` if 29
-      classes proves too few.
+      shadow-linked lights, and a per-ray occluder filter in `crust-rt` if the
+      overflow bit refuses lights in a real scene.

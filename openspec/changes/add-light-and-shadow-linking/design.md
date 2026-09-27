@@ -104,25 +104,48 @@ collection.
 ### D3. Shadow linking: reuse the kernel mask's free bits, and make restricted lights NEE-only
 
 **Occlusion.** Shadow classes (D1, computed over `shadowLink` only) are encoded in
-ray-mask bits 3–31, which gives up to 29 classes. Each geometry that casts shadows
-(`MASK_SHADOW` set) carries its class's bit in place of bits 3–31. Class 0, the
-class included in every restricted light's set, keeps the `MASK_SHADOW` bit
-itself. A restricted light's shadow ray carries the union of its included classes'
-bits, and an unrestricted light's ray carries `MASK_SHADOW | bits 3–31`, which is
-exactly what it carries today. `shadow_transmittance` passes the same mask on each
-of its steps through media, so an excluded volume does not attenuate either.
-`crust-rt` needs no change.
+the kernel ray mask's free bits. Today no ray ever carries bits 3–31: camera,
+indirect and shadow rays carry only `MASK_CAMERA`, `MASK_INDIRECT` and
+`MASK_SHADOW`. So a geometry's bits 3–31 have no observable effect, and the
+encoding can take them over without changing what an authored mask means.
 
-- **Trap:** an authored `crust:rayMask` with bits ≥ 3 set would alias shadow
-  classes. Those bits become reserved, and an authored value that uses them is
-  masked with a `WARN`.
+- **The encoding is active only when some light authors a restricted
+  `shadowLink`.** Otherwise every geometry mask, including an authored
+  `crust:rayMask`, is passed through unchanged, and every shadow ray carries
+  `MASK_SHADOW` as it does today. That is what makes the "unlinked scenes are
+  unchanged" requirement hold bit for bit.
+- **When it is active,** each geometry that casts shadows (`MASK_SHADOW` set)
+  keeps `MASK_SHADOW` only if it is in class 0, the class every restricted light
+  includes. Otherwise it clears `MASK_SHADOW` and carries exactly one *shadow
+  bit*. Bits 3–30 are allocated to the 28 most-populated remaining classes, and
+  bit 31 is the shared **overflow bit** for every class left over. The encoding
+  rewrites bits 3–31 of an authored `crust:rayMask`. Because no ray ever
+  carried those bits, this changes no visibility; it logs one `WARN` per scene
+  that authored any of them.
+- **Ray masks.**
+  - An unrestricted light's shadow ray carries `MASK_SHADOW | bits 3–31`, which
+    matches every shadow-casting geometry: each one carries `MASK_SHADOW` or
+    exactly one bit in 3–31. The result is equivalent to today's `MASK_SHADOW`
+    ray.
+  - A restricted light's ray carries `MASK_SHADOW` (class 0), the bits of the
+    allocated classes it includes, and the overflow bit only if it includes
+    **every** overflow class.
+  - A restricted light that includes some overflow classes but not others cannot
+    be encoded. It is refused with a `WARN` and falls back to the unrestricted
+    mask, which, by the invariant above, is blocked by every occluder, overflow
+    geometry included.
+- `shadow_transmittance` passes the same mask on each of its steps through
+  media, so an excluded volume does not attenuate either. `crust-rt` needs no
+  change.
 - **Trap:** nested instance masks compose, so the prototype's geometry must keep
   every class bit and let the instance's own mask decide. Otherwise a class bit
   is lost inside instances.
-- **More than 29 classes:** the lights whose sets need more are refused with a
-  `WARN`, and their shadows fall back to every occluder. A per-ray occluder filter
-  in `crust_rt::Scene::occluded` (a `geom_id` bitset, keeping the kernel free of
-  crust types) is the follow-up if a real scene hits this limit.
+- **Trap:** the invariant "every shadow-casting geometry carries `MASK_SHADOW` or
+  exactly one bit in 3–31" is what makes both the unrestricted and the fallback
+  mask correct. Pin it with a test that includes a geometry in an overflow class.
+- **Beyond the encoding:** a per-ray occluder filter in `crust_rt::Scene::occluded`
+  (a `geom_id` bitset, keeping the kernel free of crust types) is the follow-up if
+  a real scene refuses lights for want of bits.
 
 **The bounce-side twin.** A BSDF ray that reaches a light through an occluder
 outside the light's shadow set is stopped by that occluder, while NEE sees the light.
@@ -157,8 +180,10 @@ light gives its member counts. An `INFO` line would violate the bounded-INFO rul
 - **NEE-only restricted lights (D3)** give up MIS on those lights. That is visible
   as extra noise on glossy materials. It is accepted for the first version and
   measured on the sample with `exr_diff`'s `relmse:` against a 1024 spp reference.
-- **The class limit (D3)** of 29 shadow classes is plenty for character and
-  set rigs. It is a hard refusal, not a silent approximation, when exceeded.
+- **The class limit (D3):** 28 individually encoded shadow classes plus one
+  shared overflow bit is plenty for character and set rigs. A light that cannot
+  be encoded is refused with a warning and falls back to full shadowing; it is
+  never silently approximated.
 - **Wasted picks (D2)** grow with the number of unlinked lights. Per-class
   renormalisation is the fix and is scoped as its own task.
 - **Throughput.** One class lookup per NEE sample, and per emitter hit, when
