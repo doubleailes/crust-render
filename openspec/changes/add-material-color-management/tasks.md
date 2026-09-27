@@ -10,7 +10,7 @@
       numerically distinct output at a representative input (e.g. 0.5), so
       an accidental future unification of the two curves fails a test.
 
-## 2. Material importer enforcement (`usd_import.rs`)
+## 2. Material importer enforcement (`usd_import/`)
 
 - [ ] 2.1 Add a `RawColor3(Vec3A)` newtype with `RawColor3::decode(self,
       space: ColorSpace) -> Vec3A`; change `shader_input_vec3` to return
@@ -28,7 +28,7 @@
       `ColorSpace::Linear`, making the "no conversion" decision explicit at
       each call site.
 
-## 3. Light and volume importer enforcement (`usd_import.rs`)
+## 3. Light and volume importer enforcement (`usd_import/`)
 
 - [ ] 3.1 Change `attr_color3f` and `custom_color3` to return `RawColor3`
       (same newtype as task 2.1), so light and volume color reads go through

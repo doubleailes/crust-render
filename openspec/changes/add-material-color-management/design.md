@@ -3,16 +3,16 @@
 See proposal.md - Why/What Changes for the motivating gap. Relevant current
 code (from investigation, not restated in full):
 
-- `usd_import.rs::preview_surface_openpbr` reads `diffuseColor`/`emissiveColor`
+- `usd_import::preview_surface_openpbr` reads `diffuseColor`/`emissiveColor`
   raw (no conversion) into `OpenPBR::base_color`/`emission_color`.
-- `usd_import.rs::disney_to_openpbr` converts `baseColor` via a private
+- `usd_import::disney_to_openpbr` converts `baseColor` via a private
   `srgb_to_linear` that is actually a flat `powf(2.2)`, not the piecewise sRGB
   EOTF; every other `PxrDisneyBsdf` input is a scalar, read raw, correctly.
-- `usd_import.rs::decode_crust_openpbr` reads every `crust:openpbr` color
+- `usd_import::decode_crust_openpbr` reads every `crust:openpbr` color
   field raw via `shader_input_vec3`, by design (native format is
   linear-authored) but with nothing marking that as a decision.
 - `crust-render/src/main.rs::PtexColor::open` decodes every Ptex texel with
-  its own inline `powf(2.2)`, independent of `usd_import.rs`'s function.
+  its own inline `powf(2.2)`, independent of `usd_import/`'s function.
 - `main.rs::load_image_environment` already picks correctly per format
   (piecewise sRGB for LDR, linear pass-through for `.hdr`/EXR) and is not
   broken; it is a candidate to consume the same shared primitive, not a
@@ -25,9 +25,9 @@ code (from investigation, not restated in full):
   through a decode step at all before landing in an `OpenPBR` field — which
   is exactly how the `UsdPreviewSurface` bug happened.
 - The same "read raw, no decision made" gap exists in two more places, both
-  outside `OpenPBR`/materials entirely: `usd_import.rs::lux_emission` reads
+  outside `OpenPBR`/materials entirely: `usd_import::lux_emission` reads
   `inputs:color` for `UsdLuxDistantLight`/`DomeLight`/`SphereLight`/`RectLight`
-  via `attr_color3f`, and the volume-region importer (~usd_import.rs:482-484)
+  via `attr_color3f`, and the volume-region importer (`usd_import/volume.rs`, `emit_volume`)
   reads `crust:volume:sigmaS`/`sigmaA`/`emission` via `custom_color3`. Neither
   helper does any conversion today, and — unlike `UsdPreviewSurface` — neither
   should: OpenUSD's own docs for `UsdLuxLightAPI:inputs:color` state it is "in
@@ -53,7 +53,7 @@ code (from investigation, not restated in full):
   EOTF, flat gamma 2.2) plus the identity case, replacing the two
   independent inline implementations.
 - Make it structurally impossible to add a new color-valued shader input to
-  `usd_import.rs` without a call site explicitly stating its source color
+  `usd_import/` without a call site explicitly stating its source color
   space — including explicitly stating "linear, no conversion" rather than
   achieving that by silently not calling anything.
 - Fix the `UsdPreviewSurface` gap as part of the same mechanism, not as a
@@ -91,7 +91,7 @@ code (from investigation, not restated in full):
 `ColorSpace { Linear, Srgb, Gamma(f32) }` with `ColorSpace::decode(self, Vec3A)
 -> Vec3A`, living in a new `crust-core/src/color.rs`, re-exported from
 `lib.rs` so `crust-render`'s `main.rs` can use the same `Gamma(2.2)` arm for
-Ptex that `usd_import.rs` uses for `PxrDisneyBsdf`.
+Ptex that `usd_import/` uses for `PxrDisneyBsdf`.
 
 Alternative considered: a generic `Color<S: ColorSpaceMarker>(Vec3A)` newtype
 threaded all the way into `OpenPBR`'s fields, giving compile-time-verified
@@ -179,7 +179,7 @@ becomes visible and enforced.
 - **[Trade-off]** `RawColor3` adds one wrapper/unwrap step at ~27 material
   call sites plus the light and volume color reads → accepted, since that
   friction is the entire point (each site must state its color space), and
-  it is confined to `usd_import.rs` with no runtime cost and no change
+  it is confined to `usd_import/` with no runtime cost and no change
   outside the importer.
 - **[Risk]** A reviewer sees `ColorSpace::Linear` at every light/volume call
   site and assumes it's a no-op not worth reviewing carefully, missing a
@@ -197,7 +197,7 @@ becomes visible and enforced.
 1. Add `ColorSpace` enum + `decode` fn in a new `crust-core/src/color.rs`,
    re-exported from `lib.rs`.
 2. Change `shader_input_vec3`, `attr_color3f`, and `custom_color3` in
-   `usd_import.rs` to return `RawColor3`; add `RawColor3::decode`.
+   `usd_import/` to return `RawColor3`; add `RawColor3::decode`.
 3. Update `preview_surface_openpbr`: decode `diffuseColor`/`emissiveColor`
    with `ColorSpace::Srgb` (the bug fix). Scalar fields untouched.
 4. Update `disney_to_openpbr`: decode `baseColor` with `ColorSpace::Gamma(2.2)`
