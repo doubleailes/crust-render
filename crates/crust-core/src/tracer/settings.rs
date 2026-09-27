@@ -144,8 +144,9 @@ pub struct RenderSettings {
     pub(super) light_selection: LightSelection,
     // Firefly clamp on each camera sample's indirect light (see
     // `with_indirect_clamp`; `crust:indirectClamp` / `--indirect-clamp`).
-    // `DEFAULT_INDIRECT_CLAMP` unless overridden; 0 disables it.
-    pub(super) indirect_clamp: f32,
+    // `DEFAULT_INDIRECT_CLAMP` unless overridden; `None` is off (an authored
+    // 0). Validated at construction: `Some` is always finite and positive.
+    pub(super) indirect_clamp: Option<f32>,
 }
 impl RenderSettings {
     pub fn new(
@@ -171,7 +172,7 @@ impl RenderSettings {
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
-            indirect_clamp: DEFAULT_INDIRECT_CLAMP,
+            indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
         }
     }
 
@@ -246,16 +247,13 @@ impl RenderSettings {
     /// average out. Direct light is never touched, so lights, their direct
     /// illumination and their MIS-weighted bounce hits keep full energy.
     pub fn with_indirect_clamp(mut self, limit: f32) -> Self {
-        self.indirect_clamp = if limit.is_finite() && limit > 0.0 {
-            limit
-        } else {
-            0.0
-        };
+        self.indirect_clamp = (limit.is_finite() && limit > 0.0).then_some(limit);
         self
     }
 
-    /// The indirect clamp in effect; `0.0` when disabled.
-    pub fn indirect_clamp(&self) -> f32 {
+    /// The indirect clamp in effect — finite and positive — or `None` when it
+    /// is off.
+    pub fn indirect_clamp(&self) -> Option<f32> {
         self.indirect_clamp
     }
 

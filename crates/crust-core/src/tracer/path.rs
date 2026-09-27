@@ -69,7 +69,7 @@ pub fn ray_color(
         volumes,
         depth,
         strategy,
-        0.0,
+        None,
         sampler,
         None,
         &mut no_training,
@@ -477,7 +477,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
     volumes: &Volumes,
     depth: i32,
     strategy: SamplingStrategy,
-    indirect_clamp: f32,
+    indirect_clamp: Option<f32>,
     sampler: PathSampler,
     guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
@@ -1025,7 +1025,10 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // primary bounce escaped, and what it found at infinity (a dome, a
         // sun, the sky) is the bounce half of *direct* light, whose NEE half
         // is exact. So only a deeper vertex makes the continuation indirect.
-        radiance = if index == 0 && indirect_clamp > 0.0 && records.len() > 1 {
+        radiance = if let Some(limit) = indirect_clamp
+            && index == 0
+            && records.len() > 1
+        {
             // The primary vertex splits into what `clamp_indirect` leaves
             // alone and the continuation it clamps. Kept off the ordinary
             // expression below, which a disabled clamp must reproduce to the
@@ -1035,7 +1038,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     * (vrec.emit_here
                         + vrec.nee
                         + vrec.factor * (vrec.next_emit * vrec.next_emit_weight))
-                + clamp_indirect(vrec.atten * (vrec.factor * radiance), indirect_clamp)
+                + clamp_indirect(vrec.atten * (vrec.factor * radiance), limit)
         } else {
             vrec.segment_emit
                 + vrec.atten

@@ -68,7 +68,11 @@ fn render_settings_report_what_they_were_given() {
     assert_eq!(s.sampling_strategy(), SamplingStrategy::PowerMis);
     assert_eq!(s.pixel_filter(), PixelFilter::Triangle { radius: 1.0 });
     assert_eq!(s.light_selection(), LightSelection::Power);
-    assert_eq!(s.indirect_clamp(), 10.0, "firefly clamp on by default");
+    assert_eq!(
+        s.indirect_clamp(),
+        Some(10.0),
+        "firefly clamp on by default"
+    );
 }
 
 #[test]

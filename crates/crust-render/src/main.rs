@@ -96,12 +96,12 @@ struct Cli {
     /// Pixel filter radius in pixels, measured from the pixel center
     /// (each filter has its own default: box 0.5, triangle 1, gaussian /
     /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_radius)]
     filter_radius: Option<f32>,
     /// Firefly clamp: cap each sample's indirect light at this value in its
     /// largest channel (linear, hue kept). Biased, and 0 turns it off.
     /// Overrides the scene's `crust:indirectClamp`.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_clamp)]
     indirect_clamp: Option<f32>,
     /// Print render statistics and a per-phase profile (parse, build,
     /// render, output) when the render finishes.
@@ -132,6 +132,32 @@ fn parse_frame(s: &str) -> std::result::Result<f64, String> {
         Ok(frame)
     } else {
         Err(format!("{s} is not a finite time code"))
+    }
+}
+
+/// `--filter-radius`'s parser: a finite, positive radius in pixels. The
+/// engine would clamp anything else to its minimum radius without a word;
+/// refusing it here reports the typo as a usage error instead.
+fn parse_radius(s: &str) -> std::result::Result<f32, String> {
+    let r: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if r.is_finite() && r > 0.0 {
+        Ok(r)
+    } else {
+        Err(format!("{s} is not a positive, finite radius"))
+    }
+}
+
+/// `--indirect-clamp`'s parser: a finite, non-negative limit, `0` turning
+/// the clamp off. The engine reads anything else as off too, silently;
+/// refusing it here says so.
+fn parse_clamp(s: &str) -> std::result::Result<f32, String> {
+    let c: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if c.is_finite() && c >= 0.0 {
+        Ok(c)
+    } else {
+        Err(format!(
+            "{s} is not a finite, non-negative limit (0 turns the clamp off)"
+        ))
     }
 }
 
@@ -444,8 +470,8 @@ fn main() {
             None => String::new(),
         },
         // Biased, so a render that clamps says so in its one banner line.
-        if settings.indirect_clamp() > 0.0 {
-            format!(", indirect clamp {}", settings.indirect_clamp())
+        if let Some(limit) = settings.indirect_clamp() {
+            format!(", indirect clamp {limit}")
         } else {
             String::new()
         }
@@ -817,14 +843,14 @@ mod tests {
         let (_, base) = crust_core::get_settings();
         assert_eq!(
             base.indirect_clamp(),
-            crust_core::DEFAULT_INDIRECT_CLAMP,
+            Some(crust_core::DEFAULT_INDIRECT_CLAMP),
             "on by default"
         );
         assert_eq!(crust_core::DEFAULT_INDIRECT_CLAMP, 10.0);
-        assert_eq!(base.with_indirect_clamp(10.0).indirect_clamp(), 10.0);
-        assert_eq!(base.with_indirect_clamp(0.0).indirect_clamp(), 0.0);
-        assert_eq!(base.with_indirect_clamp(-3.0).indirect_clamp(), 0.0);
-        assert_eq!(base.with_indirect_clamp(f32::NAN).indirect_clamp(), 0.0);
+        assert_eq!(base.with_indirect_clamp(10.0).indirect_clamp(), Some(10.0));
+        assert_eq!(base.with_indirect_clamp(0.0).indirect_clamp(), None);
+        assert_eq!(base.with_indirect_clamp(-3.0).indirect_clamp(), None);
+        assert_eq!(base.with_indirect_clamp(f32::NAN).indirect_clamp(), None);
     }
 
     #[test]
@@ -955,6 +981,34 @@ mod tests {
             );
         }
         assert!(Cli::try_parse_from(["crust-render", "--frame", "twelve"]).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_a_radius_or_clamp_that_is_no_number_the_engine_uses() {
+        for bad in ["-1", "nan", "inf", "0"] {
+            assert!(
+                Cli::try_parse_from(["crust-render", "--filter-radius", bad]).is_err(),
+                "--filter-radius {bad}"
+            );
+        }
+        for bad in ["-1", "nan", "inf"] {
+            assert!(
+                Cli::try_parse_from(["crust-render", "--indirect-clamp", bad]).is_err(),
+                "--indirect-clamp {bad}"
+            );
+        }
+        let ok = Cli::try_parse_from([
+            "crust-render",
+            "--indirect-clamp",
+            "0",
+            "--filter-radius",
+            "1.5",
+        ])
+        .unwrap();
+        assert_eq!(
+            (ok.indirect_clamp, ok.filter_radius),
+            (Some(0.0), Some(1.5))
+        );
     }
 
     #[test]
