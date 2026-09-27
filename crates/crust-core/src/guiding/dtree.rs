@@ -160,6 +160,7 @@ impl DTree {
     /// drawing per-level from the QMC sampler burns through its dimension
     /// window; the hashed stream avoids both while keeping the sampler's
     /// dimension usage fixed.
+    #[must_use]
     pub fn sample(&self, seed: [f32; 2]) -> Option<([f32; 2], f32)> {
         if self.total_flux() <= 0.0 {
             return None;

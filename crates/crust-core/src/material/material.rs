@@ -54,6 +54,7 @@ pub trait Material: Send + Sync {
     /// # Returns
     /// - `Some(sample)` describing the sampled bounce (see [`ScatterSample`]).
     /// - `None` if the material does not scatter the ray.
+    #[must_use]
     fn scatter_importance(
         &self,
         r_in: &Ray,
@@ -114,6 +115,7 @@ pub trait Material: Send + Sync {
     /// [`Resolution::emitted`] as [`Material::emitted_at`], and the `OpenPBR`
     /// *fully* resolved — its own per-hit lookups (Ptex) already applied, see
     /// [`OpenPBR::into_resolved`] — for the BSDF queries.
+    #[must_use]
     fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
         let _ = (r_in, rec, cos_theta_o);
         None
@@ -270,6 +272,7 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// [`Material::scatter_importance`] at this hit.
+    #[must_use]
     pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),

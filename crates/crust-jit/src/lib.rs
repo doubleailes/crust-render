@@ -119,6 +119,7 @@ impl JitProgram {
     /// the interpreter's bounds checks, so it must never be given one out of
     /// range. The caller then runs the program on the interpreter, which
     /// reads such an operand as zero.
+    #[must_use = "a refused program must fall back to the interpreter"]
     pub fn new(program: &Program) -> Result<JitProgram, JitError> {
         if !program.is_well_formed() {
             return Err(JitError(

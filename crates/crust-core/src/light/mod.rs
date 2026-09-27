@@ -60,6 +60,7 @@ pub trait Light: Send + Sync {
     ///
     /// # Parameters
     /// - `u`, `v`: Unit random numbers driving the sample.
+    #[must_use]
     fn sample_li(&self, from: Vec3A, u: f32, v: f32) -> Option<LightSample>;
 
     /// Solid-angle pdf, as seen from `from`, of [`Light::sample_li`] having

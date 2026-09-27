@@ -97,12 +97,14 @@ impl Ray {
     }
 
     /// Same ray with the shutter time replaced.
+    #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_time(mut self, time: f32) -> Ray {
         self.rt.time = time;
         self
     }
 
     /// Same ray with the visibility mask replaced.
+    #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_mask(mut self, mask: u32) -> Ray {
         self.rt.mask = mask;
         self
@@ -113,6 +115,7 @@ impl Ray {
     /// Materials build scattered rays with no path context, so — like the
     /// shutter time and the visibility mask — the cone is stamped on by the
     /// tracer once the ray comes back.
+    #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_cone(mut self, cone: RayCone) -> Ray {
         self.cone = cone;
         self
