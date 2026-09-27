@@ -283,8 +283,8 @@ impl DTree {
     }
 
     /// Maximum depth of the tree (a single root node has depth 1).
-    /// Diagnostics/tests helper.
-    #[allow(dead_code)]
+    /// Test helper.
+    #[cfg(test)]
     pub fn depth(&self) -> u32 {
         fn rec(nodes: &[DNode], idx: usize) -> u32 {
             let mut d = 1;

@@ -172,7 +172,7 @@ const EON_B: f32 = 2.0 / 3.0 - 28.0 / (15.0 * PI);
 
 /// Fujii Oren-Nayar directional albedo, exact closed form. (Reference for
 /// the approximation below; used by tests to pin the fit.)
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn eon_albedo_exact(mu: f32, roughness: f32) -> f32 {
     let mu = mu.clamp(1e-4, 1.0);
     let af = 1.0 / (1.0 + EON_A * roughness);

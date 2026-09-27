@@ -26,8 +26,10 @@
 //!
 //! # `unsafe`
 //!
-//! This is the one crate in the workspace that is not `forbid(unsafe_code)`,
-//! as the plan requires: calling generated code cannot be done without it.
+//! This is the one crate in the workspace with `unsafe` in production code —
+//! `crust-core` is also `deny` rather than `forbid`, but only for a test-only
+//! allocator — as the plan requires: calling generated code cannot be done
+//! without it.
 //! `deny(unsafe_code)` holds everywhere except four audited blocks, each with
 //! its safety argument beside it: the transmute of the finalized code pointer
 //! to a function type ([`JitProgram::new`]), the raw-pointer accesses in the

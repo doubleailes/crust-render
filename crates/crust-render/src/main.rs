@@ -1,7 +1,7 @@
 //! The CLI: parse args, build a `Scene`, render, write the images.
 //!
-//! `forbid(unsafe_code)`, like every crate here but `crust-core` — whose one
-//! exception is a test-only counting allocator.
+//! `forbid(unsafe_code)`, like every crate here but `crust-core` (a test-only
+//! counting allocator) and `crust-jit` (calling generated code).
 #![forbid(unsafe_code)]
 
 use clap::Parser;
@@ -252,14 +252,10 @@ fn get_logger_level(level: LoggerLevel) -> Level {
     }
 }
 
-/// Compress a linear f32 into [0,1] and encode it as an sRGB byte.
+/// Compress a linear f32 into [0,1] and encode it as an sRGB byte, through
+/// the same transfer function the texture decoders invert.
 fn tone_map(linear: f32) -> u8 {
-    let clamped = linear.clamp(0.0, 1.0);
-    let srgb = if clamped <= 0.0031308 {
-        12.92 * clamped
-    } else {
-        1.055 * clamped.powf(1.0 / 2.4) - 0.055
-    };
+    let srgb = crust_assets::linear_to_srgb(linear.clamp(0.0, 1.0));
     (srgb * 255.0 + 0.5).floor() as u8
 }
 

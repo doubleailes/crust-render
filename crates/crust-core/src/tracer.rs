@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::filter::{FilterSampler, PixelFilter};
-use crate::guiding::{GuidingConfig, GuidingField, SampleData, luminance};
+use crate::guiding::{GuidingConfig, GuidingField, SampleData};
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
@@ -13,6 +13,7 @@ use crate::{LightList, LightSelection, PathSampler, camera::Camera};
 use glam::Vec3A;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
+use utils::luminance;
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
 // (per-pixel, per-sample) sampler; each per-event sub-domain hangs off the

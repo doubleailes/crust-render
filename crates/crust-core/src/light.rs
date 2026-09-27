@@ -1,9 +1,10 @@
-use crate::environment::{EnvironmentMap, luminance};
+use crate::environment::EnvironmentMap;
 use crate::material::Emissive;
 use glam::{Affine3A, DVec2, DVec3, Mat3A, Vec3, Vec3A};
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::Arc;
+use utils::luminance;
 
 /// The emitting surface of an area light, decoupled from any material: pure
 /// geometry that knows how to sample itself uniformly by area, and — where it

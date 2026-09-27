@@ -233,7 +233,7 @@ pub(crate) fn train(
                                 if world.occluded(&shadow, 0.001, ls.distance - 0.001) {
                                     continue;
                                 }
-                                let e = crate::guiding::luminance(c) / ls.pdf;
+                                let e = utils::luminance(c) / ls.pdf;
                                 if e.is_finite() {
                                     sum += e;
                                 }
