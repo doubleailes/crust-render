@@ -98,6 +98,12 @@ pub enum Op {
         /// widths (see [`shifted_uv`]). Zero everywhere except the copies of
         /// a subgraph `heighttonormal` differentiates.
         shift: [f32; 2],
+        /// The slot holding an authored `texcoord` connection, when the
+        /// image has one other than the default chart; `None` reads the
+        /// shading point's `uv` (displaced by `shift`). A connected
+        /// coordinate carries any shift in its own `TexCoord` ops, so a
+        /// coordinate that does not depend on the chart is not displaced.
+        coord: Option<u32>,
     },
     /// `primvars:st` as a `vector2`, displaced by `shift` footprint widths
     /// exactly as [`Op::Texture`] is.
@@ -213,12 +219,12 @@ impl Op {
     /// Calls `f` on every operand slot index, in a fixed order.
     pub fn for_each_operand(&mut self, mut f: impl FnMut(&mut u32)) {
         match self {
-            Op::Const(_)
-            | Op::Texture { .. }
-            | Op::TexCoord { .. }
-            | Op::Normal
-            | Op::ViewDirection
-            | Op::Position => {}
+            Op::Texture { coord, .. } => {
+                if let Some(c) = coord {
+                    f(c);
+                }
+            }
+            Op::Const(_) | Op::TexCoord { .. } | Op::Normal | Op::ViewDirection | Op::Position => {}
             Op::Unary { a, .. }
             | Op::Luminance { a }
             | Op::Convert { a, .. }
@@ -488,9 +494,22 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             offset,
             arity,
             shift,
+            coord,
         } => match tex {
             Some(t) => {
-                let (u, v) = shifted_uv(ctx, *shift);
+                let (u, v) = match coord {
+                    Some(c) => {
+                        let c = g(*c);
+                        // A `float` coordinate is both axes, as MaterialX's
+                        // implicit promotion to `vector2` makes it.
+                        if c.arity == 1 {
+                            (c.x(), c.x())
+                        } else {
+                            (c.v[0], c.v[1])
+                        }
+                    }
+                    None => shifted_uv(ctx, *shift),
+                };
                 let u = u * scale[0] + offset[0];
                 let v = v * scale[1] + offset[1];
                 // `uvtiling` scales the coordinates, so it scales the
@@ -1147,7 +1166,20 @@ impl<'a> Compiler<'a> {
             return self.constant(Val::float(0.5));
         }
         let input = self.input_or(node, "in", Val::vec3(1.0, 1.0, 1.0));
-        let mut c = input;
+        // Promote a `float` input to the colour MaterialX makes of it — its
+        // first lane, three times — before any stage runs. A one-lane texture
+        // carries its file's other channels in the lanes above the first, and
+        // the stages below work lane by lane, so without this they would
+        // correct those hidden channels too and a later `convert` would
+        // surface them as colour. `zip` broadcasts a one-lane operand from
+        // lane 0 and multiplying by one is exact, so a `color3` input passes
+        // through bit for bit.
+        let ones = self.constant(Val::vec3(1.0, 1.0, 1.0));
+        let mut c = self.emit(Op::Binary {
+            op: BinOp::Mul,
+            a: input,
+            b: ones,
+        });
         // Each parameter's slot, unless it folds to the stage's identity.
         let param = |cc: &mut Self, name: &str, default: f32| -> Option<u32> {
             let s = cc.input_or(node, name, Val::float(default));
@@ -1246,11 +1278,6 @@ impl<'a> Compiler<'a> {
                 b: k,
             });
         }
-        if c == input {
-            // Every stage widens to the colour's three lanes; with none run,
-            // a scalar `in` still has to come out as a `color3`.
-            c = self.emit(Op::Convert { a: c, arity: 3 });
-        }
         c
     }
 
@@ -1290,6 +1317,7 @@ impl<'a> Compiler<'a> {
         } else {
             ([1.0, 1.0], [0.0, 0.0])
         };
+        let coord = self.image_coord(node);
         self.emit(Op::Texture {
             tex,
             fallback,
@@ -1297,7 +1325,33 @@ impl<'a> Compiler<'a> {
             offset,
             arity,
             shift: self.uv_shift,
+            coord,
         })
+    }
+
+    /// An image's authored `texcoord`, compiled, or `None` for the shading
+    /// point's own chart.
+    ///
+    /// `None` covers the unconnected input and a connection to the default
+    /// chart itself (`texcoord` index 0, or `geompropvalue` of `st`), which is
+    /// how nearly every document spells it; those keep the op on the JIT's
+    /// inline texture path. A connection whose subgraph meets an operator
+    /// this compiler lacks (`place2d`, a second UV set) also takes `None`:
+    /// the chart is a better stand-in for an unknown coordinate than the
+    /// constant the unknown node would compile to, and that node is already
+    /// reported.
+    fn image_coord(&mut self, node: &Node) -> Option<u32> {
+        let input = node.input("texcoord")?;
+        if let Source::Node { name, .. } = &input.source {
+            let scope = node.graph.clone().unwrap_or_default();
+            if self.doc.find(&scope, name).is_some_and(is_default_chart) {
+                return None;
+            }
+        }
+        // A literal compiles to a constant: one fixed texel, as authored.
+        let reported = self.unsupported.len();
+        let slot = self.compile_input(node, input);
+        (self.unsupported.len() == reported).then_some(slot)
     }
 }
 
@@ -1321,6 +1375,21 @@ impl Compiler<'_> {
                 .insert(format!("{} (varying {name})", node.category));
             default
         })
+    }
+}
+
+/// Whether `node` is the shading point's default chart: `texcoord` with
+/// index 0, or `geompropvalue` reading `st` — what `ShadeCtx::uv` holds.
+fn is_default_chart(node: &Node) -> bool {
+    let text = |name: &str| {
+        node.input(name)
+            .and_then(|i| i.text.as_deref())
+            .map(str::trim)
+    };
+    match node.category.as_str() {
+        "texcoord" => text("index").is_none_or(|i| i == "0"),
+        "geompropvalue" => text("geomprop") == Some("st"),
+        _ => false,
     }
 }
 
@@ -1659,6 +1728,163 @@ mod tests {
             height_to_normal_at(10.0, 5.0, 0.0, "n"),
             Vec3A::new(0.5, 0.5, 1.0)
         );
+    }
+
+    /// `node` of `doc`, every image in it served by `tex`, at uv (0.3, 0.6)
+    /// with a footprint `uv_width` wide. Also returns the compiled program.
+    fn eval_with(
+        doc: &str,
+        node: &str,
+        tex: impl crate::Texture + Clone + 'static,
+        uv_width: f32,
+    ) -> (Val, Program) {
+        let doc = Doc::parse(doc).unwrap();
+        let loader =
+            move |_: &str, _: Option<&str>| Some(TextureRef(std::sync::Arc::new(tex.clone())));
+        let mut c = Compiler::new(&doc, &loader);
+        let slot = c.compile_named("", node, None);
+        let mut slots = Vec::new();
+        let ctx = ShadeCtx {
+            uv: (0.3, 0.6),
+            normal: Vec3A::Z,
+            tangent: Vec3A::X,
+            view: -Vec3A::Z,
+            position: Vec3A::ZERO,
+            uv_width,
+        };
+        c.program.eval(&ctx, &mut slots);
+        (slots[slot as usize], c.program)
+    }
+
+    #[derive(Clone)]
+    struct RampTex(f32);
+    impl crate::Texture for RampTex {
+        fn eval(&self, u: f32, _: f32, _: f32) -> [f32; 4] {
+            [self.0 * u; 4]
+        }
+    }
+
+    /// `heighttonormal` over an image whose `texcoord` is `coord` — a
+    /// fragment of nodes naming the connected one `c`, or empty for none.
+    fn height_doc(coord: &str) -> String {
+        let conn = if coord.is_empty() {
+            String::new()
+        } else {
+            r#"<input name="texcoord" type="vector2" nodename="c" />"#.into()
+        };
+        format!(
+            r#"<materialx>
+                 {coord}
+                 <image name="h" type="float">
+                   <input name="file" type="filename" value="height.tif" />
+                   {conn}
+                 </image>
+                 <heighttonormal name="n" type="vector3">
+                   <input name="in" type="float" nodename="h" />
+                 </heighttonormal>
+               </materialx>"#
+        )
+    }
+
+    fn texture_coords(p: &Program) -> Vec<Option<u32>> {
+        p.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Texture { coord, .. } => Some(*coord),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heighttonormal_of_a_constant_coordinate_is_flat() {
+        // Every tap reads the same texel, whatever the footprint.
+        let doc = height_doc(
+            r#"<constant name="c" type="vector2"><input name="value" type="vector2" value="0.5, 0.5" /></constant>"#,
+        );
+        let (n, _) = eval_with(&doc, "n", RampTex(10.0), 0.01);
+        assert_eq!(n.rgb(), Vec3A::new(0.5, 0.5, 1.0));
+    }
+
+    #[test]
+    fn the_default_chart_spelled_out_is_the_implicit_one() {
+        // `geompropvalue st` and `texcoord` are what `ctx.uv` already holds:
+        // same answer as no connection, and still the JIT's inline lookup.
+        let (want, p) = eval_with(&height_doc(""), "n", RampTex(10.0), 0.01);
+        assert!(texture_coords(&p).iter().all(Option::is_none));
+        for c in [
+            r#"<geompropvalue name="c" type="vector2"><input name="geomprop" type="string" value="st" /></geompropvalue>"#,
+            r#"<texcoord name="c" type="vector2" />"#,
+        ] {
+            let (got, p) = eval_with(&height_doc(c), "n", RampTex(10.0), 0.01);
+            assert_eq!(bits_of(got), bits_of(want), "{c}");
+            assert!(texture_coords(&p).iter().all(Option::is_none), "{c}");
+        }
+    }
+
+    fn bits_of(v: Val) -> ([u32; 4], u8) {
+        (v.v.map(f32::to_bits), v.arity)
+    }
+
+    #[test]
+    fn an_authored_coordinate_is_sampled_and_differentiated_through() {
+        // `texcoord · 2`: the image reads at twice the chart, and the height
+        // changes twice as fast across the same footprint.
+        let doc = height_doc(
+            r#"<texcoord name="t" type="vector2" />
+               <multiply name="c" type="vector2">
+                 <input name="in1" type="vector2" nodename="t" />
+                 <input name="in2" type="float" value="2" />
+               </multiply>"#,
+        );
+        let (h, _) = eval_with(&doc, "h", RampTex(10.0), 0.01);
+        assert!((h.x() - 10.0 * 0.6).abs() < 1e-5, "height {}", h.x());
+        let (n, _) = eval_with(&doc, "n", RampTex(10.0), 0.01);
+        let du = 0.2f32; // 10 per unit, 2x the chart, 0.01 across
+        let want =
+            Vec3A::new(-du, 0.0, (1.0 - du * du).sqrt()).normalize() * 0.5 + Vec3A::splat(0.5);
+        close(n.rgb(), want);
+    }
+
+    #[test]
+    fn an_uncompilable_coordinate_falls_back_to_the_chart() {
+        // `place2d` has no operator here; its constant stand-in would pin the
+        // lookup to one texel, so the chart is used instead (and reported).
+        let doc = height_doc(r#"<place2d name="c" type="vector2" />"#);
+        let (h, p) = eval_with(&doc, "h", RampTex(10.0), 0.01);
+        assert!((h.x() - 3.0).abs() < 1e-5, "height {}", h.x());
+        assert!(texture_coords(&p).iter().all(Option::is_none));
+    }
+
+    #[derive(Clone)]
+    struct Channels;
+    impl crate::Texture for Channels {
+        fn eval(&self, _: f32, _: f32, _: f32) -> [f32; 4] {
+            [0.25, 0.5, 0.75, 1.0]
+        }
+    }
+
+    #[test]
+    fn colorcorrect_of_a_float_image_is_grey() {
+        // A one-lane lookup keeps its file's other channels in lanes 1..3; the
+        // correction must promote lane 0, not correct and expose the rest.
+        let doc = r#"<materialx>
+                 <image name="m" type="float">
+                   <input name="file" type="filename" value="mask.tif" />
+                 </image>
+                 <colorcorrect name="cc" type="color3">
+                   <input name="in" type="float" nodename="m" />
+                   <input name="gain" type="float" value="2" />
+                 </colorcorrect>
+                 <convert name="out" type="color3">
+                   <input name="in" type="color3" nodename="cc" />
+                 </convert>
+               </materialx>"#;
+        for node in ["cc", "out"] {
+            let (v, _) = eval_with(doc, node, Channels, 0.0);
+            assert_eq!(v.arity, 3, "{node}");
+            assert_eq!(v.rgb(), Vec3A::splat(0.5), "{node}");
+        }
     }
 
     #[test]
