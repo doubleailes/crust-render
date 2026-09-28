@@ -62,6 +62,9 @@ pub struct Node {
     /// Set for nodes parsed inside a `<nodegraph>`, so a name collision
     /// between two graphs cannot merge them.
     pub graph: Option<String>,
+    /// The node's `version` attribute, when authored: which version of its
+    /// nodedef it instantiates.
+    pub version: Option<String>,
 }
 
 impl Node {
@@ -296,6 +299,7 @@ fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
         type_name,
         inputs,
         graph,
+        version: el.attribute("version").map(str::to_string),
     }
 }
 

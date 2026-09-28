@@ -318,6 +318,19 @@ pub struct Emission {
     /// arity-3 value with three distinct channels. Read it with `Val::rgb`,
     /// which broadcasts an arity-1 value.
     pub weight: Slot,
+    /// A `generalized_schlick_edf` over this term: its radiance is scaled by
+    /// `mix(color0, color90, (1 − cosθ)^exponent)` toward a view at θ from the
+    /// normal. `None` for a uniform emitter.
+    pub falloff: Option<EdfFalloff>,
+}
+
+/// `generalized_schlick_edf`'s angular falloff (MaterialX:
+/// `mx_fresnel_schlick(NdotV, color0, color90, exponent)` times its `base`).
+#[derive(Clone, Copy, Debug)]
+pub struct EdfFalloff {
+    pub color0: Slot,
+    pub color90: Slot,
+    pub exponent: Slot,
 }
 
 /// A homogeneous interior medium: MaterialX's `anisotropic_vdf`, or the
@@ -356,12 +369,20 @@ impl Closures {
         (self.nodes.len() - 1) as NodeId
     }
 
-    /// Number of BSDF leaves in the tree.
+    /// Number of BSDF leaves reachable from the root — what a shading point
+    /// has to hold. The arena may also carry leaves a builder made and then
+    /// pruned the branch of; those are never visited.
     pub fn leaf_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .filter(|n| matches!(n, Closure::Leaf(_)))
-            .count()
+        fn count(cl: &Closures, id: NodeId) -> usize {
+            match &cl.nodes[id as usize] {
+                Closure::Leaf(_) => 1,
+                Closure::Layer { top: a, base: b }
+                | Closure::Mix { fg: a, bg: b, .. }
+                | Closure::Add { a, b } => count(cl, *a) + count(cl, *b),
+                Closure::Multiply { input, .. } => count(cl, *input),
+            }
+        }
+        self.root.map_or(0, |r| count(self, r))
     }
 
     /// The leaves reachable from the root, each with its **structural**
@@ -429,6 +450,11 @@ impl Closures {
         for e in &mut self.emission {
             f(&mut e.color);
             f(&mut e.weight);
+            if let Some(fo) = &mut e.falloff {
+                f(&mut fo.color0);
+                f(&mut fo.color90);
+                f(&mut fo.exponent);
+            }
         }
         if let Some(v) = &mut self.volume {
             f(&mut v.absorption);
@@ -507,7 +533,7 @@ fn shader(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) {
             }
             if let Some(n) = connected_node(c, node, "edf") {
                 let one = c.constant(Val::ONE);
-                edf_walk(c, &n, one, depth + 1, out);
+                edf_walk(c, &n, one, None, depth + 1, out);
             }
             if let Some(t) = c.optional_input(node, "thin_walled") {
                 out.thin_walled = Some(t);
@@ -817,8 +843,16 @@ fn vdf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
     }
 }
 
-/// Walks the EDF tree, accumulating the weight reaching each `uniform_edf`.
-fn edf_walk(c: &mut Compiler<'_>, node: &Node, weight: Slot, depth: usize, out: &mut Closures) {
+/// Walks the EDF tree, accumulating the weight reaching each `uniform_edf` and
+/// the `generalized_schlick_edf` falloff over it, if any.
+pub(crate) fn edf_walk(
+    c: &mut Compiler<'_>,
+    node: &Node,
+    weight: Slot,
+    falloff: Option<EdfFalloff>,
+    depth: usize,
+    out: &mut Closures,
+) {
     if depth > MAX_DEPTH {
         return;
     }
@@ -838,16 +872,16 @@ fn edf_walk(c: &mut Compiler<'_>, node: &Node, weight: Slot, depth: usize, out: 
                 b: inv,
             });
             if let Some(n) = closure_input(c, node, "bg", ClosureType::Edf) {
-                edf_walk(c, &n, w_bg, depth + 1, out);
+                edf_walk(c, &n, w_bg, falloff, depth + 1, out);
             }
             if let Some(n) = closure_input(c, node, "fg", ClosureType::Edf) {
-                edf_walk(c, &n, w_fg, depth + 1, out);
+                edf_walk(c, &n, w_fg, falloff, depth + 1, out);
             }
         }
         "add" => {
             for name in ["in1", "in2"] {
                 if let Some(n) = closure_input(c, node, name, ClosureType::Edf) {
-                    edf_walk(c, &n, weight, depth + 1, out);
+                    edf_walk(c, &n, weight, falloff, depth + 1, out);
                 }
             }
         }
@@ -869,7 +903,24 @@ fn edf_walk(c: &mut Compiler<'_>, node: &Node, weight: Slot, depth: usize, out: 
                     a: weight,
                     b: s,
                 });
-                edf_walk(c, &n, w, depth + 1, out);
+                edf_walk(c, &n, w, falloff, depth + 1, out);
+            }
+        }
+        // A view-dependent Fresnel-style falloff over its `base` EDF. One
+        // level is represented; a falloff over a falloff is reported.
+        "generalized_schlick_edf" => {
+            if falloff.is_some() {
+                c.unsupported
+                    .insert("generalized_schlick_edf (nested)".into());
+                return;
+            }
+            let fo = EdfFalloff {
+                color0: c.input_or(node, "color0", Val::ONE),
+                color90: c.input_or(node, "color90", Val::ONE),
+                exponent: c.input_or(node, "exponent", Val::float(5.0)),
+            };
+            if let Some(n) = closure_input(c, node, "base", ClosureType::Edf) {
+                edf_walk(c, &n, weight, Some(fo), depth + 1, out);
             }
         }
         // Only `uniform_edf` is mapped, and the refusal of the others is the
@@ -884,7 +935,11 @@ fn edf_walk(c: &mut Compiler<'_>, node: &Node, weight: Slot, depth: usize, out: 
                 return;
             }
             let color = c.input_or(node, "color", Val::ONE);
-            out.emission.push(Emission { color, weight });
+            out.emission.push(Emission {
+                color,
+                weight,
+                falloff,
+            });
         }
         other => {
             c.unsupported.insert(other.to_string());

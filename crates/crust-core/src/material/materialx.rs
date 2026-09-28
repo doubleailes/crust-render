@@ -134,15 +134,31 @@ impl MtlxMaterial {
     /// channels multiply into positive light. The weight is read with
     /// `Val::rgb`, because a `multiply` by a `color3` tints an emitter per
     /// channel; taking lane 0 would turn `(0, 0.6, 0.9)` into black.
-    fn emission(&self, slots: &[Val]) -> Vec3A {
+    ///
+    /// A `generalized_schlick_edf` over a term scales it by
+    /// `mix(color0, color90, (1 − cosθ)^exponent)` toward the viewer at
+    /// `cos_theta_o` — how OpenPBR and Standard Surface fade emission seen
+    /// through their coat's Fresnel.
+    fn emission(&self, slots: &[Val], cos_theta_o: f32) -> Vec3A {
         let clean = |v: Vec3A| {
             let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
             Vec3A::new(f(v.x), f(v.y), f(v.z))
         };
+        let x = (1.0 - cos_theta_o).clamp(0.0, 1.0);
         self.closures
             .emission
             .iter()
-            .map(|e| clean(slots[e.weight as usize].rgb()) * clean(slots[e.color as usize].rgb()))
+            .map(|e| {
+                let mut r =
+                    clean(slots[e.weight as usize].rgb()) * clean(slots[e.color as usize].rgb());
+                if let Some(fo) = e.falloff {
+                    let c0 = clean(slots[fo.color0 as usize].rgb());
+                    let c90 = clean(slots[fo.color90 as usize].rgb());
+                    let k = slots[fo.exponent as usize].x().max(0.0);
+                    r *= c0.lerp(c90, x.powf(k));
+                }
+                r
+            })
             .sum()
     }
 
@@ -159,9 +175,10 @@ impl MtlxMaterial {
     /// read the numbers it produces at a named point on the chart — not to
     /// compare renders.
     pub fn probe(&self, r_in: &Ray, rec: &HitRecord) -> Probe {
+        let cos = rec.normal.dot(-r_in.direction().normalize()).max(0.0);
         self.with_slots(r_in, rec, |s| Probe {
             closure: ResolvedClosure::resolve(&self.closures, s, r_in, rec),
-            emission: self.emission(s),
+            emission: self.emission(s, cos),
         })
     }
 }
@@ -187,10 +204,9 @@ impl Material for MtlxMaterial {
     /// One program run per vertex: the emission and the collapsed closure
     /// both come from the same evaluated slots.
     fn resolve(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Option<Resolution> {
-        let _ = cos_theta_o;
         Some(self.with_slots(r_in, rec, |s| {
             let emitted = if self.can_emit() {
-                self.emission(s)
+                self.emission(s, cos_theta_o)
             } else {
                 Vec3A::ZERO
             };
@@ -221,11 +237,10 @@ impl Material for MtlxMaterial {
     }
 
     fn emitted_at(&self, r_in: &Ray, rec: &HitRecord, cos_theta_o: f32) -> Vec3A {
-        let _ = cos_theta_o;
         if !self.can_emit() {
             return Vec3A::ZERO;
         }
-        self.with_slots(r_in, rec, |s| self.emission(s))
+        self.with_slots(r_in, rec, |s| self.emission(s, cos_theta_o))
     }
 }
 

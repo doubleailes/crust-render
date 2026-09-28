@@ -1,0 +1,85 @@
+<?xml version="1.0"?>
+<!--
+  MaterialX surface-shader fixture: one material per surface node crust
+  expands into its MaterialX 1.39 nodegraph (open_pbr_surface,
+  standard_surface, gltf_pbr), plus the shapes the closure tree newly makes
+  possible — a refractive glass, a volume-attenuated glTF transmission and a
+  coat whose normal differs from the base's. Texture-free on purpose, so the
+  tests and the probe (`examples/mtlx_shade`) can pin exact numbers.
+-->
+<materialx version="1.39" colorspace="lin_rec709">
+
+  <!-- OpenPBR: a clear-coated red plastic with a little fuzz. -->
+  <open_pbr_surface name="openpbr_coated" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.7, 0.12, 0.08" />
+    <input name="specular_roughness" type="float" value="0.35" />
+    <input name="coat_weight" type="float" value="1" />
+    <input name="coat_roughness" type="float" value="0.05" />
+    <input name="fuzz_weight" type="float" value="0.25" />
+  </open_pbr_surface>
+  <surfacematerial name="mtlx_openpbr_coated" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="openpbr_coated" />
+  </surfacematerial>
+
+  <!-- Standard Surface: brushed gold, an artistic-IOR conductor. -->
+  <standard_surface name="std_gold" type="surfaceshader">
+    <input name="metalness" type="float" value="1" />
+    <input name="base_color" type="color3" value="0.944, 0.776, 0.373" />
+    <input name="specular_color" type="color3" value="0.998, 0.981, 0.751" />
+    <input name="specular_roughness" type="float" value="0.25" />
+    <input name="specular_anisotropy" type="float" value="0.5" />
+  </standard_surface>
+  <surfacematerial name="mtlx_standard_gold" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="std_gold" />
+  </surfacematerial>
+
+  <!-- glTF PBR: a blue metallic-roughness dielectric with a clearcoat. -->
+  <gltf_pbr name="gltf_clearcoat" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.1, 0.25, 0.7" />
+    <input name="metallic" type="float" value="0" />
+    <input name="roughness" type="float" value="0.6" />
+    <input name="clearcoat" type="float" value="1" />
+    <input name="clearcoat_roughness" type="float" value="0.03" />
+  </gltf_pbr>
+  <surfacematerial name="mtlx_gltf_clearcoat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="gltf_clearcoat" />
+  </surfacematerial>
+
+  <!-- Standard Surface glass: refracts, thick (a medium-free interior). -->
+  <standard_surface name="std_glass" type="surfaceshader">
+    <input name="base" type="float" value="0" />
+    <input name="transmission" type="float" value="1" />
+    <input name="specular_roughness" type="float" value="0.02" />
+    <input name="specular_IOR" type="float" value="1.5" />
+  </standard_surface>
+  <surfacematerial name="mtlx_standard_glass" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="std_glass" />
+  </surfacematerial>
+
+  <!-- glTF transmission with Beer-Lambert attenuation: red-tinted in depth. -->
+  <gltf_pbr name="gltf_ruby" type="surfaceshader">
+    <input name="base_color" type="color3" value="1, 1, 1" />
+    <input name="metallic" type="float" value="0" />
+    <input name="roughness" type="float" value="0.05" />
+    <input name="transmission" type="float" value="1" />
+    <input name="attenuation_color" type="color3" value="1, 0.2, 0.2" />
+    <input name="attenuation_distance" type="float" value="0.5" />
+  </gltf_pbr>
+  <surfacematerial name="mtlx_gltf_ruby" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="gltf_ruby" />
+  </surfacematerial>
+
+  <!-- OpenPBR with a coat normal: a normal-mapped clear coat over a smooth
+       base, the base keeping the interpolated normal. -->
+  <normalmap name="coat_bump" type="vector3">
+    <input name="in" type="vector3" value="0.62, 0.5, 1.0" />
+  </normalmap>
+  <open_pbr_surface name="openpbr_bumped_coat" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.05, 0.3, 0.1" />
+    <input name="coat_weight" type="float" value="1" />
+    <input name="geometry_coat_normal" type="vector3" nodename="coat_bump" />
+  </open_pbr_surface>
+  <surfacematerial name="mtlx_openpbr_bumped_coat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="openpbr_bumped_coat" />
+  </surfacematerial>
+</materialx>

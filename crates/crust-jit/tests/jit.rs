@@ -87,6 +87,10 @@ fn check_file(path: &Path) {
 fn the_jit_matches_the_interpreter_on_the_fixtures() {
     check_file(&repo().join("samples/materialx_basic.mtlx"));
     check_file(&repo().join("samples/materialx_emissive.mtlx"));
+    // The surface-shader builders' programs: every derived closure parameter
+    // (coat-broadened roughness, the modulated IOR, the darkening, the
+    // `ifgreater` selects) is plain program ops, so it JITs like any graph.
+    check_file(&repo().join("samples/materialx_surfaces.mtlx"));
 }
 
 #[test]

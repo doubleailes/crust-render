@@ -1,0 +1,158 @@
+#usda 1.0
+(
+    doc = """MaterialX surface-shader fixture: six spheres, one per material of
+    `materialx_surfaces.mtlx`, each a USD `Material` whose only opinion is a
+    reference into the document — `open_pbr_surface`, `standard_surface` and
+    `gltf_pbr` expanded into the closure trees of their MaterialX nodegraphs.
+
+    Top row: coated OpenPBR plastic, Standard Surface gold (an artistic-IOR
+    conductor, anisotropic), glTF clearcoat. Bottom row: Standard Surface
+    glass and glTF ruby (both refract; the ruby's attenuation tints it in
+    depth), and an OpenPBR coat whose normal is mapped while its base's is
+    not. Separate from `materialx_basic`, which tests pin at exactly three
+    materials.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "OpenPbrCoated" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_openpbr_coated>
+        )
+        {
+        }
+
+        def Material "StandardGold" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_standard_gold>
+        )
+        {
+        }
+
+        def Material "GltfClearcoat" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_gltf_clearcoat>
+        )
+        {
+        }
+
+        def Material "StandardGlass" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_standard_glass>
+        )
+        {
+        }
+
+        def Material "GltfRuby" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_gltf_ruby>
+        )
+        {
+        }
+
+        def Material "OpenPbrBumpedCoat" (
+            prepend references = @materialx_surfaces.mtlx@</MaterialX/Materials/mtlx_openpbr_bumped_coat>
+        )
+        {
+        }
+
+        def Material "Floor"
+        {
+            token outputs:surface.connect = </World/Looks/Floor/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.45, 0.45, 0.43)
+                float inputs:specularRoughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+
+    def Sphere "OpenPbrCoated" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/OpenPbrCoated>
+        double3 xformOp:translate = (-2, 2.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "StandardGold" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/StandardGold>
+        double3 xformOp:translate = (0, 2.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "GltfClearcoat" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/GltfClearcoat>
+        double3 xformOp:translate = (2, 2.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "StandardGlass" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/StandardGlass>
+        double3 xformOp:translate = (-2, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "GltfRuby" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/GltfRuby>
+        double3 xformOp:translate = (0, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "OpenPbrBumpedCoat" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/OpenPbrBumpedCoat>
+        double3 xformOp:translate = (2, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/Floor>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 1.0
+        asset inputs:texture:file = @sky_env.exr@
+        token inputs:texture:format = "latlong"
+        float xformOp:rotateY = 20
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 40
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 1.8, 9)
+        float xformOp:rotateX = -4
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+# crust resolves render settings through the stage's `renderSettingsPrimPath`
+# metadatum, falling back to the conventional `/Render/settings`.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 400)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 12
+    }
+}
