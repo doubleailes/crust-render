@@ -498,3 +498,146 @@ fn a_transmission_only_dielectric_pays_its_fresnel_loss() {
     let tir = albedo(&resolved(&body, "s", theta, false), theta, false, 512);
     assert!(tir.max_element() < 1e-3, "total internal reflection: {tir}");
 }
+
+/// Task 2.4's measurement, kept as a bound: BSDL's baked `E_R` describes
+/// BSDL's own GGX (with its Turquin multiple-scattering term), not crust's
+/// leaf (MaterialX's analytic fit for the compensation), so the two are not
+/// the same integral. This measures the gap over the table's range — the
+/// layer throughput a top leaf hands its base is `1 − E_table` while the top
+/// itself reflects `E_leaf`, so `E_leaf − E_table` is exactly the energy a
+/// layer creates (positive) or loses (negative). `--nocapture` prints the grid.
+#[test]
+fn the_bsdl_table_tracks_the_leaf_it_stands_for() {
+    let mut worst = (0.0f32, 0.0, 0.0, 0.0);
+    for ior in [1.2f32, 1.5, 2.0, 3.0] {
+        for r in [0.05f32, 0.2, 0.4, 0.6, 0.8, 1.0] {
+            let a = r * r;
+            let body = doc(&format!(
+                r#"<dielectric_bsdf name="g" type="BSDF">
+                     <input name="ior" type="float" value="{ior}" />
+                     <input name="roughness" type="vector2" value="{a}, {a}" />
+                   </dielectric_bsdf>
+                   <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="g" /></surface>"#
+            ));
+            let mut row = String::new();
+            for cos in [0.1f32, 0.3, 0.6, 1.0] {
+                let theta = cos.acos();
+                let e_leaf = albedo(&resolved(&body, "s", theta, true), theta, true, 4096).x;
+                let e_table = 1.0 - dielectric_refl_filter(cos, r, ior);
+                let gap = e_leaf - e_table;
+                row += &format!("  cos {cos:.1}: {e_leaf:.4} vs {e_table:.4} ({gap:+.4})");
+                if gap.abs() > worst.0.abs() {
+                    worst = (gap, ior, r, cos);
+                }
+            }
+            println!("ior {ior:.1} r {r:.2}{row}");
+        }
+    }
+    println!(
+        "worst gap {:+.4} at ior {} r {} cos {}",
+        worst.0, worst.1, worst.2, worst.3
+    );
+    assert!(worst.0.abs() < 0.025, "table vs leaf: {worst:?}");
+}
+
+/// The same measurement for the throughputs that come from MaterialX's
+/// analytic fits rather than a table — generalized Schlick
+/// (`mx_ggx_dir_albedo` × compensation) and sheen
+/// (`mx_imageworks_sheen_dir_albedo`). The `E` a layer uses is read back as
+/// `1 − weight` of a white diffuse base under the leaf.
+#[test]
+fn the_materialx_fits_track_the_leaves_they_stand_for() {
+    let leaves = [
+        (
+            "schlick",
+            r#"<generalized_schlick_bsdf name="t" type="BSDF">
+                 <input name="color0" type="color3" value="0.04, 0.04, 0.04" />
+                 <input name="roughness" type="vector2" value="{a}, {a}" />
+               </generalized_schlick_bsdf>"#,
+            0.015f32,
+        ),
+        (
+            "sheen",
+            r#"<sheen_bsdf name="t" type="BSDF">
+                 <input name="roughness" type="float" value="{r}" />
+               </sheen_bsdf>"#,
+            // The fit overestimates `E` by up to 0.035 at low roughness and
+            // grazing: a sheen layer there loses energy, never creates it.
+            0.04,
+        ),
+    ];
+    for (kind, leaf, bound) in leaves {
+        let mut worst = (0.0f32, 0.0, 0.0);
+        for r in [0.1f32, 0.3, 0.5, 0.8] {
+            let top = leaf
+                .replace("{a}", &(r * r).to_string())
+                .replace("{r}", &r.to_string());
+            let alone = doc(&format!(
+                r#"{top}<surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="t" /></surface>"#
+            ));
+            let layered = doc(&format!(
+                r#"{top}<oren_nayar_diffuse_bsdf name="d" type="BSDF"><input name="color" type="color3" value="1, 1, 1" /></oren_nayar_diffuse_bsdf>
+                   <layer name="l" type="BSDF"><input name="top" type="BSDF" nodename="t" /><input name="base" type="BSDF" nodename="d" /></layer>
+                   <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="l" /></surface>"#
+            ));
+            let mut row = String::new();
+            for cos in [0.1f32, 0.3, 0.6, 1.0] {
+                let theta = cos.acos();
+                let e_leaf = albedo(&resolved(&alone, "s", theta, true), theta, true, 4096).x;
+                let c = resolved(&layered, "s", theta, true);
+                let base = c
+                    .leaves()
+                    .iter()
+                    .find(|l| l.category == "oren_nayar_diffuse_bsdf")
+                    .expect("the base leaf");
+                let e_fit = 1.0 - base.weight.x;
+                let gap = e_leaf - e_fit;
+                row += &format!("  cos {cos:.1}: {e_leaf:.4} vs {e_fit:.4} ({gap:+.4})");
+                if gap.abs() > worst.0.abs() {
+                    worst = (gap, r, cos);
+                }
+            }
+            println!("{kind} r {r:.1}{row}");
+        }
+        println!(
+            "{kind}: worst gap {:+.4} at r {} cos {}",
+            worst.0, worst.1, worst.2
+        );
+        assert!(worst.0.abs() < bound, "{kind}: {worst:?}");
+    }
+}
+
+/// The closure's ~1.9 KB of leaves lives behind a pooled box, so the
+/// `ShadingPoint` every material shares stays small; inline, it was 1984 bytes
+/// and a vertex paid seven whole-struct moves (see `PooledClosure`).
+#[test]
+fn a_shading_point_carries_the_closure_by_pointer() {
+    assert!(size_of::<ResolvedClosure>() > 1024);
+    assert!(
+        size_of::<crate::ShadingPoint>() <= 512,
+        "ShadingPoint is {} bytes",
+        size_of::<crate::ShadingPoint>()
+    );
+}
+
+/// A closure dropped goes back to its thread's pool and the next resolve
+/// reuses it, overwriting every field a stale one could leak.
+#[test]
+fn a_recycled_closure_answers_like_a_fresh_one() {
+    let two = doc(r#"<dielectric_bsdf name="g" type="BSDF" />
+           <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+           <layer name="l" type="BSDF"><input name="top" type="BSDF" nodename="g" /><input name="base" type="BSDF" nodename="d" /></layer>
+           <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="l" /></surface>"#);
+    let one = doc(r#"<oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+           <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></surface>"#);
+    let (r, rec) = (arriving(0.3), hit(true));
+    let (c2, s2) = tree(&two, "s");
+    let (c1, s1) = tree(&one, "s");
+    drop(PooledClosure::resolve(&c2, &s2, &r, &rec));
+    let reused = PooledClosure::resolve(&c1, &s1, &r, &rec);
+    let fresh = ResolvedClosure::resolve(&c1, &s1, &r, &rec);
+    assert_eq!(reused.leaves().len(), 1);
+    let wi = Vec3A::new(0.2, 0.1, 0.9).normalize();
+    assert_eq!(reused.eval(&r, &rec, wi), fresh.eval(&r, &rec, wi));
+    assert!(!reused.transmits() && reused.medium().is_none());
+}

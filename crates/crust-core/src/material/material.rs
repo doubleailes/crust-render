@@ -1,6 +1,6 @@
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::closure::ResolvedClosure;
+use crate::material::closure::{PooledClosure, ResolvedClosure};
 use crate::material::{OpenPBR, ResolvedOpenPBR};
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -248,7 +248,7 @@ pub struct Resolution {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ResolvedBsdf {
     OpenPBR(ResolvedOpenPBR),
-    Closure(ResolvedClosure),
+    Closure(PooledClosure),
 }
 
 impl Resolution {
@@ -256,7 +256,7 @@ impl Resolution {
     /// graph's emission there, read from the same evaluated program as the
     /// closure — there is no parameter set for a later lookup to replace, so
     /// the order the OpenPBR constructor enforces is trivially kept.
-    pub fn closure(emitted: Vec3A, bsdf: ResolvedClosure, rec: HitRecord) -> Resolution {
+    pub fn closure(emitted: Vec3A, bsdf: PooledClosure, rec: HitRecord) -> Resolution {
         Resolution {
             bsdf: ResolvedBsdf::Closure(bsdf),
             rec,
@@ -347,7 +347,7 @@ enum Resolved<'a> {
     /// returned.
     OpenPBR(ResolvedOpenPBR),
     /// A MaterialX closure tree collapsed at this vertex.
-    Closure(ResolvedClosure),
+    Closure(PooledClosure),
 }
 
 impl<'a> ShadingPoint<'a> {
@@ -386,6 +386,7 @@ impl<'a> ShadingPoint<'a> {
 
     /// [`Material::scatter_importance`] at this hit.
     #[must_use]
+    #[inline]
     pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),

@@ -29,6 +29,7 @@ mod bsdl_tables;
 pub mod mx;
 
 use glam::Vec3A;
+use std::cell::RefCell;
 use std::f32::consts::FRAC_1_PI;
 use utils::cosine_hemisphere;
 
@@ -208,6 +209,75 @@ pub struct ResolvedClosure {
     transmits: bool,
 }
 
+thread_local! {
+    /// Boxes [`PooledClosure`]s return to, per thread. Bounded, so a thread
+    /// that once held many vertices at once does not keep them all.
+    // Boxes, not values: a closure leaves the pool as a pointer move, where
+    // `Vec<ResolvedClosure>` would copy its ~1.9 KB out on every pop.
+    #[allow(clippy::vec_box)]
+    static POOL: RefCell<Vec<Box<ResolvedClosure>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many recycled closures a thread keeps.
+const POOL_CAP: usize = 16;
+
+/// A [`ResolvedClosure`] on the heap, recycled through a per-thread pool.
+///
+/// The inline form is ~1.9 KB, of which a typical vertex uses two or three
+/// leaves, and the path from `Material::resolve` into a `ShadingPoint` moved
+/// it whole about seven times, plus one copy per leaf to initialise it:
+/// `memcpy` was 17% of the instructions of `materialx_basic`, and the
+/// `ShadingPoint` every material shares grew by the same 1.9 KB. Boxed, a
+/// vertex moves a pointer and resolves in place; recycled, it allocates
+/// nothing once each thread's pool is warm.
+pub struct PooledClosure(Option<Box<ResolvedClosure>>);
+
+impl PooledClosure {
+    /// [`ResolvedClosure::resolve`] into a recycled box.
+    pub fn resolve(closures: &Closures, slots: &[Val], r_in: &Ray, rec: &HitRecord) -> Self {
+        let mut b = POOL
+            .try_with(|p| p.borrow_mut().pop())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Box::new(ResolvedClosure::empty()));
+        b.resolve_into(closures, slots, r_in, rec);
+        PooledClosure(Some(b))
+    }
+}
+
+impl std::ops::Deref for PooledClosure {
+    type Target = ResolvedClosure;
+    fn deref(&self) -> &ResolvedClosure {
+        // `None` only between `drop` taking the box and the value vanishing.
+        self.0
+            .as_deref()
+            .expect("a live PooledClosure holds its box")
+    }
+}
+
+impl Drop for PooledClosure {
+    // Inline, with the pool work out of line: every `ShadingPoint` has this
+    // in its drop glue, and most of them hold no closure at all.
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(b) = self.0.take() {
+            recycle(b);
+        }
+    }
+}
+
+#[inline(never)]
+fn recycle(b: Box<ResolvedClosure>) {
+    // During thread teardown the pool may already be gone; the box is then
+    // simply freed.
+    let _ = POOL.try_with(|p| {
+        let mut p = p.borrow_mut();
+        if p.len() < POOL_CAP {
+            p.push(b);
+        }
+    });
+}
+
 /// What the tree walk needs besides the tree.
 struct Walk<'a> {
     slots: &'a [Val],
@@ -226,16 +296,31 @@ impl ResolvedClosure {
         r_in: &Ray,
         rec: &HitRecord,
     ) -> ResolvedClosure {
-        let thin_walled = closures
-            .thin_walled
-            .is_some_and(|s| slots[s as usize].x() > 0.5);
-        let mut out = ResolvedClosure {
+        let mut out = ResolvedClosure::empty();
+        out.resolve_into(closures, slots, r_in, rec);
+        out
+    }
+
+    fn empty() -> ResolvedClosure {
+        ResolvedClosure {
             leaves: [EMPTY; MAX_LEAVES],
             len: 0,
             select_total: 0.0,
             medium: None,
             transmits: false,
-        };
+        }
+    }
+
+    /// [`ResolvedClosure::resolve`] into `self`, overwriting whatever it
+    /// held; leaves past the new length are left stale, never read.
+    fn resolve_into(&mut self, closures: &Closures, slots: &[Val], r_in: &Ray, rec: &HitRecord) {
+        let thin_walled = closures
+            .thin_walled
+            .is_some_and(|s| slots[s as usize].x() > 0.5);
+        self.len = 0;
+        self.select_total = 0.0;
+        self.medium = None;
+        self.transmits = false;
         let walk = Walk {
             slots,
             rec,
@@ -243,11 +328,11 @@ impl ResolvedClosure {
             thin_walled,
         };
         if let Some(root) = closures.root {
-            out.walk(closures, root, Vec3A::ONE, &walk);
+            self.walk(closures, root, Vec3A::ONE, &walk);
         }
-        out.select_total = out.leaves[..out.len].iter().map(|l| l.select).sum();
-        if out.transmits && !thin_walled {
-            out.medium = closures.volume.and_then(|v| {
+        self.select_total = self.leaves[..self.len].iter().map(|l| l.select).sum();
+        if self.transmits && !thin_walled {
+            self.medium = closures.volume.and_then(|v| {
                 let m = Medium {
                     sigma_a: sanitize(slots[v.absorption as usize].rgb()),
                     sigma_s: sanitize(slots[v.scattering as usize].rgb()),
@@ -256,7 +341,6 @@ impl ResolvedClosure {
                 (m.sigma_t_max() > 1e-6).then_some(m)
             });
         }
-        out
     }
 
     /// The resolved leaves, for probes.
