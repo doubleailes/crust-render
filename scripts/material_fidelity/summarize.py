@@ -5,8 +5,8 @@ Reports crust's PSNR against `materialx-glsl.png` per suite group, beside the
 suite's own published renderers on the same materials, and — statically, from
 the documents themselves — which node categories the suite uses that
 `crust-mtlx` has no operator for. The static half is needed because the
-compiler stops at an unknown surface node and never reaches the nodegraph
-behind it, so the render log alone cannot say which pattern nodes are missing.
+compiler degrades an unknown node to a constant and stops there, never reaching
+the graph upstream of it, so the render log alone undercounts missing nodes.
 
 Usage: summarize.py --suite /path/to/material-fidelity results.json > report.md
 """
@@ -24,12 +24,14 @@ STRUCTURAL = {"materialx", "nodegraph", "input", "output", "nodedef", "implement
               "variantset", "variantassign", "geominfo", "geomprop", "backdrop", "member",
               "propertyset", "propertysetassign", "property", "visibility", "unit",
               "unittypedef", "unitdef", "attributedef", "targetdef"}
-# Handled by `bsdf::flatten` rather than the pattern compiler.
+# Handled by `bsdf::flatten` (and, for the surface nodes, `surface.rs`) rather
+# than the pattern compiler.
 CLOSURE_NODES = {"surfacematerial", "surface", "layer", "mix", "add", "multiply",
                  "oren_nayar_diffuse_bsdf", "diffuse_bsdf", "burley_diffuse_bsdf",
                  "dielectric_bsdf", "generalized_schlick_bsdf", "thin_film_bsdf",
                  "conductor_bsdf", "sheen_bsdf", "subsurface_bsdf", "translucent_bsdf",
-                 "uniform_edf"}
+                 "uniform_edf", "generalized_schlick_edf", "anisotropic_vdf",
+                 "absorption_vdf", "standard_surface", "open_pbr_surface", "gltf_pbr"}
 SURFACES = ("standard_surface", "open_pbr_surface", "gltf_pbr")
 
 
