@@ -27,6 +27,7 @@
 mod environment;
 mod error;
 mod ies;
+mod image_file;
 mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;

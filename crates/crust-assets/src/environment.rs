@@ -163,15 +163,9 @@ pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
 }
 
 fn decode_image_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
-    // `image::open`'s default 512MiB decode-allocation limit is well below a
-    // production-scale panorama (e.g. a 16k HDRI): lift it for this trusted,
-    // locally-authored asset rather than have large dome lights fail to load.
-    let mut reader = image::ImageReader::open(path)
-        .map_err(AssetError::io(path))?
-        .with_guessed_format()
-        .map_err(AssetError::io(path))?;
-    reader.no_limits();
-    let decoded = reader.decode().map_err(AssetError::image(path))?;
+    // Without `image`'s default 512MiB decode limit, which a production-scale
+    // panorama (e.g. a 16k HDRI) exceeds.
+    let decoded = crate::image_file::decode(path)?;
     let rgb = decoded.to_rgb32f();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     // `to_rgb32f` keeps HDR values as authored, but rescales integer
