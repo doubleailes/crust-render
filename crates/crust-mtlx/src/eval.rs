@@ -958,8 +958,8 @@ impl<'a> Compiler<'a> {
         // `tiledimage` scales and offsets the chart before the lookup;
         // `image` samples it as authored.
         let (scale, offset) = if node.category == "tiledimage" {
-            let s = literal_of(node, "uvtiling").unwrap_or(Val::vec2(1.0, 1.0));
-            let o = literal_of(node, "uvoffset").unwrap_or(Val::vec2(0.0, 0.0));
+            let s = self.static_input(node, "uvtiling", Val::vec2(1.0, 1.0));
+            let o = self.static_input(node, "uvoffset", Val::vec2(0.0, 0.0));
             let s = if s.arity == 1 {
                 [s.x(), s.x()]
             } else {
@@ -985,6 +985,28 @@ impl<'a> Compiler<'a> {
 }
 
 /// An input's authored literal, when it is one (not a connection).
+impl Compiler<'_> {
+    /// An input the lookup needs as a compile-time constant: the literal, or
+    /// a connection that folds to one (`convert(8.0)` is how documents feed a
+    /// `tiledimage`'s `uvtiling`). One that varies over the surface cannot be
+    /// baked into the texture op, so it takes `default` and is reported —
+    /// never silently.
+    fn static_input(&mut self, node: &Node, name: &str, default: Val) -> Val {
+        if let Some(v) = literal_of(node, name) {
+            return v;
+        }
+        if node.input(name).is_none() {
+            return default;
+        }
+        let slot = self.input_or(node, name, default);
+        self.fold(slot).unwrap_or_else(|| {
+            self.unsupported
+                .insert(format!("{} (varying {name})", node.category));
+            default
+        })
+    }
+}
+
 fn literal_of(node: &Node, name: &str) -> Option<Val> {
     match node.input(name)?.source {
         Source::Value(v) => Some(v),

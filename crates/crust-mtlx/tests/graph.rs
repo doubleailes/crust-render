@@ -1025,6 +1025,33 @@ fn tiledimage_scales_and_offsets_the_uv() {
     assert!(v.v[0].is_finite() && v.v[1].is_finite());
 }
 
+/// The suite's `textured` sample feeds `uvtiling` through `convert(8.0)`.
+/// Read only as a literal, the connection fell back to 1 without a word and
+/// the checker rendered untiled; a connection that folds is its constant.
+#[test]
+fn a_connected_uvtiling_that_folds_is_applied() {
+    let loader =
+        |_: &str, _: Option<&str>| -> Option<TextureRef> { Some(TextureRef(Arc::new(Echo))) };
+    let at = |tiling: &str| {
+        run_with(
+            &format!(
+                r#"<materialx>
+                     <convert name="k" type="vector2"><input name="in" type="float" value="8" /></convert>
+                     <tiledimage name="n" type="vector2">
+                       <input name="file" type="filename" value="e.png" />
+                       {tiling}
+                     </tiledimage></materialx>"#
+            ),
+            "n",
+            &ctx(),
+            &loader,
+        )
+    };
+    let literal = at(r#"<input name="uvtiling" type="vector2" value="8, 8" />"#);
+    let connected = at(r#"<input name="uvtiling" type="vector2" nodename="k" />"#);
+    assert_eq!(literal.v[..2], connected.v[..2]);
+}
+
 #[test]
 fn a_flat_normal_map_returns_the_geometric_normal() {
     let loader = |_: &str, _: Option<&str>| -> Option<TextureRef> {
