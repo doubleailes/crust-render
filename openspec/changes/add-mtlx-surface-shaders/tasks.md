@@ -45,8 +45,8 @@
 
 ## 7. Documentation
 
-- [ ] 7.1 Rewrite `openspec/specs/materials/design.md` § MaterialX for the closure tree (D1–D10). Retire the pooled-reduction traps, since the record describes current behaviour, and rewrite § Known gaps: MaterialX (subsurface, Zeltner, opacity, rotation, table mismatch, `crust:openpbr` divergence, Typhoon deviations followed or not). Verify with a review that every spec approximation appears in Known gaps.
-- [ ] 7.2 Update the README's MaterialX section and `docs/color_management.md` (inherited colour-space handling of surface inputs). Verify the README no longer describes the BSDF reduction as pooling onto OpenPBR.
+- [x] 7.1 Rewrite `openspec/specs/materials/design.md` § MaterialX for the closure tree (D1–D10). Retire the pooled-reduction traps, since the record describes current behaviour, and rewrite § Known gaps: MaterialX (subsurface, Zeltner, opacity, rotation, table mismatch, `crust:openpbr` divergence, Typhoon deviations followed or not). Verify with a review that every spec approximation appears in Known gaps.
+- [x] 7.2 Update the README's MaterialX section and `docs/color_management.md` (inherited colour-space handling of surface inputs). Verify the README no longer describes the BSDF reduction as pooling onto OpenPBR.
 
 ## 8. Integration: the Material Fidelity suite
 

@@ -11,10 +11,11 @@ step, and the call counts below were confirmed by them.
 
 Two materials evaluate a pattern network at every hit:
 
-- **`MtlxMaterial`** (`material/materialx.rs`). `shade()` runs the compiled
-  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then `reduce()` pools the
-  flattened lobes onto an `OpenPBR`, then hands that `OpenPBR` to the requested
-  query. The `Program` is already a linear, slot-indexed instruction list with a
+- **`MtlxMaterial`** (`material/materialx.rs`). It runs the compiled
+  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then collapses the document's
+  closure tree into a `ResolvedClosure` that answers the query (at the time of
+  this plan it pooled the lobes onto an `OpenPBR` instead; the closure tree's
+  cost is recorded in `openspec/specs/materials/design.md` § MaterialX). The `Program` is already a linear, slot-indexed instruction list with a
   thread-local value buffer. It does no name hashing and allocates nothing.
   Each instruction is still one `match` arm over `Op`, and each operand read is a
   bounds-checked `slots.get()`. `Val` is always four lanes plus an arity tag, so

@@ -33,8 +33,8 @@ pub mod profile;
 mod ray;
 mod rt_world;
 mod scene;
-/// MaterialX surfaces — `MtlxMaterial`, the lobe pooling onto OpenPBR, and
-/// the importer's `load`. The document reader itself is the `crust-mtlx`
+/// MaterialX surfaces — `MtlxMaterial`, which evaluates a document's closure
+/// tree (`closure`), and the importer's `load`. The document reader itself is the `crust-mtlx`
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
