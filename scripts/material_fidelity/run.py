@@ -200,10 +200,20 @@ def render_one(mtlx, args, shots, binary):
         )
         env = dict(os.environ, RAYON_NUM_THREADS=str(args.threads))
         t0 = time.perf_counter()
-        proc = subprocess.run(
-            [binary, "-i", str(shot), "-o", str(exr), "-l", "warn"],
-            capture_output=True, text=True, env=env, timeout=args.timeout,
-        )
+        # A failure here is this material's, not the run's: raising would stop
+        # `pool.map` before results.json is written.
+        try:
+            proc = subprocess.run(
+                [binary, "-i", str(shot), "-o", str(exr), "-l", "warn"],
+                capture_output=True, text=True, env=env, timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            report.update(status="error", error=f"timed out after {args.timeout:g}s",
+                          seconds=round(time.perf_counter() - t0, 2))
+            return report
+        except OSError as e:
+            report.update(status="error", error=f"could not launch crust: {e}")
+            return report
         report["seconds"] = round(time.perf_counter() - t0, 2)
         log = ANSI.sub("", proc.stdout + proc.stderr)
         report["log"] = [l for l in log.splitlines() if l.strip()][-40:]

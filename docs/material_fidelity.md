@@ -22,8 +22,8 @@ operator for, not shading; the `nodes/*` group (17.5 dB) is where that shows.
 
 ```bash
 git clone https://github.com/bhouston/material-fidelity
-GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/bhouston/material-samples \
-    material-fidelity/submodules/material-samples        # 4.5 GB, includes the reference PNGs
+git clone https://github.com/bhouston/material-samples \
+    material-fidelity/submodules/material-samples        # 4.5 GB, includes the reference PNGs (no LFS)
 pip install numpy pillow pygltflib OpenEXR
 cargo build --release
 scripts/material_fidelity/run.py --suite material-fidelity --out fidelity-out      # ~85 min on 4 cores
@@ -52,7 +52,10 @@ environment. At 180° those pixels score **34.2 dB** against the reference, agai
 (MaterialXView filters the environment it displays). So MaterialXView's lat-long seam
 is where crust (−Z at `u = 0.5`) puts the image centre. The UV flip was checked on
 `uv_debug_texcoord_rgb`. Crust ran at 64 spp (32 minimum, adaptive),
-`maxDepth` 12 and `indirectClamp 0`: about 5 s a material.
+`maxDepth` 12 and `indirectClamp 0`: about 5 s a material. This is a score against
+an external reference, not a regression check: noise costs PSNR, so it wants more
+samples, not the 16 spp that `check_images.sh` pins for bit-identity between two
+crust binaries.
 
 ## Results
 

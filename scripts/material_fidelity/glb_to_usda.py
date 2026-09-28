@@ -97,6 +97,10 @@ def main(src, dst):
             uv = accessor(g, blob, prim.attributes.TEXCOORD_0).astype(float).copy()
             uv[:, 1] = 1.0 - uv[:, 1]
             idx = accessor(g, blob, prim.indices).astype(np.int64)
+            # glTF: a negative-determinant world transform flips the winding.
+            # The points are baked, so the triangles are turned back here.
+            if np.linalg.det(world[:3, :3]) < 0.0:
+                idx = idx.reshape(-1, 3)[:, [0, 2, 1]].reshape(-1)
             meshes.append((name, p, n, uv, idx))
 
     lo = np.min([m[1].min(axis=0) for m in meshes], axis=0)
