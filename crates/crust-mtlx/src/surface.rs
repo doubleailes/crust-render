@@ -380,7 +380,8 @@ impl B<'_, '_> {
         }
     }
 
-    /// `mix(fg, bg, m)`, pruned at a constant `m` of 0 or 1.
+    /// `mix(fg, bg, m)`, pruned at a constant `m` of 0 or 1. A pruned branch
+    /// keeps its share of the throughput ([`Closures::mix`]).
     fn mixc(&mut self, fg: Option<NodeId>, bg: Option<NodeId>, m: Slot) -> Option<NodeId> {
         if self.is(m, 0.0) {
             return bg;
@@ -388,21 +389,7 @@ impl B<'_, '_> {
         if self.is(m, 1.0) {
             return fg;
         }
-        match (fg, bg) {
-            (Some(fg), Some(bg)) => Some(self.push(Closure::Mix { fg, bg, mix: m })),
-            (Some(fg), None) => Some(self.push(Closure::Multiply {
-                input: fg,
-                weight: m,
-            })),
-            (None, Some(bg)) => {
-                let inv = self.one_minus(m);
-                Some(self.push(Closure::Multiply {
-                    input: bg,
-                    weight: inv,
-                }))
-            }
-            (None, None) => None,
-        }
+        self.out.mix(fg, bg, m)
     }
 
     /// `multiply(x, w)`, pruned at a constant `w` of 0 and elided at 1.
