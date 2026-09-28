@@ -80,12 +80,15 @@ saturated or dark references. `image_format_avif/svg/webp` score about 10 dB for
 ## What stands between crust and a meaningful score
 
 1. **The three surface nodes (all 826 materials).** MaterialX defines each one
-   as a nodegraph over the standalone BSDFs crust already reduces (`libraries/bxdf/*.mtlx`).
-   Crust's own model is OpenPBR, so `open_pbr_surface` maps onto it almost
-   parameter for parameter, `standard_surface` through the documented Standard
-   Surface → OpenPBR mapping, and `gltf_pbr` through its metallic-roughness
-   definition. This one change turns the suite from "fallback everywhere" into a
-   measurement.
+   as a nodegraph over standalone BSDFs (`libraries/bxdf/*.mtlx`): a closure tree of
+   BSDF leaves joined by `layer`, `mix` and `multiply`. Crust cannot read that tree
+   faithfully today, because `crust-mtlx` pools every leaf onto one OpenPBR parameter
+   set. The planned change, `openspec/changes/add-mtlx-surface-shaders`, follows
+   NVIDIA Typhoon rather than mapping the nodes onto crust's OpenPBR. It makes the
+   MaterialX path a real closure-tree evaluator, with MaterialX's albedo-scaled
+   layering. It then expands each surface node into the tree its nodegraph
+   describes, node for node. This one change turns the suite from "fallback
+   everywhere" into a measurement of shading.
 2. **Pattern nodes `crust-mtlx`'s compiler has no operator for.** This is a static scan
    of the documents (`summarize.py`), because the compiler stops at the unknown surface
    node and never reaches the graph behind it, so the render log names only the
@@ -124,8 +127,13 @@ saturated or dark references. `image_format_avif/svg/webp` score about 10 dB for
    suite's harness nodes. Its node-isolation materials wrap the node under test in
    a shared UV-driven graph, so those five gate hundreds of `nodes/*` samples
    whatever node they isolate.
-3. **Known reduction gaps that will then show** (`openspec/specs/materials/design.md`
-   § Known gaps: MaterialX): MaterialX transmission renders opaque, `thin_film_bsdf`
-   pools as a plain dielectric, a coat's `tint` is dropped, and `opacity` is ignored.
-   The `transmission_*`, `thin_film` and `feature_opacity` samples will stay low
-   until those gaps close.
+3. **Gaps that will still show after that change.** The pooled reduction's own
+   losses (MaterialX transmission rendering opaque, `thin_film_bsdf` pooled as a plain
+   dielectric, a coat's `tint` dropped) go away with it. The tree keeps every leaf,
+   transmits through its dielectrics and carries per-leaf thin film. Some things
+   remain unsupported and are reported, per that change's spec:
+   - `opacity` / `alpha` has no cutout, so `feature_opacity` and the alpha samples
+     stay low;
+   - anisotropy rotation;
+   - subsurface without a random walk;
+   - Zeltner sheen, evaluated as Charlie.
