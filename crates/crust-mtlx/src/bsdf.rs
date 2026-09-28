@@ -543,8 +543,21 @@ pub(crate) enum ClosureType {
 /// MaterialX has no depth limit, but a hand-edited document can describe a
 /// cycle through `layer`/`mix` that the pattern compiler's own cycle guard
 /// does not see (it guards *pattern* recursion, and closure inputs are walked
-/// separately).
+/// separately). The bound also caps the walk: a cycle through both branches of
+/// a `mix` doubles it per level.
 const MAX_DEPTH: usize = 16;
+
+/// Whether `depth` is past [`MAX_DEPTH`], reporting it when it is: what lies
+/// deeper is dropped, and a truncated tree still shades plausibly.
+fn too_deep(depth: usize, out: &mut Closures) -> bool {
+    let deep = depth > MAX_DEPTH;
+    if deep {
+        out.reported.insert(format!(
+            "closure graph nested past {MAX_DEPTH} levels (a cycle?): deeper closures dropped"
+        ));
+    }
+    deep
+}
 
 /// Reads the closure graph under `node` — a `surfacematerial`, a `surface`,
 /// a surface-shader node or a bare BSDF — into `out`.
@@ -553,7 +566,7 @@ pub fn flatten(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
 }
 
 fn shader(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth, out) {
         return;
     }
     match node.category.as_str() {
@@ -635,7 +648,7 @@ fn bsdf_tree(
     depth: usize,
     out: &mut Closures,
 ) -> Option<NodeId> {
-    if depth > MAX_DEPTH {
+    if too_deep(depth, out) {
         return None;
     }
     match node.category.as_str() {
@@ -876,7 +889,7 @@ pub(crate) fn edf_walk(
     depth: usize,
     out: &mut Closures,
 ) {
-    if depth > MAX_DEPTH {
+    if too_deep(depth, out) {
         return;
     }
     match node.category.as_str() {
@@ -1194,6 +1207,25 @@ mod tests {
         </materialx>"#;
         let (_, cl) = build(doc, "s");
         assert!(cl.reported.iter().any(|r| r.contains("zeltner")));
+    }
+
+    #[test]
+    fn a_closure_cycle_is_cut_and_reported() {
+        // `l`'s base is `l` itself: nothing in MaterialX forbids writing it,
+        // and the walk must end, keep the diffuse, and say what it dropped.
+        let doc = r#"<materialx>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+          <layer name="l" type="BSDF">
+            <input name="top" type="BSDF" nodename="d" />
+            <input name="base" type="BSDF" nodename="l" />
+          </layer>
+        </materialx>"#;
+        let (_, cl) = build(doc, "l");
+        assert!(cl.leaf_count() > 0);
+        assert!(cl.reported.iter().any(|r| r.contains("nested past")));
+        // A tree within the bound reports nothing.
+        let (_, cl) = build(MIXED, "m");
+        assert!(cl.reported.is_empty());
     }
 
     #[test]
