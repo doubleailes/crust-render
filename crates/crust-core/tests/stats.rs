@@ -233,6 +233,10 @@ fn ray_stats_merge_adds_every_counter() {
         ended_absorbed: 9,
         volume_scatters: 1,
         medium_scatters: 2,
+        sss_walks: 4,
+        sss_exits: 3,
+        sss_steps: 40,
+        sss_rays: 41,
         light_samples: 3,
         shadow_occluded: 1,
         adaptive_pixels: 1,
@@ -253,6 +257,10 @@ fn ray_stats_merge_adds_every_counter() {
         ended_absorbed: 90,
         volume_scatters: 10,
         medium_scatters: 20,
+        sss_walks: 40,
+        sss_exits: 30,
+        sss_steps: 400,
+        sss_rays: 410,
         light_samples: 30,
         shadow_occluded: 10,
         adaptive_pixels: 2,
@@ -272,6 +280,10 @@ fn ray_stats_merge_adds_every_counter() {
     assert_eq!(a.ended_depth, 88);
     assert_eq!(a.ended_absorbed, 99);
     assert_eq!((a.volume_scatters, a.medium_scatters), (11, 22));
+    assert_eq!(
+        (a.sss_walks, a.sss_exits, a.sss_steps, a.sss_rays),
+        (44, 33, 440, 451)
+    );
     assert_eq!((a.light_samples, a.shadow_occluded), (33, 11));
     assert_eq!(
         (a.adaptive_pixels, a.adaptive_samples, a.early_stopped),

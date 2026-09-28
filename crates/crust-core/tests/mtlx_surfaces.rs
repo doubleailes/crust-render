@@ -590,3 +590,143 @@ fn a_masked_coverage_keeps_what_lies_beneath_it() {
         );
     }
 }
+
+fn subsurface_fixture(name: &str) -> Loaded {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/materialx_subsurface.mtlx");
+    materialx::load(&path, Some(name), &|_, _| None).expect("loads")
+}
+
+/// `(color, radius, anisotropy, ior, alpha)` of the one random-walk leaf.
+fn walk_leaf(l: &Loaded) -> (Vec3A, Vec3A, f32, f32, f32) {
+    let ls = leaves(l, 0.5, 0.5);
+    let walks: Vec<_> = ls
+        .iter()
+        .filter_map(|p| match p.lobe {
+            Lobe::Subsurface {
+                color,
+                radius,
+                anisotropy,
+                ior,
+                alpha,
+            } => Some((color, radius, anisotropy, ior, alpha)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        walks.len(),
+        1,
+        "{:?}",
+        ls.iter().map(|p| p.describe()).collect::<Vec<_>>()
+    );
+    walks[0]
+}
+
+/// A `subsurface_bsdf` is a random walk now, with its radius and anisotropy
+/// as authored, entered through the dielectric layered over it — or, bare,
+/// through Typhoon's defaults — and no longer reported as approximated.
+#[test]
+fn a_subsurface_bsdf_resolves_to_a_random_walk() {
+    let jade = subsurface_fixture("mtlx_bare_jade");
+    let (color, radius, g, ior, alpha) = walk_leaf(&jade);
+    assert!((color - Vec3A::new(0.3, 0.75, 0.45)).abs().max_element() < 1e-5);
+    assert!((radius - Vec3A::new(0.15, 0.3, 0.2)).abs().max_element() < 1e-5);
+    assert!(near(g, 0.3, 1e-6) && near(ior, 1.5, 1e-6) && near(alpha, 0.25, 1e-6));
+    assert!(jade.reported.is_empty(), "{:?}", jade.reported);
+
+    // OpenPBR: radius × radius_scale, through the specular dielectric
+    // (`specular_ior` 1.5 by default, roughness 0.4 → α 0.16).
+    let skin = subsurface_fixture("mtlx_openpbr_skin");
+    let (color, radius, _, ior, alpha) = walk_leaf(&skin);
+    assert!((color - Vec3A::new(0.9, 0.6, 0.45)).abs().max_element() < 1e-5);
+    assert!((radius - Vec3A::new(0.2, 0.1, 0.05)).abs().max_element() < 1e-5);
+    assert!(
+        near(ior, 1.5, 1e-5) && near(alpha, 0.16, 1e-5),
+        "{ior} {alpha}"
+    );
+    assert!(skin.reported.is_empty(), "{:?}", skin.reported);
+
+    // Standard Surface: radius × subsurface_scale.
+    let marble = subsurface_fixture("mtlx_standard_marble");
+    let (_, radius, _, ior, _) = walk_leaf(&marble);
+    assert!((radius - Vec3A::splat(0.3)).abs().max_element() < 1e-5);
+    assert!(near(ior, 1.5, 1e-5));
+}
+
+/// The walk is only a direction and a weight at the entry: no leaf value
+/// toward any light, so NEE at the entry sees nothing of it.
+#[test]
+fn a_random_walk_leaf_has_no_value_toward_a_light() {
+    let jade = subsurface_fixture("mtlx_bare_jade");
+    let (r, rec) = (straight_down(), hit(0.5, 0.5));
+    let wi = Vec3A::new(0.3, 0.2, 0.9).normalize();
+    let (value, _) = jade.material.eval(&r, &rec, wi).expect("has leaves");
+    assert_eq!(value, Vec3A::ZERO);
+}
+
+/// A zero radius exits where it enters: the leaf falls back to a diffuse in
+/// its colour instead of starting a walk that could go nowhere.
+#[test]
+fn a_zero_radius_subsurface_is_a_diffuse() {
+    let l = load(
+        "sss0",
+        r#"<subsurface_bsdf name="b" type="BSDF">
+             <input name="color" type="color3" value="0.5, 0.5, 0.5" />
+             <input name="radius" type="vector3" value="0, 0, 0" />
+           </subsurface_bsdf>
+           <surface name="s" type="surfaceshader">
+             <input name="bsdf" type="BSDF" nodename="b" />
+           </surface>"#,
+    );
+    let ls = leaves(&l, 0.5, 0.5);
+    assert!(
+        matches!(ls[0].lobe, Lobe::Diffuse { .. }),
+        "{}",
+        ls[0].describe()
+    );
+}
+
+/// Every subsurface fixture material in the white furnace, through the whole
+/// walk: nothing comes back brighter than the environment.
+#[test]
+fn every_subsurface_fixture_is_bounded_in_a_white_furnace() {
+    for name in [
+        "mtlx_openpbr_skin",
+        "mtlx_standard_marble",
+        "mtlx_bare_jade",
+    ] {
+        let loaded = subsurface_fixture(name);
+        for (offset, mean) in FURNACE_OFFSETS.into_iter().zip(furnace(&loaded)) {
+            assert!(
+                mean.max_element() <= 1.02 && mean.min_element() >= 0.0,
+                "{name} at offset {offset}: furnace mean {mean}"
+            );
+        }
+    }
+}
+
+/// Through the integrator, a walk whose mean free path is small beside the
+/// object (a unit sphere at radius 0.01 is nearly a slab) reflects what the
+/// walk alone does from a straight-down entry — the refraction through IOR
+/// 1.5 nearly is one: (0.78, 0.45, 0.16) for a colour of (0.8, 0.5, 0.2).
+/// That is Typhoon's entry, and below Chiang's fit, which describes a diffuse
+/// entry (`subsurface::tests`); the gap is measured and recorded in the
+/// materials design record, not hidden in a tolerance.
+#[test]
+fn a_short_walk_reflects_its_colour_in_the_furnace() {
+    let l = load(
+        "sssfurnace",
+        r#"<subsurface_bsdf name="b" type="BSDF">
+             <input name="color" type="color3" value="0.8, 0.5, 0.2" />
+             <input name="radius" type="vector3" value="0.01, 0.01, 0.01" />
+           </subsurface_bsdf>
+           <surface name="s" type="surfaceshader">
+             <input name="bsdf" type="BSDF" nodename="b" />
+           </surface>"#,
+    );
+    let [head_on, mid, _] = furnace(&l);
+    for mean in [head_on, mid] {
+        let err = (mean - Vec3A::new(0.777, 0.446, 0.163)).abs().max_element();
+        assert!(err < 0.025, "furnace mean {mean}");
+    }
+}

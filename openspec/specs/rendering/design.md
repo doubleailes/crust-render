@@ -110,6 +110,15 @@ consumed as ordinary dependencies:
      albedo/Beer-Lambert forms). Carried-medium scatter vertices run **no NEE** and keep
      `prev = None` (full-weight next emission) — that pairing is what avoids double
      counting there. Free-space rays are unaffected.
+   - **Random-walk subsurface** (`subsurface.rs`, MaterialX `subsurface_bsdf` only).
+     A material sample with `ScatterSample::subsurface` set is not a bounce: the
+     tracer runs a self-contained walk against the hit's own `geom_id` (Typhoon's
+     `RandomWalkSSS`), multiplies the entry record's factor by its throughput, and
+     makes the exit the next vertex — shaded on a white `ExitLambertian`, with NEE and
+     an ordinary bounce, `prev = None` and no emission of its own. The walk spends no
+     depth and records no vertex; its free flights draw from `K_SSS` off the entry
+     vertex (stratified on the first step, incidental after). A walk that finds no
+     exit ends the path as absorbed. Design and traps: materials `design.md`.
    - **Volume regions** (`volume.rs`): free-standing smoke/fog/absorption/fire volumes
      held on `Renderer.volumes`, *outside* the surface BVH so their bounds never occlude
      shadow rays. Each `VolumeRegion` is an oriented box (composed prim xform) with a

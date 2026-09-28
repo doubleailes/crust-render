@@ -300,6 +300,59 @@
     Fresnel, the reflection layer's `1 − E_R` times the transmission's `1 − F`,
     which Typhoon's `standard_surface` shares. A thin-walled surface transmits
     straight through; a thick one hands the refracted ray the interior medium.
+  - **`subsurface_bsdf` is a random walk — Typhoon's.** The leaf
+    (`Lobe::Subsurface`) has no value toward any direction, so NEE at the entry
+    sees nothing of it, exactly as Typhoon's `EvalNode` returns 0 for it.
+    Selecting it (with probability `∝ weight · luminance(color)`, Typhoon's
+    `_ApproxWeight`) is a delta event carrying `weight / p` and an entry
+    direction: a refraction through the interface above the leaf
+    (`closure::subsurface_entry`, Typhoon's `SampleSubsurfaceEntry`) — the
+    nearest dielectric a `layer` puts over it, whose IOR and GGX alpha the
+    collapse walk carries down (`interface_of`), else Typhoon's closure
+    defaults, IOR 1.5 and roughness 0.5. The interface's energy is already in
+    the leaf's weight (the layer's throughput); the entry only picks a
+    direction. The tracer then runs the walk (`subsurface.rs`, a port of
+    `ty::RandomWalkSSS`, itself Cycles' `subsurface_random_walk.h`): Chiang
+    2016's albedo inversion with the 0.2 albedo floor and its throughput
+    correction, per-bounce channel MIS, forward and backward Dwivedi guiding
+    with the extended first ray finding the opposite interface, the similarity
+    relation after 9 bounces, 256 bounces at most. It traces the owner's
+    `geom_id` alone, stepping past every other surface, and the path resumes at
+    the exit on a white Lambertian with no emission (`ExitLambertian`,
+    Typhoon's and Cycles' synthetic exit), weighted by the walk's throughput.
+    The walk is one surface event: it spends no path depth, records no vertex
+    of its own and runs no NEE inside. A zero radius falls back to the diffuse
+    in the leaf's colour that the leaf used to be. Verified in numbers: on a
+    semi-infinite slab with a cosine-weighted entry the walk reflects its
+    colour to within 0.02 for `g ≤ 0.6` and albedos up to 0.9, a chromatic
+    radius included (`subsurface/tests.rs`); through the integrator, the white
+    furnace bounds every fixture of `samples/materialx_subsurface.mtlx`
+    (`tests/mtlx_surfaces.rs`). Three traps, each fallen into once:
+    - **Scatter points are not offset.** Typhoon starts every segment at
+      `tnear = 1e-4`. From a scatter point that lies within that distance
+      under the surface the ray steps straight through the boundary, the walk
+      carries on *outside* the object, and later re-enters through a front
+      face; on a 0.1 mean free path this killed the slab test outright. Only
+      the entry, which lies on the surface, is offset. A walk that still meets
+      the boundary from its entry's side (a point rounded across the surface)
+      is dropped as lost — the facing test is relative to the entry, so an
+      inverted winding walks the same.
+    - **Chiang's fit is for `g ≥ 0`.** At `g = −0.4` its `d` coefficient is
+      −3.7, the remapped albedo is negative, and every walk dies. Typhoon clamps
+      the anisotropy to ±0.99 and inherits that; the walk clamps it to
+      `[0, 0.99]`, as Cycles does (`walk_anisotropy`).
+    - **The walk's rays use the tracer's own interval.** Every other
+      `World::intersect` asks for `(0.001, ∞)`, and LLVM propagates the two
+      constants into the kernel. The walk asking for its own bounds lost that:
+      cornellbox, which never walks, ran 0.3% more instructions in the
+      triangle test. `trace_owner` moves the ray's origin instead. The rest of
+      the integration is kept off the per-vertex path the same way — the walk
+      and the exit hit are `#[cold]`, out of line, the pending exit lives in
+      `PathScratch` behind a flag, and `ScatterSample` carries a one-byte leaf
+      index in its padding rather than the walk's parameters; inlined, or as
+      an `Option<WalkExit>`, each of those cost cornellbox about 1%. What is
+      left is +0.49% instructions on cornellbox (callgrind, 2 spp), and every
+      sample scene without a subsurface leaf renders bit-identically.
   - **Throughput tables are ported, not regenerated.** The dielectric throughput
     is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
     (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),
@@ -348,9 +401,8 @@
     warning: opacity / `alpha_mode` (no cutout), anisotropy rotations, glTF
     `occlusion`, the inputs MaterialX's own graphs ignore (glTF `dispersion` and
     `thickness`, `standard_surface`'s `transmission_depth` / `scatter` /
-    `dispersion`, OpenPBR's `transmission_dispersion_scale`), a live Zeltner
-    sheen (evaluated as Imageworks) and a live `subsurface_bsdf` (shaded as a
-    diffuse). Default-valued inputs stay silent: the suite authors
+    `dispersion`, OpenPBR's `transmission_dispersion_scale`) and a live Zeltner
+    sheen (evaluated as Imageworks). Default-valued inputs stay silent: the suite authors
     `alpha_mode` and `geometry_opacity` at their defaults in dozens of
     documents.
   - **The EDF half is a second list, not a leaf.** MaterialX's `<surface>` has an
@@ -429,9 +481,35 @@
 
 ## Known gaps: MaterialX
 
-- **Approximated leaves.** `subsurface_bsdf` shades as a diffuse in its colour
-  (no random walk, no radius); a Zeltner sheen (`mode = zeltner`, OpenPBR's fuzz)
-  is evaluated as Imageworks / Charlie. Both are reported per material when live.
+- **Approximated leaves.** A Zeltner sheen (`mode = zeltner`, OpenPBR's fuzz)
+  is evaluated as Imageworks / Charlie, and reported per material when live.
+- **The random walk reflects less than its colour, as Typhoon's does.**
+  Chiang's inversion is fitted for a *diffuse* entry; entered by refraction, a
+  walk heads deeper and more of it is absorbed. Through the integrator a colour
+  of (0.8, 0.5, 0.2) on a near-slab reflects (0.78, 0.45, 0.16) — pinned by
+  `a_short_walk_reflects_its_colour_in_the_furnace` and, for the walk alone,
+  `a_normal_entry_reflects_less_than_the_fit`. The refracted entry is
+  Typhoon's (and Cycles' when it has an IOR); a cosine-weighted entry, Cycles'
+  classic random walk, would reflect the colour to 0.02 and is a one-function
+  change in `closure::subsurface_entry` if matching the authored albedo ever
+  matters more than matching the reference. The fit also over-reflects where
+  it passes 1 and is clamped: `g ≥ 0.8`, and colours near white (0.95 at
+  `g = 0` reflects 0.93, 0.6 at `g = 0.9` reflects 0.70) —
+  `high_anisotropy_over_reflects_boundedly`. Negative anisotropy walks as
+  isotropic (the fit has no `g < 0` branch).
+- **A walk sees its own `geom_id` only.** A mesh split into several geometries
+  (one per material subset) is several media: a walk entering one does not
+  exit through another, and meets it as nothing. Nested objects inside the
+  medium (eyes in a head) are stepped past, not scattered off, as in Typhoon's
+  owner-scene trace. A walk that leaves no exit in 256 bounces — an open mesh,
+  a sheet, a sliver — is absorbed, and so is one that rounds across its
+  boundary (`--stats` reports the share that exited).
+- **No BSSRDF importance, no NEE inside.** Walks are brute-force: the exit's
+  Lambertian is the first place light is sampled, so a thin backlit feature
+  (ears, leaves) converges only as fast as its walks reach the far side. The
+  native `crust:openpbr` / `UsdPreviewSurface` subsurface still renders as the
+  tinted diffuse (`docs/openpbr_reference_alignment.md`): the walk is wired to
+  the MaterialX leaf only.
 - **Not applied.** Opacity cutout (`opacity`, `geometry_opacity`, glTF `alpha`),
   anisotropy rotation, and glTF `occlusion` are reported, not implemented.
   Dispersion is ignored where MaterialX's own graphs ignore it, and reported.

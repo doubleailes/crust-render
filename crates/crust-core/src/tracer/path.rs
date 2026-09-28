@@ -16,6 +16,7 @@ use crate::profile::Section;
 use crate::ray::Ray;
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
+use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{Light, LightList, PathSampler, profile};
 
@@ -36,6 +37,10 @@ const K_PHASE: i32 = 4; // off vertex: phase lobe (0) + HG uv (1,2)
 const K_RR: i32 = 5; // off vertex: Russian-roulette survival
 const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
 const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
+const K_SSS: i32 = 8; // off vertex: the subsurface random walk (per step below)
+
+/// The white Lambertian every random walk exits through.
+static SSS_EXIT: ExitLambertian = ExitLambertian;
 
 /// Training-only clamp on recorded radiance so a single firefly cannot
 /// dominate a directional distribution. Affects the guiding field, never the
@@ -138,6 +143,7 @@ fn sample_bounce_direction(
                 // only steers secondary bounces, where the cone is already
                 // near-saturated, so this costs sharpness nowhere it had any.
                 spread: crate::RayCone::MAX_SPREAD,
+                subsurface: None,
             });
         }
         // Material with no continuous component: pure BSDF sampling.
@@ -223,6 +229,10 @@ pub(super) struct TrainRec {
 /// and there is nothing to synchronise.
 pub(crate) struct PathScratch {
     pub(super) records: Vec<VertexRec>,
+    /// Where the last random walk left its object — read only while the
+    /// path's own flag says a walk is pending. Kept here, not in the path,
+    /// so a path that never walks never initialises it.
+    sss_exit: PendingExit,
 }
 
 impl PathScratch {
@@ -230,6 +240,7 @@ impl PathScratch {
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
             records: Vec::with_capacity(max_depth),
+            sss_exit: PendingExit::default(),
         }
     }
 }
@@ -507,6 +518,13 @@ pub(super) fn trace_path<const PROFILE: bool>(
     let mut beta = Vec3A::ONE;
     // Radiance entering the path from beyond the last vertex.
     let mut terminal = Vec3A::ZERO;
+    // Set when the last vertex entered a random walk: the next vertex is
+    // its exit, shaded without tracing the segment that reaches it (the walk
+    // already did, inside the object). A flag beside a slot rather than an
+    // `Option<WalkExit>`: taking a 150-byte option at every vertex cost
+    // cornellbox, which never walks, 1% of its instructions.
+    let mut sss_pending = false;
+    let sss_exit = &mut scratch.sss_exit;
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
@@ -545,8 +563,12 @@ pub(super) fn trace_path<const PROFILE: bool>(
             break;
         }
 
-        stats.closest_hit += 1;
-        let hit_opt = {
+        let exiting = sss_pending;
+        let hit_opt = if exiting {
+            sss_pending = false;
+            sss_exit.hit()
+        } else {
+            stats.closest_hit += 1;
             let _p = profile::scope_if::<PROFILE>(Section::Trace);
             world.intersect(&ray, 0.001, f32::INFINITY)
         };
@@ -571,7 +593,8 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // regions is exact (superposed processes), and the `Passthrough`
         // weight is precisely the region transmittance up to the winner.
         let t_lim = t_surf.min(t_med);
-        let event = if volumes.is_empty() {
+        // A walk's exit has no arriving segment outside the object.
+        let event = if volumes.is_empty() || exiting {
             VolumeEvent::Passthrough {
                 transmittance: Vec3A::ONE,
                 emitted: Vec3A::ZERO,
@@ -921,10 +944,19 @@ pub(super) fn trace_path<const PROFILE: bool>(
         };
 
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
-        let bounce = {
+        let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
             sample_bounce_direction(&ray, &rec, &sp, guiding_here, v)
         };
+        // A subsurface leaf was selected: walk the interior now. The walk is
+        // part of this surface event — the entry's record carries its weight
+        // and the exit is the next vertex — so it spends no path depth.
+        // (Replaced only when it walks: passing the sample through a `match`
+        // or a rebinding moves all of it at every vertex.)
+        if let Some(sample) = bounce.take_if(|s| s.subsurface.is_some()) {
+            bounce = walk_subsurface(world, &hit, &ray, &sp, sample, v, sss_exit, stats);
+            sss_pending = bounce.is_some();
+        }
         if bounce.is_none() {
             stats.ended_absorbed += 1;
         }
@@ -971,6 +1003,23 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     });
                 }
                 vrec.factor = factor;
+                if sss_pending {
+                    let exit = &*sss_exit;
+                    // The exit vertex sees the walk arrive from outside,
+                    // along its last direction; what it emits there leaves
+                    // the object, so nothing is owed to this record.
+                    stats.vertices += 1;
+                    records.push(vrec);
+                    prev = None;
+                    ray = Ray::new(exit.rec.p, -exit.dir)
+                        .with_time(ray.time())
+                        .with_mask(crate::ray::MASK_INDIRECT)
+                        .with_cone(
+                            ray.cone()
+                                .scattered(cone_width_here, crate::RayCone::MAX_SPREAD),
+                        );
+                    continue;
+                }
                 prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
                     // A BSDF (or guide-mixture) pdf, in solid angle.
@@ -1053,6 +1102,80 @@ pub(super) fn trace_path<const PROFILE: bool>(
         };
     }
     radiance
+}
+
+/// Where a random walk left its object: the next vertex, and the geometry it
+/// is on.
+#[derive(Default)]
+struct PendingExit {
+    rec: HitRecord,
+    dir: Vec3A,
+    owner: u32,
+}
+
+impl PendingExit {
+    /// The exit as the hit the next vertex shades, on the exit Lambertian.
+    ///
+    /// Out of line for the same reason as [`walk_subsurface`]: built inline
+    /// beside `World::intersect`, the two sources of the vertex's hit made
+    /// LLVM copy the record at every vertex instead of writing it in place.
+    #[cold]
+    #[inline(never)]
+    fn hit(&self) -> Option<WorldHit<'static>> {
+        Some(WorldHit {
+            rec: HitRecord { t: 0.0, ..self.rec },
+            mat: &SSS_EXIT,
+            geom_id: self.owner,
+            prim_id: 0,
+        })
+    }
+}
+
+/// Runs the random walk a subsurface `sample` at `hit` enters, and returns
+/// the sample weighted by the walk's throughput with its exit parked in
+/// `sss_exit` — or `None` when the walk was absorbed.
+///
+/// Out of line and cold on purpose: inlined, the walk made `trace_path` too
+/// large for LLVM to inline into `render_pixel`, and cornellbox — which never
+/// walks — ran 2.4% more instructions.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn walk_subsurface(
+    world: &World,
+    hit: &WorldHit,
+    ray: &Ray,
+    sp: &ShadingPoint,
+    mut sample: ScatterSample,
+    v: PathSampler,
+    sss_exit: &mut PendingExit,
+    stats: &mut RayStats,
+) -> Option<ScatterSample> {
+    let entry = sp.subsurface_entry(&sample)?;
+    stats.sss_walks += 1;
+    let mut cost = WalkCost::default();
+    let exit = random_walk(
+        world,
+        hit.geom_id,
+        hit.rec.p,
+        hit.rec.normal,
+        hit.rec.front_face,
+        &entry,
+        ray.time(),
+        v.new_domain(K_SSS),
+        &mut cost,
+    );
+    stats.sss_steps += u64::from(cost.steps);
+    stats.sss_rays += u64::from(cost.rays);
+    let exit = exit?;
+    stats.sss_exits += 1;
+    sample.value *= exit.weight;
+    *sss_exit = PendingExit {
+        rec: exit.rec,
+        dir: exit.dir,
+        owner: hit.geom_id,
+    };
+    Some(sample)
 }
 
 /// Scales `indirect` down whole so its largest channel is at most `limit`.

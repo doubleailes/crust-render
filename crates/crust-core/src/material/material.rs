@@ -33,6 +33,19 @@ pub struct ScatterSample {
     /// which says nothing about how wide that lobe is. `0.0` keeps the
     /// arriving cone as it was, which is what a delta lobe wants.
     pub spread: f32,
+    /// Set when the material selected a subsurface leaf: the direction is
+    /// not a bounce but the entry into a random walk
+    /// ([`crate::subsurface`]), which the tracer runs before the path
+    /// resumes at the walk's exit. Such a sample is `delta` — no continuous
+    /// density can produce it — and its `value` is the leaf's weight over its
+    /// selection probability. The value is the leaf's index, which
+    /// [`ShadingPoint::subsurface_entry`] turns into the walk's parameters.
+    ///
+    /// An index and not the parameters themselves: this sits in padding the
+    /// struct already had, where the parameters grew every sample by 64
+    /// bytes and cost 0.7% of cornellbox's instructions moving them around
+    /// at vertices that never walk.
+    pub subsurface: Option<u8>,
 }
 
 /// The `Material` trait defines the behavior of materials in the ray tracing system.
@@ -405,6 +418,18 @@ impl<'a> ShadingPoint<'a> {
             Resolved::Plain(m) => m.eval_resolved(r_in, &self.rec, wi),
             Resolved::OpenPBR(m) => m.eval(r_in, &self.rec, wi),
             Resolved::Closure(c) => c.eval(r_in, &self.rec, wi),
+        }
+    }
+
+    /// The random walk a sample with [`ScatterSample::subsurface`] set enters
+    /// toward `dir`: `None` for any other sample.
+    pub fn subsurface_entry(
+        &self,
+        sample: &ScatterSample,
+    ) -> Option<crate::subsurface::SubsurfaceEntry> {
+        match &self.bsdf {
+            Resolved::Closure(c) => c.subsurface_entry(sample.subsurface?, sample.ray.direction()),
+            _ => None,
         }
     }
 

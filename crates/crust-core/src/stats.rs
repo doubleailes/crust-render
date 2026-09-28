@@ -164,6 +164,15 @@ pub struct RayStats {
     /// carried medium (subsurface / glass interiors). The rest are surfaces.
     pub volume_scatters: u64,
     pub medium_scatters: u64,
+    /// Subsurface random walks started, and how many found an exit (the rest
+    /// were absorbed or left no way out). Their steps are the walks' free
+    /// flights, and their rays the closest-hit queries those issued —
+    /// counted apart from `closest_hit` so `bounce_rays` still means bounces,
+    /// and folded into `total_rays`.
+    pub sss_walks: u64,
+    pub sss_exits: u64,
+    pub sss_steps: u64,
+    pub sss_rays: u64,
     /// Light samples drawn by next-event estimation that reached a light
     /// (`sample_li` answered). A shadow ray follows only when the connection
     /// can carry something, so `light_samples - shadow_rays` is the NEE work
@@ -184,7 +193,7 @@ pub struct RayStats {
 impl RayStats {
     /// All ray queries, of every kind.
     pub fn total_rays(&self) -> u64 {
-        self.closest_hit + self.shadow_rays
+        self.closest_hit + self.shadow_rays + self.sss_rays
     }
 
     /// Mean shaded vertices per camera ray — the effective path length.
@@ -241,6 +250,10 @@ impl RayStats {
         self.ended_absorbed += o.ended_absorbed;
         self.volume_scatters += o.volume_scatters;
         self.medium_scatters += o.medium_scatters;
+        self.sss_walks += o.sss_walks;
+        self.sss_exits += o.sss_exits;
+        self.sss_steps += o.sss_steps;
+        self.sss_rays += o.sss_rays;
         self.light_samples += o.light_samples;
         self.shadow_occluded += o.shadow_occluded;
         self.camera_rays += o.camera_rays;
@@ -735,6 +748,9 @@ impl fmt::Display for RenderStats {
                 count(r.shadow_rays),
                 share(r.shadow_occluded, r.shadow_rays)
             )?;
+            if r.sss_walks > 0 {
+                writeln!(f, "  {:<28} {}", "subsurface walk rays", count(r.sss_rays))?;
+            }
             writeln!(f, "  {:<28} {}", "total ray queries", count(r.total_rays()))?;
             // Throughput needs the render phase alone, not the whole run:
             // dividing by total would credit rays to time spent parsing.
@@ -777,6 +793,16 @@ impl fmt::Display for RenderStats {
                         share(n, r.vertices)
                     )?;
                 }
+            }
+            if r.sss_walks > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {} ({:.1}% exited, {:.1} steps each)",
+                    "subsurface walks",
+                    count(r.sss_walks),
+                    share(r.sss_exits, r.sss_walks),
+                    r.sss_steps as f64 / r.sss_walks as f64
+                )?;
             }
             // Guerilla's "shadow rays / shading point": normally well under
             // 5, and crust casts at most one per vertex, so this is also the

@@ -171,7 +171,8 @@ is itself a failed texture load.
    - OpenPBR fuzz is Zeltner sheen, evaluated as Imageworks / Charlie: the fuzz sweeps
      sit 5–8 dB below `blender-new` (`sweep_fuzz_roughness_0_25` −8.4,
      `input_fuzz_sheenlike` −5.6, `velvet` −5.3);
-   - anisotropy rotation, and subsurface without a random walk.
+   - anisotropy rotation. (Subsurface was on this list: `subsurface_bsdf` is a
+     random walk now, which this run predates.)
 3. **Two more pattern gaps worth naming.** `greysphere_calibration` (−6.6 dB)
    places its colour chart with `place2d`, which crust does not have; the
    `gltf_*` image samples use the `gltf_image` / `gltf_colorimage` /

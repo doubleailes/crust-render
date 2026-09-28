@@ -445,6 +445,7 @@ impl OpenPBR {
                     pdf,
                     delta: false,
                     spread: lobe_spread(self, lobe),
+                    subsurface: None,
                 });
             }
 
@@ -463,6 +464,7 @@ impl OpenPBR {
                 // through, so the cone it arrived with is the cone it leaves
                 // with.
                 spread: 0.0,
+                subsurface: None,
             });
         }
 
@@ -511,6 +513,7 @@ impl OpenPBR {
             pdf,
             delta: false,
             spread: lobe_spread(self, lobe),
+            subsurface: None,
         })
     }
 

@@ -164,7 +164,12 @@ Known, deliberate, and recorded here so nobody rediscovers them:
 - **Random-walk subsurface entry** — non-transmissive SSS materials never
   refract into their interior; they use the tinted-diffuse (EON)
   approximation. Needs an interface refraction event for the SSS fraction
-  and an exit strategy (module header "Phase 5").
+  and an exit strategy (module header "Phase 5"). Both now exist for the
+  MaterialX `subsurface_bsdf` (`crust-core/src/subsurface.rs`: the walk, and
+  the exit Lambertian the tracer resumes on); the native shader would need a
+  subsurface lobe whose selection returns a `ScatterSample::subsurface`
+  entry, and its `from_subsurface` van de Hulst medium replaced by the walk's
+  Chiang remap, since the two invert the albedo differently.
 - **`specular_weight` semantics** — `specular_weight` weighs the **dielectric
   base's** specular interface and nothing else: it scales the finished
   dielectric lobe, and the metal lobe takes its coverage from `base_metalness`

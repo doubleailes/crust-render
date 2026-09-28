@@ -344,21 +344,14 @@ impl B<'_, '_> {
         if self.is(weight, 0.0) {
             return None;
         }
-        match &bsdf {
-            Bsdf::Sheen {
-                mode: SheenMode::Zeltner,
-                ..
-            } => {
-                self.out
-                    .reported
-                    .insert("sheen_bsdf mode zeltner (evaluated as conty_kulla)".into());
-            }
-            Bsdf::Subsurface { .. } => {
-                self.out
-                    .reported
-                    .insert("subsurface_bsdf (no random walk: shaded as diffuse)".into());
-            }
-            _ => {}
+        if let Bsdf::Sheen {
+            mode: SheenMode::Zeltner,
+            ..
+        } = &bsdf
+        {
+            self.out
+                .reported
+                .insert("sheen_bsdf mode zeltner (evaluated as conty_kulla)".into());
         }
         Some(self.push(Closure::Leaf(Leaf {
             bsdf,
