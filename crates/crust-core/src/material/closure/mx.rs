@@ -147,6 +147,11 @@ pub fn fresnel_conductor(cos_theta: f32, n: Vec3A, k: Vec3A) -> Vec3A {
 }
 
 /// `mx_fresnel_hoffman_schlick`: generalized Schlick with an F82 tint.
+///
+/// At `f90 = 1`, `exponent = 5` this is `brdf::fresnel_f82_tint`, native
+/// OpenPBR's metal Fresnel. The two are kept apart on purpose: this one tracks
+/// the GLSL (free `f90` and exponent, no clamp), and folding either into the
+/// other would move the other path's bits.
 pub fn fresnel_hoffman_schlick(
     cos_theta: f32,
     f0: Vec3A,

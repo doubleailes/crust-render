@@ -215,6 +215,10 @@ pub fn eon_diffuse(rho: Vec3A, roughness: f32, v_local: Vec3A, l_local: Vec3A) -
 /// with the reflectance at μ̄ = cos 82° ≈ 1/7 scaled by `tint` — the
 /// `specular_color` edge tint:
 ///   `F(μ) = F_s(μ) − μ (1 − μ)⁶ · F_s(μ̄) (1 − tint) / (μ̄ (1 − μ̄)⁶)`
+///
+/// MaterialX's generalisation (free `f90` and exponent) is
+/// `closure::mx::fresnel_hoffman_schlick`, a line-by-line GLSL port kept
+/// separate; a fix to the formula here likely belongs there too.
 pub fn fresnel_f82_tint(cos_theta: f32, f0: Vec3A, tint: Vec3A) -> Vec3A {
     const MU_BAR: f32 = 1.0 / 7.0;
     let mu = cos_theta.clamp(0.0, 1.0);
