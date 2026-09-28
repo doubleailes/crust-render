@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!--
+  MaterialX subsurface scattering: `subsurface_bsdf` rendered as a random walk
+  (crates/crust-core/src/subsurface.rs, a port of NVIDIA Typhoon's walk).
+
+  Three materials, one per way a document reaches the leaf:
+
+    mtlx_openpbr_skin      — `open_pbr_surface` at subsurface_weight 1: the
+                             leaf under the specular dielectric, entered
+                             through that dielectric's IOR and roughness. A
+                             chromatic radius (red travels four times further
+                             than blue) is what Typhoon's channel MIS is for.
+    mtlx_standard_marble   — `standard_surface` at subsurface 1, a near-white
+                             medium with a long mean free path.
+    mtlx_bare_jade         — a bare `subsurface_bsdf` as the surface's only
+                             closure: no interface over it, so the walk is
+                             entered through Typhoon's defaults (IOR 1.5,
+                             roughness 0.5).
+
+  Texture-free on purpose, so tests and `examples/mtlx_shade` can pin exact
+  numbers. Separate from `materialx_surfaces`, whose furnace and counts are
+  pinned per document.
+-->
+<materialx version="1.39" colorspace="lin_rec709">
+
+  <open_pbr_surface name="openpbr_skin" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.8, 0.55, 0.45" />
+    <input name="subsurface_weight" type="float" value="1" />
+    <input name="subsurface_color" type="color3" value="0.9, 0.6, 0.45" />
+    <input name="subsurface_radius" type="float" value="0.2" />
+    <input name="subsurface_radius_scale" type="color3" value="1, 0.5, 0.25" />
+    <input name="specular_roughness" type="float" value="0.4" />
+  </open_pbr_surface>
+  <surfacematerial name="mtlx_openpbr_skin" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="openpbr_skin" />
+  </surfacematerial>
+
+  <standard_surface name="std_marble" type="surfaceshader">
+    <input name="subsurface" type="float" value="1" />
+    <input name="subsurface_color" type="color3" value="0.85, 0.85, 0.8" />
+    <input name="subsurface_radius" type="color3" value="1, 1, 1" />
+    <input name="subsurface_scale" type="float" value="0.3" />
+    <input name="specular_roughness" type="float" value="0.15" />
+  </standard_surface>
+  <surfacematerial name="mtlx_standard_marble" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="std_marble" />
+  </surfacematerial>
+
+  <subsurface_bsdf name="jade_bsdf" type="BSDF">
+    <input name="color" type="color3" value="0.3, 0.75, 0.45" />
+    <input name="radius" type="vector3" value="0.15, 0.3, 0.2" />
+    <input name="anisotropy" type="float" value="0.3" />
+  </subsurface_bsdf>
+  <surface name="jade_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="jade_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_bare_jade" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="jade_surface" />
+  </surfacematerial>
+
+</materialx>

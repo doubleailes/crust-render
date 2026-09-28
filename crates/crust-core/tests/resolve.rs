@@ -119,6 +119,7 @@ fn assert_resolve_matches(name: &str, mat: &dyn Material) {
                     assert_eq!(bits(a.value), bits(b.value), "{what}: value");
                     assert_eq!(a.pdf.to_bits(), b.pdf.to_bits(), "{what}: pdf");
                     assert_eq!(a.delta, b.delta, "{what}: delta");
+                    assert_eq!(a.subsurface, b.subsurface, "{what}: subsurface");
                     assert_eq!(a.spread.to_bits(), b.spread.to_bits(), "{what}: spread");
                     same_ray(&a.ray, &b.ray, &what);
                 }
@@ -222,6 +223,9 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("materialx_surfaces.mtlx", "mtlx_standard_glass"),
         ("materialx_surfaces.mtlx", "mtlx_gltf_ruby"),
         ("materialx_surfaces.mtlx", "mtlx_openpbr_bumped_coat"),
+        ("materialx_subsurface.mtlx", "mtlx_openpbr_skin"),
+        ("materialx_subsurface.mtlx", "mtlx_standard_marble"),
+        ("materialx_subsurface.mtlx", "mtlx_bare_jade"),
     ] {
         let loaded = materialx::load(&sample(file), Some(node), &decline)
             .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));

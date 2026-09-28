@@ -38,6 +38,7 @@ mod scene;
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
+pub mod subsurface;
 mod texture;
 mod tracer;
 mod volume;

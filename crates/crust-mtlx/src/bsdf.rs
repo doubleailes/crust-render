@@ -818,15 +818,11 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
                 mode,
             }
         }
-        "subsurface_bsdf" => {
-            out.reported
-                .insert("subsurface_bsdf (no random walk: shaded as diffuse)".into());
-            Bsdf::Subsurface {
-                color: c.input_or(node, "color", Val::vec3(0.18, 0.18, 0.18)),
-                radius: c.input_or(node, "radius", Val::ONE),
-                anisotropy: c.input_or(node, "anisotropy", Val::ZERO),
-            }
-        }
+        "subsurface_bsdf" => Bsdf::Subsurface {
+            color: c.input_or(node, "color", Val::vec3(0.18, 0.18, 0.18)),
+            radius: c.input_or(node, "radius", Val::ONE),
+            anisotropy: c.input_or(node, "anisotropy", Val::ZERO),
+        },
         _ => Bsdf::Translucent {
             color: c.input_or(node, "color", Val::ONE),
         },

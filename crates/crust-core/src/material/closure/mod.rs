@@ -42,6 +42,7 @@ use crate::material::brdf::{
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
+use crate::subsurface::SubsurfaceEntry;
 use crust_mtlx::{Bsdf, Closure, Closures, DiffuseModel, NodeId, ScatterMode, Val};
 use mx::{Fresnel, FresnelModel};
 
@@ -116,6 +117,17 @@ pub enum Lobe {
     Translucent {
         color: Vec3A,
     },
+    /// `subsurface_bsdf`: no value toward any direction (as in Typhoon, the
+    /// leaf does no NEE); selecting it enters a random walk
+    /// ([`crate::subsurface`]) through the interface above it.
+    Subsurface {
+        color: Vec3A,
+        radius: Vec3A,
+        anisotropy: f32,
+        /// The entry interface: its IOR (≥ 1) and GGX alpha.
+        ior: f32,
+        alpha: f32,
+    },
 }
 
 /// One leaf at a vertex: its lobe, the weight the tree gives it there, its
@@ -179,6 +191,17 @@ impl Prepared {
                 format!("sheen color {} roughness {roughness:.3}", c(color))
             }
             Lobe::Translucent { color } => format!("translucent color {}", c(color)),
+            Lobe::Subsurface {
+                color,
+                radius,
+                anisotropy,
+                ior,
+                alpha,
+            } => format!(
+                "random walk color {} radius {} anisotropy {anisotropy:.3} entry ior {ior:.4} alpha {alpha:.4}",
+                c(color),
+                c(radius)
+            ),
         }
     }
 }
@@ -286,6 +309,47 @@ struct Walk<'a> {
     thin_walled: bool,
 }
 
+/// The interface a subsurface leaf is entered through: the nearest
+/// dielectric layered over it, or — with none, as for a bare
+/// `subsurface_bsdf` — Typhoon's closure defaults, IOR 1.5 and roughness 0.5.
+#[derive(Clone, Copy, Debug)]
+struct Interface {
+    ior: f32,
+    alpha: f32,
+}
+
+const DEFAULT_INTERFACE: Interface = Interface {
+    ior: 1.5,
+    alpha: 0.25,
+};
+
+/// The first dielectric leaf a layer's top reaches, as an entry interface.
+fn interface_of(cl: &Closures, id: NodeId, slots: &[Val]) -> Option<Interface> {
+    match &cl.nodes[id as usize] {
+        Closure::Leaf(leaf) => match &leaf.bsdf {
+            Bsdf::Dielectric { ior, roughness, .. } => {
+                let ior = slots[*ior as usize].x();
+                let ior = if ior.is_finite() { ior.max(1.0) } else { 1.5 };
+                let (ax, ay) = alphas(slots[*roughness as usize]);
+                Some(Interface {
+                    ior,
+                    alpha: mx::average_alpha(ax, ay),
+                })
+            }
+            _ => None,
+        },
+        Closure::Multiply { input, .. } => interface_of(cl, *input, slots),
+        Closure::Mix { fg, bg, .. } => {
+            interface_of(cl, *fg, slots).or_else(|| interface_of(cl, *bg, slots))
+        }
+        Closure::Layer { top, .. } => interface_of(cl, *top, slots),
+        Closure::Add { a, b } => {
+            interface_of(cl, *a, slots).or_else(|| interface_of(cl, *b, slots))
+        }
+        Closure::Empty => None,
+    }
+}
+
 impl ResolvedClosure {
     /// Collapses `closures` at a vertex: `slots` is the evaluated program,
     /// `rec` the hit (its normal the ray-facing shading normal), `r_in` the
@@ -328,7 +392,7 @@ impl ResolvedClosure {
             thin_walled,
         };
         if let Some(root) = closures.root {
-            self.walk(closures, root, Vec3A::ONE, &walk);
+            self.walk(closures, root, Vec3A::ONE, DEFAULT_INTERFACE, &walk);
         }
         self.select_total = self.leaves[..self.len].iter().map(|l| l.select).sum();
         if self.transmits && !thin_walled {
@@ -360,11 +424,18 @@ impl ResolvedClosure {
 
     /// Walks the subtree `id` reached with `weight`, pushing its leaves, and
     /// returns its throughput toward ωo.
-    fn walk(&mut self, cl: &Closures, id: NodeId, weight: Vec3A, w: &Walk<'_>) -> Vec3A {
+    fn walk(
+        &mut self,
+        cl: &Closures,
+        id: NodeId,
+        weight: Vec3A,
+        iface: Interface,
+        w: &Walk<'_>,
+    ) -> Vec3A {
         match &cl.nodes[id as usize] {
             Closure::Leaf(leaf) => {
                 let own = w.slots[leaf.weight as usize].x().max(0.0);
-                let (mut p, albedo) = prepare(leaf, w);
+                let (mut p, albedo) = prepare(leaf, iface, w);
                 let weight = weight * own;
                 if weight.max_element() > 0.0 && self.len < MAX_LEAVES {
                     p.weight = weight;
@@ -390,24 +461,27 @@ impl ResolvedClosure {
                 }
             }
             Closure::Layer { top, base } => {
-                let t_top = self.walk(cl, *top, weight, w);
-                let t_base = self.walk(cl, *base, weight * t_top, w);
+                let t_top = self.walk(cl, *top, weight, iface, w);
+                // A dielectric over the base is what a random walk below it
+                // is entered through.
+                let under = interface_of(cl, *top, w.slots).unwrap_or(iface);
+                let t_base = self.walk(cl, *base, weight * t_top, under, w);
                 t_top * t_base
             }
             Closure::Mix { fg, bg, mix } => {
                 let m = w.slots[*mix as usize].x().clamp(0.0, 1.0);
-                let t_fg = self.walk(cl, *fg, weight * m, w);
-                let t_bg = self.walk(cl, *bg, weight * (1.0 - m), w);
+                let t_fg = self.walk(cl, *fg, weight * m, iface, w);
+                let t_bg = self.walk(cl, *bg, weight * (1.0 - m), iface, w);
                 t_bg.lerp(t_fg, m)
             }
             Closure::Add { a, b } => {
-                let ta = self.walk(cl, *a, weight, w);
-                let tb = self.walk(cl, *b, weight, w);
+                let ta = self.walk(cl, *a, weight, iface, w);
+                let tb = self.walk(cl, *b, weight, iface, w);
                 (ta + tb - Vec3A::ONE).max(Vec3A::ZERO)
             }
             Closure::Multiply { input, weight: k } => {
                 let k = sanitize(w.slots[*k as usize].rgb()).min(Vec3A::ONE);
-                self.walk(cl, *input, weight * k, w)
+                self.walk(cl, *input, weight * k, iface, w)
             }
             // A pruned branch: nothing to shade, and it lets everything through.
             Closure::Empty => Vec3A::ONE,
@@ -476,6 +550,24 @@ impl ResolvedClosure {
         }
         let leaf = &self.leaves[pick];
         match sample_lobe(&leaf.lobe, leaf.v, [s[1], s[2]], s[3])? {
+            LobeSample::Subsurface { dir } => {
+                let world = leaf.frame.to_world(dir).normalize();
+                // Inward in the leaf's frame can still be outward through the
+                // true face when a normal map tilts the frame hard; such an
+                // entry is refused rather than redirected.
+                if rec.normal.dot(world) >= 0.0 {
+                    return None;
+                }
+                let p = self.p(pick).max(1e-4);
+                Some(ScatterSample {
+                    ray: Ray::new(rec.p + world * 1e-4, world),
+                    value: leaf.weight / p,
+                    pdf: 1.0,
+                    delta: true,
+                    spread: crate::RayCone::MAX_SPREAD,
+                    subsurface: Some(pick as u8),
+                })
+            }
             LobeSample::Delta { dir, value } => {
                 let world = leaf.frame.to_world(dir);
                 let p = self.p(pick).max(1e-4);
@@ -485,6 +577,7 @@ impl ResolvedClosure {
                     pdf: 1.0,
                     delta: true,
                     spread: 0.0,
+                    subsurface: None,
                 })
             }
             LobeSample::Continuous { dir, spread } => {
@@ -496,6 +589,7 @@ impl ResolvedClosure {
                     pdf: pdf.max(1e-4),
                     delta: false,
                     spread,
+                    subsurface: None,
                 })
             }
         }
@@ -513,6 +607,25 @@ impl ResolvedClosure {
             return Ray::new(rec.p + wi * 1e-4, wi);
         }
         Ray::new(rec.p, wi)
+    }
+
+    /// The walk leaf `index` enters toward `dir` — see
+    /// [`crate::ScatterSample::subsurface`].
+    pub fn subsurface_entry(&self, index: u8, dir: Vec3A) -> Option<SubsurfaceEntry> {
+        match self.leaves[..self.len].get(index as usize)?.lobe {
+            Lobe::Subsurface {
+                color,
+                radius,
+                anisotropy,
+                ..
+            } => Some(SubsurfaceEntry {
+                dir,
+                albedo: color,
+                radius,
+                anisotropy,
+            }),
+            _ => None,
+        }
     }
 
     /// [`crate::Material::make_ray`].
@@ -548,7 +661,7 @@ fn alphas(v: Val) -> (f32, f32) {
 /// Builds a leaf's lobe and frame at the vertex, and returns the directional
 /// albedo `E(ωo)` its throughput is `1 − E·weight` of — `None` for an opaque
 /// leaf, whose throughput is 0.
-fn prepare(leaf: &crust_mtlx::Leaf, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
+fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
     let s = |i: u32| w.slots[i as usize];
     let rgb = |i: u32| sanitize(s(i).rgb());
     let n = leaf
@@ -593,19 +706,43 @@ fn prepare(leaf: &crust_mtlx::Leaf, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
                 None,
             )
         }
-        Bsdf::Subsurface { color, .. } => {
-            // Reported at load: no random walk. Shaded as a diffuse in the
-            // subsurface colour, as MaterialX's GLSL renders it indirectly.
-            let color = rgb(*color);
-            (
+        Bsdf::Subsurface {
+            color,
+            radius,
+            anisotropy,
+        } => {
+            let color = rgb(*color).min(Vec3A::ONE);
+            // `radius` is a vector3; a float broadcasts.
+            let r = s(*radius);
+            let radius = sanitize(if r.arity >= 3 {
+                r.rgb()
+            } else {
+                Vec3A::splat(r.x())
+            });
+            let lobe = if radius.max_element() > 0.0 {
+                let anisotropy = s(*anisotropy).x();
+                Lobe::Subsurface {
+                    color,
+                    radius,
+                    anisotropy: if anisotropy.is_finite() {
+                        anisotropy.clamp(-0.99, 0.99)
+                    } else {
+                        0.0
+                    },
+                    ior: iface.ior,
+                    alpha: iface.alpha,
+                }
+            } else {
+                // A zero mean free path exits where it entered: a diffuse in
+                // the subsurface colour, which is also what MaterialX's GLSL
+                // renders it as.
                 Lobe::Diffuse {
                     model: DiffuseModel::OrenNayar,
                     color,
                     roughness: 0.0,
-                },
-                luminance(color).max(0.02),
-                None,
-            )
+                }
+            };
+            (lobe, luminance(color).max(0.02), None)
         }
         Bsdf::Translucent { color } => {
             let color = rgb(*color);
@@ -810,8 +947,18 @@ pub fn dielectric_refl_filter(cos_o: f32, r: f32, ior: f32) -> f32 {
 }
 
 enum LobeSample {
-    Continuous { dir: Vec3A, spread: f32 },
-    Delta { dir: Vec3A, value: Vec3A },
+    Continuous {
+        dir: Vec3A,
+        spread: f32,
+    },
+    Delta {
+        dir: Vec3A,
+        value: Vec3A,
+    },
+    /// The direction into a random walk.
+    Subsurface {
+        dir: Vec3A,
+    },
 }
 
 /// `(f, pdf)` of a lobe for local `v`, `l`: the BSDF value without the cosine,
@@ -844,6 +991,9 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
             }
             (color * FRAC_1_PI, -l.z * FRAC_1_PI)
         }
+        // Light reaches a walk only through its entry, never toward a
+        // direction: no value and no continuous density.
+        Lobe::Subsurface { .. } => (Vec3A::ZERO, 0.0),
         Lobe::Sheen { color, roughness } => {
             if l.z <= 0.0 {
                 return (Vec3A::ZERO, 0.0);
@@ -957,6 +1107,9 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
                 spread: crate::RayCone::MAX_SPREAD,
             })
         }
+        Lobe::Subsurface { ior, alpha, .. } => {
+            subsurface_entry(v, ior, alpha, uv).map(|dir| LobeSample::Subsurface { dir })
+        }
         Lobe::Specular {
             fresnel,
             tint,
@@ -1003,6 +1156,33 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
             (l.z < -1e-6).then_some(LobeSample::Continuous { dir: l, spread })
         }
     }
+}
+
+/// The entry direction of a random walk, in the leaf's frame — Typhoon's
+/// `Bsdf::SampleSubsurfaceEntry`: refraction through the interface at
+/// `ior` (never below 1, so there is no total internal reflection going in),
+/// about the normal when smooth and about a GGX VNDF microfacet normal
+/// otherwise. Only a direction: the interface's energy is the layer's
+/// throughput above the leaf, already in its weight.
+fn subsurface_entry(v: Vec3A, ior: f32, alpha: f32, uv: [f32; 2]) -> Option<Vec3A> {
+    if v.z <= 0.0 {
+        return None;
+    }
+    let eta = 1.0 / ior.max(1.0);
+    let h = if alpha < 1e-3 {
+        Vec3A::Z
+    } else {
+        sample_vndf_ggx_aniso_local(v.normalize(), alpha, alpha, uv)
+    };
+    let cos_i = v.dot(h);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    let l = if sin2_t >= 1.0 {
+        -v
+    } else {
+        let cos_t = (1.0 - sin2_t).sqrt();
+        -v * eta + h * (eta * cos_i - cos_t)
+    };
+    (l.z < 0.0).then(|| l.normalize())
 }
 
 #[cfg(test)]

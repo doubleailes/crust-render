@@ -5,7 +5,7 @@ mod material;
 pub use material::{Material, Resolution, ScatterSample, ShadingPoint};
 mod emissive;
 pub use emissive::Emissive;
-mod brdf;
+pub(crate) mod brdf;
 pub mod closure;
 mod openpbr;
 mod pattern;

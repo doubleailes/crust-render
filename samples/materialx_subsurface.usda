@@ -1,0 +1,126 @@
+#usda 1.0
+(
+    doc = """MaterialX random-walk subsurface fixture: three spheres, one per
+    material of `materialx_subsurface.mtlx` — OpenPBR skin, Standard Surface
+    marble and a bare `subsurface_bsdf` jade — over a grey floor, lit by the
+    sky and a small light behind them, so the rims show the light that walked
+    through. Their mean free paths are a sizeable fraction of the 0.8 radius
+    on purpose: translucency, not a diffuse, is what the walk adds.
+
+    A/B against the diffuse approximation that preceded the walk:
+
+      cargo run --release -- -i samples/materialx_subsurface.usda -o sss.exr --stats
+
+    `--stats` reports the walks, the share that found an exit and their mean
+    length.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "OpenPbrSkin" (
+            prepend references = @materialx_subsurface.mtlx@</MaterialX/Materials/mtlx_openpbr_skin>
+        )
+        {
+        }
+
+        def Material "StandardMarble" (
+            prepend references = @materialx_subsurface.mtlx@</MaterialX/Materials/mtlx_standard_marble>
+        )
+        {
+        }
+
+        def Material "BareJade" (
+            prepend references = @materialx_subsurface.mtlx@</MaterialX/Materials/mtlx_bare_jade>
+        )
+        {
+        }
+
+        def Material "Floor"
+        {
+            token outputs:surface.connect = </World/Looks/Floor/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.45, 0.45, 0.43)
+                float inputs:specularRoughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+
+    def Sphere "OpenPbrSkin" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/OpenPbrSkin>
+        double3 xformOp:translate = (-2, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "StandardMarble" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/StandardMarble>
+        double3 xformOp:translate = (0, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BareJade" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/BareJade>
+        double3 xformOp:translate = (2, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/Floor>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.4
+        asset inputs:texture:file = @sky_env.exr@
+        token inputs:texture:format = "latlong"
+        float xformOp:rotateY = 20
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+    }
+
+    # Behind and above the spheres: the backlight their rims glow against.
+    def SphereLight "Back"
+    {
+        float inputs:intensity = 60
+        float inputs:radius = 0.4
+        color3f inputs:color = (1, 0.9, 0.8)
+        double3 xformOp:translate = (0, 2.2, -2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 40
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 1.2, 7)
+        float xformOp:rotateX = -3
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 320)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 12
+    }
+}

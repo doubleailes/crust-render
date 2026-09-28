@@ -53,6 +53,12 @@ cargo run --release -- -i samples/curves.usda --stats
 # with the report), so never take a Render time from a --profile run.
 cargo run --release -- -i samples/materialx_basic.usda --profile
 
+# Subsurface random walks: --stats adds how many walks ran, the share that
+# found an exit (the rest were absorbed or leaked out of an open mesh), their
+# mean length in free flights, and the ray queries they cost ("subsurface walk
+# rays", counted into the total but not into "bounce rays").
+cargo run --release -- -i samples/materialx_subsurface.usda --stats
+
 # Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
 cargo test
 cargo test -p crust-core loads_cornellbox_usda     # run a single test by name
