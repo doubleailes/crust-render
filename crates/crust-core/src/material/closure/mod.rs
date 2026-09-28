@@ -580,7 +580,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
             let e = luminance(e_r);
             let select = match mode {
                 ScatterMode::R => e,
-                ScatterMode::T => luminance(tint),
+                ScatterMode::T => (1.0 - e) * luminance(tint),
                 ScatterMode::RT => e + (1.0 - e) * luminance(tint),
             };
             (
@@ -801,14 +801,16 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
                 if btdf <= 0.0 {
                     return (Vec3A::ZERO, 0.0);
                 }
-                // `RT` pays the interface's `(1 − F)` and samples refraction
-                // with that probability; `T` carries neither (MaterialX: the
-                // layer above owns the Fresnel loss).
-                let t = match mode {
-                    ScatterMode::RT => 1.0 - scalar(fresnel.eval(vh)),
-                    _ => 1.0,
+                // Both modes pay the interface's `(1 − F)` (MaterialX GLSL's
+                // `mx_surface_transmission`, OSL, BSDL and Typhoon alike —
+                // the layer above attenuates only by its own throughput);
+                // `RT` also samples refraction with that probability.
+                let t = 1.0 - scalar(fresnel.eval(vh));
+                let pdf = match mode {
+                    ScatterMode::RT => p_h * t,
+                    _ => p_h,
                 };
-                (tint * (btdf * t), p_h * t)
+                (tint * (btdf * t), pdf)
             } else {
                 (Vec3A::ZERO, 0.0)
             }
@@ -822,7 +824,7 @@ fn scalar(f: Vec3A) -> f32 {
 }
 
 /// Walter et al. 2007's refraction BTDF without its Fresnel factor — the
-/// `(1 − F)` is the caller's, since MaterialX's `T` mode omits it — plus the
+/// `(1 − F)` is the caller's, film-aware Fresnel — plus the
 /// VNDF sampling density of `l` and `v·h` at the refraction half vector.
 /// `eta` is `η_t / η_i`.
 fn refraction(v: Vec3A, l: Vec3A, eta: f32, ax: f32, ay: f32) -> (f32, f32, f32) {
@@ -897,13 +899,13 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
             }
             if thin_walled {
                 // Straight through: a thin sheet's two refractions cancel.
-                // MaterialX's `T` mode carries no Fresnel loss (the layer
-                // above owns it); `RT` pays `(1 − F)`, which the selection
-                // above already sampled, so the estimator divides it out.
-                return Some(LobeSample::Delta {
-                    dir: -v,
-                    value: tint,
-                });
+                // Both modes pay `(1 − F)`: `RT` by the selection above
+                // (so the estimator divides it out), `T` in the value.
+                let value = match mode {
+                    ScatterMode::RT => tint,
+                    _ => tint * (1.0 - scalar(fresnel.eval(vh))),
+                };
+                return Some(LobeSample::Delta { dir: -v, value });
             }
             let eta_rel = 1.0 / eta;
             let sin2_t = eta_rel * eta_rel * (1.0 - vh * vh);

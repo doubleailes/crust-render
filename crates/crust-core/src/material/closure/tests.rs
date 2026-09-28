@@ -478,3 +478,23 @@ fn the_bsdl_filter_matches_its_grid_points() {
         dielectric_refl_filter(0.5, 0.3, 1.0 / 1.5)
     );
 }
+
+/// A `T`-mode dielectric pays its own `(1 − F)` — MaterialX GLSL, OSL, BSDL
+/// and Typhoon all do — so from inside a glass, past the critical angle, it
+/// transmits nothing. Without the factor, a glass's exit leaf transmitted
+/// `1 − E_R(front)` beside a reflection leaf already reflecting the total
+/// internal reflection, and a glass sphere returned 1.16× a white furnace.
+#[test]
+fn a_transmission_only_dielectric_pays_its_fresnel_loss() {
+    let body = doc(r#"<dielectric_bsdf name="g" type="BSDF">
+             <input name="roughness" type="vector2" value="0.01, 0.01" />
+             <input name="scatter_mode" type="string" value="T" />
+           </dielectric_bsdf>
+           <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="g" /></surface>"#);
+    let head_on = albedo(&resolved(&body, "s", 0.0, true), 0.0, true, 512);
+    assert!((head_on.x - 0.96).abs() < 0.01, "front, head on: {head_on}");
+    // Leaving the interior at 60°, beyond asin(1/1.5) ≈ 41.8°.
+    let theta = 60f32.to_radians();
+    let tir = albedo(&resolved(&body, "s", theta, false), theta, false, 512);
+    assert!(tir.max_element() < 1e-3, "total internal reflection: {tir}");
+}
