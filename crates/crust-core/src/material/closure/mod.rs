@@ -409,6 +409,8 @@ impl ResolvedClosure {
                 let k = sanitize(w.slots[*k as usize].rgb()).min(Vec3A::ONE);
                 self.walk(cl, *input, weight * k, w)
             }
+            // A pruned branch: nothing to shade, and it lets everything through.
+            Closure::Empty => Vec3A::ONE,
         }
     }
 

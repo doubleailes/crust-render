@@ -205,13 +205,14 @@
   - **A closure tree, evaluated with MaterialX's own semantics.** MaterialX
     assembles a look from standalone BSDF nodes glued with `layer`, `mix`, `add`
     and `multiply`, and `bsdf::flatten` keeps that tree as it is: an arena of
-    `Closure::{Leaf, Layer, Mix, Add, Multiply}` whose parameters are program
-    slots, so the graph's masks and textures drive them per point. The rules are
-    MaterialX GLSL's (`mx_*_bsdf.glsl`), which NVIDIA's Typhoon follows too:
-    `layer(top, base) = top + base · T_top(ωo)`; `mix(fg, bg, m) = m·fg +
-    (1 − m)·bg` with `m` clamped; `multiply` scales the response (its weight
-    clamped to [0, 1]) and passes the throughput through unchanged; `add` sums
-    the responses and its throughput is `max(t₁ + t₂ − 1, 0)`. A leaf's
+    `Closure::{Leaf, Layer, Mix, Add, Multiply, Empty}` whose parameters are
+    program slots, so the graph's masks and textures drive them per point. The
+    rules are MaterialX GLSL's (`mx_*_bsdf.glsl`), which NVIDIA's Typhoon
+    follows too: `layer(top, base) = top + base · T_top(ωo)`;
+    `mix(fg, bg, m) = m·fg + (1 − m)·bg` with `m` clamped; `multiply` scales
+    the response (its weight clamped to [0, 1]) and passes the throughput
+    through unchanged; `add` sums the responses and its throughput is
+    `max(t₁ + t₂ − 1, 0)`. A leaf's
     throughput is `1 − E_R·w` for a dielectric (every scatter mode),
     `1 − avg(E)·w` for generalized Schlick and `1 − E·w` for sheen — and **0**
     for diffuse, conductor, subsurface and translucent *whatever their weight*.
@@ -225,6 +226,32 @@
     and keeping the leaves apart retired the class rather than patching
     instances of it. It also makes a MaterialX glass refract, a coat keep its
     `tint`, and a third stacked dielectric keep its own roughness.
+  - **Pruned at compile time, to MaterialX's empty BSDF.** A branch that can
+    never respond is dropped at `flatten`, so it costs no leaf slot and no work
+    per hit. That covers a leaf whose weight is a literal 0 (in the surface
+    builders, one that folds to 0), a `multiply` by a literal 0, and the far
+    side of a `mix` at a literal 0 or 1. What it leaves behind is MaterialX's
+    `BSDF(0, 1)`: no response and a throughput of 1. That is the value
+    MaterialX's GLSL starts every BSDF at, and the value it leaves a
+    zero-weight dielectric, generalized Schlick or sheen at. A `mix` at a
+    literal endpoint selects its other branch exactly, and `layer`, `add` and
+    `multiply` simplify over an empty branch exactly (`layer(∅, b) = b`,
+    `add(a, ∅) = a`). **A `mix` with a live factor does not**: its throughput
+    `m·T_fg + (1 − m)·T_bg` still needs the pruned side's 1. So the mix stays a
+    mix, with a `Closure::Empty` on the pruned side (`Closures::mix`, the one
+    place `bsdf_tree` and the surface builders build a mix). That is the trap.
+    Rewriting `mix(fg, ∅, m)` as `multiply(fg, m)` keeps the response but loses
+    the throughput, because `multiply` passes `T_fg` through, and for an opaque
+    `fg` that is 0. The DPEL assets are built on exactly this difference. Each
+    dust and stain diffuse is mixed by its mask against a zero-weight, IOR-1
+    `dielectric_bsdf` (their "transmission dummy"), which turns the mask into a
+    *coverage*, and that coverage is layered over the glaze. With the rewrite,
+    the diffuse's 0 stood for the whole top, and both assets rendered black
+    except for their dust and the Lion's sheen: every glaze, conductor and body
+    leaf at weight exactly 0, with no NaN and no warning. The probe showed it at
+    the first point it was aimed at. `closure/tests.rs` now pins a pruned dummy
+    against the same dummy at a *connected* weight of 0, which the compiler
+    cannot prune, bit for bit.
   - **Collapsed at `resolve`, exactly.** `T_top` depends on ωo alone, and ωo
     is fixed at a path vertex, so there the tree *is* a weighted sum of leaves.
     `ResolvedClosure::resolve` walks it once per vertex: `mix` and `multiply`
@@ -359,10 +386,14 @@
     "the probe" is a test over the same function (`tests/mtlx_surfaces.rs`).
     This is what settled the teapot: the render looked washed out against the
     reference, and the probe showed the graph producing exactly the right deep
-    blue (0.005, 0.024, 0.074) on the body against light ribs — so the fault
-    was the sample scene's exposure, not the material. It reaches its textures
-    through `FileAssets` rather than `UvTexture` directly, so
-    `CRUST_TEX_STREAM` is honoured. That last part is not tidying: the
+    blue on the body against light ribs — so the fault was the sample scene's
+    exposure, not the material. The reduction printed that blue as one pooled
+    base colour, (0.0048, 0.0234, 0.0734) at (0.962, 0.312), matching the
+    (0.005, 0.024, 0.074) first recorded here. The tree shows its parts: the
+    body diffuse at (0.0026, 0.0213, 0.0717), weight 0.956 under the glaze,
+    beside a stain diffuse at 0.006, which pool back to the same colour. It
+    reaches its textures through `FileAssets` rather than `UvTexture`
+    directly, so `CRUST_TEX_STREAM` is honoured. That last part is not tidying: the
     preloaded decoder narrows to 8 bits, so an HDR emission texture probed
     through it reads 1.0 whatever the file holds, and a probe that cannot see
     the range is worse than no probe because it answers confidently.
@@ -390,7 +421,11 @@
     radiance L reflects a·L). The lion
     is the larger graph (140 ops, 7 textures over 6 UDIM tiles, 1.06 M
     baked triangles) and the one that layers a `sheen_bsdf`; both import with no
-    unsupported nodes.
+    unsupported nodes. They are also the only documents here that build
+    coverages from zero-weight dummies (the pruning trap above). CI cannot see
+    them, so `tests/mtlx_surfaces.rs` carries the Teapot's four-layer stack in
+    miniature, in white, and they still need probing by hand after any change
+    to the tree.
 
 ## Known gaps: MaterialX
 
@@ -408,6 +443,15 @@
   total internal reflection, so the transmission leaf below is weighted a little
   high there. The `T` leaf's own `(1 − F)` keeps the sum bounded (furnace), but the
   exit weighting is not BSDF-exact.
+- **Pruning is GLSL-exact only for leaves that let light through.** A diffuse,
+  conductor, subsurface or translucent leaf at a literal weight of 0 is pruned
+  to the empty BSDF like any other. MaterialX's GLSL, though, writes such a
+  leaf's throughput of 0 before it checks the weight, so there it still hides
+  its base, as it does in crust at a *connected* weight of 0, which is not
+  pruned. A literal `multiply` by 0 is pruned the same way, where GLSL passes
+  its input's throughput through. The difference shows only under a layer's
+  top, and neither the built-in surfaces (whose layer tops are dielectric and
+  sheen leaves) nor the DPEL assets put either one there.
 - **Layering is MaterialX's, not physical.** `T_top(ωo)` only (non-reciprocal,
   single-scattering): NEE and bounce evaluate the same `f(ωo, ωi)`, so MIS is
   consistent, but a bidirectional method would need care. A reflection layer over

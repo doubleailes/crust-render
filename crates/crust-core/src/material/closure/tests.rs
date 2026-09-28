@@ -338,6 +338,96 @@ fn a_multiply_scales_response_but_not_throughput() {
     assert!((dx - dy).abs() < 1e-6, "{dx} vs {dy}");
 }
 
+/// The DPEL Teapot's dust and stain layers, and the Lion's: an opaque diffuse
+/// mixed by a mask against a zero-weight dielectric, layered over the rest of
+/// the look. `dummy` is the branch that makes the mask a *coverage*: the
+/// dielectric at weight 0 is MaterialX's `BSDF(0, 1)` — no response, full
+/// throughput — so the layer's top lets `1 − m` of the base through.
+const COVERAGE: &str = r#"
+  <oren_nayar_diffuse_bsdf name="dust" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="roughness" type="float" value="0.544" />
+  </oren_nayar_diffuse_bsdf>
+  <dielectric_bsdf name="dummy" type="BSDF">
+    <input name="ior" type="float" value="1" />
+    <input name="weight" type="float" WEIGHT />
+  </dielectric_bsdf>
+  <constant name="zero" type="float"><input name="value" type="float" value="0" /></constant>
+  <mix name="coverage" type="BSDF">
+    <input name="FG" type="BSDF" nodename="dust" />
+    <input name="BG" type="BSDF" nodename="dummy" />
+    <input name="mix" type="float" value="0.25" />
+  </mix>
+  <oren_nayar_diffuse_bsdf name="body" type="BSDF">
+    <input name="color" type="color3" value="0.005, 0.024, 0.074" />
+  </oren_nayar_diffuse_bsdf>
+  <layer name="x" type="BSDF">
+    <input name="top" type="BSDF" nodename="coverage" />
+    <input name="base" type="BSDF" nodename="body" />
+  </layer>"#;
+
+/// [`COVERAGE`] with the dummy's weight a literal 0 (`pruned`, which the
+/// compiler drops) or connected to a constant 0 (kept as a live leaf), and
+/// the dust as the mix's `fg` or its `bg`.
+fn coverage(pruned: bool, dust_is_fg: bool) -> String {
+    let weight = if pruned {
+        r#"value="0""#
+    } else {
+        r#"nodename="zero""#
+    };
+    let (fg, bg) = if dust_is_fg {
+        ("fg", "bg")
+    } else {
+        ("bg", "fg")
+    };
+    doc(&COVERAGE
+        .replace("WEIGHT", weight)
+        .replace("FG", fg)
+        .replace("BG", bg))
+}
+
+/// `(category, weight)` of every resolved leaf.
+fn weights(c: &ResolvedClosure) -> Vec<(&'static str, Vec3A)> {
+    c.leaves().iter().map(|l| (l.category, l.weight)).collect()
+}
+
+#[test]
+fn a_pruned_mix_branch_keeps_its_share_of_the_throughput() {
+    // `mix(T_bg, T_fg, m)` with the dummy's throughput at 1 and the dust's at
+    // 0: the base keeps `1 − 0.25` when the dust is `fg`, `0.25` when it is
+    // `bg`. Rewritten as `multiply(dust, m)`, the top took the diffuse's
+    // throughput alone, 0, and the DPEL assets rendered black but for their
+    // dust.
+    for (dust_is_fg, dust, body) in [(true, 0.25, 0.75), (false, 0.75, 0.25)] {
+        let c = resolved(&coverage(true, dust_is_fg), "x", 0.3, true);
+        assert_eq!(
+            weights(&c),
+            vec![
+                ("oren_nayar_diffuse_bsdf", Vec3A::splat(dust)),
+                ("oren_nayar_diffuse_bsdf", Vec3A::splat(body)),
+            ],
+            "dust as {}",
+            if dust_is_fg { "fg" } else { "bg" }
+        );
+    }
+}
+
+#[test]
+fn pruning_a_zero_weight_dielectric_does_not_change_the_closure() {
+    // Pruning is a compile-time shortcut, so a literal-zero weight must
+    // resolve exactly as the same weight arriving through a connection, which
+    // the compiler cannot prune and the walk evaluates as a live leaf.
+    // (Exact for the leaves MaterialX leaves at throughput 1 when their
+    // weight is 0: dielectric, generalized Schlick and sheen.)
+    for dust_is_fg in [true, false] {
+        for theta in [0.0f32, 0.8, 1.4] {
+            let pruned = resolved(&coverage(true, dust_is_fg), "x", theta, true);
+            let live = resolved(&coverage(false, dust_is_fg), "x", theta, true);
+            assert_eq!(weights(&pruned), weights(&live), "theta {theta}");
+        }
+    }
+}
+
 #[test]
 fn a_coat_normal_perturbs_only_the_coat() {
     let body = doc(r#"

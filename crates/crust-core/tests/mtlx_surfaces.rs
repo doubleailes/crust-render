@@ -4,7 +4,7 @@
 //! surface-shader requirements.
 
 use crust_core::closure::mx::{Fresnel, FresnelModel};
-use crust_core::closure::{Lobe, Prepared};
+use crust_core::closure::{self, Lobe, Prepared};
 use crust_core::materialx::{self, Loaded};
 use crust_core::rt::Geometry;
 use crust_core::{
@@ -437,13 +437,56 @@ fn standalone_bsdf_documents_are_untouched_by_the_builders() {
     );
 }
 
-/// The white furnace: every fixture material on a unit sphere inside a
-/// uniform emitter of radiance 1, traced unclamped (`ray_color` applies no
-/// firefly clamp). A closure that is energy-conserving reflects and transmits
-/// at most what arrives, so no pixel — head-on, mid-way or grazing — may come
-/// back brighter than the environment behind it. A layer that added its top's
-/// and base's full responses, or a leaf whose sample weight disagreed with its
-/// `eval / pdf`, reads above 1 here.
+/// The impact offsets the white furnace aims at: head-on, mid-way, grazing.
+const FURNACE_OFFSETS: [f32; 3] = [0.0, 0.6, 0.95];
+
+/// The white furnace: `l`'s material on a unit sphere inside a uniform
+/// emitter of radiance 1, traced unclamped (`ray_color` applies no firefly
+/// clamp). Returns the mean radiance at each of [`FURNACE_OFFSETS`] — on a
+/// convex surface, the material's directional albedo there.
+fn furnace(l: &Loaded) -> [Vec3A; 3] {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        l.material.clone(),
+    );
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 50.0,
+        },
+        Arc::new(Emissive::new(Vec3A::ONE)),
+    );
+    let world = world.commit();
+    let (lights, volumes) = (LightList::new(), Volumes::default());
+    FURNACE_OFFSETS.map(|offset| {
+        let ray = Ray::new(Vec3A::new(offset, 0.0, -5.0), Vec3A::Z);
+        let n = 2048;
+        let mut sum = Vec3A::ZERO;
+        for i in 0..n {
+            sum += ray_color(
+                &ray,
+                &world,
+                &lights,
+                &volumes,
+                24,
+                SamplingStrategy::PowerMis,
+                PathSampler::new(5, 11, 0, i),
+            );
+        }
+        sum / n as f32
+    })
+}
+
+/// Every fixture material in the white furnace. A closure that is
+/// energy-conserving reflects and transmits at most what arrives, so no
+/// pixel — head-on, mid-way or grazing — may come back brighter than the
+/// environment behind it. A layer that added its top's and base's full
+/// responses, or a leaf whose sample weight disagreed with its `eval / pdf`,
+/// reads above 1 here.
 #[test]
 fn every_fixture_material_is_bounded_in_a_white_furnace() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -458,43 +501,92 @@ fn every_fixture_material_is_bounded_in_a_white_furnace() {
     ];
     for name in names {
         let loaded = materialx::load(&path, Some(name), &|_, _| None).expect("loads");
-        let mut world = WorldBuilder::new();
-        world.attach(
-            Geometry::Sphere {
-                center: Vec3A::ZERO,
-                radius: 1.0,
-            },
-            loaded.material.clone(),
-        );
-        world.attach(
-            Geometry::Sphere {
-                center: Vec3A::ZERO,
-                radius: 50.0,
-            },
-            Arc::new(Emissive::new(Vec3A::ONE)),
-        );
-        let world = world.commit();
-        let (lights, volumes) = (LightList::new(), Volumes::default());
-        for offset in [0.0f32, 0.6, 0.95] {
-            let ray = Ray::new(Vec3A::new(offset, 0.0, -5.0), Vec3A::Z);
-            let n = 2048;
-            let mut sum = Vec3A::ZERO;
-            for i in 0..n {
-                sum += ray_color(
-                    &ray,
-                    &world,
-                    &lights,
-                    &volumes,
-                    24,
-                    SamplingStrategy::PowerMis,
-                    PathSampler::new(5, 11, 0, i),
-                );
-            }
-            let mean = sum / n as f32;
+        for (offset, mean) in FURNACE_OFFSETS.into_iter().zip(furnace(&loaded)) {
             assert!(
                 mean.max_element() <= 1.02 && mean.min_element() >= 0.0,
                 "{name} at offset {offset}: furnace mean {mean}"
             );
         }
+    }
+}
+
+/// The DPEL Teapot's look in miniature, and in white: a dust diffuse and a
+/// stain diffuse, each mixed by its mask against a zero-weight dielectric —
+/// the assets' idiom for turning a mask into a *coverage* — over a smooth
+/// glaze over the body. The Lion puts the same dust mix under a sheen.
+const COVERAGE_STACK: &str = r#"
+  <oren_nayar_diffuse_bsdf name="dust" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="roughness" type="float" value="0.544" />
+  </oren_nayar_diffuse_bsdf>
+  <dielectric_bsdf name="dust_dummy" type="BSDF">
+    <input name="ior" type="float" value="1" />
+    <input name="weight" type="float" value="0" />
+  </dielectric_bsdf>
+  <mix name="dust_mix" type="BSDF">
+    <input name="fg" type="BSDF" nodename="dust" />
+    <input name="bg" type="BSDF" nodename="dust_dummy" />
+    <input name="mix" type="float" value="0.3" />
+  </mix>
+  <oren_nayar_diffuse_bsdf name="stain" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+    <input name="roughness" type="float" value="0.268" />
+  </oren_nayar_diffuse_bsdf>
+  <dielectric_bsdf name="stain_dummy" type="BSDF">
+    <input name="ior" type="float" value="1" />
+    <input name="weight" type="float" value="0" />
+  </dielectric_bsdf>
+  <mix name="stain_mix" type="BSDF">
+    <input name="fg" type="BSDF" nodename="stain" />
+    <input name="bg" type="BSDF" nodename="stain_dummy" />
+    <input name="mix" type="float" value="0.4" />
+  </mix>
+  <dielectric_bsdf name="glaze" type="BSDF">
+    <input name="ior" type="float" value="1.48" />
+    <input name="roughness" type="vector2" value="0.002, 0.002" />
+  </dielectric_bsdf>
+  <oren_nayar_diffuse_bsdf name="body" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+  </oren_nayar_diffuse_bsdf>
+  <layer name="glazing" type="BSDF">
+    <input name="top" type="BSDF" nodename="glaze" />
+    <input name="base" type="BSDF" nodename="body" />
+  </layer>
+  <layer name="stained" type="BSDF">
+    <input name="top" type="BSDF" nodename="stain_mix" />
+    <input name="base" type="BSDF" nodename="glazing" />
+  </layer>
+  <layer name="dusted" type="BSDF">
+    <input name="top" type="BSDF" nodename="dust_mix" />
+    <input name="base" type="BSDF" nodename="stained" />
+  </layer>
+  <surface name="s" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="dusted" />
+  </surface>"#;
+
+#[test]
+fn a_masked_coverage_keeps_what_lies_beneath_it() {
+    let l = load("coverage", COVERAGE_STACK);
+    // In numbers: each coverage passes `1 − mask` of what is below it, the
+    // glaze passes `1 − E_R`, and the dummies contribute nothing else.
+    let ls = leaves(&l, 0.5, 0.5);
+    let w = |category: &str, i: usize| find(&ls, category)[i].weight.x;
+    let (stain, glaze) = (0.7 * 0.4, 0.7 * 0.6);
+    let body = glaze * closure::dielectric_refl_filter(1.0, 0.002f32.sqrt(), 1.48);
+    assert_eq!(ls.len(), 4, "dust, stain, glaze and body");
+    assert!(near(w("oren_nayar_diffuse_bsdf", 0), 0.3, 1e-6), "dust");
+    assert!(near(w("oren_nayar_diffuse_bsdf", 1), stain, 1e-6), "stain");
+    assert!(near(w("dielectric_bsdf", 0), glaze, 1e-6), "glaze");
+    assert!(near(w("oren_nayar_diffuse_bsdf", 2), body, 1e-6), "body");
+    // In the furnace: every layer is white, so nearly all the light comes
+    // back (0.90 to 0.96: the dust's and stain's Oren–Nayar albedo is the
+    // only loss) and never more than arrives. Rewriting the pruned dummies
+    // away gave the dust layer's top the diffuse's throughput of 0, and this
+    // read the dust alone, 0.23 to 0.27.
+    for (offset, mean) in FURNACE_OFFSETS.into_iter().zip(furnace(&l)) {
+        assert!(
+            mean.max_element() <= 1.02 && mean.min_element() > 0.8,
+            "offset {offset}: furnace mean {mean}"
+        );
     }
 }

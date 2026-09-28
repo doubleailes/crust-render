@@ -16,7 +16,9 @@
 //! - `add(a, b)` is `a + b`;
 //! - `multiply(x, w)` scales `x`'s response by `w` and leaves its throughput;
 //! - `layer(top, base)` is `top + base · T_top(ωo)`, where `T_top` is the
-//!   top's directional throughput — `1 − E(ωo)·weight` for a reflecting leaf.
+//!   top's directional throughput — `1 − E(ωo)·weight` for a reflecting leaf;
+//! - a branch pruned at compile time is MaterialX's empty `BSDF(0, 1)`: no
+//!   response, and a throughput of 1 (see `Closures::mix`).
 //!
 //! Evaluating it is the renderer's half. Nothing here knows what a GGX lobe
 //! is; the crate names MaterialX's leaves and their inputs, and crust-core's
@@ -293,6 +295,12 @@ pub enum Closure {
         input: NodeId,
         weight: Slot,
     },
+    /// No BSDF: no response and a throughput of 1 — MaterialX's `BSDF(0, 1)`,
+    /// which is what a zero-weight dielectric, generalized Schlick or sheen
+    /// evaluates to. It holds the place of a branch pruned under a `mix`
+    /// (`Closures::mix`); a `layer`, `add` or `multiply` over a pruned
+    /// branch simplifies exactly without one.
+    Empty,
 }
 
 /// One flattened EDF leaf: the weight reaching it and the program slot its
@@ -369,6 +377,32 @@ impl Closures {
         (self.nodes.len() - 1) as NodeId
     }
 
+    /// `mix(fg, bg, m)` over branches either of which may have been pruned
+    /// (`None`) — the one place a mix is built, for [`bsdf_tree`] and the
+    /// surface builders alike.
+    ///
+    /// A pruned branch contributes no response, but it keeps its share of the
+    /// throughput, `mix(T_bg, T_fg, m)` at `T = 1`, so the mix stays a mix and
+    /// the pruned side becomes a [`Closure::Empty`]. Rewriting `mix(fg, ∅, m)`
+    /// as `multiply(fg, m)` gets the response right and the throughput wrong:
+    /// a `multiply` passes `T_fg` through, and for an opaque `fg` that is 0.
+    /// The DPEL assets mix a diffuse against a zero-weight dielectric to turn
+    /// a dust mask into a *coverage*, and under that rewrite their dust layer
+    /// hid the entire look beneath it.
+    pub(crate) fn mix(
+        &mut self,
+        fg: Option<NodeId>,
+        bg: Option<NodeId>,
+        mix: Slot,
+    ) -> Option<NodeId> {
+        if fg.is_none() && bg.is_none() {
+            return None;
+        }
+        let fg = fg.unwrap_or_else(|| self.push(Closure::Empty));
+        let bg = bg.unwrap_or_else(|| self.push(Closure::Empty));
+        Some(self.push(Closure::Mix { fg, bg, mix }))
+    }
+
     /// Number of BSDF leaves reachable from the root — what a shading point
     /// has to hold. The arena may also carry leaves a builder made and then
     /// pruned the branch of; those are never visited.
@@ -380,6 +414,7 @@ impl Closures {
                 | Closure::Mix { fg: a, bg: b, .. }
                 | Closure::Add { a, b } => count(cl, *a) + count(cl, *b),
                 Closure::Multiply { input, .. } => count(cl, *input),
+                Closure::Empty => 0,
             }
         }
         self.root.map_or(0, |r| count(self, r))
@@ -425,6 +460,7 @@ impl Closures {
                 let k = slots[*weight as usize].rgb().clamp(Vec3A::ZERO, Vec3A::ONE);
                 self.walk_weights(*input, w * k, slots, out);
             }
+            Closure::Empty => {}
         }
     }
 
@@ -444,7 +480,7 @@ impl Closures {
                 }
                 Closure::Mix { mix, .. } => f(mix),
                 Closure::Multiply { weight, .. } => f(weight),
-                Closure::Layer { .. } | Closure::Add { .. } => {}
+                Closure::Layer { .. } | Closure::Add { .. } | Closure::Empty => {}
             }
         }
         for e in &mut self.emission {
@@ -484,6 +520,7 @@ impl Closures {
                 self.apply_thin_film(b, film);
             }
             Closure::Multiply { input, .. } => self.apply_thin_film(input, film),
+            Closure::Empty => {}
         }
     }
 }
@@ -640,35 +677,21 @@ fn bsdf_tree(
             } else {
                 None
             });
-            let fg = match m {
-                Some(m) if m <= 0.0 => None,
-                _ => closure_input(c, node, "fg", ClosureType::Bsdf)
-                    .and_then(|n| bsdf_tree(c, &n, depth + 1, out)),
+            let branch = |c: &mut Compiler<'_>, out: &mut Closures, name: &str| {
+                closure_input(c, node, name, ClosureType::Bsdf)
+                    .and_then(|n| bsdf_tree(c, &n, depth + 1, out))
             };
-            let bg = match m {
-                Some(m) if m >= 1.0 => None,
-                _ => closure_input(c, node, "bg", ClosureType::Bsdf)
-                    .and_then(|n| bsdf_tree(c, &n, depth + 1, out)),
-            };
-            let mix = c.input_or(node, "mix", Val::ZERO);
-            match (fg, bg) {
-                (Some(fg), Some(bg)) => Some(out.push(Closure::Mix { fg, bg, mix })),
-                (Some(fg), None) => Some(out.push(Closure::Multiply {
-                    input: fg,
-                    weight: mix,
-                })),
-                (None, Some(bg)) => {
-                    let one = c.constant(Val::ONE);
-                    let inv = c.emit(Op::Invert {
-                        a: mix,
-                        amount: one,
-                    });
-                    Some(out.push(Closure::Multiply {
-                        input: bg,
-                        weight: inv,
-                    }))
+            // A literal endpoint selects one branch outright: the other's
+            // share of the response and of the throughput is 0 alike.
+            match m {
+                Some(m) if m <= 0.0 => branch(c, out, "bg"),
+                Some(m) if m >= 1.0 => branch(c, out, "fg"),
+                _ => {
+                    let fg = branch(c, out, "fg");
+                    let bg = branch(c, out, "bg");
+                    let mix = c.input_or(node, "mix", Val::ZERO);
+                    out.mix(fg, bg, mix)
                 }
-                (None, None) => None,
             }
         }
         "add" => {
@@ -1100,6 +1123,33 @@ mod tests {
             cl.nodes[cl.root.unwrap() as usize],
             Closure::Leaf(_)
         ));
+    }
+
+    #[test]
+    fn a_mix_against_a_pruned_branch_stays_a_mix() {
+        // The zero-weight dielectric is pruned, but the mix keeps its place
+        // with an empty closure there: `mix(T_bg, T_fg, m)` still needs the
+        // pruned side's throughput of 1, which `multiply(fg, m)` would replace
+        // with the diffuse's 0.
+        let doc = r#"<materialx>
+          <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+          <dielectric_bsdf name="t" type="BSDF">
+            <input name="weight" type="float" value="0" />
+          </dielectric_bsdf>
+          <mix name="m" type="BSDF">
+            <input name="fg" type="BSDF" nodename="d" />
+            <input name="bg" type="BSDF" nodename="t" />
+            <input name="mix" type="float" value="0.25" />
+          </mix>
+        </materialx>"#;
+        let (_, cl) = build(doc, "m");
+        let Closure::Mix { fg, bg, .. } = cl.nodes[cl.root.unwrap() as usize] else {
+            panic!("the root stays a mix");
+        };
+        assert!(matches!(cl.nodes[fg as usize], Closure::Leaf(_)));
+        assert!(matches!(cl.nodes[bg as usize], Closure::Empty));
+        assert_eq!(cl.leaf_count(), 1);
+        assert_eq!(weights(doc, "m"), vec![("oren_nayar_diffuse_bsdf", 0.25)]);
     }
 
     #[test]
