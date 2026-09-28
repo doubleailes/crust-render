@@ -1,173 +1,240 @@
+## MODIFIED Requirements
+
+### Requirement: Supported shading models
+
+The engine SHALL shade every surface through one of three models. The first is
+**`OpenPBR`**, a single übershader covering diffuse, metal, glass/transmission,
+coat, fuzz, thin-film and subsurface, with `diffuse` / `metal` / `glass` /
+`glossy` Rust-side preset constructors. The second is **`Emissive`**, a pure
+emitter with no geometry knowledge. The third is a **MaterialX closure tree**, the
+BSDF leaves and `layer` / `mix` / `add` / `multiply` combinators a `.mtlx`
+material compiles to. `PreviewSurface` (a textured `UsdPreviewSurface`) SHALL
+evaluate its inputs per shading point and delegate the BSDF to the `OpenPBR` it
+resolves to. `MtlxMaterial` (a MaterialX graph) SHALL evaluate its pattern graph
+per shading point and shade with its closure tree. It SHALL NOT pool that tree
+onto a single `OpenPBR`.
+
+#### Scenario: A model is selected for a surface
+
+- **WHEN** a surface is assigned a material
+- **THEN** rays scatter according to `OpenPBR`'s layered BSDF and parameters,
+  or according to the MaterialX closure tree the material compiled to, or the
+  surface is a pure `Emissive` light
+
+#### Scenario: A MaterialX graph keeps its leaves apart
+
+- **WHEN** a `.mtlx` material mixes two `dielectric_bsdf`s of roughness 0.05 and
+  0.8 at `mix = 0.5`
+- **THEN** its reflection shows both a sharp and a broad highlight, and
+  `examples/mtlx_shade` lists two dielectric leaves with their own roughness,
+  rather than one lobe at an averaged roughness
+
 ## ADDED Requirements
+
+### Requirement: MaterialX closure-tree semantics
+
+A MaterialX material SHALL be evaluated as its closure tree with MaterialX's
+combinator semantics, at every shading point:
+
+- `mix(fg, bg, m)` SHALL be `m · fg + (1 − m) · bg`, with `m` clamped to [0, 1].
+- `add(a, b)` SHALL be `a + b`.
+- `multiply(x, w)` SHALL be `w · x`, per channel for a `color3` weight.
+- `layer(top, base)` SHALL be `f_top + f_base · T_top(ωo)`. `T_top` is the top
+  sub-tree's directional throughput toward the outgoing direction ωo:
+  `1 − E(ωo)` for a reflecting leaf, the product of throughputs for nested
+  layers, and the mix of throughputs for a mix.
+
+A leaf whose weight is exactly 0, and a mix whose factor is exactly 0 or 1,
+SHALL contribute nothing from the pruned branch. Importance sampling, `eval`
+and the pdf SHALL describe the same distribution for every tree. A layer SHALL
+never reflect more energy than its top and base would separately.
+
+#### Scenario: A coat dims what lies beneath it at grazing angles
+
+- **WHEN** a `layer` puts a smooth `dielectric_bsdf` (IOR 1.5) over an
+  `oren_nayar_diffuse_bsdf`
+- **THEN** `examples/mtlx_shade` reports the diffuse leaf's resolved weight as
+  `1 − E_dielectric(ωo)`, lower at a grazing ωo than at normal incidence
+
+#### Scenario: Sampling agrees with evaluation
+
+- **WHEN** the tree of each fixture material is tested by drawing many BSDF
+  samples at a fixed ωo
+- **THEN** the sampled directions' histogram matches the reported pdf, and the
+  estimator `f·cos/pdf` averages to the tree's directional albedo, within
+  Monte Carlo tolerance
+
+#### Scenario: A layered surface does not create energy
+
+- **WHEN** any fixture material is lit by a uniform white environment
+- **THEN** no pixel of a non-emissive surface is brighter than the environment
+  (furnace test)
 
 ### Requirement: MaterialX surface-shader nodes
 
 A MaterialX material whose `surfaceshader` is a `standard_surface`,
-`open_pbr_surface` or `gltf_pbr` node SHALL render with that node's parameters,
-mapped onto `OpenPBR`, and SHALL NOT fall back to the default material. Every
-input of the node SHALL take, in order of precedence: its connection, evaluated
-per shading point through the same pattern graph evaluation as any other
-MaterialX input; its authored `value`; or its MaterialX 1.39 nodedef default,
-including the case where a document declares no nodedef. Such a material SHALL
-NOT be reported as having an unsupported `standard_surface`,
-`open_pbr_surface` or `gltf_pbr` node. A document whose surface is built from
-standalone BSDF nodes SHALL render exactly as it did before this requirement.
+`open_pbr_surface` or `gltf_pbr` node SHALL render with that node and SHALL NOT
+fall back to the default material, nor report the node as unsupported. Every
+input SHALL take, in order of precedence:
+
+1. its connection, evaluated per shading point by the pattern graph;
+2. its authored `value`;
+3. its MaterialX 1.39 nodedef default, including when the document declares no
+   nodedef.
 
 #### Scenario: A constant standard_surface is no longer the fallback
 
-- **WHEN** a `.mtlx` binds `standard_surface` with `base_color = (0.8, 0.1, 0.1)`
+- **WHEN** a `.mtlx` binds a `standard_surface` with `base_color = (0.8, 0.1, 0.1)`
   and no other inputs, and a USD `Material` references it
-- **THEN** the surface renders red rather than as the fallback, and no
-  "no operator for node type(s) standard_surface" warning is logged
+- **THEN** the surface renders red, and no "no operator for node type(s)
+  standard_surface" warning is logged
 
-#### Scenario: An input left unauthored takes the nodedef default
+#### Scenario: An unauthored input takes the nodedef default
 
-- **WHEN** a `standard_surface` authors only `base_color`
-- **THEN** the OpenPBR parameters reported by `examples/mtlx_shade` at any point
-  equal the mapping of Standard Surface's defaults (`base = 0.8`,
-  `specular_roughness = 0.2`, `specular_IOR = 1.5`, …) with that `base_color`
+- **WHEN** an `open_pbr_surface` authors only `base_color`
+- **THEN** `examples/mtlx_shade` shows the specular leaf at the OpenPBR 1.1
+  default roughness 0.3 and IOR 1.5
 
 #### Scenario: A connected input varies over the surface
 
-- **WHEN** an `open_pbr_surface`'s `base_color` is connected to a node graph
-  driven by `texcoord`
-- **THEN** `examples/mtlx_shade` reports a different `base_color` at two
-  different `(u, v)`, equal to the graph's output at each point
+- **WHEN** a `gltf_pbr`'s `base_color` is connected to a node graph driven by
+  `texcoord`
+- **THEN** `examples/mtlx_shade` reports a different diffuse-leaf colour at two
+  different `(u, v)`, each equal to the graph's output at that point
 
-#### Scenario: A standalone-BSDF document is unaffected
+### Requirement: Surface-shader nodes expand to their MaterialX nodegraph
 
-- **WHEN** `samples/materialx_basic.usda` is rendered at 16 spp before and after
-  this change
-- **THEN** the EXRs are bit-identical
+Each surface node SHALL be expanded into the closure tree of its MaterialX 1.39
+implementation nodegraph: `NG_open_pbr_surface_surfaceshader`,
+`NG_standard_surface_surfaceshader_100` and `IMPL_gltf_pbr_surfaceshader`. The
+expansion SHALL have the same leaves, the same combinators in the same order,
+and the same derived leaf parameters, except where this capability states an
+approximation. In particular:
 
-### Requirement: Surface-shader parameter mapping
+- **`open_pbr_surface`**:
+  - Its metal leaf is a generalized-Schlick (F82) lobe weighted by
+    `specular_weight`.
+  - `specular_weight` modulates the dielectric's normal-incidence reflectance
+    through its effective IOR.
+  - A coat broadens the base specular roughness and makes the base IOR relative
+    to the coat, both by `coat_weight`.
+  - The substrate under the coat is multiplied by `mix(1, coat_color,
+    coat_weight)` and by the coat-darkening factor.
+  - Transmission is a combined reflect/transmit dielectric over
+    `(1 − transmission_weight)` of the substrate.
+- **`standard_surface`**:
+  - Its metal is a conductor whose complex IOR comes from `artistic_ior(base_color,
+    specular_color)`, as the nodegraph does.
+  - The coat attenuates the substrate by `coat_color` and `coat_affect_color`
+    as the nodegraph does.
+  - It is not routed through the Standard Surface → OpenPBR translation graph.
+- **`gltf_pbr`**:
+  - Its base is the nodegraph's dielectric-over-diffuse / generalized-Schlick
+    metal mix.
+  - `clearcoat`, `sheen` and `iridescence` are layered as the nodegraph layers
+    them.
+  - `attenuation_color` / `attenuation_distance` define the interior medium.
 
-The mapping from each surface node to `OpenPBR` SHALL be fixed per node type:
+#### Scenario: open_pbr_surface metal honours specular_weight
 
-- `open_pbr_surface`: each input SHALL set the `OpenPBR` parameter of the same
-  name, unconverted, including `coat_darkening` at its authored or default
-  value.
-- `standard_surface`: parameters SHALL be exactly the outputs of MaterialX's
-  published translation graph `ND_standard_surface_to_open_pbr_surface`
-  (MaterialX 1.39, `libraries/bxdf/translation/standard_surface_to_open_pbr.mtlx`)
-  for the same inputs, including its approximations, among them:
-  `base_color` multiplied by `mix(1, coat_color, coat)`; `coat_weight` forced to
-  0 where `coat · metalness > 0`; `specular_weight` forced to 1 where
-  `metalness > 0`; `fuzz_roughness = sheen_roughness^0.4`; thin-film thickness
-  converted from nanometres to micrometres, with `thin_film_weight = 1` exactly
-  where the thickness is positive; `geometry_opacity` taken from `opacity`'s
-  first channel.
-- `gltf_pbr`: parameters SHALL follow the glTF 2.0 metallic-roughness model and
-  its `KHR_materials_*` extensions: `base_color`, `metallic` and `roughness` →
-  `base_color`, `base_metalness` and `specular_roughness`; `ior`, `specular`
-  and `specular_color` → the dielectric specular; `transmission` →
-  `transmission_weight`, thin-walled exactly when `thickness` is 0. With an
-  authored, finite `attenuation_distance`, `attenuation_color` /
-  `attenuation_distance` → `transmission_color` / `transmission_depth`.
-  Without one, glTF's infinite distance, the transmission is tinted by
-  `base_color` at the interface instead; `clearcoat` / `clearcoat_roughness` → the coat at IOR
-  1.5 with no darkening; `sheen_color` / `sheen_roughness` → fuzz;
-  `iridescence` / `iridescence_ior` / `iridescence_thickness` → thin film, with
-  the thickness converted from nanometres to micrometres; `emissive ·
-  emissive_strength` → emission; `dispersion` → transmission dispersion; and
-  `anisotropy_strength` → `specular_roughness_anisotropy`.
+- **WHEN** an `open_pbr_surface` authors `base_metalness = 1` and
+  `specular_weight = 0.5`
+- **THEN** the metal leaf's resolved weight is half that at `specular_weight = 1`
 
-Emission SHALL NOT be clamped above 1.0.
+#### Scenario: open_pbr_surface coat broadens the base highlight
 
-#### Scenario: open_pbr_surface is one to one
+- **WHEN** an `open_pbr_surface` authors `specular_roughness = 0.1`,
+  `coat_weight = 1` and `coat_roughness = 0.5`
+- **THEN** the base specular leaf's roughness is `(0.1⁴ + 2·0.5⁴)^¼`
 
-- **WHEN** an `open_pbr_surface` authors `specular_roughness = 0.35`,
-  `coat_weight = 0.6` and `coat_ior = 1.6`
-- **THEN** `examples/mtlx_shade` reports exactly those three values on the
-  OpenPBR parameters, and every unauthored parameter at the OpenPBR 1.1 nodedef
-  default
+#### Scenario: standard_surface metal is an artistic-IOR conductor
 
-#### Scenario: standard_surface metal keeps full specular weight
+- **WHEN** a `standard_surface` authors `metalness = 1`,
+  `base_color = (0.9, 0.6, 0.2)` and `specular_color = (1, 0.9, 0.7)`
+- **THEN** the probe lists a conductor leaf whose complex IOR equals
+  `artistic_ior((0.9, 0.6, 0.2), (1, 0.9, 0.7))`
 
-- **WHEN** a `standard_surface` authors `metalness = 1` and `specular = 0.25`
-- **THEN** the reported `specular_weight` is 1.0, as the translation graph's
-  `ifgreater(metalness, 0)` gives it
+#### Scenario: gltf_pbr clearcoat is a separate lobe
 
-#### Scenario: standard_surface coat tints the base
+- **WHEN** a `gltf_pbr` authors `clearcoat = 1`, `clearcoat_roughness = 0` and
+  `roughness = 0.6`
+- **THEN** its render shows a sharp clearcoat highlight over a broad base
+  highlight, and the probe lists two specular leaves at those two roughnesses
 
-- **WHEN** a `standard_surface` authors `base_color = (1, 1, 1)`,
-  `coat = 0.5` and `coat_color = (1, 0, 0)`
-- **THEN** the reported `base_color` is `(1, 0.5, 0.5)` and `coat_weight`
-  is 0.5
+### Requirement: Per-leaf shading normal and tangent
 
-#### Scenario: gltf_pbr volume becomes transmission depth
+Every BSDF leaf SHALL shade in its own frame, built from that leaf's `normal`
+input (and `tangent`, where it has one), under the rule a MaterialX `normal`
+follows today:
 
-- **WHEN** a `gltf_pbr` authors `transmission = 1`, `thickness = 0.1`,
-  `attenuation_color = (0.5, 0.8, 1)` and `attenuation_distance = 2`
-- **THEN** the reported parameters have `transmission_weight = 1`,
-  `transmission_color = (0.5, 0.8, 1)`, `transmission_depth = 2` and are not
-  thin-walled
+- The input is normalised.
+- A normal facing away from the geometric normal is ignored rather than flipping
+  the surface.
+- An unconnected input takes the interpolated shading normal and tangent.
 
-#### Scenario: gltf_pbr iridescence thickness is converted
+A surface node's normal inputs SHALL reach the leaves its nodegraph routes them
+to. `geometry_normal` / `normal` goes to the base leaves, and `geometry_coat_normal`
+/ `coat_normal` / `clearcoat_normal` to the coat leaf.
 
-- **WHEN** a `gltf_pbr` authors `iridescence = 1` and
-  `iridescence_thickness = 400`
-- **THEN** the reported `thin_film_weight` is 1 and `thin_film_thickness` is 0.4
+#### Scenario: A coat normal perturbs only the coat
 
-### Requirement: Surface-shader shading normal
+- **WHEN** an `open_pbr_surface` connects `geometry_coat_normal` to a
+  `normalmap` and leaves `geometry_normal` unconnected
+- **THEN** the probe shows the coat leaf's normal perturbed and the base leaves'
+  normal equal to the interpolated normal
 
-A surface node's normal input (`normal` for `standard_surface` and `gltf_pbr`,
-`geometry_normal` for `open_pbr_surface`) SHALL, when connected, replace the
-shading normal for the whole BSDF under the same rule a BSDF node's `normal`
-follows today. The normal is normalised, and a normal facing away from the
-geometric normal is ignored rather than flipping the surface. An unconnected
-normal input SHALL leave the interpolated shading normal unchanged.
+#### Scenario: An authored tangent orients anisotropy
 
-#### Scenario: A normal map perturbs a surface shader
+- **WHEN** a `gltf_pbr` with `anisotropy_strength = 0.8` connects `tangent`
+  to a constant `(0, 1, 0)` in tangent space
+- **THEN** the highlight's stretch follows that direction rather than the
+  mesh's `dPdu`
 
-- **WHEN** a `standard_surface`'s `normal` is connected to a `normalmap` node
-- **THEN** its render shows the normal map's relief, and the probe's shading
-  normal differs from the geometric normal where the map is not flat
+### Requirement: MaterialX transmission and interior media
 
-#### Scenario: An unconnected normal is the geometry's
+A MaterialX closure tree whose leaves can transmit SHALL refract light through
+them. This covers a `dielectric_bsdf` in `T` or `RT` scatter mode, and a
+surface node whose transmission weight is not the literal 0. A ray refracted
+into a thick (not thin-walled) surface SHALL carry the interior medium the
+material defines:
 
-- **WHEN** a `gltf_pbr` has no `normal` connection
-- **THEN** it shades with the mesh's interpolated normal
+- a surface node's transmission colour, depth and scatter, converted as the
+  MaterialX volume graph converts them;
+- `gltf_pbr`'s attenuation;
+- or a `vdf` input.
 
-### Requirement: Surface-shader transmission
-
-A surface-shader material whose transmission weight can be non-zero SHALL
-transmit and refract light through `OpenPBR`'s transmission lobe, and rays it
-refracts into a thick (not thin-walled) surface SHALL carry that surface's
-interior medium, as for an authored `crust:openpbr` glass. A material whose
-transmission input is the literal value 0 SHALL pay no extra per-ray cost for
-this.
+A thin-walled surface SHALL transmit without a medium.
 
 #### Scenario: A standard_surface glass is transparent
 
-- **WHEN** a `standard_surface` authors `transmission = 1`,
+- **WHEN** a `standard_surface` authors `transmission = 1` and
   `specular_roughness = 0` and is rendered in front of the dome
-- **THEN** the dome is visible, refracted, through the object, rather than the
-  object rendering opaque
+- **THEN** the dome is visible, refracted, through the object
 
-#### Scenario: Coloured depth absorbs inside the object
+#### Scenario: Depth absorbs inside the object
 
-- **WHEN** a `gltf_pbr` authors `transmission = 1`, `thickness = 1` and
-  `attenuation_color = (1, 0.2, 0.2)` at `attenuation_distance = 0.5`
-- **THEN** light passing through thicker parts of the object is more strongly
-  red-tinted than through thinner parts
+- **WHEN** a `gltf_pbr` authors `transmission = 1`, `thickness = 1`,
+  `attenuation_color = (1, 0.2, 0.2)` and `attenuation_distance = 0.5`
+- **THEN** light through thicker parts of the object is more strongly
+  red-tinted than light through thinner parts
 
-### Requirement: Unrepresentable surface-shader inputs are reported
+### Requirement: Unrepresentable and approximated MaterialX inputs are reported
 
-An input authored away from its nodedef default that the mapping cannot represent
-SHALL be ignored and reported with one `WARN` line per material naming the
-inputs. Such an input is either authored as a differing value or connected. The
-inputs are:
+The material SHALL be reported with one `WARN` line per material, naming the
+inputs or closures, in two cases:
 
-- `opacity`, `geometry_opacity`, `alpha` and `alpha_mode` (no cutout).
-- `specular_rotation`, `coat_rotation` and `anisotropy_rotation`.
-- `coat_normal`, `geometry_coat_normal` and `clearcoat_normal`.
-- `tangent`, `geometry_tangent` and `geometry_coat_tangent`.
-- `occlusion` (a path tracer computes its own).
-- `transmission_extra_roughness` and `coat_affect_color`, which the translation
-  graph ignores.
+- **Unrepresentable input, ignored.** An input is authored away from its nodedef
+  default (connected, or given a differing value) and the tree cannot represent
+  it. These are `opacity`, `geometry_opacity`, `alpha`, `alpha_mode` (no
+  cutout), `specular_rotation`, `coat_rotation`, `anisotropy_rotation` and
+  `occlusion`.
+- **Approximated closure, kept.** A closure the renderer approximates is live,
+  meaning its weight is not the literal 0. These are `subsurface_bsdf` (shaded
+  as a diffuse-like leaf in the subsurface colour, no random walk) and
+  `sheen_bsdf` in `zeltner` mode (evaluated as Charlie).
 
-An input left at its default SHALL NOT be reported.
+An input left at its default, or a closure pruned at weight 0, SHALL NOT be
+reported.
 
 #### Scenario: Authored opacity is reported, not applied
 
@@ -175,7 +242,14 @@ An input left at its default SHALL NOT be reported.
 - **THEN** the surface renders opaque and the log carries one `WARN` for that
   material naming `opacity`
 
-#### Scenario: A default-valued input is silent
+#### Scenario: Default-valued inputs are silent
 
-- **WHEN** a `gltf_pbr` authors `alpha = 1` and `alpha_mode = 0` explicitly
-- **THEN** no warning is logged for them
+- **WHEN** a `gltf_pbr` authors `alpha = 1` and `alpha_mode = 0` explicitly and
+  no sheen
+- **THEN** no warning is logged for that material
+
+#### Scenario: A live fuzz layer reports its sheen approximation
+
+- **WHEN** an `open_pbr_surface` authors `fuzz_weight = 0.5`
+- **THEN** the log carries one `WARN` naming the `zeltner` sheen as evaluated
+  with Charlie

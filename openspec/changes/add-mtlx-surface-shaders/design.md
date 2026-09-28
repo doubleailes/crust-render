@@ -4,248 +4,301 @@
 
 See `proposal.md` § Why. The current state that shapes the approach:
 
-- `crust-mtlx` compiles a material in two halves. A pattern `Program` (slot-indexed
-  ops, optimised by `CRUST_MTLX_OPT`, JIT-compiled by `crust-jit`) and a flattened
-  closure tree (`Lobe`s and `Emission` terms whose parameters are program slots).
-  `bsdf::flatten` walks from the `surfacematerial`. When it meets a category it
-  does not know, such as `standard_surface`, it stops. The compiler therefore never
-  visits the node graph behind that surface, so the log names only the surface node.
-- `crust-core`'s `MtlxMaterial::run` evaluates the program once per path vertex
-  (`Material::resolve`), pools the lobes onto one `OpenPBR` in `reduce()`, and
-  delegates the BSDF to it through `PatternMaterial`. `reduce()` is lossy by design
-  (`openspec/specs/materials/design.md` § MaterialX). It pools roughness, maps
-  transmission to no lobe, pools `thin_film_bsdf` as a dielectric, and so on.
-- Crust's `OpenPBR` already carries every parameter the three surface nodes need:
-  transmission and interior media, subsurface, fuzz, coat, thin film (thickness in
-  µm, like OpenPBR's nodedef), emission as `color · luminance`, and dispersion.
-  `geometry_opacity` exists as a field but is not implemented, and it has no
-  tangent rotation or coat normal (`openpbr/mod.rs` § Not implemented).
-- MaterialX 1.39 publishes `standard_surface_to_open_pbr_surface`, a translation
-  node graph from Standard Surface to OpenPBR. It publishes none for `gltf_pbr`.
-- The suite's documents: 826 surfaces, all at the nodedefs' default versions (19
-  name `ND_standard_surface_surfaceshader` explicitly). None mixes
-  `surfaceshader`s, and none has more than one surface node.
+- **`crust-mtlx` today.** A material compiles to a pattern `Program` (slot-indexed
+  ops, optimised under `CRUST_MTLX_OPT`, JIT-compiled by `crust-jit`) plus
+  `Flattened`: a *list* of `Lobe`s (`LobeKind` ∈ diffuse / dielectric / coat /
+  conductor / sheen / subsurface) and `Emission` terms. `bsdf::flatten` walks
+  `layer` / `mix` / `add` / `multiply` and bakes the tree's structure into
+  per-leaf path weights. The tree itself is discarded. Only one fact survives, a
+  dielectric over a specular becoming `Coat`.
+- **`crust-core` today.** `MtlxMaterial::run` evaluates the program per path
+  vertex, then `reduce()` pools the lobes onto one `OpenPBR`. `Material::resolve`
+  → `Resolution` → `ShadingPoint` carries a `ResolvedOpenPBR`
+  (`material/material.rs`). Outside `material/`, only
+  `examples/light_occlusion.rs` reads it as OpenPBR. The integrator, NEE, MIS and
+  guiding see only `scatter` / `eval` / `make_ray`.
+- **Leaf BSDFs.** Crust already has them in `material/brdf.rs` and `openpbr/`:
+  anisotropic GGX with VNDF sampling, EON diffuse, F82-tint and Schlick Fresnel,
+  Charlie sheen, 3-wavelength thin film, a Walter BTDF with dispersion, and a
+  homogeneous interior `Medium`.
+- **The reference, Typhoon** (NVIDIA OpenUSD `typhoon/main` @ `70c45e8`,
+  `pxr/imaging/plugin/hdEmbree/renderer/materials/MaterialXCpp/`):
+  - Each surface node is a C++ builder emitting a closure tree
+    (`materials/openPbr.cpp`, `standardSurface.cpp`, `gltfPbr.cpp`).
+  - The tree is evaluated with `layer = f_top + f_base · T_top(ωo)`
+    (`bsdf/closureTraversal.cpp`).
+  - The dielectric `T` comes from BSDL's tabulated reflection filter by default
+    (`ty:dielectricLayerThroughputMode = "bsdl"`, alternative `"materialxGlsl"`).
+  - The branch is marked on hold pending a refactor, so the commit is pinned.
+    Where Typhoon departs from the MaterialX graph, this design follows the graph
+    and says so. Examples: `SheenMode::Zeltner` set but evaluated as Charlie, and
+    no thin-walled subsurface branch.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Read the three surface nodes with **no loss beyond what the target OpenPBR
-  parameters cannot express**. The lossy lobe pool is used only for documents that
-  really are standalone-BSDF graphs.
-- One auditable reference per mapping: OpenPBR's own nodedef, MaterialX's
-  translation graph, and the glTF specification.
-- Leave every existing MaterialX render bit-identical.
+- One MaterialX evaluation path whose semantics are MaterialX's closure semantics,
+  with leaves kept apart, for standalone-BSDF graphs and surface nodes alike.
+- The three surface nodes expanded to their MaterialX 1.39 nodegraphs, node for
+  node, auditable against the `.mtlx` sources.
+- No new per-query tree walk. Tree work happens once per vertex.
 
 **Non-Goals:**
 
-- The missing pattern operators (`separate2`, `fract`, `range`, `ifgreater`,
-  `combine4`, noises, `place2d`, …). These are the next change, and are where
-  the suite's `nodes/*` group moves.
-- A general `<nodedef>` / `<nodegraph>` implementation instantiator. That remains a
-  known gap. This change does not build it, even though it could run the
-  translation graph directly (D1).
-- Opacity cutout (`opacity`, `geometry_opacity`, `alpha`, `alpha_mode`): an
-  integrator feature (stochastic pass-through, shadow rays included), not a mapping.
-- Anisotropy rotation, authored tangents and coat normals. OpenPBR in crust has none
-  of these.
-- `mix` of `surfaceshader`s, and the other surface nodes (`disney_principled`,
-  `UsdPreviewSurface` in `.mtlx`, LaMa). They remain "unsupported node" as today.
-- Making an emissive surface-shader material a light-list entry. MaterialX emission
-  keeps today's rule: found by bounce sampling only, and never an `AreaLight`.
-- Non-default nodedef versions. A `version` other than the default is warned about
-  and mapped as the default.
+- Changing crust's native `OpenPBR` (`crust:openpbr`, `UsdPreviewSurface`), or
+  aligning it with the graph. That is a follow-up, informed by the Typhoon
+  comparison.
+- Missing pattern operators (`separate2`, `fract`, `range`, `ifgreater`,
+  `combine4`, noises, `place2d`, …). A separate change. A builder needs some
+  internal operators (D6), but no new *document* node categories are added.
+- Opacity cutout, random-walk subsurface, Zeltner sheen, and anisotropy rotation.
+  They are reported (spec), not implemented.
+- Instantiating `<nodedef>` implementation graphs in general. Builders are
+  hand-written (D6).
+- Emissive MaterialX materials as light-list entries. Today's rule stands.
 
 ## Decisions
 
-### D1. Map parameters directly; do not expand the surface into BSDF nodes
+### D1. A closure tree, not a pooled übershader
 
-A surface node becomes a set of **input slots** in the program, and `crust-core`
-maps the evaluated slots onto `OpenPBR` fields at the shading point.
+MaterialX's own semantics are a tree, and the pooled reduction is where every
+recorded MaterialX trap came from: coat promotion by tree shape, alpha pooling,
+the `coat_darkening = 0` override, and independent-coverage bookkeeping. Keeping
+the leaves apart retires the class of trap rather than patching instances of it.
 
 Alternatives considered:
+- **Map surface nodes onto `OpenPBR`**, the previous draft of this change.
+  Rejected. It routes MaterialX through crust's OpenPBR, which differs from the
+  MaterialX graph in layering, `specular_weight`, coat–base coupling and coat
+  tint. It also forces the translation-graph approximations on `standard_surface`.
+- **Keep `reduce()` for standalone-BSDF graphs.** Rejected by decision: two
+  MaterialX semantics would coexist, and the same `.mtlx` would shade differently
+  depending on whether it used a surface node.
 
-- **Expand through MaterialX's `libraries/bxdf/*.mtlx` implementation graphs**,
-  then flatten and `reduce()`. Rejected. It routes the one lossless case
-  (`open_pbr_surface` → crust's OpenPBR) through the lossy pool. Transmission would
-  still map to no lobe, and `coat_color` / thin film would pool wrongly. It also
-  needs nodedef instantiation and the stdlib shipped at run time.
-- **Compile the published translation graph at run time** (bind its
-  `interfacename`s to the surface's inputs, then map `open_pbr` 1:1). This is
-  elegant, and it would make the graph literally the reference. Rejected for now:
-  it needs the general nodedef instantiator (a non-goal), plus the `ifgreater` /
-  `ifequal` / `dot` / `dotproduct` operators the pattern-node change adds. It also
-  cannot cover `gltf_pbr`. It is recorded as the natural refactor once both exist.
-  D4's tests keep the Rust mapping honest against the graph until then.
+### D2. The IR lives in `crust-mtlx`, in MaterialX vocabulary
 
-### D2. The split: `crust-mtlx` knows MaterialX inputs; `crust-core` knows OpenPBR
+`Flattened { lobes, emission }` becomes `Closures { tree, emission }`:
 
-- **`crust-mtlx`**: `flatten`, reaching `standard_surface`, `open_pbr_surface` or
-  `gltf_pbr`, records a `SurfaceShader { model, inputs }` on `Compiled` in place of
-  lobes. `inputs` holds one program slot per nodedef input, named by its MaterialX
-  name. Each slot is compiled with the existing input path: a connection, a value,
-  or the **nodedef default** from a per-model table in `crust-mtlx`. It also records
-  which inputs were authored away from their default, for D7. `Compiled::roots()`
-  and `optimize()` remap these slots like lobe slots, so unconnected inputs fold to
-  constants.
-- **`crust-core`**: `MtlxMaterial` gains a surface-shader mode. Its `run` evaluates
-  the program as now, then calls `map_open_pbr` / `map_standard_surface` /
-  `map_gltf_pbr` in place of `reduce()`. `crust-mtlx` stays free of crust types, as
-  the workspace rule requires. It does not need OpenPBR's field list, only
-  MaterialX's.
-- **Why the defaults live in `crust-mtlx`**: they are MaterialX facts (the
-  nodedef), and the suite's documents never carry the stdlib nodedefs. A missing
-  input must still read the right default. To stop transcription drift, the three
-  nodedefs (`ND_standard_surface_surfaceshader`, `ND_open_pbr_surface_surfaceshader`
-  1.1, `ND_gltf_pbr_surfaceshader`) are **vendored as test fixtures** with their
-  Apache-2.0 header. A test asserts the table has exactly their inputs, types and
-  defaults.
-- `gltf_pbr`'s `attenuation_distance` has **no** nodedef default: glTF's
-  "infinite". The table represents it as `+∞`, and the mapping treats a
-  non-finite distance as "no attenuation" (D5).
+- `tree` is an arena of `Closure` nodes: `Leaf(Leaf)`, `Layer { top, base }`,
+  `Mix { fg, bg, mix: Slot }`, `Add { a, b }` and `Multiply { input, weight: Slot }`.
+- A `Leaf` names a MaterialX BSDF node with its inputs as program slots:
+  - `OrenNayarDiffuse { weight, color, roughness, energy_compensation }` and
+    `BurleyDiffuse`;
+  - `Dielectric { weight, tint, ior, roughness: vec2, scatter_mode: R|T|RT,
+    thin_film }`;
+  - `Conductor { weight, ior: color3, extinction: color3, roughness, thin_film }`;
+  - `GeneralizedSchlick { weight, color0, color82, color90, exponent, roughness,
+    scatter_mode, thin_film }`;
+  - `Sheen { weight, color, roughness, mode }`;
+  - `Subsurface { weight, color, radius, anisotropy }`;
+  - `Translucent { weight, color }`.
+- Every leaf carries optional `normal` / `tangent` slots.
+- `emission` keeps today's EDF term list and its per-channel weight rules.
+- A volume term (`vdf` / surface transmission medium) is recorded beside the tree
+  (D8).
 
-### D3. `open_pbr_surface` is one to one, including `coat_darkening`
+The crate stays free of crust types. It describes *what MaterialX says*. How a
+renderer evaluates a `Dielectric` leaf is crust-core's business, as with
+`Texture` today. `Compiled::roots()` / `optimize()` remap tree slots as they
+remap lobe slots now, so constant branches fold. The flatten pass keeps pruning
+literal-zero branches (a leaf `weight` of 0, a `multiply` by 0, a `mix` at 0 or
+1) at compile time.
 
-Each input sets the `OpenPBR` field of the same name. The one deliberate difference
-from today's lobe path is `coat_darkening`. `load()` zeroes it for lobe-built
-materials, because MaterialX's `layer` is single-scattering. An `open_pbr_surface`
-states its own `coat_darkening` (default 1), and MaterialX's reference graph for
-the node implements it. So the authored value is used unchanged. `geometry_normal`
-goes to the shading normal (D6). `geometry_opacity`, the tangents and the coat
-normal are reported (D7).
+### D3. Collapse the tree at `resolve`, because throughput depends only on ωo
 
-### D4. `standard_surface` mirrors the translation graph node for node
+`T_top` in `layer` is a function of the outgoing direction alone (MaterialX's
+and Typhoon's model). ωo is fixed at a path vertex, so the tree is **exactly**
+equivalent there to a weighted sum of leaves:
 
-`map_standard_surface` is written as the graph's nodes in order, each commented
-with the graph's node name. That keeps it reviewable against the file, including
-the graph's approximations the spec lists: coat tint on `base_color`, `coat_weight`
-zeroed for coated metals, `specular_weight = 1` for any metalness,
-`fuzz_roughness = sheen_roughness^0.4`, the nm → µm thin film,
-`coat_darkening ← coat_affect_roughness`, and opacity's first channel. Tests pin the
-mapping at representative inputs whose outputs are derived by hand from the graph.
-Once the D1 alternative exists, one test runs the real graph and asserts equality.
+- `mix` scales its branches by `m` and `1 − m`;
+- `multiply` scales its input;
+- `add` concatenates;
+- `layer` scales every base leaf by `T_top(ωo)`.
 
-**Improving on the graph is out of scope here.** A deviation, for example Standard
-Surface's own `coat_affect_color`, is a later change justified by a suite
-measurement. Otherwise "why does crust's Standard Surface differ" has no single
-answer.
+`Material::resolve` walks the tree once. It produces a `ResolvedClosure`: an
+inline, fixed-capacity list of `(rgb_weight, leaf, frame)`. The list is
+safe-Rust, with no heap allocation per vertex and no new dependency. Then:
 
-### D5. `gltf_pbr` is defined by the glTF specification
+- `eval(ωi)` is `Σ wᵢ · fᵢ(ωo, ωi)`;
+- the pdf is the mixture `Σ pᵢ · pdfᵢ` with `pᵢ ∝ lum(wᵢ) · Êᵢ(ωo)`, floored as
+  Typhoon's `_ApproxWeight` does so no live leaf gets probability 0;
+- sampling picks a leaf by `pᵢ`, samples it, and returns the mixture pdf and the
+  full `eval`. That is one-sample MIS, as `OpenPBR` already composes its lobes.
 
-There is no published translation, so the mapping is crust's and is documented in
-the MaterialX section of `design.md` field by field. Traps it must handle:
+This is not pooling. Each leaf keeps its own roughness, IOR, normal and Fresnel,
+and the weights vary with the view. Capacity is 16 leaves, and the worst built-in
+expansion is 7 (`standard_surface`). A document whose tree exceeds 16 live leaves
+is refused at load with a `WARN` and falls back.
 
-- **Roughness is already perceptual.** glTF's `α = roughness²` is OpenPBR's
-  convention, so it maps unchanged. (The lobe path's `√alpha` conversion is only
-  for BSDF nodes' `roughness` inputs.)
-- **Transmission tint.** glTF tints transmitted light by `base_color` and
-  attenuates by `attenuation_color` over `attenuation_distance`. OpenPBR has one
-  `transmission_color`. With a finite distance, the volume wins
-  (`transmission_color = attenuation_color`, `transmission_depth = distance`) and
-  the interface tint is lost. Otherwise `transmission_color = base_color` at depth
-  0. It is thin-walled exactly when `thickness == 0`, which is glTF's own rule.
-- **Specular colour on metals.** OpenPBR's `specular_color` is also the metal's
-  F82 edge tint. glTF's metal has no edge tint. So `specular_color` is
-  `mix(specular_color, 1, metallic)`: exact at metallic 0 and 1, approximate
-  between.
-- **Sheen has no weight.** `fuzz_weight = max(sheen_color)`,
-  `fuzz_color = sheen_color / fuzz_weight` (0 → no fuzz), and `fuzz_roughness =
-  sheen_roughness`. This is the unit the lobe path already feeds Charlie with, to
-  be confirmed by probe against `gltf_pbr.mtlx`'s `sheen_bsdf` wiring.
-- **Clearcoat** → coat at IOR 1.5, `coat_color = 1`, `coat_darkening = 0`.
-- **Iridescence** → thin film, `iridescence_thickness` nm → µm.
-- **Anisotropy.** glTF's `α_t = mix(α, 1, s²)` and OpenPBR's anisotropy
-  parametrise the stretch differently. `specular_roughness_anisotropy` is chosen to
-  reproduce glTF's `α_b / α_t` ratio, and the resulting `α_t` mismatch is recorded.
-  `anisotropy_rotation` is reported (D7).
-- **Emission**: `emission_color = emissive`, `emission_luminance =
-  emissive_strength`, unclamped.
-- **Dispersion**: glTF `dispersion = 20 / V_d`, so it maps to
-  `transmission_dispersion_scale` with OpenPBR's Abbe default of 20.
-- **`occlusion`** is reported and ignored: the path tracer computes occlusion.
+### D4. Throughput and energy tables are ported from BSDL and MaterialX
 
-### D6. The surface's normal input reuses the lobe path's shading-normal rule
+Per decision, the tables are ported rather than regenerated:
 
-`run` already applies an optional graph normal: it normalises it, and ignores it if
-it faces away from the geometric normal. The surface mode feeds the node's
-`normal` / `geometry_normal` slot through that same code. The slot is `None` when
-unconnected, which keeps the interpolated normal and skips the work.
+- **Dielectric reflection throughput**: BSDL's `DielectricReflFront` filter
+  (OpenShadingLanguage `libbsdl` `genluts.cpp`, BSD-3-Clause, at OSL commit
+  `3dd1d94fe07b5374c6519cd44ca65f83d4598a80`, the commit Typhoon's
+  `dielectricReflFrontLut.h` documents). It keeps BSDL's axes: IOR index
+  `√((ior − 1.001)/(5 − 1.001))`, perceptual roughness, and a linear `cosθo`
+  grid. The BSDL transmission-albedo and coupled-dielectric compensation tables
+  are ported for `RT` leaves.
+- **Conductor / generalized-Schlick throughput** and **GGX multiple-scattering
+  compensation**: MaterialX GLSL's `mx_ggx_dir_albedo` analytic fit and
+  `mx_ggx_energy_compensation` (Apache-2.0). Throughput is `1 − E_ss(cosθo, α) ·
+  F`, the form Typhoon's `LayerThroughputReflectance` uses.
+- **Sheen throughput**: MaterialX's `mx_imageworks_sheen_dir_albedo` fit.
+- **Thin film on a top leaf** uses the Fresnel-weighted form with the thin-film
+  Fresnel, as Typhoon does, not the dielectric filter table.
 
-### D7. Unrepresentable inputs are decided at compile time, reported at load
+The tables become Rust `const` arrays under `crust-core/src/material/closure/lut/`.
+They are converted by a checked-in script from the upstream sources, with a
+`THIRD-PARTY.md` notice (BSD-3-Clause and Apache-2.0 are compatible with crust's
+MIT licence under attribution). Tests pin spot values against the upstream
+formulas and the axis conventions.
 
-"Authored away from the default" is static: the input is connected, or its value
-differs from the nodedef default. `crust-mtlx` returns the list of such inputs
-drawn from a fixed per-model "unrepresentable" set. The importer logs them in one
-`WARN` per material, beside the existing unsupported-node warning. That is the
-same cardinality, and the logging rule's meaning of `WARN` ("authored, refused").
-An explicit default (`alpha = 1`) is silent. The suite authors
-`alpha_mode` / `geometry_opacity` at their defaults in dozens of documents, and a
-warning there would be noise.
+**Consequence to measure, not assume.** The tables describe BSDL's and
+MaterialX's lobes, not crust's own GGX. The gap between a table's `E` and crust's
+integrated leaf albedo is measured per table over the grid and recorded in the
+materials `design.md`. The furnace scenario bounds its effect on energy.
 
-### D8. Transmission needs `make_ray` to know the medium, so the graph runs there, but only when it can matter
+### D5. Leaves are evaluated with `brdf.rs`, and microfacet leaves are compensated
 
-`pattern_make_ray` never runs the graph today, because the lobe path cannot
-transmit. For a surface-shader material, `load()` computes `may_transmit`: false
-exactly when the transmission-weight slot is a program constant equal to 0 after
-optimisation. When it is true and `wi` points below the geometric surface,
-`make_ray` runs the graph and mapping and delegates to `OpenPBR::make_ray`, which
-attaches the interior medium. Every other `make_ray` stays the free
-`Ray::new(rec.p, wi)`. That is the spec's "no extra per-ray cost" for opaque
-materials.
+- `Dielectric` uses the existing GGX VNDF, dielectric Fresnel and Walter BTDF
+  (`R` / `T` / `RT`, thin-walled window when the surface is thin-walled), with
+  dispersion when the builder passes an Abbe number.
+- `Conductor` needs a complex-IOR Fresnel (new, per channel).
+- `GeneralizedSchlick` uses the F82 form for `color82` (new generalisation of
+  the existing F82-tint).
+- `OrenNayarDiffuse` with `energy_compensation` is EON. Without it, it is
+  MaterialX's plain Oren–Nayar.
+- `Sheen` is Charlie (both modes, reported per spec).
+- `Subsurface` is a diffuse-like leaf in its colour (reported).
+- `Translucent` is a Lambertian BTDF.
+- Microfacet leaves apply GGX multiple-scattering compensation with the D4 fit,
+  as MaterialX GLSL does.
+- Each leaf builds its own frame from its normal and tangent slots, following
+  today's normal rule, and per-leaf thereafter.
 
-### D9. Verification is numeric first, then the suite
+### D6. Hand-written surface builders in `crust-mtlx`, node for node
 
-- **Probe**: `examples/mtlx_shade` already prints the `OpenPBR` a material reduces
-  to. It is the unit test's oracle and the tool to check each mapping by hand
-  (`CLAUDE.md`: numbers, not eyes).
-- **Fixture**: a new `samples/materialx_surfaces.mtlx` / `.usda` holds one material
-  per model, plus a glass and a normal-mapped one. It is kept separate because
-  `materialx_basic` is pinned at exactly three materials.
-- **Pinned pairs**: `tests/resolve.rs` gains the fixture's materials. The JIT ↔
-  interpreter test gains a surface-shader program. The mapping runs outside the
-  program, so no new JIT operators are needed.
-- **Suite re-run**: `scripts/material_fidelity/run.py`, with results recorded in
-  `docs/material_fidelity.md`. The bar for archiving is on the `surfaces/*` and
-  `showcase/*` groups: a group whose mean falls more than 3 dB below `blender-new`
-  (Cycles) is investigated as a probable mapping bug before archiving. The target is
-  not a spec requirement, because PSNR against a rasteriser's IBL mixes shading with
-  lighting-model differences (prefiltered environment, no occlusion). It is still a
-  tripwire.
+`crust-mtlx/src/surface/{open_pbr,standard_surface,gltf_pbr}.rs` each emit the
+tree of their nodegraph (`NG_open_pbr_surface_surfaceshader`,
+`NG_standard_surface_surfaceshader_100`, `IMPL_gltf_pbr_surfaceshader`), as
+Typhoon's builders do. Every block is commented with the nodegraph node names it
+reproduces.
+
+- Derived leaf parameters are **program ops** emitted by the builder, so they fold
+  and JIT. Examples: coat-broadened roughness, the effective IOR modulated by
+  `specular_weight`, the darkening factor, and `artistic_ior`, which is already an
+  operator.
+- Any operator this needs and the program lacks is added to the interpreter and
+  `crust-jit` together, with a bit-identity test. Candidates are a select /
+  compare and `copysign`.
+- **Where Typhoon and the graph disagree, the graph wins.** The
+  `open_pbr_surface` builder includes the thin-walled subsurface branch
+  (diffuse-reflection + translucent), which Typhoon omits. The builder records
+  the sheen `mode` it would need.
+- Inputs are compiled connection → value → **nodedef default**. The defaults are
+  per-model tables in `crust-mtlx`. The three nodedefs are vendored as test
+  fixtures (Apache-2.0 header kept), and a test asserts the tables match them
+  exactly.
+- A non-default nodedef `version` is warned about and built as the default.
+
+Alternative considered: instantiating the vendored stdlib nodegraphs through a
+general nodedef mechanism. Rejected by decision. It needs many more pattern
+operators and roughly a hundred-op program per surface per vertex. It would
+become the natural cross-check once the pattern-node change lands.
+
+### D7. `ShadingPoint` gains a closure variant; the ordering rule is kept
+
+`Resolved` gains `Closure(ResolvedClosure)`. `Resolution` gains a closure
+constructor that, like `Resolution::new`, reads emission from the evaluated
+program **before** resolving the BSDF. The type still allows no other order.
+`MtlxMaterial` implements `resolve` directly, not through `PatternMaterial`,
+which stays for `PreviewSurface`.
+
+`examples/light_occlusion.rs` stops reading `bsdf().params()`: it asks the
+resolution whether it transmits. `tests/resolve.rs` keeps its contract, that
+`resolve` answers exactly as per-query shading does, for the closure material.
+
+### D8. Media come from the resolved closure, converted as MaterialX does
+
+The resolved closure knows its interior medium, so `make_ray` attaches it on
+refraction below a thick surface, and nothing re-runs the graph. The medium comes
+from, in priority order:
+
+- the surface node's transmission parameters, converted like the MaterialX volume
+  graph and Typhoon's `MakeTransmissionMedium`: `σ_t = −ln(color)/depth`,
+  `σ_s = scatter/depth`, `σ_a = σ_t − σ_s` shifted so its minimum is 0;
+- `gltf_pbr`'s attenuation;
+- an `anisotropic_vdf`.
+
+Depth 0 means no medium. The medium is crust's homogeneous `Medium`. This
+conversion differs from crust's `OpenPBR`, which uses the van de Hulst inversion.
+That is deliberate for the MaterialX path and recorded.
+
+### D9. Reporting is static where it can be
+
+"Authored away from default" (connected, or a differing value) and "closure live"
+(weight not a literal 0 after optimisation) are known at compile time. The
+importer prints one `WARN` per material beside the unsupported-node warning:
+the same cardinality, and `WARN`'s meaning of "authored, refused or approximated".
+The suite authors `alpha_mode` / `geometry_opacity` at their defaults in dozens of
+documents, so default-valued inputs stay silent.
+
+### D10. Numbers first: the probe prints the resolved leaves
+
+`examples/mtlx_shade` prints, at a named `(u, v)` and ωo, each resolved leaf: its
+kind, RGB weight, roughness / IOR / colours, and normal. It also prints the
+emission and the medium. Every spec scenario that says "the probe" is a unit test
+over the same function. That is the check `CLAUDE.md` asks for. A wrong albedo or
+weight still renders as a plausible surface.
 
 ## Risks / Trade-offs
 
-- [The translation graph's approximations become crust's behaviour: coated metals
-  lose their coat, `coat_darkening ← coat_affect_roughness`, and `specular` is
-  ignored on any metal] → deliberate (D4), listed in the spec, and each has a
-  suite sample (`input_coat_affect_roughness`, the metal showcases) that measures
-  it. Deviations go through a later change.
-- [Hand-transcribed defaults drift from MaterialX] → vendored nodedefs and an
-  exact-match test (D2).
-- [glTF approximations (transmission tint, metal edge tint, anisotropy stretch)
-  look plausible and are wrong] → each is named in `design.md`'s Known gaps. The
-  fixture pins its numbers, and the suite's `surfaces/gltf_pbr` samples isolate
-  each one.
-- [Throughput: a surface node compiles ~40 input slots] → unconnected inputs fold
-  to constants under `CRUST_MTLX_OPT`. The mapping is scalar arithmetic once per
-  vertex. The existing lobe path is untouched, and `bench_ab.sh` on
-  `materialx_basic` / the DPEL teapot must show no change. Callgrind instruction
-  counts on the new fixture are recorded in the materials `design.md`.
-- [`make_ray` for transmissive materials now runs the graph a second time per
-  refraction] → bounded to `may_transmit` materials and below-surface directions
-  (D8). If it shows up in profiles, the later fix is to carry the resolved
-  `OpenPBR` from `resolve` into `make_ray`, which is a trait change.
-- [Document `colorspace` on constant colour inputs] → this change adds no colour
-  rule. Surface inputs go through the compiler's existing input path and inherit
-  exactly its handling. The suite is `lin_rec709` throughout, so it cannot catch a
-  mistake here. `docs/color_management.md` should say so when this lands.
-- [Opacity-heavy samples stay wrong] → out of scope (a cutout is integrator work).
-  They are reported by D7 and listed in the suite write-up so they are not read as
-  mapping bugs.
+- [**BREAKING renders**: `materialx_basic`, `materialx_emissive`, the DPEL Teapot
+  and Lion change] → intended. Before and after is checked by probe numbers per
+  material, not by eye. The DPEL numbers already recorded in the materials
+  `design.md` (for example the teapot's body albedo) must survive. Goldens are
+  re-recorded in the same commit that changes them, and nothing else changes
+  goldens.
+- [**Shading cost**: a vertex with 4–7 leaves evaluates each for every NEE / guide
+  query, against one pooled OpenPBR today] → the tree walk is once per vertex
+  (D3), and zero branches are pruned at compile time and resolve. It is measured
+  with `bench_ab.sh` on `materialx_basic` and the DPEL assets, plus callgrind at
+  `-s 2`, and recorded. A regression is accepted only as the price of correctness
+  and is stated.
+- [**Table ↔ leaf mismatch**: ported BSDL / MaterialX tables are not integrals of
+  crust's leaves] → measured and recorded (D4). The furnace test bounds energy. If
+  the mismatch matters, the follow-up is to regenerate tables from crust's leaves
+  with the same axes.
+- [**Non-reciprocal layering**: `T_top(ωo)` only] → it is the model's definition
+  (MaterialX, Typhoon). NEE and bounce evaluate the same `f(ωo, ωi)`, so MIS stays
+  consistent. Bidirectional methods, which crust does not have, would need care.
+- [**`ShadingPoint` grows**: 16 inline leaves on the stack per vertex] → sized and
+  measured. If it shows up, the capacity is lowered (7 is the built-in worst case).
+- [**The reference moves**: Typhoon is on hold pending a refactor] → commit pinned.
+  MaterialX 1.39's nodegraphs, not Typhoon, are the normative source. Typhoon is
+  the worked example.
+- [**`crust:openpbr` and MaterialX `open_pbr_surface` disagree**] → stated in the
+  proposal and in the materials `design.md`. The follow-up aligns crust's
+  `OpenPBR` with the graph.
+- [**Colour space of constant inputs**] → inherits the compiler's existing
+  handling, unchanged. The suite is `lin_rec709` throughout, so it cannot catch a
+  mistake here. Noted in `docs/color_management.md`.
 
 ## Migration Plan
 
-No migration. Documents that fall back today start rendering their authored
-material, and nothing that renders correctly today changes. The lobe path is
-pinned bit-identical by the unchanged-render scenario. Rollback is a revert: no
-file format, CLI flag or environment switch is added. This is a feature, not an
-optimisation, so there is no old behaviour to A/B behind a `CRUST_*` switch.
+- **One path.** The pooled `reduce()` path and `LobeKind` are removed in the same
+  change that makes the tree live, so no document is ever shaded by both.
+- **No environment switch.** This is a semantic change, not an optimisation, so
+  there is no honest "old behaviour" to A/B.
+- **Goldens.** Image goldens that include MaterialX materials are re-recorded,
+  with the probe-number check above as the gate. Rollback is a revert.
+
+## Open Questions
+
+- Whether to also port MaterialX GLSL's dielectric layer-throughput fit, as a
+  second mode for A/B against the suite's `materialx-glsl` reference (Typhoon's
+  `ty:dielectricLayerThroughputMode = "materialxGlsl"`). It is deferrable: it adds
+  a table and a switch without changing the specs or the task structure.
