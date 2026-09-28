@@ -29,7 +29,7 @@
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::closure::{MAX_LEAVES, ResolvedClosure};
+use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure};
 use crate::material::{Material, Resolution, ScatterSample};
 use crate::ray::Ray;
 use crust_mtlx::{Closures, Program, ShadeCtx, TextureLoader, Val};
@@ -162,9 +162,9 @@ impl MtlxMaterial {
             .sum()
     }
 
-    fn resolved(&self, r_in: &Ray, rec: &HitRecord) -> ResolvedClosure {
+    fn resolved(&self, r_in: &Ray, rec: &HitRecord) -> PooledClosure {
         self.with_slots(r_in, rec, |s| {
-            ResolvedClosure::resolve(&self.closures, s, r_in, rec)
+            PooledClosure::resolve(&self.closures, s, r_in, rec)
         })
     }
 
@@ -212,7 +212,7 @@ impl Material for MtlxMaterial {
             };
             Resolution::closure(
                 emitted,
-                ResolvedClosure::resolve(&self.closures, s, r_in, rec),
+                PooledClosure::resolve(&self.closures, s, r_in, rec),
                 *rec,
             )
         }))
