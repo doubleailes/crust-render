@@ -14,8 +14,11 @@ exr = "1.74.2"
 # Decoder-side image formats. Declared once so `crust-assets` (which decodes)
 # and `crust-render` (which writes PNGs) resolve the same package; the
 # `hdr`/`jpeg` features are the decoder's and reach crust-render through
-# feature unification whether stated here or not.
-image = { version = "0.25.6", default-features = false, features = ["png", "hdr", "jpeg"] }
+# feature unification whether stated here or not. `tiff` decodes plain
+# (untiled) `.tif` sources — Substance-style UDIM exports — and needs
+# image >= 0.25.10 (which depends on tiff 0.11), so it unifies with the
+# `.tx` reader's `tiff` below instead of adding a second copy.
+image = { version = "0.25.10", default-features = false, features = ["png", "hdr", "jpeg", "tiff"] }
 # Pure-Rust Ptex reader (package `ptex-rust`, lib name `ptex`). Pinned by `rev`
 # because the crate is not published and `Cargo.lock` is not checked in —
 # without it a fresh clone silently takes whatever `main` points at. Hoisted so
@@ -36,12 +39,13 @@ image = { version = "0.25.6", default-features = false, features = ["png", "hdr"
 # the workspace already says.
 ptex = { package = "ptex-rust", git = "https://github.com/doubleailes/ptex-rs", rev = "884007d872a014a1d7056564ae718e589d35e65f", features = ["cache"] }
 # Tiled, mip-mapped TIFF — the `.tx` textures a streaming cache reads a single
-# tile at a time. Deliberately NOT routed through `image`'s `tiff` feature:
-# that pins 0.9, which predates the chunk API this needs (`read_chunk`,
-# `seek_to_image`), and pulling both would put two copies of the crate in the
-# graph under one lib name. `default-features = false` drops the fax/jpeg/lzw
-# decoders crust never asks for, leaving `tiff` + `quick-error` as the only new
-# packages — `flate2` and `half` are already here via png/ptex-rs/zip and exr.
+# tile at a time. Named directly rather than reached through `image`, because
+# the tiled reader uses the chunk API (`read_chunk`, `seek_to_image`) that
+# `image` does not expose. It is the same package `image`'s `tiff` feature
+# pulls (both 0.11), so the graph holds one copy. `default-features = false`
+# here states what the `.tx` path needs; `image` enables tiff's default
+# features (lzw/jpeg/fax) through unification, which plain `.tif` exports
+# routinely need — LZW is the usual compression out of Substance and Photoshop.
 tiff = { version = "0.11.3", default-features = false, features = ["deflate"] }
 # Already in the graph transitively (png, ptex-rs, zip); named here because the
 # `.tx` writer deflates each tile itself. The `tiff` crate only applies its own

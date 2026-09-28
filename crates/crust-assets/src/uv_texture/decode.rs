@@ -28,14 +28,7 @@ pub(super) fn decode_tile(
     number: u32,
     max_edge: NonZeroUsize,
 ) -> Result<(Tile<u8>, (bool, u8)), AssetError> {
-    let mut reader = image::ImageReader::open(path)
-        .map_err(AssetError::io(path))?
-        .with_guessed_format()
-        .map_err(AssetError::io(path))?;
-    // Same reasoning as the environment decoder: these are trusted, locally
-    // authored assets and an 8K texture exceeds the default allocation limit.
-    reader.no_limits();
-    let decoded = reader.decode().map_err(AssetError::image(path))?;
+    let decoded = crate::image_file::decode(path)?;
     let color = decoded.color();
     let format = (
         color.bytes_per_pixel() == color.channel_count(),

@@ -89,6 +89,18 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   normal, a roughness or a mask is raw data. MaterialX states it per input
   (`colorspace="srgb_texture"`), and **anything else, including an absent
   attribute, means raw**.
+  - **Plain `.tif` sources decode through `image`'s `tiff` feature**, which is
+    the same `tiff` 0.11 the `.tx` reader uses. Every `image` decode (UV tiles,
+    environment maps, `maketx`) goes through `crust-assets/src/image_file.rs`,
+    because `tiff` 0.11.3 scrambles an RGB file whose fourth sample is
+    `ExtraSamples = 0` (unspecified): it strips that sample at the wrong stride
+    under the horizontal predictor. The result is plausible-looking streaky
+    noise, not an error. The OpenPBR playground's `walls_*`,
+    `drapedfabric_*` and `OJfoam_Normal` are written that way, and the walls
+    rendered as multicoloured speckle. `image_file` rewrites the tag to
+    unassociated alpha before decoding, which is exact because every caller
+    drops alpha. A test (`the_tiff_crate_still_needs_the_workaround`) fails
+    once an upgrade fixes the crate.
   - `UvMap` (`rt_world.rs`) carries per-triangle **corner** UVs, not per-vertex:
     USD's `st` is usually `faceVarying`, and a vertex on a UV seam has one
     position but two texture coordinates. Built only when the bound material

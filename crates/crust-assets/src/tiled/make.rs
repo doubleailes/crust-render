@@ -74,14 +74,7 @@ fn decode(src: &Path) -> Result<(Source, usize, usize, (bool, u8)), AssetError> 
         let (pixels, w, h) = crate::environment::try_read_exr_rgb(src)?;
         return Ok((Source::Floats(pixels), w, h, (false, 3)));
     }
-    let mut reader = image::ImageReader::open(src)
-        .map_err(AssetError::io(src))?
-        .with_guessed_format()
-        .map_err(AssetError::io(src))?;
-    // Trusted, locally authored assets; an 8K texture exceeds the default
-    // allocation limit, which is exactly the size this exists for.
-    reader.no_limits();
-    let img = reader.decode().map_err(AssetError::image(src))?;
+    let img = crate::image_file::decode(src)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let color = img.color();
     let format = (
