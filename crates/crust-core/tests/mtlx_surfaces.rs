@@ -6,7 +6,12 @@
 use crust_core::closure::mx::{Fresnel, FresnelModel};
 use crust_core::closure::{Lobe, Prepared};
 use crust_core::materialx::{self, Loaded};
-use crust_core::{HitRecord, Material, Ray, Vec3A};
+use crust_core::rt::Geometry;
+use crust_core::{
+    Emissive, HitRecord, LightList, Material, PathSampler, Ray, SamplingStrategy, Vec3A, Volumes,
+    WorldBuilder, ray_color,
+};
+use std::sync::Arc;
 
 /// Loads the first material of an inline document whose body declares a
 /// surface node named `s`.
@@ -430,4 +435,66 @@ fn standalone_bsdf_documents_are_untouched_by_the_builders() {
             .eval(&straight_down(), &hit(0.5, 0.5), Vec3A::Z)
             .is_some()
     );
+}
+
+/// The white furnace: every fixture material on a unit sphere inside a
+/// uniform emitter of radiance 1, traced unclamped (`ray_color` applies no
+/// firefly clamp). A closure that is energy-conserving reflects and transmits
+/// at most what arrives, so no pixel — head-on, mid-way or grazing — may come
+/// back brighter than the environment behind it. A layer that added its top's
+/// and base's full responses, or a leaf whose sample weight disagreed with its
+/// `eval / pdf`, reads above 1 here.
+#[test]
+fn every_fixture_material_is_bounded_in_a_white_furnace() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/materialx_surfaces.mtlx");
+    let names = [
+        "mtlx_openpbr_coated",
+        "mtlx_standard_gold",
+        "mtlx_gltf_clearcoat",
+        "mtlx_standard_glass",
+        "mtlx_gltf_ruby",
+        "mtlx_openpbr_bumped_coat",
+    ];
+    for name in names {
+        let loaded = materialx::load(&path, Some(name), &|_, _| None).expect("loads");
+        let mut world = WorldBuilder::new();
+        world.attach(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            loaded.material.clone(),
+        );
+        world.attach(
+            Geometry::Sphere {
+                center: Vec3A::ZERO,
+                radius: 50.0,
+            },
+            Arc::new(Emissive::new(Vec3A::ONE)),
+        );
+        let world = world.commit();
+        let (lights, volumes) = (LightList::new(), Volumes::default());
+        for offset in [0.0f32, 0.6, 0.95] {
+            let ray = Ray::new(Vec3A::new(offset, 0.0, -5.0), Vec3A::Z);
+            let n = 2048;
+            let mut sum = Vec3A::ZERO;
+            for i in 0..n {
+                sum += ray_color(
+                    &ray,
+                    &world,
+                    &lights,
+                    &volumes,
+                    24,
+                    SamplingStrategy::PowerMis,
+                    PathSampler::new(5, 11, 0, i),
+                );
+            }
+            let mean = sum / n as f32;
+            assert!(
+                mean.max_element() <= 1.02 && mean.min_element() >= 0.0,
+                "{name} at offset {offset}: furnace mean {mean}"
+            );
+        }
+    }
 }
