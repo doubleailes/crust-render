@@ -4,8 +4,8 @@
 //! sample document.
 
 use crust_mtlx::{
-    BinOp, Compiler, Doc, Flattened, LobeKind, MtlxError, Op, Program, ShadeCtx, Source, Texture,
-    TextureRef, Val, compile, flatten, reflectivity_from_ior,
+    BinOp, Bsdf, Closure, Closures, Compiler, Doc, MtlxError, Op, Program, ShadeCtx, Source,
+    Texture, TextureRef, Val, compile, flatten, reflectivity_from_ior,
 };
 use glam::Vec3A;
 use std::path::PathBuf;
@@ -71,47 +71,68 @@ fn binary(category: &str, ty: &str, a: &str, b: &str) -> String {
     )
 }
 
-/// Lobe kinds and weights of a compiled material, evaluated at `ctx`.
-fn lobes_of(doc: &str, root: &str) -> Vec<(LobeKind, f32, Vec3A, f32)> {
+/// Compiles `root` of `doc` into its closures and evaluates the program at
+/// `ctx`.
+fn closures_of(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let d = Doc::parse(doc).unwrap();
     let mut c = Compiler::new(&d, &decline);
-    let one = c.constant(Val::ONE);
     let root = d.find("", root).expect("root node").clone();
-    let mut flat = Flattened::default();
-    flatten(&mut c, &root, one, 0, &mut flat);
+    let mut out = Closures::default();
+    flatten(&mut c, &root, &mut out);
     let mut slots = Vec::new();
     c.program.eval(&ctx(), &mut slots);
-    flat.lobes
-        .iter()
-        .map(|l| {
-            (
-                l.kind,
-                slots[l.weight as usize].x(),
-                slots[l.color as usize].rgb(),
-                slots[l.roughness as usize].x(),
-            )
+    (out, slots)
+}
+
+/// A leaf's category, colour and (lane-0) roughness at the evaluated slots.
+fn leaf_params(l: &Bsdf, slots: &[Val]) -> (&'static str, Vec3A, f32) {
+    let v = |s: u32| slots[s as usize];
+    let (color, rough) = match l {
+        Bsdf::Diffuse {
+            color, roughness, ..
+        } => (v(*color).rgb(), v(*roughness).x()),
+        Bsdf::Dielectric {
+            tint, roughness, ..
+        } => (v(*tint).rgb(), v(*roughness).x()),
+        Bsdf::Conductor { roughness, .. } => (Vec3A::ONE, v(*roughness).x()),
+        Bsdf::Schlick {
+            color0, roughness, ..
+        } => (v(*color0).rgb(), v(*roughness).x()),
+        Bsdf::Sheen {
+            color, roughness, ..
+        } => (v(*color).rgb(), v(*roughness).x()),
+        Bsdf::Subsurface { color, .. } | Bsdf::Translucent { color } => (v(*color).rgb(), 0.0),
+    };
+    (l.category(), color, rough)
+}
+
+/// Leaf categories and structural weights of a compiled material, evaluated
+/// at `ctx`: `(category, weight, colour, roughness)`, top before base.
+fn lobes_of(doc: &str, root: &str) -> Vec<(&'static str, f32, Vec3A, f32)> {
+    let (cl, slots) = closures_of(doc, root);
+    cl.structural_weights(&slots)
+        .into_iter()
+        .map(|(id, w)| match &cl.nodes[id as usize] {
+            Closure::Leaf(l) => {
+                let (cat, color, rough) = leaf_params(&l.bsdf, &slots);
+                (cat, w.x, color, rough)
+            }
+            _ => unreachable!("structural weights are leaves"),
         })
         .collect()
 }
 
 /// Emission terms of a compiled material — `(weight, radiance)` at `ctx` —
-/// alongside the lobe kinds, so a test can assert that reading the `edf` left
-/// the BSDF side alone.
+/// alongside the leaf categories, so a test can assert that reading the
+/// `edf` left the BSDF side alone.
 ///
 /// The weight is a `Vec3A` rather than an `f32` because the slot genuinely is
 /// not a scalar: MaterialX's `ND_multiply_edfC` tints an EDF by a `color3`, and
 /// `Mul` promotes arity. `Val::rgb` broadcasts an arity-1 value, so a `float`
 /// weight still reads as three equal channels.
-fn emission_of(doc: &str, root: &str) -> (Vec<(Vec3A, Vec3A)>, Vec<LobeKind>) {
-    let d = Doc::parse(doc).unwrap();
-    let mut c = Compiler::new(&d, &decline);
-    let one = c.constant(Val::ONE);
-    let root = d.find("", root).expect("root node").clone();
-    let mut flat = Flattened::default();
-    flatten(&mut c, &root, one, 0, &mut flat);
-    let mut slots = Vec::new();
-    c.program.eval(&ctx(), &mut slots);
-    let terms = flat
+fn emission_of(doc: &str, root: &str) -> (Vec<(Vec3A, Vec3A)>, Vec<&'static str>) {
+    let (cl, slots) = closures_of(doc, root);
+    let terms = cl
         .emission
         .iter()
         .map(|e| {
@@ -121,17 +142,34 @@ fn emission_of(doc: &str, root: &str) -> (Vec<(Vec3A, Vec3A)>, Vec<LobeKind>) {
             )
         })
         .collect();
-    (terms, flat.lobes.iter().map(|l| l.kind).collect())
+    let kinds = lobes_of(doc, root).into_iter().map(|l| l.0).collect();
+    (terms, kinds)
+}
+
+/// The category of leaf `id`.
+fn leaf_category(cl: &Closures, id: u32) -> &'static str {
+    match &cl.nodes[id as usize] {
+        Closure::Leaf(l) => l.bsdf.category(),
+        _ => "not a leaf",
+    }
+}
+
+/// Every reachable leaf's category, top before base.
+fn leaf_categories(cl: &Closures) -> Vec<&'static str> {
+    let slots = vec![Val::ONE; 1 << 16];
+    cl.structural_weights(&slots)
+        .into_iter()
+        .map(|(id, _)| leaf_category(cl, id))
+        .collect()
 }
 
 /// Node categories the compiler had nothing for, for the EDF tests.
 fn unsupported_of(doc: &str, root: &str) -> Vec<String> {
     let d = Doc::parse(doc).unwrap();
     let mut c = Compiler::new(&d, &decline);
-    let one = c.constant(Val::ONE);
     let root = d.find("", root).expect("root node").clone();
-    let mut flat = Flattened::default();
-    flatten(&mut c, &root, one, 0, &mut flat);
+    let mut out = Closures::default();
+    flatten(&mut c, &root, &mut out);
     c.unsupported.iter().cloned().collect()
 }
 
@@ -1101,28 +1139,28 @@ const METAL: &str = r#"<conductor_bsdf name="c" type="BSDF">
                        </conductor_bsdf>"#;
 
 #[test]
-fn a_bare_diffuse_lobe_carries_its_parameters() {
+fn a_bare_diffuse_leaf_carries_its_parameters() {
     let l = lobes_of(&format!("<materialx>{DIFFUSE}</materialx>"), "d");
     assert_eq!(l.len(), 1);
     let (kind, w, color, rough) = l[0];
-    assert_eq!(kind, LobeKind::Diffuse);
+    assert_eq!(kind, "oren_nayar_diffuse_bsdf");
     assert!(approx(w, 1.0));
     assert!(color.abs_diff_eq(Vec3A::new(0.5, 0.4, 0.3), 1e-5));
     assert!(approx(rough, 0.2));
 }
 
 #[test]
-fn every_bsdf_leaf_category_maps_to_a_pool() {
+fn every_bsdf_leaf_category_becomes_a_leaf() {
     for (cat, kind) in [
-        ("oren_nayar_diffuse_bsdf", LobeKind::Diffuse),
-        ("diffuse_bsdf", LobeKind::Diffuse),
-        ("burley_diffuse_bsdf", LobeKind::Diffuse),
-        ("dielectric_bsdf", LobeKind::Dielectric),
-        ("generalized_schlick_bsdf", LobeKind::Dielectric),
-        ("conductor_bsdf", LobeKind::Conductor),
-        ("sheen_bsdf", LobeKind::Sheen),
-        ("subsurface_bsdf", LobeKind::Subsurface),
-        ("translucent_bsdf", LobeKind::Subsurface),
+        ("oren_nayar_diffuse_bsdf", "oren_nayar_diffuse_bsdf"),
+        ("diffuse_bsdf", "oren_nayar_diffuse_bsdf"),
+        ("burley_diffuse_bsdf", "burley_diffuse_bsdf"),
+        ("dielectric_bsdf", "dielectric_bsdf"),
+        ("generalized_schlick_bsdf", "generalized_schlick_bsdf"),
+        ("conductor_bsdf", "conductor_bsdf"),
+        ("sheen_bsdf", "sheen_bsdf"),
+        ("subsurface_bsdf", "subsurface_bsdf"),
+        ("translucent_bsdf", "translucent_bsdf"),
     ] {
         let l = lobes_of(
             &format!(r#"<materialx><{cat} name="x" type="BSDF" /></materialx>"#),
@@ -1151,8 +1189,8 @@ fn layer_keeps_full_weight_on_both_branches() {
     for (kind, w, _, _) in &l {
         assert!(approx(*w, 1.0), "{kind:?} weight {w}");
     }
-    assert!(l.iter().any(|l| l.0 == LobeKind::Diffuse));
-    assert!(l.iter().any(|l| l.0 == LobeKind::Dielectric));
+    assert!(l.iter().any(|l| l.0 == "oren_nayar_diffuse_bsdf"));
+    assert!(l.iter().any(|l| l.0 == "dielectric_bsdf"));
 }
 
 #[test]
@@ -1175,10 +1213,10 @@ fn nested_mixes_multiply_their_masks() {
         ),
         "outer",
     );
-    let w = |k: LobeKind| l.iter().filter(|l| l.0 == k).map(|l| l.1).sum::<f32>();
-    assert!(approx(w(LobeKind::Sheen), 0.2));
-    assert!(approx(w(LobeKind::Diffuse), 0.4));
-    assert!(approx(w(LobeKind::Conductor), 0.4));
+    let w = |k: &str| l.iter().filter(|l| l.0 == k).map(|l| l.1).sum::<f32>();
+    assert!(approx(w("sheen_bsdf"), 0.2));
+    assert!(approx(w("oren_nayar_diffuse_bsdf"), 0.4));
+    assert!(approx(w("conductor_bsdf"), 0.4));
     let total: f32 = l.iter().map(|l| l.1).sum();
     assert!(approx(total, 1.0));
 }
@@ -1203,8 +1241,12 @@ fn a_mix_driven_by_a_pattern_evaluates_the_pattern() {
         ),
         "x",
     );
-    let metal = l.iter().find(|l| l.0 == LobeKind::Conductor).unwrap().1;
-    let diffuse = l.iter().find(|l| l.0 == LobeKind::Diffuse).unwrap().1;
+    let metal = l.iter().find(|l| l.0 == "conductor_bsdf").unwrap().1;
+    let diffuse = l
+        .iter()
+        .find(|l| l.0 == "oren_nayar_diffuse_bsdf")
+        .unwrap()
+        .1;
     assert!(approx(metal, 0.6));
     assert!(approx(diffuse, 0.4));
 }
@@ -1282,11 +1324,9 @@ fn a_literal_zero_multiply_is_pruned_at_compile_time() {
 }
 
 #[test]
-fn a_zero_multiplied_dielectric_does_not_promote_the_glaze_above_it() {
-    // The shape this regression is about: a diffuse base with a
-    // zero-multiplied dielectric over it, all under a clear glaze. The glaze
-    // must stay the *base specular* — the only specular interface the surface
-    // actually has — rather than becoming a coat over a base that carries none.
+fn a_zero_multiplied_dielectric_is_pruned_from_under_a_glaze() {
+    // A diffuse base with a zero-multiplied dielectric over it, all under a
+    // clear glaze: the dummy is pruned, leaving the glaze over the diffuse.
     let l = lobes_of(
         r#"<materialx>
              <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
@@ -1309,11 +1349,11 @@ fn a_zero_multiplied_dielectric_does_not_promote_the_glaze_above_it() {
            </materialx>"#,
         "L",
     );
-    let kinds: Vec<LobeKind> = l.iter().map(|x| x.0).collect();
+    let kinds: Vec<&str> = l.iter().map(|x| x.0).collect();
     assert_eq!(
         kinds,
-        vec![LobeKind::Diffuse, LobeKind::Dielectric],
-        "the zero-multiplied dummy promoted the glaze: {l:?}"
+        vec!["dielectric_bsdf", "oren_nayar_diffuse_bsdf"],
+        "the zero-multiplied dummy survived: {l:?}"
     );
 }
 
@@ -1385,7 +1425,7 @@ fn surfacematerial_surface_and_bsdf_chain_reaches_the_leaves() {
         "m",
     );
     assert_eq!(l.len(), 1);
-    assert_eq!(l[0].0, LobeKind::Diffuse);
+    assert_eq!(l[0].0, "oren_nayar_diffuse_bsdf");
 }
 
 #[test]
@@ -1405,7 +1445,7 @@ fn a_bsdf_cycle_terminates() {
 }
 
 #[test]
-fn a_lobe_authoring_a_normal_records_it() {
+fn a_leaf_authoring_a_normal_records_it() {
     let d = Doc::parse(
         r#"<materialx>
              <normal name="gn" type="vector3" />
@@ -1417,19 +1457,16 @@ fn a_lobe_authoring_a_normal_records_it() {
     )
     .unwrap();
     let mut c = Compiler::new(&d, &decline);
-    let one = c.constant(Val::ONE);
-    let mut flat = Flattened::default();
-    flatten(&mut c, &d.find("", "d").unwrap().clone(), one, 0, &mut flat);
-    assert!(flat.lobes[0].normal.is_some());
-    let mut flat2 = Flattened::default();
-    flatten(
-        &mut c,
-        &d.find("", "e").unwrap().clone(),
-        one,
-        0,
-        &mut flat2,
-    );
-    assert!(flat2.lobes[0].normal.is_none());
+    let leaf = |cl: &Closures| match &cl.nodes[cl.root.unwrap() as usize] {
+        Closure::Leaf(l) => l.normal,
+        _ => panic!("a bare leaf"),
+    };
+    let mut a = Closures::default();
+    flatten(&mut c, &d.find("", "d").unwrap().clone(), &mut a);
+    assert!(leaf(&a).is_some());
+    let mut b = Closures::default();
+    flatten(&mut c, &d.find("", "e").unwrap().clone(), &mut b);
+    assert!(leaf(&b).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,26 +1488,29 @@ fn sample_ceramic_compiles_to_a_layered_diffuse_and_dielectric() {
     assert_eq!(c.root_name, "mtlx_ceramic");
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     assert_eq!(c.textures, 0, "every texture was declined");
-    let kinds: Vec<LobeKind> = c.lobes.iter().map(|l| l.kind).collect();
-    assert!(kinds.contains(&LobeKind::Diffuse));
-    assert!(kinds.contains(&LobeKind::Dielectric));
+    let kinds = leaf_categories(&c.closures);
+    assert!(kinds.contains(&"oren_nayar_diffuse_bsdf"));
+    assert!(kinds.contains(&"dielectric_bsdf"));
     assert_eq!(kinds.len(), 2);
     assert!(!c.program.ops.is_empty());
 }
 
 #[test]
-fn sample_lacquer_compiles_to_diffuse_dielectric_and_coat() {
-    // Two specular lobes: the clear varnish sits over a base that already
-    // carries the satin dielectric, so it is the coat — in tree order, base
-    // before top, innermost first.
+fn sample_lacquer_keeps_both_dielectrics_as_their_own_leaves() {
+    // Two specular interfaces, each a leaf with its own roughness: the clear
+    // varnish over the satin dielectric over the diffuse. Nothing is pooled.
     let c = compile(&sample_mtlx(), Some("mtlx_lacquer"), &decline).expect("compiles");
     assert_eq!(c.root_name, "mtlx_lacquer");
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     assert_eq!(c.textures, 0, "the lacquer is texture-free by design");
-    let kinds: Vec<LobeKind> = c.lobes.iter().map(|l| l.kind).collect();
+    let kinds = leaf_categories(&c.closures);
     assert_eq!(
         kinds,
-        vec![LobeKind::Diffuse, LobeKind::Dielectric, LobeKind::Coat]
+        vec![
+            "dielectric_bsdf",
+            "dielectric_bsdf",
+            "oren_nayar_diffuse_bsdf"
+        ]
     );
 }
 
@@ -1481,27 +1521,35 @@ fn sample_metal_compiles_with_mask_driven_weights() {
     assert!(c.unsupported.is_empty());
     let mut slots = Vec::new();
     c.program.eval(&ctx(), &mut slots);
-    let w = |k: LobeKind| {
-        c.lobes
+    let weights = c.closures.structural_weights(&slots);
+    let w = |k: &str| {
+        weights
             .iter()
-            .filter(|l| l.kind == k)
-            .map(|l| slots[l.weight as usize].x())
+            .filter(|(id, _)| leaf_category(&c.closures, *id) == k)
+            .map(|(_, w)| w.x)
             .sum::<f32>()
     };
-    let total = w(LobeKind::Conductor) + w(LobeKind::Diffuse);
+    let total = w("conductor_bsdf") + w("oren_nayar_diffuse_bsdf");
     assert!(
         (total - 1.0).abs() < 1e-4,
         "a mix partitions its weight: {total}"
     );
     // The conductor's colour reduces from artistic_ior back to the authored
     // reflectivity.
-    let metal = c
-        .lobes
+    let (n, k) = c
+        .closures
+        .nodes
         .iter()
-        .find(|l| l.kind == LobeKind::Conductor)
-        .unwrap();
-    let n = slots[metal.ior as usize].rgb();
-    let k = slots[metal.extinction as usize].rgb();
+        .find_map(|n| match n {
+            Closure::Leaf(l) => match l.bsdf {
+                Bsdf::Conductor {
+                    ior, extinction, ..
+                } => Some((slots[ior as usize].rgb(), slots[extinction as usize].rgb())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a conductor leaf");
     let r = reflectivity_from_ior(n, k);
     assert!(r.abs_diff_eq(Vec3A::new(0.94, 0.72, 0.36), 1e-2), "{r}");
 }
@@ -1565,7 +1613,11 @@ fn a_uniform_edf_under_a_surface_reaches_the_emission_list() {
       </surface>
     </materialx>"#;
     let (terms, kinds) = emission_of(doc, "s");
-    assert_eq!(kinds, vec![LobeKind::Diffuse], "the BSDF side is untouched");
+    assert_eq!(
+        kinds,
+        vec!["oren_nayar_diffuse_bsdf"],
+        "the BSDF side is untouched"
+    );
     assert_eq!(terms.len(), 1);
     assert_eq!(terms[0].0.x, 1.0);
     assert_eq!(terms[0].1, Vec3A::new(2.0, 3.0, 4.0));
@@ -1734,7 +1786,7 @@ fn a_literal_black_edf_is_pruned() {
 /// emitter — this is the test that would catch a future refactor merging the
 /// two into one vector of kinds.
 #[test]
-fn an_edf_does_not_disturb_the_coat_promotion() {
+fn an_edf_does_not_disturb_the_bsdf_tree() {
     let doc = r#"<materialx>
       <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
       <dielectric_bsdf name="satin" type="BSDF">
@@ -1762,8 +1814,12 @@ fn an_edf_does_not_disturb_the_coat_promotion() {
     let (terms, kinds) = emission_of(doc, "s");
     assert_eq!(
         kinds,
-        vec![LobeKind::Diffuse, LobeKind::Dielectric, LobeKind::Coat],
-        "the glaze over a base specular is still the coat"
+        vec![
+            "dielectric_bsdf",
+            "dielectric_bsdf",
+            "oren_nayar_diffuse_bsdf"
+        ],
+        "both glazes and the diffuse stay leaves"
     );
     assert_eq!(terms.len(), 1);
 }

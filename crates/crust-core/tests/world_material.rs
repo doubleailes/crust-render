@@ -885,24 +885,31 @@ fn loading_the_sample_builds_a_material_that_shades() {
     assert_eq!(loaded.textures, 0);
     assert!(loaded.unsupported.is_empty());
     assert!(loaded.summary.contains("mtlx_ceramic"));
-    assert!(loaded.summary.contains("lobes"));
+    assert!(loaded.summary.contains("leaves"));
     assert!(
         loaded.material.uses_uv(),
         "the graph reads texture coordinates"
     );
 
     let (r_in, rec) = upward_hit();
-    let params = loaded.material.probe(&r_in, &rec);
-    assert!(params.base_color.is_finite());
-    assert!(params.base_color.min_element() >= 0.0 && params.base_color.max_element() <= 1.0);
+    let probe = loaded.material.probe(&r_in, &rec);
+    let leaves = probe.closure.leaves();
+    for l in leaves {
+        assert!(l.weight.is_finite() && l.weight.min_element() >= 0.0);
+        assert!(l.weight.max_element() <= 1.0, "{}", l.weight);
+    }
+    let glaze = leaves
+        .iter()
+        .find(|l| l.category == "dielectric_bsdf")
+        .expect("the glaze is a leaf");
     assert!(
-        (params.specular_ior - 1.48).abs() < 1e-3,
-        "the glaze IOR reaches OpenPBR: {}",
-        params.specular_ior
+        glaze.describe().contains("ior 1.4800"),
+        "the glaze IOR reaches its leaf: {}",
+        glaze.describe()
     );
-    assert_eq!(
-        params.base_metalness, 0.0,
-        "no conductor lobe in the ceramic"
+    assert!(
+        !leaves.iter().any(|l| l.category == "conductor_bsdf"),
+        "no conductor leaf in the ceramic"
     );
 
     let s = loaded
@@ -915,16 +922,21 @@ fn loading_the_sample_builds_a_material_that_shades() {
 }
 
 #[test]
-fn the_sample_metal_reduces_to_a_metal_lobe() {
+fn the_sample_metal_has_a_live_conductor_leaf() {
     let loaded = materialx::load(&sample_mtlx(), Some("mtlx_metal"), &|_, _| None).expect("loads");
     let (r_in, rec) = upward_hit();
-    let params = loaded.material.probe(&r_in, &rec);
+    let probe = loaded.material.probe(&r_in, &rec);
+    let metal = probe
+        .closure
+        .leaves()
+        .iter()
+        .find(|l| l.category == "conductor_bsdf")
+        .expect("the conductor is a leaf");
     assert!(
-        params.base_metalness > 0.0 && params.base_metalness <= 1.0,
+        metal.weight.max_element() > 0.0 && metal.weight.max_element() <= 1.0,
         "{}",
-        params.base_metalness
+        metal.weight
     );
-    assert!(params.base_color.max_element() > 0.0);
 }
 
 #[test]
@@ -1135,10 +1147,9 @@ fn an_hdr_texture_drives_emission_above_one() {
         "an HDR texel must reach emission unclamped, got {e:?}"
     );
 
-    // And the split is a presentation detail: the product is the contract.
-    let params = loaded.material.probe(&r_in, &rec);
-    assert!(params.emission_color.max_element() <= 1.0 + 1e-6);
-    assert!((params.emission_luminance - 16.0).abs() < 1e-3);
+    // The probe reports the same unclamped radiance.
+    let probe = loaded.material.probe(&r_in, &rec);
+    assert!((probe.emission - hdr).length() < 1e-3, "{}", probe.emission);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

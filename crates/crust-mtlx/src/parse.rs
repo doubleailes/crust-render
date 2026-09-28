@@ -108,6 +108,8 @@ pub enum MtlxError {
     Xml(roxmltree::Error),
     /// The document parsed, but the requested material node is not in it.
     NoSuchMaterial(String),
+    /// A document this reader parses but will not shade, and why.
+    Unsupported(String),
 }
 
 impl std::fmt::Display for MtlxError {
@@ -116,6 +118,7 @@ impl std::fmt::Display for MtlxError {
             MtlxError::Io(e) => write!(f, "cannot read: {e}"),
             MtlxError::Xml(e) => write!(f, "malformed XML: {e}"),
             MtlxError::NoSuchMaterial(n) => write!(f, "no material node named '{n}'"),
+            MtlxError::Unsupported(why) => write!(f, "unsupported: {why}"),
         }
     }
 }

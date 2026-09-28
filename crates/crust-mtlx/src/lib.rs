@@ -13,9 +13,12 @@
 //! - [`parse`] — XML → a flat, name-addressable node graph.
 //! - [`eval`] — that graph compiled once into a slot-indexed [`Program`],
 //!   evaluated per shading point with no name lookups and no allocation.
-//! - [`bsdf`] — the BSDF half of the graph (`layer`/`mix` over standalone BSDF
-//!   nodes) flattened into weighted [`Lobe`]s, which a renderer then pools onto
-//!   its own material.
+//! - [`bsdf`] — the closure half of the graph read as the tree MaterialX
+//!   defines: BSDF leaves combined by `layer` / `mix` / `add` / `multiply`
+//!   ([`Closures`]), with the EDF terms and the interior volume beside it.
+//!   The three surface-shader nodes (`open_pbr_surface`, `standard_surface`,
+//!   `gltf_pbr`) expand into the tree of their MaterialX nodegraphs
+//!   ([`surface`]).
 //!
 //! [`compile`] runs all three for one material node. The crate decodes *no
 //! pixels*: an `image` node's file is handed to the caller's
@@ -27,10 +30,14 @@
 pub mod bsdf;
 pub mod eval;
 pub mod parse;
+pub mod surface;
 mod texture;
 pub mod value;
 
-pub use bsdf::{Emission, Flattened, Lobe, LobeKind, flatten};
+pub use bsdf::{
+    Bsdf, Closure, Closures, DiffuseModel, Emission, Leaf, NodeId, ScatterMode, SheenMode, Slot,
+    ThinFilm, Volume, flatten,
+};
 pub use eval::{
     BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
 };
@@ -45,14 +52,11 @@ pub type TextureLoader<'a> = &'a dyn Fn(&str, Option<&str>) -> Option<TextureRef
 
 /// One material node, compiled.
 pub struct Compiled {
-    /// The pattern program every lobe's parameters are computed by.
+    /// The pattern program every closure parameter is computed by.
     pub program: Program,
-    /// The BSDF tree, flattened. Slots index into `program`'s output.
-    pub lobes: Vec<Lobe>,
-    /// The EDF tree, flattened. Empty for a material that authors no `edf`,
-    /// which is the overwhelming majority — a consumer can key a "do not
-    /// evaluate the graph at all" fast path on that, and crust does.
-    pub emission: Vec<Emission>,
+    /// The closure tree, EDF terms and volume. Slots index into `program`'s
+    /// output.
+    pub closures: Closures,
     /// The material node's own `name`.
     pub root_name: String,
     /// Node categories the compiler had no operator for, sorted, for one
@@ -67,40 +71,23 @@ pub struct Compiled {
 }
 
 impl Compiled {
-    /// Every program slot a consumer reads: each lobe's and each emitter's.
+    /// Every program slot a consumer reads.
     pub fn roots(&self) -> Vec<u32> {
         let mut roots = Vec::new();
-        for l in &self.lobes {
-            roots.extend([l.weight, l.color, l.roughness, l.ior, l.extinction]);
-            roots.extend(l.normal);
-        }
-        for e in &self.emission {
-            roots.extend([e.color, e.weight]);
-        }
+        // `for_each_slot` visits mutably; walk a copy, the tree is small.
+        self.closures.clone().for_each_slot(|s| roots.push(*s));
         roots
     }
 
     /// Replaces the program with [`Program::optimize`]'s and points every
-    /// lobe and emitter at its slot's new home. Every root keeps its value
+    /// closure parameter at its slot's new home. Every root keeps its value
     /// bit for bit at every shading point; only the work to reach it shrinks.
     pub fn optimize(&mut self) {
         let (program, remap) = self.program.optimize(&self.roots());
         // Every root is live, so every root was placed.
-        let at = |s: &mut u32| *s = remap[*s as usize].expect("a root slot survives optimization");
-        for l in &mut self.lobes {
-            at(&mut l.weight);
-            at(&mut l.color);
-            at(&mut l.roughness);
-            at(&mut l.ior);
-            at(&mut l.extinction);
-            if let Some(n) = &mut l.normal {
-                at(n);
-            }
-        }
-        for e in &mut self.emission {
-            at(&mut e.color);
-            at(&mut e.weight);
-        }
+        self.closures.for_each_slot(|s| {
+            *s = remap[*s as usize].expect("a root slot survives optimization");
+        });
         self.program = program;
     }
 }
@@ -130,9 +117,8 @@ pub fn compile(
     };
 
     let mut c = Compiler::new(&doc, load_texture);
-    let one = c.constant(Val::ONE);
-    let mut flat = Flattened::default();
-    flatten(&mut c, &root, one, 0, &mut flat);
+    let mut closures = Closures::default();
+    flatten(&mut c, &root, &mut closures);
     // Counted off the compiled program rather than inside the loader
     // closure: the compiler memoises, so a texture feeding three nodes is
     // loaded once, and the program is the record of what actually resolved.
@@ -146,8 +132,7 @@ pub fn compile(
 
     Ok(Compiled {
         program: c.program,
-        lobes: flat.lobes,
-        emission: flat.emission,
+        closures,
         root_name: root.name.clone(),
         unsupported,
         textures,

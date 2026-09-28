@@ -505,6 +505,13 @@ fn load_mtlx_material(
                     l.unsupported.join(", ")
                 );
             }
+            if !l.reported.is_empty() {
+                warn!(
+                    "MaterialX {}: not represented — {}",
+                    file.display(),
+                    l.reported.join("; ")
+                );
+            }
             debug!(
                 "MaterialX {} -> {} ({} textures resolved)",
                 file.display(),
