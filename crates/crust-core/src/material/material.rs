@@ -1,5 +1,6 @@
 use crate::PathSampler;
 use crate::hittable::HitRecord;
+use crate::material::closure::ResolvedClosure;
 use crate::material::{OpenPBR, ResolvedOpenPBR};
 use crate::ray::Ray;
 use glam::Vec3A;
@@ -230,8 +231,8 @@ pub trait Material: Send + Sync {
 /// *before* resolving them: the order the trap in the materials design record
 /// is about is now the only one that compiles.
 pub struct Resolution {
-    /// The fully resolved BSDF parameters.
-    pub(crate) bsdf: ResolvedOpenPBR,
+    /// The fully resolved BSDF.
+    pub(crate) bsdf: ResolvedBsdf,
     /// The record the BSDF shades with (the shading normal applied).
     pub(crate) rec: HitRecord,
     /// [`Material::emitted_at`] at this hit, computed from the parameters the
@@ -241,7 +242,28 @@ pub struct Resolution {
     pub(crate) emitted: Vec3A,
 }
 
+/// The BSDF a [`Resolution`] carries: resolved OpenPBR parameters, or a
+/// MaterialX closure tree collapsed at the hit.
+// Lives on the stack for one path vertex; see `Resolved`.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ResolvedBsdf {
+    OpenPBR(ResolvedOpenPBR),
+    Closure(ResolvedClosure),
+}
+
 impl Resolution {
+    /// The resolution of a MaterialX closure tree at `rec`: `emitted` is the
+    /// graph's emission there, read from the same evaluated program as the
+    /// closure — there is no parameter set for a later lookup to replace, so
+    /// the order the OpenPBR constructor enforces is trivially kept.
+    pub fn closure(emitted: Vec3A, bsdf: ResolvedClosure, rec: HitRecord) -> Resolution {
+        Resolution {
+            bsdf: ResolvedBsdf::Closure(bsdf),
+            rec,
+            emitted,
+        }
+    }
+
     /// The resolution of `params` — a network's output, its own Ptex lookups
     /// not yet applied — shading with `rec`: the emission toward
     /// `cos_theta_o` read from `params` as they are (zero unless `can_emit`),
@@ -254,7 +276,7 @@ impl Resolution {
             Vec3A::ZERO
         };
         Resolution {
-            bsdf: params.into_resolved(&rec),
+            bsdf: ResolvedBsdf::OpenPBR(params.into_resolved(&rec)),
             rec,
             emitted,
         }
@@ -270,15 +292,26 @@ impl Resolution {
         cos_theta_o: f32,
     ) -> Option<Resolution> {
         unresolved.resolved_at(rec).map(|bsdf| Resolution {
-            bsdf,
+            bsdf: ResolvedBsdf::OpenPBR(bsdf),
             rec: *rec,
             emitted: unresolved.emitted_directional(cos_theta_o),
         })
     }
 
-    /// The resolved BSDF.
-    pub fn bsdf(&self) -> &ResolvedOpenPBR {
-        &self.bsdf
+    /// The resolved OpenPBR parameters, when the BSDF is OpenPBR.
+    pub fn openpbr(&self) -> Option<&ResolvedOpenPBR> {
+        match &self.bsdf {
+            ResolvedBsdf::OpenPBR(m) => Some(m),
+            ResolvedBsdf::Closure(_) => None,
+        }
+    }
+
+    /// The collapsed MaterialX closure, when the BSDF is one.
+    pub fn closure_bsdf(&self) -> Option<&ResolvedClosure> {
+        match &self.bsdf {
+            ResolvedBsdf::Closure(c) => Some(c),
+            ResolvedBsdf::OpenPBR(_) => None,
+        }
     }
 
     /// The record the BSDF shades with.
@@ -313,6 +346,8 @@ enum Resolved<'a> {
     /// The material's resolved `OpenPBR`, queried with the record `resolve`
     /// returned.
     OpenPBR(ResolvedOpenPBR),
+    /// A MaterialX closure tree collapsed at this vertex.
+    Closure(ResolvedClosure),
 }
 
 impl<'a> ShadingPoint<'a> {
@@ -323,7 +358,10 @@ impl<'a> ShadingPoint<'a> {
             Some(r) => ShadingPoint {
                 rec: r.rec,
                 emitted: r.emitted,
-                bsdf: Resolved::OpenPBR(r.bsdf),
+                bsdf: match r.bsdf {
+                    ResolvedBsdf::OpenPBR(m) => Resolved::OpenPBR(m),
+                    ResolvedBsdf::Closure(c) => Resolved::Closure(c),
+                },
             },
             None => match mat.as_openpbr() {
                 // `OpenPBR`'s `emitted_at` is the default, `emitted_directional`.
@@ -355,6 +393,7 @@ impl<'a> ShadingPoint<'a> {
             // `OpenPBR::scatter_importance` runs `scatter_resolved` on itself.
             Resolved::Plain(m) => m.scatter_resolved(r_in, &self.rec, sampler),
             Resolved::OpenPBR(m) => m.scatter(r_in, &self.rec, sampler),
+            Resolved::Closure(c) => c.scatter(r_in, &self.rec, sampler),
         }
     }
 
@@ -364,6 +403,7 @@ impl<'a> ShadingPoint<'a> {
             Resolved::Material(m) => m.eval(r_in, &self.rec, wi),
             Resolved::Plain(m) => m.eval_resolved(r_in, &self.rec, wi),
             Resolved::OpenPBR(m) => m.eval(r_in, &self.rec, wi),
+            Resolved::Closure(c) => c.eval(r_in, &self.rec, wi),
         }
     }
 
@@ -373,6 +413,7 @@ impl<'a> ShadingPoint<'a> {
             Resolved::Material(m) => m.make_ray(&self.rec, wi),
             Resolved::Plain(m) => Material::make_ray(*m, &self.rec, wi),
             Resolved::OpenPBR(m) => m.make_ray(&self.rec, wi),
+            Resolved::Closure(c) => c.make_ray(&self.rec, wi),
         }
     }
 }

@@ -100,7 +100,10 @@ const MAX_CROSSINGS: usize = 32;
 fn transmissive(mat: &dyn Material, ray: &Ray, hit: &crust_core::HitRecord) -> bool {
     let cos = ray.direction().normalize().dot(hit.normal).abs();
     match mat.resolve(ray, hit, cos) {
-        Some(r) => r.bsdf().params().transmission_weight > 0.5,
+        Some(r) => r.openpbr().map_or_else(
+            || r.closure_bsdf().is_some_and(|c| c.transmits()),
+            |m| m.params().transmission_weight > 0.5,
+        ),
         // An untextured material reports nothing; treat as opaque. On ALab
         // every shaded material is a textured PreviewSurface.
         None => false,

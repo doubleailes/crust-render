@@ -1472,15 +1472,36 @@ fn a_materialx_reference_resolves_to_a_real_material() {
     );
 }
 
-/// Two specular lobes. A dielectric layered over a base that already carries
-/// a specular is OpenPBR's coat, not a second contribution to the base
-/// specular pool — so the lacquer's clear varnish and satin undercoat keep
-/// their own roughnesses instead of averaging into one intermediate lobe.
-/// Checked in numbers rather than pixels, because a wrong reduction still
-/// renders as a plausible glossy surface.
+/// A probe hit looking straight down at a flat, upward-facing patch.
+fn probe_hit() -> (crust_core::HitRecord, crust_core::Ray) {
+    use crust_core::{HitRecord, Ray, Vec3A};
+    let rec = HitRecord {
+        p: Vec3A::ZERO,
+        normal: Vec3A::Z,
+        t: 1.0,
+        front_face: true,
+        face: None,
+        uv: (0.5, 0.5),
+        tangent: Vec3A::X,
+        has_uv: true,
+        // Point-sample: this probe reports what the graph evaluates to at a
+        // named (u, v), not what a filtered render would show there.
+        uv_width: 0.0,
+        face_width: 0.0,
+    };
+    (rec, Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z))
+}
+
+/// Two specular interfaces, each its own leaf. The lacquer is a clear varnish
+/// (α 0.02) over a satin dielectric (α 0.4) over a red diffuse; the closure
+/// tree keeps all three, each at the roughness the `.mtlx` authors — a GGX
+/// alpha, used as authored — rather than pooling the two dielectrics onto one
+/// set of parameters. Checked in numbers rather than pixels, because a wrong
+/// tree still renders as a plausible glossy surface.
 #[test]
-fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
-    use crust_core::{HitRecord, Ray, Vec3A, materialx};
+fn a_materialx_lacquer_keeps_each_interface_as_its_own_leaf() {
+    use crust_core::closure::{Lobe, mx::FresnelModel};
+    use crust_core::materialx;
 
     let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
     let loaded = materialx::load(
@@ -1490,89 +1511,43 @@ fn a_materialx_lacquer_reduces_to_a_coat_over_a_base_specular() {
     )
     .expect("mtlx_lacquer compiles");
     assert!(loaded.unsupported.is_empty(), "{:?}", loaded.unsupported);
+    let (rec, r) = probe_hit();
+    let p = loaded.material.probe(&r, &rec);
+    let leaves = p.closure.leaves();
+    assert_eq!(leaves.len(), 3, "varnish, satin and diffuse");
 
-    // A hit looking straight down at a flat, upward-facing patch.
-    let rec = HitRecord {
-        p: Vec3A::ZERO,
-        normal: Vec3A::Z,
-        t: 1.0,
-        front_face: true,
-        face: None,
-        uv: (0.5, 0.5),
-        tangent: Vec3A::X,
-        has_uv: true,
-        // Point-sample: this probe reports what the graph evaluates to at a
-        // named (u, v), not what a filtered render would show there.
-        uv_width: 0.0,
-        face_width: 0.0,
+    let alpha_ior = |l: &crust_core::closure::Prepared| match l.lobe {
+        Lobe::Specular {
+            ax,
+            fresnel:
+                crust_core::closure::mx::Fresnel {
+                    model: FresnelModel::Dielectric { ior },
+                    ..
+                },
+            ..
+        } => (ax, ior),
+        _ => panic!("{} is not a dielectric", l.category),
     };
-    let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
-    let m = loaded.material.probe(&r, &rec);
-
-    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
-    assert!(near(m.coat_weight, 1.0), "coat weight {}", m.coat_weight);
-    // The `.mtlx` authors GGX alphas; crust's roughness is perceptual.
-    assert!(
-        near(m.coat_roughness, (0.02f32).sqrt()),
-        "coat roughness {}",
-        m.coat_roughness
-    );
-    assert!(near(m.coat_ior, 1.5), "coat ior {}", m.coat_ior);
-    assert!(
-        near(m.specular_weight, 1.0),
-        "specular weight {}",
-        m.specular_weight
-    );
-    assert!(
-        near(m.specular_roughness, (0.4f32).sqrt()),
-        "the two roughnesses averaged into one lobe: {}",
-        m.specular_roughness
-    );
-    assert!(
-        near(m.base_metalness, 0.0),
-        "metalness {}",
-        m.base_metalness
-    );
-    assert!(near(m.base_weight, 1.0), "base weight {}", m.base_weight);
-    assert!(
-        m.base_color.x > m.base_color.y && m.base_color.x > m.base_color.z,
-        "red base lost: {}",
-        m.base_color
-    );
-
-    // And the single-dielectric ceramic is untouched: one glaze over diffuse
-    // is the base specular, with no coat.
-    let ceramic = materialx::load(
-        &sample("materialx_basic.mtlx"),
-        Some("mtlx_ceramic"),
-        &decline,
-    )
-    .expect("mtlx_ceramic compiles");
-    let c = ceramic.material.probe(&r, &rec);
-    assert_eq!(
-        c.coat_weight, 0.0,
-        "a lone glaze over diffuse became a coat"
-    );
-    assert!(
-        near(c.specular_roughness, (0.06f32).sqrt()),
-        "ceramic glaze roughness {}",
-        c.specular_roughness
-    );
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+    let (a_clear, ior_clear) = alpha_ior(&leaves[0]);
+    let (a_satin, ior_satin) = alpha_ior(&leaves[1]);
+    assert!(near(a_clear, 0.02), "varnish alpha {a_clear}");
+    assert!(near(a_satin, 0.4), "satin alpha {a_satin}");
+    assert!(near(ior_clear, 1.5) && near(ior_satin, 1.5));
+    assert_eq!(leaves[2].category, "oren_nayar_diffuse_bsdf");
+    let red = leaves[2].describe();
+    assert!(red.contains("0.5500 0.0800 0.0600"), "red base lost: {red}");
 }
 
-/// A MaterialX coat must not carry OpenPBR's multiple-scattering darkening.
-///
-/// `coat_darkening_factor` models the bounce series between the coat's
-/// underside and the substrate — light the base reflects up, total internal
-/// reflection turns back down, the base absorbs again. MaterialX's `layer` has
-/// no such term: it is single-scattering, `base·(1 − F) + top`. So a coat that
-/// exists only because `reduce()` promoted a `dielectric_bsdf` must arrive with
-/// the darkening switched off, or the reduction darkens a substrate the source
-/// material never darkened. On the DPEL lion that was a factor of 0.52 over the
-/// whole body.
+/// MaterialX's `layer` is single-scattering: the base sees exactly the
+/// throughput of what lies above it, `1 − E(ωo)` per interface, and nothing
+/// else — no OpenPBR-style multiple-scattering coat darkening. So the
+/// lacquer's diffuse weight is the product of the two dielectrics' filters,
+/// and the satin's is the varnish's alone.
 #[test]
-fn a_materialx_coat_carries_no_multiple_scattering_darkening() {
-    use crust_core::{HitRecord, Ray, Vec3A, materialx};
+fn a_materialx_layer_attenuates_its_base_by_the_tops_throughput_only() {
+    use crust_core::closure::dielectric_refl_filter;
+    use crust_core::materialx;
 
     let decline = |_: &str, _: Option<&str>| -> Option<crust_core::TextureRef> { None };
     let loaded = materialx::load(
@@ -1581,29 +1556,27 @@ fn a_materialx_coat_carries_no_multiple_scattering_darkening() {
         &decline,
     )
     .expect("mtlx_lacquer compiles");
-
-    let rec = HitRecord {
-        p: Vec3A::ZERO,
-        normal: Vec3A::Z,
-        t: 1.0,
-        front_face: true,
-        face: None,
-        uv: (0.5, 0.5),
-        tangent: Vec3A::X,
-        has_uv: true,
-        // Point-sample: this probe reports what the graph evaluates to at a
-        // named (u, v), not what a filtered render would show there.
-        uv_width: 0.0,
-        face_width: 0.0,
-    };
-    let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
-    let m = loaded.material.probe(&r, &rec);
-
-    // Not vacuous: this material really does reduce to a coat.
-    assert_eq!(m.coat_weight, 1.0, "coat weight {}", m.coat_weight);
-    assert_eq!(
-        m.coat_darkening, 0.0,
-        "a MaterialX coat inherited OpenPBR's multiple-scattering darkening"
+    let (rec, r) = probe_hit();
+    let p = loaded.material.probe(&r, &rec);
+    let leaves = p.closure.leaves();
+    let t_clear = dielectric_refl_filter(1.0, 0.02f32.sqrt(), 1.5);
+    let t_satin = dielectric_refl_filter(1.0, 0.4f32.sqrt(), 1.5);
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+    assert!(
+        near(leaves[0].weight.x, 1.0),
+        "varnish {}",
+        leaves[0].weight
+    );
+    assert!(
+        near(leaves[1].weight.x, t_clear),
+        "satin {} vs {t_clear}",
+        leaves[1].weight
+    );
+    assert!(
+        near(leaves[2].weight.x, t_clear * t_satin),
+        "diffuse {} vs {}",
+        leaves[2].weight,
+        t_clear * t_satin
     );
 }
 

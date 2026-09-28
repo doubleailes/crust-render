@@ -127,9 +127,11 @@ safe-Rust, with no heap allocation per vertex and no new dependency. Then:
   full `eval`. That is one-sample MIS, as `OpenPBR` already composes its lobes.
 
 This is not pooling. Each leaf keeps its own roughness, IOR, normal and Fresnel,
-and the weights vary with the view. Capacity is 16 leaves, and the worst built-in
-expansion is 7 (`standard_surface`). A document whose tree exceeds 16 live leaves
-is refused at load with a `WARN` and falls back.
+and the weights vary with the view. Capacity is 8 leaves, and the worst built-in
+expansion is 7 (`standard_surface`). 16 was the first plan, but it would have
+doubled `ShadingPoint`'s stack size for every material, MaterialX or not. A
+document whose tree has more than 8 leaves is refused at load with a `WARN` and
+falls back.
 
 ### D4. Throughput and energy tables are ported from BSDL and MaterialX
 
@@ -140,18 +142,23 @@ Per decision, the tables are ported rather than regenerated:
   `3dd1d94fe07b5374c6519cd44ca65f83d4598a80`, the commit Typhoon's
   `dielectricReflFrontLut.h` documents). It keeps BSDL's axes: IOR index
   `√((ior − 1.001)/(5 − 1.001))`, perceptual roughness, and a linear `cosθo`
-  grid. The BSDL transmission-albedo and coupled-dielectric compensation tables
-  are ported for `RT` leaves.
+  grid. Regenerated from BSDL's source, it matches Typhoon's shipped table bit
+  for bit. BSDL's transmission-albedo and coupled-dielectric compensation tables
+  are *not* ported. MaterialX's `layer` throughput reads the reflection albedo
+  alone, and its GLSL does not compensate transmission, so they would have no
+  consumer.
 - **Conductor / generalized-Schlick throughput** and **GGX multiple-scattering
-  compensation**: MaterialX GLSL's `mx_ggx_dir_albedo` analytic fit and
+  compensation**: MaterialX GLSL's `mx_ggx_dir_albedo_analytic` fit and
   `mx_ggx_energy_compensation` (Apache-2.0). Throughput is `1 − E_ss(cosθo, α) ·
   F`, the form Typhoon's `LayerThroughputReflectance` uses.
 - **Sheen throughput**: MaterialX's `mx_imageworks_sheen_dir_albedo` fit.
 - **Thin film on a top leaf** uses the Fresnel-weighted form with the thin-film
   Fresnel, as Typhoon does, not the dielectric filter table.
 
-The tables become Rust `const` arrays under `crust-core/src/material/closure/lut/`.
-They are converted by a checked-in script from the upstream sources, with a
+The BSDL table becomes a Rust `static` array
+(`crust-core/src/material/closure/bsdl_tables.rs`) and the MaterialX fits are
+ported as functions (`closure/mx.rs`). The table is converted by a checked-in
+script (`scripts/tables/bsdl_luts_to_rust.py`) from BSDL's own output, with a
 `THIRD-PARTY.md` notice (BSD-3-Clause and Apache-2.0 are compatible with crust's
 MIT licence under attribution). Tests pin spot values against the upstream
 formulas and the axis conventions.
@@ -275,8 +282,9 @@ weight still renders as a plausible surface.
 - [**Non-reciprocal layering**: `T_top(ωo)` only] → it is the model's definition
   (MaterialX, Typhoon). NEE and bounce evaluate the same `f(ωo, ωi)`, so MIS stays
   consistent. Bidirectional methods, which crust does not have, would need care.
-- [**`ShadingPoint` grows**: 16 inline leaves on the stack per vertex] → sized and
-  measured. If it shows up, the capacity is lowered (7 is the built-in worst case).
+- [**`ShadingPoint` grows**: 8 inline leaves on the stack per vertex] → sized and
+  measured (group 6). The capacity is already the smallest that holds every
+  built-in expansion.
 - [**The reference moves**: Typhoon is on hold pending a refactor] → commit pinned.
   MaterialX 1.39's nodegraphs, not Typhoon, are the normative source. Typhoon is
   the worked example.

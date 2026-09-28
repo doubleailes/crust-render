@@ -6,6 +6,7 @@ pub use material::{Material, Resolution, ScatterSample, ShadingPoint};
 mod emissive;
 pub use emissive::Emissive;
 mod brdf;
+pub mod closure;
 mod openpbr;
 mod pattern;
 pub use openpbr::{InteriorCache, OpenPBR, ResolvedOpenPBR};

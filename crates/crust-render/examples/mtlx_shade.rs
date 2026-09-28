@@ -1,18 +1,20 @@
-//! Diagnostic: what OpenPBR parameters does a `.mtlx` graph reduce to at a
-//! given point on the chart?
+//! Diagnostic: what does a `.mtlx` closure tree resolve to at a given point
+//! on the chart?
 //!
 //! A MaterialX surface can only be wrong in ways that still look like a
 //! surface — a mis-decoded albedo is a plausible pastel, a mask read at the
 //! wrong colour space is a plausible blend — so comparing renders by eye
-//! settles nothing. This prints the numbers instead: the base colour,
-//! metalness, roughness, lobe weights and the coat (the second specular lobe
-//! a dielectric layered over another specular reduces to) the reduction
-//! produces at whatever `(u, v)` you name, which can be checked against the
-//! texture's own texels.
+//! settles nothing. This prints the numbers instead: every live BSDF leaf the
+//! tree collapses to at whatever `(u, v)` you name — its MaterialX category,
+//! the RGB weight the tree gives it there (mix factors, multiplies and the
+//! throughput of every layer above it), its lobe parameters and normal — plus
+//! the emitted radiance and the interior medium. The view is straight down
+//! the normal unless `--theta <degrees>` tilts it, since layer throughput is a
+//! function of the view angle.
 //!
 //! ```sh
 //! cargo run --release -p crust-render --example mtlx_shade -- \
-//!     Looks/teapot_ceramic_ldX.mtlx [material_node] [u v]...
+//!     Looks/teapot_ceramic_ldX.mtlx [material_node] [--theta deg] [u v]...
 //! ```
 //!
 //! With no coordinates it sweeps a few points across the first UDIM tile.
@@ -27,7 +29,7 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(file) = args.first() else {
-        eprintln!("usage: mtlx_shade <file.mtlx> [material_node] [u v]...");
+        eprintln!("usage: mtlx_shade <file.mtlx> [material_node] [--theta deg] [u v]...");
         std::process::exit(2);
     };
     let file = Path::new(file);
@@ -37,7 +39,17 @@ fn main() {
     // position.
     let mut node: Option<String> = None;
     let mut coords: Vec<f32> = Vec::new();
-    for a in &args[1..] {
+    let mut theta = 0.0f32;
+    let mut rest = args[1..].iter();
+    while let Some(a) = rest.next() {
+        if a == "--theta" {
+            theta = rest
+                .next()
+                .and_then(|t| t.parse::<f32>().ok())
+                .unwrap_or(0.0)
+                .to_radians();
+            continue;
+        }
         match a.parse::<f32>() {
             Ok(v) => coords.push(v),
             Err(_) if node.is_none() => node = Some(a.clone()),
@@ -86,27 +98,11 @@ fn main() {
     if !loaded.unsupported.is_empty() {
         println!("unsupported nodes: {}", loaded.unsupported.join(", "));
     }
+    if !loaded.reported.is_empty() {
+        println!("not represented: {}", loaded.reported.join("; "));
+    }
     println!();
 
-    // A hit looking straight down at a flat, upward-facing patch: the view
-    // direction matters (these graphs compute a view-dependent glaze path
-    // length), so it is stated rather than left at a default.
-    println!(
-        "{:>6} {:>6}   {:>22} {:>6} {:>6} {:>6} {:>6} {:>10}   {:>22}",
-        "u",
-        "v",
-        "base_color",
-        "metal",
-        "rough",
-        "spec",
-        "coat",
-        "coat_rough",
-        // The product, not the two fields: OpenPBR only ever multiplies them
-        // back together, so the split is a presentation choice and either
-        // field alone would mislead. A value above 1.0 here is the point --
-        // radiance has no ceiling, unlike the albedo two columns left.
-        "emission"
-    );
     for (u, v) in points {
         let rec = HitRecord {
             p: Vec3A::ZERO,
@@ -122,23 +118,42 @@ fn main() {
             uv_width: 0.0,
             face_width: 0.0,
         };
-        let r = Ray::new(Vec3A::new(0.0, 0.0, 1.0), -Vec3A::Z);
-        let m = loaded.material.probe(&r, &rec);
-        let emission = m.emission_color * m.emission_luminance;
+        let eye = Vec3A::new(theta.sin(), 0.0, theta.cos());
+        let r = Ray::new(eye, -eye);
+        let p = loaded.material.probe(&r, &rec);
+        // Radiance has no ceiling, unlike the albedos below: a value above 1.0
+        // here is the point, not an error.
         println!(
-            "{u:>6.3} {v:>6.3}   ({:>6.4} {:>6.4} {:>6.4}) {:>6.3} {:>6.4} {:>6.3} {:>6.3} {:>10.4}   \
-             ({:>6.3} {:>6.3} {:>6.3})",
-            m.base_color.x,
-            m.base_color.y,
-            m.base_color.z,
-            m.base_metalness,
-            m.specular_roughness,
-            m.specular_weight,
-            m.coat_weight,
-            m.coat_roughness,
-            emission.x,
-            emission.y,
-            emission.z
+            "(u, v) = ({u:.3}, {v:.3})  emission ({:.4} {:.4} {:.4}){}",
+            p.emission.x,
+            p.emission.y,
+            p.emission.z,
+            p.closure
+                .medium()
+                .map(|m| format!(
+                    "  medium σa ({:.3} {:.3} {:.3}) σs ({:.3} {:.3} {:.3}) g {:.2}",
+                    m.sigma_a.x,
+                    m.sigma_a.y,
+                    m.sigma_a.z,
+                    m.sigma_s.x,
+                    m.sigma_s.y,
+                    m.sigma_s.z,
+                    m.g
+                ))
+                .unwrap_or_default()
         );
+        for l in p.closure.leaves() {
+            println!(
+                "  {:<26} weight ({:.4} {:.4} {:.4})  {}  n ({:.3} {:.3} {:.3})",
+                l.category,
+                l.weight.x,
+                l.weight.y,
+                l.weight.z,
+                l.describe(),
+                l.frame.n.x,
+                l.frame.n.y,
+                l.frame.n.z
+            );
+        }
     }
 }
