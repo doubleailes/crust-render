@@ -406,9 +406,14 @@ impl Gen<'_> {
                 self.put(slot, lanes, n);
                 true
             }
-            // A shifted lookup (a `heighttonormal` tap) takes the interpreter
-            // call below: its coordinates are the interpreter's to compute.
-            None if matches!(op, Op::Texture { tex: Some(_), shift, .. } if *shift == [0.0; 2]) => {
+            // A shifted lookup (a `heighttonormal` tap) or one at an authored
+            // `texcoord` takes the interpreter call below: its coordinates are
+            // the interpreter's to compute.
+            None if matches!(
+                op,
+                Op::Texture { tex: Some(_), shift, coord: None, .. } if *shift == [0.0; 2]
+            ) =>
+            {
                 self.texture(op, slot);
                 false
             }

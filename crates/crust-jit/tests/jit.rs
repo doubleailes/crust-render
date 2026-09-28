@@ -118,6 +118,7 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
         offset: [0.0, 0.0],
         arity,
         shift: [0.0, 0.0],
+        coord: None,
     };
     let mut p = Program::default();
     let mut push = |op: Op| {
@@ -217,6 +218,17 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
         offset: [0.0, 0.0],
         arity: 1,
         shift: [0.5, -0.5],
+        coord: None,
+    });
+    // And one at an authored coordinate, read from a slot.
+    push(Op::Texture {
+        tex: procedural("", None),
+        fallback: Val::float(0.5),
+        scale: [1.0, 2.0],
+        offset: [0.25, 0.0],
+        arity: 3,
+        shift: [0.0, 0.0],
+        coord: Some(v2),
     });
     let hsv = push(Op::HsvAdjust { a: c3, amount: kc });
     let h2n = push(Op::HeightToNormal {
@@ -232,7 +244,7 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
         b: h2n,
     });
     let (inline, host) = same(&p, "synthetic");
-    assert!(inline > 900 && host >= 5, "inline {inline}, host {host}");
+    assert!(inline > 900 && host >= 6, "inline {inline}, host {host}");
 }
 
 #[test]

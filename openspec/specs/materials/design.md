@@ -495,7 +495,13 @@
   strengthens at later bounces as ray cones widen), and with no footprint
   (`CRUST_RAY_CONES=0`, or geometry with no UV density) it reads **flat**. Only
   UV lookups move: a height built from `position` or `normal` differentiates to
-  zero. The JIT sends shifted lookups back to the interpreter, which keeps its
+  zero, and so does an image at a constant `texcoord`.
+- **An image's `texcoord` connection is honoured** (`Op::Texture::coord`).
+  The default chart spelled out (`texcoord` index 0, `geompropvalue st`) stays
+  `None`, which keeps the lookup on the JIT's inline path. A coordinate
+  subgraph that hits an unsupported node (`place2d`, a second UV set) also
+  falls back to the chart, because the constant that node would compile to
+  pins the lookup to a single texel. The JIT sends shifted lookups back to the interpreter, which keeps its
   inline texture path, and so the bit-identity pin, untouched.
 - **Emission.** `uniform_edf` is exact and `generalized_schlick_edf` is carried as
   its closed-form falloff; `conical_edf` and `measured_edf` are directional

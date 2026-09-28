@@ -4,7 +4,7 @@
 //! through [`decode`], so the decode limits and the TIFF workaround below
 //! apply to all of them alike.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use crate::error::AssetError;
@@ -13,14 +13,40 @@ use crate::error::AssetError;
 ///
 /// The limit is lifted because these are trusted, locally authored assets,
 /// and an 8K texture or a 16K panorama exceeds `image`'s default 512 MiB.
+///
+/// Only a TIFF is read into memory first, to be patched; every other format
+/// streams from the file, so a large PNG or HDR does not hold its encoded
+/// bytes alongside the decoded image.
 pub(crate) fn decode(path: &Path) -> Result<image::DynamicImage, AssetError> {
-    let mut bytes = std::fs::read(path).map_err(AssetError::io(path))?;
-    declare_unspecified_extra_sample_as_alpha(&mut bytes);
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
+    let mut magic = [0u8; 4];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut magic))
         .map_err(AssetError::io(path))?;
-    reader.no_limits();
-    reader.decode().map_err(AssetError::image(path))
+    let decoded = if tiff_byte_order(&magic[..n]).is_some() {
+        let mut bytes = std::fs::read(path).map_err(AssetError::io(path))?;
+        declare_unspecified_extra_sample_as_alpha(&mut bytes);
+        let mut reader =
+            image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Tiff);
+        reader.no_limits();
+        reader.decode()
+    } else {
+        let mut reader = image::ImageReader::open(path)
+            .map_err(AssetError::io(path))?
+            .with_guessed_format()
+            .map_err(AssetError::io(path))?;
+        reader.no_limits();
+        reader.decode()
+    };
+    decoded.map_err(AssetError::image(path))
+}
+
+/// `Some(little_endian)` for a classic TIFF header, `None` for anything else.
+fn tiff_byte_order(bytes: &[u8]) -> Option<bool> {
+    match bytes.get(0..4)? {
+        [b'I', b'I', 42, 0] => Some(true),
+        [b'M', b'M', 0, 42] => Some(false),
+        _ => None,
+    }
 }
 
 /// Rewrites a TIFF's `ExtraSamples = [0]` (one unspecified extra sample) to
@@ -42,10 +68,8 @@ pub(crate) fn decode(path: &Path) -> Result<image::DynamicImage, AssetError> {
 fn declare_unspecified_extra_sample_as_alpha(bytes: &mut [u8]) {
     const EXTRA_SAMPLES: u16 = 338;
     const SHORT: u16 = 3;
-    let le = match bytes.get(0..4) {
-        Some([b'I', b'I', 42, 0]) => true,
-        Some([b'M', b'M', 0, 42]) => false,
-        _ => return,
+    let Some(le) = tiff_byte_order(bytes) else {
+        return;
     };
     let u16_at = |b: &[u8], o: usize| -> Option<u16> {
         let v: [u8; 2] = b.get(o..o + 2)?.try_into().ok()?;
@@ -157,11 +181,50 @@ mod tests {
         assert_eq!(rgb8(&bytes), RGB);
     }
 
+    /// The upstream bug this module works around, as a canary: when it
+    /// fails, `tiff` has fixed it and the workaround can go. Ignored because
+    /// `Cargo.lock` is not checked in and `tiff` is a caret requirement, so
+    /// a fixed 0.11.x would otherwise fail a fresh clone's CI with no change
+    /// here. Run with `cargo test -p crust-assets -- --ignored`.
     #[test]
+    #[ignore = "canary for an upstream tiff fix; run with --ignored"]
     fn the_tiff_crate_still_needs_the_workaround() {
-        // The upstream bug this module works around. When a `tiff` upgrade
-        // makes this fail, the workaround can go.
         assert_ne!(rgb8(&rgbx_tiff(&PIXELS, 0)), RGB);
+    }
+
+    /// A file under the temp directory, removed on drop.
+    struct TempFile(std::path::PathBuf);
+    impl TempFile {
+        fn new(name: &str, bytes: &[u8]) -> TempFile {
+            let p = std::env::temp_dir()
+                .join(format!("crust-image-file-{}-{name}", std::process::id()));
+            std::fs::write(&p, bytes).unwrap();
+            TempFile(p)
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn decode_patches_a_tiff_and_streams_everything_else() {
+        let tif = TempFile::new("rgbx.tif", &rgbx_tiff(&PIXELS, 0));
+        assert_eq!(decode(&tif.0).unwrap().to_rgb8().into_raw(), RGB);
+
+        let mut png = Vec::new();
+        image::RgbImage::from_raw(3, 1, RGB.to_vec())
+            .unwrap()
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        // No extension: the format comes from the bytes on both paths.
+        let png = TempFile::new("rgb", &png);
+        assert_eq!(decode(&png.0).unwrap().to_rgb8().into_raw(), RGB);
+
+        let short = TempFile::new("short", b"II");
+        assert!(decode(&short.0).is_err());
+        assert!(decode(Path::new("does/not/exist.tif")).is_err());
     }
 
     #[test]
