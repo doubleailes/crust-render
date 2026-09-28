@@ -105,8 +105,9 @@ fn check(path: &Path) -> usize {
 #[test]
 fn the_optimised_program_matches_the_reference_on_the_fixtures() {
     let n = check(&repo().join("samples/materialx_basic.mtlx"))
-        + check(&repo().join("samples/materialx_emissive.mtlx"));
-    assert!(n >= 5, "expected the fixtures' materials, found {n}");
+        + check(&repo().join("samples/materialx_emissive.mtlx"))
+        + check(&repo().join("samples/materialx_surfaces.mtlx"));
+    assert!(n >= 11, "expected the fixtures' materials, found {n}");
 }
 
 #[test]

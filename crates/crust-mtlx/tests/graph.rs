@@ -1736,15 +1736,15 @@ fn an_untyped_edge_to_an_edf_node_is_still_an_edf() {
     assert_eq!(terms.len(), 2);
 }
 
-/// Every EDF but `uniform_edf` is a *directional* distribution, and the
-/// consumer's emitter is uniform — so a cone, an IES profile or a Schlick
-/// falloff has nowhere to go. Pooling one onto a uniform emitter would be a
-/// plausible glow at the wrong intensity, so they are refused; what matters is
-/// that the refusal is *reported* rather than silent, which is precisely what
-/// the unread `edf` input was not.
+/// A cone or an IES profile is a directional distribution the consumer's
+/// emitter has nowhere to put (a Schlick falloff is the exception: it is a
+/// closed form of the exit cosine, carried on the term). Pooling one onto a
+/// uniform emitter would be a plausible glow at the wrong intensity, so they
+/// are refused; what matters is that the refusal is *reported* rather than
+/// silent, which is precisely what the unread `edf` input was not.
 #[test]
 fn a_directional_edf_is_reported_rather_than_dropped() {
-    for category in ["conical_edf", "measured_edf", "generalized_schlick_edf"] {
+    for category in ["conical_edf", "measured_edf"] {
         let doc = format!(
             r#"<materialx>
               <{category} name="e" type="EDF">
@@ -1762,6 +1762,36 @@ fn a_directional_edf_is_reported_rather_than_dropped() {
             "{category} must be reported"
         );
     }
+}
+
+/// `generalized_schlick_edf` scales its `base` by a Schlick blend of the exit
+/// cosine — the coat-darkened emission of `open_pbr_surface` is built from it —
+/// so it is carried as a falloff on the base's term, not refused.
+#[test]
+fn a_schlick_edf_carries_its_falloff_on_the_base_term() {
+    let doc = r#"<materialx>
+      <uniform_edf name="u" type="EDF">
+        <input name="color" type="color3" value="2, 3, 4" />
+      </uniform_edf>
+      <generalized_schlick_edf name="e" type="EDF">
+        <input name="color0" type="color3" value="0.5, 0.5, 0.5" />
+        <input name="color90" type="color3" value="0, 0, 0" />
+        <input name="exponent" type="float" value="3" />
+        <input name="base" type="EDF" nodename="u" />
+      </generalized_schlick_edf>
+      <surface name="s" type="surfaceshader">
+        <input name="edf" type="EDF" nodename="e" />
+      </surface>
+    </materialx>"#;
+    let (cl, slots) = closures_of(doc, "s");
+    assert_eq!(cl.emission.len(), 1);
+    let e = &cl.emission[0];
+    assert_eq!(slots[e.color as usize].rgb(), Vec3A::new(2.0, 3.0, 4.0));
+    let fo = e.falloff.expect("the Schlick falloff");
+    assert_eq!(slots[fo.color0 as usize].rgb(), Vec3A::splat(0.5));
+    assert_eq!(slots[fo.color90 as usize].rgb(), Vec3A::ZERO);
+    assert_eq!(slots[fo.exponent as usize].x(), 3.0);
+    assert!(!unsupported_of(doc, "s").contains(&"generalized_schlick_edf".to_string()));
 }
 
 /// A literal black EDF is a dummy branch exactly as a literal `weight = 0`

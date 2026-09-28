@@ -154,3 +154,26 @@ fn every_scatter_agrees_with_the_resolved_closure() {
     let via = res.closure_bsdf().unwrap().eval(&r, &rec, wi).unwrap();
     assert_eq!(direct, via);
 }
+
+#[test]
+fn a_schlick_edf_falls_off_with_the_exit_cosine() {
+    // mix(color0, color90, (1 - cos)^exponent) times the base.
+    let edf = r#"<uniform_edf name="u" type="EDF"><input name="color" type="color3" value="4, 4, 4" /></uniform_edf>
+        <generalized_schlick_edf name="e" type="EDF">
+          <input name="color0" type="color3" value="1, 0.5, 0.25" />
+          <input name="color90" type="color3" value="0, 0, 0" />
+          <input name="exponent" type="float" value="2" />
+          <input name="base" type="EDF" nodename="u" />
+        </generalized_schlick_edf>"#;
+    let loaded = load_inline("schlick", &emitter(edf)).expect("loads");
+    let (r, rec) = upward();
+    let head_on = loaded.material.emitted_at(&r, &rec, 1.0);
+    assert!(
+        head_on.abs_diff_eq(Vec3A::new(4.0, 2.0, 1.0), 1e-5),
+        "{head_on}"
+    );
+    // cos = 0.6: the blend weight is 0.4^2 = 0.16.
+    let grazing = loaded.material.emitted_at(&r, &rec, 0.6);
+    let want = Vec3A::new(4.0, 2.0, 1.0) * 0.84;
+    assert!(grazing.abs_diff_eq(want, 1e-4), "{grazing} vs {want}");
+}

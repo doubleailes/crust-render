@@ -216,6 +216,12 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("materialx_basic.mtlx", "mtlx_lacquer"),
         ("materialx_emissive.mtlx", "mtlx_emitter_constant"),
         ("materialx_emissive.mtlx", "mtlx_emitter_textured"),
+        ("materialx_surfaces.mtlx", "mtlx_openpbr_coated"),
+        ("materialx_surfaces.mtlx", "mtlx_standard_gold"),
+        ("materialx_surfaces.mtlx", "mtlx_gltf_clearcoat"),
+        ("materialx_surfaces.mtlx", "mtlx_standard_glass"),
+        ("materialx_surfaces.mtlx", "mtlx_gltf_ruby"),
+        ("materialx_surfaces.mtlx", "mtlx_openpbr_bumped_coat"),
     ] {
         let loaded = materialx::load(&sample(file), Some(node), &decline)
             .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));

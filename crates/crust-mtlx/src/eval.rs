@@ -696,6 +696,40 @@ impl<'a> Compiler<'a> {
         self.emit(Op::Const(v))
     }
 
+    /// The value of `slot` when it is a compile-time constant — a literal, or
+    /// a pure operator over constants — and `None` when it depends on the
+    /// shading point or a texture.
+    ///
+    /// What the closure builders prune on: a branch whose weight folds to a
+    /// literal zero, or a mix whose factor folds to exactly 0 or 1, is left
+    /// out of the tree altogether rather than evaluated at every vertex to be
+    /// told it contributes nothing.
+    pub fn fold(&self, slot: u32) -> Option<Val> {
+        let ops = &self.program.ops;
+        let op = ops.get(slot as usize)?;
+        if let Op::Const(v) = op {
+            return Some(*v);
+        }
+        if !op.is_pure() {
+            return None;
+        }
+        let mut operands = Vec::new();
+        op.clone().for_each_operand(|o| operands.push(*o));
+        let mut slots = vec![Val::ZERO; slot as usize];
+        for o in operands {
+            slots[o as usize] = self.fold(o)?;
+        }
+        let ctx = ShadeCtx {
+            uv: (0.0, 0.0),
+            normal: Vec3A::Z,
+            tangent: Vec3A::X,
+            view: -Vec3A::Z,
+            position: Vec3A::ZERO,
+            uv_width: 0.0,
+        };
+        Some(apply(op, &slots, &ctx))
+    }
+
     /// Compiles the value feeding `input` of `node`, or `default` when the
     /// input is unauthored.
     pub fn input_or(&mut self, node: &Node, name: &str, default: Val) -> u32 {
