@@ -15,7 +15,7 @@ Measured 2026-09-27 at `abae004`, on the same machine as `docs/alab_profile.md`
 ## Setup
 
 ```bash
-ISLAND=~/Workspace/island/usd/island.usda
+ISLAND=~/Workspace/samples/island/usd/island.usda
 cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
 ```
 
@@ -262,7 +262,7 @@ or part:
 ## Reproducing
 
 ```bash
-ISLAND=~/Workspace/island/usd/island.usda
+ISLAND=~/Workspace/samples/island/usd/island.usda
 # profile
 cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
 # traversal counts + per-instance attribution (slow; see above)
