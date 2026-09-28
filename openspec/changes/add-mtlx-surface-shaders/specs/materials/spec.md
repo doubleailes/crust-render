@@ -199,11 +199,21 @@ into a thick (not thin-walled) surface SHALL carry the interior medium the
 material defines:
 
 - a surface node's transmission colour, depth and scatter, converted as the
-  MaterialX volume graph converts them;
+  MaterialX volume graph converts them, where the node's nodegraph builds a
+  volume (`open_pbr_surface`; `standard_surface`'s graph builds none);
 - `gltf_pbr`'s attenuation;
 - or a `vdf` input.
 
-A thin-walled surface SHALL transmit without a medium.
+A thin-walled surface SHALL transmit without a medium. A `dielectric_bsdf` in
+`T` mode SHALL weight its transmission by its own `(1 − F)`, as MaterialX GLSL
+does, so that a reflection layer over it attenuates only by the layer's
+throughput and no surface returns more than it receives.
+
+#### Scenario: A glass is bounded in a white furnace
+
+- **WHEN** a `standard_surface` glass sphere is rendered unclamped inside a
+  uniform emitter of radiance 1
+- **THEN** no pixel, head-on or at grazing incidence, exceeds 1
 
 #### Scenario: A standard_surface glass is transparent
 
@@ -221,13 +231,18 @@ A thin-walled surface SHALL transmit without a medium.
 ### Requirement: Unrepresentable and approximated MaterialX inputs are reported
 
 The material SHALL be reported with one `WARN` line per material, naming the
-inputs or closures, in two cases:
+inputs or closures, in three cases:
 
 - **Unrepresentable input, ignored.** An input is authored away from its nodedef
   default (connected, or given a differing value) and the tree cannot represent
   it. These are `opacity`, `geometry_opacity`, `alpha`, `alpha_mode` (no
   cutout), `specular_rotation`, `coat_rotation`, `anisotropy_rotation` and
   `occlusion`.
+- **Input the MaterialX graph itself ignores.** An input authored away from
+  its default that the node's own nodegraph does not read. These are
+  `gltf_pbr`'s `dispersion` and `thickness`, `standard_surface`'s
+  `transmission_depth`, `transmission_scatter` and `transmission_dispersion`,
+  and `open_pbr_surface`'s `transmission_dispersion_scale`.
 - **Approximated closure, kept.** A closure the renderer approximates is live,
   meaning its weight is not the literal 0. These are `subsurface_bsdf` (shaded
   as a diffuse-like leaf in the subsurface colour, no random walk) and

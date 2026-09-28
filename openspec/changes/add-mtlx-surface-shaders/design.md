@@ -172,7 +172,9 @@ materials `design.md`. The furnace scenario bounds its effect on energy.
 
 - `Dielectric` uses the existing GGX VNDF, dielectric Fresnel and Walter BTDF
   (`R` / `T` / `RT`, thin-walled window when the surface is thin-walled), with
-  dispersion when the builder passes an Abbe number.
+  dispersion when the builder passes an Abbe number. `T`'s transmission carries its own `(1 − F)`, as MaterialX GLSL's
+  `mx_surface_transmission`, OSL, BSDL and Typhoon all do; the furnace (task
+  5.4) caught an implementation without it.
 - `Conductor` needs a complex-IOR Fresnel (new, per channel).
 - `GeneralizedSchlick` uses the F82 form for `color82` (new generalisation of
   the existing F82-tint).
@@ -236,7 +238,10 @@ from, in priority order:
 
 - the surface node's transmission parameters, converted like the MaterialX volume
   graph and Typhoon's `MakeTransmissionMedium`: `σ_t = −ln(color)/depth`,
-  `σ_s = scatter/depth`, `σ_a = σ_t − σ_s` shifted so its minimum is 0;
+  `σ_s = scatter/depth`, `σ_a = σ_t − σ_s` shifted so its minimum is 0. Only
+  where the node's nodegraph builds a volume (`open_pbr_surface`): Typhoon also
+  gives `standard_surface` one, but its MaterialX graph has none, so the graph
+  wins and `transmission_depth` / `transmission_scatter` are reported;
 - `gltf_pbr`'s attenuation;
 - an `anisotropic_vdf`.
 

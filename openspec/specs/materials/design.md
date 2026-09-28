@@ -13,11 +13,14 @@
   dependency** (roxmltree + glam only) behind a seam crust-core consumes.
   `parse` (XML → name-addressed graph), `value` (the one runtime value), `eval`
   (the graph compiled to a slot-indexed `Program`), `bsdf` (the closure tree —
-  `layer`/`mix` flattened to weighted `Lobe`s, and `edf` to `Emission` terms), and `compile()` running all three for one
+  `layer` / `mix` / `add` / `multiply` over leaf BSDFs in MaterialX vocabulary, and
+  `edf` to `Emission` terms), `surface` (the three surface-shader nodes expanded
+  into their nodegraphs' trees), and `compile()` running them for one
   material node. It names the one thing it asks of its host — `Texture`, a
   `(u, v) → RGBA` sampler — and crust-core re-exports that trait as its own
-  `Texture2D`, exactly as it adopts `crust_rt::Geometry`. What a renderer does
-  with the lobes is not decided here; crust's OpenPBR pooling is in crust-core.
+  `Texture2D`, exactly as it adopts `crust_rt::Geometry`. How a renderer
+  evaluates a leaf is not decided here; crust's is in crust-core's
+  `material/closure/`.
 
 ## Crate: crust-jit
 
@@ -77,14 +80,15 @@
   `Resolution` is built only by `Resolution::new`, which reads the emission and
   then resolves. `tests/resolve.rs` pins the contract bit for bit for every kind
   of material (plain, Ptex, glass, emissive, textured preview surface, MaterialX).
-  The pattern materials share their `Material` impl through `PatternMaterial`
-  (`material/pattern.rs`), which states the order once. Four implementations: **`OpenPBR`**,
+  `PreviewSurface` gets its `Material` impl through `PatternMaterial`
+  (`material/pattern.rs`), which states the order once; `MtlxMaterial` implements
+  `resolve` directly and builds its resolution with `Resolution::closure`, which
+  takes the emission first in the same way. Four implementations: **`OpenPBR`**,
   the single übershader for all surfaces (with `diffuse`/`metal`/`glass`/`glossy` preset
   constructors used by `world.rs` and the USD fallback), **`Emissive`**, a pure
   emitter with no geometry knowledge, and **`MtlxMaterial`**
   (`material/materialx.rs`), which evaluates a MaterialX graph per shading point and
-  *delegates* the BSDF to the `OpenPBR` it reduces to — so sampling, MIS
-  densities and energy compensation stay in one place — and **`PreviewSurface`**
+  collapses its closure tree into a `ResolvedClosure` (§ MaterialX), and **`PreviewSurface`**
   (`material/preview_surface.rs`), the same delegation for a `UsdPreviewSurface`
   whose inputs are driven by `UsdUVTexture`s. Two hooks gate the
   per-triangle side tables the importer would otherwise build for every mesh:
@@ -173,7 +177,8 @@
 
 ## MaterialX
 
-- **MaterialX** (`crates/crust-mtlx`, adapter in `material/materialx.rs`) — `.mtlx` look-dev graphs, read directly.
+- **MaterialX** (`crates/crust-mtlx`, crust-core's `material/materialx.rs` and
+  `material/closure/`) — `.mtlx` look-dev graphs, read directly.
   USD's own answer is a file-format plugin that composes a `.mtlx` into the
   stage as `UsdShade` prims; **openusd ships none**, so a `Material` prim whose
   only opinion is `references = @foo.mtlx@</MaterialX/Materials/name>` composes
@@ -182,10 +187,11 @@
   DPEL assets (MaterialX Teapot, MaterialX Lion) did on import. The reader is
   the standalone `crust-mtlx` crate — `parse.rs` (XML → a flat,
   name-addressable graph), `value.rs` (the one runtime value), `eval.rs` (the
-  graph compiled to a slot-indexed program), `bsdf.rs` (the BSDF tree
-  flattened to weighted lobes) — and crust-core's `material/materialx.rs` is
-  the adapter: `MtlxMaterial` (impl `Material`), `reduce()` pooling the lobes
-  onto OpenPBR, and the importer-facing `load()`.
+  graph compiled to a slot-indexed program), `bsdf.rs` (the closure tree),
+  `surface.rs` (the three surface-shader nodes expanded into closure trees) —
+  and crust-core evaluates what it describes: `closure/` collapses the tree at
+  a vertex and shades its leaves, `materialx.rs` is the `Material` and the
+  importer-facing `load()`.
   - **Compiled once, not walked per hit.** A look-dev graph must be evaluated
     per shading point — its textures and masks are the point — but the teapot's
     ceramic graph is ~50 nodes run at every path vertex (once, since
@@ -196,149 +202,184 @@
     allocation (the value stack is a thread-local scratch buffer). ~30 node
     types are implemented; an unknown one degrades that one input to a constant
     and is reported once per material, never fails the material.
-  - **The BSDF reduction is the lossy part, and deliberately so.** MaterialX
-    assembles a look from *standalone* BSDF nodes (`oren_nayar_diffuse_bsdf`,
-    `dielectric_bsdf`, `conductor_bsdf`, `sheen_bsdf`) glued with `layer` and
-    `mix`; crust has one übershader with a fixed lobe stack. At **compile
-    time** the tree is flattened — a `mix(fg, bg, m)` sends `m` down one branch
-    and `1 − m` down the other, a `layer` sends full weight down both — so each
-    leaf arrives with a weight that is a product of mask expressions, compiled
-    into the same program. At **shading time** the leaves pool by kind and the
-    pools normalise into OpenPBR parameters (diffuse+metal → `base_color` and
-    `base_metalness` as their ratio; dielectric+conductor → one joint
-    `specular_roughness`; sheen → fuzz). A leaf's own `weight` input multiplies
-    its path weight; a branch that is a *literal* zero — either a leaf whose
-    `weight` is 0, the "transmission dummy" both assets use as a mix's null
-    branch, or a `multiply(BSDF, 0)` — is pruned at flatten time rather than
-    carried at weight 0. Both forms have to be pruned, and for the structural
-    reason rather than the numeric one: `reduce` drops a zero-weight lobe
-    anyway, but the `layer` promotion below counts it as a specular interface
-    first. **Two specular lobes.** The flattening
-    keeps one structural fact: a dielectric that is the `top` of a `layer`
-    whose base already carries a specular (another dielectric, a conductor)
-    arrives as `LobeKind::Coat` and pools onto OpenPBR's coat lobe with its own
-    roughness and IOR, while a dielectric directly over a diffuse stays the
-    base specular (that is how OpenPBR's own dielectric base is built). So a
-    varnish over a conductor keeps its varnish — the single pool used to lose
-    it, since a metal base zeroes the dielectric Fresnel term — and the DPEL
-    **lion**, whose glaze sits over a `mix(conductor, diffuse)`, reduces to
-    `coat_weight = 1`. The **teapot** does not: its glaze sits over a plain
-    `oren_nayar_diffuse_bsdf`, so both its glazes stay the base specular and it
-    reduces to `coat_weight = 0` at every point — correctly, and worth knowing
-    before blaming the coat for anything the teapot does. The decision is
-    by tree shape, never by evaluated weight (a per-point flip would draw a
-    seam along a mask's zero contour), which is why a literal-zero branch has
-    to be pruned before the layer looks at its base. What this still cannot
-    represent: three or more stacked dielectrics pool their upper ones into one
-    coat roughness, and a coat dielectric's `tint` is ignored (MaterialX tints
-    the coat's reflection; OpenPBR's `coat_color` is substrate absorption). A
-    `conductor_bsdf` fed by `artistic_ior` is reduced back to a reflectivity
-    colour through the exact inverse of Gulbrandsen's formula, so a metal
-    authored either way lands on the same OpenPBR metal lobe.
-  - **Two unit conversions the reduction owes MaterialX**, both easy to
-    re-break. First, a MaterialX specular BSDF's `roughness` input is the GGX
-    **alpha**, not a perceptual roughness — that is what `roughness_anisotropy`
-    exists to produce, and the DPEL teapot's `.mtlx` makes it explicit with
-    `power` nodes named `desquare_roughness_*`. crust's OpenPBR roughness is
-    perceptual and gets squared again, so `reduce()` takes the square root
-    once, *after* pooling (`√` is concave, so pooling in alpha and converting
-    at the end is both cheaper and the better stand-in for a GGX mixture). Only
-    the GGX lobes convert: `oren_nayar_diffuse_bsdf`'s roughness is an
-    Oren-Nayar sigma and `sheen_bsdf`'s drives the Charlie NDF directly.
-    Second, a MaterialX coat arrives with `coat_darkening = 0`, set on the base
-    in `load()`: MaterialX's `layer` is single-scattering, so imposing
-    OpenPBR's coat-underside TIR bounce series would darken a substrate the
-    source material never darkened (on the lion, by a factor of 0.52).
-    Relatedly, the dielectric and conductor pools carry **independent
-    coverage**, and keeping them independent takes both halves of the seam.
-    `base_metalness` is the conductor's share of the substrate and
-    `specular_weight` is the dielectric interface's share of the *dielectric
-    base* (not of the whole surface), so `eval_specular` reconstructs the two as
-    `base_metalness` and `(1 − base_metalness)·specular_weight` and each comes
-    back as authored. The metal lobe therefore does **not** read
-    `specular_weight` — that parameter belongs to the dielectric base, and a
-    metal has no dielectric interface to weigh. While it scaled both halves, one
-    pool's coverage multiplied the other: a conductor at 0.25 under a glaze at
-    0.75 rendered its metal at 0.25 × 0.75. Two consequences worth knowing: the
-    dielectric base's coverage is `max(diffuse + sss, dielectric)` rather than a
-    sum, because MaterialX's `layer` puts an interface *on top of* a substrate
-    rather than beside it — and a conductor mixed with a *bare* dielectric used
-    to pin `base_metalness` to 1 and lose the dielectric outright. A graph with
-    no base `dielectric_bsdf` at all — the lion, whose glazes are both coats, and
-    the teapot's metal — now reduces to `specular_weight = 0`, which is correct:
-    it has no base specular, and it used to be given one.
-  - **The EDF half is a second list, not a seventh lobe kind.** MaterialX's
-    `<surface>` has an `edf` input beside its `bsdf`, and the flatten now walks
-    both — the same `layer`/`mix`/`multiply`/`add` algebra, since a mix
-    partitions radiance exactly as it partitions reflectance. Three things are
-    load-bearing. The walk carries a **closure domain**, because
-    `closure_input` gates a branch on its declared type and an EDF-typed `mix`
-    declares `type="EDF"`: asking "is this a BSDF?" in the emission tree
-    resolves both branches to `None` and the emission vanishes silently. The
-    terms land in `Flattened::emission` rather than as a `LobeKind`, which
-    makes the `layer` arm's `base_has_specular` scan *structurally* unable to
-    see an emitter — the strongest form of "emission does not disturb the coat
-    promotion" — and keeps the two algebras apart: BSDF pools take a weighted
-    **mean** (two diffuse leaves are one surface shared between them) while
-    emission **sums** (two emitters are twice the light). And neither the
+  - **A closure tree, evaluated with MaterialX's own semantics.** MaterialX
+    assembles a look from standalone BSDF nodes glued with `layer`, `mix`, `add`
+    and `multiply`, and `bsdf::flatten` keeps that tree as it is: an arena of
+    `Closure::{Leaf, Layer, Mix, Add, Multiply}` whose parameters are program
+    slots, so the graph's masks and textures drive them per point. The rules are
+    MaterialX GLSL's (`mx_*_bsdf.glsl`), which NVIDIA's Typhoon follows too:
+    `layer(top, base) = top + base · T_top(ωo)`; `mix(fg, bg, m) = m·fg +
+    (1 − m)·bg` with `m` clamped; `multiply` scales the response (its weight
+    clamped to [0, 1]) and passes the throughput through unchanged; `add` sums
+    the responses and its throughput is `max(t₁ + t₂ − 1, 0)`. A leaf's
+    throughput is `1 − E_R·w` for a dielectric (every scatter mode),
+    `1 − avg(E)·w` for generalized Schlick and `1 − E·w` for sheen — and **0**
+    for diffuse, conductor, subsurface and translucent *whatever their weight*.
+    That last rule is the trap: a leaf at weight 0.3 still hides its base
+    completely, and an early version that returned `1 − own albedo` let a
+    conductor's base shine through it.
+    This replaced a reduction that pooled the leaves by kind onto one `OpenPBR`.
+    Every recorded MaterialX bug came from that projection — coat promotion by
+    tree shape, roughness pooled in alpha, a `coat_darkening` override,
+    independent-coverage bookkeeping between the metal and dielectric pools —
+    and keeping the leaves apart retired the class rather than patching
+    instances of it. It also makes a MaterialX glass refract, a coat keep its
+    `tint`, and a third stacked dielectric keep its own roughness.
+  - **Collapsed at `resolve`, exactly.** `T_top` depends on ωo alone, and ωo
+    is fixed at a path vertex, so there the tree *is* a weighted sum of leaves.
+    `ResolvedClosure::resolve` walks it once per vertex: `mix` and `multiply`
+    scale the weight passed down, `layer` scales everything below by the top's
+    throughput, and each live leaf lands in an inline list of at most
+    `MAX_LEAVES` = 8 with its RGB weight, its own frame (a leaf's `normal` and
+    `tangent` inputs, so a coat can carry a normal map its base does not) and its
+    parameters. `eval` is `Σ wᵢ fᵢ`; sampling picks a leaf with probability
+    `∝ lum(wᵢ)·Êᵢ(ωo)` (floored at 0.02 so no live leaf gets probability 0, as
+    Typhoon's `_ApproxWeight` does) and returns the mixture pdf, one-sample MIS
+    as `OpenPBR` composes its own lobes. The worst built-in expansion is 7
+    leaves (`standard_surface`); a document above 8 is **refused** at load
+    with a `WARN` naming the count, never truncated — dropping a leaf would be a
+    plausible, wrong surface. Leaves are counted from the root, so branches a
+    surface node builds lazily and never connects do not count.
+    **The leaves live behind a pooled box** (`PooledClosure`). Inline, 8 × 224
+    bytes made `ShadingPoint` 1984 bytes for *every* material, and the path
+    from `Material::resolve` into a `ShadingPoint` moved it whole about seven
+    times per vertex: `memcpy` was 17% of `materialx_basic`'s instructions, and
+    the change measured +20.3% against the pooled reduction. Boxed and
+    recycled through a per-thread pool (bounded at 16 per thread), a vertex
+    moves a pointer, resolves in place and allocates nothing once the pool is
+    warm; `ShadingPoint` is back to 464 bytes and `materialx_basic` costs +2.2%
+    instructions (callgrind, `-s 2`) over the reduction it replaced. The
+    `Drop` is inlined with the pool work out of line — otherwise every
+    `ShadingPoint`, MaterialX or not, paid an out-of-line drop call.
+  - **Leaves.** Each is the MaterialX lobe, ported from MaterialX GLSL
+    (Apache-2.0, `closure/mx.rs`): GGX with VNDF sampling and MaterialX's
+    `mx_ggx_energy_compensation`; exact dielectric, complex-IOR conductor and
+    F82 generalized-Schlick Fresnel, each optionally through the Airy thin film
+    a `layer` of `thin_film_bsdf` puts on the base's specular leaves; EON (an
+    `oren_nayar_diffuse_bsdf` with `energy_compensation`), plain Oren–Nayar and
+    Burley diffuse; Imageworks sheen. A specular leaf's `roughness` is GGX
+    **alpha**, taken as authored — the DPEL teapot's `desquare_roughness_*`
+    nodes exist to produce it — and only the BSDL table below is indexed by
+    perceptual roughness `√α`. Dielectric scatter modes: `R`; `RT`, which picks
+    reflection with probability `F(v·h)` — the *same* film-aware Fresnel on the
+    sampling and the pdf side, or the two disagree; and `T`, whose
+    transmission **pays its own `(1 − F)`**. MaterialX GLSL
+    (`mx_surface_transmission`), OSL, BSDL and Typhoon all do. Leaving it out,
+    on the reading that the reflection layer above "owns" the Fresnel loss,
+    made a glass's exit leaf transmit `1 − E_R` beside a reflection leaf already
+    reflecting total internal reflection, and the furnace caught a
+    `standard_surface` glass sphere returning 1.16× its environment at grazing
+    incidence. With it, that glass reads 0.92 head-on: MaterialX's own double
+    Fresnel, the reflection layer's `1 − E_R` times the transmission's `1 − F`,
+    which Typhoon's `standard_surface` shares. A thin-walled surface transmits
+    straight through; a thick one hands the refracted ray the interior medium.
+  - **Throughput tables are ported, not regenerated.** The dielectric throughput
+    is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
+    (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),
+    regenerated from BSDL's `genluts` by `scripts/tables/bsdl_luts_to_rust.py`
+    and bit-identical to the table Typhoon ships
+    (`ty:dielectricLayerThroughputMode = "bsdl"`, its default); a film on the
+    dielectric uses MaterialX's Fresnel-weighted fit instead, as Typhoon does.
+    Generalized Schlick and sheen use MaterialX's analytic fits
+    (`mx_ggx_dir_albedo`, `mx_imageworks_sheen_dir_albedo`). The tables describe
+    BSDL's and MaterialX's lobes, not crust's, so the gap is measured and pinned
+    (`closure/tests.rs`, 4096 samples per point): the BSDL table is within
+    ±0.004 of crust's integrated dielectric leaf everywhere except near-smooth
+    grazing, worst +0.020 (IOR 2, r 0.05, cos 0.1), where its linear
+    interpolation in cosine undershoots a steep curve; the Schlick fit is within
+    0.011; the sheen fit overestimates by up to 0.035 at low roughness and
+    grazing — a sheen layer there loses energy, never creates it. The white
+    furnace over every fixture material (`tests/mtlx_surfaces.rs`) bounds the
+    sum: nothing returns more than its environment.
+  - **Surface shaders are their nodegraphs, node for node.** `open_pbr_surface`
+    (1.1), `standard_surface` (1.0.1) and `gltf_pbr` (2.0.1) are MaterialX
+    nodedefs implemented as nodegraphs over standalone BSDFs, and a document
+    never carries the implementation. `surface.rs` reproduces each graph — the
+    same leaves, the same `layer` / `mix` / `multiply` in the same order, the same
+    derived parameters emitted as program ops so they fold, optimise and JIT —
+    commented with the nodegraph node names so it can be checked against the
+    `.mtlx` line by line; Typhoon builds its surfaces the same way. **Where
+    Typhoon and the graph disagree, the graph wins** (Typhoon omits OpenPBR's
+    thin-walled subsurface branch; this does not). Inputs resolve connection →
+    authored value → **nodedef default**, from tables vendored with their
+    nodedefs under `crust-mtlx/tests/nodedefs/` and checked against them by
+    `tests/nodedefs.rs` — a slip there shades every document that leaves the
+    input unauthored, plausibly. `standard_surface` 1.0.1 *inherits* 1.0.0 and
+    overrides `base` = 1 and `base_color` = 0.8, which is why both nodedefs are
+    vendored. A non-default `version` is warned about and built as the default.
+    The graphs need `ifgreater`, which the program has no op for; it is built as
+    `mix(in2, in1, max(sign(v2 − v1), 0))` from existing ops, so the JIT needed
+    nothing new (`sign(+0) = 1` in Rust, so equality takes `in2`). The
+    transmission medium is the graph's own: OpenPBR's `transmission_depth` /
+    `transmission_scatter` volume and glTF's attenuation (`σ = −ln(color) /
+    distance`) become the interior `Medium`; `standard_surface`'s graph has
+    none, so its `transmission_depth` is reported rather than invented.
+  - **Reported, not dropped.** What the tree cannot represent is known at
+    compile time — an input *authored away from its default* (connected, or a
+    differing value) and a closure that stays live after optimisation — so the
+    importer prints **one `WARN` per material**, beside the unsupported-node
+    warning: opacity / `alpha_mode` (no cutout), anisotropy rotations, glTF
+    `occlusion`, the inputs MaterialX's own graphs ignore (glTF `dispersion` and
+    `thickness`, `standard_surface`'s `transmission_depth` / `scatter` /
+    `dispersion`, OpenPBR's `transmission_dispersion_scale`), a live Zeltner
+    sheen (evaluated as Imageworks) and a live `subsurface_bsdf` (shaded as a
+    diffuse). Default-valued inputs stay silent: the suite authors
+    `alpha_mode` and `geometry_opacity` at their defaults in dozens of
+    documents.
+  - **The EDF half is a second list, not a leaf.** MaterialX's `<surface>` has an
+    `edf` input beside its `bsdf`, and the flatten walks both — the same
+    `layer`/`mix`/`multiply`/`add` algebra, since a mix partitions radiance
+    exactly as it partitions reflectance. The walk carries a **closure domain**,
+    because `closure_input` gates a branch on its declared type and an EDF-typed
+    `mix` declares `type="EDF"`: asking "is this a BSDF?" in the emission tree
+    resolves both branches to `None` and the emission vanishes silently.
+    Emission terms **sum** (two emitters are twice the light), and neither the
     weight nor the colour is clamped above: `multiply(uniform_edf, 100)` is how
     a document authors a bright emitter, and this is the one shading input for
-    which a value above 1.0 is meaningful rather than an authoring error.
-    **The weight is not a scalar**, and reading it as one is a quiet, severe
-    bug: MaterialX declares `ND_multiply_edfC`, a `multiply` on an EDF by a
-    `color3`, so a tinted emitter is ordinary authoring and `Mul` promotes arity
-    into the weight slot per channel. Taking lane 0 alone turned a weight of
-    `(0, 0.6, 0.9)` into a **black** emitter and `(1, 0.5, 0.2)` into a neutral
-    one at full strength. `reduce()` reads both factors with `Val::rgb`, which
-    broadcasts an arity-1 value so the `float` case is unchanged, and sanitises
-    each factor *before* the product — clamping the product instead would let
-    two negative channels multiply into positive light. Non-finite is refused
-    per channel here where the lobe loop drops the whole lobe, and that
-    asymmetry is structural: emission sums, so a zeroed channel contaminates
-    nothing, while a lobe's weight is a *divisor* (`Pool::w` normalises every
-    colour in its pool). The **BSDF** lobe weight still reads lane 0, and
-    deliberately: `ND_multiply_bsdfC` exists too, but every OpenPBR coverage
-    field it feeds (`base_weight`, `specular_weight`, `coat_weight`,
-    `fuzz_weight`, `subsurface_weight`) is an `f32`, so a colour there has
-    nowhere to go short of folding the tint into the lobe's own colour.
-    `reduce()` factors the summed radiance by its **peak channel**, so
-    `emission_color` is always a chromaticity in `[0,1]³` and the range lives
-    in `emission_luminance`; factoring by Rec.709 luminance instead — what
-    OpenPBR's spec means by nits — would send a saturated emitter's *colour*
-    above one, since (0, 0, 8) has luminance 0.43 and would store (0, 0, 18.6).
-    A `surface` with an `edf` and no `bsdf` also has its `base_weight` zeroed,
-    or a pure emitter would keep OpenPBR's default grey diffuse underneath it.
+    which a value above 1.0 is meaningful. **The weight is not a scalar**:
+    MaterialX declares `ND_multiply_edfC`, so a tinted emitter is ordinary
+    authoring, and taking lane 0 alone turned a weight of `(0, 0.6, 0.9)` into a
+    **black** emitter. Both factors are read with `Val::rgb` and sanitised per
+    channel *before* the product — clamping the product would let two negative
+    channels multiply into positive light. `generalized_schlick_edf` is carried
+    as a falloff on its base's term, `mix(color0, color90, (1 − cosθo)^exponent)`
+    — it is how `open_pbr_surface` darkens its emission through the coat. A
+    `surface` with an `edf` and no `bsdf` has no leaves: a pure emitter does not
+    also reflect.
   - **The shipped `.mtlx` files are not well-formed XML.** They address a UDIM
     set as `value="Albedo.<UDIM>.png"` — a bare `<` inside an attribute value,
     which XML forbids. MaterialX's own reader is PugiXML, which accepts it;
     `roxmltree` rejects the whole document with an `InvalidChar`. `parse.rs`
     escapes the two specified tokens first, so this is not "the UDIM path is
     wrong" but "no material at all" if it is ever removed.
-  - **Verified in numbers, not by eye** — `examples/mtlx_shade` prints the
-    OpenPBR parameters a graph reduces to at a named `(u, v)`. This is what
-    settled the teapot: the render looked washed out against the reference, and
-    the probe showed the graph producing exactly the right deep blue
-    (0.005, 0.024, 0.074) on the body against light ribs — so the fault was the
-    sample scene's exposure, not the material. A mis-decoded albedo is a
-    plausible pastel and a mask read at the wrong colour space is a plausible
-    blend; comparing renders settles nothing. It prints an `emission` column
-    too — the *product* `emission_color * emission_luminance`, since OpenPBR
-    only ever multiplies the two back together and either field alone would
-    mislead — and it reaches its textures through `FileAssets` rather than
-    `UvTexture` directly, so `CRUST_TEX_STREAM` is honoured. That last part is
-    not tidying: the preloaded decoder narrows to 8 bits, so an HDR emission
-    texture probed through it reads 1.0 whatever the file holds, and a probe
-    that cannot see the range is worse than no probe because it answers
-    confidently.
+  - **Verified in numbers, not by eye** — `examples/mtlx_shade` prints, at a
+    named `(u, v)` and view angle (`--theta`), every live leaf the tree
+    collapses to: its MaterialX category, RGB weight, parameters and normal,
+    plus the emission and the interior medium. Every spec scenario that says
+    "the probe" is a test over the same function (`tests/mtlx_surfaces.rs`).
+    This is what settled the teapot: the render looked washed out against the
+    reference, and the probe showed the graph producing exactly the right deep
+    blue (0.005, 0.024, 0.074) on the body against light ribs — so the fault
+    was the sample scene's exposure, not the material. It reaches its textures
+    through `FileAssets` rather than `UvTexture` directly, so
+    `CRUST_TEX_STREAM` is honoured. That last part is not tidying: the
+    preloaded decoder narrows to 8 bits, so an HDR emission texture probed
+    through it reads 1.0 whatever the file holds, and a probe that cannot see
+    the range is worse than no probe because it answers confidently.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
     KiB of textures, what `tests/usd_scene.rs` runs against; its `mtlx_lacquer`
-    is the two-dielectric stack that must reduce to base specular + coat),
+    is a two-dielectric stack whose interfaces stay separate leaves — α 0.02 at
+    weight 1 over α 0.4 at 0.96 over the diffuse at 0.929),
     `samples/materialx_emissive.usda` + `.mtlx` (the EDF fixture: a constant
     `multiply(uniform_edf, 12)` and a pure emitter driven by
     `textures/mtlx_emission.hdr`, whose bright cells sit at (16, 9, 3) —
     deliberately a **separate** document, because three assertions pin
-    `materialx_basic` at exactly three materials and three textures), and the two shot
-    layers for the DPEL assets, which are gitignored and must be downloaded:
+    `materialx_basic` at exactly three materials and three textures),
+    `samples/materialx_surfaces.usda` + `.mtlx` (one texture-free material per
+    surface node plus a `standard_surface` glass, a `gltf_pbr` with attenuation
+    and an `open_pbr_surface` with a coat normal: what the surface-node tests
+    and the furnace run against), and the two shot layers for the DPEL assets,
+    which are gitignored and must be downloaded:
     `samples/materialx_teapot.usda` and `samples/materialx_lion.usda`, plus
     `samples/materialx_showcase.usda` composing both after the `overview.png`
     the assets ship with (the lion is scaled to 0.52 there: both are ~0.26 m
@@ -347,48 +388,53 @@
     the seamless sweep is a near-white floor under a uniform dome, the two
     meeting at the horizon because a Lambertian floor of albedo a under
     radiance L reflects a·L). The lion
-    is the larger graph (140 ops, 8 lobes, 7 textures over 6 UDIM tiles, 1.06 M
-    baked triangles) and the one that layers a `sheen_bsdf`, so it is what
-    exercises the fuzz pool; both import with no unsupported nodes.
+    is the larger graph (140 ops, 7 textures over 6 UDIM tiles, 1.06 M
+    baked triangles) and the one that layers a `sheen_bsdf`; both import with no
+    unsupported nodes.
 
 ## Known gaps: MaterialX
 
-- **No surface-shader nodes.** `standard_surface`, `open_pbr_surface` and
-  `gltf_pbr` have no reduction: only standalone BSDF graphs are read, so a
-  document whose surface is one of those renders with the fallback material.
-  That is every material in the Material Fidelity suite (826 of 826), whose
-  full-run baseline, harness and missing-pattern-node list are in
-  `docs/material_fidelity.md` (`scripts/material_fidelity/`).
-- **MaterialX caveats.** The BSDF reduction projects a layered MaterialX stack
-  onto one OpenPBR lobe set. Two stacked dielectrics survive (the upper one is
-  the coat), but a *third* is averaged into the coat's roughness, a coat's
-  `tint` is dropped, and a glaze over a base specular whose mask is zero at
-  some point still shades there as coat-over-diffuse (the promotion is
-  structural, by design). Anything past two specular interfaces needs a
-  layered BSDF material, not a different reduction. `subsurface_bsdf` maps to OpenPBR's
-  subsurface weight but not its radius; `thin_film_bsdf` is pooled as an
-  ordinary dielectric; MaterialX transmission maps to no lobe, so a
-  MaterialX-authored glass renders opaque. The graph runs **once per path
-  vertex** (`Material::resolve` → `ShadingPoint`; it used to run once per
-  query, 3.0 times a vertex measured), and `docs/shading_performance.md` is the
-  plan from here: a faster interpreter next, a Cranelift JIT only last. Only
-  document-scope and `<nodegraph>` nodes are read — `<nodedef>` custom node
-  *implementations* are not, so a graph instantiating one gets that input at a
-  constant (reported, not silent). No `<look>` / `<materialassign>`: bindings
-  come from USD.
-  On the **emission** side: `uniform_edf` is read exactly, and it is the only EDF
-  that is. `conical_edf`, `measured_edf` and `generalized_schlick_edf` are all
-  *directional* distributions, and crust's OpenPBR emitter is uniform —
-  `emitted_directional` varies with angle only through the coat, which is a slab
-  above the emitter and not the emitter's own lobe shape — so a cone, an IES profile
-  or a Schlick falloff has nowhere to go. Pooling one onto a uniform emitter would be
-  a plausible glow at the wrong intensity, so they are refused and reported rather
-  than approximated, the same standard `crust:mipspace` applies. A `surface`'s
-  `opacity` input is still dropped. And an **emissive MaterialX surface is not a
-  light-list entry**: `AreaLight` pairs a `LightShape` with an `Arc<Emissive>`, whose
-  radiance is a constant, and a graph's emission is a function of the shading point.
-  So such a surface is found by BSDF/bounce sampling only, at full weight — exactly
-  how emissive curves, instances and volumes already behave — which means no NEE and
-  a firefly risk near a small bright emitter. That is also why `MtlxMaterial` leaves
-  `emitted()` at zero and answers through `emitted_at` instead: the light list reads
-  the hit-free one, and the two must agree for anything it samples.
+- **Approximated leaves.** `subsurface_bsdf` shades as a diffuse in its colour
+  (no random walk, no radius); a Zeltner sheen (`mode = zeltner`, OpenPBR's fuzz)
+  is evaluated as Imageworks / Charlie. Both are reported per material when live.
+- **Not applied.** Opacity cutout (`opacity`, `geometry_opacity`, glTF `alpha`),
+  anisotropy rotation, and glTF `occlusion` are reported, not implemented.
+  Dispersion is ignored where MaterialX's own graphs ignore it, and reported.
+- **The throughput tables are not integrals of crust's leaves.** Measured above
+  (worst +0.020 dielectric, 0.035 sheen); the follow-up, if it ever matters, is
+  regenerating them from crust's leaves on the same axes. The dielectric table is
+  BSDL's *front-side* reflection filter and is used for a back-facing hit too, as
+  Typhoon does; from inside a thick glass the true reflection albedo includes
+  total internal reflection, so the transmission leaf below is weighted a little
+  high there. The `T` leaf's own `(1 − F)` keeps the sum bounded (furnace), but the
+  exit weighting is not BSDF-exact.
+- **Layering is MaterialX's, not physical.** `T_top(ωo)` only (non-reciprocal,
+  single-scattering): NEE and bounce evaluate the same `f(ωo, ωi)`, so MIS is
+  consistent, but a bidirectional method would need care. A reflection layer over
+  a `T` dielectric pays Fresnel twice, so a `standard_surface` glass is ~8% dark
+  in a white furnace — as it is in MaterialX GLSL and Typhoon.
+- **`crust:openpbr` and MaterialX `open_pbr_surface` disagree.** crust's native
+  `OpenPBR` (also what `UsdPreviewSurface` maps to) is its own übershader: it
+  differs from the MaterialX graph in layering, `specular_weight`, coat–base
+  coupling and coat tint, and converts transmission depth to a medium by the
+  van de Hulst inversion rather than the graph's `−ln(color)/depth`. The same
+  parameters authored both ways shade differently.
+- **Capacity.** A tree with more than 8 live-reachable leaves is refused, whole.
+- **Pattern nodes.** Only document-scope and `<nodegraph>` nodes are read;
+  `<nodedef>` custom node *implementations* are not, so a graph instantiating one
+  gets that input at a constant (reported). The pattern operators the Material
+  Fidelity suite still lacks are listed in `docs/material_fidelity.md`. No
+  `<look>` / `<materialassign>`: bindings come from USD. Two parser quirks
+  predate the tree: `sign(0)` is 1 where GLSL's is 0, and two nodes with the same
+  name in one scope collide.
+- **Emission.** `uniform_edf` is exact and `generalized_schlick_edf` is carried as
+  its closed-form falloff; `conical_edf` and `measured_edf` are directional
+  distributions with nowhere to go and are refused and reported. An **emissive
+  MaterialX surface is not a light-list entry**: `AreaLight` pairs a `LightShape`
+  with an `Arc<Emissive>`, whose radiance is a constant, and a graph's emission is
+  a function of the shading point. So such a surface is found by BSDF/bounce
+  sampling only, at full weight — as emissive curves, instances and volumes
+  already are — which means no NEE and a firefly risk near a small bright emitter.
+  That is also why `MtlxMaterial` leaves `emitted()` at zero and answers through
+  `emitted_at`: the light list reads the hit-free one, and the two must agree for
+  anything it samples.

@@ -102,7 +102,9 @@ takes the texture's `sourceColorSpace` instead (see the textures table).
 | `UsdPreviewSurface.emissiveColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** | ⚠️ **bug** — same |
 | `PxrDisneyBsdf.baseColor` | `usd_import/materials.rs`, `disney_to_openpbr` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
 | `crust:openpbr` — all 7 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** | ✅ intentional — native format is linear-authored |
-| MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_leaf` | whatever the feeding node declares | ✅ correct per MaterialX |
+| MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_walk` | whatever the feeding node declares | ✅ correct per MaterialX |
+| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/surface.rs` / `bsdf.rs`, through the compiler | **none**: the value as authored | ⚠️ correct only for `lin_rec709` documents — see [Known gaps](#known-gaps) #4 |
+| same, fed by an `image` | `crust-assets/src/uv_texture/` | the `image`'s own `colorspace`, as for any texture | ✅ correct per MaterialX |
 
 [^1]: `baseColor`, `specularColor`, `transmissionColor`, `subsurfaceColor`,
 `fuzzColor`, `coatColor`, `emissionColor` — all via the `c` closure at
@@ -113,7 +115,7 @@ values are authored in the renderer's working space by definition. That makes
 "no conversion" correct — but note it is achieved by *not calling anything*,
 not by a stated decision.
 
-**MaterialX emission is a radiance, and the reduction is colour-space neutral.**
+**MaterialX emission is a radiance, and the evaluation is colour-space neutral.**
 An `edf`'s colour is light leaving the surface, not a reflectance swatch, so the
 curve question is answered entirely by whatever feeds it: a literal is authored
 in the working space, and an `image` node carries its own `colorspace`
@@ -121,11 +123,10 @@ attribute through `ColorSpace::from_mtlx` exactly as `base_color`'s does — wit
 an absent tag meaning **raw**, which is the right answer for the scene-linear
 float file an emission texture usually is. `samples/materialx_emissive.mtlx`
 leaves it absent on purpose; tagging a Radiance `.hdr` `srgb_texture` would put
-a transfer curve on light. The reduction itself adds nothing: `reduce()` sums
-the weighted terms and then factors the result by its peak channel into
-`emission_color × emission_luminance`, and a scalar times a colour in one space
-is the same radiance whichever way it is factored, so the split cannot
-introduce a colour error. Note this is also the **first input whose range is
+a transfer curve on light. The evaluation itself adds nothing: `MtlxMaterial`
+sums the weighted terms (each factor sanitised per channel, a
+`generalized_schlick_edf` falloff applied per channel), all in the one working
+space, so it cannot introduce a colour error. Note this is also the **first input whose range is
 used rather than merely carried** — the `.tx` EXR backing's values above 1.0
 reach the film here, where on `base_color` they meet `eon_diffuse`'s ρ ≤ 1
 clamp, correctly.
@@ -320,6 +321,17 @@ one is to get gap #1 again, silently.
 **3. Per-attribute colour-space authoring is unsupported.** A USD attribute
 carrying an explicit `colorSpace` metadatum is ignored; the curve is chosen by
 shader family, not by what the asset declares.
+
+**4. A MaterialX document's `colorspace` is not applied to literal colours.**
+The compiler honours `colorspace` only where it crosses into a texture decode
+(an `image`'s `file`). A literal `color3` value on a surface node, a BSDF leaf
+or a pattern node is used as authored, whatever the document, node-graph or
+input `colorspace` says. The surface-shader builders inherit this unchanged
+(`openspec/changes/add-mtlx-surface-shaders/`), since they read every input
+through the same compiler. It is invisible to the Material Fidelity suite, whose
+documents are `lin_rec709` throughout, so no suite result can catch a mistake
+here; a document authored `colorspace="srgb_texture"` at the root would shade
+too bright.
 
 Gaps #1 and #2 are addressed by the OpenSpec change
 `openspec/changes/add-material-color-management/`, which introduces a

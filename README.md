@@ -45,10 +45,12 @@ feature-by-feature comparison against Embree's intersection kernels, and
   - Microfacet GGX BRDF with Fresnel and geometry terms
   - Rust-side presets: `OpenPBR::diffuse / metal / glass / glossy`
 - 🧩 **MaterialX** (`.mtlx`) look-dev graphs, read directly — standalone BSDF
-  nodes composed with `layer`/`mix`, textured through UV/**UDIM** image sets
-  and tangent-space normal maps, reduced onto OpenPBR at every shading point,
-  plus `uniform_edf` emission an image can drive (the one input that uses an
-  HDR texture's range, since an albedo above 1 creates energy and is clamped)
+  nodes composed with `layer`/`mix`/`add`/`multiply` and the `open_pbr_surface`,
+  `standard_surface` and `gltf_pbr` surface nodes (expanded into their MaterialX
+  nodegraphs), evaluated as a closure tree with MaterialX's own layering,
+  textured through UV/**UDIM** image sets and tangent-space normal maps, plus
+  `uniform_edf` emission an image can drive (the one input that uses an HDR
+  texture's range, since an albedo above 1 creates energy and is clamped)
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
 - 🧭 **Path Guiding** (opt-in)
@@ -158,13 +160,20 @@ crate (no renderer dependency, just an XML parser and `glam`):
   `tiledimage`, `normalmap`, `mix`, `remap`, `contrast`, `artistic_ior`, …) —
   that runs per shading point with no name lookups and no allocation;
 - the BSDF half — standalone `oren_nayar_diffuse_bsdf` / `dielectric_bsdf` /
-  `conductor_bsdf` / `sheen_bsdf` nodes glued with `layer` and `mix`, which is
-  how production look-dev is authored — is **flattened into weighted lobes**
-  at compile time and pooled onto OpenPBR's lobe stack at shading time, so
-  sampling, MIS and energy compensation stay in the one übershader. A
-  dielectric layered over another specular (a glaze over a satin glaze, a
-  varnish over metal) becomes OpenPBR's **coat** — the second specular lobe —
-  with its own roughness and IOR; only deeper stacks average;
+  `conductor_bsdf` / `generalized_schlick_bsdf` / `sheen_bsdf` / … nodes glued
+  with `layer`, `mix`, `add` and `multiply`, which is how production look-dev
+  is authored — is kept as a **closure tree** and evaluated with MaterialX's
+  semantics (`layer = top + base · T_top(ωo)`, the dielectric throughput from
+  BSDL's table as NVIDIA's Typhoon uses it). At each path vertex the tree
+  collapses exactly into up to eight weighted leaves, each with its own
+  roughness, IOR, Fresnel and normal, so a glaze over a glaze, a varnish over
+  metal or a normal-mapped coat over a smooth base all keep every interface,
+  and a MaterialX glass refracts;
+- the surface nodes — `open_pbr_surface`, `standard_surface`, `gltf_pbr` — are
+  expanded **node for node** into the trees of their MaterialX 1.39
+  nodegraphs, unauthored inputs taking the nodedefs' defaults; what a tree
+  cannot represent (opacity cutout, anisotropy rotation, …) is reported in one
+  warning per material rather than dropped silently;
 - `image` nodes resolve through the `AssetLoader` seam to **UV/UDIM**
   textures (`primvars:st`, `<UDIM>` tile sets, per-input colour space from
   the graph's own `colorspace` attribute) with a tangent frame for normal
@@ -187,12 +196,14 @@ reader tolerates it; crust escapes the token before parsing, since rejecting
 the document would mean no material at all rather than a wrong path.
 
 Samples: `samples/materialx_basic.usda` is a self-contained fixture (20 KiB
-of textures, what the tests run against); `materialx_teapot.usda`,
+of textures, what the tests run against), `materialx_surfaces.usda` puts one
+sphere per surface node side by side; `materialx_teapot.usda`,
 `materialx_lion.usda` and `materialx_showcase.usda` are shot layers for the
 DPEL assets, which are not checked in — download
 [MaterialXTeapotLion](https://dpel.aswf.io/materialx-teapot-lion/) first.
 `cargo run --release -p crust-render --example mtlx_shade -- file.mtlx` prints
-the OpenPBR parameters a graph reduces to at a given `(u, v)` — the way to
+the leaves a closure tree collapses to at a given `(u, v)` and view angle —
+their weights, roughness, IOR and normals — the way to
 check a MaterialX surface, since a wrong colour-space decode still renders as
 a plausible surface.
 
@@ -456,7 +467,7 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   against a declared working space; doing it here would mean a second pyramid cache *and*
   a full-resolution read to answer a coarse lookup.
 - **An HDR texture's range now reaches the film, through emission.** MaterialX's `edf`
-  is read, so a `uniform_edf` driven by an image drives `emissionColor`, and nothing
+  is read, so a `uniform_edf` driven by an image drives the surface's emission, and nothing
   between the texture and the film clamps it. On `samples/materialx_emissive.usda` the
   same frame preloaded and streamed differs by exactly **15.0** at most — the fixture's
   authored 16.0 against the 8-bit path's clamp at 1.0. What remains: base colour above 1
@@ -465,13 +476,15 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   `CRUST_TEX_STREAM=1` and a converted `.tx`, and an emissive MaterialX surface is not a
   light-list entry — it is found by BSDF sampling only, like emissive curves and volumes.
   Dome lights were never affected: that path is `f32` end to end.
-- **Only `uniform_edf` among MaterialX's EDFs.** `conical_edf`, `measured_edf` and
-  `generalized_schlick_edf` are directional distributions and crust's emitter is uniform,
-  so they are refused and reported rather than approximated into a plausible glow at the
-  wrong intensity.
-- **MaterialX layering caps at two stacked specular interfaces**; a third dielectric
-  layer is averaged into the coat rather than kept distinct, and MaterialX transmission
-  nodes have no glass lobe equivalent yet.
+- **MaterialX EDFs: `uniform_edf` and `generalized_schlick_edf` only.** `conical_edf`
+  and `measured_edf` are directional distributions crust's emitter cannot carry, so they
+  are refused and reported rather than approximated into a plausible glow at the wrong
+  intensity.
+- **MaterialX closures are MaterialX's, approximations named.** `subsurface_bsdf` shades
+  as a diffuse and Zeltner sheen as Imageworks; opacity cutout and anisotropy rotation
+  are reported, not applied; a tree above eight leaves is refused. crust's native
+  `crust:openpbr` and MaterialX's `open_pbr_surface` still differ (see
+  `openspec/specs/materials/design.md` § Known gaps: MaterialX).
 - **Path guiding covers surfaces only** — no volume/phase-function guiding, and it
   trains on luminance rather than a chromatic distribution.
 - Some USD inputs are read and warned about rather than mapped: `subsurface*` /
