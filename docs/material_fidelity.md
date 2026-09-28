@@ -150,7 +150,11 @@ is itself a failed texture load.
 | `fractal3d` | 12 | `fractal3d` |
 | `splitlr` | 11 | `colorcorrect_edge_contrast_negative` |
 
-   Plus: `splittb` (11), `colorcorrect` (10), `fractal2d` (10), `rotate3d` (10), `worleynoise2d` (10), `worleynoise3d` (10), `gltf_normalmap` (8), `transformnormal` (8), `noise2d` (7), `noise3d` (7), `rotate2d` (7), `ramptb` (6), `cellnoise2d` (5), `cellnoise3d` (5), `checkerboard` (5), `gltf_image` (5), `transformvector` (5), `ifequal` (5), `heighttonormal` (5), `determinant` (4), `ramplr` (4), `circle` (3), `transpose` (3), `switch` (3), `blackbody` (2), `ifgreatereq` (2), `bump` (2), `burn` (2), `difference` (2), `dodge` (2), `hsvtorgb` (2), `and` (2), `or` (2), `xor` (2), `invertmatrix` (2), `minus` (2), `ramp` (2), `ramp4` (2), `rgbtohsv` (2), `unpremult` (2), `gltf_colorimage` (2), `open_pbr_anisotropy` (2), `crossproduct` (1), `distance` (1), `frame` (1), `hextilednormalmap` (1), `not` (1), `overlay` (1), `ramp_gradient` (1), `reflect` (1), `refract` (1), `round` (1), `safepower` (1), `saturate` (1), `screen` (1), `tan` (1), `time` (1), `transformpoint` (1), `gltf_iridescence_thickness` (1).
+   `colorcorrect` (10 materials) and `heighttonormal` (5) have since gained
+   operators (`openspec/specs/materials/design.md`); the suite has not been re-run
+   to measure them, and the table above predates that change.
+
+   Plus: `splittb` (11), `fractal2d` (10), `rotate3d` (10), `worleynoise2d` (10), `worleynoise3d` (10), `gltf_normalmap` (8), `transformnormal` (8), `noise2d` (7), `noise3d` (7), `rotate2d` (7), `ramptb` (6), `cellnoise2d` (5), `cellnoise3d` (5), `checkerboard` (5), `gltf_image` (5), `transformvector` (5), `ifequal` (5), `determinant` (4), `ramplr` (4), `circle` (3), `transpose` (3), `switch` (3), `blackbody` (2), `ifgreatereq` (2), `bump` (2), `burn` (2), `difference` (2), `dodge` (2), `hsvtorgb` (2), `and` (2), `or` (2), `xor` (2), `invertmatrix` (2), `minus` (2), `ramp` (2), `ramp4` (2), `rgbtohsv` (2), `unpremult` (2), `gltf_colorimage` (2), `open_pbr_anisotropy` (2), `crossproduct` (1), `distance` (1), `frame` (1), `hextilednormalmap` (1), `not` (1), `overlay` (1), `ramp_gradient` (1), `reflect` (1), `refract` (1), `round` (1), `safepower` (1), `saturate` (1), `screen` (1), `tan` (1), `time` (1), `transformpoint` (1), `gltf_iridescence_thickness` (1).
 
    The first five (`separate2`, `fract`, `range`, `ifgreater`, `combine4`) are the
    suite's harness nodes: its node-isolation materials wrap the node under test in a

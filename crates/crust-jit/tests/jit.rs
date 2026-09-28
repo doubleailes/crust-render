@@ -117,6 +117,7 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
         scale: [1.0, 1.0],
         offset: [0.0, 0.0],
         arity,
+        shift: [0.0, 0.0],
     };
     let mut p = Program::default();
     let mut push = |op: Op| {
@@ -207,8 +208,31 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
         out_low: f,
         out_high: kc,
     });
+    // A `heighttonormal` tap: a shifted lookup is the interpreter's, and so
+    // are the HSV and height-to-normal ops it and `colorcorrect` compile to.
+    let shifted = push(Op::Texture {
+        tex: procedural("", None),
+        fallback: Val::float(0.5),
+        scale: [2.0, 1.0],
+        offset: [0.0, 0.0],
+        arity: 1,
+        shift: [0.5, -0.5],
+    });
+    let hsv = push(Op::HsvAdjust { a: c3, amount: kc });
+    let h2n = push(Op::HeightToNormal {
+        xp: shifted,
+        xm: f,
+        yp: c3,
+        ym: zero,
+        scale: k,
+    });
+    push(Op::Binary {
+        op: BinOp::Mul,
+        a: hsv,
+        b: h2n,
+    });
     let (inline, host) = same(&p, "synthetic");
-    assert!(inline > 900 && host >= 2, "inline {inline}, host {host}");
+    assert!(inline > 900 && host >= 5, "inline {inline}, host {host}");
 }
 
 #[test]

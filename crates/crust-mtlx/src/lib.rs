@@ -122,12 +122,18 @@ pub fn compile(
     // Counted off the compiled program rather than inside the loader
     // closure: the compiler memoises, so a texture feeding three nodes is
     // loaded once, and the program is the record of what actually resolved.
+    // Distinct samplers, not lookups: `heighttonormal` reads one image at
+    // four offsets through four ops sharing one handle.
     let textures = c
         .program
         .ops
         .iter()
-        .filter(|op| matches!(op, Op::Texture { tex: Some(_), .. }))
-        .count();
+        .filter_map(|op| match op {
+            Op::Texture { tex: Some(t), .. } => Some(std::sync::Arc::as_ptr(&t.0).cast::<()>()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let unsupported: Vec<String> = c.unsupported.iter().cloned().collect();
 
     Ok(Compiled {
