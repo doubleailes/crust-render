@@ -462,17 +462,17 @@ impl ResolvedClosure {
         let mut u = s[0] * self.select_total.max(0.0);
         let mut pick = self.len - 1;
         if self.select_total > 0.0 {
-            for i in 0..self.len {
-                if u < self.leaves[i].select {
+            for (i, l) in self.leaves[..self.len].iter().enumerate() {
+                if u < l.select {
                     pick = i;
                     break;
                 }
-                u -= self.leaves[i].select;
+                u -= l.select;
             }
         } else {
             pick = ((s[0] * self.len as f32) as usize).min(self.len - 1);
         }
-        let leaf = self.leaves[pick];
+        let leaf = &self.leaves[pick];
         match sample_lobe(&leaf.lobe, leaf.v, [s[1], s[2]], s[3])? {
             LobeSample::Delta { dir, value } => {
                 let world = leaf.frame.to_world(dir);
