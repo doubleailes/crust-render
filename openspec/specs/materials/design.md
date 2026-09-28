@@ -461,8 +461,15 @@
   `OpenPBR` (also what `UsdPreviewSurface` maps to) is its own übershader: it
   differs from the MaterialX graph in layering, `specular_weight`, coat–base
   coupling and coat tint, and converts transmission depth to a medium by the
-  van de Hulst inversion rather than the graph's `−ln(color)/depth`. The same
-  parameters authored both ways shade differently.
+  van de Hulst inversion rather than the graph's `−ln(color)/depth`. A thin-walled
+  dielectric differs too: the closure leaf transmits one interface's `(1 − F)`,
+  as MaterialX's GLSL does (`mx_surface_transmission`; `$refractionTwoSided`
+  squares the tint, nothing more), where native OpenPBR uses the Adobe
+  reference's window model, `2R/(1+R)` reflected and `(1−R)/(1+R)` through,
+  with the sheet's internal bounces. Moving the leaf to the window model would
+  take the MaterialX path away from its reference, and in a surface graph the
+  reflection is a separate leaf layered above, so the leaf would count it twice.
+  The same parameters authored both ways shade differently.
 - **Capacity.** A tree with more than 8 live-reachable leaves is refused, whole.
 - **Pattern nodes.** Only document-scope and `<nodegraph>` nodes are read;
   `<nodedef>` custom node *implementations* are not, so a graph instantiating one
