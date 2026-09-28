@@ -478,6 +478,25 @@
   `<look>` / `<materialassign>`: bindings come from USD. Two parser quirks
   predate the tree: `sign(0)` is 1 where GLSL's is 0, and two nodes with the same
   name in one scope collide.
+- **Stdlib nodegraphs lowered by hand.** `colorcorrect` (`color3`) is compiled to
+  `NG_colorcorrect_color3`'s own chain (`hsvadjust` → `saturate` → `range` gamma →
+  lift → gain → `contrast` → exposure) out of existing ops plus `HsvAdjust`, with a
+  stage whose parameter folds to its identity left out. The stage order is pinned
+  by a test, since swapping any two still renders plausibly. `colorcorrect` on
+  `color4` is refused and reported, because there is no `combine4` to route alpha
+  around the chain.
+- **`heighttonormal` differentiates over the ray footprint.** The OSL reference is
+  `normalize(-Dx(h), Dy(h), scale·√…)`, which uses screen-space derivatives. There
+  is no `Dx` here, so the compiler builds the `in` subgraph four more times with
+  every `Texture` / `TexCoord` op under it displaced by ±½ `uv_width` along `u` and
+  `v` (`Op::*::shift`, part of the memo key; the four copies share one sampler).
+  Two consequences are inherited from the reference, not bugs: the bump is
+  resolution-dependent (a coarser footprint reads steeper, so the effect also
+  strengthens at later bounces as ray cones widen), and with no footprint
+  (`CRUST_RAY_CONES=0`, or geometry with no UV density) it reads **flat**. Only
+  UV lookups move: a height built from `position` or `normal` differentiates to
+  zero. The JIT sends shifted lookups back to the interpreter, which keeps its
+  inline texture path, and so the bit-identity pin, untouched.
 - **Emission.** `uniform_edf` is exact and `generalized_schlick_edf` is carried as
   its closed-form falloff; `conical_edf` and `measured_edf` are directional
   distributions with nowhere to go and are refused and reported. An **emissive

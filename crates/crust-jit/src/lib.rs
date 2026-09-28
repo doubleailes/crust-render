@@ -406,7 +406,9 @@ impl Gen<'_> {
                 self.put(slot, lanes, n);
                 true
             }
-            None if matches!(op, Op::Texture { tex: Some(_), .. }) => {
+            // A shifted lookup (a `heighttonormal` tap) takes the interpreter
+            // call below: its coordinates are the interpreter's to compute.
+            None if matches!(op, Op::Texture { tex: Some(_), shift, .. } if *shift == [0.0; 2]) => {
                 self.texture(op, slot);
                 false
             }
@@ -489,7 +491,7 @@ impl Gen<'_> {
                 fallback,
                 ..
             } => Some(fallback.arity),
-            Op::TexCoord => Some(2),
+            Op::TexCoord { .. } => Some(2),
             Op::Normal | Op::ViewDirection | Op::Position => Some(3),
             // `normalize` returns a `vector3` — or, for a zero-length input,
             // the input itself, whose width is only equal when it is 3.
@@ -512,7 +514,11 @@ impl Gen<'_> {
             Op::Invert { a, amount } => max(&[a, amount]),
             Op::Convert { arity, .. } => Some((*arity).clamp(1, 4)),
             Op::Extract { .. } | Op::DotProduct { .. } | Op::Luminance { .. } => Some(1),
-            Op::Combine3 { .. } | Op::NormalMap { .. } | Op::ArtisticIor { .. } => Some(3),
+            Op::Combine3 { .. }
+            | Op::NormalMap { .. }
+            | Op::ArtisticIor { .. }
+            | Op::HsvAdjust { .. }
+            | Op::HeightToNormal { .. } => Some(3),
             Op::Combine2 { .. } => Some(2),
         }
     }

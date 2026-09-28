@@ -94,9 +94,16 @@ pub enum Op {
         scale: [f32; 2],
         offset: [f32; 2],
         arity: u8,
+        /// Where to look up relative to the shading point, in footprint
+        /// widths (see [`shifted_uv`]). Zero everywhere except the copies of
+        /// a subgraph `heighttonormal` differentiates.
+        shift: [f32; 2],
     },
-    /// `primvars:st` as a `vector2`.
-    TexCoord,
+    /// `primvars:st` as a `vector2`, displaced by `shift` footprint widths
+    /// exactly as [`Op::Texture`] is.
+    TexCoord {
+        shift: [f32; 2],
+    },
     /// World-space geometric normal.
     Normal,
     ViewDirection,
@@ -184,6 +191,22 @@ pub enum Op {
         low: u32,
         high: u32,
     },
+    /// MaterialX `hsvadjust`: to HSV, add `amount.x` to the hue and scale
+    /// saturation and value by `amount.y` / `amount.z`, and back.
+    HsvAdjust {
+        a: u32,
+        amount: u32,
+    },
+    /// MaterialX `heighttonormal`, from the height at half a footprint either
+    /// side of the shading point along `u` (`xp`, `xm`) and `v` (`yp`, `ym`).
+    /// The result is encoded in `[0, 1]`, like a normal-map texel.
+    HeightToNormal {
+        xp: u32,
+        xm: u32,
+        yp: u32,
+        ym: u32,
+        scale: u32,
+    },
 }
 
 impl Op {
@@ -192,7 +215,7 @@ impl Op {
         match self {
             Op::Const(_)
             | Op::Texture { .. }
-            | Op::TexCoord
+            | Op::TexCoord { .. }
             | Op::Normal
             | Op::ViewDirection
             | Op::Position => {}
@@ -205,6 +228,7 @@ impl Op {
             | Op::Combine2 { a, b }
             | Op::DotProduct { a, b }
             | Op::NormalMap { a, scale: b }
+            | Op::HsvAdjust { a, amount: b }
             | Op::ArtisticIor {
                 reflectivity: a,
                 edge: b,
@@ -246,6 +270,19 @@ impl Op {
                 f(out_low);
                 f(out_high);
             }
+            Op::HeightToNormal {
+                xp,
+                xm,
+                yp,
+                ym,
+                scale,
+            } => {
+                f(xp);
+                f(xm);
+                f(yp);
+                f(ym);
+                f(scale);
+            }
         }
     }
 
@@ -254,9 +291,11 @@ impl Op {
     fn is_pure(&self) -> bool {
         match self {
             Op::Texture { tex, .. } => tex.is_none(),
-            Op::TexCoord | Op::Normal | Op::ViewDirection | Op::Position | Op::NormalMap { .. } => {
-                false
-            }
+            Op::TexCoord { .. }
+            | Op::Normal
+            | Op::ViewDirection
+            | Op::Position
+            | Op::NormalMap { .. } => false,
             _ => true,
         }
     }
@@ -448,10 +487,12 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             scale,
             offset,
             arity,
+            shift,
         } => match tex {
             Some(t) => {
-                let u = ctx.uv.0 * scale[0] + offset[0];
-                let v = ctx.uv.1 * scale[1] + offset[1];
+                let (u, v) = shifted_uv(ctx, *shift);
+                let u = u * scale[0] + offset[0];
+                let v = v * scale[1] + offset[1];
                 // `uvtiling` scales the coordinates, so it scales the
                 // footprint with them: a texture tiled 10× is being
                 // minified 10× and must read a coarser level to match.
@@ -466,7 +507,10 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
             }
             None => *fallback,
         },
-        Op::TexCoord => Val::vec2(ctx.uv.0, ctx.uv.1),
+        Op::TexCoord { shift } => {
+            let (u, v) = shifted_uv(ctx, *shift);
+            Val::vec2(u, v)
+        }
         Op::Normal => ctx.normal.into(),
         Op::ViewDirection => ctx.view.into(),
         Op::Position => ctx.position.into(),
@@ -570,6 +614,107 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
                 })
                 .map(|t| t * t * (3.0 - 2.0 * t))
         }
+        Op::HsvAdjust { a, amount } => {
+            let hsv = rgb_to_hsv(g(*a).rgb());
+            let m = g(*amount).rgb();
+            hsv_to_rgb(Vec3A::new(hsv.x + m.x, hsv.y * m.y, hsv.z * m.z)).into()
+        }
+        Op::HeightToNormal {
+            xp,
+            xm,
+            yp,
+            ym,
+            scale,
+        } => height_to_normal(
+            g(*xp).x() - g(*xm).x(),
+            g(*yp).x() - g(*ym).x(),
+            g(*scale).x(),
+        )
+        .into(),
+    }
+}
+
+/// The chart coordinates `shift` footprint widths away from the shading
+/// point.
+///
+/// A zero shift returns `ctx.uv` untouched rather than adding `0 · width`,
+/// which keeps every ordinary lookup bit-identical to what it was before
+/// shifts existed (and to the JIT's inline texture path, which never sees a
+/// shifted op). A shift over a zero footprint — no ray cone — lands back on
+/// the shading point, so a derivative taken from shifted copies reads zero.
+#[inline]
+fn shifted_uv(ctx: &ShadeCtx, shift: [f32; 2]) -> (f32, f32) {
+    if shift == [0.0, 0.0] {
+        ctx.uv
+    } else {
+        (
+            ctx.uv.0 + shift[0] * ctx.uv_width,
+            ctx.uv.1 + shift[1] * ctx.uv_width,
+        )
+    }
+}
+
+/// MaterialX's OSL `mx_heighttonormal_vector3`, given the height's change
+/// across one footprint along `u` (`du`) and `v` (`dv`).
+///
+/// The reference reads `dx = -Dx(in)`, `dy = Dy(in)`: screen-space
+/// derivatives, i.e. the height's change across one pixel. The footprint is
+/// this renderer's pixel (a ray cone's width in chart units), so the change
+/// across it is the same quantity, with `Dx` running along `u`. Raster `y`
+/// runs *down* while `v` runs up, so `Dy(in) = -dv` and both lateral
+/// components come out as `-dh`: the normal of a surface raised by `in`.
+/// That also makes the result resolution-dependent exactly as the
+/// reference's is — a bump reads steeper the coarser the footprint.
+fn height_to_normal(du: f32, dv: f32, scale: f32) -> Vec3A {
+    let (dx, dy) = (-du, -dv);
+    let dz = scale.max(1.0e-5) * (1.0 - dx * dx - dy * dy).max(1.0e-5).sqrt();
+    Vec3A::new(dx, dy, dz).normalize_or(Vec3A::Z) * 0.5 + Vec3A::splat(0.5)
+}
+
+/// MaterialX's `mx_rgbtohsv` (Foley & van Dam, via OSL), transcribed.
+fn rgb_to_hsv(c: Vec3A) -> Vec3A {
+    let (r, g, b) = (c.x, c.y, c.z);
+    let min = r.min(g.min(b));
+    let max = r.max(g.max(b));
+    let delta = max - min;
+    let s = if max > 0.0 { delta / max } else { 0.0 };
+    let h = if s <= 0.0 {
+        0.0
+    } else {
+        let h = if r >= max {
+            (g - b) / delta
+        } else if g >= max {
+            2.0 + (b - r) / delta
+        } else {
+            4.0 + (r - g) / delta
+        } * (1.0 / 6.0);
+        if h < 0.0 { h + 1.0 } else { h }
+    };
+    Vec3A::new(h, s, max)
+}
+
+/// MaterialX's `mx_hsvtorgb`, transcribed. The hue wraps, so a hue shift
+/// past 1 comes round again.
+fn hsv_to_rgb(hsv: Vec3A) -> Vec3A {
+    let (h, s, v) = (hsv.x, hsv.y, hsv.z);
+    if s < 0.0001 {
+        return Vec3A::splat(v);
+    }
+    let h = 6.0 * (h - h.floor());
+    // `h` is in [0, 6) up to rounding; a non-finite hue lands in the last
+    // sextant rather than anywhere undefined.
+    let hi = h.trunc();
+    let f = h - hi;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    match hi as i32 {
+        0 => Vec3A::new(v, t, p),
+        1 => Vec3A::new(q, v, p),
+        2 => Vec3A::new(p, v, t),
+        3 => Vec3A::new(p, q, v),
+        4 => Vec3A::new(t, p, v),
+        _ => Vec3A::new(v, p, q),
     }
 }
 
@@ -660,10 +805,20 @@ pub fn reflectivity_from_ior(n: Vec3A, k: Vec3A) -> Vec3A {
 pub struct Compiler<'a> {
     pub doc: &'a Doc,
     pub program: Program,
-    /// Slot already emitted for a `(graph, node, output)` triple, so a node
-    /// feeding five others is evaluated once. The output name matters:
+    /// Slot already emitted for a `(graph, node, output, shift)` key, so a
+    /// node feeding five others is evaluated once. The output name matters:
     /// `artistic_ior` emits a different slot for `ior` than for `extinction`.
-    memo: std::collections::HashMap<(String, String, String), u32>,
+    /// So does the shift: a node under `heighttonormal` is compiled once per
+    /// offset it is differentiated at.
+    memo: std::collections::HashMap<(String, String, String, [u32; 2]), u32>,
+    /// The offset, in footprint widths, every texture lookup and `texcoord`
+    /// compiled now is displaced by — zero except while `heighttonormal`
+    /// compiles the shifted copies of its input.
+    uv_shift: [f32; 2],
+    /// What the loader answered per `(file, colorspace)`, so the shifted
+    /// copies of an `image` share the one sampler rather than asking the host
+    /// again.
+    images: std::collections::HashMap<(String, Option<String>), Option<TextureRef>>,
     /// Nodes currently being compiled, so a cyclic document — which a
     /// hand-edited `.mtlx` can be — terminates as a constant rather than
     /// recursing until the stack runs out.
@@ -681,6 +836,8 @@ impl<'a> Compiler<'a> {
             doc,
             program: Program::default(),
             memo: std::collections::HashMap::new(),
+            uv_shift: [0.0, 0.0],
+            images: std::collections::HashMap::new(),
             active: Vec::new(),
             loader,
             unsupported: Default::default(),
@@ -782,6 +939,7 @@ impl<'a> Compiler<'a> {
             scope.to_string(),
             name.to_string(),
             output.unwrap_or("").to_string(),
+            self.uv_shift.map(f32::to_bits),
         );
         if let Some(&slot) = self.memo.get(&key) {
             return slot;
@@ -816,7 +974,9 @@ impl<'a> Compiler<'a> {
         match node.category.as_str() {
             "constant" => self.input_or(node, "value", Val::ZERO),
             "image" | "tiledimage" => self.compile_image(node, arity),
-            "texcoord" => self.emit(Op::TexCoord),
+            "texcoord" => self.emit(Op::TexCoord {
+                shift: self.uv_shift,
+            }),
             "normal" => self.emit(Op::Normal),
             "viewdirection" => self.emit(Op::ViewDirection),
             "position" => self.emit(Op::Position),
@@ -932,6 +1092,22 @@ impl<'a> Compiler<'a> {
                     extinction: output == Some("extinction"),
                 })
             }
+            "colorcorrect" => self.compile_colorcorrect(node),
+            "heighttonormal" => {
+                let scale = self.input_or(node, "scale", Val::ONE);
+                // Half a footprint either side, so the difference spans one.
+                let xp = self.shifted_input(node, "in", [0.5, 0.0]);
+                let xm = self.shifted_input(node, "in", [-0.5, 0.0]);
+                let yp = self.shifted_input(node, "in", [0.0, 0.5]);
+                let ym = self.shifted_input(node, "in", [0.0, -0.5]);
+                self.emit(Op::HeightToNormal {
+                    xp,
+                    xm,
+                    yp,
+                    ym,
+                    scale,
+                })
+            }
             other => {
                 self.unsupported.insert(other.to_string());
                 // Degrade this input to mid-grey rather than to black: an
@@ -942,12 +1118,152 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// `input` of `node` compiled with every lookup under it displaced by a
+    /// further `shift` footprint widths.
+    fn shifted_input(&mut self, node: &Node, input: &str, shift: [f32; 2]) -> u32 {
+        let outer = self.uv_shift;
+        self.uv_shift = [outer[0] + shift[0], outer[1] + shift[1]];
+        let slot = self.input_or(node, input, Val::ZERO);
+        self.uv_shift = outer;
+        slot
+    }
+
+    /// MaterialX `colorcorrect` (`color3`), lowered to the stdlib's own
+    /// `NG_colorcorrect_color3` chain: `hsvadjust` (hue) → `saturate` →
+    /// `range` (gamma) → lift → gain → `contrast` → exposure.
+    ///
+    /// Expanded here rather than kept as one op so the stages reuse
+    /// operators the JIT already inlines. A stage whose parameter folds to
+    /// its identity (hue 0, saturation 1, …) is left out: the reference's
+    /// arithmetic at those values is the identity up to rounding at most, and
+    /// the playground's graphs author one or two of the eight inputs.
+    fn compile_colorcorrect(&mut self, node: &Node) -> u32 {
+        if node.type_name != "color3" {
+            // `color4` routes alpha around the chain, and there is no
+            // `combine4` to put it back with; say so rather than correct the
+            // alpha too.
+            self.unsupported
+                .insert(format!("colorcorrect ({})", node.type_name));
+            return self.constant(Val::float(0.5));
+        }
+        let input = self.input_or(node, "in", Val::vec3(1.0, 1.0, 1.0));
+        let mut c = input;
+        // Each parameter's slot, unless it folds to the stage's identity.
+        let param = |cc: &mut Self, name: &str, default: f32| -> Option<u32> {
+            let s = cc.input_or(node, name, Val::float(default));
+            (cc.fold(s).map(|v| v.x()) != Some(default)).then_some(s)
+        };
+        if let Some(hue) = param(self, "hue", 0.0) {
+            let one = self.constant(Val::ONE);
+            let amount = self.emit(Op::Combine3 {
+                a: hue,
+                b: one,
+                c: one,
+            });
+            c = self.emit(Op::HsvAdjust { a: c, amount });
+        }
+        if let Some(sat) = param(self, "saturation", 1.0) {
+            // `saturate`: mix from the luminance grey toward the colour.
+            let grey = self.emit(Op::Luminance { a: c });
+            c = self.emit(Op::Mix {
+                fg: c,
+                bg: grey,
+                m: sat,
+            });
+        }
+        if let Some(gamma) = param(self, "gamma", 1.0) {
+            // `range` over [0, 1] → [0, 1] unclamped: both remaps are the
+            // identity, leaving `sign(x)·|x|^(1/gamma)`.
+            let one = self.constant(Val::ONE);
+            let recip = self.emit(Op::Binary {
+                op: BinOp::Div,
+                a: one,
+                b: gamma,
+            });
+            let abs = self.emit(Op::Unary {
+                op: UnOp::Abs,
+                a: c,
+            });
+            let pow = self.emit(Op::Binary {
+                op: BinOp::Pow,
+                a: abs,
+                b: recip,
+            });
+            let sign = self.emit(Op::Unary {
+                op: UnOp::Sign,
+                a: c,
+            });
+            c = self.emit(Op::Binary {
+                op: BinOp::Mul,
+                a: pow,
+                b: sign,
+            });
+        }
+        if let Some(lift) = param(self, "lift", 0.0) {
+            // `c·(1 − lift) + lift`: raises black to `lift`, keeps white.
+            let one = self.constant(Val::ONE);
+            let keep = self.emit(Op::Binary {
+                op: BinOp::Sub,
+                a: one,
+                b: lift,
+            });
+            let scaled = self.emit(Op::Binary {
+                op: BinOp::Mul,
+                a: c,
+                b: keep,
+            });
+            c = self.emit(Op::Binary {
+                op: BinOp::Add,
+                a: scaled,
+                b: lift,
+            });
+        }
+        if let Some(gain) = param(self, "gain", 1.0) {
+            c = self.emit(Op::Binary {
+                op: BinOp::Mul,
+                a: c,
+                b: gain,
+            });
+        }
+        if let Some(amount) = param(self, "contrast", 1.0) {
+            let pivot = self.input_or(node, "contrastpivot", Val::float(0.5));
+            c = self.emit(Op::Contrast {
+                a: c,
+                amount,
+                pivot,
+            });
+        }
+        if let Some(exposure) = param(self, "exposure", 0.0) {
+            let two = self.constant(Val::float(2.0));
+            let k = self.emit(Op::Binary {
+                op: BinOp::Pow,
+                a: two,
+                b: exposure,
+            });
+            c = self.emit(Op::Binary {
+                op: BinOp::Mul,
+                a: c,
+                b: k,
+            });
+        }
+        if c == input {
+            // Every stage widens to the colour's three lanes; with none run,
+            // a scalar `in` still has to come out as a `color3`.
+            c = self.emit(Op::Convert { a: c, arity: 3 });
+        }
+        c
+    }
+
     fn compile_image(&mut self, node: &Node, arity: u8) -> u32 {
         let file = node.input("file").and_then(|i| i.text.clone());
         let space = node.input("file").and_then(|i| i.colorspace.clone());
-        let tex = file
-            .as_deref()
-            .and_then(|f| (self.loader)(f, space.as_deref()));
+        let tex = file.and_then(|f| {
+            let loader = self.loader;
+            self.images
+                .entry((f, space))
+                .or_insert_with_key(|(f, s)| loader(f, s.as_deref()))
+                .clone()
+        });
         let fallback = node
             .input("default")
             .map(|i| match i.source {
@@ -980,6 +1296,7 @@ impl<'a> Compiler<'a> {
             scale,
             offset,
             arity,
+            shift: self.uv_shift,
         })
     }
 }
@@ -1146,6 +1463,221 @@ mod tests {
             "a",
         );
         assert!(v.x().is_finite());
+    }
+
+    /// `colorcorrect` of a constant `in`, with `params` authored as floats.
+    fn colorcorrect(input: [f32; 3], params: &[(&str, f32)]) -> Vec3A {
+        let inputs: String = params
+            .iter()
+            .map(|(n, v)| format!(r#"<input name="{n}" type="float" value="{v}" />"#))
+            .collect();
+        let doc = format!(
+            r#"<materialx>
+                 <colorcorrect name="cc" type="color3">
+                   <input name="in" type="color3" value="{}, {}, {}" />
+                   {inputs}
+                 </colorcorrect>
+               </materialx>"#,
+            input[0], input[1], input[2]
+        );
+        let v = run(&doc, "cc");
+        assert_eq!(v.arity, 3);
+        v.rgb()
+    }
+
+    fn close(got: Vec3A, want: Vec3A) {
+        assert!(
+            (got - want).abs().max_element() < 1e-5,
+            "got {got}, want {want}"
+        );
+    }
+
+    #[test]
+    fn colorcorrect_defaults_are_the_identity() {
+        // Bitwise: every stage folds to its identity and is left out.
+        let c = [0.1, 0.7, 2.5];
+        assert_eq!(colorcorrect(c, &[]), Vec3A::from(c));
+        assert_eq!(
+            colorcorrect(c, &[("hue", 0.0), ("gain", 1.0), ("exposure", 0.0)]),
+            Vec3A::from(c)
+        );
+    }
+
+    #[test]
+    fn colorcorrect_applies_each_stage_as_the_stdlib_graph_does() {
+        let c = [0.125, 0.5, 1.0];
+        close(colorcorrect(c, &[("gain", 4.0)]), Vec3A::new(0.5, 2.0, 4.0));
+        // `range` with gamma: x^(1/gamma), sign-preserving, unclamped.
+        close(
+            colorcorrect([0.125, 8.0, -0.125], &[("gamma", 3.0)]),
+            Vec3A::new(0.5, 2.0, -0.5),
+        );
+        // Lift raises black to `lift` and leaves white alone.
+        close(
+            colorcorrect([0.0, 0.5, 1.0], &[("lift", 0.5)]),
+            Vec3A::new(0.5, 0.75, 1.0),
+        );
+        close(
+            colorcorrect(
+                [0.25, 0.5, 1.0],
+                &[("contrast", 2.0), ("contrastpivot", 0.5)],
+            ),
+            Vec3A::new(0.0, 0.5, 1.5),
+        );
+        close(
+            colorcorrect(c, &[("exposure", -1.0)]),
+            Vec3A::new(0.0625, 0.25, 0.5),
+        );
+        // Saturation 0 is the luminance grey (MaterialX's ACEScg default
+        // `lumacoeffs`); 2 pushes away from it.
+        let l = 0.2722287 * 0.125 + 0.6740818 * 0.5 + 0.0536895;
+        close(colorcorrect(c, &[("saturation", 0.0)]), Vec3A::splat(l));
+        close(
+            colorcorrect(c, &[("saturation", 2.0)]),
+            Vec3A::from(c) * 2.0 - Vec3A::splat(l),
+        );
+        // Hue rotates in turns and wraps: a third of a turn takes red to
+        // green, and 1.5 turns is the same as a half.
+        close(
+            colorcorrect([1.0, 0.0, 0.0], &[("hue", 1.0 / 3.0)]),
+            Vec3A::new(0.0, 1.0, 0.0),
+        );
+        close(
+            colorcorrect([1.0, 0.0, 0.0], &[("hue", 1.5)]),
+            Vec3A::new(0.0, 1.0, 1.0),
+        );
+    }
+
+    #[test]
+    fn colorcorrect_stages_run_in_the_stdlib_order() {
+        // Gamma before lift before gain before contrast before exposure: any
+        // two swapped gives a different answer on this input.
+        let got = colorcorrect(
+            [0.25; 3],
+            &[
+                ("gamma", 2.0),
+                ("lift", 0.5),
+                ("gain", 2.0),
+                ("contrast", 0.5),
+                ("exposure", 1.0),
+            ],
+        );
+        let x = 0.25f32.sqrt(); // gamma → 0.5
+        let x = x * (1.0 - 0.5) + 0.5; // lift → 0.75
+        let x = x * 2.0; // gain → 1.5
+        let x = (x - 0.5) * 0.5 + 0.5; // contrast → 1.0
+        let x = x * 2.0; // exposure → 2.0
+        close(got, Vec3A::splat(x));
+    }
+
+    #[test]
+    fn hsv_round_trips() {
+        for c in [
+            Vec3A::new(0.9, 0.2, 0.1),
+            Vec3A::new(0.1, 0.8, 0.3),
+            Vec3A::new(0.2, 0.3, 0.95),
+            Vec3A::new(0.7, 0.1, 0.6),
+            Vec3A::splat(0.4),
+            Vec3A::new(3.0, 1.0, 0.5),
+        ] {
+            close(hsv_to_rgb(rgb_to_hsv(c)), c);
+        }
+    }
+
+    /// A height of `slope_u · u + slope_v · v`, sampled through a real
+    /// `image` node so the shifted lookups are what is being differentiated.
+    struct Ramp {
+        slope_u: f32,
+        slope_v: f32,
+    }
+    impl crate::Texture for Ramp {
+        fn eval(&self, u: f32, v: f32, _: f32) -> [f32; 4] {
+            [self.slope_u * u + self.slope_v * v; 4]
+        }
+    }
+
+    const HEIGHT_DOC: &str = r#"<materialx>
+             <image name="h" type="float">
+               <input name="file" type="filename" value="height.tif" />
+             </image>
+             <heighttonormal name="n" type="vector3">
+               <input name="in" type="float" nodename="h" />
+               <input name="scale" type="float" value="1" />
+             </heighttonormal>
+             <normalmap name="world" type="vector3">
+               <input name="in" type="vector3" nodename="n" />
+             </normalmap>
+           </materialx>"#;
+
+    fn height_to_normal_at(slope_u: f32, slope_v: f32, uv_width: f32, node: &str) -> Vec3A {
+        let doc = Doc::parse(HEIGHT_DOC).unwrap();
+        let loader = move |_: &str, _: Option<&str>| {
+            Some(TextureRef(std::sync::Arc::new(Ramp { slope_u, slope_v })))
+        };
+        let mut c = Compiler::new(&doc, &loader);
+        let slot = c.compile_named("", node, None);
+        let mut slots = Vec::new();
+        let ctx = ShadeCtx {
+            uv: (0.3, 0.6),
+            normal: Vec3A::Z,
+            tangent: Vec3A::X,
+            view: -Vec3A::Z,
+            position: Vec3A::ZERO,
+            uv_width,
+        };
+        c.program.eval(&ctx, &mut slots);
+        slots[slot as usize].rgb()
+    }
+
+    #[test]
+    fn heighttonormal_is_the_osl_reference_over_one_footprint() {
+        // A height rising 10 per UV unit, over a 0.01-wide footprint, changes
+        // by 0.1 across it: the reference's `Dx(in)`.
+        let (du, dv) = (0.1f32, 0.0f32);
+        let dz = (1.0 - du * du - dv * dv).sqrt();
+        let want = Vec3A::new(-du, -dv, dz).normalize() * 0.5 + Vec3A::splat(0.5);
+        close(height_to_normal_at(10.0, 0.0, 0.01, "n"), want);
+        let want = Vec3A::new(0.0, -0.1, dz).normalize() * 0.5 + Vec3A::splat(0.5);
+        close(height_to_normal_at(0.0, 10.0, 0.01, "n"), want);
+    }
+
+    #[test]
+    fn heighttonormal_tilts_away_from_rising_height() {
+        // Through `normalmap` in a frame with the tangent along +u: a height
+        // rising along +u (+v) is a slope facing −u (−v), which is where the
+        // normal must lean.
+        let n = height_to_normal_at(10.0, 0.0, 0.01, "world");
+        assert!(n.x < -0.05 && n.y.abs() < 1e-6 && n.z > 0.9, "{n}");
+        let n = height_to_normal_at(0.0, 10.0, 0.01, "world");
+        assert!(n.y < -0.05 && n.x.abs() < 1e-6 && n.z > 0.9, "{n}");
+    }
+
+    #[test]
+    fn heighttonormal_without_a_footprint_is_flat() {
+        // No ray cone, no derivative — the nodedef's own default output.
+        assert_eq!(
+            height_to_normal_at(10.0, 5.0, 0.0, "n"),
+            Vec3A::new(0.5, 0.5, 1.0)
+        );
+    }
+
+    #[test]
+    fn heighttonormal_asks_the_host_for_its_image_once() {
+        // Four shifted copies of the lookup, one sampler: the host's decode
+        // and residency are per file, not per tap.
+        let doc = Doc::parse(HEIGHT_DOC).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let loader = |_: &str, _: Option<&str>| {
+            calls.set(calls.get() + 1);
+            Some(TextureRef(std::sync::Arc::new(Ramp {
+                slope_u: 1.0,
+                slope_v: 0.0,
+            })))
+        };
+        let mut c = Compiler::new(&doc, &loader);
+        c.compile_named("", "n", None);
+        c.compile_named("", "h", None);
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
