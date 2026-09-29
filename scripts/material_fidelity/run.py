@@ -5,10 +5,19 @@
 
 For every `.mtlx` under `<samples>/materials`, writes a shot layer that follows
 the suite's reference setup (`README.md` § Reference Renderer Setup), renders
-it with crust, writes `crust.png` beside the material (the suite's
-`<renderer-name>.png` convention, so its viewer can show it), and scores it with
-the suite's own metric: PSNR over 8-bit RGB against `materialx-glsl.png`
-(`packages/core/src/metrics.ts`, reproduced exactly in `psnr()`).
+it with crust and scores it with the suite's own metric: PSNR over 8-bit RGB
+against `materialx-glsl.avif` (`packages/core/src/metrics.ts`, reproduced
+exactly in `suite.psnr()`).
+
+Into each material directory it writes what the suite's own renderers write, so
+the suite's viewer and `pnpm cli metrics` treat crust as one more renderer:
+`crust.avif` (encoded as the suite encodes every render: AVIF quality 90, 4:4:4),
+`crust.json` (the render report: status and log) and a `crust` entry merged into
+`metrics.json`. `--no-write-suite` keeps the checkout untouched.
+
+`psnr` scores the AVIF, as the suite scores every other renderer;
+`psnr_lossless` scores the same pixels before encoding, so the codec's share of
+the gap is visible.
 
 Scene contract, as the suite states it:
   camera   perspective, vertical FOV 45, near 0.05, eye (0,0,5) looking at the origin
@@ -24,7 +33,6 @@ Usage:
 """
 import argparse
 import json
-import math
 import os
 import re
 import subprocess
@@ -33,206 +41,116 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
-import OpenEXR
 from PIL import Image
 
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
-RENDERER_NAME = "crust"
-REFERENCE_NAME = "materialx-glsl"
-SIZE = 512
-FOV_DEG = 45.0
-FOCAL = 50.0
-APERTURE = 2.0 * FOCAL * math.tan(math.radians(FOV_DEG) / 2.0)
+import suite
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-UNSUPPORTED = re.compile(r"no operator for node type\(s\) (.+?) \u2014")
-
-SHOT = """#usda 1.0
-(
-    defaultPrim = "World"
-    upAxis = "Y"
-    metersPerUnit = 1
-)
-
-def Xform "World"
-{{
-    def Camera "Cam"
-    {{
-        float focalLength = {focal}
-        float horizontalAperture = {aperture}
-        float verticalAperture = {aperture}
-        float2 clippingRange = (0.05, 1000)
-        double3 xformOp:translate = (0, 0, 5)
-        uniform token[] xformOpOrder = ["xformOp:translate"]
-    }}
-
-    def DomeLight "Env"
-    {{
-        float inputs:intensity = 1
-        asset inputs:texture:file = @{hdr}@
-        token inputs:texture:format = "latlong"
-        float xformOp:rotateY = {env_rotate}
-        uniform token[] xformOpOrder = ["xformOp:rotateY"]
-    }}
-
-    def Scope "Looks"
-    {{
-        def Material "M" (
-            prepend references = @{mtlx}@</MaterialX/Materials/{material}>
-        )
-        {{
-        }}
-    }}
-
-    def "Ball" (
-        prepend references = @{ball}@
-    )
-    {{
-        over "Preview_Mesh" (prepend apiSchemas = ["MaterialBindingAPI"])
-        {{
-            rel material:binding = </World/Looks/M>
-            int crust:rayMask = {ray_mask}
-        }}
-        over "Calibration_Mesh" (prepend apiSchemas = ["MaterialBindingAPI"])
-        {{
-            rel material:binding = </World/Looks/M>
-            int crust:rayMask = {ray_mask}
-        }}
-    }}
-}}
-
-def Scope "Render"
-{{
-    def RenderSettings "settings"
-    {{
-        rel camera = </World/Cam>
-        int2 resolution = ({size}, {size})
-        int crust:samplesPerPixel = {spp}
-        int crust:minSamplesPerPixel = {min_spp}
-        int crust:maxDepth = {max_depth}
-        float crust:indirectClamp = 0
-    }}
-}}
-"""
+UNSUPPORTED = re.compile(r"no operator for node type\(s\) (.+?) —")
+LEVEL = re.compile(r"\b(ERROR|WARN|INFO|DEBUG|TRACE)\b")
+REPORT_LEVELS = {"ERROR": "error", "WARN": "warning", "INFO": "info", "DEBUG": "debug", "TRACE": "debug"}
 
 
-def find_materials(root, selectors):
-    files = sorted(root.rglob("*.mtlx"))
-    if not selectors:
-        return files
-    out = []
-    for f in files:
-        leaf = f.parent.name
-        for s in selectors:
-            if s.startswith("re:"):
-                if re.search(s[3:], leaf):
-                    out.append(f)
-                    break
-            elif s in leaf:
-                out.append(f)
-                break
-    return out
+def write_render_report(material_dir, status, log_lines, error=None):
+    """`<renderer>.json`: the suite's `RenderResultReport` (packages/samples/src/render-report.ts)."""
+    logs = []
+    for line in log_lines:
+        m = LEVEL.search(line)
+        logs.append({"level": REPORT_LEVELS[m.group(1)] if m else "info",
+                     "source": "renderer", "message": line})
+    report = {"rendererName": suite.RENDERER_NAME, "status": status,
+              "error": {"name": "Error", "message": error} if error else None, "logs": logs}
+    (material_dir / f"{suite.RENDERER_NAME}.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
-def surface_material_name(mtlx):
-    text = mtlx.read_text(errors="replace")
-    m = re.search(r"<surfacematerial\b[^>]*\bname\s*=\s*\"([^\"]+)\"", text)
-    return m.group(1) if m else None
+def merge_metrics(material_dir, value):
+    """Add crust to the suite's per-material `metrics.json`, keyed by renderer name."""
+    path = material_dir / "metrics.json"
+    try:
+        metrics = json.loads(path.read_text())
+    except (OSError, ValueError):
+        metrics = {}
+    metrics[suite.RENDERER_NAME] = {"psnr": value}
+    path.write_text(json.dumps(metrics, indent=2) + "\n")
 
 
-def exr_to_srgb8(path):
-    with OpenEXR.File(str(path)) as f:
-        ch = f.channels()
-        if "RGB" in ch:
-            rgb = np.asarray(ch["RGB"].pixels, dtype=np.float32)
-        else:
-            rgb = np.stack([np.asarray(ch[c].pixels, dtype=np.float32) for c in "RGB"], axis=-1)
-    rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
-    c = np.clip(rgb, 0.0, 1.0)
-    srgb = np.where(c <= 0.0031308, 12.92 * c, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
-    return np.clip(np.round(srgb * 255.0), 0, 255).astype(np.uint8)
-
-
-def load_rgb8(path):
-    return np.asarray(Image.open(path).convert("RGBA"), dtype=np.uint8)[..., :3]
-
-
-def psnr(src, ref):
-    """`calculatePsnr` in the suite's packages/core/src/metrics.ts, exactly."""
-    d = src.astype(np.float64) - ref.astype(np.float64)
-    sse = float(np.sum(d * d))
-    if sse == 0.0:
-        return None
-    return round(20.0 * math.log10(255.0 / math.sqrt(sse / d.size)), 3)
-
-
-def render_one(mtlx, args, shots, binary):
-    out_png = mtlx.parent / f"{RENDERER_NAME}.png"
-    report = {"material": str(mtlx.relative_to(args.materials_root)), "png": str(out_png)}
-    ref_png = mtlx.parent / f"{REFERENCE_NAME}.png"
-    if args.skip_existing and out_png.exists():
+def render_one(mtlx, args, shots):
+    mdir = mtlx.parent
+    ref = suite.renderer_image(mdir, suite.REFERENCE_NAME)
+    # Follow the reference's format, so an older PNG checkout gets `crust.png`.
+    ext = ref.suffix if ref is not None else suite.IMAGE_EXTS[0]
+    out_img = (mdir if args.write_suite else shots) / (
+        f"{suite.RENDERER_NAME}{ext}" if args.write_suite
+        else str(mtlx.relative_to(args.materials_root).parent).replace("/", "__") + ext)
+    report = {"material": str(mtlx.relative_to(args.materials_root)), "image": str(out_img)}
+    rgb8 = None
+    if args.skip_existing and out_img.exists():
         report["status"] = "skipped"
     else:
-        name = surface_material_name(mtlx)
+        name = suite.surface_material_name(mtlx)
         if name is None:
             report.update(status="error", error="no <surfacematerial> in document")
             return report
         stem = str(mtlx.relative_to(args.materials_root)).replace("/", "__")[: -len(".mtlx")]
         shot = shots / f"{stem}.usda"
         exr = shots / f"{stem}.exr"
-        shot.write_text(
-            SHOT.format(
-                focal=FOCAL,
-                aperture=f"{APERTURE:.6f}",
-                hdr=args.hdr,
-                env_rotate=args.env_rotate,
-                mtlx=mtlx.resolve(),
-                material=name,
-                ball=args.ball,
-                ray_mask=5 if args.no_self_shadow else 7,
-                size=SIZE,
-                spp=args.spp,
-                min_spp=min(args.spp, args.min_spp),
-                max_depth=args.max_depth,
-            )
-        )
+        shot.write_text(suite.shot_layer(
+            mtlx=mtlx, material=name, ball=args.ball, hdr=args.hdr, spp=args.spp,
+            min_spp=args.min_spp, max_depth=args.max_depth, product=exr.name,
+            self_shadow=args.self_shadow, env_rotate=args.env_rotate))
         env = dict(os.environ, RAYON_NUM_THREADS=str(args.threads))
         t0 = time.perf_counter()
         # A failure here is this material's, not the run's: raising would stop
         # `pool.map` before results.json is written.
         try:
             proc = subprocess.run(
-                [binary, "-i", str(shot), "-o", str(exr), "-l", "warn"],
+                [str(args.binary), "-i", str(shot), "-o", str(exr), "-l", "warn"],
                 capture_output=True, text=True, env=env, timeout=args.timeout,
             )
         except subprocess.TimeoutExpired:
             report.update(status="error", error=f"timed out after {args.timeout:g}s",
                           seconds=round(time.perf_counter() - t0, 2))
+            if args.write_suite:
+                write_render_report(mdir, "failed", [], report["error"])
             return report
         except OSError as e:
             report.update(status="error", error=f"could not launch crust: {e}")
             return report
         report["seconds"] = round(time.perf_counter() - t0, 2)
-        log = ANSI.sub("", proc.stdout + proc.stderr)
-        report["log"] = [l for l in log.splitlines() if l.strip()][-40:]
-        unsupported = sorted({n.strip() for m in UNSUPPORTED.finditer(log) for n in m.group(1).split(",")})
+        log = [l for l in ANSI.sub("", proc.stdout + proc.stderr).splitlines() if l.strip()]
+        report["log"] = log[-40:]
+        unsupported = sorted({n.strip() for l in log for m in UNSUPPORTED.finditer(l)
+                              for n in m.group(1).split(",")})
         if unsupported:
             report["unsupported"] = unsupported
         if proc.returncode != 0 or not exr.exists():
             report.update(status="error", error=f"crust exited {proc.returncode}")
+            if args.write_suite:
+                write_render_report(mdir, "failed", log, report["error"])
             return report
-        Image.fromarray(exr_to_srgb8(exr), "RGB").save(out_png)
-        exr.unlink()
+        rgb8 = suite.linear_to_srgb8(suite.read_exr_rgb(exr))
+        img = Image.fromarray(rgb8, "RGB")
+        if ext == ".avif":
+            img.save(out_img, **suite.AVIF_OPTIONS)
+        else:
+            img.save(out_img)
+        if not args.keep_exr:
+            exr.unlink()
         exr.with_suffix(".png").unlink(missing_ok=True)
+        if args.write_suite:
+            write_render_report(mdir, "success", log)
         report["status"] = "rendered"
-    if ref_png.exists() and out_png.exists():
-        report["psnr"] = psnr(load_rgb8(out_png), load_rgb8(ref_png))
+    if ref is not None and out_img.exists():
+        ref8 = suite.load_rgb8(ref)
+        report["psnr"] = suite.psnr(suite.load_rgb8(out_img), ref8)
+        if rgb8 is not None:
+            report["psnr_lossless"] = suite.psnr(rgb8, ref8)
+        if args.write_suite:
+            merge_metrics(mdir, report["psnr"])
         for other in args.compare:
-            o = mtlx.parent / f"{other}.png"
-            if o.exists():
-                report.setdefault("others", {})[other] = psnr(load_rgb8(o), load_rgb8(ref_png))
+            o = suite.renderer_image(mdir, other)
+            if o is not None:
+                report.setdefault("others", {})[other] = suite.psnr(suite.load_rgb8(o), ref8)
     return report
 
 
@@ -243,36 +161,40 @@ def main():
     ap.add_argument("--spp", type=int, default=64)
     ap.add_argument("--min-spp", type=int, default=32)
     ap.add_argument("--max-depth", type=int, default=12)
-    # MaterialXView's lat-long puts the seam where crust (USD: -Z at u = 0.5)
-    # puts the centre. Fitted on the background of the reference images: 180
-    # scores 34 dB there, 177 and 183 score 11-12 dB.
-    ap.add_argument("--env-rotate", type=float, default=180.0, help="dome rotateY in degrees")
-    ap.add_argument("--self-shadow", dest="no_self_shadow", action="store_false",
+    ap.add_argument("--env-rotate", type=float, default=suite.ENV_ROTATE, help="dome rotateY in degrees")
+    ap.add_argument("--self-shadow", action="store_true",
                     help="let the ball shadow itself (the suite's renderers do not)")
     ap.add_argument("--jobs", type=int, default=1, help="materials rendered at once")
     ap.add_argument("--threads", type=int, default=os.cpu_count(), help="RAYON_NUM_THREADS per render")
     ap.add_argument("--timeout", type=float, default=900)
-    ap.add_argument("--skip-existing", action="store_true")
-    ap.add_argument("--compare", action="append", default=["blender-nodes", "blender-new", "threejs-new"],
-                    help="also report these renderers' published PSNR")
-    ap.add_argument("--binary", type=Path, default=REPO / "target/release/crust-render")
+    ap.add_argument("--skip-existing", action="store_true", help="re-score existing crust images instead of rendering")
+    ap.add_argument("--no-write-suite", dest="write_suite", action="store_false",
+                    help="write images under --out, not crust.avif / crust.json / metrics.json in the suite")
+    ap.add_argument("--keep-exr", action="store_true", help="keep each linear EXR beside its shot")
+    ap.add_argument("--compare", action="append",
+                    default=["materialx-osl", "blender-new", "blender-nodes", "threejs-new"],
+                    help="also score these renderers' published images")
+    ap.add_argument("--binary", type=Path, default=suite.REPO / "target/release/crust-render")
     ap.add_argument("--out", type=Path, default=Path("fidelity-out"), help="shots, shader ball, results.json")
     args = ap.parse_args()
 
-    samples = args.suite / "submodules/material-samples"
+    samples = suite.samples_root(args.suite)
     args.materials_root = samples / "materials"
     args.hdr = (samples / "viewer/san_giuseppe_bridge_2k.hdr").resolve()
+    if not args.binary.exists():
+        sys.exit(f"no crust binary at {args.binary}; run `cargo build --release`")
     args.out.mkdir(parents=True, exist_ok=True)
     shots = args.out / "shots"
     shots.mkdir(exist_ok=True)
     ball = args.out / "shaderball.usda"
     if not ball.exists():
-        subprocess.run([sys.executable, str(HERE / "glb_to_usda.py"),
+        subprocess.run([sys.executable, str(suite.HERE / "glb_to_usda.py"),
                         str(samples / "viewer/ShaderBall.glb"), str(ball)], check=True)
     args.ball = ball.resolve()
 
-    materials = find_materials(args.materials_root, args.materials)
-    print(f"{len(materials)} materials, {args.spp} spp, jobs {args.jobs} x {args.threads} threads", flush=True)
+    materials = suite.find_materials(args.materials_root, args.materials)
+    print(f"{len(materials)} materials from {samples.name}, {args.spp} spp, "
+          f"jobs {args.jobs} x {args.threads} threads", flush=True)
     results_path = args.out / "results.json"
     results = {}
     if results_path.exists() and args.skip_existing:
@@ -280,22 +202,26 @@ def main():
     t0 = time.perf_counter()
     done = 0
 
-    def job(m):
-        return render_one(m, args, shots, str(args.binary))
+    def save():
+        meta = {"spp": args.spp, "min_spp": args.min_spp, "max_depth": args.max_depth,
+                "env_rotate": args.env_rotate, "self_shadow": args.self_shadow,
+                "samples": samples.name, "reference": suite.REFERENCE_NAME}
+        (args.out / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+        results_path.write_text(json.dumps(sorted(results.values(), key=lambda r: r["material"]), indent=1))
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        for r in pool.map(job, materials):
+        for r in pool.map(lambda m: render_one(m, args, shots), materials):
             done += 1
             prev = results.get(r["material"], {})
             if r.get("status") == "skipped":
                 r = {**prev, **{k: v for k, v in r.items() if k != "status"}}
-                r.setdefault("status", "rendered")
+                r["status"] = prev.get("status", "rendered")
             results[r["material"]] = r
             print(f"[{done}/{len(materials)}] {r['status']:8} psnr={r.get('psnr')!s:>7} "
                   f"{r.get('seconds', '-')!s:>6}s {r['material']}", flush=True)
             if done % 20 == 0:
-                results_path.write_text(json.dumps(list(results.values()), indent=1))
-    results_path.write_text(json.dumps(list(results.values()), indent=1))
+                save()
+    save()
     print(f"done in {time.perf_counter() - t0:.0f}s -> {results_path}")
 
 

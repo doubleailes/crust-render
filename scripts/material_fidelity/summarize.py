@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarise a `run.py` results.json as Markdown.
 
-Reports crust's PSNR against `materialx-glsl.png` per suite group, beside the
+Reports crust's PSNR against `materialx-glsl` per suite group, beside the
 suite's own published renderers on the same materials, and — statically, from
 the documents themselves — which node categories the suite uses that
 `crust-mtlx` has no operator for. The static half is needed because the
@@ -17,7 +17,9 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+import suite
+
+REPO = suite.REPO
 # Elements that are document structure, not nodes.
 STRUCTURAL = {"materialx", "nodegraph", "input", "output", "nodedef", "implementation",
               "look", "materialassign", "collection", "typedef", "token", "variant",
@@ -46,8 +48,8 @@ def supported_categories():
 
 def group_of(material):
     parts = material.split("/")
-    if parts[0] == "nodes":
-        return "nodes"
+    if parts[0] in ("nodes", "ai_authored"):
+        return parts[0]
     return f"{parts[0]}/{parts[1]}"
 
 
@@ -70,7 +72,7 @@ def main():
     ap.add_argument("--suite", required=True, type=Path)
     ap.add_argument("results", type=Path)
     args = ap.parse_args()
-    root = args.suite / "submodules/material-samples/materials"
+    root = suite.materials_root(args.suite)
     results = json.loads(args.results.read_text())
     supported = supported_categories()
 
@@ -94,8 +96,12 @@ def main():
 
     scored = [r for r in results if r.get("psnr") is not None]
     out = []
-    out.append(f"Materials: {len(results)}; scored against `materialx-glsl.png`: {len(scored)}; "
+    lossless = [r["psnr_lossless"] for r in scored if r.get("psnr_lossless") is not None]
+    out.append(f"Materials: {len(results)}; scored against `{suite.REFERENCE_NAME}`: {len(scored)}; "
                f"render errors: {len(errors)}.\n")
+    if lossless:
+        out.append(f"Mean PSNR before AVIF encoding: {statistics.mean(lossless):.2f} dB "
+                   f"(the `crust` columns score the AVIF, as the suite scores every renderer).\n")
     head = "| group | n | crust mean | crust median | " + " | ".join(f"{o} mean" for o in others) + " |"
     out.append(head)
     out.append("|" + "---|" * (4 + len(others)))

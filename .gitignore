@@ -14,3 +14,5 @@ samples/ALab
 # build artefact of a texture, not a texture: it is reproducible from the PNG
 # next to it, and checking one in would mean checking in the mip filter too.
 *.tx
+.fidelity/
+__pycache__/
