@@ -1552,6 +1552,76 @@ fn level_zero_shades_the_cage_smooth() {
     );
 }
 
+/// A smooth level-0 subdivision cage and a faceted `none` cage share every
+/// array and the material, but not their shading: they must not intern to
+/// one shared mesh, whichever comes first.
+#[test]
+fn a_smooth_cage_and_a_faceted_cage_do_not_share_a_mesh() {
+    let cube = |name: &str, x: f32, scheme: &str| {
+        format!(
+            r#"
+    def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+{CUBE}
+        {scheme}
+        rel material:binding = </World/Looks/Grey>
+        double3 xformOp:translate = ({x}, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}"#
+        )
+    };
+    let looks = r#"
+    def Scope "Looks" {
+        def Material "Grey" {
+            token outputs:surface.connect = </World/Looks/Grey/S.outputs:surface>
+            def Shader "S" {
+                uniform token info:id = "crust:openpbr"
+                token outputs:surface
+            }
+        }
+    }"#;
+    let none = r#"uniform token subdivisionScheme = "none""#;
+    for (name, first, second) in [
+        (
+            "subdiv_key_faceted_first",
+            ("Faceted", -3.0, none),
+            ("Smooth", 3.0, ""),
+        ),
+        (
+            "subdiv_key_smooth_first",
+            ("Smooth", 3.0, ""),
+            ("Faceted", -3.0, none),
+        ),
+    ] {
+        let scene = load(
+            name,
+            &format!(
+                "{looks}{}{}",
+                cube(first.0, first.1, first.2),
+                cube(second.0, second.1, second.2)
+            ),
+        );
+        let normal_at = |x: f32| {
+            scene
+                .world
+                .intersect(&Ray::new(Vec3A::new(x, 0.5, 5.0), -Vec3A::Z), 1e-3, 100.0)
+                .unwrap()
+                .rec
+                .normal
+        };
+        let faceted = normal_at(-3.0 + 0.5);
+        let smooth = normal_at(3.0 + 0.5);
+        assert!(
+            (faceted.z - 1.0).abs() < 1e-5,
+            "{name}: the none cage shades faceted, got {faceted:?}"
+        );
+        assert!(
+            smooth.z < 0.999,
+            "{name}: the subdivision cage shades smooth, got {smooth:?}"
+        );
+    }
+}
+
 /// The per-prim attribute is retired: the load's level wins over it.
 #[test]
 fn a_per_prim_level_is_no_longer_read() {

@@ -1267,6 +1267,94 @@ impl crust_core::AssetLoader for SlowPtexAssets {
     }
 }
 
+/// Loop refinement builds no face table, so a Loop mesh whose material reads
+/// a per-face (Ptex) texture keeps its cage — face ids that index the
+/// authored triangles — rather than refining into triangles whose ordinals
+/// would be read as cage face ids. The same mesh without Ptex still refines.
+#[test]
+fn a_loop_mesh_with_ptex_keeps_its_cage_face_ids() {
+    let dir = std::env::temp_dir().join(format!("crust_loop_ptex_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let stage = |binding: &str| {
+        format!(
+            r#"#usda 1.0
+( defaultPrim = "World" )
+
+def Xform "World"
+{{
+    def Mesh "Tris" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "loop"
+        {binding}
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    }}
+
+    def Scope "Looks"
+    {{
+        def Material "Rock"
+        {{
+            asset inputs:surfaceMap = @./nonexistent.ptx@
+            token outputs:ri:surface.connect = </World/Looks/Rock/Bxdf.outputs:bxdf_out>
+
+            def Shader "Bxdf"
+            {{
+                uniform token info:id = "PxrDisneyBsdf"
+                token outputs:bxdf_out
+            }}
+        }}
+    }}
+}}
+"#
+        )
+    };
+    let assets = SlowPtexAssets {
+        delay: std::time::Duration::ZERO,
+        loaded: std::sync::Mutex::new(Vec::new()),
+    };
+    let options = crust_core::UsdImportOptions {
+        subdivision_level: Some(1),
+        ..crust_core::UsdImportOptions::default()
+    };
+    let load = |name: &str, binding: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, stage(binding)).expect("write stage");
+        Scene::from_usd_with_options(&path, &assets, &options).expect("stage must load")
+    };
+
+    let ptex = load(
+        "loop_ptex.usda",
+        "rel material:binding = </World/Looks/Rock>",
+    );
+    assert_eq!(
+        ptex.world.primitive_breakdown().triangles,
+        2,
+        "a Ptex Loop mesh keeps its cage"
+    );
+    let hit = ptex
+        .world
+        .intersect(
+            &crust_core::Ray::new(crust_core::Vec3A::new(0.8, 0.2, 5.0), -crust_core::Vec3A::Z),
+            1e-3,
+            100.0,
+        )
+        .expect("the cage is hit");
+    assert_eq!(
+        hit.rec.face.expect("a Ptex face hit").id,
+        0,
+        "the hit resolves to the authored triangle"
+    );
+
+    let plain = load("loop_plain.usda", "");
+    assert_eq!(
+        plain.world.primitive_breakdown().triangles,
+        2 * 4,
+        "without Ptex, Loop refines"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Time the host spends decoding assets is reported as "Load assets" and taken
 /// back out of "Traverse prims" — for Ptex exactly as for environment maps.
 ///
