@@ -124,8 +124,9 @@ consumed as ordinary dependencies:
      `alpha` — and a `UsdPreviewSurface` under `opacityThreshold`). A hit on a
      material with `has_cutout` is *present* with probability equal to its opacity
      (`pass_cutouts`, one `pcg::Rng` off `K_CUTOUT` per vertex); otherwise the segment
-     carries on along the **same line**: the ray is restarted at the hit (`restarted`,
-     still asking `(0.001, ∞)`) and the hit's `t` is added back onto the next one, so
+     carries on along the **same line**: the ray is restarted just short of the hit
+     (`restarted` at `resume_before(t)`, still asking `(0.001, ∞)`, which then begins
+     just past it) and the restart's offset is added back onto the next hit's `t`, so
      `t`, the carried medium, the volume regions and the ray cone still measure from
      the segment's origin and the free-flight competition stays exact. A surface passed
      through is no vertex — no depth, no emission, no MIS record — and the previous
@@ -149,8 +150,11 @@ consumed as ordinary dependencies:
      since an open segment crosses no cutout either. Three traps kept the "no cost
      without a cutout" promise from being free, each measured on cornellbox
      (callgrind, 2 spp): stepping past a hit by raising `t_min` broke the `(0.001, ∞)`
-     constant propagation into the kernel, so both walks restart the ray at the hit
-     instead (`restarted`, the subsurface walk's trick); an `if` yielding the hit from
+     constant propagation into the kernel, so both walks restart the ray instead
+     (`restarted`, the subsurface walk's trick) — short of the hit by the 0.001 offset,
+     since restarted *on* it that offset stepped over any surface within 0.001 behind
+     a cutout and a layered card leaked light
+     (`a_surface_just_behind_a_cutout_is_not_skipped`); an `if` yielding the hit from
      either arm copied the whole `Option<WorldHit>` at every vertex (+0.8%), so the
      hit is patched in place; and the extra code tipped `trace_path` over LLVM's
      inline threshold (+1.4% out of line), so it is `#[inline(always)]` into

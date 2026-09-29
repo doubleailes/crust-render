@@ -28,10 +28,12 @@ isn't there, which the integrator has to know before it shades.
   fold.
 - **D4 — Bounce side stochastic, shadow side a product.** `pass_cutouts` meets
   a hit with probability `opacity` (a `pcg::Rng` off `K_CUTOUT`) and otherwise
-  asks for the next hit along the same line. It restarts the ray at the hit
+  asks for the next hit along the same line. It restarts the ray
   (`restarted`) rather than raising `t_min`, which would break the
-  `(0.001, ∞)` constant propagation into the kernel, and adds the hit's `t`
-  back onto the next one. `t`, the medium, the volume regions and the cone
+  `(0.001, ∞)` constant propagation into the kernel, and adds the restart's
+  offset back onto the next hit's `t`. The restart is short of the hit by
+  that 0.001 (`resume_before`), so the interval begins just past it and a
+  surface layered right behind a cutout is still met. `t`, the medium, the volume regions and the cone
   then all still measure from the segment's origin. `cutout_through` (under
   `cutout_shadow`) multiplies `1 − opacity` over every crossing of a shadow
   ray and stops at the first opaque hit. Both point-sample the opacity and

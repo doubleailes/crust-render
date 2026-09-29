@@ -446,7 +446,8 @@ const MAX_CUTOUT_CROSSINGS: usize = 256;
 /// Stepping past a hit moves the origin rather than raising `t_min`, as the
 /// subsurface walk's rays do: every `World::intersect` asks for
 /// `(0.001, ∞)`, LLVM propagates those two constants into the kernel, and a
-/// caller asking for other bounds costs every ray in every scene.
+/// caller asking for other bounds costs every ray in every scene. The
+/// origin goes to [`resume_before`] the hit, not onto it.
 fn restarted(ray: &Ray, t: f32) -> Ray {
     let cone = ray.cone();
     Ray::new(ray.at(t), ray.direction())
@@ -456,6 +457,18 @@ fn restarted(ray: &Ray, t: f32) -> Ray {
             width: cone.width_at(t * ray.direction().length()),
             spread: cone.spread,
         })
+}
+
+/// Where to restart a segment that passes a hit at `t` (see [`restarted`]):
+/// short of it by the tracer's 0.001, less a relative step, so the restarted
+/// ray's `(0.001, ∞)` begins just *past* the hit. Restarted on the hit
+/// itself, the offset stepped over any surface within 0.001 behind it — a
+/// decal or card layered over opaque geometry leaked light through
+/// (`a_surface_just_behind_a_cutout_is_not_skipped`). The step is relative,
+/// so a far hit is not met again through rounding.
+#[inline]
+fn resume_before(t: f32) -> f32 {
+    t - 0.001 + t.abs().max(1.0) * 1e-5
 }
 
 /// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
@@ -512,7 +525,7 @@ pub(crate) fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut R
         if kept <= 0.0 {
             return 0.0;
         }
-        t += h.rec.t;
+        t = resume_before(t + h.rec.t);
         segment = restarted(ray, t);
     }
     unreachable!("the last crossing returns")
@@ -574,7 +587,7 @@ fn pass_cutouts<'w>(
         }
         stats.cutout_passes += 1;
         stats.cutout_rays += 1;
-        let t = h.rec.t;
+        let t = resume_before(h.rec.t);
         *hit = world
             .intersect(&restarted(ray, t), 0.001, f32::INFINITY)
             .map(|mut next| {
