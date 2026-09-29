@@ -24,7 +24,8 @@ use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32, light_ray_mask,
+    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32,
+    infinite_light_escape_mask, light_ray_mask,
 };
 use super::materials::asset_value_path;
 use super::time::eval_time;
@@ -646,14 +647,16 @@ pub(super) fn emit_distant_light(
         luminance * per_nit
     };
     let light = CoreDistantLight::new(direction, illuminance, angle);
+    let mask = infinite_light_escape_mask(prim);
     debug!(
-        "DistantLight {}: direction={:?} angle={}° normalize={}",
+        "DistantLight {}: direction={:?} angle={}° normalize={} camera-visible={}",
         prim.path(),
         direction,
         angle,
-        params.normalize
+        params.normalize,
+        mask.sees(crate::ray::MASK_CAMERA)
     );
-    lights.add(light);
+    lights.add_masked(light, mask);
 }
 
 /// Imports a `UsdLuxDomeLight` as an infinite environment.
@@ -729,16 +732,18 @@ pub(super) fn emit_dome_light(
         Vec3A::new(m[2][0], m[2][1], m[2][2]).normalize_or(Vec3A::Z),
     );
 
+    let mask = infinite_light_escape_mask(prim);
     debug!(
-        "Imported DomeLight at {} (tint={:?}, {})",
+        "Imported DomeLight at {} (tint={:?}, {}, camera-visible={})",
         prim.path(),
         tint,
         match &map {
             Some(m) => format!("{}x{} environment map", m.width(), m.height()),
             None => "uniform".to_string(),
-        }
+        },
+        mask.sees(crate::ray::MASK_CAMERA)
     );
-    lights.add(CoreDomeLight::new(tint, map, rotation));
+    lights.add_masked(CoreDomeLight::new(tint, map, rotation), mask);
 }
 
 /// The dome's `inputs:texture:file` as a filesystem path.

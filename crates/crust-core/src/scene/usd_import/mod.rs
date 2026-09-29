@@ -19,6 +19,7 @@
 //! | [`shapes`]     | `UsdGeomSphere`, `UsdGeomBasisCurves`                        |
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
+//! | [`light_links`] | `collection:lightLink`: lights that illuminate nothing      |
 //! | [`materials`]  | binding resolution, the material cache, shader dispatch      |
 //! | [`preview`]    | `UsdPreviewSurface` + `UsdUVTexture` networks                |
 //! | [`volume`]     | `crust:volume:*` regions                                     |
@@ -58,6 +59,7 @@ use openusd_schemas::lux::{
 mod attrs;
 mod camera;
 mod instancing;
+mod light_links;
 mod lights;
 mod materials;
 mod mesh;
@@ -71,13 +73,17 @@ mod xform;
 use attrs::custom_token;
 use camera::build_camera;
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
+use light_links::LightLinks;
 use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
     emit_sphere_light,
 };
 use materials::{MaterialCache, resolve_material};
 use mesh::{MeshArena, MeshPlacement, emit_mesh, flush_meshes};
-use settings::{CameraChoice, check_time_range, import_render_settings, render_settings_camera};
+use settings::{
+    CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
+    render_settings_camera,
+};
 use shapes::{emit_curves, emit_sphere};
 use time::{EvalTimeScope, eval_time};
 use volume::emit_volume;
@@ -178,9 +184,15 @@ struct ImportCtx<'a> {
     /// the decision needs every chunk's placement counts, so it cannot be
     /// made while walking. Holds ~88 bytes per mesh prim, not per triangle.
     pending_meshes: Vec<MeshPlacement>,
+    /// Receivers seen and lights whose `collection:lightLink` restricts
+    /// them, resolved after the last chunk (see [`light_links`]).
+    links: LightLinks,
     settings: RenderSettings,
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
+    /// The whole stage with payloads unloaded, where light collections are
+    /// resolved (a chunk's mask may exclude what they name).
+    index: &'a Stage,
     assets: &'a dyn AssetLoader,
 }
 
@@ -241,6 +253,13 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             continue;
         }
 
+        // What this prim emits, for the light links: ids are handed out in
+        // traversal order, so the range recorded after dispatch is exactly
+        // this prim's (see `light_links`).
+        let geoms_before = ctx.world.count();
+        let vols_before = ctx.volumes.len();
+        let lights_before = ctx.lights.count();
+
         // Native instancing: an `instanceable` prim with a composition arc
         // shares one prototype with every other instance of it. Take the
         // geometry from the prototype and place it — never descend into
@@ -257,6 +276,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                         this_world,
                         &mut ctx.caches,
                     );
+                    ctx.links
+                        .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
                     continue;
                 }
                 _ => warn!(
@@ -281,6 +302,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 this_world,
                 &mut ctx.caches,
             );
+            ctx.links
+                .saw(prim.path(), geoms_before..ctx.world.count(), 0..0);
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
@@ -325,6 +348,17 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
                 ctx.assets,
                 &mut ctx.caches.asset_time,
             );
+        }
+        ctx.links.saw(
+            prim.path(),
+            geoms_before..ctx.world.count(),
+            vols_before..ctx.volumes.len(),
+        );
+        // Every light adds at most one entry, so a grown list means `prim`
+        // is the light that grew it.
+        if ctx.lights.count() > lights_before {
+            ctx.links
+                .light_added(ctx.index, stage, prim.path(), lights_before);
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -484,6 +518,7 @@ pub(crate) fn load_scene(
     }
     // Render settings come first — the camera importer needs the aspect ratio.
     let mut settings = import_render_settings(&index);
+    let domes_seen_by_camera = dome_light_camera_visibility(&index);
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
@@ -504,7 +539,10 @@ pub(crate) fn load_scene(
         settings = settings.with_frame(seed);
     }
     let chunks = stream_roots(&index);
-    drop(index);
+    // Kept, not dropped: a light's link collections are read on it (see
+    // `light_links`), because a streamed chunk's population mask can leave
+    // out the prims a collection refers to. It stays cheap — openusd composes
+    // lazily, and only the lights' prims are ever asked for.
     let open_elapsed = open_start.elapsed();
     let open_mem = MemorySample::now();
 
@@ -522,8 +560,10 @@ pub(crate) fn load_scene(
         // baked flat into the parent BVH when it is placed exactly once.
         caches: ImportCaches::new(assets, path),
         pending_meshes: Vec::new(),
+        links: LightLinks::default(),
         settings,
         stage_path: path,
+        index: &index,
         assets,
     };
 
@@ -632,6 +672,16 @@ pub(crate) fn load_scene(
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
     // before `commit`, which is what consumes the geometry table.
+    // Likewise every receiver has been seen, so a light's link can be judged
+    // against all of them; before `commit`, which freezes geometry masks.
+    std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
+    if !domes_seen_by_camera {
+        debug!(
+            "domeLightCameraVisibility = false: every light at infinity is hidden from the camera"
+        );
+        ctx.lights.hide_infinite_from_camera();
+    }
+
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
 

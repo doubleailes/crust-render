@@ -196,10 +196,13 @@ fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
             },
             Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
         );
+        // A uniform sky, so the ball's shading is sampled noise.
+        let mut lights = LightList::new();
+        lights.add(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY));
         Renderer::new(
             camera,
             b.commit(),
-            LightList::new(),
+            lights,
             RenderSettings::new(16, 3, w, h, 16, 0.0, frame),
         )
     };
@@ -388,43 +391,25 @@ fn ray_color_returns_emission_for_a_direct_hit() {
     }
 }
 
+/// With nothing at infinity there is no sky: an escaping ray is black in
+/// every direction.
 #[test]
-fn ray_color_of_an_escaping_ray_is_the_sky_and_deterministic() {
+fn ray_color_of_an_escaping_ray_without_lights_is_black() {
     let world = WorldBuilder::new().commit();
     let lights = LightList::new();
     let volumes = Volumes::default();
-    let up = Ray::new(Vec3A::ZERO, Vec3A::Y);
-    let a = ray_color(
-        &up,
-        &world,
-        &lights,
-        &volumes,
-        4,
-        SamplingStrategy::PowerMis,
-        PathSampler::new(0, 0, 0, 0),
-    );
-    let b = ray_color(
-        &up,
-        &world,
-        &lights,
-        &volumes,
-        4,
-        SamplingStrategy::PowerMis,
-        PathSampler::new(0, 0, 0, 0),
-    );
-    assert_eq!(a, b);
-    assert!(a.min_element() >= 0.0 && a.is_finite());
-    let down = ray_color(
-        &Ray::new(Vec3A::ZERO, -Vec3A::Y),
-        &world,
-        &lights,
-        &volumes,
-        4,
-        SamplingStrategy::PowerMis,
-        PathSampler::new(0, 0, 0, 0),
-    );
-    assert!(down.min_element() >= 0.0);
-    assert_ne!(a, down, "a gradient sky differs between up and down");
+    for dir in [Vec3A::Y, -Vec3A::Y, Vec3A::X] {
+        let c = ray_color(
+            &Ray::new(Vec3A::ZERO, dir),
+            &world,
+            &lights,
+            &volumes,
+            4,
+            SamplingStrategy::PowerMis,
+            PathSampler::new(0, 0, 0, 0),
+        );
+        assert_eq!(c, Vec3A::ZERO, "{dir}");
+    }
 }
 
 /// A convex diffuse ball inside a large purely emissive enclosure: the

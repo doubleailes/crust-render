@@ -499,5 +499,8 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   trains on luminance rather than a chromatic distribution.
 - Some USD inputs are read and warned about rather than mapped: `subsurface*` /
   `specularTint` on `PxrDisneyBsdf`, `inputs:diffuse` / `inputs:specular` on lights, and
-  `UsdTransform2d` on preview-surface textures. `PortalLight`, mesh lights, light
-  filters and light linking are not read.
+  `UsdTransform2d` on preview-surface textures. `PortalLight`, mesh lights and light
+  filters are not read. Light and shadow linking are read, with three gaps: a
+  collection target inside an instance prototype cannot tell instances apart,
+  `membershipExpression` is refused, and a shadow-linked light is sampled by NEE
+  alone (noisier on glossy receivers, and a mirror still shows its physical shadow).

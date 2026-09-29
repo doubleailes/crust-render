@@ -24,18 +24,44 @@ pub(super) fn prim_ray_mask(prim: &Prim) -> RayMask {
         .unwrap_or(MASK_ALL)
 }
 
+/// RenderMan's per-light camera visibility, which published assets carry
+/// (the Moana island's `islandPrman.usda` authors it on every light).
+const RI_CAMERA_VISIBILITY: &str = "primvars:ri:attributes:visibility:camera";
+
+/// Whether the camera sees a light, when anything says: crust's own
+/// `crust:light:cameraVisible` first, RenderMan's primvar (an int, non-zero
+/// meaning visible) as the portable fallback.
+fn authored_camera_visibility(prim: &Prim) -> Option<bool> {
+    custom_bool(prim, "crust:light:cameraVisible")
+        .or_else(|| custom_bool(prim, RI_CAMERA_VISIBILITY))
+}
+
 /// Ray mask for a light's *source geometry*. Industry default (Arnold,
 /// RenderMan, Karma): the surface is invisible to camera rays — lights sit
 /// in frame without showing up — while shadow and indirect rays still see
 /// it, so occlusion and the bounce side of MIS are unchanged.
-/// `crust:light:cameraVisible = true` opts the surface back in (classic
-/// Cornell-box look); an authored `crust:rayMask` wins outright.
+/// `crust:light:cameraVisible = true` (or RenderMan's
+/// `primvars:ri:attributes:visibility:camera = 1`) opts the surface back in
+/// (classic Cornell-box look); an authored `crust:rayMask` wins outright.
 pub(super) fn light_ray_mask(prim: &Prim) -> RayMask {
     if let Some(m) = custom_i32(prim, "crust:rayMask") {
         return RayMask(m as u32);
     }
-    let visible = custom_bool(prim, "crust:light:cameraVisible").unwrap_or(false);
+    let visible = authored_camera_visibility(prim).unwrap_or(false);
     MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { RayMask::NONE }
+}
+
+/// Which escaping rays see a light at infinity: every category, unless the
+/// camera is told not to (same attributes and precedence as
+/// [`light_ray_mask`], but visible by default — a dome is the sky behind
+/// the scene unless something hides it). `crust:rayMask` does not apply: a
+/// light at infinity has no geometry to mask.
+pub(super) fn infinite_light_escape_mask(prim: &Prim) -> RayMask {
+    if authored_camera_visibility(prim).unwrap_or(true) {
+        MASK_ALL
+    } else {
+        RayMask(MASK_ALL.0 & !MASK_CAMERA.0)
+    }
 }
 
 /// `crust:motion:translate` — a world-space translation the prim moves

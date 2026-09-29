@@ -13,12 +13,12 @@ use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
 use crate::pdf::PdfSolidAngle;
 use crate::profile::Section;
-use crate::ray::Ray;
+use crate::ray::{Ray, RayMask};
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
 use crate::volume::{PhaseMix, VolumeEvent, Volumes};
-use crate::{Light, LightList, PathSampler, profile};
+use crate::{EVERY_CLASS, Light, LightList, PathSampler, profile};
 
 use super::GuidingContext;
 use super::settings::SamplingStrategy;
@@ -254,10 +254,13 @@ impl PathScratch {
 /// what `Material::eval` returning `Some` means; the integrator used to ask
 /// `eval` again, which for a textured material is a full network run
 /// answering a question the sample already had.
-struct PrevBounce<'a> {
+pub(super) struct PrevBounce<'a> {
     pub(super) pos: Vec3A,
     pub(super) pdf: PdfSolidAngle,
     pub(super) delta: bool,
+    /// The light-link class of the surface this bounce left: the receiver
+    /// whose links decide what the bounce may collect.
+    pub(super) class: u16,
     /// What a fresh `eval` would be asked, kept only to check the claim
     /// above in debug builds.
     #[cfg(debug_assertions)]
@@ -289,7 +292,7 @@ impl PrevBounce<'_> {
 // Large only in debug builds, where `PrevBounce` carries its `check` copy of
 // the hit; boxing it would allocate once per bounce for a debug assertion.
 #[allow(clippy::large_enum_variant)]
-enum PrevVertex<'a> {
+pub(super) enum PrevVertex<'a> {
     Surface(PrevBounce<'a>),
     Phase {
         /// The scatter point (the light strategy's pdf is evaluated from it).
@@ -319,27 +322,47 @@ fn bounce_emission_weight(
     hit: &WorldHit,
     strategy: SamplingStrategy,
 ) -> f32 {
-    let (from, bounce_pdf) = match prev {
-        PrevVertex::Surface(p) => {
-            if !p.continuous() {
-                return strategy.unopposed_weight();
-            }
-            (p.pos, p.pdf)
-        }
-        PrevVertex::Phase { pos, pdf } => (*pos, *pdf),
+    // The receiver is the vertex the bounce left, and its links apply
+    // whatever the bounce's lobe: a light that does not illuminate it gives
+    // nothing on this side, exactly as NEE there skips it.
+    let (from, class, competing) = match prev {
+        PrevVertex::Surface(p) => (p.pos, p.class, p.continuous().then_some(p.pdf)),
+        // A volume-region scatter belongs to no prim: every light reaches it.
+        PrevVertex::Phase { pos, pdf } => (*pos, EVERY_CLASS, Some(*pdf)),
     };
-    match lights.find_by_geom_at(hit.geom_id, from) {
-        Some((light, pmf)) if pmf > 0.0 => {
-            // No pdf is a point NEE refuses to sample (an edge-on point of
-            // an area-sampled light, say): nothing competes for it, exactly
-            // as for a light NEE never picks.
-            let Some(point_pdf) = light.pdf_at_point(from, hit.rec.p) else {
-                return strategy.unopposed_weight();
-            };
-            let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
-            strategy.bounce_weight(bounce_pdf, light_pdf)
-        }
-        _ => strategy.unopposed_weight(),
+    // Nothing competes after a delta bounce, and without links nothing can
+    // filter it either: skip the light lookup, as before links existed.
+    if competing.is_none() && lights.links().is_none() {
+        return strategy.unopposed_weight();
+    }
+    let Some((index, pmf)) = lights.find_index_by_geom_at(hit.geom_id, from) else {
+        // Emissive geometry with no light-list entry: NEE never samples it.
+        return strategy.unopposed_weight();
+    };
+    if !lights.illuminates(index, class) {
+        return 0.0;
+    }
+    let Some(bounce_pdf) = competing else {
+        return strategy.unopposed_weight();
+    };
+    // A shadow-linked light is NEE's alone at a continuous vertex: this ray
+    // is stopped by occluders its shadow rays ignore, so the two strategies
+    // disagree on its visibility and cannot be MIS-combined.
+    if lights.nee_only(index) && strategy.samples_lights() {
+        return 0.0;
+    }
+    let light = lights.light(index);
+    if pmf > 0.0 {
+        // No pdf is a point NEE refuses to sample (an edge-on point of
+        // an area-sampled light, say): nothing competes for it, exactly
+        // as for a light NEE never picks.
+        let Some(point_pdf) = light.pdf_at_point(from, hit.rec.p) else {
+            return strategy.unopposed_weight();
+        };
+        let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
+        strategy.bounce_weight(bounce_pdf, light_pdf)
+    } else {
+        strategy.unopposed_weight()
     }
 }
 
@@ -352,17 +375,33 @@ fn bounce_emission_weight(
 /// it covers, and weighted by the pdf reported from `Light::escaped`. Both
 /// must use the same density NEE used, or emission is double-counted.
 ///
-/// Returns the MIS-weighted radiance and whether any light covered the
-/// direction — the caller falls back to the sky gradient when nothing did.
+/// `mask` is the escaping ray's category. A camera ray sees only the lights
+/// visible to the camera, or the backdrops alone when there are any: they
+/// stand in front of every other light at infinity, for camera rays only.
+/// Camera rays run no NEE, so hiding a light from them moves no MIS weight.
+///
+/// A direction no light answers is black: there is no built-in sky.
 #[inline(always)]
-fn escaped_emission(
+pub(super) fn escaped_emission(
     prev: &Option<PrevVertex>,
     lights: &LightList,
     direction: Vec3A,
+    mask: RayMask,
     strategy: SamplingStrategy,
-) -> (Vec3A, bool) {
+) -> Vec3A {
+    let mut radiance = Vec3A::ZERO;
+    if lights.escapes_to_backdrop(mask) {
+        // No NEE ever competes for a backdrop — nothing can select it — so
+        // its emission is taken whole, as for any camera ray.
+        for backdrop in lights.backdrops() {
+            if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
+                radiance += emitted * strategy.unopposed_weight();
+            }
+        }
+        return radiance;
+    }
     if lights.count() == 0 {
-        return (Vec3A::ZERO, false);
+        return radiance;
     }
     // As on the bounce-hit path, a delta or non-evaluable previous vertex
     // means NEE could not have found this light, so there is no competing
@@ -374,16 +413,26 @@ fn escaped_emission(
         // NEE — full weight, exactly as `prev = None` means elsewhere.
         None => None,
     };
-    let mut radiance = Vec3A::ZERO;
-    let mut covered = false;
+    // The receiver whose light links apply: the surface the ray left. The
+    // camera and a volume scatter have none, and see every light.
+    let class = match prev {
+        Some(PrevVertex::Surface(p)) => p.class,
+        _ => EVERY_CLASS,
+    };
     let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
     // The pmf at the vertex the escaping ray left: the one its NEE picked with.
     // Only lights at infinity can answer `escaped`; the rest are skipped.
-    for (light, pmf) in lights.infinite_at(from) {
+    for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
+        if !lights.illuminates(index, class) {
+            continue;
+        }
+        // NEE's alone at a continuous vertex (see `bounce_emission_weight`).
+        if competing.is_some() && lights.nee_only(index) && strategy.samples_lights() {
+            continue;
+        }
         let Some((emitted, pdf)) = light.escaped(from, direction) else {
             continue;
         };
-        covered = true;
         let weight = match (competing, pdf) {
             (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
                 let light_pdf = lights.density(pdf, pmf).max(1e-6);
@@ -396,7 +445,7 @@ fn escaped_emission(
         };
         radiance += emitted * weight;
     }
-    (radiance, covered)
+    radiance
 }
 
 /// NEE shadow test used at surface and volume vertices alike: ZERO when a
@@ -620,9 +669,11 @@ fn volume_nee<const PROFILE: bool>(
     }
     let _p = profile::scope_if::<PROFILE>(Section::VolumeLighting);
     let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
-    let Some((light, pmf)) = lights.pick_at(p, nee[0]) else {
+    // A volume-region scatter belongs to no prim, so every light reaches it.
+    let Some((index, pmf)) = lights.pick_index_at(p, nee[0]) else {
         return Vec3A::ZERO;
     };
+    let light = lights.light(index);
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
         return Vec3A::ZERO;
     };
@@ -636,15 +687,20 @@ fn volume_nee<const PROFILE: bool>(
     }
     let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
-        .with_mask(crate::ray::MASK_SHADOW);
+        .with_mask(lights.shadow_mask(index));
     let tr =
         shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, s.distance, vertex, stats);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
     let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
-    // The phase function is its own pdf, in solid angle.
-    let weight = strategy.light_weight(light_pdf, PdfSolidAngle::from_measure(phase_val));
+    // The phase function is its own pdf, in solid angle. A shadow-linked
+    // light has no competing bounce strategy (see `bounce_emission_weight`).
+    let weight = if lights.nee_only(index) {
+        1.0
+    } else {
+        strategy.light_weight(light_pdf, PdfSolidAngle::from_measure(phase_val))
+    };
     s.radiance * phase_val * tr * weight / light_pdf.get()
 }
 
@@ -964,15 +1020,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // by chance, so it is a bounce-side MIS event just like hitting
             // an emissive surface.
             let unit_direction = Vec3A::normalize(ray.direction());
-            let (mut background, covered) =
-                escaped_emission(&prev, lights, unit_direction, strategy);
-            if !covered {
-                // Nothing at infinity covers this direction — keep the
-                // built-in sky gradient so scenes without an environment
-                // light look as they always have.
-                let t = 0.5 * (unit_direction.y + 1.0);
-                background += (1.0 - t) * Vec3A::new(1.0, 1.0, 1.0) + t * Vec3A::new(0.5, 0.7, 1.0);
-            }
+            let background = escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy);
             // Segment emission is already weighted; the background pays the
             // volume transmittance of the final segment.
             terminal = vol_emit + vol_tr * background;
@@ -1010,6 +1058,9 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // way the emission pays the arriving segment's attenuation (an
         // emitter seen through tinted glass or smoke must dim).
         let cos_o = ray.direction().normalize().dot(rec.normal).abs();
+        // The receiver's light-link class, for NEE here and for whatever the
+        // bounce leaving this vertex collects.
+        let class_here = world.light_class(hit.geom_id);
         // The material's per-hit work (pattern network, textures), done once
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
@@ -1049,11 +1100,17 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // `sample_li` returns `None` when the light cannot be reached from
         // this point at all — below a dome's horizon, or a degenerate
         // coincident point.
-        if let Some((light, pmf)) = strategy
+        // A picked light that does not illuminate this receiver contributes
+        // nothing, and its pick probability stays what it was, so the bounce
+        // side, which zeroes the same light, still describes one strategy.
+        if let Some((light_index, pmf)) = strategy
             .samples_lights()
-            .then(|| lights.pick_at(rec.p, nee_s[0]))
+            .then(|| lights.pick_index_at(rec.p, nee_s[0]))
             .flatten()
-            && let Some(ls) = light.sample_li(rec.p, nee_s[1], nee_s[2])
+            && lights.illuminates(light_index, class_here)
+            && let Some(ls) = lights
+                .light(light_index)
+                .sample_li(rec.p, nee_s[1], nee_s[2])
         {
             stats.light_samples += 1;
             let light_dir_unit = ls.direction;
@@ -1075,7 +1132,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
             let mut visibility = || {
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
-                    .with_mask(crate::ray::MASK_SHADOW);
+                    .with_mask(lights.shadow_mask(light_index));
                 let tr = shadow_transmittance::<PROFILE>(
                     world,
                     volumes,
@@ -1108,7 +1165,13 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     }
                     _ => brdf_pdf,
                 });
-                let weight = strategy.light_weight(light_pdf, bounce_pdf);
+                // A shadow-linked light is NEE's alone here: the bounce side
+                // collects none of it at a continuous vertex.
+                let weight = if lights.nee_only(light_index) {
+                    1.0
+                } else {
+                    strategy.light_weight(light_pdf, bounce_pdf)
+                };
                 // `brdf_value` already carries the geometric cosine —
                 // `Material::eval` returns `brdf · |cos|` (unsigned, so a
                 // continuous transmission lobe can see a light behind the
@@ -1217,6 +1280,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     // A BSDF (or guide-mixture) pdf, in solid angle.
                     pdf: PdfSolidAngle::from_measure(sample.pdf),
                     delta: sample.delta,
+                    class: class_here,
                     #[cfg(debug_assertions)]
                     check: (ray.clone(), rec, mat, dir),
                     #[cfg(not(debug_assertions))]

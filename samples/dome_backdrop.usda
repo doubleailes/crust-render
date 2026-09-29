@@ -1,6 +1,14 @@
 #usda 1.0
 (
-    doc = "Lights at infinity: a UsdLuxDomeLight carrying a lat-long HDRI (sky_env.exr, with a small very bright sun disc that importance sampling has to find) and a UsdLuxDistantLight for the sharp key. Neither has scene geometry — bounce rays find them by escaping, and the dome is the background (there is no built-in sky)."
+    doc = """A backdrop in front of the lighting dome — the Moana island's sky rig in miniature.
+
+Two DomeLights with different jobs. "Hdri" (warm, uniform) lights and shadows
+everything and is what the mirror sphere reflects. "Backdrop" (blue, uniform)
+is linked to nothing (collection:lightLink:includeRoot = 0), so it lights
+nothing, and crust imports it as a backdrop: camera rays that escape see it
+alone, in front of the Hdri, and no other ray sees it. Deactivate "Backdrop"
+and every pixel that shows geometry, the mirror included, renders identically;
+only the sky changes."""
     defaultPrim = "World"
     upAxis = "Y"
 )
@@ -16,38 +24,23 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
     }
 
-    # The environment. `intensity` scales the map; the prim's rotation
-    # turns the sky, which is why the sun in the HDRI lands where it does.
-    def DomeLight "Sky"
+    def DomeLight "Hdri"
     {
         float inputs:intensity = 1.0
-        color3f inputs:color = (1, 1, 1)
-        asset inputs:texture:file = @sky_env.exr@
-        token inputs:texture:format = "latlong"
-        float xformOp:rotateY = 20
-        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+        color3f inputs:color = (1, 0.9, 0.7)
     }
 
-    # The key. `inputs:angle` is the source's angular diameter; with
-    # `inputs:normalize` on, `intensity` is the illuminance (lux) on a surface
-    # facing the sun, so widening the angle softens the shadow without
-    # changing exposure. Without it, `intensity` would be the sun disk's
-    # *luminance* in nits (UsdLux) and 2.2 nits over a 1.5° disk is black.
-    def DistantLight "Sun"
+    def DomeLight "Backdrop"
     {
-        bool inputs:normalize = 1
-        float inputs:intensity = 2.2
-        float inputs:angle = 1.5
-        color3f inputs:color = (1.0, 0.94, 0.82)
-        float xformOp:rotateY = 40
-        float xformOp:rotateX = -48
-        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+        float inputs:intensity = 1.0
+        color3f inputs:color = (0.1, 0.3, 0.9)
+        uniform bool collection:lightLink:includeRoot = 0
     }
 
-    def Sphere "Chrome" (prepend apiSchemas = ["MaterialBindingAPI"])
+    def Sphere "Mirror" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
         double radius = 1.0
-        rel material:binding = </World/Looks/Metal>
+        rel material:binding = </World/Looks/Mirror>
         double3 xformOp:translate = (-1.6, 1.0, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -70,15 +63,15 @@ def Xform "World"
 
     def Scope "Looks"
     {
-        def Material "Metal"
+        def Material "Mirror"
         {
-            token outputs:surface.connect = </World/Looks/Metal/Shader.outputs:surface>
+            token outputs:surface.connect = </World/Looks/Mirror/Shader.outputs:surface>
             def Shader "Shader"
             {
                 uniform token info:id = "crust:openpbr"
-                color3f inputs:baseColor = (0.92, 0.9, 0.86)
+                color3f inputs:baseColor = (0.95, 0.95, 0.95)
                 float inputs:baseMetalness = 1.0
-                float inputs:specularRoughness = 0.08
+                float inputs:specularRoughness = 0.0
                 token outputs:surface
             }
         }
@@ -113,11 +106,10 @@ def Scope "Render"
 {
     def RenderSettings "settings"
     {
-        int2 resolution = (480, 270)
-        int crust:samplesPerPixel = 96
+        int2 resolution = (240, 136)
+        int crust:samplesPerPixel = 32
         int crust:maxDepth = 8
-        int crust:minSamplesPerPixel = 32
+        int crust:minSamplesPerPixel = 16
         float crust:varianceThreshold = 0.02
-        int crust:frame = 0
     }
 }

@@ -135,3 +135,98 @@ fn power_sharpens_balance() {
     );
     assert!(power > balance, "power {power} <= balance {balance}");
 }
+
+/// A dome hidden from the camera: a camera ray escaping past it collects
+/// black, while a bounce ray still collects the dome, at the same weight as
+/// when it was visible.
+#[test]
+fn a_camera_invisible_dome_is_black_to_the_camera_only() {
+    use super::path::escaped_emission;
+    use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT};
+    use crate::{DomeLight, LightList};
+    use glam::{Mat3A, Vec3A};
+    let dome = || DomeLight::new(Vec3A::new(0.2, 0.4, 0.8), None, Mat3A::IDENTITY);
+    let mut hidden = LightList::new();
+    hidden.add_masked(dome(), crate::RayMask(MASK_ALL.0 & !MASK_CAMERA.0));
+    let mut shown = LightList::new();
+    shown.add(dome());
+    let s = SamplingStrategy::PowerMis;
+    let dir = Vec3A::Y;
+    assert_eq!(
+        escaped_emission(&None, &hidden, dir, MASK_CAMERA, s),
+        Vec3A::ZERO
+    );
+    assert_eq!(
+        escaped_emission(&None, &hidden, dir, MASK_INDIRECT, s),
+        escaped_emission(&None, &shown, dir, MASK_INDIRECT, s)
+    );
+    assert_eq!(
+        escaped_emission(&None, &shown, dir, MASK_CAMERA, s),
+        Vec3A::new(0.2, 0.4, 0.8)
+    );
+    // `domeLightCameraVisibility = false` hides it the same way.
+    shown.hide_infinite_from_camera();
+    assert_eq!(
+        escaped_emission(&None, &shown, dir, MASK_CAMERA, s),
+        Vec3A::ZERO
+    );
+}
+
+/// A backdrop stands in front of the HDRI for camera rays and does not
+/// exist for any other: each ray category collects exactly one of them.
+#[test]
+fn a_backdrop_is_seen_by_camera_rays_alone() {
+    use super::path::escaped_emission;
+    use crate::ray::{MASK_CAMERA, MASK_INDIRECT};
+    use crate::{DomeLight, LightList};
+    use glam::{Mat3A, Vec3A};
+    let hdri = Vec3A::new(1.0, 0.9, 0.7);
+    let backdrop = Vec3A::new(0.1, 0.3, 0.9);
+    let mut lights = LightList::new();
+    lights.add(DomeLight::new(hdri, None, Mat3A::IDENTITY));
+    lights.add_backdrop(DomeLight::new(backdrop, None, Mat3A::IDENTITY));
+    let s = SamplingStrategy::PowerMis;
+    for dir in [Vec3A::Y, -Vec3A::Y, Vec3A::X] {
+        assert_eq!(
+            escaped_emission(&None, &lights, dir, MASK_CAMERA, s),
+            backdrop
+        );
+        assert_eq!(
+            escaped_emission(&None, &lights, dir, MASK_INDIRECT, s),
+            hdri
+        );
+    }
+    // A backdrop alone lights nothing.
+    let mut only = LightList::new();
+    only.add_backdrop(DomeLight::new(backdrop, None, Mat3A::IDENTITY));
+    assert_eq!(
+        escaped_emission(&None, &only, Vec3A::Y, MASK_INDIRECT, s),
+        Vec3A::ZERO
+    );
+    // The global switch hides the backdrop too: camera rays see nothing.
+    lights.hide_infinite_from_camera();
+    assert_eq!(
+        escaped_emission(&None, &lights, Vec3A::Y, MASK_CAMERA, s),
+        Vec3A::ZERO
+    );
+    assert_eq!(
+        escaped_emission(&None, &lights, Vec3A::Y, MASK_INDIRECT, s),
+        hdri
+    );
+}
+
+/// With no light at infinity an escaping ray is black: there is no
+/// built-in sky.
+#[test]
+fn nothing_at_infinity_is_black() {
+    use super::path::escaped_emission;
+    use crate::LightList;
+    use crate::ray::MASK_CAMERA;
+    use glam::Vec3A;
+    let s = SamplingStrategy::PowerMis;
+    let none = LightList::new();
+    assert_eq!(
+        escaped_emission(&None, &none, Vec3A::Y, MASK_CAMERA, s),
+        Vec3A::ZERO
+    );
+}

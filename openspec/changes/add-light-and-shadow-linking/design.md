@@ -61,21 +61,33 @@ bitset over classes: `illuminates(class)` for light linking and
 `shadowed_by(class)` for shadow linking. Classes are deduplicated, so a scene
 with ten linked lights usually has a handful of classes, not one per prim.
 
-- Membership is tested on the geometry's prim path and its ancestors, using
-  `UsdCollectionAPI` rules: the nearest path in `includes` / `excludes` decides,
-  with `includeRoot` as the fallback. `expandPrims` is the default rule,
-  `explicitOnly` matches only the named paths, and `expandPrimsAndProperties`
-  behaves like `expandPrims` because crust has no property-level geometry.
-  Included collections are resolved recursively, and a cycle is refused with a
-  `WARN`.
+- Membership is openusd's own: `usd::Collection::compute_membership_query`
+  gives a `MembershipQuery` whose `is_path_included` applies the
+  `UsdCollectionAPI` rules (nearest opinion in `includes` / `excludes` decides,
+  `includeRoot` as the fallback, `expandPrims` by default, `explicitOnly`
+  matching only the named paths, included collections merged with cycles
+  broken). crust adds no `collections.rs`. An expression-mode collection
+  (`membershipExpression`) is refused with a `WARN` and read as the default.
 - A collection with `includeRoot = true` (UsdLux's fallback) and no
   `includes` / `excludes` is *default*: it builds nothing.
-- **Trap:** the streaming import does not keep prim paths after emission, so the
-  class has to be assigned while each geometry is emitted, which means lights must
-  be resolved first. Either resolve light collections in a light-first pass over
-  the stage (lights are few), or record `(geom_id, path)` and assign classes after
-  traversal. The second option costs memory proportional to the prim count on
-  Moana-scale scenes, so prefer the first.
+- **Classes are assigned after traversal.** A light can be traversed after the
+  geometry it links (and, streaming, in another chunk whose stage is gone), so
+  nothing is decided at emission. Instead, as the traversal dispatches each prim
+  that emits geometry, it records one entry: the first `geom_id` that prim
+  assigned, and its stage path interned. `geom_id`s are handed out in traversal
+  order, so one entry covers a mesh, a native instance, a whole PointInstancer
+  and an area light's own emitter. Each linked light's `MembershipQuery` is
+  computed when the light is met, while its chunk's stage is live. After the
+  last chunk, each distinct path is evaluated against every linked light, the
+  answer vectors are deduplicated into classes, and the per-`geom_id` class
+  table is filled from the runs. This extends the `light_links` module of
+  `light-camera-visibility-and-link-exclusion`: that change's "covers no
+  receiver" test becomes "the light's illuminated-class set is empty".
+  *Rejected:* a light-first pass over the index stage. Both production scenes
+  would allow it (ALab's and Moana's rigs come in through sublayers and
+  references, not payloads), but it composes most of the index stage a second
+  time (composition is ALab's largest traversal cost) and cannot see a linked
+  light behind a payload.
 - **Instances.** The receiver is the top-level instance's `geom_id`, so
   membership is that of the instance prim. A collection target inside a native
   instance's prototype, or one PointInstancer instance, cannot be told apart
@@ -190,10 +202,25 @@ light gives its member counts. An `INFO` line would violate the bounded-INFO rul
   linking exists. Verify with `scripts/bench_ab.sh` on `usdlux.usda` (unlinked:
   expect noise) and the new sample.
 
+## Follow-ups (scoped separately)
+
+- **Restore MIS for shadow-linked lights** with a Cycles-style extra ray that finds
+  the light behind excluded blockers and MISes it. Motivated by the measurement in
+  `openspec/specs/lighting/design.md`: NEE-only costs nothing on the diffuse
+  sample, but relMSE rises 2.1× (median) to 3.1× (mean) on the same scene in rough
+  metal. It matters for ALab, whose key light (`lgt_sun_area_*`) is shadow-linked
+  past the louvered windows.
+- **Per-class renormalisation of the light pick.** Removes the NEE picks wasted on
+  lights a receiver is not linked to. A `density` / `pmf` pair change: it must
+  land on the NEE and bounce sides together, with `light_cache` in step.
+- **A per-ray occluder filter in `crust-rt`** (a `geom_id` bitset on the occlusion
+  query), if a real scene refuses shadow-linked lights for want of mask bits. ALab
+  needs 3 occluder classes of the 28 available.
+
 ## Migration Plan
 
-1. Membership resolution and classes (D1), with unit tests on `includes` /
-   `excludes` / nesting / `includeRoot` / `explicitOnly`.
+1. Membership resolution and classes (D1), with tests on `includes` /
+   `excludes` / nesting / `includeRoot` / `explicitOnly` through openusd's query.
 2. Light linking (D2) on all three sites, plus learned-selection training (D4).
 3. Shadow linking occlusion (D3), then its bounce-side rule.
 4. The sample, spec sync, and the design-record and README gap updates.
@@ -203,7 +230,5 @@ Each step is independently shippable, and each ends with
 
 ## Open Questions
 
-- Does `openusd-schemas` 0.7 expose `UsdCollectionAPI` membership publicly? If it
-  does, D1 uses it instead of `collections.rs`.
 - Should the NEE-only rule (D3) be replaced by the Cycles-style extra ray in the
   same change, or only once the sample's relMSE shows it matters?

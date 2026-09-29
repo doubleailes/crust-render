@@ -13,7 +13,7 @@
 
 use crate::aabb::AABB;
 use crate::medium::hg_phase;
-use crate::ray::Ray;
+use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Mat4, Vec3, Vec3A};
 use openqmc::pcg::Rng;
 
@@ -192,6 +192,10 @@ pub struct VolumeRegion {
     field: DensityField,
     /// `max_channel(σₐ + σₛ) · field.max_value()` — the tracking majorant.
     majorant_sigma_t: f32,
+    /// Which ray categories the region acts on, as a geometry's mask does:
+    /// [`MASK_ALL`] by default. Shadow linking rewrites its shadow bits, so a
+    /// light whose `shadowLink` excludes the region is not attenuated by it.
+    pub mask: RayMask,
 }
 
 impl VolumeRegion {
@@ -243,6 +247,7 @@ impl VolumeRegion {
             emission,
             field,
             majorant_sigma_t,
+            mask: MASK_ALL,
         }
     }
 
@@ -405,7 +410,7 @@ impl Volumes {
         let mut spans = Vec::new();
         let mut majorant = 0.0f32;
         for (i, region) in self.regions.iter().enumerate() {
-            if region.majorant_sigma_t <= 0.0 {
+            if region.majorant_sigma_t <= 0.0 || !ray.mask().sees(region.mask) {
                 continue;
             }
             if !region.world_aabb.hit(ray.rt(), t_eps, t_max) {

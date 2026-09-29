@@ -39,7 +39,7 @@
 use crate::camera::Camera;
 use crate::light::{Light, LightList};
 use crate::material::ShadingPoint;
-use crate::ray::{MASK_INDIRECT, MASK_SHADOW, Ray};
+use crate::ray::{MASK_INDIRECT, Ray};
 use crate::rt_world::World;
 use crate::{PathSampler, Vec3A};
 use rayon::prelude::*;
@@ -205,11 +205,17 @@ pub(crate) fn train(
                     let cos = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let sp = ShadingPoint::new(hit.mat, &ray, &hit.rec, cos);
                     let p = hit.rec.p;
+                    // Trained through the same links NEE applies, or the
+                    // cell tables would favour lights this receiver cannot use.
+                    let class = world.light_class(hit.geom_id);
                     let contrib = list
                         .iter()
                         .enumerate()
                         .map(|(k, light)| {
                             let mut sum = 0.0f32;
+                            if !lights.illuminates(k, class) {
+                                return sum;
+                            }
                             for s in 0..LIGHT_SAMPLES {
                                 let d = vertex
                                     .new_domain(8 + (k * LIGHT_SAMPLES + s) as i32)
@@ -232,7 +238,7 @@ pub(crate) fn train(
                                 }
                                 let shadow = Ray::new(p, ls.direction)
                                     .with_time(ray.time())
-                                    .with_mask(MASK_SHADOW);
+                                    .with_mask(lights.shadow_mask(k));
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.

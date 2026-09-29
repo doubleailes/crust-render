@@ -55,11 +55,11 @@ fn loads_openpbr_showcase_usda() {
         "expected at least 10 hittables, got {}",
         scene.world.count()
     );
-    // Two SphereLights → two Light entries.
+    // Two SphereLights and the sky dome → three Light entries.
     assert_eq!(
         scene.lights.count(),
-        2,
-        "expected 2 lights (SphereLight × 2), got {}",
+        3,
+        "expected 3 lights (SphereLight × 2 + DomeLight), got {}",
         scene.lights.count()
     );
     // RenderSettings authored 640×360.
@@ -1088,6 +1088,58 @@ fn loads_domelight_usda() {
         "infinite lights must not add hittables, got {} geometries",
         scene.world.count()
     );
+}
+
+/// `samples/light_linking.usda`: Rim and Fill author light links, Key a
+/// shadow link, so two lights carry illuminated-class sets and one is
+/// sampled by NEE alone.
+#[test]
+fn loads_light_linking_usda() {
+    let scene =
+        Scene::from_usd(&sample("light_linking.usda")).expect("failed to open light_linking.usda");
+    assert_eq!(scene.lights.count(), 3);
+    let links = scene.lights.links().expect("the sample authors links");
+    assert_eq!(links.illuminates.iter().filter(|s| s.is_some()).count(), 2);
+    assert_eq!(links.nee_only.iter().filter(|&&n| n).count(), 1);
+    // The hero, the floor and the rest are three receiver classes.
+    let class = |z: f32, y: f32| {
+        let ray = Ray::new(Vec3A::new(0.0, y, z), -Vec3A::Z).with_mask(crust_core::MASK_CAMERA);
+        scene
+            .world
+            .light_class(scene.world.intersect(&ray, 1e-3, 1e4).expect("hit").geom_id)
+    };
+    let (hero, floor) = (class(5.0, 0.9), {
+        let ray =
+            Ray::new(Vec3A::new(-5.0, 5.0, 5.0), -Vec3A::Y).with_mask(crust_core::MASK_CAMERA);
+        scene.world.light_class(
+            scene
+                .world
+                .intersect(&ray, 1e-3, 1e4)
+                .expect("floor")
+                .geom_id,
+        )
+    });
+    assert_ne!(hero, floor);
+    let lit_by = |class: u16| {
+        (0..3)
+            .filter(|&i| scene.lights.illuminates(i, class))
+            .count()
+    };
+    assert_eq!(lit_by(hero), 3, "Key, Fill and Rim all light the hero");
+    assert_eq!(lit_by(floor), 1, "Key alone lights the floor");
+}
+
+/// `samples/dome_backdrop.usda`: the lighting dome is the one light, the
+/// backdrop dome (linked to nothing) is what the camera sees in front of it.
+#[test]
+fn loads_dome_backdrop_usda() {
+    let scene =
+        Scene::from_usd(&sample("dome_backdrop.usda")).expect("failed to open dome_backdrop.usda");
+    assert_eq!(scene.lights.count(), 1, "only the Hdri illuminates");
+    assert_eq!(scene.lights.backdrops().len(), 1);
+    assert!(scene.lights.escapes_to_backdrop(crust_core::MASK_CAMERA));
+    assert!(!scene.lights.escapes_to_backdrop(crust_core::MASK_INDIRECT));
+    assert_eq!(scene.world.count(), 3);
 }
 
 /// `inputs:texture:file` is resolved against the USD layer's directory and

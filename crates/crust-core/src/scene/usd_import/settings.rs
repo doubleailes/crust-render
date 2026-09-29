@@ -71,6 +71,22 @@ pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
     s.camera_rel().targets().ok()?.into_iter().next()
 }
 
+/// Whether the camera sees the lights at infinity at all: Hydra's
+/// `domeLightCameraVisibility` render setting (the name hdEmbree and usdview
+/// use), read off the `RenderSettings` prim, with `crust:domeLightCameraVisibility`
+/// winning when both are authored. Default `true`. `false` hides every dome,
+/// distant light and backdrop from camera rays whatever the lights themselves
+/// author; how they illuminate is unchanged.
+pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
+    let Some(path) = render_settings_path(stage) else {
+        return true;
+    };
+    let prim = prim_at(stage, path);
+    custom_bool(&prim, "crust:domeLightCameraVisibility")
+        .or_else(|| custom_bool(&prim, "domeLightCameraVisibility"))
+        .unwrap_or(true)
+}
+
 pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let Some(path) = render_settings_path(stage) else {
         return default_settings();

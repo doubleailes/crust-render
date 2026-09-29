@@ -1715,3 +1715,211 @@ fn non_finite_shaping_inputs_fall_back() {
     assert_eq!(r, Vec3A::ONE);
     assert!(assert_mis_sides_agree(&scene, Vec3A::new(0.3, 0.2, 0.0)) > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Camera visibility and lights linked to nothing
+// ---------------------------------------------------------------------------
+
+/// How many of the stage's lights at infinity a ray of category `mask`
+/// sees on escaping.
+fn infinite_seen(scene: &Scene, mask: crust_core::RayMask) -> usize {
+    scene.lights.infinite_seen_by(Vec3A::ZERO, mask).count()
+}
+
+fn camera_hits(scene: &Scene) -> bool {
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, 10.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+    scene.world.intersect(&ray, 1e-3, 100.0).is_some()
+}
+
+fn indirect_hits(scene: &Scene) -> bool {
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, 10.0), -Vec3A::Z).with_mask(crust_core::MASK_INDIRECT);
+    scene.world.intersect(&ray, 1e-3, 100.0).is_some()
+}
+
+#[test]
+fn the_renderman_camera_primvar_hides_a_dome_from_the_camera_only() {
+    let scene = load(
+        "dome_ri_camera",
+        r#"
+    def DomeLight "Sky"
+    {
+        custom int primvars:ri:attributes:visibility:camera = 0
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 1, "it still lights the scene");
+    assert_eq!(infinite_seen(&scene, MASK_CAMERA), 0);
+    assert_eq!(infinite_seen(&scene, crust_core::MASK_INDIRECT), 1);
+}
+
+#[test]
+fn a_dome_is_camera_visible_by_default_and_crust_beats_renderman() {
+    let default = load("dome_default", "    def DomeLight \"Sky\"\n    {\n    }");
+    assert_eq!(infinite_seen(&default, MASK_CAMERA), 1);
+    let both = load(
+        "dome_crust_wins",
+        r#"
+    def DomeLight "Sky"
+    {
+        bool crust:light:cameraVisible = true
+        custom int primvars:ri:attributes:visibility:camera = 0
+    }"#,
+    );
+    assert_eq!(infinite_seen(&both, MASK_CAMERA), 1);
+}
+
+#[test]
+fn the_renderman_camera_primvar_shows_an_area_light_and_crust_beats_it() {
+    let shown = load(
+        "sphere_ri_camera",
+        r#"
+    def SphereLight "L"
+    {
+        custom int primvars:ri:attributes:visibility:camera = 1
+    }"#,
+    );
+    assert!(camera_hits(&shown));
+    let hidden = load(
+        "sphere_crust_wins",
+        r#"
+    def SphereLight "L"
+    {
+        bool crust:light:cameraVisible = false
+        custom int primvars:ri:attributes:visibility:camera = 1
+    }"#,
+    );
+    assert!(!camera_hits(&hidden));
+    assert!(indirect_hits(&hidden), "still found by bounces");
+}
+
+/// The Moana rig: an HDRI whose link excludes only the other *light*, and a
+/// backdrop whose link excludes every receiver.
+#[test]
+fn a_dome_linked_to_nothing_becomes_a_backdrop() {
+    let scene = load(
+        "backdrop",
+        r#"
+    def DomeLight "Hdri"
+    {
+        prepend rel collection:lightLink:excludes = </World/Backdrop>
+    }
+    def DomeLight "Backdrop"
+    {
+        prepend rel collection:lightLink:excludes = </World>
+    }
+    def Sphere "Ball"
+    {
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 1, "only the HDRI illuminates");
+    assert_eq!(scene.lights.backdrops().len(), 1);
+    assert!(scene.lights.escapes_to_backdrop(MASK_CAMERA));
+    assert!(!scene.lights.escapes_to_backdrop(crust_core::MASK_INDIRECT));
+}
+
+/// The link is judged once every receiver is in, so a light traversed
+/// before the geometry it excludes — and, streamed, in a different chunk
+/// (four children of the root make four chunks) — is judged the same.
+#[test]
+fn a_link_is_judged_after_the_last_receiver() {
+    let scene = load(
+        "backdrop_streamed",
+        r#"
+    def DomeLight "Backdrop"
+    {
+        prepend rel collection:lightLink:excludes = </World>
+    }
+    def Sphere "A"
+    {
+    }
+    def Sphere "B"
+    {
+    }
+    def Xform "C"
+    {
+        def Sphere "Deep"
+        {
+        }
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 0);
+    assert_eq!(scene.lights.backdrops().len(), 1);
+}
+
+#[test]
+fn a_partial_link_is_ignored_and_lights_everything() {
+    let scene = load(
+        "partial_link",
+        r#"
+    def DomeLight "Sky"
+    {
+        prepend rel collection:lightLink:excludes = </World/A>
+    }
+    def Sphere "A"
+    {
+    }
+    def Sphere "B"
+    {
+    }"#,
+    );
+    assert_eq!(scene.lights.count(), 1);
+    assert!(scene.lights.backdrops().is_empty());
+}
+
+#[test]
+fn an_area_light_linked_to_nothing_keeps_only_its_camera_geometry() {
+    let hidden = load(
+        "area_nothing",
+        r#"
+    def SphereLight "L"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+    }"#,
+    );
+    assert_eq!(hidden.lights.count(), 0);
+    assert!(!camera_hits(&hidden) && !indirect_hits(&hidden));
+    let shown = load(
+        "area_nothing_visible",
+        r#"
+    def SphereLight "L"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+        bool crust:light:cameraVisible = true
+    }"#,
+    );
+    assert_eq!(shown.lights.count(), 0);
+    assert!(camera_hits(&shown), "the camera still sees it");
+    assert!(
+        !indirect_hits(&shown),
+        "no bounce can find it, so it lights nothing"
+    );
+}
+
+#[test]
+fn dome_light_camera_visibility_false_hides_every_dome_and_backdrop() {
+    let scene = load_with_settings(
+        "dome_camera_off",
+        r#"
+    def DomeLight "Hdri"
+    {
+    }
+    def DomeLight "Backdrop"
+    {
+        prepend rel collection:lightLink:excludes = </World>
+    }
+    def Sphere "Ball"
+    {
+    }"#,
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        bool domeLightCameraVisibility = false
+    }
+}"#,
+    );
+    assert_eq!(scene.lights.count(), 1);
+    assert_eq!(infinite_seen(&scene, MASK_CAMERA), 0);
+    assert_eq!(infinite_seen(&scene, crust_core::MASK_INDIRECT), 1);
+    assert!(!scene.lights.escapes_to_backdrop(MASK_CAMERA));
+}
