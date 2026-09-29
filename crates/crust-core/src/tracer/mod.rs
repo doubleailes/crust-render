@@ -14,6 +14,7 @@ use crate::volume::Volumes;
 use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
+pub(crate) use path::cutout_through;
 mod settings;
 
 use path::{K_CAMERA, K_TIME, ray_cones_enabled, trace_path};

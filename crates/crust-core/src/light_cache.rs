@@ -233,10 +233,26 @@ pub(crate) fn train(
                                 let shadow = Ray::new(p, ls.direction)
                                     .with_time(ray.time())
                                     .with_mask(MASK_SHADOW);
+                                // The integrator's visibility, cutouts included:
+                                // a light seen through a leaf card is trained at
+                                // the share the card lets through.
+                                let mut through = 1.0;
                                 if world.occluded(&shadow, 0.001, ls.distance - 0.001) {
-                                    continue;
+                                    through = if world.has_cutouts() {
+                                        crate::tracer::cutout_through(
+                                            world,
+                                            &shadow,
+                                            ls.distance - 0.001,
+                                            &mut crate::stats::RayStats::default(),
+                                        )
+                                    } else {
+                                        0.0
+                                    };
+                                    if through == 0.0 {
+                                        continue;
+                                    }
                                 }
-                                let e = utils::luminance(c) / ls.pdf.get();
+                                let e = through * utils::luminance(c) / ls.pdf.get();
                                 if e.is_finite() {
                                     sum += e;
                                 }

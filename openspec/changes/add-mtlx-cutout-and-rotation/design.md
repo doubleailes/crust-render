@@ -26,13 +26,17 @@ isn't there, which the integrator has to know before it shades.
   would have made every OPAQUE glTF material with a textured alpha a cutout:
   correct, and expensive. The chain is built only for a mode that doesn't
   fold.
-- **D4 — Bounce side stochastic, shadow side a product.** `present_hit` meets
+- **D4 — Bounce side stochastic, shadow side a product.** `pass_cutouts` meets
   a hit with probability `opacity` (a `pcg::Rng` off `K_CUTOUT`) and otherwise
-  asks for the next hit along the same ray (`t_min` just past it). `t`, the
-  medium, the volume regions and the cone then all still measure from the
-  segment's origin. `cutout_transmittance` multiplies `1 − opacity` over every
-  crossing of a shadow ray and stops at the first opaque hit. Both estimate
-  one visibility, pinned by the strategy-agreement test.
+  asks for the next hit along the same line. It restarts the ray at the hit
+  (`restarted`) rather than raising `t_min`, which would break the
+  `(0.001, ∞)` constant propagation into the kernel, and adds the hit's `t`
+  back onto the next one. `t`, the medium, the volume regions and the cone
+  then all still measure from the segment's origin. `cutout_through` (under
+  `cutout_shadow`) multiplies `1 − opacity` over every crossing of a shadow
+  ray and stops at the first opaque hit. Both point-sample the opacity and
+  follow the same 256 crossings, so they estimate one visibility, pinned by
+  the strategy-agreement, footprint and crossing-limit tests.
 - **D5 — Gated twice.** `World::has_cutouts` is fixed at commit. Without a
   cutout material the integrator takes exactly its old code. With one, a
   shadow ray still asks `occluded` first and walks only when it is blocked.
@@ -51,5 +55,9 @@ isn't there, which the integrator has to know before it shades.
   any-hit filter in `crust-rt` is the fix, and is a kernel change.
 - Opacity is asked with the shadow ray's direction on one side and the path's
   on the other. A view-dependent opacity sees opposite views.
-- The learned light cache trains through cutouts as if they were opaque. It
-  is a guide only, so this costs variance, not bias.
+- The learned light cache's training shadow rays see cutouts as NEE does;
+  its training paths still stop at a cutout as if it were present. It is a
+  guide only, so that costs variance, not bias.
+- Opacity is point-sampled, so a distant cutout reads its alpha map's finest
+  level: more texture traffic, in exchange for NEE and the bounce side
+  agreeing.

@@ -1330,11 +1330,16 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
     // Alpha. `alpha_mode` is a uniform, so it folds, and the graph's two
     // `ifequal`s select one branch outright: OPAQUE never reads `alpha`,
     // which exporters connect to a texture's alpha whatever the mode, and
-    // folding the select through that texture is not possible.
+    // folding the select through that texture is not possible. Nor is it
+    // compiled there: compiling it would load that texture, or report its
+    // unsupported nodes, for an input the surface cannot show.
     let mode = b.get("alpha_mode");
+    let folded = b.c.fold(mode).map(|v| v.x());
+    if folded == Some(0.0) {
+        return; // OPAQUE
+    }
     let alpha = b.get("alpha");
-    let opacity = match b.c.fold(mode).map(|v| v.x()) {
-        Some(0.0) => return,               // OPAQUE
+    let opacity = match folded {
         Some(1.0) => alpha_mask(b, alpha), // MASK
         Some(_) => alpha,                  // BLEND
         None => {

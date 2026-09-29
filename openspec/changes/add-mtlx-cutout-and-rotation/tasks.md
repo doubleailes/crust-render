@@ -8,7 +8,7 @@
 ## 2. crust-core
 
 - [x] 2.1 `Material::has_cutout` / `opacity`; `MtlxMaterial` runs the opacity's own program (D2); `World::has_cutouts`.
-- [x] 2.2 `present_hit` and `cutout_transmittance` (D4, D5); `--stats` counters. Verify: every sample scene renders bit-identically at 16 spp, cornellbox's instruction count unchanged within noise, strategies agree through a cutout, an opaque occluder still blocks with and without cutouts in the world.
+- [x] 2.2 `pass_cutouts` and `cutout_through` / `cutout_shadow` (D4, D5); `--stats` counters. Verify: every sample scene renders bit-identically at 16 spp, cornellbox's instruction count unchanged within noise, strategies agree through a cutout, an opaque occluder still blocks with and without cutouts in the world.
 - [x] 2.3 `Frame::rotated` in `closure::prepare`. Verify with probe tests of every rotated leaf and the furnace on a rotated anisotropic metal.
 
 ## 3. Native cutouts

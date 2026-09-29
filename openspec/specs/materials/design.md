@@ -581,9 +581,12 @@
   `crust-rt`); an unblocked ray keeps the fast answer. The opacity is asked
   with the shadow ray's direction there and the path's on the bounce side, so
   a graph whose opacity reads `viewdirection` sees opposite views on the two
-  sides. The learned light cache's training paths ignore cutouts (a guide
-  only, never bias). A walk's exit and the walk itself ignore the entered
-  object's own opacity. A segment follows at most 256 cutouts.
+  sides. The learned light cache's training shadow rays see cutouts, but
+  its training paths stop at one as if it were present (a guide only, never
+  bias). A walk's exit and the walk itself ignore the entered object's own
+  opacity. A segment follows at most 256 cutouts, on both sides. Opacity is
+  point-sampled, so a distant cutout reads its alpha map's finest level —
+  the price of NEE and the bounce side agreeing (rendering record).
 - **The throughput tables are not integrals of crust's leaves.** Measured above
   (worst +0.020 dielectric, 0.035 sheen); the follow-up, if it ever matters, is
   regenerating them from crust's leaves on the same axes. The dielectric table is
