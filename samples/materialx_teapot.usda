@@ -31,6 +31,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)]
@@ -138,6 +139,9 @@ def Scope "Render"
     {
         int2 resolution = (960, 540)
         int crust:samplesPerPixel = 128
+        # The asset's meshes are Catmull-Clark surfaces; refine them once
+        # (crust's default level is 0: smooth-shaded cages).
+        int crust:subdivisionLevel = 1
         int crust:maxDepth = 12
         int crust:minSamplesPerPixel = 32
         float crust:varianceThreshold = 0.02

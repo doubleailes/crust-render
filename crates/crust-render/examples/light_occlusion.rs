@@ -192,6 +192,7 @@ fn main() {
         frame,
         camera,
         skip_stage_teardown: true,
+        ..UsdImportOptions::default()
     };
     let scene = match crust_core::Scene::from_usd_with_options(&path, &assets, &options) {
         Ok(s) => s,

@@ -150,6 +150,7 @@ def Xform "World"
     # -------------------------------------------------------------------
     def Mesh "Plate0" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/PlateSmoothest>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -158,6 +159,7 @@ def Xform "World"
 
     def Mesh "Plate1" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/PlateSmooth>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -166,6 +168,7 @@ def Xform "World"
 
     def Mesh "Plate2" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/PlateRough>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -174,6 +177,7 @@ def Xform "World"
 
     def Mesh "Plate3" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/PlateRoughest>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -184,6 +188,7 @@ def Xform "World"
     # surroundings instead of the sky gradient.
     def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/Backdrop>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -192,6 +197,7 @@ def Xform "World"
 
     def Mesh "BackWall" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Materials/Backdrop>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]

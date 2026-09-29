@@ -66,6 +66,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4, 4, 4, 4]
         int[] faceVertexIndices = [
             0, 1, 4, 3,
@@ -87,6 +88,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4, 4]
         int[] faceVertexIndices = [
             0, 1, 4, 3,

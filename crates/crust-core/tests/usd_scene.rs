@@ -757,6 +757,7 @@ fn many_part_stage(name: &str, placements: &str) -> PathBuf {
         let look = if i % 2 == 0 { "Even" } else { "Odd" };
         parts.push_str(&format!(
             r#"        def Mesh "part{i}" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+            uniform token subdivisionScheme = "none"
             rel material:binding = </W/Looks/{look}>
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
@@ -1291,6 +1292,7 @@ def Xform "World"
 {
     def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Looks/Rock>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
@@ -1358,98 +1360,108 @@ def Xform "World"
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `samples/subdivision.usda`: five identical cube cages, four at
-/// `crust:subdivisionLevel` 0–3 and one fully edge-creased at level 3.
-/// Probed with rays rather than counts — the *shape* is what subdivision
-/// changes: the limit surface sags strictly inside the cage and rounds its
-/// corners away, while infinite creases pin the cage exactly.
+/// `samples/subdivision.usda`: six identical cube cages, differing only in
+/// what they author — no scheme (USD's fallback, `catmullClark`), `none`,
+/// `bilinear`, `catmullClark`, a fully edge-creased `catmullClark`, and a
+/// UV-textured `catmullClark` — refined at the stage's
+/// `crust:subdivisionLevel` (2). Probed with rays rather than counts — the
+/// *shape* is what subdivision changes: the limit surface sags strictly
+/// inside the cage and rounds its corners away, while `none`, bilinear
+/// refinement and infinite creases all keep the cube.
 #[test]
 fn loads_subdivision_usda() {
     let scene =
         Scene::from_usd(&sample("subdivision.usda")).expect("failed to open subdivision.usda");
 
-    // 5 cubes + floor + rect-light mesh.
+    // 6 cubes + floor + rect-light mesh.
     assert_eq!(
         scene.world.count(),
-        7,
-        "expected 7 geometries (5 cubes, floor, rect-light mesh), got {}",
+        8,
+        "expected 8 geometries (6 cubes, floor, rect-light mesh), got {}",
         scene.world.count()
     );
 
-    // Cube centers sit at x = -6 (L0), -3 (L1), 0 (L2), 3 (L3), 6 (creased),
-    // all spanning y in [0, 2]. Rays fire straight down from y = 8; the
-    // floor at y = 0 answers t = 8 for anything the cube no longer covers.
+    // Cube centers sit at x = -7.5 (no scheme: catmullClark), -4.5 (none), -1.5
+    // (bilinear), 1.5 (catmullClark), 4.5 (creased), 7.5 (textured), all
+    // spanning y in [0, 2]. Rays fire straight down from y = 8; the floor at
+    // y = 0 answers t = 8 for anything the cube no longer covers.
     let down = -crust_core::Vec3A::Y;
-    let probe = |x: f32, z: f32| {
+    let cast = |x: f32, z: f32| {
         let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 8.0, z), down);
         scene
             .world
             .intersect(&ray, 0.001, f32::INFINITY)
             .unwrap_or_else(|| panic!("the floor backs every probe (x={x}, z={z})"))
-            .rec
-            .t
     };
+    let probe = |x: f32, z: f32| cast(x, z).rec.t;
+    let (cage, none, bilinear, smooth, creased, textured) = (-7.5, -4.5, -1.5, 1.5, 4.5, 7.5);
 
-    // Down the centers: the cage tops out at y = 2 (t = 6); every subdivided
-    // top sags strictly below it, deeper than any float slop; the creased
-    // limit surface *is* the cage.
-    let t_l0 = probe(-6.0, 0.0);
-    let t_l3 = probe(3.0, 0.0);
-    let t_creased = probe(6.0, 0.0);
-    assert!((t_l0 - 6.0).abs() < 1e-3, "L0 cage top at t={t_l0}");
-    assert!(
-        t_l3 > t_l0 + 0.1,
-        "the level-3 limit surface must sag below the cage (t={t_l3})"
-    );
-    assert!(
-        (t_creased - 6.0).abs() < 1e-3,
-        "infinite creases keep the cage top (t={t_creased})"
-    );
+    // Down the centers: a cube top at y = 2 answers t = 6; the Catmull-Clark
+    // tops sag strictly below it, deeper than any float slop.
+    for (what, x) in [("none", none), ("bilinear", bilinear), ("creased", creased)] {
+        let t = probe(x, 0.0);
+        assert!((t - 6.0).abs() < 1e-3, "{what}: cube top at t={t}");
+    }
+    for (what, x) in [
+        ("no scheme", cage),
+        ("catmullClark", smooth),
+        ("textured", textured),
+    ] {
+        let t = probe(x, 0.0);
+        assert!(
+            t > 6.1,
+            "{what}: the limit surface must sag below the cage (t={t})"
+        );
+    }
 
-    // Near a top corner: the cage still stands at y = 2 there, the rounded
-    // level-3 surface has pulled away entirely (the ray falls through to the
-    // floor), and the creased cube again keeps its corner.
+    // Near a top corner: every cube still stands at y = 2 there; the rounded
+    // surfaces have pulled away entirely (the ray falls through to the
+    // floor).
     let (dx, dz) = (0.95, 0.95);
-    let c_l0 = probe(-6.0 + dx, dz);
-    let c_l3 = probe(3.0 + dx, dz);
-    let c_creased = probe(6.0 + dx, dz);
-    assert!((c_l0 - 6.0).abs() < 1e-3, "L0 corner at t={c_l0}");
+    for (what, x) in [("none", none), ("bilinear", bilinear), ("creased", creased)] {
+        let t = probe(x + dx, dz);
+        assert!((t - 6.0).abs() < 1e-3, "{what}: corner at t={t}");
+    }
+    for (what, x) in [
+        ("no scheme", cage),
+        ("catmullClark", smooth),
+        ("textured", textured),
+    ] {
+        let t = probe(x + dx, dz);
+        assert!(
+            (t - 8.0).abs() < 1e-3,
+            "{what}: the rounded corner must miss (t={t})"
+        );
+    }
+
+    // Subdivided geometry carries smooth shading normals: on the dome the
+    // normal at an off-center point tilts away from straight up, which a
+    // faceted cage top could never report; the `none` cage top reports
+    // exactly +Y.
+    let n_cage = cast(none + 0.5, 0.5).rec.normal;
     assert!(
-        (c_l3 - 8.0).abs() < 1e-3,
-        "the rounded corner must miss to the floor (t={c_l3})"
+        (n_cage.y - 1.0).abs() < 1e-5,
+        "the cage top is flat, normal {n_cage:?}"
     );
+    let n_smooth = cast(smooth + 0.5, 0.5).rec.normal;
     assert!(
-        (c_creased - 6.0).abs() < 1e-3,
-        "the creased corner stays sharp (t={c_creased})"
+        n_smooth.y < 0.999 && n_smooth.x > 1e-3 && n_smooth.z > 1e-3,
+        "the dome's smooth normal must tilt outward, got {n_smooth:?}"
     );
 
-    // Subdivided geometry carries smooth shading normals: on the level-3
-    // dome the ray-facing normal at an off-center point tilts away from
-    // straight up, which a faceted cage top could never report; the level-0
-    // cage top reports exactly +Y.
-    let normal_at = |x: f32, z: f32| {
-        let ray = crust_core::Ray::new(crust_core::Vec3A::new(x, 8.0, z), down);
-        scene
-            .world
-            .intersect(&ray, 0.001, f32::INFINITY)
-            .expect("probe hits")
-            .rec
-            .normal
-    };
-    let n_l0 = normal_at(-6.0 + 0.5, 0.5);
+    // The textured dome kept its chart through refinement: the top face is
+    // charted onto the unit square, so its middle reads about (0.5, 0.5).
+    let top = cast(textured, 0.0).rec;
+    assert!(top.has_uv, "the refined mesh dropped its UVs");
     assert!(
-        (n_l0.y - 1.0).abs() < 1e-5,
-        "the cage top is flat, normal {n_l0:?}"
-    );
-    let n_l3 = normal_at(3.0 + 0.5, 0.5);
-    assert!(
-        n_l3.y < 0.999 && n_l3.x > 1e-3 && n_l3.z > 1e-3,
-        "the dome's smooth normal must tilt outward, got {n_l3:?}"
+        (top.uv.0 - 0.5).abs() < 0.05 && (top.uv.1 - 0.5).abs() < 0.05,
+        "top-face middle reads {:?}",
+        top.uv
     );
 }
 
-/// `subdivisionScheme = none` refuses refinement no matter what level is
-/// asked for — warn-and-ignore, so the cage renders unchanged.
+/// `subdivisionScheme = none` is a polygon cage whatever level the stage
+/// asks for.
 #[test]
 fn subdivision_scheme_none_keeps_the_cage() {
     let dir = std::env::temp_dir().join("crust_subdiv_none_probe");
@@ -1461,13 +1473,17 @@ fn subdivision_scheme_none_keeps_the_cage() {
 (defaultPrim = "W")
 def Xform "W" {
     def Mesh "Cube" {
-        int crust:subdivisionLevel = 2
         uniform token subdivisionScheme = "none"
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
         int[] faceVertexIndices = [0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7,
                                    1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0]
+    }
+}
+def Scope "Render" {
+    def RenderSettings "settings" {
+        int crust:subdivisionLevel = 3
     }
 }
 "#,
@@ -1770,6 +1786,7 @@ def Xform "W" {{
         }}
     }}
     def Mesh "A" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
@@ -1781,6 +1798,7 @@ def Xform "W" {{
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }}
     def Mesh "B" (prepend apiSchemas = ["MaterialBindingAPI"]) {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, 0, 0), (1, 0, 0), (1, 2, 0), (-1, 2, 0)]
@@ -2143,6 +2161,7 @@ fn a_declined_preview_texture_falls_back_to_its_fallback_then_the_constant() {
             r#"
     def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
     {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
@@ -2268,6 +2287,7 @@ fn preview_surface_opacity_refracts_unless_it_is_a_cutout() {
             r#"
     def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
     {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
@@ -2430,6 +2450,7 @@ fn bindings_inherit_from_ancestors_and_prefer_the_full_purpose() {
             r#"
             def Mesh "{name}"
             {{
+                uniform token subdivisionScheme = "none"
                 int[] faceVertexCounts = [4]
                 int[] faceVertexIndices = [0, 1, 2, 3]
                 point3f[] points = [({x0}, 0, 0), ({x1}, 0, 0), ({x1}, 1, 0), ({x0}, 1, 0)]
@@ -2518,6 +2539,7 @@ fn proxy_and_guide_purpose_subtrees_are_not_rendered() {
             r#"
         def Mesh "{name}"
         {{
+            uniform token subdivisionScheme = "none"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
@@ -2582,6 +2604,7 @@ fn invisible_subtrees_draw_and_light_nothing_but_keep_their_cameras() {
             r#"
         def Mesh "{name}"
         {{
+            uniform token subdivisionScheme = "none"
             {extra}
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
@@ -2743,6 +2766,7 @@ def Xform "W"
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {
+            uniform token subdivisionScheme = "none"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
@@ -2828,6 +2852,7 @@ def Xform "W"
             prepend apiSchemas = ["MaterialBindingAPI"]
         )
         {
+            uniform token subdivisionScheme = "none"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]

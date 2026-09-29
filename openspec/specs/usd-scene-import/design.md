@@ -143,46 +143,117 @@ Schema mapping:
   `UsdGeomSphere` → analytic `Sphere` geometry.
 - **Subdivision surfaces** (`scene/subdiv.rs`, via the pure-Rust
   [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
-  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned by git tag). A mesh
-  prim authoring `crust:subdivisionLevel` (int, default 0, clamped to 6) is uniformly
-  refined that many times and **snapped to the limit surface**, with smooth per-vertex
-  shading normals (the kernel's `TriangleMesh.normals`, interpolated by barycentrics).
-  Deliberately **opt-in per prim** rather than triggered by `subdivisionScheme`: USD's
-  fallback scheme is `catmullClark`, so honouring the scheme alone would subdivide
-  virtually every mesh ever authored (all of the Moana island included), and USD has no
-  standard per-prim refinement level — Hydra treats refinement as a render setting. The
-  scheme still picks the algorithm once a level asks: unauthored/`catmullClark` →
-  Catmark, `bilinear` → Bilinear, `loop` → Loop (all-triangle cages only), `none` →
-  warn and render the cage. `creaseIndices`/`creaseLengths`/`creaseSharpnesses`
-  (per-run or per-edge sharpness, 10 = infinite), `cornerIndices`/`cornerSharpnesses`
-  and `interpolateBoundary` are honoured; `holeIndices` and
-  `faceVaryingLinearInterpolation` are not. Refinement happens in `mesh_source`,
-  *before* interning, so every path (direct bake, deferred instance-vs-bake,
-  prototypes) sees it exactly once and `MeshKey` dedupes on the refined arrays. A
-  malformed cage or refiner error warns and degrades to the cage. **Ptex keeps
-  indexing the base cage**: refined triangles carry explicit corner UVs
-  (`FaceMap.uvs`) mapping them back into their cage face's unit square (a synthetic
-  face-varying channel refined with linear-everywhere interpolation), and
-  `check_face_count` compares the texture against the *authored* face count. Baked
-  placements push normals through the inverse transpose (`bake_normals`), matching the
-  kernel's instance path exactly — mirrors included. Sample scene:
-  `samples/subdivision.usda` (levels 0–3 plus a fully edge-creased cube that stays a
-  cube); `CRUST_SUBDIV=0` is the kill switch.
-  **Memory, measured** (the refiner retains every level 0..L, a ×4/3 geometric series
-  over the last level): `subdivide()` transiently allocates **~313 B per refined face**,
-  ~556–592 B when the material needs Ptex sub-face UVs (the synthetic fvar channel is a
-  full parallel hierarchy); the returned mesh holds 48 B/face (84 with UVs). Pinned by
-  the allocation-counting probe `cargo test -p crust-core --lib
-  subdivision_memory_probe -- --ignored --nocapture --test-threads=1` (deterministic
-  requested-byte ceilings ~25% above those numbers). End to end
-  (`scripts/gen_subdiv_stress.py`, 1.18 M refined quads at level 3, A/B'd with
-  `CRUST_SUBDIV=0`): traverse-phase peak +310 MiB — within 6% of the model — and
-  kernel-resident memory scaling exactly ×4 per level (34.67 MiB at level 1 → 2.17 GiB
-  at level 4). The whole-process peak is **not** opensubdiv: at level 4 traversal peaks
-  at 1.16 GiB while the SBVH build over the baked result peaks at 2.19 GiB — the
-  pre-existing build transient (see "Known gaps: geometry and acceleration" in
-  `openspec/specs/intersection-kernel/design.md`), which subdivision merely
-  feeds 4^L× more triangles.
+  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned by git tag). Read from
+  USD, never from a crust attribute on the prim: every mesh is a subdivision surface
+  unless its `subdivisionScheme` is `none`, with an unauthored scheme taking the schema
+  fallback, `catmullClark` → Catmark (`bilinear` → Bilinear, `loop` → Loop on
+  all-triangle cages only, else warn and render the cage). It is uniformly refined to the
+  load's one level, **snapped to the limit surface**, and shaded with smooth per-vertex
+  normals (the kernel's `TriangleMesh.normals`, interpolated by barycentrics).
+  - **Trap: the fallback is the signal.** A first cut refined only an *authored* scheme,
+    on the belief that polygon exporters leave it unauthored. Production data says the
+    opposite: ALab's and Kitchen_set's render meshes author neither a scheme nor
+    normals — USD's way of saying "subdivision surface" — while ALab's polygonal display
+    proxies author `none` *and* face-varying normals. ALab rendered its foam hand and
+    glassware as faceted cages until the fallback was honoured. Polygon content has to
+    say `none`; every checked-in sample does. (Checking an asset: crate files ≥ 0.4
+    compress their token table, so `grep catmullClark` on a `.usd` finds nothing — read
+    the attribute through openusd instead.)
+  - **Level 0 is a smooth cage**: the cage's triangles with smooth per-vertex cage
+    normals (`subdiv::smooth_cage_normals`), as Storm draws a subdivision surface at low
+    complexity — so `--subdiv-level 0` renders a large subdivision scene smooth-shaded
+    at its cage's memory. `none` stays faceted, and so does everything under
+    `CRUST_SUBDIV=0` (`SubdivPolicy::enabled`), which is the behaviour this replaced.
+  - The **level** is one per load, as Hydra's `refineLevel` is a render setting and
+    USD has no per-prim level. It is resolved in `load_scene`: the host's
+    `UsdImportOptions::subdivision_level` (the CLI's `--subdiv-level`), then
+    `crust:subdivisionLevel` on the `RenderSettings` prim, then **0**; clamped to 6.
+    `CRUST_SUBDIV=0` forces 0. It lives on `MeshArena` (`SubdivPolicy`) because every
+    path that reads a mesh — direct prims, prototype parts, every streamed chunk —
+    already holds the arena.
+  - Why 0 by default: every production scene here is a subdivision scene — the Moana
+    island authors `catmullClark` explicitly in 189 of its 213 mesh-bearing files, and
+    ALab and Kitchen_set take the fallback — so any default refinement multiplies them.
+    Level 1 costs ALab 32 → 49 GiB peak (measured below); level 2 would cost Moana 16×
+    on 60.9 M triangles and 39 GiB of kernel memory. Refinement is asked for by the
+    scene's RenderSettings (the DPEL teapot wrappers set 1) or by `--subdiv-level`.
+  - The per-prim `crust:subdivisionLevel` this replaced is read only to warn — once per
+    load (`SubdivPolicy::legacy_warned`), since a per-prim warning would scale with
+    the scene.
+  - `creaseIndices` / `creaseLengths` / `creaseSharpnesses` (per-run or per-edge
+    sharpness, 10 = infinite), `cornerIndices` / `cornerSharpnesses`,
+    `interpolateBoundary` and `faceVaryingLinearInterpolation` are honoured;
+    `holeIndices` is not.
+  - Refinement happens in `mesh_source`, *before* interning, so every path (direct
+    bake, deferred instance-vs-bake, prototypes) sees it exactly once and `MeshKey`
+    dedupes on the refined arrays, the refined chart included. A malformed cage or
+    refiner error warns and degrades to the cage.
+  - **The UV chart is refined with the surface.** A `faceVarying` `primvars:st` (and
+    `:indices`) becomes a real face-varying channel under the mesh's
+    `faceVaryingLinearInterpolation` (USD fallback `cornersPlus1`, *not* OpenSubdiv's
+    `cornersOnly`); a `vertex` chart is refined like the points. Both are snapped to
+    the limit with the positions, so a texel stays on the limit point its vertex was
+    snapped to. A chart whose indices do not resolve is dropped with a warning,
+    because a refiner cannot skip a bad value the way a triangle lookup can. Pinned by
+    `subdiv::tests` (affine charts reproduced exactly under all six rules, a UV seam
+    keeps each side on its island, vertex charts) and by inline-USD tests reading the
+    chart back through a hit (`a_subdivided_mesh_keeps_its_uv_chart`,
+    `every_face_varying_rule_is_read`).
+  - **Ptex keeps indexing the base cage**: refined triangles carry explicit corner UVs
+    (`FaceMap.uvs`) mapping them back into their cage face's unit square, from a
+    synthetic face-varying channel, and `check_face_count` compares the texture
+    against the *authored* face count. **Trap:** the face-varying rule is one per
+    refiner, not per channel, and the authored chart's rule wins. The Ptex channel
+    comes out bit-identical under five rules (each value is private to its face, so
+    every edge is a face-varying boundary, and the data is affine), but not under
+    `none`, which smooths face-varying corners (0 → 0.125…). A mesh needing Ptex *and*
+    a `none` chart is therefore refined twice, once chartless for the face table.
+    `ptex_channel_is_invariant_under_every_fvar_rule` pins both paths.
+  - Baked placements push normals through the inverse transpose (`bake_normals`),
+    matching the kernel's instance path exactly — mirrors included.
+  - Sample scene: `samples/subdivision.usda`, six identical cube cages authored with no
+    scheme (the fallback), `none`, `bilinear`, `catmullClark`, a fully edge-creased `catmullClark`
+    (stays a cube), and a UV-textured `catmullClark`, at a settings level of 2. Compare
+    levels with `--subdiv-level`.
+  - **Memory, measured** (the refiner retains every level 0..L, a ×4/3 geometric series
+    over the last level): `subdivide()` transiently allocates **~313 B per refined face**;
+    ~560–568 B with the Ptex sub-face channel and ~536 B with a shared UV chart (each
+    face-varying channel is a full parallel hierarchy). The returned mesh holds 48 B/face;
+    88 with the Ptex table, 72 with a refined chart. Pinned by the allocation-counting
+    probe `cargo test --release -p crust-core --lib subdivision_memory_probe -- --ignored
+    --nocapture --test-threads=1`, whose deterministic requested-byte ceilings sit ~25%
+    above those numbers.
+  - End to end (`scripts/gen_subdiv_stress.py`, 1.18 M refined quads at level 3, A/B'd
+    with `CRUST_SUBDIV=0`): traverse-phase peak +310 MiB, within 6% of the model.
+    Kernel-resident memory scales exactly ×4 per level (34.67 MiB at level 1 →
+    2.17 GiB at level 4). The whole-process peak is **not** opensubdiv: at level 4
+    traversal peaks at 1.16 GiB while the SBVH build over the baked result peaks at
+    2.19 GiB. That is the pre-existing build transient (see "Known gaps: geometry and
+    acceleration" in `openspec/specs/intersection-kernel/design.md`), which
+    subdivision merely feeds 4^L× more triangles.
+  - The DPEL MaterialX teapot (three `catmullClark` cages, 32 504 quads, faceVarying
+    `st` under `boundaries`), measured with `--stats`:
+
+    | | cage | level 1 | level 2 |
+    |---|---|---|---|
+    | triangles | 64 930 | 259 870 | 1 039 462 |
+    | kernel memory | 11.05 MiB | 54.15 MiB | 212.95 MiB |
+    | peak RSS | 456 MiB | 582 MiB | 1.02 GiB |
+    | traverse + commit | 0.09 s | 0.32 s | 1.33 s |
+
+    Its 18 s import is texture decoding either way.
+  - ALab, frame 1004, `renderCam` (its render meshes take the fallback scheme), with
+    `--stats`; level 0 at 640×360 × 8 spp, level 1 at 1920×1080 × 32 spp (parse and
+    memory do not depend on either):
+
+    | | level 0 (default: smooth cages) | level 1 |
+    |---|---|---|
+    | triangles in memory | 21 166 922 | 81 836 458 |
+    | kernel memory | 6.87 GiB | 19.64 GiB |
+    | peak RSS | 32.30 GiB | 49.01 GiB |
+    | Parse USD stage | 2:54 | 4:07 |
+
+    Level 1 fits a 61 GiB machine with ~12 GiB to spare; level 2 would not.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) as one `CubicCurveSegment` per span,
   converted to Bézier control points and subdivided per ray query by the kernel's cubic

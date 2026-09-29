@@ -281,6 +281,7 @@ fn linked_scene(strategy: &str, spp: u32) -> Scene {
     }
     def Mesh "Floor"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
@@ -416,6 +417,7 @@ fn shadow_scene(name: &str, blocker: &str, light_links: &str, strategy: &str) ->
     }}
     def Mesh "Floor"
     {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
@@ -618,6 +620,7 @@ def Xform "World"
     }
     def Mesh "Floor"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]

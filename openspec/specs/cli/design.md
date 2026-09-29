@@ -32,6 +32,8 @@ cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles 
 # --indirect-clamp VALUE (firefly clamp on each sample's indirect light; default 10, 0 = off),
 # --camera PRIM_PATH (render through that camera; else RenderSettings.camera,
 #   else the first camera found -- a wrong path errors and lists the stage's cameras),
+# --subdiv-level N (refinement level for every mesh whose subdivisionScheme is not none;
+#   overrides RenderSettings crust:subdivisionLevel, default 0 = smooth-shaded cages; max 6),
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --auto-tx (convert UV textures to a .tx beside the original on first use)
@@ -290,9 +292,10 @@ forces every mesh to be instanced instead of baking single-placement geometry fl
 is bit-identical with it set, which is what separates a deferral bug from a baking
 difference); `CRUST_PTEX=0` declines every Ptex texture so surfaces fall back to their
 constant `baseColor`; `CRUST_PTEX_MAX_LOG2` caps the per-face texture resolution loaded
-(log2 edge length, default 5 = 32x32); `CRUST_SUBDIV=0` forces every
-`crust:subdivisionLevel` to 0 so subdivision-surface meshes render their base cage — the
-A/B that separates a subdivision artifact from a material or lighting one; `CRUST_TEX=0`
+(log2 edge length, default 5 = 32x32); `CRUST_SUBDIV=0` renders every mesh as its faceted base cage,
+as before subdivision surfaces were read (unlike `--subdiv-level 0`, which keeps smooth
+cage normals) — the A/B that separates a subdivision artifact from a material or
+lighting one; `CRUST_TEX=0`
 declines every UV texture so a MaterialX surface renders on its constant inputs (the
 `CRUST_PTEX=0` of the UV path), and `CRUST_TEX_MAX` caps each decoded texture tile's edge
 length in pixels (default 1024). MaterialX programs have two, each bit-identical against

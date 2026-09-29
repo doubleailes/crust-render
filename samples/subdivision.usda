@@ -1,16 +1,28 @@
 #usda 1.0
 (
-    doc = """Subdivision-surface showcase: five identical cube cages in a row.
+    doc = """Subdivision-surface showcase: six identical cube cages in a row.
 
-    The first four author crust:subdivisionLevel = 0/1/2/3 — the cage, then
-    progressively smoother Catmull-Clark limit surfaces (level 3 is nearly a
-    sphere). The fifth subdivides at level 3 too, but creases all twelve cage
-    edges at sharpness 10, so its limit surface *is* the cube: creases carry
-    through refinement. Subdivided meshes shade with smooth per-vertex
-    normals; the level-0 cage stays faceted.
+    Subdivision is read from USD: every mesh is a subdivision surface
+    unless it authors subdivisionScheme = "none" — an unauthored scheme is
+    USD's fallback, catmullClark, which is how production assets (ALab,
+    Kitchen_set) mark their subdivision meshes. It is refined to the one
+    level set by crust:subdivisionLevel on the RenderSettings prim (2 here;
+    the default is 0, no refinement) or by --subdiv-level. Left to right:
 
-    A/B: render with CRUST_SUBDIV=0 to force every level to 0 — five
-    identical sharp cubes."""
+      1. no scheme authored — the fallback, catmullClark: rounded;
+      2. subdivisionScheme = "none" — a polygon cage, faceted;
+      3. "bilinear" — refined, but still a cube;
+      4. "catmullClark" — the rounded limit surface, smooth normals;
+      5. "catmullClark" with all twelve edges creased at sharpness 10 — the
+         limit surface is the cube itself: creases carry through refinement;
+      6. "catmullClark" with a faceVarying primvars:st and a textured
+         UsdPreviewSurface — the chart is refined with the surface, so the
+         texture follows the rounded shape.
+
+    --subdiv-level 0 renders every subdivision surface as its cage shaded
+    with smooth normals (the silhouette stays faceted); CRUST_SUBDIV=0
+    renders every cage faceted, as before subdivision was read at all;
+    --subdiv-level 1 / 3 show the refinement converging."""
     defaultPrim = "World"
     upAxis = "Y"
 )
@@ -31,7 +43,7 @@ def Xform "World"
     {
         float focalLength = 18
         float horizontalAperture = 20.955
-        double3 xformOp:translate = (0, 3.5, 14)
+        double3 xformOp:translate = (0, 3.5, 17)
         float xformOp:rotateX = -10
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
     }
@@ -82,6 +94,32 @@ def Xform "World"
             }
         }
 
+        def Material "checker"
+        {
+            token outputs:surface.connect = </World/Materials/checker/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Materials/checker/Albedo.outputs:rgb>
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+            def Shader "Albedo"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/usdpreview_albedo.exr@
+                float4 inputs:fallback = (1, 0, 1, 1)
+                float2 inputs:st.connect = </World/Materials/checker/Reader.outputs:result>
+                vector3f outputs:rgb
+            }
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
         def Material "red"
         {
             token outputs:surface.connect = </World/Materials/red/Surface.outputs:surface>
@@ -94,12 +132,11 @@ def Xform "World"
         }
     }
 
-    # The five cages are identical ±1 cubes; only the subdivision request
+    # The six cages are identical ±1 cubes; only the subdivision authoring
     # differs. Class-less duplication keeps the file trivially greppable.
-    def Mesh "CubeL0" (prepend apiSchemas = ["MaterialBindingAPI"])
+    # No subdivisionScheme: USD's fallback, catmullClark.
+    def Mesh "CubeCage" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        # Level 0 is the default — authored anyway to document the knob.
-        int crust:subdivisionLevel = 0
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
@@ -110,13 +147,13 @@ def Xform "World"
                                    3, 2, 6, 7,
                                    4, 5, 1, 0]
         rel material:binding = </World/Materials/blue>
-        double3 xformOp:translate = (-6, 1, 0)
+        double3 xformOp:translate = (-7.5, 1, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    def Mesh "CubeL1" (prepend apiSchemas = ["MaterialBindingAPI"])
+    def Mesh "CubeNone" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        int crust:subdivisionLevel = 1
+        uniform token subdivisionScheme = "none"
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
@@ -127,13 +164,13 @@ def Xform "World"
                                    3, 2, 6, 7,
                                    4, 5, 1, 0]
         rel material:binding = </World/Materials/teal>
-        double3 xformOp:translate = (-3, 1, 0)
+        double3 xformOp:translate = (-4.5, 1, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    def Mesh "CubeL2" (prepend apiSchemas = ["MaterialBindingAPI"])
+    def Mesh "CubeBilinear" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        int crust:subdivisionLevel = 2
+        uniform token subdivisionScheme = "bilinear"
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
@@ -144,13 +181,12 @@ def Xform "World"
                                    3, 2, 6, 7,
                                    4, 5, 1, 0]
         rel material:binding = </World/Materials/green>
-        double3 xformOp:translate = (0, 1, 0)
+        double3 xformOp:translate = (-1.5, 1, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    def Mesh "CubeL3" (prepend apiSchemas = ["MaterialBindingAPI"])
+    def Mesh "CubeCatmullClark" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        int crust:subdivisionLevel = 3
         uniform token subdivisionScheme = "catmullClark"
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
@@ -162,17 +198,21 @@ def Xform "World"
                                    3, 2, 6, 7,
                                    4, 5, 1, 0]
         rel material:binding = </World/Materials/amber>
-        double3 xformOp:translate = (3, 1, 0)
+        double3 xformOp:translate = (1.5, 1, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    # Same refinement as CubeL3, but all 12 cage edges creased at USD's
-    # maximum sharpness (10 = infinitely sharp): the limit surface is the
-    # cage itself, so this renders as an exact cube beside its rounded twin.
+    # All 12 cage edges creased at USD's maximum sharpness (10 = infinitely
+    # sharp): the limit surface is the cage itself, so this renders as an
+    # exact cube beside its rounded twin.
     def Mesh "CubeCreased" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        int crust:subdivisionLevel = 3
         uniform token subdivisionScheme = "catmullClark"
+        int[] creaseIndices = [0, 1, 1, 2, 2, 3, 3, 0,
+                               4, 5, 5, 6, 6, 7, 7, 4,
+                               0, 4, 1, 5, 2, 6, 3, 7]
+        int[] creaseLengths = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        float[] creaseSharpnesses = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
                             (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
@@ -182,18 +222,42 @@ def Xform "World"
                                    1, 5, 6, 2,
                                    3, 2, 6, 7,
                                    4, 5, 1, 0]
-        int[] creaseIndices = [0, 1, 1, 2, 2, 3, 3, 0,
-                               4, 5, 5, 6, 6, 7, 7, 4,
-                               0, 4, 1, 5, 2, 6, 3, 7]
-        int[] creaseLengths = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-        float[] creaseSharpnesses = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]
         rel material:binding = </World/Materials/red>
-        double3 xformOp:translate = (6, 1, 0)
+        double3 xformOp:translate = (4.5, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # One unit square per face, refined with the surface under
+    # faceVaryingLinearInterpolation = "boundaries".
+    def Mesh "CubeTextured" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1),
+                                    (0, 0), (1, 0), (1, 1), (0, 1),
+                                    (0, 0), (1, 0), (1, 1), (0, 1),
+                                    (0, 0), (1, 0), (1, 1), (0, 1),
+                                    (0, 0), (1, 0), (1, 1), (0, 1),
+                                    (0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        uniform token faceVaryingLinearInterpolation = "boundaries"
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/checker>
+        double3 xformOp:translate = (7.5, 1, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
     def Mesh "Floor"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-14, 0, -10), (14, 0, -10), (14, 0, 10), (-14, 0, 10)]
@@ -222,5 +286,8 @@ def Scope "Render"
         int crust:minSamplesPerPixel = 16
         float crust:varianceThreshold = 0.05
         int crust:frame = 0
+        # The one refinement level for every mesh not authoring scheme none
+        # (the default is 0; --subdiv-level overrides it).
+        int crust:subdivisionLevel = 2
     }
 }

@@ -244,6 +244,7 @@ pub(super) fn collect_proto_parts(
                 material.face_texture().is_some(),
                 material.uses_uv(),
                 material.uv_primvar(),
+                &mut caches.meshes.subdiv,
             ) && let Some(slot) = caches.meshes.intern(&prim, src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();

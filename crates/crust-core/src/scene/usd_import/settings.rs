@@ -89,6 +89,17 @@ pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
         .unwrap_or(DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY)
 }
 
+/// `crust:subdivisionLevel` as authored on the `RenderSettings` prim — the
+/// stage's refinement level for every mesh whose `subdivisionScheme` is
+/// not `none`. `None` when unauthored; the caller
+/// ([`resolve_subdiv_level`](super::attrs::resolve_subdiv_level)) applies the
+/// host override, the default and the clamp. A geometry setting, not a
+/// tracer one, so it stays out of [`RenderSettings`].
+pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
+    let prim = prim_at(stage, render_settings_path(stage)?);
+    custom_i32(&prim, "crust:subdivisionLevel")
+}
+
 pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let Some(path) = render_settings_path(stage) else {
         return default_settings();

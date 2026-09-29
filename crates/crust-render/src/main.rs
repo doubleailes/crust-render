@@ -81,6 +81,12 @@ struct Cli {
     /// that is not a camera on the stage stops the render.
     #[arg(long, value_name = "PRIM_PATH")]
     camera: Option<String>,
+    /// Subdivision refinement level for every mesh whose `subdivisionScheme`
+    /// is not `none` (unauthored means USD's fallback, `catmullClark`).
+    /// Overrides the scene's `crust:subdivisionLevel` render setting
+    /// (default 0: each cage shaded with smooth normals, unrefined). Clamped to 6.
+    #[arg(long, value_name = "N")]
+    subdiv_level: Option<u32>,
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
     /// strategy alone to visualize what MIS balances between.
@@ -362,6 +368,7 @@ fn main() -> ExitCode {
         let options = crust_core::UsdImportOptions {
             frame: cli.frame,
             camera: cli.camera.clone(),
+            subdivision_level: cli.subdiv_level,
             // The process renders once and exits, so freeing the composed
             // stage is pure delay before the render (45 s on ALab).
             skip_stage_teardown: true,
@@ -963,9 +970,25 @@ mod tests {
         assert!(cli.filter.is_none());
         assert!(cli.filter_radius.is_none());
         assert!(cli.frame.is_none());
+        assert!(
+            cli.subdiv_level.is_none(),
+            "the scene's level unless overridden"
+        );
         assert!(!cli.stats);
         assert!(!cli.profile);
         assert!(matches!(cli.level, LoggerLevel::Info));
+    }
+
+    #[test]
+    fn cli_subdiv_level_overrides_the_scene() {
+        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "0"]).expect("valid");
+        assert_eq!(cli.subdiv_level, Some(0));
+        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "3"]).expect("valid");
+        assert_eq!(cli.subdiv_level, Some(3));
+        assert!(
+            Cli::try_parse_from(["crust-render", "--subdiv-level", "-1"]).is_err(),
+            "a level is a count"
+        );
     }
 
     #[test]

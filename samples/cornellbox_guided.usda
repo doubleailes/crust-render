@@ -68,6 +68,7 @@ def Xform "World"
     {
         def Mesh "floor" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-2.0, 0.0, -2.0), (2.0, 0.0, 2.0)]
             int[] faceVertexCounts = [4]
@@ -78,6 +79,7 @@ def Xform "World"
 
         def Mesh "ceiling" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-2.0, 4.0, -2.0), (2.0, 4.0, 2.0)]
             int[] faceVertexCounts = [4]
@@ -88,6 +90,7 @@ def Xform "World"
 
         def Mesh "back_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-2.0, 0.0, -2.0), (2.0, 4.0, -2.0)]
             int[] faceVertexCounts = [4]
@@ -98,6 +101,7 @@ def Xform "World"
 
         def Mesh "front_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-2.0, 0.0, 2.0), (2.0, 4.0, 2.0)]
             int[] faceVertexCounts = [4]
@@ -108,6 +112,7 @@ def Xform "World"
 
         def Mesh "left_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-2.0, 0.0, -2.0), (-2.0, 4.0, 2.0)]
             int[] faceVertexCounts = [4]
@@ -118,6 +123,7 @@ def Xform "World"
 
         def Mesh "right_wall" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(2.0, 0.0, -2.0), (2.0, 4.0, 2.0)]
             int[] faceVertexCounts = [4]
@@ -128,6 +134,7 @@ def Xform "World"
 
         def Mesh "light_shroud" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             uniform bool doubleSided = 1
             float3[] extent = [(-1.0, 3.0, -1.0), (1.0, 3.0, 1.0)]
             int[] faceVertexCounts = [4]

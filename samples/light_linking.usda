@@ -28,6 +28,7 @@ def Xform "World"
 
     def Mesh "Floor"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-8, 0, -8), (8, 0, -8), (8, 0, 8), (-8, 0, 8)]
@@ -57,6 +58,7 @@ def Xform "World"
     # Between Key and the floor in front of the balls.
     def Mesh "Pillar"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
         int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6, 3, 0, 4, 7]
         point3f[] points = [(1.05, 0, 2.05), (1.35, 0, 2.05), (1.35, 0, 2.35), (1.05, 0, 2.35), (1.05, 5, 2.05), (1.35, 5, 2.05), (1.35, 5, 2.35), (1.05, 5, 2.35)]

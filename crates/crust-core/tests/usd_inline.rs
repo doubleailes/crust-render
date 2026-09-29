@@ -3,7 +3,9 @@
 //! volumes, masks, subdivision and error handling. Complements
 //! `usd_scene.rs`, which loads the checked-in sample files.
 
-use crust_core::{Light, MASK_CAMERA, Ray, SamplingStrategy, Scene, Vec3A};
+use crust_core::{
+    Light, MASK_CAMERA, NoAssets, Ray, SamplingStrategy, Scene, UsdImportOptions, Vec3A,
+};
 use std::path::PathBuf;
 
 /// Writes `body` (the prims under `/World`) into a fresh `.usda` and loads it.
@@ -47,6 +49,34 @@ def Xform "World"
 "#
         ),
     )
+}
+
+/// Like `load`, refining subdivision surfaces at `level` through the host
+/// option (the CLI's `--subdiv-level`) — no settings prim, so the stage's
+/// shape (and whether it streams) is exactly `load`'s.
+fn load_at_level(name: &str, body: &str, level: u32) -> Scene {
+    let path = write_stage(
+        name,
+        &format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{{
+{body}
+}}
+"#
+        ),
+    );
+    let options = UsdImportOptions {
+        subdivision_level: Some(level),
+        ..UsdImportOptions::default()
+    };
+    Scene::from_usd_with_options(&path, &NoAssets, &options)
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 fn load_raw(name: &str, text: &str) -> Scene {
@@ -162,6 +192,7 @@ fn a_quad_mesh_is_fan_triangulated() {
         r#"
     def Mesh "Quad"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
@@ -181,6 +212,7 @@ fn ngons_and_mixed_face_counts_triangulate_to_n_minus_two() {
         r#"
     def Mesh "Mixed"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [5, 3, 4]
         int[] faceVertexIndices = [0, 1, 2, 3, 4,  5, 6, 7,  8, 9, 10, 11]
         point3f[] points = [
@@ -217,6 +249,7 @@ fn a_mesh_missing_its_arrays_is_skipped_not_fatal() {
         r#"
     def Mesh "NoPoints"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [3]
         int[] faceVertexIndices = [0, 1, 2]
     }
@@ -233,6 +266,7 @@ fn identical_meshes_placed_twice_are_instanced_once_baked() {
             r#"
     def Mesh "{name}"
     {{
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
@@ -334,6 +368,7 @@ fn translate_then_scale_stack_keeps_the_authored_translation() {
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         def Mesh "Quad"
         {
+            uniform token subdivisionScheme = "none"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
@@ -363,6 +398,7 @@ fn a_mirrored_placement_keeps_the_surface_facing_outward() {
         uniform token[] xformOpOrder = ["xformOp:scale"]
         def Mesh "Quad"
         {
+            uniform token subdivisionScheme = "none"
             int[] faceVertexCounts = [4]
             int[] faceVertexIndices = [0, 1, 2, 3]
             point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
@@ -1409,41 +1445,118 @@ const CUBE: &str = r#"
         point3f[] points = [(-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1), (-1, 1, -1), (1, 1, -1), (-1, -1, -1), (1, -1, -1)]
 "#;
 
-#[test]
-fn subdivision_level_multiplies_faces_by_four() {
-    let at_level = |level: u32| {
-        load(
-            &format!("subdiv_{level}"),
-            &format!(
-                r#"
+/// A `RenderSettings` prim authoring only `crust:subdivisionLevel`.
+fn subdiv_settings(level: i32) -> String {
+    format!(
+        r#"def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        int crust:subdivisionLevel = {level}
+    }}
+}}"#
+    )
+}
+
+/// The cube with an authored Catmull-Clark scheme.
+fn catmull_cube() -> String {
+    format!(
+        r#"
     def Mesh "Cube"
     {{
 {CUBE}
-        int crust:subdivisionLevel = {level}
+        uniform token subdivisionScheme = "catmullClark"
     }}"#
-            ),
-        )
-        .world
-        .primitive_breakdown()
-        .triangles
+    )
+}
+
+fn triangles(scene: &Scene) -> usize {
+    scene.world.primitive_breakdown().triangles
+}
+
+#[test]
+fn subdivision_level_multiplies_faces_by_four() {
+    let at_level = |level: i32| {
+        triangles(&load_with_settings(
+            &format!("subdiv_{level}"),
+            &catmull_cube(),
+            &subdiv_settings(level),
+        ))
     };
     let l0 = at_level(0);
-    assert_eq!(l0, 12);
+    assert_eq!(l0, 12, "level 0 renders the cage");
     assert_eq!(at_level(1), 4 * l0);
     assert_eq!(at_level(2), 16 * l0);
 }
 
 #[test]
-fn a_subdivided_cube_shrinks_toward_a_sphere() {
-    let cage = load(
-        "subdiv_cage",
+fn by_default_nothing_is_refined() {
+    let scene = load("subdiv_default", &catmull_cube());
+    assert_eq!(triangles(&scene), 12, "default level 0: the cage");
+}
+
+/// An unauthored scheme is USD's fallback, `catmullClark` — how ALab and
+/// Kitchen_set mark their subdivision meshes.
+#[test]
+fn an_unauthored_scheme_is_catmull_clark() {
+    let scene = load_with_settings(
+        "subdiv_unauthored",
         &format!(
             r#"
     def Mesh "Cube" {{ {CUBE} }}"#
         ),
+        &subdiv_settings(3),
     );
-    let smooth = load(
-        "subdiv_smooth",
+    assert_eq!(triangles(&scene), 12 * 64);
+    // The rounded limit surface, not the cage: the corner is gone.
+    assert!(!hits(
+        &scene,
+        Vec3A::splat(0.95) + Vec3A::Z * 5.0,
+        -Vec3A::Z
+    ));
+}
+
+/// At level 0 a subdivision surface renders its cage — same triangles — but
+/// shades it with smooth normals, where a `none` cage stays faceted.
+#[test]
+fn level_zero_shades_the_cage_smooth() {
+    let normal_at = |scene: &Scene| {
+        scene
+            .world
+            .intersect(&Ray::new(Vec3A::new(0.5, 0.5, 5.0), -Vec3A::Z), 1e-3, 100.0)
+            .unwrap()
+            .rec
+            .normal
+    };
+    let smooth = load_with_settings("subdiv_level0", &catmull_cube(), &subdiv_settings(0));
+    assert_eq!(triangles(&smooth), 12, "level 0 keeps the cage");
+    let n = normal_at(&smooth);
+    assert!(
+        n.z < 0.999 && n.x > 1e-3 && n.y > 1e-3,
+        "the cage top shades with a smooth normal, got {n:?}"
+    );
+    let faceted = load(
+        "subdiv_none_faceted",
+        &format!(
+            r#"
+    def Mesh "Cube"
+    {{
+{CUBE}
+        uniform token subdivisionScheme = "none"
+    }}"#
+        ),
+    );
+    assert!(
+        (normal_at(&faceted).z - 1.0).abs() < 1e-5,
+        "scheme none is faceted"
+    );
+}
+
+/// The per-prim attribute is retired: the load's level wins over it.
+#[test]
+fn a_per_prim_level_is_no_longer_read() {
+    let scene = load(
+        "subdiv_legacy",
         &format!(
             r#"
     def Mesh "Cube"
@@ -1453,6 +1566,23 @@ fn a_subdivided_cube_shrinks_toward_a_sphere() {
     }}"#
         ),
     );
+    assert_eq!(
+        triangles(&scene),
+        12,
+        "the default level 0, not the prim's 3"
+    );
+}
+
+#[test]
+fn a_subdivided_cube_shrinks_toward_a_sphere() {
+    let cage = load(
+        "subdiv_cage",
+        &format!(
+            r#"
+    def Mesh "Cube" {{ {CUBE} uniform token subdivisionScheme = "none" }}"#
+        ),
+    );
+    let smooth = load_with_settings("subdiv_smooth", &catmull_cube(), &subdiv_settings(3));
     let corner = Vec3A::splat(0.95);
     assert!(
         hits(&cage, corner + Vec3A::Z * 5.0, -Vec3A::Z),
@@ -1483,7 +1613,7 @@ fn a_subdivided_cube_shrinks_toward_a_sphere() {
 
 #[test]
 fn subdivision_scheme_none_and_clamping() {
-    let none = load(
+    let none = load_with_settings(
         "subdiv_none",
         &format!(
             r#"
@@ -1491,28 +1621,254 @@ fn subdivision_scheme_none_and_clamping() {
     {{
 {CUBE}
         uniform token subdivisionScheme = "none"
-        int crust:subdivisionLevel = 2
     }}"#
         ),
+        &subdiv_settings(2),
     );
-    assert_eq!(
-        none.world.primitive_breakdown().triangles,
-        12,
-        "scheme none renders the cage"
-    );
-    let huge = load(
-        "subdiv_clamped",
-        &format!(
+    assert_eq!(triangles(&none), 12, "scheme none renders the cage");
+    let huge = load_with_settings("subdiv_clamped", &catmull_cube(), &subdiv_settings(40));
+    // Clamped to level 6: 12 · 4^6.
+    assert_eq!(triangles(&huge), 12 * 4096);
+}
+
+#[test]
+fn bilinear_and_loop_schemes() {
+    let cube = |scheme: &str| {
+        format!(
             r#"
     def Mesh "Cube"
     {{
 {CUBE}
-        int crust:subdivisionLevel = 40
+        uniform token subdivisionScheme = "{scheme}"
     }}"#
+        )
+    };
+    let bilinear = load_at_level("subdiv_bilinear", &cube("bilinear"), 1);
+    assert_eq!(triangles(&bilinear), 12 * 4, "bilinear refines");
+    // Bilinear keeps the cube's shape: its corner stays filled.
+    assert!(hits(
+        &bilinear,
+        Vec3A::splat(0.95) + Vec3A::Z * 5.0,
+        -Vec3A::Z
+    ));
+    // Loop needs an all-triangle cage; the quad cube warns and stays a cage.
+    let looped = load_at_level("subdiv_loop_quads", &cube("loop"), 1);
+    assert_eq!(triangles(&looped), 12);
+}
+
+/// Streaming walks each top-level subtree under its own masked stage; the
+/// load-wide level must reach every one of them.
+#[test]
+fn a_streamed_import_subdivides_every_chunk() {
+    let body: String = (0..4)
+        .map(|i| {
+            format!(
+                r#"
+    def Mesh "Cube{i}"
+    {{
+{CUBE}
+        uniform token subdivisionScheme = "catmullClark"
+        double3 xformOp:translate = ({x}, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}"#,
+                x = 3 * i
+            )
+        })
+        .collect();
+    let scene = load_at_level("subdiv_streamed", &body, 1);
+    assert_eq!(scene.world.count(), 4);
+    // Four identical cages: one shared refined mesh, instanced four times,
+    // or four baked copies — either way every placement is refined.
+    for i in 0..4 {
+        let t = hit_t(&scene, Vec3A::new(3.0 * i as f32, 0.0, 5.0), -Vec3A::Z)
+            .unwrap_or_else(|| panic!("cube {i} missing"));
+        assert!(t > 4.0 + 1e-3, "cube {i} was not refined (t = {t})");
+    }
+}
+
+/// The host's level (the CLI's `--subdiv-level`) wins over the stage's.
+#[test]
+fn the_host_subdivision_level_overrides_the_stage() {
+    let path = write_stage(
+        "subdiv_override",
+        &format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{{
+{}
+}}
+{}
+"#,
+            catmull_cube(),
+            subdiv_settings(3)
         ),
     );
-    // Clamped to level 6: 12 · 4^6.
-    assert_eq!(huge.world.primitive_breakdown().triangles, 12 * 4096);
+    let at = |level: Option<u32>| {
+        let options = UsdImportOptions {
+            subdivision_level: level,
+            ..UsdImportOptions::default()
+        };
+        triangles(&Scene::from_usd_with_options(&path, &NoAssets, &options).unwrap())
+    };
+    assert_eq!(at(None), 12 * 64, "the stage's level 3");
+    assert_eq!(at(Some(0)), 12, "--subdiv-level 0 renders the cage");
+    assert_eq!(at(Some(1)), 12 * 4);
+}
+
+/// A flat 2×2 quad charted 0..1, subdivided: every hit must read the chart
+/// the cage authored at that point — and must read one at all, where a
+/// subdivided mesh used to drop its UVs. A sharp-cornered flat quad
+/// reproduces affine data, so the refined chart is exactly `(x, y) / 2`.
+#[test]
+fn a_subdivided_mesh_keeps_its_uv_chart() {
+    let dir = std::env::temp_dir().join("crust_usd_inline_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // A `.mtlx` material, because `uses_uv()` is what makes the importer
+    // read a chart at all.
+    std::fs::write(
+        dir.join("subdiv_flat.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="flat_diffuse" type="BSDF">
+    <input name="color" type="color3" value="0.8, 0.8, 0.8" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="flat_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="flat_diffuse" />
+  </surface>
+  <surfacematerial name="mtlx_flat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="flat_surface" />
+  </surfacematerial>
+</materialx>
+"#,
+    )
+    .expect("write probe mtlx");
+    let quad = |name: &str, st: &str| {
+        load_at_level(
+            name,
+            &format!(
+                r#"
+    def Scope "Looks" {{
+        def Material "Mtl" (
+            prepend references = @subdiv_flat.mtlx@</MaterialX/Materials/mtlx_flat>
+        ) {{
+        }}
+    }}
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)]
+        {st}
+        uniform token subdivisionScheme = "catmullClark"
+        rel material:binding = </World/Looks/Mtl>
+    }}"#
+            ),
+            1,
+        )
+    };
+    let face_varying = quad(
+        "subdiv_uv_fv",
+        r#"texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        uniform token faceVaryingLinearInterpolation = "boundaries""#,
+    );
+    let vertex = quad(
+        "subdiv_uv_vertex",
+        r#"texCoord2f[] primvars:st = [(0, 1), (1, 1), (1, 0), (0, 0)] (interpolation = "vertex")
+        int[] primvars:st:indices = [3, 2, 1, 0]"#,
+    );
+    for (what, scene) in [("faceVarying", &face_varying), ("vertex", &vertex)] {
+        assert_eq!(triangles(scene), 2 * 4, "{what}: refined to level 1");
+        for (x, y) in [(1.0, 1.0), (0.5, 1.5), (1.7, 0.3), (0.1, 0.1)] {
+            let r = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+            let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
+            assert!(hit.rec.has_uv, "{what}: no chart at ({x}, {y})");
+            let (u, v) = hit.rec.uv;
+            assert!(
+                (u - x / 2.0).abs() < 1e-4 && (v - y / 2.0).abs() < 1e-4,
+                "{what}: ({x}, {y}) reads ({u}, {v})"
+            );
+        }
+    }
+}
+
+/// Each `faceVaryingLinearInterpolation` token reaches the refiner. A 2×2
+/// grid charted `(x, y) / 2`, except the interior vertex, pulled to
+/// `(0.9, 0.5)`: `all` interpolates the chart linearly, so the limit keeps
+/// the authored value there, while `none` smooths it back toward its
+/// neighbours. (A lone quad cannot tell the rules apart — Catmull-Clark
+/// reproduces bilinear data on it exactly.)
+#[test]
+fn every_face_varying_rule_is_read() {
+    let dir = std::env::temp_dir().join("crust_usd_inline_tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("subdiv_rule.mtlx"),
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+  <surface name="s" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="d" />
+  </surface>
+  <surfacematerial name="m" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="s" />
+  </surfacematerial>
+</materialx>
+"#,
+    )
+    .expect("write probe mtlx");
+    let probe = |rule: &str| {
+        let scene = load_at_level(
+            &format!("subdiv_rule_{rule}"),
+            &format!(
+                r#"
+    def Scope "Looks" {{
+        def Material "Mtl" (
+            prepend references = @subdiv_rule.mtlx@</MaterialX/Materials/m>
+        ) {{
+        }}
+    }}
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        int[] faceVertexCounts = [4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (0, 2, 0), (1, 2, 0), (2, 2, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (0.5, 0), (1, 0), (0, 0.5), (0.9, 0.5), (1, 0.5), (0, 1), (0.5, 1), (1, 1)] (interpolation = "faceVarying")
+        int[] primvars:st:indices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+        uniform token faceVaryingLinearInterpolation = "{rule}"
+        uniform token subdivisionScheme = "catmullClark"
+        rel material:binding = </World/Looks/Mtl>
+    }}"#
+            ),
+            1,
+        );
+        let r = Ray::new(Vec3A::new(1.001, 1.001, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
+        let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
+        assert!(hit.rec.has_uv, "{rule}: no chart");
+        hit.rec.uv
+    };
+    let rules = [
+        "none",
+        "cornersOnly",
+        "cornersPlus1",
+        "cornersPlus2",
+        "boundaries",
+        "all",
+    ];
+    let uvs: Vec<(f32, f32)> = rules.iter().map(|r| probe(r)).collect();
+    let (none, all) = (uvs[0], uvs[5]);
+    assert!(
+        (all.0 - 0.9).abs() < 0.01 && (all.1 - 0.5).abs() < 0.01,
+        "all keeps the authored interior value: {all:?}"
+    );
+    assert!(
+        none.0 < 0.85,
+        "none smooths the interior value toward its neighbours: {none:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,6 +1945,7 @@ fn loading_the_same_stage_twice_is_identical() {
     def Sphere "A" { double radius = 0.7 }
     def Mesh "Q"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, -1, -2), (1, -1, -2), (1, 1, -2), (-1, 1, -2)]
