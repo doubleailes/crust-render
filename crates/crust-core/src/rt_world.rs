@@ -393,6 +393,10 @@ pub struct WorldBuilder {
     /// samples a per-face or UV texture carry a table, so a scene with no
     /// textures pays one empty entry per geometry and nothing more.
     faces: Vec<SideTables>,
+    /// Per `geom_id`, the light-link class of its receiver prim, when any
+    /// light authors a `lightLink`; empty otherwise (see
+    /// [`World::light_class`]).
+    light_classes: Vec<u16>,
 }
 
 impl WorldBuilder {
@@ -513,6 +517,17 @@ impl WorldBuilder {
         self.rt.set_geometry(id, geometry);
     }
 
+    /// The ray mask the geometry at `id` was attached with.
+    pub fn mask(&self, id: u32) -> RayMask {
+        self.rt.mask(id)
+    }
+
+    /// Replaces the ray mask of an attached geometry — see
+    /// `crust_rt::SceneBuilder::set_mask`.
+    pub fn set_mask(&mut self, id: u32, mask: RayMask) {
+        self.rt.set_mask(id, mask);
+    }
+
     /// Reserves capacity for `additional` more geometries — see
     /// `crust_rt::SceneBuilder::reserve`. Callers importing a known-size
     /// batch (a `PointInstancer` with N placements) should call this
@@ -534,7 +549,19 @@ impl WorldBuilder {
             materials: self.materials,
             faces: self.faces,
             cutouts,
+            light_classes: self.light_classes,
         }
+    }
+
+    /// Installs the per-`geom_id` light-link classes (one entry per attached
+    /// geometry). Only the importer's link resolution calls this, and only
+    /// when some light authors a `lightLink`.
+    ///
+    /// # Panics
+    /// If `classes` does not have one entry per attached geometry.
+    pub fn set_light_classes(&mut self, classes: Vec<u16>) {
+        assert_eq!(classes.len(), self.count(), "one class per geometry");
+        self.light_classes = classes;
     }
 }
 
@@ -555,9 +582,22 @@ pub struct World {
     faces: Vec<SideTables>,
     /// Whether any material has a cutout ([`Material::has_cutout`]).
     cutouts: bool,
+    light_classes: Vec<u16>,
 }
 
 impl World {
+    /// The light-link class of the prim a hit on `geom_id` belongs to — what
+    /// [`LightList::illuminates`](crate::LightList::illuminates) is asked
+    /// about. [`EVERY_CLASS`](crate::EVERY_CLASS) when no light authors a
+    /// `lightLink`.
+    #[inline]
+    pub fn light_class(&self, geom_id: u32) -> u16 {
+        self.light_classes
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(crate::EVERY_CLASS)
+    }
+
     /// Closest hit in `(t_min, t_max)` with its material resolved.
     #[must_use]
     pub fn intersect(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<WorldHit<'_>> {

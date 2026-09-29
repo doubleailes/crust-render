@@ -260,6 +260,46 @@ light traverse the whole BVH. At equal time that leaves about 3.6× on direct
 lighting and about 1.1× on the full image. The rest of the full image's noise is
 indirect light from the windows, which selection cannot reach.
 
+## Shadow links: the louvered windows block the key
+
+Measured 2026-09-29. The light rig
+(`fragment/lightrig/lighting/mk020_0281_export/base/placement/…_placement.usda`)
+authors `collection:shadowLink` on its exterior lights, and crust reads none of it:
+- **`lgt_env_dome`** excludes `/root/dmp_skydome_alab01`, the matte-painting sphere
+  (radius 350 000) around the set that carries the same sky texture as the dome.
+- **`lgt_sun_distant`** excludes the skydome and the two
+  `wall04/structure_window_louvered02_000{1,2}` windows.
+- **`lgt_sun_area_01` / `_02`** exclude the two louvered windows.
+
+Two lights also author per-object `lightLink` (`lgt_screenLights*`:
+`includeRoot = 0`, `includes` = the display screens). That link only warns and is
+ignored, as before.
+
+The same `light_occlusion` run (160×90 receivers, 4 samples per light, power
+selection) over wrapper layers that deactivate the shadow-excluded geometry.
+Deactivating also hides it from the camera, so this attributes the misses; it is
+not a render.
+
+| NEE visible, weighted by pick | as is | skydome off | skydome + louvers off |
+|---|---|---|---|
+| all lights | 3.2% | 3.2% | **16.9%** |
+| rect #3, pmf 0.355 (the brightest) | 0.0% | 0.0% | **38.3%** |
+| distant sun | 0.0% | 0.0% | 1.9% |
+| dome | 0.0% | 0.1% | 0.3% |
+
+- **The skydome costs nothing in this shot.** The camera looks at the interior,
+  and the walls and roof block the dome and the sun either way.
+- **The louvered windows are the loss.** They take the most-picked light from 0%
+  to 38% visible, 29% of its samples having been stopped by their glass. That is
+  the light the rig excludes them from.
+- **This revises "Outcome: NEE's misses" above.** At least one of the "exterior
+  lights visible from none of the frame" is invisible only because shadow linking
+  is not read. `learned` selection learns to avoid a light the rig intends to be
+  the key.
+- **This is `add-light-and-shadow-linking`'s shadow-linking half.** Its D3 needs
+  three shadow classes here (skydome, louver 1, louver 2), well inside the 28-bit
+  budget.
+
 ## Reproducing the scaling pair
 
 ```bash

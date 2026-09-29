@@ -130,6 +130,8 @@ textured card, dome), and the dome gets 1/7 of it however dim it is.
 | `DomeLight` with a map | piecewise-constant 2D over luminance × sin θ | This is pbrt-v3's recipe, and correct. It lacks pbrt-v4's MIS compensation (§5.3). |
 | **The built-in sky gradient** | **not a light at all** | Every scene with no `DomeLight` is lit by an environment that NEE never samples. `samples/cornellbox.usda`, the first command in the README, has **no light prim**: it is lit entirely by that gradient, through pure BSDF sampling. |
 
+*Since `light-camera-visibility-and-link-exclusion`, the built-in sky is gone: an escaping ray with no light at infinity is black. The row above, roadmap item 5 and every `cornellbox` figure below describe the renderer before that change.*
+
 That last row does not make `cornellbox` itself very noisy (§3.6 has the
 number: its open box lets bounce rays find the sky easily). But it means no
 light-sampling change can improve that scene. And in any enclosed scene lit by

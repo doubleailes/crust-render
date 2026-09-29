@@ -90,7 +90,9 @@
   Lights are stored in a `LightList` and their surfaces are also attached to `world` as
   emissive geometry — masked out of **camera** rays by default (the industry convention:
   a light in frame does not show its source; `crust:light:cameraVisible` opts back in,
-  an authored `crust:rayMask` wins outright, and shadow/indirect rays always see it) —
+  then RenderMan's `primvars:ri:attributes:visibility:camera` (an int, non-zero
+  visible) when the crust attribute is not authored, an authored `crust:rayMask` wins
+  outright, and shadow/indirect rays always see it) —
   the `AreaLight` records the geometry's `geom_id`, which is how the integrator
   attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
   **NEE samples one light per vertex**, picked by the `LightList`'s selection,
@@ -224,9 +226,12 @@
   whose cancellation made a 1.5° sun 2e-4 too bright — so `samples/domelight.usda` now
   authors `normalize = 1` to keep the look it was lit with. Bounce rays find it by *escaping*
   along a direction inside its cone, which is the `Light::escaped` half of MIS.
-- `UsdLuxDomeLight` → a `DomeLight`: an infinite environment covering every direction, so
-  once one exists it **replaces the built-in sky gradient** (`Light::escaped` answers for
-  every escaping ray). Radiance is `intensity × color × 2^exposure` (× the colour
+- `UsdLuxDomeLight` → a `DomeLight`: an infinite environment covering every direction
+  (`Light::escaped` answers for every escaping ray). There is **no built-in sky**: with
+  no light at infinity an escaping ray is black. The procedural gradient that used to
+  stand in was removed with camera visibility, because a camera-invisible dome would
+  otherwise have shown it behind the scene (`samples/cornellbox.usda`, which has no
+  light, was lit entirely by it). Radiance is `intensity × color × 2^exposure` (× the colour
   temperature's blackbody; `normalize` does not apply to a dome) times an optional
   lat-long `EnvironmentMap`; only `latlong`/`automatic` `texture:format` is supported and
   anything else warns and falls back to the uniform colour. The prim's *rotation* orients
@@ -271,8 +276,86 @@
     lets an area-light renderer ignore).
   The source geometry is camera-invisible by default (`light_ray_mask`) — see the
   `crust:rayMask` bullet above for the opt-ins. Sample: `samples/light_visibility.usda`.
-  `PortalLight`, `GeometryLight` / `MeshLightAPI`, `VolumeLightAPI`, light filters and
-  light linking are not read.
+  `PortalLight`, `GeometryLight` / `MeshLightAPI`, `VolumeLightAPI` and light filters
+  are not read. Light and shadow linking are, as below.
+- **Camera visibility of lights at infinity.** A dome or distant light is visible to
+  camera rays by default. `crust:light:cameraVisible`, else
+  `primvars:ri:attributes:visibility:camera`, hides it (`infinite_light_escape_mask`),
+  and the render setting `domeLightCameraVisibility = false` (or
+  `crust:domeLightCameraVisibility`, which wins) hides them all, whatever each light
+  authors (`LightList::hide_infinite_from_camera`). The mask lives in `LightList`
+  beside the infinite-light index and is tested against the escaping ray's own mask in
+  `escaped_emission`: a camera ray carries `MASK_CAMERA` and every continuation,
+  including delta reflection and refraction, phase and carried-medium scatters,
+  carries `MASK_INDIRECT`. That is the definition of a camera ray. Neither
+  `depth == 0` nor `prev.is_none()` would do: the latter also holds after a
+  carried-medium scatter. Hiding a light from camera rays moves no MIS weight,
+  because camera rays have no NEE competitor.
+- **Light linking.** Each receiver (the prim that brought a geometry in) has a
+  *light class*, deduplicated over every linked light's answers, in a per-`geom_id`
+  table (`World::light_class`); each linked light a bitset of the classes it
+  illuminates (`LightList::illuminates`). A light that does not illuminate a
+  receiver contributes zero on **every** strategy that could deliver it, judged on
+  the same receiver: surface NEE skips it after the pick (the pick pmf is
+  unchanged, so `density` and the bounce side still describe one strategy),
+  `bounce_emission_weight` and `escaped_emission` zero it against the vertex the
+  bounce *left* (`PrevBounce::class`), including after a delta bounce, and
+  `light_cache::train` skips it. A volume-region scatter belongs to no prim and is
+  lit by every light (`EVERY_CLASS`), and so is the camera. The cost is wasted NEE
+  picks on unlinked lights. Per-class renormalisation of the pick is the fix, and
+  it is a `density` / `pmf` pair change (a follow-up).
+- **Shadow linking** (design D3 of the change). Occluder classes are encoded in
+  the kernel mask's free bits 3–31, and only when some light authors a restricted
+  `shadowLink`, so an unlinked scene's masks and rays are untouched. Class 0 (what
+  every restricted light is shadowed by) keeps `MASK_SHADOW`; every other caster
+  clears it and carries one bit, 3–30 for the 28 most populated classes and 31
+  shared. An unrestricted light's rays carry `MASK_SHADOW | bits 3–31` and match
+  every caster. A restricted light's carry `MASK_SHADOW` and its classes' bits,
+  and the overflow bit only if it includes every overflow class; one including
+  some but not all is refused with a `WARN` and shadowed by everything. Volume
+  regions carry the same encoding (`VolumeRegion::mask`, tested in
+  `active_intervals`), so an excluded volume does not attenuate. Inner prototype
+  geometry keeps its own mask: every shadow ray carries `MASK_SHADOW`, so it matches
+  inside any instance its class bit let it into.
+  A shadow-linked light is **NEE-only at continuous vertices**
+  (`LightList::nee_only`): NEE weight 1, bounce-side emission 0. A bounce ray is
+  stopped by occluders the light's shadow rays ignore, so the two strategies
+  disagree on its visibility and cannot be MIS-combined. After a delta bounce the
+  light is found at full weight through the real occluders, so a mirror shows the
+  physical shadow; so does a `bsdf`-only render. *Measured* (2026-09-29,
+  `samples/light_linking.usda` with Key's shadow link pointed at an occluder that
+  changes nothing, 16 spp against a 1024 spp reference, `--indirect-clamp 0`, 4
+  seeds): no cost on the diffuse sample (relMSE +0.004–0.02%), but on the same
+  scene in rough metal (roughness 0.15) relMSE rises **2.1× (median), 3.1×
+  (mean)**, heavy-tailed. A Cycles-style extra ray that finds the light behind
+  excluded blockers and MISes it is the follow-up.
+  *Throughput* on unlinked scenes (callgrind, `usdlux`, `-s 2`, single thread,
+  against the renderer before camera visibility and linking): **+1.3%
+  instructions**; `bench_ab.sh` +1.1% on `usdlux`, +0.7% on `cornellbox`. That is
+  the per-vertex cost of the class lookup, the three `links` tests on NEE and the
+  escape filter. A first build measured +2.9%, and more than half of that was
+  LLVM no longer inlining `trace_path` into `render_pixel`. It is now
+  `#[inline(always)]`; check the inlining before blaming a check.
+  Linked lights are resolved on the index stage (payloads unloaded): a streamed
+  chunk's population mask leaves out prims a nested collection names, which
+  resolved it to nothing.
+- **Lights linked to nothing, and backdrops.** A light whose `collection:lightLink`
+  covers no receiver illuminates nothing and is *removed* from `LightList` rather
+  than weighted to zero in it. No pmf, `density`, light cache or guide can then
+  mention it, so the NEE ↔ bounce pair stays consistent by construction. A
+  camera-visible light at infinity of that kind is a **backdrop**
+  (`LightList::backdrops`, outside selection): a camera ray that escapes sees the
+  backdrops *alone*, as a surface at infinity in front of every other light, and no
+  other ray sees them. That is the Moana island's `sky_dome_cam_llc` (visible sky,
+  lights nothing) in front of `sky_dome_env_llc` (the HDRI). An area light of that
+  kind keeps its geometry masked to `MASK_CAMERA` (or to nothing), so no bounce can
+  find it. How "covers no receiver" is decided is in the `usd-scene-import` record.
+  *Comparison:* hdEmbree/Typhoon has the same global `domeLightCameraVisibility`, but
+  on a camera escape it **sums every visible dome and ignores links**, and it has no
+  per-dome camera visibility (`visibleInPrimaryRay` is for area-light shapes). It
+  would show the island's two skies added together. Its linking is receiver-based on
+  Hydra categories, judged against the previous vertex for bounces, which is the
+  model crust's light linking takes.
 
 ## Known gaps: light sampling
 
@@ -287,8 +370,7 @@
   and rect lights their spherical rectangle (1.4–1.5× lower relMSE on near panels and
   fog, but 4–9% *higher* on the glossy `materialx_basic`/`usdpreview_textured` tiles, at
   ~110 ns more per NEE sample, §3.9 there), but disk/tube lights still sample by area
-  rather than solid angle; the built-in sky
-  gradient is not a light, so NEE never samples it. (NEE runs its three tests
+  rather than solid angle. (NEE runs its three tests
   cheapest first: the light's radiance, then the BSDF `eval`, then the shadow
   ray — for every material now, since `eval` goes through the vertex's
   `ShadingPoint` and reads no texture. Textured materials used to trace the ray
@@ -302,7 +384,14 @@
 ## Known gaps: lighting
 
 - **Lighting caveats.** Mesh lights (`MeshLightAPI` / `GeometryLight`), `PortalLight`,
-  light filters, light/shadow linking and `ShadowAPI` are not read. A textured
+  light filters and `ShadowAPI` are not read. Light and shadow linking are read, with
+  these gaps: membership is judged on the prim that brought the geometry in, so a
+  collection target inside a native instance's prototype, or one `PointInstancer`
+  instance, cannot be told apart from its siblings (warned per collection);
+  `membershipExpression` is refused with a `WARN` and read as the default; and a
+  shadow-linked light is NEE-only at continuous vertices (noisier on glossy
+  receivers) and physically shadowed through delta ones and under `bsdf`-only. Of RenderMan's per-light `visibility:*` primvars
+  only `camera` is read. A textured
   `RectLight` is sampled by solid angle rather than by its map's luminance (a card
   with a small bright region is noisier than it need be), its lookup is nearest-texel
   as the reference's is, and a `.tex` (RenderMan) map is not decoded.

@@ -373,3 +373,86 @@ fn infinite_at_is_iter_at_filtered_to_escaped() {
         }
     }
 }
+
+/// A backdrop is not a selectable light: adding one leaves every other
+/// light's pick probability bit-equal, and nothing iterates over it.
+#[test]
+fn a_backdrop_changes_no_selection() {
+    let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
+    let build = |backdrop: bool| {
+        let mut lights = LightList::new();
+        lights.add(AreaLight::new(
+            SphereShape {
+                center: Vec3A::ZERO,
+                radius: 1.0,
+            },
+            mat.clone(),
+            0,
+        ));
+        lights.add(DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY));
+        if backdrop {
+            lights.add_backdrop(DomeLight::new(Vec3A::X, None, glam::Mat3A::IDENTITY));
+        }
+        lights.select_by(LightSelection::Power);
+        lights
+    };
+    let (with, without) = (build(true), build(false));
+    assert_eq!(with.count(), without.count());
+    let pmfs = |l: &LightList| l.iter().map(|(_, p)| p.to_bits()).collect::<Vec<_>>();
+    assert_eq!(pmfs(&with), pmfs(&without));
+    assert_eq!(with.infinite_at(Vec3A::ZERO).count(), 1);
+    assert_eq!(with.backdrops().len(), 1);
+    assert!(with.escapes_to_backdrop(crate::ray::MASK_CAMERA));
+    assert!(!with.escapes_to_backdrop(crate::ray::MASK_INDIRECT));
+    assert!(!without.escapes_to_backdrop(crate::ray::MASK_CAMERA));
+}
+
+/// Removing a light leaves the list exactly as if it had never been added:
+/// the geometry index, the infinite-light table and their masks all shift.
+#[test]
+fn remove_is_as_if_never_added() {
+    use crate::ray::{MASK_ALL, MASK_CAMERA};
+    let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
+    let area = |id: u32| {
+        AreaLight::new(
+            SphereShape {
+                center: Vec3A::new(id as f32 * 3.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            mat.clone(),
+            id,
+        )
+    };
+    let hidden = crate::RayMask(MASK_ALL.0 & !MASK_CAMERA.0);
+    let dome = || DomeLight::new(Vec3A::ONE, None, glam::Mat3A::IDENTITY);
+    let mut removed = LightList::new();
+    removed.add(area(0));
+    removed.add_masked(dome(), hidden);
+    removed.add(area(1));
+    removed.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
+    let (light, mask) = removed.remove(1);
+    assert!(light.at_infinity());
+    assert_eq!(mask, hidden);
+    let (light, mask) = removed.remove(0);
+    assert_eq!(light.geom_id(), Some(0));
+    assert_eq!(mask, MASK_ALL);
+
+    let mut never = LightList::new();
+    never.add(area(1));
+    never.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
+    for l in [&mut removed, &mut never] {
+        l.select_by(LightSelection::Power);
+    }
+    assert_eq!(removed.count(), never.count());
+    assert!(removed.find_by_geom(0).is_none());
+    assert_eq!(
+        removed.find_by_geom(1).map(|(_, p)| p.to_bits()),
+        never.find_by_geom(1).map(|(_, p)| p.to_bits())
+    );
+    let seen = |l: &LightList| {
+        l.infinite_seen_by(Vec3A::ZERO, MASK_CAMERA)
+            .map(|(_, p)| p.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(seen(&removed), seen(&never));
+}

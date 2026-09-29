@@ -11,8 +11,8 @@
 The only scene format. The module is split by schema family — `mod.rs` holds
 `load_scene`, the streaming chunk loop, the traversal and the import-wide state
 (`ImportCtx`, `ImportCaches`), and dispatches into `mesh`, `shapes`, `instancing`,
-`lights`, `materials`, `preview`, `volume`, `camera`, `xform`, `settings`, `attrs` and
-`time`; the table in `mod.rs`'s module doc says which reads what. Siblings expose what
+`lights`, `light_links`, `materials`, `preview`, `volume`, `camera`, `xform`,
+`settings`, `attrs` and `time`; the table in `mod.rs`'s module doc says which reads what. Siblings expose what
 they share as `pub(super)` and import each other explicitly — keep it that way (no
 `use super::*`), so a file's `use` block stays its real dependency list.
 
@@ -65,6 +65,49 @@ Together (`scripts/bench_ab.sh -n 2 -p "Parse USD stage" -x "-f 1004 --camera �
 samples/ALab/entry.usda`): 209.9 / 216.1 s → 163.2 / 164.1 s, **−22.2% min, −24.1%
 mean**; 16 spp image identical. `bench_ab.sh -p` times any `--stats` phase (default
 `Render`) and `-x` passes extra renderer arguments.
+
+### Light links are decided after the last chunk
+
+`light_links.rs` reads `collection:lightLink` and `collection:shadowLink` through
+openusd's own `Collection::compute_membership_query`, so every `UsdCollectionAPI`
+rule (nearest opinion, `includeRoot`, expansion rules, nested collections with
+cycles broken) is the reference's. Two traps:
+
+- **UsdLux's `includeRoot` fallback is true**, `UsdCollectionAPI`'s (and openusd's)
+  false. When it is not authored the pseudo-root is added to the query's rule map
+  (`link_query`), unless `/` already carries an opinion.
+- **Ordering.** A light can be traversed before the receivers it links, and when
+  streaming they sit in different chunks whose stages are gone by the end, so
+  nothing is decided at the light. The traversal records, per prim that emits
+  geometry (mesh, sphere, curves, native instance, `PointInstancer`, an area
+  light's emitter) or a volume region, its first `geom_id` and its interned stage
+  path; ids are handed out in traversal order, so that run covers every geometry
+  the prim emits. Judging the instance or instancer prim, never a prototype's
+  `/__Prototype_N` path, keeps the answer independent of instancing and streaming.
+- **Collections are read on the index stage** (payloads unloaded, kept alive
+  through traversal) when the light is there, and on its chunk otherwise. On a
+  chunk, the population mask leaves out prims outside the subtree, so a nested
+  collection in another scope resolved to nothing. Both production rigs (the
+  island's, ALab's) come in through sublayers and references, not payloads.
+
+After the last chunk, and before `flush_meshes` / `commit`, `LightLinks::resolve`
+evaluates every distinct path against every linked light, and:
+1. demotes the lights whose `lightLink` includes no receiver, highest index first
+   through `LightList::remove` (the backdrop case, see the `lighting` record);
+2. deduplicates the light-link answers into classes and fills the per-`geom_id`
+   table (`WorldBuilder::set_light_classes`) from the runs;
+3. encodes shadow classes into geometry and volume masks
+   (`SceneBuilder::set_mask`, the mask twin of `set_geometry`), allocating bits by
+   the number of geometries each class holds;
+4. installs per-light illuminated sets, shadow masks and NEE-only flags
+   (`LightList::set_links`).
+
+The memory is one `(u32, u32)` per emitting prim plus one path per distinct one.
+A `PointInstancer` counts once however many placements it has.
+
+The render setting `domeLightCameraVisibility` (Hydra's name) or
+`crust:domeLightCameraVisibility` is read off the index stage with the other
+settings, and applied right after `resolve`.
 
 ## Geometry schema mapping
 
@@ -241,7 +284,8 @@ Schema mapping:
   `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power` | `learned`,
   `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float,
-  `crust:indirectClamp` float). Missing attrs
+  `crust:indirectClamp` float, and `crust:domeLightCameraVisibility` / Hydra's
+  un-namespaced `domeLightCameraVisibility` bool, default true). Missing attrs
   fall back to defaults (128 spp, depth 32, 640×360, power MIS, power light selection,
   triangle filter at radius 1.0, indirect clamp 10) defined as consts at the top of the file
   (the clamp's in `tracer/settings.rs`, `DEFAULT_INDIRECT_CLAMP`, since it is the engine's own default).
@@ -357,10 +401,14 @@ per query. Grouping per prototype (see "Nesting" under instancing) took the 4 sp
 from **312.6 s to 1.195 s** (`bench_ab.sh`, min of 2; −99.6%), Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
 33.92 GiB and peak RSS from 51.5 to 46.2 GiB.
 
-Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and crust
-has no per-light camera-visibility, so both light the scene (the sky is doubled) and both
-textures decode — `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB. Dropping
-`sky_dome_cam_llc` (`active = false`) is the first lever if memory or exposure matters.
+Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and both
+textures decode, since `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB.
+They do different jobs. `sky_dome_cam_llc` authors `collection:lightLink:excludes =
+</island>`, so it is imported as a camera-only **backdrop** in front of the HDRI
+`sky_dome_env_llc`. Before that was read, both lit the island (the sky was doubled,
+part of the cool cast against the RenderMan reference) and the camera saw their sum.
+Dropping `sky_dome_cam_llc` (`active = false`) is still the memory lever, at the cost
+of the camera seeing the HDRI instead of the backdrop.
 
 ## Known gaps: instancing
 

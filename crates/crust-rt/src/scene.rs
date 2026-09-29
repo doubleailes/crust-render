@@ -266,6 +266,26 @@ impl SceneBuilder {
         self.geoms[id as usize].0 = geometry;
     }
 
+    /// The ray mask the geometry at `id` was attached with.
+    ///
+    /// # Panics
+    /// If `id` was never attached.
+    pub fn mask(&self, id: u32) -> RayMask {
+        self.geoms[id as usize].1
+    }
+
+    /// Replaces the ray mask of the geometry already attached at `id`,
+    /// keeping the geometry. The same deferred-decision escape hatch as
+    /// [`SceneBuilder::set_geometry`], for a visibility that is only known
+    /// once the whole input has been read. Only valid before
+    /// [`SceneBuilder::commit`].
+    ///
+    /// # Panics
+    /// If `id` was never attached.
+    pub fn set_mask(&mut self, id: u32, mask: RayMask) {
+        self.geoms[id as usize].1 = mask;
+    }
+
     /// A geometry that expands to no primitives — the placeholder to pair
     /// with [`SceneBuilder::set_geometry`]. Allocates nothing.
     pub fn empty_geometry() -> Geometry {
@@ -1288,6 +1308,28 @@ mod tests {
         );
         assert!(!scene.occluded(&ray.with_mask(MASK_CAMERA), 0.001, 100.0));
         assert!(scene.occluded(&ray.with_mask(MASK_SHADOW), 0.001, 100.0));
+    }
+
+    /// A mask replaced after attaching is the one the committed scene
+    /// filters by, exactly as if it had been attached with it.
+    #[test]
+    fn set_mask_replaces_the_attached_mask() {
+        let mut b = SceneBuilder::new();
+        let id = b.attach(Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        });
+        assert_eq!(b.mask(id), MASK_ALL);
+        b.set_mask(id, MASK_CAMERA);
+        assert_eq!(b.mask(id), MASK_CAMERA);
+        let scene = b.commit();
+        let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
+        assert!(
+            scene
+                .intersect(&ray.with_mask(MASK_CAMERA), 0.001, 100.0)
+                .is_some()
+        );
+        assert!(!scene.occluded(&ray.with_mask(MASK_SHADOW), 0.001, 100.0));
     }
 
     #[test]

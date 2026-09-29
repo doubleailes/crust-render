@@ -241,6 +241,50 @@ or part:
   resolves to the material it binds, both natively instanced and inside a
   nested scatter.
 
+## The sky rig: backdrop and camera visibility
+
+Measured 2026-09-29 for `light-camera-visibility-and-link-exclusion`. `island.usda`
+lights the island with two `DomeLight`s:
+- `sky_dome_env_llc` (`islandsun.exr`) is the HDRI.
+- `sky_dome_cam_llc` (`islandsunVIS.png`) is a camera-visible backdrop with
+  `collection:lightLink:excludes = </island>`.
+
+Before the change, crust read neither the link nor any camera visibility, so both
+domes lit the island and the camera saw their sum. Now the backdrop is imported as
+a camera-only backdrop in front of the HDRI. `islandPrman.usda` additionally hides
+the HDRI from the camera with `primvars:ri:attributes:visibility:camera = 0`.
+
+Setup for all three renders: `renders/moana_island/island_water.usda` (the ocean
+reshaded as clear water) at 1024×512, `--camera /island/cam/shotCam -s 16
+--indirect-clamp 0`. The islandPrman leg points its two dome maps back at the
+`.exr` / `.png`, because crust cannot decode RenderMan `.tex`. Colour is the mean
+of the tone-mapped PNG, sRGB-decoded, after a 1200 px downscale: the island is the
+left 65% of the frame, the sky the top-right patch. The reference is the published
+RenderMan JPEG, measured the same way.
+
+| render | island R/G | island B/G | sky, linear RGB | sky clipped |
+|---|---|---|---|---|
+| RenderMan reference | 0.920 | 0.337 | (0.395, 0.537, 0.729) | 0% |
+| before (both domes light, camera sees the sum) | 0.450 | 0.490 | (0.922, 0.989, 1.000) | 100% |
+| after, `island.usda` | **0.542** | **0.432** | (0.530, 0.582, 0.603) | 0% |
+| after, over `islandPrman.usda` | 0.474 | 0.479 | (0.530, 0.582, 0.603) | 0% |
+
+- **The sky is fixed.** The camera sees the backdrop alone in both layers
+  (identical sky values), with clouds instead of clipped white.
+- **The island moves toward the reference**, by about a fifth of the red gap
+  and a third of the blue one. It is still much cooler than RenderMan.
+- **The islandPrman leg is cooler than `island.usda`**, because that layer
+  raises the HDRI's exposure from 0.3 to 1: twice the blue sky.
+
+What is left is not the sky rig. Candidates, none measured yet:
+- The three `distantPalm_key` lights link to `isPalmRig` only (`includes`).
+  They are warned about and light everything.
+- The cyan `palm_bounce` rect lights. `islandPrman.usda` drops them to exposure
+  0.05; `island.usda` keeps them at 1.
+- The per-channel clip tone map, against the reference's grade.
+
+Same wall time as before (about 5:10 to 5:20) and the same peak RSS (51.5 GiB).
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance

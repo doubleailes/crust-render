@@ -166,9 +166,9 @@ const UNIFORM_SPHERE_PDF: PdfSolidAngle = PdfSolidAngle::from_measure(1.0 / (4.0
 
 /// A `UsdLuxDomeLight`: an infinite environment surrounding the scene.
 ///
-/// Covers every direction, so once one exists it *is* the background — the
-/// integrator's built-in sky gradient stops applying, because
-/// [`Light::escaped`] answers for every ray that leaves.
+/// Covers every direction, so once one exists it *is* the background:
+/// [`Light::escaped`] answers for every ray that leaves. (Without one, an
+/// escaping ray is black — there is no built-in sky.)
 ///
 /// Radiance is a uniform `tint` multiplied by an optional lat-long
 /// [`EnvironmentMap`]. With a map, directions are importance-sampled from

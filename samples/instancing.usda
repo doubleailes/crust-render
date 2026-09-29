@@ -7,6 +7,16 @@
 
 def Xform "World"
 {
+    # The sky. Until the built-in sky gradient was removed, every ray that
+    # escaped this scene collected that gradient; `sky_gradient.exr` is the
+    # same gradient baked into a lat-long map, so the scene keeps its look,
+    # and NEE can now sample the sky rather than only find it by chance.
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky_gradient.exr@
+        token inputs:texture:format = "latlong"
+    }
+
     def Camera "Cam"
     {
         float focalLength = 24

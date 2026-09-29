@@ -7,6 +7,7 @@ use glam::Vec3A;
 
 use super::{Light, LightKind};
 use crate::pdf::PdfSolidAngle;
+use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_SHADOW, RayMask};
 
 /// How NEE chooses which light to sample at a vertex (`crust:lightSelection`,
 /// `--light-selection`). Measured in `docs/light_sampling.md` §3.8.
@@ -62,6 +63,29 @@ crate::names::named!(
 /// defensive importance sampling).
 pub const DEFENSIVE_SHARE: f64 = 0.5;
 
+/// The class of a receiver that every light illuminates: a vertex with no
+/// prim to judge (a volume-region scatter), or any vertex of a scene whose
+/// links were never resolved.
+pub const EVERY_CLASS: u16 = u16::MAX;
+
+/// Per-light light and shadow linking, indexed like [`LightList::lights`].
+/// Built by the importer once every receiver is known
+/// ([`LightList::set_links`]); absent when no light authors a link, which is
+/// what keeps an unlinked scene's hot path to one `None` test.
+#[derive(Clone, Debug, Default)]
+pub struct LightLinks {
+    /// Per light, the receiver classes it illuminates as a bitset
+    /// (`class / 64`, `1 << class % 64`); `None` illuminates every class.
+    pub illuminates: Vec<Option<Box<[u64]>>>,
+    /// Per light, the mask its shadow rays carry: which occluder classes
+    /// block it (see `shadow_link` encoding in the importer).
+    pub shadow_masks: Vec<RayMask>,
+    /// Per light, whether its shadow set is restricted: such a light is
+    /// sampled by NEE alone at non-delta vertices, because a bounce ray is
+    /// stopped by the occluders its shadow rays ignore.
+    pub nee_only: Vec<bool>,
+}
+
 /// The scene's lights, and how NEE picks one of them.
 ///
 /// The pick's probability is half of the light strategy's MIS density (the
@@ -89,10 +113,24 @@ pub struct LightList {
     /// in list order: the only ones an escaping ray can find, so
     /// [`LightList::infinite_at`] visits these rather than every light.
     pub(super) infinite: Vec<u32>,
+    /// Per entry of `infinite`, the categories of *escaping* ray that see
+    /// that light: [`MASK_ALL`] unless it is hidden from the camera. A light
+    /// hidden from a ray is skipped only on the escape it would have been
+    /// found by; its selection, NEE and every MIS weight are untouched,
+    /// which is sound because camera rays have no NEE competitor.
+    pub(super) infinite_masks: Vec<RayMask>,
+    /// Lights at infinity that illuminate nothing but the camera sees — a
+    /// backdrop. Outside `lights` on purpose: nothing can select them, so
+    /// no pmf, [`LightList::density`], light cache or guide can mention
+    /// them. Only an escaping camera ray reads them
+    /// ([`LightList::backdrops`]).
+    pub(super) backdrops: Vec<LightKind>,
     /// The learned per-region selection, under [`LightSelection::Learned`].
     /// Consulted by every `*_at` method; `pmf` / `cdf` are what it falls back
     /// to outside trained cells.
     pub(super) cache: Option<std::sync::Arc<crate::light_cache::LightCache>>,
+    /// Light and shadow linking, when any light authors a link.
+    pub(super) links: Option<Box<LightLinks>>,
 }
 
 impl Default for LightList {
@@ -112,7 +150,10 @@ impl LightList {
             cdf: Vec::new(),
             by_geom: HashMap::new(),
             infinite: Vec::new(),
+            infinite_masks: Vec::new(),
+            backdrops: Vec::new(),
             cache: None,
+            links: None,
         }
     }
 
@@ -120,17 +161,63 @@ impl LightList {
     /// next [`LightList::select_by`], since a table built over the old list
     /// would describe the wrong one.
     pub fn add(&mut self, light: impl Into<LightKind>) {
+        self.add_masked(light, MASK_ALL);
+    }
+
+    /// [`LightList::add`] for a light at infinity seen only by the escaping
+    /// rays in `escape_mask` — `MASK_ALL` without [`MASK_CAMERA`] hides it
+    /// from the camera. A finite light's camera visibility lives on its
+    /// geometry instead, so the mask is ignored for it.
+    pub fn add_masked(&mut self, light: impl Into<LightKind>, escape_mask: RayMask) {
+        debug_assert!(self.links.is_none(), "links are set after the last light");
         let light = light.into();
         if let Some(id) = light.geom_id() {
             self.by_geom.insert(id, self.lights.len());
         }
         if light.at_infinity() {
             self.infinite.push(self.lights.len() as u32);
+            self.infinite_masks.push(escape_mask);
         }
         self.lights.push(light);
         self.pmf.clear();
         self.cdf.clear();
         self.cache = None;
+    }
+
+    /// Removes the light at `index` (in [`LightList::lights`] order) and
+    /// returns it with the escape mask it was added with ([`MASK_ALL`] for a
+    /// finite light). Every later light shifts down one place, and its
+    /// geometry and infinite-light entries with it. The selection falls back
+    /// to uniform, as after [`LightList::add`].
+    ///
+    /// For the importer, which can only tell a light that illuminates nothing
+    /// once every receiver has been read.
+    ///
+    /// # Panics
+    /// If `index` is out of range.
+    pub fn remove(&mut self, index: usize) -> (LightKind, RayMask) {
+        debug_assert!(self.links.is_none(), "links are set after the last removal");
+        let light = self.lights.remove(index);
+        self.by_geom.retain(|_, i| *i != index);
+        for i in self.by_geom.values_mut() {
+            if *i > index {
+                *i -= 1;
+            }
+        }
+        let mut mask = MASK_ALL;
+        if let Some(at) = self.infinite.iter().position(|&i| i as usize == index) {
+            self.infinite.remove(at);
+            mask = self.infinite_masks.remove(at);
+        }
+        for i in &mut self.infinite {
+            if *i as usize > index {
+                *i -= 1;
+            }
+        }
+        self.pmf.clear();
+        self.cdf.clear();
+        self.cache = None;
+        (light, mask)
     }
 
     /// Builds the selection over the current lights (see [`LightSelection`]).
@@ -258,6 +345,12 @@ impl LightList {
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it
     /// was picked. `None` only for an empty list.
     pub fn pick(&self, u: f32) -> Option<(&LightKind, f32)> {
+        self.pick_index(u)
+            .map(|(index, pmf)| (&self.lights[index], pmf))
+    }
+
+    /// [`LightList::pick`] as an index into [`LightList::lights`].
+    pub fn pick_index(&self, u: f32) -> Option<(usize, f32)> {
         let n = self.lights.len();
         if n == 0 {
             return None;
@@ -270,7 +363,7 @@ impl LightList {
             // light's slice of the CDF is empty, so it is never landed on.
             self.cdf.partition_point(|&c| c <= u).min(n - 1)
         };
-        Some((&self.lights[index], self.pmf(index)))
+        Some((index, self.pmf(index)))
     }
 
     /// Finds the light whose scene geometry has world id `geom_id`, with its
@@ -286,12 +379,19 @@ impl LightList {
     /// the distribution of the cell holding `p`; otherwise exactly `pick`.
     #[inline]
     pub fn pick_at(&self, p: Vec3A, u: f32) -> Option<(&LightKind, f32)> {
+        self.pick_index_at(p, u)
+            .map(|(index, pmf)| (&self.lights[index], pmf))
+    }
+
+    /// [`LightList::pick_at`] as an index into [`LightList::lights`].
+    #[inline]
+    pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
         match self.cache.as_ref().and_then(|c| c.lookup(p)) {
             Some((pmf, cdf)) => {
                 let index = cdf.partition_point(|&c| c <= u).min(self.lights.len() - 1);
-                Some((&self.lights[index], pmf[index]))
+                Some((index, pmf[index]))
             }
-            None => self.pick(u),
+            None => self.pick_index(u),
         }
     }
 
@@ -308,8 +408,14 @@ impl LightList {
     /// [`LightList::find_by_geom`] with the pick probability of a vertex at
     /// `p`: the bounce-side half of [`LightList::pick_at`].
     pub fn find_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(&LightKind, f32)> {
+        self.find_index_by_geom_at(geom_id, p)
+            .map(|(index, pmf)| (&self.lights[index], pmf))
+    }
+
+    /// [`LightList::find_by_geom_at`] as an index into [`LightList::lights`].
+    pub fn find_index_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(usize, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
-        Some((&self.lights[index], self.pmf_at(p, index)))
+        Some((index, self.pmf_at(p, index)))
     }
 
     /// [`LightList::iter`] with the pick probabilities of a vertex at `p`.
@@ -346,6 +452,120 @@ impl LightList {
                 },
             )
         })
+    }
+
+    /// [`LightList::infinite_at`] restricted to the lights an escaping ray
+    /// of category `mask` sees.
+    pub fn infinite_seen_by(
+        &self,
+        p: Vec3A,
+        mask: RayMask,
+    ) -> impl Iterator<Item = (&LightKind, f32)> {
+        self.infinite_indexed_seen_by(p, mask)
+            .map(|(_, light, pmf)| (light, pmf))
+    }
+
+    /// [`LightList::infinite_seen_by`] with each light's index into
+    /// [`LightList::lights`].
+    pub fn infinite_indexed_seen_by(
+        &self,
+        p: Vec3A,
+        mask: RayMask,
+    ) -> impl Iterator<Item = (usize, &LightKind, f32)> {
+        self.infinite_at(p)
+            .zip(self.infinite.iter().zip(&self.infinite_masks))
+            .filter(move |(_, (_, m))| m.sees(mask))
+            .map(|((light, pmf), (&index, _))| (index as usize, light, pmf))
+    }
+
+    /// The light at `index` of [`LightList::lights`].
+    #[inline]
+    pub fn light(&self, index: usize) -> &LightKind {
+        &self.lights[index]
+    }
+
+    /// Installs light and shadow linking for the current lights. Indexed
+    /// like [`LightList::lights`], so it must come after the last
+    /// [`LightList::add`] and [`LightList::remove`].
+    ///
+    /// # Panics
+    /// If a table's length is not the number of lights.
+    pub fn set_links(&mut self, links: LightLinks) {
+        let n = self.lights.len();
+        assert!(
+            links.illuminates.len() == n
+                && links.shadow_masks.len() == n
+                && links.nee_only.len() == n,
+            "light links are indexed like the lights"
+        );
+        self.links = Some(Box::new(links));
+    }
+
+    /// The linking tables, when any light authors a link.
+    pub fn links(&self) -> Option<&LightLinks> {
+        self.links.as_deref()
+    }
+
+    /// Whether light `index` illuminates a receiver of `class` (see
+    /// [`EVERY_CLASS`]). Always true in a scene without light links.
+    #[inline]
+    pub fn illuminates(&self, index: usize, class: u16) -> bool {
+        match &self.links {
+            None => true,
+            Some(_) if class == EVERY_CLASS => true,
+            Some(l) => l.illuminates[index].as_ref().is_none_or(|bits| {
+                let c = class as usize;
+                bits.get(c / 64).is_some_and(|w| w & (1 << (c % 64)) != 0)
+            }),
+        }
+    }
+
+    /// The mask light `index`'s shadow rays carry: [`MASK_SHADOW`] in a
+    /// scene without shadow links.
+    #[inline]
+    pub fn shadow_mask(&self, index: usize) -> RayMask {
+        match &self.links {
+            None => MASK_SHADOW,
+            Some(l) => l.shadow_masks[index],
+        }
+    }
+
+    /// Whether light `index` is sampled by NEE alone at non-delta vertices
+    /// (its shadow set is restricted). False in a scene without shadow links.
+    #[inline]
+    pub fn nee_only(&self, index: usize) -> bool {
+        self.links.as_ref().is_some_and(|l| l.nee_only[index])
+    }
+
+    /// Hides every light at infinity from the camera, backdrops included —
+    /// the `domeLightCameraVisibility = false` render setting. Nothing else
+    /// changes: which lights illuminate, and how they are selected, stays.
+    pub fn hide_infinite_from_camera(&mut self) {
+        for m in &mut self.infinite_masks {
+            *m = RayMask(m.0 & !MASK_CAMERA.0);
+        }
+        self.backdrops.clear();
+    }
+
+    /// Adds a backdrop: a light at infinity that illuminates nothing and
+    /// that escaping camera rays see in front of every other light at
+    /// infinity. Not a selectable light — see the `backdrops` field.
+    pub fn add_backdrop(&mut self, light: impl Into<LightKind>) {
+        let light = light.into();
+        debug_assert!(light.at_infinity(), "a backdrop is a light at infinity");
+        self.backdrops.push(light);
+    }
+
+    /// The backdrops, in the order they were added.
+    pub fn backdrops(&self) -> &[LightKind] {
+        &self.backdrops
+    }
+
+    /// Whether a ray of category `mask` escaping the scene sees the
+    /// backdrops (and only them): a camera ray, when there are any.
+    #[inline]
+    pub fn escapes_to_backdrop(&self, mask: RayMask) -> bool {
+        !self.backdrops.is_empty() && mask.sees(MASK_CAMERA)
     }
 
     /// Every light with its selection probability.
