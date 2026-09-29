@@ -49,8 +49,7 @@ pub(super) fn preview_surface_material(
         (Target::EmissiveColor, ps.emissive_color.texture().is_some()),
         (Target::Metallic, ps.metallic.texture().is_some()),
         (Target::Roughness, ps.roughness.texture().is_some()),
-        // A cutout mask has no per-point counterpart (`geometry_opacity` is
-        // not implemented), so only translucency drives a texture.
+        // Translucency only: a textured cutout mask is read apart, below.
         (
             Target::Opacity,
             ps.opacity.texture().is_some() && opacity_transmission(&ps),
@@ -88,6 +87,19 @@ pub(super) fn preview_surface_material(
     } else {
         None
     };
+    // `opacityThreshold > 0` with a textured opacity: the mask is sampled
+    // per hit. (A constant one is already thresholded into
+    // `geometry_opacity`.)
+    let cutout = if !opacity_transmission(&ps) && ps.opacity.texture().is_some() {
+        preview_uv_input(stage, mat_path, shader, "opacity", caches).map(|(input, varname)| {
+            note(varname);
+            let threshold = ps.opacity_threshold.value().copied().unwrap_or(0.0);
+            (input, threshold)
+        })
+    } else {
+        None
+    };
+
     // One chart per mesh: a network whose readers name two primvars shades
     // every texture from the first.
     if varnames.len() > 1 {
@@ -105,18 +117,14 @@ pub(super) fn preview_surface_material(
             debug!("UsdPreviewSurface at {mat_path}: {name} is not read");
         }
     }
-    if !opacity_transmission(&ps) && ps.opacity.is_set() {
-        debug!(
-            "UsdPreviewSurface at {mat_path}: opacityThreshold > 0 makes opacity a cutout \
-             mask, which crust does not implement; the surface renders opaque"
-        );
-    }
-
-    if inputs.is_empty() && normal.is_none() {
+    if inputs.is_empty() && normal.is_none() && cutout.is_none() {
         return Arc::new(base);
     }
-    let m = crate::PreviewSurface::new(mat_path.to_string(), base, inputs, normal)
+    let mut m = crate::PreviewSurface::new(mat_path.to_string(), base, inputs, normal)
         .with_uv_primvar(varnames.into_iter().next());
+    if let Some((input, threshold)) = cutout {
+        m = m.with_cutout(input, threshold);
+    }
     debug!("Material {mat_path}: {m:?}");
     Arc::new(m)
 }
@@ -329,7 +337,9 @@ fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
         if opacity_transmission(ps) {
             o.transmission_weight = 1.0 - op.clamp(0.0, 1.0);
         } else {
-            o.geometry_opacity = *op;
+            // The spec's cutout: kept whole at or above the threshold.
+            let threshold = ps.opacity_threshold.value().copied().unwrap_or(0.0);
+            o.geometry_opacity = if *op >= threshold { 1.0 } else { 0.0 };
         }
     }
     if let Some(rgb) = ps.emissive_color.value() {

@@ -117,9 +117,10 @@
     refraction, not a cutout**: `transmission_weight = 1 − opacity` at `ior`, the
     spec's "index of refraction to be used for translucent objects" — how ALab authors
     all its glass (opacity ≈ 0, ior ≈ 1.49). `opacityThreshold > 0` is the spec's
-    cutout mode and stays on native `OpenPBR`'s `geometry_opacity`, which nothing
-    reads yet: the integrator's cutout (`Material::opacity`, § MaterialX) is
-    MaterialX's alone so far. A textured `ior`
+    cutout mode, and a cutout: a constant `opacity` is thresholded into `geometry_opacity`
+    (1 at or above the threshold, else 0, as Typhoon does), and a textured one becomes
+    the `PreviewSurface`'s mask, sampled and thresholded per hit by `Material::opacity`
+    before anything shades (the integrator's cutout, § MaterialX). A textured `ior`
     below 1 keeps the constant: production `ior` maps are 0 in their UV gutters, so a
     filtered tap there would invert refraction along every seam. Constant inputs
     are still read **undecoded** (the openspec `add-material-color-management` change
@@ -169,7 +170,9 @@
     island authors them. `sheen` is deliberately **not** mapped to `fuzz_weight`: Disney
     adds sheen at grazing angles, OpenPBR mixes fuzz *over* the layers beneath, so the
     island's `sheen = 1` erased all base colour (Ptex included) and rendered smooth
-    plastic. `subsurface*`, `diffuseTransmission` and `specularTint` have no equivalent
+    plastic. `alpha` is `geometry_opacity`, which is a cutout: an island material that
+    authors it below 1 renders partly present, where before this was ignored and it
+    rendered solid. `subsurface*`, `diffuseTransmission` and `specularTint` have no equivalent
     lobe and are dropped.
   - **`.mtlx` reference** → the MaterialX graph, read by crust itself
     (`crust-mtlx` + `material/materialx.rs`, below). Checked at each point the USD path gives up,

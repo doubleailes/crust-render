@@ -28,7 +28,9 @@
 //!   to be used for translucent objects" and says clear glass at opacity 0
 //!   "still has a specular response", so a translucent surface is a
 //!   dielectric, not an alpha blend. Under `opacityThreshold > 0` opacity is a
-//!   cutout mask instead, which the importer keeps off this path.
+//!   cutout mask instead, which the importer keeps off this path: a constant
+//!   is thresholded into `geometry_opacity`, a texture becomes the mask
+//!   [`PreviewSurface::with_cutout`] samples.
 //!
 //! What it does not: `UsdTransform2d` (warned about, identity chart),
 //! `occlusion` and `displacement` (no counterpart in the integrator), and a
@@ -273,6 +275,9 @@ pub struct PreviewSurface {
     /// The primvar the network's `UsdPrimvarReader_float2` names, when it is
     /// not `st` (see [`Material::uv_primvar`]).
     uv_primvar: Option<String>,
+    /// A textured `opacity` under `opacityThreshold > 0`: the cutout mask and
+    /// its threshold (see [`PreviewSurface::with_cutout`]).
+    cutout: Option<(UvInput, f32)>,
     pub name: String,
 }
 
@@ -316,8 +321,19 @@ impl PreviewSurface {
             emission_textured,
             ray_reads_hit,
             uv_primvar: None,
+            cutout: None,
             name,
         }
+    }
+
+    /// Makes a textured `opacity` the spec's cutout mask: under
+    /// `opacityThreshold > 0` a point is kept whole where `opacity ≥
+    /// threshold` and discarded otherwise, and nothing refracts. It is read
+    /// by [`Material::opacity`], before the hit is shaded, so the BSDF never
+    /// sees it.
+    pub fn with_cutout(mut self, opacity: UvInput, threshold: f32) -> PreviewSurface {
+        self.cutout = Some((opacity, threshold));
+        self
     }
 
     /// Whether the surface can emit at all: textured or constant emission.
@@ -440,6 +456,26 @@ impl PatternMaterial for PreviewSurface {
     /// `Material::emitted_at`).
     fn constant_emission(&self) -> Option<&OpenPBR> {
         (!self.emission_textured).then_some(&self.base)
+    }
+
+    fn pattern_has_cutout(&self) -> bool {
+        self.cutout.is_some() || self.base.has_cutout()
+    }
+
+    /// The textured mask when there is one — a non-finite tap is kept — else
+    /// the constant `geometry_opacity`.
+    fn pattern_opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
+        match &self.cutout {
+            Some((input, threshold)) => {
+                let o = input.scalar(input.sample(rec));
+                if o.is_nan() || o >= *threshold {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            None => self.base.opacity(r_in, rec),
+        }
     }
 }
 

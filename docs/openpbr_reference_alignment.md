@@ -191,10 +191,10 @@ Known, deliberate, and recorded here so nobody rediscovers them:
 - **Interior hits** — emission is not suppressed when a closed surface is
   hit from inside, and the coat is not reduced to transmission-tint-only
   there.
-- **`geometry_opacity`** — unconsumed, by design on both sides: Adobe
-  documents opacity as the host renderer's job (stochastic cutout). The
-  tracer has that cutout now (`Material::opacity`), but only MaterialX
-  surfaces feed it; native `OpenPBR` still reports 1.
+- **`geometry_opacity`** — not a BSDF input on either side: Adobe documents
+  opacity as the host renderer's job (stochastic cutout), and crust's host
+  does it (`Material::opacity`): below 1 the surface is met with that
+  probability and otherwise passed through.
 - **Geometry inputs** — no normal mapping and no user tangents
   (`geometry_normal/tangent/coat_normal/coat_tangent`); frames are
   auto-generated (Duff et al.), so anisotropy has no authored orientation

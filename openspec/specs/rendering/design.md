@@ -119,7 +119,9 @@ consumed as ordinary dependencies:
      depth and records no vertex; its free flights draw from `K_SSS` off the entry
      vertex (stratified on the first step, incidental after). A walk that finds no
      exit ends the path as absorbed. Design and traps: materials `design.md`.
-   - **Cutouts** (`Material::opacity`, MaterialX surfaces' `opacity` only). A hit on a
+   - **Cutouts** (`Material::opacity`: MaterialX surfaces' `opacity`, native
+     `OpenPBR`'s `geometry_opacity` — `crust:openpbr` `geometryOpacity`, PxrDisney
+     `alpha` — and a `UsdPreviewSurface` under `opacityThreshold`). A hit on a
      material with `has_cutout` is *present* with probability equal to its opacity
      (`present_hit`, one `pcg::Rng` off `K_CUTOUT` per vertex); otherwise the segment
      carries on along the **same ray** from just past it (`past(t)`, relative), so `t`,

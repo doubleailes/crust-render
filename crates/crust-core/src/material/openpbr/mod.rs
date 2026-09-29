@@ -32,8 +32,9 @@
 //!   crust couples diffuse↔specular with a flat `1 − F_avg`).
 //! - Random-walk subsurface entry: SSS without transmission renders as
 //!   tinted diffuse — its volume is only reachable through refraction.
-//! - `geometry_opacity` (host-renderer cutout) and authored geometry
-//!   normals/tangents.
+//! - Authored geometry normals/tangents. (`geometry_opacity` is the host's
+//!   job, and the integrator's stochastic cutout does it:
+//!   [`Material::opacity`].)
 
 use glam::Vec3A;
 use utils::cosine_hemisphere;
@@ -575,6 +576,21 @@ impl Material for OpenPBR {
 
     fn as_openpbr(&self) -> Option<&OpenPBR> {
         Some(self)
+    }
+
+    /// `geometry_opacity` below 1: OpenPBR leaves opacity to the host, and
+    /// crust's is the integrator's stochastic cutout. A non-finite value is
+    /// opaque.
+    fn has_cutout(&self) -> bool {
+        self.geometry_opacity < 1.0
+    }
+
+    fn opacity(&self, _r_in: &Ray, _rec: &HitRecord) -> f32 {
+        if self.geometry_opacity.is_finite() {
+            self.geometry_opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
     }
 
     fn resolve(
