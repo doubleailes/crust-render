@@ -5,11 +5,12 @@ The checked-in samples/subdivision.usda is far too small to move RSS, so
 this emits quad cages big enough that the refiner's transient and the
 refined mesh's resident cost stand well clear of page-granularity noise:
 
-  - one GRID x GRID quad-grid cage authoring crust:subdivisionLevel = LEVEL
-    (defaults: 128^2 = 16 384 cage quads, level 3 -> 1 048 576 refined quads
+  - one GRID x GRID quad-grid cage authoring subdivisionScheme =
+    "catmullClark", refined at LEVEL (the RenderSettings prim's
+    crust:subdivisionLevel; defaults: 128^2 = 16 384 cage quads, level 3 -> 1 048 576 refined quads
     -> 2 097 152 triangles), placed once so it takes the bake path;
   - two placements of an identical smaller cage (same points/topology/
-    material, so the importer interns them to one slot) at the same LEVEL,
+    material, so the importer interns them to one slot), also refined,
     exercising the committed-prototype/instance path;
   - a floor, a RectLight, a camera, and a tiny RenderSettings (memory, not
     render time, is the subject).
@@ -32,7 +33,7 @@ import sys
 
 GRID = 128            # big cage: GRID x GRID quads, placed once (bake path)
 INSTANCED_GRID = 32   # small cage: authored twice -> interned, instanced
-LEVEL = 3             # crust:subdivisionLevel for every cage
+LEVEL = 3             # the RenderSettings crust:subdivisionLevel
 
 
 def quad_grid(n, size):
@@ -56,12 +57,11 @@ def fmt_pts(pts):
     return ", ".join(f"({x:.4g}, {y:.4g}, {z:.4g})" for x, y, z in pts)
 
 
-def mesh(name, n, size, translate, level):
+def mesh(name, n, size, translate):
     pts, counts, idx = quad_grid(n, size)
     return f"""
     def Mesh "{name}" (prepend apiSchemas = ["MaterialBindingAPI"])
     {{
-        int crust:subdivisionLevel = {level}
         uniform token subdivisionScheme = "catmullClark"
         point3f[] points = [{fmt_pts(pts)}]
         int[] faceVertexCounts = [{", ".join(map(str, counts))}]
@@ -77,7 +77,7 @@ def main(out_path):
     parts = [
         f"""#usda 1.0
 (
-    doc = "Generated subdivision memory stress scene (scripts/gen_subdiv_stress.py): {GRID}x{GRID} cage + 2x {INSTANCED_GRID}x{INSTANCED_GRID} instanced cages, all at crust:subdivisionLevel = {LEVEL}."
+    doc = "Generated subdivision memory stress scene (scripts/gen_subdiv_stress.py): {GRID}x{GRID} cage + 2x {INSTANCED_GRID}x{INSTANCED_GRID} instanced cages, all refined at crust:subdivisionLevel = {LEVEL}."
     defaultPrim = "World"
     upAxis = "Y"
 )
@@ -109,11 +109,11 @@ def Xform "World"
 """
     ]
     # The big cage, placed exactly once -> baked flat after flush_meshes.
-    parts.append(mesh("BigCage", GRID, 20.0, (0, 2, 0), LEVEL))
+    parts.append(mesh("BigCage", GRID, 20.0, (0, 2, 0)))
     # Two placements of the identical small cage -> one interned slot, two
     # kernel instances of one committed scene.
-    parts.append(mesh("SmallCageA", INSTANCED_GRID, 6.0, (-14, 2, 0), LEVEL))
-    parts.append(mesh("SmallCageB", INSTANCED_GRID, 6.0, (14, 2, 0), LEVEL))
+    parts.append(mesh("SmallCageA", INSTANCED_GRID, 6.0, (-14, 2, 0)))
+    parts.append(mesh("SmallCageB", INSTANCED_GRID, 6.0, (14, 2, 0)))
     parts.append(
         """
     def Mesh "Floor"
@@ -145,6 +145,9 @@ def Scope "Render"
         int crust:minSamplesPerPixel = 4
         float crust:varianceThreshold = 0
         int crust:frame = 0
+        int crust:subdivisionLevel = """
+        + str(LEVEL)
+        + """
     }
 }
 """

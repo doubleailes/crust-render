@@ -171,6 +171,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-2.1, 0, 0), (-0.1, 0, 0), (-0.1, 1, 0), (-2.1, 1, 0)]
@@ -184,6 +185,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(0.1, 0, 0), (2.1, 0, 0), (2.1, 1, 0), (0.1, 1, 0)]
@@ -198,6 +200,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-2.1, -1.2, 0), (-0.1, -1.2, 0), (-0.1, -0.2, 0), (-2.1, -0.2, 0)]
@@ -211,6 +214,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(0.1, -1.2, 0), (2.1, -1.2, 0), (2.1, -0.2, 0), (0.1, -0.2, 0)]

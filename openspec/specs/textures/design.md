@@ -528,11 +528,11 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     `v0=(0,0)` than transposed, and 1.9–97x lower than between unrelated faces.
     Alongside those, 10 textures / 28 816 faces against 57 632 triangles (exactly 2 per
     quad). The importer warns when a texture's `numFaces` disagrees with its mesh. Not reproduced: no
-    displacement (`inputs:displacementMap` is unread), no subdivision *on the island*
-    (subdivision is opt-in via `crust:subdivisionLevel`, which the island does not
-    author, so its `catmullClark` base cages render as before — Ptex is indifferent
-    either way, since face ids index cage faces and subdivided face tables map back to
-    them), and the reference's `islandsunEnv.tex` environment is a
+    displacement (`inputs:displacementMap` is unread); the island's authored
+    `catmullClark` cages were measured *unrefined* (the default level 0 still leaves
+    them unrefined, only shaded with smooth cage normals; Ptex is
+    indifferent either way, since face ids index cage faces and subdivided face tables
+    map back to them); and the reference's `islandsunEnv.tex` environment is a
     RenderMan-only format.
 
 ## Texture filtering
@@ -702,10 +702,10 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   not evaluated, `occlusion`/`displacement`/`specularColor` are not read, and a
   texture's `fallback` default when unauthored is the surface input's constant, then
   its schema default, rather than the spec's opaque black (deliberately — see above). A **subdivided** mesh
-  carries no chart at all: refining a face-varying UV channel is a second
-  synthetic hierarchy through the refiner, and carrying the cage's UVs onto
-  refined triangles would stretch every texture across the patch it came from —
-  so such a mesh warns and renders on its material's constant inputs. Only
+  shades through its *refined* chart (`faceVarying` under the mesh's
+  `faceVaryingLinearInterpolation`, `vertex` like the points; see the subdivision
+  section of `openspec/specs/usd-scene-import/design.md`), never the cage's UVs on
+  refined triangles, which would stretch every texture across the patch it came from. Only
   `primvars:st` (and `uv`/`st0`/`UVMap` as fallbacks) is read; there is no
   general primvar plumbing and no second UV set. `texcoord`'s `index` input is
   ignored for the same reason. And `decode_tile`'s `CRUST_TEX_MAX` resize has a

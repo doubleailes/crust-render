@@ -55,6 +55,7 @@ def Xform "World"
 
     def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Looks/Ground>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]

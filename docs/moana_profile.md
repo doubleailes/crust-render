@@ -19,6 +19,13 @@ ISLAND=~/Workspace/samples/island/usd/island.usda
 cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
 ```
 
+Every measurement on this page is of the island's **unrefined cages**. The island
+authors `subdivisionScheme = "catmullClark"` in 189 of its 213 mesh-bearing files, and
+since `usd-driven-subdivision` they stay unrefined at the default level 0, only shaded
+with smooth cage normals (so the images differ slightly; the triangle counts do not).
+`--subdiv-level 1` would cost 4× their triangles on a scene already holding 60.9 M
+triangles in 39 GiB of kernel memory; that has not been measured here.
+
 - **Settings:** the stage authors no `crust:` settings, so the importer defaults
   apply (640×360, depth 32, power MIS and light selection, triangle filter,
   indirect clamp 10), except that `-s 4` replaces 128 spp. At 128 spp the render

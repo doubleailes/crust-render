@@ -140,6 +140,12 @@ pub struct UsdImportOptions {
     /// camera on the stage is an error ([`crate::Error::CameraNotFound`]); a
     /// dangling `RenderSettings.camera` only warns and falls back.
     pub camera: Option<String>,
+    /// The subdivision refinement level (the CLI's `--subdiv-level`), over
+    /// the stage's `crust:subdivisionLevel` render setting and the default
+    /// of 0. Applies to every mesh whose `subdivisionScheme` is not `none`
+    /// (unauthored is USD's fallback, `catmullClark`); 0 renders each cage
+    /// with smooth normals. Clamped to 6.
+    pub subdivision_level: Option<u32>,
     /// Leave the last composed USD stage allocated instead of freeing it.
     ///
     /// Tearing a composed stage down is not free: openusd's index cache is

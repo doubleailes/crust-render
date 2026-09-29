@@ -37,6 +37,7 @@ def Xform "World"
     # A cube mesh rising over the shutter.
     def Mesh "Riser"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
         int[] faceVertexIndices = [
             0, 1, 3, 2, 4, 6, 7, 5, 0, 4, 5, 1, 2, 3, 7, 6, 0, 2, 6, 4, 1, 5, 7, 3
@@ -52,6 +53,7 @@ def Xform "World"
 
     def Mesh "Floor"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-8, 0, -8), (8, 0, -8), (8, 0, 8), (-8, 0, 8)]
@@ -61,6 +63,7 @@ def Xform "World"
     # it darkens the floor without appearing in the image.
     def Mesh "ShadowCard"
     {
+        uniform token subdivisionScheme = "none"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]

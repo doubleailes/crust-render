@@ -11,7 +11,10 @@ use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::Prim;
-use openusd_schemas::geom::{InterpolateBoundary, Mesh as UsdMesh, PointBased, SubdivisionScheme};
+use openusd_schemas::geom::{
+    FaceVaryingLinearInterpolation, InterpolateBoundary, Mesh as UsdMesh, PointBased,
+    SubdivisionScheme,
+};
 use rayon::prelude::*;
 use tracing::{debug, warn};
 
@@ -19,7 +22,7 @@ use crate::material::Material;
 use crate::rt_world::{FaceMap, FanSlice, UvMap, WorldBuilder};
 use crate::scene::subdiv;
 
-use super::attrs::{prim_motion_translate, prim_ray_mask, subdiv_level};
+use super::attrs::{custom_i32, prim_motion_translate, prim_ray_mask};
 use super::time::eval_time;
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
@@ -133,12 +136,40 @@ pub(super) struct MeshSlot {
 /// Replaces a bare `HashMap<MeshKey, Arc<RtScene>>`: the same content-hash
 /// deduplication, but a mesh's *representation* is no longer decided the
 /// moment it is first seen.
-#[derive(Default)]
 pub(super) struct MeshArena {
     /// Indexed by the `u32` in `by_key`. Iterate this, never `by_key` — a
     /// `HashMap`'s order is not stable and the build must be deterministic.
     pub(super) slots: Vec<MeshSlot>,
     pub(super) by_key: HashMap<MeshKey, u32>,
+    /// How this load refines subdivision surfaces. Here rather than on the
+    /// import context because every path that reads a mesh — direct prims
+    /// and prototype parts alike — already holds the arena.
+    pub(super) subdiv: SubdivPolicy,
+}
+
+/// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
+pub(super) struct SubdivPolicy {
+    /// The one refinement level, resolved by
+    /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level).
+    pub(super) level: u32,
+    /// `false` under `CRUST_SUBDIV=0`: every mesh renders its faceted cage,
+    /// exactly as before subdivision surfaces were read at all — so, unlike
+    /// level 0, not even smooth cage normals. The honest "off" side of the A/B.
+    enabled: bool,
+    /// Whether the retired per-prim `crust:subdivisionLevel` has been warned
+    /// about: once per load, since a per-prim warning would scale with the
+    /// scene.
+    legacy_warned: bool,
+}
+
+impl SubdivPolicy {
+    pub(super) fn new(level: u32) -> Self {
+        SubdivPolicy {
+            level,
+            enabled: crate::config().subdiv,
+            legacy_warned: false,
+        }
+    }
 }
 
 /// A direct mesh prim whose geometry is recorded but not yet attached.
@@ -152,6 +183,14 @@ pub(super) struct MeshPlacement {
 }
 
 impl MeshArena {
+    pub(super) fn new(subdiv: SubdivPolicy) -> Self {
+        MeshArena {
+            slots: Vec::new(),
+            by_key: HashMap::new(),
+            subdiv,
+        }
+    }
+
     /// Interns a mesh by content, returning its slot index. Triangulates on
     /// first sight; `None` if nothing survives triangulation (matching the
     /// old behaviour, which also did not cache a failed mesh).
@@ -325,7 +364,14 @@ pub(super) fn emit_mesh(
 ) {
     let want_faces = material.face_texture().is_some();
     let want_uvs = material.uses_uv();
-    let Some(src) = mesh_source(prim, mesh, want_faces, want_uvs, material.uv_primvar()) else {
+    let Some(src) = mesh_source(
+        prim,
+        mesh,
+        want_faces,
+        want_uvs,
+        material.uv_primvar(),
+        &mut meshes.subdiv,
+    ) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
             prim.path()
@@ -731,7 +777,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
 
 /// One mesh's geometry as the rest of the importer consumes it — either the
 /// authored cage verbatim, or its subdivision-surface refinement when the
-/// prim opts in (see [`subdiv_level`]). Refinement happens *here*, before
+/// mesh authors a subdivision scheme (see [`mesh_source`]). Refinement happens *here*, before
 /// interning, so every downstream path — direct bake, deferred
 /// instance-vs-bake, prototypes — sees it exactly once, and [`MeshKey`]
 /// dedupes on the refined arrays (two prims sharing a cage at different
@@ -750,16 +796,23 @@ pub(super) struct MeshSource {
     /// or not the mesh was refined.
     pub(super) base_face_count: usize,
     /// `primvars:st`, `Some` iff the bound material reads texture
-    /// coordinates. Absent for a subdivided mesh: refining a face-varying
-    /// chart is a second synthetic channel through the refiner (the Ptex
-    /// sub-face UVs already are one), and carrying the *cage's* UVs onto
-    /// refined triangles would stretch every texture across the patch it came
-    /// from. A subdivided MaterialX mesh therefore renders on its constant
-    /// inputs rather than on a wrong chart.
+    /// coordinates. For a subdivided mesh this is the *refined* chart — the
+    /// cage's UVs on refined triangles would stretch every texture across the
+    /// patch it came from.
     pub(super) uvs: Option<UvSource>,
 }
 
-/// Reads a mesh prim's arrays and applies subdivision when requested.
+/// Reads a mesh prim's arrays and refines them when the mesh is a
+/// subdivision surface.
+///
+/// A mesh is one unless its `subdivisionScheme` is `none` — *including* when
+/// the scheme is unauthored, since USD's fallback is `catmullClark`. That is
+/// how production assets mark a subdivision surface: ALab's and
+/// Kitchen_set's render meshes author neither a scheme nor normals, while
+/// ALab's polygonal display proxies author `none` and normals. It is refined
+/// to the load's one [`SubdivPolicy::level`]; at level 0 it renders its cage
+/// with smooth normals rather than faceted.
+///
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
 pub(super) fn mesh_source(
@@ -768,6 +821,7 @@ pub(super) fn mesh_source(
     want_faces: bool,
     want_uvs: bool,
     uv_primvar: Option<&str>,
+    policy: &mut SubdivPolicy,
 ) -> Option<MeshSource> {
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
@@ -782,25 +836,35 @@ pub(super) fn mesh_source(
         uvs,
     };
 
-    let level = subdiv_level(prim);
-    if level == 0 {
-        return Some(cage(points, counts, indices, uvs));
-    }
-    if uvs.is_some() {
+    if !policy.legacy_warned && custom_i32(prim, "crust:subdivisionLevel").is_some() {
+        policy.legacy_warned = true;
         warn!(
-            "Mesh at {}: crust:subdivisionLevel with a UV-textured material — \
-             texture coordinates are not refined, so the surface renders on its \
-             constant inputs",
+            "Mesh at {} (and possibly others): the per-prim crust:subdivisionLevel \
+             is no longer read — a mesh is subdivided when it authors \
+             subdivisionScheme, to the level set by crust:subdivisionLevel on the \
+             RenderSettings prim or --subdiv-level",
             prim.path()
         );
     }
 
+    // Unauthored (or blocked) reads the schema fallback, `catmullClark`.
     let usd_scheme = mesh
         .subdivision_scheme_attr()
         .get_at::<SubdivisionScheme>(eval_time())
         .ok()
         .flatten()
         .unwrap_or_default();
+    if !policy.enabled || usd_scheme == SubdivisionScheme::None {
+        return Some(cage(points, counts, indices, uvs));
+    }
+    let level = policy.level;
+    if level == 0 {
+        let normals = subdiv::smooth_cage_normals(&points, &counts, &indices);
+        return Some(MeshSource {
+            normals,
+            ..cage(points, counts, indices, uvs)
+        });
+    }
     let scheme = match usd_scheme {
         SubdivisionScheme::CatmullClark => subdiv::SubdivScheme::CatmullClark,
         SubdivisionScheme::Bilinear => subdiv::SubdivScheme::Bilinear,
@@ -815,14 +879,7 @@ pub(super) fn mesh_source(
             }
             subdiv::SubdivScheme::Loop
         }
-        SubdivisionScheme::None => {
-            warn!(
-                "Mesh at {}: crust:subdivisionLevel = {level} ignored \
-                 (subdivisionScheme = none)",
-                prim.path()
-            );
-            return Some(cage(points, counts, indices, uvs));
-        }
+        SubdivisionScheme::None => return Some(cage(points, counts, indices, uvs)),
     };
 
     let boundary = match mesh
@@ -857,6 +914,34 @@ pub(super) fn mesh_source(
     let corner_indices = int_array(mesh.corner_indices_attr());
     let corner_sharpnesses = float_array(mesh.corner_sharpnesses_attr());
 
+    // The chart the refiner carries. One it cannot index (a negative or
+    // out-of-range entry) is dropped rather than refined into garbage: the
+    // surface then renders on the material's constant inputs, as every
+    // subdivided mesh did before charts were refined.
+    let chart = uvs.as_ref().and_then(|uv| {
+        let channel = subdiv::UvChannel {
+            values: &uv.values,
+            indices: uv.indices.as_deref(),
+            face_varying: uv.face_varying,
+            linear: face_varying_linear(mesh),
+        };
+        let n_entries = if uv.face_varying {
+            indices.len()
+        } else {
+            points.len()
+        };
+        if channel.is_well_formed(n_entries) {
+            Some(channel)
+        } else {
+            warn!(
+                "Mesh at {}: texture coordinates do not index cleanly into their \
+                 values — the subdivided surface renders without them",
+                prim.path()
+            );
+            None
+        }
+    });
+
     let req = subdiv::SubdivRequest {
         scheme,
         level,
@@ -867,6 +952,7 @@ pub(super) fn mesh_source(
         corner_indices: &corner_indices,
         corner_sharpnesses: &corner_sharpnesses,
         want_face_uvs: want_faces,
+        uvs: chart,
     };
     match subdiv::subdivide(&points, &counts, &indices, &req) {
         Ok(refined) => {
@@ -883,7 +969,11 @@ pub(super) fn mesh_source(
                 normals: Some(refined.normals),
                 subdiv_faces: refined.faces,
                 base_face_count,
-                uvs: None,
+                uvs: refined.uvs.map(|uv| UvSource {
+                    values: uv.values,
+                    indices: uv.indices,
+                    face_varying: uv.face_varying,
+                }),
             })
         }
         Err(e) => {
@@ -895,6 +985,27 @@ pub(super) fn mesh_source(
             // index it exactly as authored.
             Some(cage(points, counts, indices, uvs))
         }
+    }
+}
+
+/// The mesh's `faceVaryingLinearInterpolation`, mapped one to one. Unauthored
+/// is USD's fallback, `cornersPlus1` — not OpenSubdiv's own default,
+/// `cornersOnly`.
+fn face_varying_linear(mesh: &UsdMesh) -> opensubdiv_rs::sdc::FVarLinearInterpolation {
+    use opensubdiv_rs::sdc::FVarLinearInterpolation as Osd;
+    match mesh
+        .face_varying_linear_interpolation_attr()
+        .get_at::<FaceVaryingLinearInterpolation>(eval_time())
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
+        FaceVaryingLinearInterpolation::None => Osd::None,
+        FaceVaryingLinearInterpolation::CornersOnly => Osd::CornersOnly,
+        FaceVaryingLinearInterpolation::CornersPlus1 => Osd::CornersPlus1,
+        FaceVaryingLinearInterpolation::CornersPlus2 => Osd::CornersPlus2,
+        FaceVaryingLinearInterpolation::Boundaries => Osd::Boundaries,
+        FaceVaryingLinearInterpolation::All => Osd::All,
     }
 }
 
@@ -1271,6 +1382,7 @@ mod face_table_tests {
             corner_indices: &[],
             corner_sharpnesses: &[],
             want_face_uvs: true,
+            uvs: None,
         };
         let refined = subdiv::subdivide(&points, &counts, &indices, &req).unwrap();
         let sub = refined.faces.as_ref().unwrap();
@@ -1410,5 +1522,55 @@ mod face_table_tests {
         let (tris, map, _) = triangulate(&counts, &indices, 4, false, None).unwrap();
         assert_eq!(tris.len(), 2);
         assert!(map.is_none());
+    }
+}
+
+#[cfg(test)]
+mod subdiv_policy_tests {
+    use super::*;
+    use openusd::usd::Stage;
+
+    /// The retired per-prim `crust:subdivisionLevel` warns once per load,
+    /// however many prims author it, and never picks the level.
+    #[test]
+    fn the_legacy_per_prim_level_warns_once_and_is_not_the_level() {
+        let dir = std::env::temp_dir().join("crust_subdiv_policy_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("legacy_level.usda");
+        let quad = |name: &str| {
+            format!(
+                r#"    def Mesh "{name}"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        int crust:subdivisionLevel = 2
+    }}
+"#
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#usda 1.0\ndef Xform \"W\"\n{{\n{}{}}}\n",
+                quad("A"),
+                quad("B")
+            ),
+        )
+        .expect("write stage");
+        let stage = Stage::builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let mut policy = SubdivPolicy::new(2);
+        for (n, name) in ["/W/A", "/W/B"].into_iter().enumerate() {
+            let p = sdf::path(name).unwrap();
+            let prim = super::super::prim_at(&stage, p.clone());
+            let mesh = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
+            let src = mesh_source(&prim, &mesh, false, false, None, &mut policy).unwrap();
+            // The fallback scheme at the policy's level 2, not the prim's.
+            assert_eq!(src.counts.len(), 16, "{name}: refined at the load's level");
+            // Set by the first prim, so the second finds the warning spent.
+            assert!(policy.legacy_warned, "after prim {n}");
+        }
     }
 }

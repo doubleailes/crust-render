@@ -70,7 +70,7 @@ mod time;
 mod volume;
 mod xform;
 
-use attrs::custom_token;
+use attrs::{custom_token, resolve_subdiv_level};
 use camera::build_camera;
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
@@ -79,10 +79,10 @@ use lights::{
     emit_sphere_light,
 };
 use materials::{MaterialCache, resolve_material};
-use mesh::{MeshArena, MeshPlacement, emit_mesh, flush_meshes};
+use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use settings::{
     CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
-    render_settings_camera,
+    render_settings_camera, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
 use time::{EvalTimeScope, eval_time};
@@ -521,6 +521,13 @@ pub(crate) fn load_scene(
     // Render settings come first — the camera importer needs the aspect ratio.
     let mut settings = import_render_settings(&index);
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
+    // Geometry, not tracer, settings: every mesh whose scheme is not `none`
+    // is refined to this one level, so it must be known before the traversal.
+    let subdiv_level = resolve_subdiv_level(
+        options.subdivision_level,
+        render_settings_subdiv_level(&index),
+    );
+    debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
     // Which camera to render through: the host's explicit choice, else the
     // stage's own `RenderSettings.camera`. Decided here, on the index stage,
     // because the traversal needs it before it meets any camera.
@@ -560,7 +567,7 @@ pub(crate) fn load_scene(
         // with identical local geometry + material share one copy of that
         // geometry — placed by an instance when it is placed more than once,
         // baked flat into the parent BVH when it is placed exactly once.
-        caches: ImportCaches::new(assets, path),
+        caches: ImportCaches::new(assets, path, subdiv_level),
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
@@ -790,10 +797,10 @@ struct ImportCaches<'a> {
 }
 
 impl<'a> ImportCaches<'a> {
-    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path) -> Self {
+    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path, subdiv_level: u32) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
-            meshes: MeshArena::default(),
+            meshes: MeshArena::new(SubdivPolicy::new(subdiv_level)),
             protos: HashMap::new(),
             groups: HashMap::new(),
             epoch: 0,

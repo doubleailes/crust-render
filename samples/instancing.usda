@@ -35,6 +35,7 @@ def Xform "World"
     {
         def Mesh "block" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             rel material:binding = </World/Looks/Copper>
             int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
             int[] faceVertexIndices = [0,1,3,2, 4,6,7,5, 0,4,5,1, 2,3,7,6, 0,2,6,4, 1,5,7,3]
@@ -49,6 +50,7 @@ def Xform "World"
         # becomes one instance *per bound geometry* rather than one total.
         def Mesh "cap" (prepend apiSchemas = ["MaterialBindingAPI"])
         {
+            uniform token subdivisionScheme = "none"
             rel material:binding = </World/Looks/Emerald>
             int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
             int[] faceVertexIndices = [0,1,3,2, 4,6,7,5, 0,4,5,1, 2,3,7,6, 0,2,6,4, 1,5,7,3]
@@ -109,6 +111,7 @@ def Xform "World"
         {
             def Mesh "Gem" (prepend apiSchemas = ["MaterialBindingAPI"])
             {
+                uniform token subdivisionScheme = "none"
                 rel material:binding = </World/Looks/Emerald>
                 int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3]
                 int[] faceVertexIndices = [
@@ -125,6 +128,7 @@ def Xform "World"
 
     def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
+        uniform token subdivisionScheme = "none"
         rel material:binding = </World/Looks/Grey>
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]

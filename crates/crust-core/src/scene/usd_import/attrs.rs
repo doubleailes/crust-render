@@ -1,5 +1,5 @@
 //! Typed readers for authored attributes: the `crust:*` custom attributes, the
-//! per-prim geometry flags (ray mask, motion, subdivision level), and
+//! per-prim geometry flags (ray mask, motion), the subdivision level, and
 //! schema-attribute value decoding. Every read resolves at [`eval_time`].
 
 use glam::{Vec3, Vec3A};
@@ -70,35 +70,49 @@ pub(super) fn prim_motion_translate(prim: &Prim) -> Option<Vec3> {
     custom_color3(prim, "crust:motion:translate").map(|v| Vec3::new(v.x, v.y, v.z))
 }
 
-/// Hard cap on `crust:subdivisionLevel` — each level quadruples the face
-/// count, so 6 turns one quad into 4096 and is already past what any of the
-/// checked-in scenes could resolve.
-const MAX_SUBDIV_LEVEL: i32 = 6;
+/// The refinement level a subdivision surface (any scheme but `none`) gets
+/// when neither the host nor the stage's `RenderSettings` names one: 0, so
+/// by default nothing is refined — a subdivision surface renders its cage,
+/// shaded smooth — and refinement is something a render setting or
+/// `--subdiv-level` asks for, as Hydra's `refineLevel` is. Conservative on
+/// purpose: every mesh not authoring `none` is a subdivision surface (ALab
+/// and Kitchen_set take the fallback scheme; Moana authors `catmullClark` in
+/// 189 of its 213 mesh files), and even level 1 costs them 4× their
+/// triangles (ALab: 32 → 49 GiB peak).
+pub(super) const DEFAULT_SUBDIV_LEVEL: u32 = 0;
 
-/// `crust:subdivisionLevel` — uniform subdivision-surface refinement depth
-/// (default 0 = render the base cage). Deliberately opt-in per prim rather
-/// than triggered by `subdivisionScheme`: USD's fallback scheme is
-/// `catmullClark`, so honouring the scheme alone would subdivide virtually
-/// every mesh ever authored (all of the Moana island included), and USD has
-/// no standard per-prim refinement level — Hydra treats refinement as a
-/// render setting. The scheme still decides *how* to subdivide once a level
-/// asks for it.
+/// Hard cap on the refinement level — each level quadruples the face count,
+/// so 6 turns one quad into 4096 and is already past what any of the
+/// checked-in scenes could resolve.
+pub(super) const MAX_SUBDIV_LEVEL: u32 = 6;
+
+/// The one refinement level every subdivided mesh of a load is refined to.
 ///
-/// `CRUST_SUBDIV=0` forces 0 everywhere — the A/B switch that separates a
-/// subdivision artifact from a material or lighting one, like
-/// `CRUST_MESH_BAKE`.
-pub(super) fn subdiv_level(prim: &Prim) -> u32 {
+/// USD has no per-prim refinement level — Hydra treats it as a render
+/// setting — so this is resolved once per load, in order: the host's
+/// override (`UsdImportOptions::subdivision_level`, the CLI's
+/// `--subdiv-level`), then `crust:subdivisionLevel` on the `RenderSettings`
+/// prim, then [`DEFAULT_SUBDIV_LEVEL`]; clamped to [`MAX_SUBDIV_LEVEL`].
+/// *Whether* a mesh is refined is its `subdivisionScheme`'s call
+/// (see `mesh::mesh_source`), never this one's.
+///
+/// `CRUST_SUBDIV=0` forces 0 — the A/B switch that separates a subdivision
+/// artifact from a material or lighting one, like `CRUST_MESH_BAKE`.
+pub(super) fn resolve_subdiv_level(host: Option<u32>, authored: Option<i32>) -> u32 {
     if !crate::config().subdiv {
         return 0;
     }
-    let level = custom_i32(prim, "crust:subdivisionLevel").unwrap_or(0);
-    if level > MAX_SUBDIV_LEVEL {
-        warn!(
-            "Mesh at {}: crust:subdivisionLevel = {level} clamped to {MAX_SUBDIV_LEVEL}",
-            prim.path()
-        );
+    let (level, source) = match (host, authored) {
+        (Some(l), _) => (i64::from(l), "the host override"),
+        (None, Some(l)) => (i64::from(l), "crust:subdivisionLevel"),
+        (None, None) => (i64::from(DEFAULT_SUBDIV_LEVEL), "the default"),
+    };
+    if level > i64::from(MAX_SUBDIV_LEVEL) {
+        warn!("Subdivision level {level} from {source} clamped to {MAX_SUBDIV_LEVEL}");
+    } else if level < 0 {
+        warn!("Subdivision level {level} from {source} clamped to 0");
     }
-    level.clamp(0, MAX_SUBDIV_LEVEL) as u32
+    level.clamp(0, i64::from(MAX_SUBDIV_LEVEL)) as u32
 }
 
 pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
@@ -210,5 +224,25 @@ pub(super) fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
         // color3f is stored as Vec3f in sdf::Value
         sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subdivision_level_precedence_and_clamp() {
+        // Only meaningful with subdivision on (`CRUST_SUBDIV` unset).
+        if !crate::config().subdiv {
+            return;
+        }
+        assert_eq!(resolve_subdiv_level(None, None), DEFAULT_SUBDIV_LEVEL);
+        assert_eq!(resolve_subdiv_level(None, Some(1)), 1, "the stage's level");
+        assert_eq!(resolve_subdiv_level(Some(0), Some(3)), 0, "the host wins");
+        assert_eq!(resolve_subdiv_level(Some(4), None), 4);
+        assert_eq!(resolve_subdiv_level(None, Some(40)), MAX_SUBDIV_LEVEL);
+        assert_eq!(resolve_subdiv_level(Some(u32::MAX), None), MAX_SUBDIV_LEVEL);
+        assert_eq!(resolve_subdiv_level(None, Some(-3)), 0);
     }
 }
