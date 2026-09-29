@@ -255,13 +255,15 @@ subsurface forced on, or Typhoon.
    literal, so a connected one (`textured` feeds it through `convert`) fell back to
    identity. It now folds, and `textured` went from 17.9 to 28.4 dB.
 2. **What the closure tree reports rather than renders**, per the change's spec:
-   - opacity / alpha has no cutout: `input_alpha_mode_mask` (−17.3 dB against
+   - opacity / alpha had no cutout: `input_alpha_mode_mask` (−17.3 dB against
      `blender-new`), `input_alpha_cutoff` (−12.4), `opacity_mask` (−11.6) and
-     `alpha_mode_mask` (−8.6) are the largest shading shortfalls in the suite;
+     `alpha_mode_mask` (−8.6) were the largest shading shortfalls in the suite.
+     Opacity is a stochastic cutout now (`openspec/changes/add-mtlx-cutout-and-rotation`),
+     which this run predates;
    - OpenPBR fuzz is Zeltner sheen, evaluated as Imageworks / Charlie: the fuzz sweeps
      sit 5–8 dB below `blender-new` (`sweep_fuzz_roughness_0_25` −8.2,
      `input_fuzz_sheenlike` −5.5, `velvet` −5.2);
-   - anisotropy rotation.
+   - anisotropy rotation, applied since, like opacity.
 
    Subsurface is rendered now, as a random walk, and scores 2.5–6 dB below the
    model it replaced (see "Subsurface" above). That is a question about the

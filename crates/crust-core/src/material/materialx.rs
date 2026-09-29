@@ -58,8 +58,26 @@ pub struct MtlxMaterial {
     jit: Option<crust_jit::JitProgram>,
     /// The closure tree, its EDF terms and interior volume.
     closures: Closures,
+    /// The program for the surface's opacity alone, when it has one.
+    presence: Option<Presence>,
     /// Name of the material node, for diagnostics.
     pub name: String,
+}
+
+/// What [`Material::opacity`] runs: the opacity's own slice of the program.
+///
+/// Opacity is asked before a hit is shaded — at every crossing of a shadow
+/// ray, and at every hit a path may pass through — so running the whole
+/// graph for one float would shade each skipped hit in full. Optimised to the
+/// one root, the program keeps only what the opacity depends on (for the
+/// usual cutout, one texture lookup), and computes it bit for bit as the
+/// full program does.
+struct Presence {
+    program: Program,
+    #[cfg(feature = "jit")]
+    jit: Option<crust_jit::JitProgram>,
+    /// Where the opacity lands in `program`'s slots.
+    slot: u32,
 }
 
 impl std::fmt::Debug for MtlxMaterial {
@@ -90,6 +108,9 @@ pub struct Probe {
     pub closure: ResolvedClosure,
     /// The emitted radiance.
     pub emission: Vec3A,
+    /// The surface's opacity ([`Material::opacity`]): 1 unless it has a
+    /// cutout.
+    pub opacity: f32,
 }
 
 impl MtlxMaterial {
@@ -101,27 +122,11 @@ impl MtlxMaterial {
 
     /// Runs the program at a hit and hands `f` the evaluated slots.
     fn with_slots<R>(&self, r_in: &Ray, rec: &HitRecord, f: impl FnOnce(&[Val]) -> R) -> R {
-        let ctx = ShadeCtx {
-            uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
-            normal: rec.normal,
-            tangent: rec.tangent,
-            view: r_in.direction(),
-            position: rec.p,
-            uv_width: rec.uv_width,
-        };
-        SLOTS.with(|cell| {
-            let mut slots = cell.borrow_mut();
-            let shader = crate::profile::scope(crate::profile::Section::RunShader);
-            #[cfg(feature = "jit")]
-            match &self.jit {
-                Some(jit) => jit.eval(&ctx, &mut slots),
-                None => self.program.eval(&ctx, &mut slots),
-            }
-            #[cfg(not(feature = "jit"))]
-            self.program.eval(&ctx, &mut slots);
-            drop(shader);
-            f(&slots)
-        })
+        #[cfg(feature = "jit")]
+        let jit = self.jit.as_ref();
+        #[cfg(not(feature = "jit"))]
+        let jit = None;
+        run(&self.program, jit, r_in, rec, f)
     }
 
     /// The emitted radiance: the EDF terms summed, each `weight · color` per
@@ -176,16 +181,76 @@ impl MtlxMaterial {
     /// compare renders.
     pub fn probe(&self, r_in: &Ray, rec: &HitRecord) -> Probe {
         let cos = rec.normal.dot(-r_in.direction().normalize()).max(0.0);
+        let opacity = self.opacity(r_in, rec);
         self.with_slots(r_in, rec, |s| Probe {
             closure: ResolvedClosure::resolve(&self.closures, s, r_in, rec),
             emission: self.emission(s, cos),
+            opacity,
         })
     }
+}
+
+/// The JIT build of a program, or a stand-in type when there is none.
+#[cfg(feature = "jit")]
+type Jit = crust_jit::JitProgram;
+#[cfg(not(feature = "jit"))]
+type Jit = std::convert::Infallible;
+
+/// Runs `program` (through `jit` when there is one) at a hit, and hands `f`
+/// the evaluated slots.
+fn run<R>(
+    program: &Program,
+    jit: Option<&Jit>,
+    r_in: &Ray,
+    rec: &HitRecord,
+    f: impl FnOnce(&[Val]) -> R,
+) -> R {
+    let ctx = ShadeCtx {
+        uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
+        normal: rec.normal,
+        tangent: rec.tangent,
+        view: r_in.direction(),
+        position: rec.p,
+        uv_width: rec.uv_width,
+    };
+    SLOTS.with(|cell| {
+        let mut slots = cell.borrow_mut();
+        let shader = crate::profile::scope(crate::profile::Section::RunShader);
+        match jit {
+            #[cfg(feature = "jit")]
+            Some(jit) => jit.eval(&ctx, &mut slots),
+            _ => program.eval(&ctx, &mut slots),
+        }
+        drop(shader);
+        f(&slots)
+    })
 }
 
 impl Material for MtlxMaterial {
     fn kind(&self) -> &'static str {
         "MaterialX"
+    }
+
+    fn has_cutout(&self) -> bool {
+        self.presence.is_some()
+    }
+
+    /// The surface's opacity, from its own slice of the program, clamped to
+    /// [0, 1]; a non-finite value is opaque.
+    fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
+        let Some(p) = &self.presence else {
+            return 1.0;
+        };
+        #[cfg(feature = "jit")]
+        let jit = p.jit.as_ref();
+        #[cfg(not(feature = "jit"))]
+        let jit = None;
+        let o = run(&p.program, jit, r_in, rec, |s| s[p.slot as usize].x());
+        if o.is_finite() {
+            o.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
     }
 
     fn scatter_importance(
@@ -308,21 +373,42 @@ pub fn load(
         c.optimize();
     }
     #[cfg(feature = "jit")]
-    let jit = jit_enabled()
-        .then(|| match crust_jit::JitProgram::new(&c.program) {
-            Ok(j) => Some(j),
-            Err(e) => {
-                tracing::warn!("{e}; {} runs on the interpreter", c.root_name);
-                None
-            }
-        })
-        .flatten();
+    let jit_of = |program: &Program| {
+        jit_enabled()
+            .then(|| match crust_jit::JitProgram::new(program) {
+                Ok(j) => Some(j),
+                Err(e) => {
+                    tracing::warn!("{e}; {} runs on the interpreter", c.root_name);
+                    None
+                }
+            })
+            .flatten()
+    };
+    #[cfg(feature = "jit")]
+    let jit = jit_of(&c.program);
+    // The opacity's slice. With the optimiser off it is the whole program,
+    // kept exactly as compiled like the rest.
+    let presence = c.closures.opacity.map(|slot| {
+        let (program, slot) = if optimize_enabled() {
+            let (p, remap) = c.program.optimize(&[slot]);
+            (p, remap[slot as usize].expect("the root survives"))
+        } else {
+            (c.program.clone(), slot)
+        };
+        Presence {
+            #[cfg(feature = "jit")]
+            jit: jit_of(&program),
+            program,
+            slot,
+        }
+    });
     let reported: Vec<String> = c.closures.reported.iter().cloned().collect();
     let material = MtlxMaterial {
         #[cfg(feature = "jit")]
         jit,
         program: c.program,
         closures: c.closures,
+        presence,
         name: c.root_name,
     };
     let summary = format!("{material:?}");

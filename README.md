@@ -171,9 +171,13 @@ crate (no renderer dependency, just an XML parser and `glam`):
   and a MaterialX glass refracts;
 - the surface nodes — `open_pbr_surface`, `standard_surface`, `gltf_pbr` — are
   expanded **node for node** into the trees of their MaterialX 1.39
-  nodegraphs, unauthored inputs taking the nodedefs' defaults; what a tree
-  cannot represent (opacity cutout, anisotropy rotation, …) is reported in one
-  warning per material rather than dropped silently;
+  nodegraphs, unauthored inputs taking the nodedefs' defaults — opacity
+  (`geometry_opacity`, `opacity`, glTF `alpha` / `alpha_mode`) is a stochastic
+  cutout the integrator honours on camera, bounce and shadow rays, and
+  `specular_rotation`, `coat_rotation` and `anisotropy_rotation` turn the
+  anisotropic lobes' tangent as the graphs do; what a tree cannot represent
+  (glTF `occlusion`, …) is reported in one warning per material rather than
+  dropped silently;
 - `image` nodes resolve through the `AssetLoader` seam to **UV/UDIM**
   textures (`primvars:st`, `<UDIM>` tile sets, per-input colour space from
   the graph's own `colorspace` attribute) with a tangent frame for normal
@@ -481,8 +485,10 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   are refused and reported rather than approximated into a plausible glow at the wrong
   intensity.
 - **MaterialX closures are MaterialX's, approximations named.** Zeltner sheen is
-  evaluated as Imageworks; opacity cutout and anisotropy rotation are reported, not
-  applied; a tree above eight leaves is refused. `subsurface_bsdf` is a random walk
+  evaluated as Imageworks; a tree above eight leaves is refused. Opacity cutouts are
+  MaterialX's only (native `crust:openpbr` `geometryOpacity` and a `UsdPreviewSurface`
+  `opacityThreshold` are still opaque), and in a scene that has one, every blocked
+  shadow ray is re-walked hit by hit (the kernel has no any-hit filter). `subsurface_bsdf` is a random walk
   (a port of NVIDIA Typhoon's, Chiang remap + Dwivedi guiding) confined to the object
   it entered, and like Typhoon's it reflects a little less than its colour; the native
   `crust:openpbr` subsurface is still a tinted diffuse. crust's native

@@ -38,6 +38,7 @@ const K_RR: i32 = 5; // off vertex: Russian-roulette survival
 const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
 const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
 const K_SSS: i32 = 8; // off vertex: the subsurface random walk (per step below)
+const K_CUTOUT: i32 = 9; // off vertex: presence at each cutout the segment meets
 
 /// The white Lambertian every random walk exits through.
 static SSS_EXIT: ExitLambertian = ExitLambertian;
@@ -416,14 +417,142 @@ fn shadow_transmittance<const PROFILE: bool>(
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
     if world.occluded(shadow_ray, 0.001, distance - 0.001) {
-        stats.shadow_occluded += 1;
-        return Vec3A::ZERO;
+        // Blocked — unless only cutouts block it, which the any-hit query
+        // cannot tell apart. An open segment crosses no cutout either, so it
+        // keeps the fast answer.
+        if !world.has_cutouts() {
+            stats.shadow_occluded += 1;
+            return Vec3A::ZERO;
+        }
+        return cutout_shadow(world, volumes, shadow_ray, distance, vertex, stats);
     }
     if volumes.is_empty() {
         return Vec3A::ONE;
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
     volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
+}
+
+/// How many cutouts one segment is followed through, on either side: past
+/// this a path treats the next hit as present, and a shadow ray as blocked.
+/// Generous — a stack of leaf cards seen edge-on is tens deep — and only
+/// there so a pathological stack cannot stall a sample.
+const MAX_CUTOUT_CROSSINGS: usize = 256;
+
+/// `ray` restarted at its own parameter `t`, in the same direction, with the
+/// cone as wide as it has grown by then: a hit on the result at `t'` is the
+/// hit on `ray` at `t + t'`.
+///
+/// Stepping past a hit moves the origin rather than raising `t_min`, as the
+/// subsurface walk's rays do: every `World::intersect` asks for
+/// `(0.001, ∞)`, LLVM propagates those two constants into the kernel, and a
+/// caller asking for other bounds costs every ray in every scene.
+fn restarted(ray: &Ray, t: f32) -> Ray {
+    let cone = ray.cone();
+    Ray::new(ray.at(t), ray.direction())
+        .with_time(ray.time())
+        .with_mask(ray.mask())
+        .with_cone(crate::RayCone {
+            width: cone.width_at(t * ray.direction().length()),
+            spread: cone.spread,
+        })
+}
+
+/// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
+/// in a world with cutouts: `Π (1 − opacity)` over every hit up to the light,
+/// or zero at the first hit on a material without a cutout, times the volume
+/// transmittance. Deterministic where the bounce side is stochastic
+/// ([`pass_cutouts`]): both estimate the same visibility, and the product is
+/// the lower-variance of the two.
+#[cold]
+#[inline(never)]
+fn cutout_shadow(
+    world: &World,
+    volumes: &Volumes,
+    ray: &Ray,
+    distance: f32,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let t_max = distance - 0.001;
+    let mut through = 0.0;
+    let (mut t, mut segment) = (0.0, ray.clone());
+    let mut kept = 1.0;
+    for _ in 0..MAX_CUTOUT_CROSSINGS {
+        stats.cutout_rays += 1;
+        let hit = world.intersect(&segment, 0.001, f32::INFINITY);
+        let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
+            through = kept;
+            break;
+        };
+        if !h.mat.has_cutout() {
+            break;
+        }
+        kept *= 1.0 - h.mat.opacity(ray, &h.rec);
+        if kept <= 0.0 {
+            break;
+        }
+        t += h.rec.t;
+        segment = restarted(ray, t);
+    }
+    if through == 0.0 {
+        stats.shadow_occluded += 1;
+        return Vec3A::ZERO;
+    }
+    if volumes.is_empty() {
+        return Vec3A::splat(through);
+    }
+    let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
+    through * volumes.transmittance(ray, 0.001, t_max, &mut rng)
+}
+
+/// Makes `hit`, a segment's closest hit, the one it actually ends at: each
+/// hit on a cutout is met with its opacity's probability and otherwise
+/// passed through, to the next hit along the same line, until one is met or
+/// the segment escapes. The hit's `t` stays measured along `ray`, so the
+/// carried medium, the volume regions and the cone all still measure from
+/// the segment's origin. A surface passed through is no vertex: it spends no
+/// depth, emits nothing and leaves the previous vertex's MIS record to
+/// whatever the segment does reach.
+///
+/// Its shadow-side twin is [`cutout_shadow`].
+#[cold]
+#[inline(never)]
+fn pass_cutouts<'w>(
+    world: &'w World,
+    ray: &Ray,
+    hit: &mut Option<WorldHit<'w>>,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) {
+    let mut rng = None;
+    for _ in 0..MAX_CUTOUT_CROSSINGS {
+        let Some(h) = hit.as_ref() else {
+            return;
+        };
+        if !h.mat.has_cutout() {
+            break;
+        }
+        let opacity = h.mat.opacity(ray, &h.rec);
+        if opacity >= 1.0 {
+            break;
+        }
+        let u = rng
+            .get_or_insert_with(|| vertex.new_domain(K_CUTOUT).rng())
+            .next_f32();
+        if u < opacity {
+            break;
+        }
+        stats.cutout_passes += 1;
+        stats.cutout_rays += 1;
+        let t = h.rec.t;
+        *hit = world
+            .intersect(&restarted(ray, t), 0.001, f32::INFINITY)
+            .map(|mut next| {
+                next.rec.t += t;
+                next
+            });
+    }
 }
 
 /// Direct lighting at a volume-region scatter point. The exact mirror of
@@ -485,7 +614,14 @@ fn volume_nee<const PROFILE: bool>(
 /// then folds the records into the radiance estimate and emits guiding
 /// training samples, which need the radiance arriving from the rest of the
 /// path and therefore cannot be computed forward.
+///
+/// Forced inline into `render_pixel` (and the `ray_color` wrapper tests call).
+/// LLVM inlined it on its
+/// own until the cutout branches tipped it over the threshold, and out of
+/// line it costs cornellbox 1.4% of its instructions (callgrind, 2 spp);
+/// forced, the tree before cutouts measured 0.4% *fewer*.
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 pub(super) fn trace_path<const PROFILE: bool>(
     r: &Ray,
     world: &World,
@@ -539,10 +675,13 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // attenuating through any media the final segment crosses.
             if let Some(p) = &prev {
                 stats.closest_hit += 1;
-                let hit = {
+                let mut hit = {
                     let _p = profile::scope_if::<PROFILE>(Section::Trace);
                     world.intersect(&ray, 0.001, f32::INFINITY)
                 };
+                if world.has_cutouts() {
+                    pass_cutouts(world, &ray, &mut hit, v, stats);
+                }
                 if let Some(hit) = hit {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let mut emitted = hit.mat.emitted_at(&ray, &hit.rec, cos_o);
@@ -564,7 +703,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         }
 
         let exiting = sss_pending;
-        let hit_opt = if exiting {
+        let mut hit_opt = if exiting {
             sss_pending = false;
             sss_exit.hit()
         } else {
@@ -572,6 +711,12 @@ pub(super) fn trace_path<const PROFILE: bool>(
             let _p = profile::scope_if::<PROFILE>(Section::Trace);
             world.intersect(&ray, 0.001, f32::INFINITY)
         };
+        // Patched in place, on the cold side only: an `if` that yields the
+        // hit from either arm copies all of it at every vertex (+0.8% of
+        // cornellbox's instructions, which has no cutout).
+        if world.has_cutouts() && !exiting {
+            pass_cutouts(world, &ray, &mut hit_opt, v, stats);
+        }
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
         // Free-flight candidate in the carried homogeneous medium

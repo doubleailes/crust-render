@@ -192,6 +192,28 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// Whether [`Material::opacity`] can be below 1 anywhere — known when the
+    /// material is built, never per hit.
+    ///
+    /// The world counts these at commit ([`crate::World::has_cutouts`]), and
+    /// a world with none keeps the integrator's opaque fast paths: the
+    /// any-hit shadow query and a single closest hit per segment. A material
+    /// answering `false` is never asked its opacity.
+    fn has_cutout(&self) -> bool {
+        false
+    }
+
+    /// The surface's presence at a hit, in [0, 1]: MaterialX `surface`'s
+    /// `opacity`. A ray meets the surface with this probability and otherwise
+    /// passes through it untouched — no vertex, no depth, no change of medium
+    /// — and a shadow ray is attenuated by `1 − opacity` at each crossing.
+    /// Asked before the hit is shaded, so it must not need a
+    /// [`ShadingPoint`]; only asked when [`Material::has_cutout`] says so.
+    fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
+        let _ = (r_in, rec);
+        1.0
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

@@ -117,7 +117,9 @@
     refraction, not a cutout**: `transmission_weight = 1 − opacity` at `ior`, the
     spec's "index of refraction to be used for translucent objects" — how ALab authors
     all its glass (opacity ≈ 0, ior ≈ 1.49). `opacityThreshold > 0` is the spec's
-    cutout mode and stays on the unimplemented `geometry_opacity`. A textured `ior`
+    cutout mode and stays on native `OpenPBR`'s `geometry_opacity`, which nothing
+    reads yet: the integrator's cutout (`Material::opacity`, § MaterialX) is
+    MaterialX's alone so far. A textured `ior`
     below 1 keeps the constant: production `ior` maps are 0 in their UV gutters, so a
     filtered tap there would invert refraction along every seam. Constant inputs
     are still read **undecoded** (the openspec `add-material-color-management` change
@@ -403,12 +405,53 @@
     `transmission_scatter` volume and glTF's attenuation (`σ = −ln(color) /
     distance`) become the interior `Medium`; `standard_surface`'s graph has
     none, so its `transmission_depth` is reported rather than invented.
+  - **Opacity is presence, and the integrator's.** Every surface graph ends in
+    MaterialX's `surface` node, whose `opacity` blends the whole surface —
+    BSDF and EDF — with nothing, and that is a statement about the geometry,
+    not a lobe: a cutout leaf is not there at all, so it neither refracts nor
+    changes the medium a ray is in. It is therefore carried beside the tree
+    (`Closures::opacity`) and applied where hits are found. OpenPBR's is
+    `geometry_opacity`; `standard_surface`'s is the graph's own
+    `luminance(opacity)` (ACEScg weights, the node's default — Typhoon averages
+    the channels; the graph wins); glTF's is `alpha` through `alpha_mode`,
+    OPAQUE 1, MASK `alpha ≥ alpha_cutoff`, BLEND `alpha`. `alpha_mode` is a
+    uniform, so the builder selects on its folded value rather than building
+    the graph's two `ifequal`s: exporters wire `alpha` to the base texture's
+    alpha whatever the mode, and a select through a texture never folds, which
+    would have made every such OPAQUE material a cutout — correct, and every
+    shadow ray in its scene several times dearer. Only a mode that does not
+    fold builds the chain (`ifequal` as "neither is greater", from `gt`). An
+    opacity that folds to 1 is no cutout: `Material::has_cutout` is false and
+    the integrator never asks. One that does not is evaluated by its own
+    slice of the program — `Program::optimize` to the one root, JIT-compiled
+    like the whole — because it is asked before a hit is shaded, at every
+    crossing, and running the full graph for one float would shade every
+    skipped leaf card in full. The integrator's side (stochastic pass-through
+    on the bounce side, `Π(1 − opacity)` on shadow rays) is in the rendering
+    record.
+  - **Anisotropy rotation turns the leaf's frame.** `standard_surface`'s
+    `main_tangent` / `coat_tangent` and glTF's `selected_tangent` are a
+    `rotate3d` of the *authored* tangent about the leaf's own normal input,
+    which the BSDF then projects onto that normal's plane — the same as
+    turning the projected tangent. The host's `Tworld` has no program slot to
+    rotate, so the angle rides on the leaf (`Leaf::rotation`, radians,
+    right-handed about the leaf normal) and `closure::prepare` turns the
+    frame after building it: sampling and evaluation share that frame, so
+    they cannot disagree. The sign is the trap: `mx_rotate_vector3` is
+    `v·cos θ + (v × axis)·sin θ + …`, Rodrigues' formula at **−θ**, and
+    Typhoon's `Rotate3d` is the same. So `standard_surface`'s
+    `rotation · 360°` turns the tangent *clockwise* seen from above the
+    surface, and glTF's `−rotation · 57.29578°` turns it counter-clockwise by
+    `rotation` radians, which is what glTF's own spec says. Guards follow the
+    graphs: `standard_surface` rotates only where its anisotropy is `> 0`
+    (`ifgreater`), glTF everywhere (a zero angle turns nothing, bit for bit);
+    glTF's clearcoat keeps the unrotated tangent, as its graph wires it;
+    OpenPBR has no rotation input.
   - **Reported, not dropped.** What the tree cannot represent is known at
     compile time — an input *authored away from its default* (connected, or a
     differing value) and a closure that stays live after optimisation — so the
     importer prints **one `WARN` per material**, beside the unsupported-node
-    warning: opacity / `alpha_mode` (no cutout), anisotropy rotations, glTF
-    `occlusion`, the inputs MaterialX's own graphs ignore (glTF `dispersion` and
+    warning: glTF `occlusion`, the inputs MaterialX's own graphs ignore (glTF `dispersion` and
     `thickness`, `standard_surface`'s `transmission_depth` / `scatter` /
     `dispersion`, OpenPBR's `transmission_dispersion_scale`) and a live Zeltner
     sheen (evaluated as Imageworks). Default-valued inputs stay silent: the suite authors
@@ -526,9 +569,18 @@
   native `crust:openpbr` / `UsdPreviewSurface` subsurface still renders as the
   tinted diffuse (`docs/openpbr_reference_alignment.md`): the walk is wired to
   the MaterialX leaf only.
-- **Not applied.** Opacity cutout (`opacity`, `geometry_opacity`, glTF `alpha`),
-  anisotropy rotation, and glTF `occlusion` are reported, not implemented.
-  Dispersion is ignored where MaterialX's own graphs ignore it, and reported.
+- **Not applied.** glTF `occlusion` is reported, not implemented: a path
+  tracer computes its own. Dispersion is ignored where MaterialX's own graphs
+  ignore it, and reported.
+- **Cutout limits.** The shadow side walks every blocked shadow ray hit by hit
+  once a world holds any cutout, since the kernel's any-hit query has no
+  filter to skip one (an Embree-style any-hit callback is the fix, in
+  `crust-rt`); an unblocked ray keeps the fast answer. The opacity is asked
+  with the shadow ray's direction there and the path's on the bounce side, so
+  a graph whose opacity reads `viewdirection` sees opposite views on the two
+  sides. The learned light cache's training paths ignore cutouts (a guide
+  only, never bias). A walk's exit and the walk itself ignore the entered
+  object's own opacity. A segment follows at most 256 cutouts.
 - **The throughput tables are not integrals of crust's leaves.** Measured above
   (worst +0.020 dielectric, 0.035 sheen); the follow-up, if it ever matters, is
   regenerating them from crust's leaves on the same axes. The dielectric table is

@@ -1,0 +1,132 @@
+#usda 1.0
+(
+    doc = """MaterialX cutout and anisotropy-rotation fixture: one object per
+    material of `materialx_cutout.mtlx` — a glTF leaf card whose MASK alpha is
+    a checker of square holes, an OpenPBR sphere present at 40% of its points,
+    and a Standard Surface brushed-metal sphere whose anisotropy is turned a
+    quarter turn — over a grey floor, under the sky and a small key light, so
+    the card's holes and the ghost cast their shadows too.
+
+      cargo run --release -- -i samples/materialx_cutout.usda -o cutout.exr --stats
+
+    `--stats` reports the extra ray queries cutouts cost and how many hits
+    paths passed straight through.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "GltfCard" (
+            prepend references = @materialx_cutout.mtlx@</MaterialX/Materials/mtlx_gltf_card>
+        )
+        {
+        }
+
+        def Material "OpenPbrGhost" (
+            prepend references = @materialx_cutout.mtlx@</MaterialX/Materials/mtlx_openpbr_ghost>
+        )
+        {
+        }
+
+        def Material "StandardBrushed" (
+            prepend references = @materialx_cutout.mtlx@</MaterialX/Materials/mtlx_standard_brushed>
+        )
+        {
+        }
+
+        def Material "Floor"
+        {
+            token outputs:surface.connect = </World/Looks/Floor/Shader.outputs:surface>
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.45, 0.45, 0.43)
+                float inputs:specularRoughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+
+    # A vertical card facing the camera, UVs spanning the unit square.
+    def Mesh "GltfCard" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/GltfCard>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.8, 0, 0), (0.8, 0, 0), (0.8, 1.6, 0), (-0.8, 1.6, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        double3 xformOp:translate = (-2, 0, 0.3)
+        float xformOp:rotateY = 15
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+    }
+
+    def Sphere "OpenPbrGhost" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/OpenPbrGhost>
+        double3 xformOp:translate = (0, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "StandardBrushed" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/StandardBrushed>
+        double3 xformOp:translate = (2, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Looks/Floor>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.4
+        asset inputs:texture:file = @sky_env.exr@
+        token inputs:texture:format = "latlong"
+        float xformOp:rotateY = 20
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+    }
+
+    # In front, above and to the left: the card's and the ghost's shadows fall
+    # back and to the right, onto the floor the camera sees.
+    def SphereLight "Key"
+    {
+        float inputs:intensity = 60
+        float inputs:radius = 0.3
+        color3f inputs:color = (1, 0.95, 0.9)
+        double3 xformOp:translate = (-2.5, 3.5, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 40
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 1.2, 7)
+        float xformOp:rotateX = -3
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 320)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 12
+    }
+}

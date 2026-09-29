@@ -79,6 +79,22 @@ impl Frame {
         Frame { t, b, n }
     }
 
+    /// The frame turned by `angle` radians about its normal, right-handed:
+    /// the tangent moves toward the bitangent `n × t`
+    /// ([`crust_mtlx::Leaf::rotation`]). A non-finite angle turns nothing.
+    fn rotated(self, angle: f32) -> Frame {
+        if !angle.is_finite() {
+            return self;
+        }
+        let (sin, cos) = angle.sin_cos();
+        let t = self.t * cos + self.n.cross(self.t) * sin;
+        Frame {
+            t,
+            b: self.n.cross(t),
+            n: self.n,
+        }
+    }
+
     fn to_local(self, v: Vec3A) -> Vec3A {
         Vec3A::new(v.dot(self.t), v.dot(self.b), v.dot(self.n))
     }
@@ -692,7 +708,10 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
         .map(|i| s(i).rgb())
         .filter(|t| t.is_finite())
         .unwrap_or(w.rec.tangent);
-    let frame = Frame::new(n, tangent);
+    let mut frame = Frame::new(n, tangent);
+    if let Some(r) = leaf.rotation {
+        frame = frame.rotated(s(r).x());
+    }
     let v = frame.to_local(w.v_world);
     let nv = v.z.clamp(1e-6, 1.0);
     let film = |tf: &Option<crust_mtlx::ThinFilm>| {

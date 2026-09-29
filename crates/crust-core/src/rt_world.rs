@@ -528,10 +528,12 @@ impl WorldBuilder {
     /// Builds the acceleration structure (parallel, deterministic).
     #[must_use = "the committed world is the only way to intersect it"]
     pub fn commit(self) -> World {
+        let cutouts = self.materials.iter().any(|m| m.has_cutout());
         World {
             scene: self.rt.commit(),
             materials: self.materials,
             faces: self.faces,
+            cutouts,
         }
     }
 }
@@ -551,6 +553,8 @@ pub struct World {
     scene: crust_rt::Scene,
     materials: Vec<Arc<dyn Material>>,
     faces: Vec<SideTables>,
+    /// Whether any material has a cutout ([`Material::has_cutout`]).
+    cutouts: bool,
 }
 
 impl World {
@@ -620,6 +624,16 @@ impl World {
     #[must_use]
     pub fn occluded(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         self.scene.occluded(ray.rt(), t_min, t_max)
+    }
+
+    /// Whether any geometry's material can be less than fully present
+    /// ([`Material::has_cutout`]). When none is, a segment's closest hit is
+    /// where it ends and any hit occludes a shadow ray, which is what the
+    /// integrator's fast paths assume; otherwise it asks each hit on a
+    /// cutout material for its opacity.
+    #[inline]
+    pub fn has_cutouts(&self) -> bool {
+        self.cutouts
     }
 
     /// World bounds of all geometry; `None` for an empty world.

@@ -150,7 +150,7 @@ when this document was first written; see the addendum in §4.)*
 | Two-level structure | ✅ (scene of instances) | ✅⁺ scene of instances sharing BLASes |
 | Closest-hit query | ✅ 1/4/8/16 | ✅ single ray |
 | Occlusion query | ✅ early-exit `rtcOccluded` | ✅⁺ early-exit `hit_any` on every shadow ray |
-| Filter / any-hit callbacks | ✅ | ❌ (no alpha-cutout shadows) |
+| Filter / any-hit callbacks | ✅ | ❌ (cutout shadows re-walk a blocked ray by closest hits) |
 | Ray masks | ✅ | ✅⁺ camera/shadow/indirect bits via `crust:rayMask` |
 | Point queries / collision | ✅ | ❌ |
 | ISA dispatch / packets | SSE2→AVX-512, NEON, SYCL GPUs | scalar rays + 4-wide node tests via glam |

@@ -237,6 +237,8 @@ fn ray_stats_merge_adds_every_counter() {
         sss_exits: 3,
         sss_steps: 40,
         sss_rays: 41,
+        cutout_passes: 5,
+        cutout_rays: 6,
         light_samples: 3,
         shadow_occluded: 1,
         adaptive_pixels: 1,
@@ -261,6 +263,8 @@ fn ray_stats_merge_adds_every_counter() {
         sss_exits: 30,
         sss_steps: 400,
         sss_rays: 410,
+        cutout_passes: 50,
+        cutout_rays: 60,
         light_samples: 30,
         shadow_occluded: 10,
         adaptive_pixels: 2,
@@ -284,6 +288,7 @@ fn ray_stats_merge_adds_every_counter() {
         (a.sss_walks, a.sss_exits, a.sss_steps, a.sss_rays),
         (44, 33, 440, 451)
     );
+    assert_eq!((a.cutout_passes, a.cutout_rays), (55, 66));
     assert_eq!((a.light_samples, a.shadow_occluded), (33, 11));
     assert_eq!(
         (a.adaptive_pixels, a.adaptive_samples, a.early_stopped),
