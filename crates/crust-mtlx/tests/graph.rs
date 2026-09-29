@@ -453,6 +453,21 @@ fn arithmetic_binaries() {
     ));
 }
 
+/// A finite `modulo` stays finite: with a subnormal divisor the quotient
+/// `x / y` overflows, so a remainder computed through it would be `−inf`.
+#[test]
+fn modulo_by_a_subnormal_divisor_is_finite() {
+    for (x, y) in [("1", "1e-40"), ("-1", "1e-40"), ("1", "-1e-40")] {
+        let r = run(&binary("modulo", "float", x, y), "n").x();
+        let y: f32 = y.parse().unwrap();
+        assert!(r.is_finite(), "{x} mod {y} = {r}");
+        assert!(
+            r.abs() <= y.abs() && (r == 0.0 || r.signum() == y.signum()),
+            "{x} mod {y} = {r}"
+        );
+    }
+}
+
 #[test]
 fn binaries_apply_lane_wise_over_vectors() {
     let v = run(&binary("multiply", "color3", "1, 2, 3", "2, 3, 4"), "n");
@@ -713,6 +728,25 @@ fn combine_nodes_assemble_lanes() {
     );
     assert_eq!(v.arity, 2);
     assert!(approx(v.v[0], 0.7) && approx(v.v[1], 0.9));
+}
+
+/// `combine2` to a `vector4` is `(vector3, float)` or `(vector2, vector2)`.
+/// With the inputs' `type` omitted — which the parser reads as `float` — the
+/// connected producers' own types still pick the second signature.
+#[test]
+fn combine2_takes_its_operand_widths_from_the_producers() {
+    let v = run(
+        r#"<materialx>
+             <constant name="a" type="vector2"><input name="value" type="vector2" value="0.1, 0.2" /></constant>
+             <constant name="b" type="vector2"><input name="value" type="vector2" value="0.3, 0.4" /></constant>
+             <combine2 name="n" type="vector4">
+               <input name="in1" nodename="a" />
+               <input name="in2" nodename="b" />
+             </combine2></materialx>"#,
+        "n",
+    );
+    assert_eq!(v.arity, 4);
+    assert_eq!(v.v, [0.1, 0.2, 0.3, 0.4]);
 }
 
 #[test]

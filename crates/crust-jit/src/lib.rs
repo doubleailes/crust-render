@@ -510,8 +510,8 @@ impl Gen<'_> {
             Op::Invert { a, amount } => max(&[a, amount]),
             Op::Convert { arity, .. } => Some((*arity).clamp(1, 4)),
             Op::Extract { .. } | Op::DotProduct { .. } => Some(1),
-            // A `color4` keeps its alpha; anything narrower is a grey `float`.
-            Op::Luminance { a, .. } => w(a).map(|n| if n == 4 { 4 } else { 1 }),
+            // The grey keeps its input's width (and a `color4` its alpha).
+            Op::Luminance { a, .. } => w(a),
             Op::Combine3 { .. }
             | Op::NormalMap { .. }
             | Op::ArtisticIor { .. }
