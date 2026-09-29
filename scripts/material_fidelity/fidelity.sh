@@ -14,7 +14,8 @@
 #              (e.g. --materials noise3d --materials re:^input_ --jobs 2 --threads 2)
 #   report     results.json -> report.md (summarize.py)
 #   check ...  gate results.json against baseline.json; args go to check.py
-#   baseline   accept this run: rewrite baseline.json from results.json
+#   baseline   accept this run: rewrite baseline.json from results.json (refused
+#              for a --materials run unless given --partial, which merges it in)
 #   goldeneye  export a Goldeneye project (goldeneye_suite.py), install Goldeneye
 #              into the venv and run it with the crust profile; args go to pytest
 #              (e.g. -k noise3d); `goldeneye view` in $FIDELITY_ROOT/goldeneye serves the report
