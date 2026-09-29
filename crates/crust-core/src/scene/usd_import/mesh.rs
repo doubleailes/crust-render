@@ -51,6 +51,12 @@ pub(super) struct MeshKey {
     /// Authored UV values, or `None` when the mesh carries no chart. A
     /// discriminator beside the hash, like the two counts above.
     pub(super) n_uvs: Option<usize>,
+    /// Whether the mesh shades with smooth normals. The normals themselves
+    /// follow from the points and topology already hashed, but whether there
+    /// are any does not: at level 0 a subdivision cage and a `none` cage share
+    /// every array yet shade smooth and faceted — without this, whichever
+    /// interned first would shade both.
+    pub(super) smooth: bool,
     pub(super) material: usize,
 }
 
@@ -85,6 +91,7 @@ impl MeshKey {
             n_points: src.points.len(),
             n_indices: src.indices.len(),
             n_uvs: src.uvs.as_ref().map(|uv| uv.values.len()),
+            smooth: src.normals.is_some(),
             material: Arc::as_ptr(material) as *const u8 as usize,
         }
     }
@@ -160,6 +167,9 @@ pub(super) struct SubdivPolicy {
     /// about: once per load, since a per-prim warning would scale with the
     /// scene.
     legacy_warned: bool,
+    /// Whether a refined chart authoring `cornersPlus2` has been warned
+    /// about, once per load for the same reason.
+    corners_plus2_warned: bool,
 }
 
 impl SubdivPolicy {
@@ -168,6 +178,7 @@ impl SubdivPolicy {
             level,
             enabled: crate::config().subdiv,
             legacy_warned: false,
+            corners_plus2_warned: false,
         }
     }
 }
@@ -858,7 +869,19 @@ pub(super) fn mesh_source(
         return Some(cage(points, counts, indices, uvs));
     }
     let level = policy.level;
-    if level == 0 {
+    // Loop refinement builds no face table (Ptex addresses quad sub-faces),
+    // so a Ptex lookup on its triangles would read refined face ordinals as
+    // cage face ids — a plausible, wrong texture. Keep the cage instead.
+    let loop_ptex = usd_scheme == SubdivisionScheme::Loop && want_faces;
+    if loop_ptex && level > 0 {
+        warn!(
+            "Mesh at {}: subdivisionScheme = loop with a per-face (Ptex) texture \
+             cannot keep its face ids through refinement — rendering the smooth \
+             base cage",
+            prim.path()
+        );
+    }
+    if level == 0 || loop_ptex {
         let normals = subdiv::smooth_cage_normals(&points, &counts, &indices);
         return Some(MeshSource {
             normals,
@@ -919,11 +942,25 @@ pub(super) fn mesh_source(
     // surface then renders on the material's constant inputs, as every
     // subdivided mesh did before charts were refined.
     let chart = uvs.as_ref().and_then(|uv| {
+        let linear = face_varying_linear(mesh);
+        if uv.face_varying
+            && linear == opensubdiv_rs::sdc::FVarLinearInterpolation::CornersPlus2
+            && !policy.corners_plus2_warned
+        {
+            policy.corners_plus2_warned = true;
+            warn!(
+                "Mesh at {} (and possibly others): faceVaryingLinearInterpolation = \
+                 cornersPlus2 is refined without its concave-corner sharpening \
+                 (opensubdiv-rs does not implement it) — a concave UV corner \
+                 renders smoothed",
+                prim.path()
+            );
+        }
         let channel = subdiv::UvChannel {
             values: &uv.values,
             indices: uv.indices.as_deref(),
             face_varying: uv.face_varying,
-            linear: face_varying_linear(mesh),
+            linear,
         };
         let n_entries = if uv.face_varying {
             indices.len()

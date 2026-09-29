@@ -1180,18 +1180,24 @@ mod tests {
                 if level >= 3 {
                     // Measured on a 64×64 cage: ~313 B/face with no
                     // face-varying channel, ~568 with the Ptex one, ~536 with
-                    // a shared UV chart; resident 48.1 / 88.1 / 72.1.
-                    // Ceilings ~25% above those.
-                    let ceiling = if mode == "no" { 400.0 } else { 700.0 };
+                    // a shared UV chart; resident 48.1 / 88.1 / 72.1 (the
+                    // Ptex table's 40 B/face: four corner UVs plus an
+                    // `Option<u32>` base face). Ceilings ~25% above those,
+                    // per mode, so no mode can hide under another's.
+                    let (ceiling, resident_ceiling) = match mode {
+                        "no" => (400.0, 60.0),
+                        "ptex" => (700.0, 105.0),
+                        _ => (700.0, 90.0),
+                    };
                     assert!(
                         per_face < ceiling,
                         "transient {per_face:.1} B/face at level {level} \
                          (uvs: {mode}) exceeds the {ceiling} B/face ceiling"
                     );
                     assert!(
-                        res_per_face < 110.0,
+                        res_per_face < resident_ceiling,
                         "resident {res_per_face:.1} B/face at level {level} \
-                         (uvs: {mode}) exceeds the 110 B/face ceiling"
+                         (uvs: {mode}) exceeds the {resident_ceiling} B/face ceiling"
                     );
                 }
                 drop(out);

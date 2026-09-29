@@ -183,10 +183,18 @@ Schema mapping:
   - `creaseIndices` / `creaseLengths` / `creaseSharpnesses` (per-run or per-edge
     sharpness, 10 = infinite), `cornerIndices` / `cornerSharpnesses`,
     `interpolateBoundary` and `faceVaryingLinearInterpolation` are honoured;
-    `holeIndices` is not.
+    `holeIndices` is not. **Gaps:** `cornersPlus2` is refined without its
+    concave-corner sharpening — opensubdiv-rs 0.1 implements its junctions and darts
+    only — so a concave face-varying UV corner comes out smoothed (warned once per
+    load); and a `loop` mesh whose material reads Ptex is not refined, because Loop
+    builds no face table and its refined triangles would be read as cage face ids (it
+    renders its smooth cage, with a warning).
   - Refinement happens in `mesh_source`, *before* interning, so every path (direct
     bake, deferred instance-vs-bake, prototypes) sees it exactly once and `MeshKey`
-    dedupes on the refined arrays, the refined chart included. A malformed cage or
+    dedupes on the refined arrays, the refined chart included. **Trap:** at level 0
+    a subdivision cage and a `none` cage share every array but not their shading,
+    so `MeshKey` also carries whether the mesh has smooth normals — without it the
+    first to intern shaded both (`a_smooth_cage_and_a_faceted_cage_do_not_share_a_mesh`). A malformed cage or
     refiner error warns and degrades to the cage.
   - **The UV chart is refined with the surface.** A `faceVarying` `primvars:st` (and
     `:indices`) becomes a real face-varying channel under the mesh's

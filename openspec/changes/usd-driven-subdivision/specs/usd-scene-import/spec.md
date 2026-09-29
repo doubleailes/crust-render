@@ -26,7 +26,25 @@ refined with the surface:
 - a `vertex` or `varying` primvar SHALL be refined like the points.
 
 A UV-textured material bound to a subdivided mesh SHALL therefore sample its
-textures. Ptex lookups SHALL keep addressing the authored cage's face ids.
+textures. Ptex lookups SHALL keep addressing the authored cage's face ids; a
+`loop` mesh whose material reads Ptex SHALL therefore render as its smooth cage
+with a warning rather than refine.
+
+Known gap: `cornersPlus2` is refined without its concave-corner sharpening (the
+subdivision library implements its junction and dart rules only), and SHALL be
+warned about once per load.
+
+#### Scenario: Loop mesh with a Ptex texture
+
+- **WHEN** a `loop` mesh whose material reads a Ptex texture is loaded at level 1
+- **THEN** it renders its authored triangles, each hit resolving to its authored
+  face id, and a warning is emitted
+
+#### Scenario: A smooth cage and a faceted cage with identical arrays
+
+- **WHEN** two meshes share points, topology and material, one authoring
+  `subdivisionScheme = "none"` and one leaving it unauthored, at level 0
+- **THEN** the first shades faceted and the second smooth
 
 The per-prim attribute `crust:subdivisionLevel` SHALL have no effect. A stage
 whose meshes author it SHALL emit a single warning naming the render-settings

@@ -49,3 +49,11 @@
 - [x] 8.2 The DPEL teapot wrappers (`materialx_teapot.usda`, `materialx_showcase.usda`) set `crust:subdivisionLevel = 1` on their RenderSettings so they keep rendering refined and textured
 - [x] 8.3 Specs, proposal, design, design records, CLI help and docs state the default of 0
 - [x] 8.4 `cargo fmt`, `clippy -D warnings`, `cargo test --workspace`, `check_images.sh check` and `openspec validate --strict` clean
+
+## 9. Review (Qodo, PR #178)
+
+- [x] 9.1 `MeshKey` carries whether the mesh has smooth normals, so a level-0 subdivision cage and an identical `none` cage no longer share a slot; verified by `a_smooth_cage_and_a_faceted_cage_do_not_share_a_mesh` (fails without the fix, both authoring orders)
+- [x] 9.2 A `loop` mesh whose material reads Ptex renders its smooth cage with a warning instead of refining into triangles read as cage face ids; verified by `a_loop_mesh_with_ptex_keeps_its_cage_face_ids` (8 triangles without the fix)
+- [x] 9.3 `cornersPlus2` warns once per load that opensubdiv-rs omits its concave-corner sharpening; recorded as a known gap in the spec and the design record
+- [x] 9.4 `subdivision_memory_probe` gets a resident ceiling per mode (no UVs 60, Ptex 105 as on `main`, chart 90 B/face); the 88.1 B/face Ptex resident is measured identical on `main`, so it predates this change (the 84 figure was stale)
+- [x] 9.5 `cargo fmt`, `clippy -D warnings`, `cargo test --workspace`, `openspec validate --strict` clean
