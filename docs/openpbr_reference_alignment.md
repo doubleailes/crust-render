@@ -192,8 +192,9 @@ Known, deliberate, and recorded here so nobody rediscovers them:
   hit from inside, and the coat is not reduced to transmission-tint-only
   there.
 - **`geometry_opacity`** — unconsumed, by design on both sides: Adobe
-  documents opacity as the host renderer's job (stochastic cutout); the
-  tracer doesn't implement cutout yet.
+  documents opacity as the host renderer's job (stochastic cutout). The
+  tracer has that cutout now (`Material::opacity`), but only MaterialX
+  surfaces feed it; native `OpenPBR` still reports 1.
 - **Geometry inputs** — no normal mapping and no user tangents
   (`geometry_normal/tangent/coat_normal/coat_tangent`); frames are
   auto-generated (Duff et al.), so anisotropy has no authored orientation

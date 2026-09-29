@@ -124,10 +124,15 @@ fn main() {
         // Radiance has no ceiling, unlike the albedos below: a value above 1.0
         // here is the point, not an error.
         println!(
-            "(u, v) = ({u:.3}, {v:.3})  emission ({:.4} {:.4} {:.4}){}",
+            "(u, v) = ({u:.3}, {v:.3})  emission ({:.4} {:.4} {:.4}){}{}",
             p.emission.x,
             p.emission.y,
             p.emission.z,
+            if p.opacity < 1.0 {
+                format!("  opacity {:.4}", p.opacity)
+            } else {
+                String::new()
+            },
             p.closure
                 .medium()
                 .map(|m| format!(
@@ -144,7 +149,7 @@ fn main() {
         );
         for l in p.closure.leaves() {
             println!(
-                "  {:<26} weight ({:.4} {:.4} {:.4})  {}  n ({:.3} {:.3} {:.3})",
+                "  {:<26} weight ({:.4} {:.4} {:.4})  {}  n ({:.3} {:.3} {:.3})  t ({:.3} {:.3} {:.3})",
                 l.category,
                 l.weight.x,
                 l.weight.y,
@@ -152,7 +157,10 @@ fn main() {
                 l.describe(),
                 l.frame.n.x,
                 l.frame.n.y,
-                l.frame.n.z
+                l.frame.n.z,
+                l.frame.t.x,
+                l.frame.t.y,
+                l.frame.t.z
             );
         }
     }

@@ -17,9 +17,13 @@
 //! nodedef default from the tables here — generated from the nodedefs, which
 //! are vendored under `tests/nodedefs/` and checked against these tables.
 //!
+//! Two parts of each graph sit outside the closure tree and are carried beside
+//! it: the `surface` node's `opacity` ([`Closures::opacity`]), and the
+//! `rotate3d` a graph applies to its tangent, which becomes the angle a leaf's
+//! frame is turned by ([`Leaf::rotation`]).
+//!
 //! What the tree cannot represent is reported rather than dropped silently:
-//! opacity (no cutout), anisotropy rotation, glTF occlusion, and inputs the
-//! MaterialX graphs themselves ignore.
+//! glTF occlusion, and inputs the MaterialX graphs themselves ignore.
 
 use crate::bsdf::{
     Bsdf, Closure, Closures, DiffuseModel, EdfFalloff, Emission, Leaf, NodeId, ScatterMode,
@@ -317,6 +321,35 @@ impl B<'_, '_> {
         self.mix(in2, in1, m)
     }
 
+    /// MaterialX's `ifgreatereq`: `in1` where `value1 ≥ value2`, else `in2` —
+    /// [`B::gt`] with its operands swapped, which is exact for the same reason.
+    fn ge(&mut self, v1: Slot, v2: Slot, in1: Slot, in2: Slot) -> Slot {
+        self.gt(v2, v1, in2, in1)
+    }
+
+    /// MaterialX's `ifequal`: `in1` where `value1 = value2`, else `in2`,
+    /// built as "neither is greater".
+    fn eq(&mut self, v1: Slot, v2: Slot, in1: Slot, in2: Slot) -> Slot {
+        let below = self.gt(v2, v1, in2, in1);
+        self.gt(v1, v2, in2, below)
+    }
+
+    /// The right-handed angle, in radians, a graph's `rotate3d` of its tangent
+    /// by `degrees` about the normal turns it by, `None` when `degrees` folds
+    /// to 0.
+    ///
+    /// `mx_rotate_vector3` is `v·cos θ + (v × axis)·sin θ + axis·(axis·v)(1 −
+    /// cos θ)`, and `v × axis = −(axis × v)`: Rodrigues' formula at `−θ`. So
+    /// a `rotate3d` by `amount` degrees turns the tangent by `−amount` in the
+    /// right-handed sense [`Leaf::rotation`] is stated in.
+    fn tangent_rotation(&mut self, degrees: Slot) -> Option<Slot> {
+        if self.is(degrees, 0.0) {
+            return None;
+        }
+        let k = self.k(-std::f32::consts::PI / 180.0);
+        Some(self.mul(degrees, k))
+    }
+
     /// `1 − a`.
     fn one_minus(&mut self, a: Slot) -> Slot {
         let one = self.k(1.0);
@@ -358,7 +391,24 @@ impl B<'_, '_> {
             weight,
             normal,
             tangent,
+            rotation: None,
         })))
+    }
+
+    /// Turns the tangent of the leaf `id` by `rotation` ([`Leaf::rotation`]).
+    fn rotate(&mut self, id: Option<NodeId>, rotation: Option<Slot>) {
+        if let (Some(id), Some(r)) = (id, rotation)
+            && let Closure::Leaf(l) = &mut self.out.nodes[id as usize]
+        {
+            l.rotation = Some(r);
+        }
+    }
+
+    /// The surface's presence, unless it folds to 1.
+    fn set_opacity(&mut self, opacity: Slot) {
+        if !self.is(opacity, 1.0) {
+            self.out.opacity = Some(opacity);
+        }
     }
 
     fn push(&mut self, c: Closure) -> NodeId {
@@ -470,7 +520,6 @@ impl B<'_, '_> {
 // ---------------------------------------------------------------------------
 
 fn open_pbr_surface(b: &mut B<'_, '_>) {
-    b.report("geometry_opacity", "no cutout");
     b.report(
         "transmission_dispersion_scale",
         "ignored, as MaterialX's own graph does",
@@ -795,6 +844,8 @@ fn open_pbr_surface(b: &mut B<'_, '_>) {
     b.emit_edf(ew, coated_w, Some(falloff)); // coated_emission_edf (fg)
 
     b.out.thin_walled = Some(thin_walled);
+    let opacity = b.get("geometry_opacity");
+    b.set_opacity(opacity); // shader_constructor.opacity
 }
 
 // ---------------------------------------------------------------------------
@@ -802,9 +853,6 @@ fn open_pbr_surface(b: &mut B<'_, '_>) {
 // ---------------------------------------------------------------------------
 
 fn standard_surface(b: &mut B<'_, '_>) {
-    b.report("opacity", "no cutout");
-    b.report("specular_rotation", "anisotropy rotation");
-    b.report("coat_rotation", "anisotropy rotation");
     for (name, why) in [
         (
             "transmission_depth",
@@ -824,10 +872,12 @@ fn standard_surface(b: &mut B<'_, '_>) {
 
     let normal = b.geom("normal");
     let coat_normal = b.geom("coat_normal");
-    // `main_tangent` / `coat_tangent` rotate the tangent by
-    // `specular_rotation` / `coat_rotation` when anisotropic; the rotation is
-    // reported above and the authored tangent used as is.
     let tangent = b.geom("tangent");
+    // `main_tangent` / `coat_tangent`: the tangent turned by a fraction of a
+    // full turn about `normal` / `coat_normal`, only where the lobe is
+    // anisotropic — the leaves' own normals, so a leaf rotation.
+    let main_rotation = standard_rotation(b, "specular_rotation", "specular_anisotropy");
+    let coat_rotation = standard_rotation(b, "coat_rotation", "coat_anisotropy");
 
     let coat_affect_roughness = b.get("coat_affect_roughness");
     let coat = b.get("coat");
@@ -928,6 +978,7 @@ fn standard_surface(b: &mut B<'_, '_>) {
             normal,
             tangent,
         ); // transmission_bsdf
+        b.rotate(trans, main_rotation);
         b.mixc(trans, sheen_layer, transmission) // transmission_mix
     };
     let specular = b.get("specular");
@@ -948,6 +999,7 @@ fn standard_surface(b: &mut B<'_, '_>) {
         normal,
         tangent,
     ); // specular_bsdf
+    b.rotate(spec, main_rotation);
     let spec_layer = b.layer(spec, trans_mix); // specular_layer
     let metalness = b.get("metalness");
     let metal_mix = if b.is(metalness, 0.0) {
@@ -976,6 +1028,7 @@ fn standard_surface(b: &mut B<'_, '_>) {
             normal,
             tangent,
         ); // metal_bsdf
+        b.rotate(metal, main_rotation);
         b.mixc(metal, spec_layer, metalness) // metalness_mix
     };
     let coat_color = b.get("coat_color");
@@ -998,6 +1051,7 @@ fn standard_surface(b: &mut B<'_, '_>) {
         coat_normal,
         tangent,
     ); // coat_bsdf
+    b.rotate(coat_bsdf, coat_rotation);
     b.out.root = b.layer(coat_bsdf, attenuated); // coat_layer
 
     // Emission, uncoated and through the coat's Fresnel.
@@ -1024,6 +1078,26 @@ fn standard_surface(b: &mut B<'_, '_>) {
 
     let thin_walled = b.get("thin_walled");
     b.out.thin_walled = Some(thin_walled);
+    let opacity = b.get("opacity");
+    let luminance = b.c.emit(Op::Luminance { a: opacity }); // opacity_luminance(_float)
+    b.set_opacity(luminance); // shader_constructor.opacity
+}
+
+/// `standard_surface`'s `main_tangent` / `coat_tangent`: `rotate3d` by
+/// `rotation · 360` degrees, selected by `ifgreater(anisotropy, 0)`.
+fn standard_rotation(
+    b: &mut B<'_, '_>,
+    rotation: &'static str,
+    anisotropy: &'static str,
+) -> Option<Slot> {
+    let r = b.get(rotation);
+    let full_turn = b.k(360.0);
+    let degrees = b.mul(r, full_turn); // tangent_rotate_degree
+    let angle = b.tangent_rotation(degrees)?; // tangent_rotate
+    let a = b.get(anisotropy);
+    let zero = b.k(0.0);
+    let selected = b.gt(a, zero, angle, zero); // main_tangent / coat_tangent
+    (!b.is(selected, 0.0)).then_some(selected)
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,18 +1105,21 @@ fn standard_surface(b: &mut B<'_, '_>) {
 // ---------------------------------------------------------------------------
 
 fn gltf_pbr(b: &mut B<'_, '_>) {
-    b.report("alpha", "no cutout");
-    b.report("alpha_mode", "no cutout");
-    b.report("anisotropy_rotation", "anisotropy rotation");
     b.report("occlusion", "a path tracer computes its own");
     b.report("dispersion", "ignored, as MaterialX's own graph does");
     b.report("thickness", "ignored, as MaterialX's own graph does");
 
     let normal = b.geom("normal");
-    // `selected_tangent` rotates the tangent by `anisotropy_rotation`; the
-    // rotation is reported above.
     let tangent = b.geom("tangent");
     let clearcoat_normal = b.geom("clearcoat_normal");
+    // `selected_tangent`: the tangent turned by `anisotropy_rotation` radians
+    // about `normal`, for every base leaf; the clearcoat keeps `tangent`.
+    // The graph's `ifgreater(|rotation|, 0)` needs no select here, since a
+    // zero angle turns nothing.
+    let aniso_rotation = b.get("anisotropy_rotation");
+    let to_degrees = b.k(-57.29578);
+    let degrees = b.mul(aniso_rotation, to_degrees); // rad_2_deg
+    let rotation = b.tangent_rotation(degrees); // rotate_tangent
 
     // The volume.
     let transmission = b.get("transmission");
@@ -1117,6 +1194,7 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
             normal,
             tangent,
         ); // transmission_bsdf (+ volume_transmission_bsdf)
+        b.rotate(trans, rotation);
         b.mixc(trans, diffuse, transmission) // transmission_mix
     };
     let five = b.k(5.0);
@@ -1134,6 +1212,7 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
         normal,
         tangent,
     ); // reflection_bsdf
+    b.rotate(refl, rotation);
     let iridescence = b.get("iridescence");
     let irid_thickness = b.get("iridescence_thickness");
     let irid_ior = b.get("iridescence_ior");
@@ -1155,6 +1234,7 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
             normal,
             tangent,
         ); // tf_reflection_bsdf
+        b.rotate(tf_refl, rotation);
         b.mixc(tf_refl, refl, iridescence) // mix_iridescent_dielectric_reflection
     };
     let irid_diel = b.layer(mix_irid, trans_mix); // iridescent_dielectric_bsdf
@@ -1176,6 +1256,7 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
             normal,
             tangent,
         ); // metal_bsdf
+        b.rotate(metal, rotation);
         if b.is(iridescence, 0.0) {
             metal
         } else {
@@ -1194,6 +1275,7 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
                 normal,
                 tangent,
             ); // tf_metal_bsdf
+            b.rotate(tf_metal, rotation);
             b.mixc(tf_metal, metal, iridescence) // mix_iridescent_metal_bsdf
         }
     };
@@ -1244,4 +1326,31 @@ fn gltf_pbr(b: &mut B<'_, '_>) {
     let ec = b.mul(emissive, strength_e); // emission_color
     let one_e = b.k(1.0);
     b.emit_edf(ec, one_e, None); // emission
+
+    // Alpha. `alpha_mode` is a uniform, so it folds, and the graph's two
+    // `ifequal`s select one branch outright: OPAQUE never reads `alpha`,
+    // which exporters connect to a texture's alpha whatever the mode, and
+    // folding the select through that texture is not possible.
+    let mode = b.get("alpha_mode");
+    let alpha = b.get("alpha");
+    let opacity = match b.c.fold(mode).map(|v| v.x()) {
+        Some(0.0) => return,               // OPAQUE
+        Some(1.0) => alpha_mask(b, alpha), // MASK
+        Some(_) => alpha,                  // BLEND
+        None => {
+            let masked = alpha_mask(b, alpha);
+            let mask_mode = b.k(1.0);
+            let mask = b.eq(mode, mask_mode, masked, alpha); // opacity_mask
+            let (opaque_mode, one) = (b.k(0.0), b.k(1.0));
+            b.eq(mode, opaque_mode, one, mask) // opacity
+        }
+    };
+    b.set_opacity(opacity); // shader_constructor.opacity
+}
+
+/// glTF's `opacity_mask_cutoff`: 1 where `alpha ≥ alpha_cutoff`, else 0.
+fn alpha_mask(b: &mut B<'_, '_>, alpha: Slot) -> Slot {
+    let cutoff = b.get("alpha_cutoff");
+    let (one, zero) = (b.k(1.0), b.k(0.0));
+    b.ge(alpha, cutoff, one, zero)
 }

@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<!--
+  MaterialX opacity cutouts and anisotropy rotation, as each surface node's
+  own nodegraph defines them (crates/crust-mtlx/src/surface.rs).
+
+    mtlx_gltf_card         — `gltf_pbr` in MASK mode, alpha a procedural
+                             checker (sin(10πu)·sin(10πv) against a cutoff
+                             of 0): a leaf card with square holes, each point
+                             kept or discarded whole.
+    mtlx_openpbr_ghost     — `open_pbr_surface` at geometry_opacity 0.4: a
+                             surface present at 40% of its points, which is
+                             not the same thing as a transmission of 0.6 (no
+                             refraction, no Fresnel).
+    mtlx_standard_brushed  — `standard_surface` brushed metal, anisotropy 0.8,
+                             its tangent turned a quarter turn by
+                             specular_rotation 0.25 — highlights stretch the
+                             other way across the chart.
+
+  Texture-free on purpose, so tests and `examples/mtlx_shade` can pin exact
+  numbers. Separate from `materialx_surfaces`, whose furnace and counts are
+  pinned per document.
+-->
+<materialx version="1.39" colorspace="lin_rec709">
+
+  <texcoord name="card_uv" type="vector2" />
+  <multiply name="card_freq" type="vector2">
+    <input name="in1" type="vector2" nodename="card_uv" />
+    <input name="in2" type="float" value="31.415926" />
+  </multiply>
+  <sin name="card_wave" type="vector2">
+    <input name="in" type="vector2" nodename="card_freq" />
+  </sin>
+  <extract name="card_wave_u" type="float">
+    <input name="in" type="vector2" nodename="card_wave" />
+    <input name="index" type="integer" value="0" />
+  </extract>
+  <extract name="card_wave_v" type="float">
+    <input name="in" type="vector2" nodename="card_wave" />
+    <input name="index" type="integer" value="1" />
+  </extract>
+  <multiply name="card_alpha" type="float">
+    <input name="in1" type="float" nodename="card_wave_u" />
+    <input name="in2" type="float" nodename="card_wave_v" />
+  </multiply>
+  <gltf_pbr name="gltf_card" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.25, 0.55, 0.15" />
+    <input name="metallic" type="float" value="0" />
+    <input name="roughness" type="float" value="0.6" />
+    <input name="alpha" type="float" nodename="card_alpha" />
+    <input name="alpha_mode" type="integer" value="1" />
+    <input name="alpha_cutoff" type="float" value="0" />
+  </gltf_pbr>
+  <surfacematerial name="mtlx_gltf_card" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="gltf_card" />
+  </surfacematerial>
+
+  <open_pbr_surface name="openpbr_ghost" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.8, 0.3, 0.2" />
+    <input name="specular_roughness" type="float" value="0.3" />
+    <input name="geometry_opacity" type="float" value="0.4" />
+  </open_pbr_surface>
+  <surfacematerial name="mtlx_openpbr_ghost" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="openpbr_ghost" />
+  </surfacematerial>
+
+  <standard_surface name="std_brushed" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.9, 0.9, 0.92" />
+    <input name="metalness" type="float" value="1" />
+    <input name="specular_roughness" type="float" value="0.35" />
+    <input name="specular_anisotropy" type="float" value="0.8" />
+    <input name="specular_rotation" type="float" value="0.25" />
+  </standard_surface>
+  <surfacematerial name="mtlx_standard_brushed" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="std_brushed" />
+  </surfacematerial>
+
+</materialx>

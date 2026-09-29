@@ -59,6 +59,14 @@ cargo run --release -- -i samples/materialx_basic.usda --profile
 # rays", counted into the total but not into "bounce rays").
 cargo run --release -- -i samples/materialx_subsurface.usda --stats
 
+# Cutouts: --stats adds the closest-hit queries they cost ("cutout rays": the
+# query past every hit a path passed through, plus every query of a blocked
+# shadow ray re-walked through cutouts) and how many hits were passed through.
+# A scene with no cutout material prints neither and runs the old code.
+cargo run --release -- -i samples/materialx_cutout.usda --stats
+# ...and the numbers behind it: opacity and each leaf's tangent at a point.
+cargo run --release -p crust-render --example mtlx_shade -- samples/materialx_cutout.mtlx mtlx_gltf_card 0.05 0.05
+
 # Tests (integration tests live in crust-core/tests/usd_scene.rs, load sample USD files)
 cargo test
 cargo test -p crust-core loads_cornellbox_usda     # run a single test by name

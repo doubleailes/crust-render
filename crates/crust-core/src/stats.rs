@@ -173,6 +173,14 @@ pub struct RayStats {
     pub sss_exits: u64,
     pub sss_steps: u64,
     pub sss_rays: u64,
+    /// Cutouts (`Material::opacity`): the hits a path passed straight
+    /// through, and the closest-hit queries cutouts cost beyond the ones the
+    /// integrator makes anyway — the query past each hit passed through, and
+    /// every query of a shadow ray the any-hit test found blocked in a world
+    /// with cutouts. Counted apart from `closest_hit`, like `sss_rays`, and
+    /// folded into `total_rays`.
+    pub cutout_passes: u64,
+    pub cutout_rays: u64,
     /// Light samples drawn by next-event estimation that reached a light
     /// (`sample_li` answered). A shadow ray follows only when the connection
     /// can carry something, so `light_samples - shadow_rays` is the NEE work
@@ -193,7 +201,7 @@ pub struct RayStats {
 impl RayStats {
     /// All ray queries, of every kind.
     pub fn total_rays(&self) -> u64 {
-        self.closest_hit + self.shadow_rays + self.sss_rays
+        self.closest_hit + self.shadow_rays + self.sss_rays + self.cutout_rays
     }
 
     /// Mean shaded vertices per camera ray — the effective path length.
@@ -254,6 +262,8 @@ impl RayStats {
         self.sss_exits += o.sss_exits;
         self.sss_steps += o.sss_steps;
         self.sss_rays += o.sss_rays;
+        self.cutout_passes += o.cutout_passes;
+        self.cutout_rays += o.cutout_rays;
         self.light_samples += o.light_samples;
         self.shadow_occluded += o.shadow_occluded;
         self.camera_rays += o.camera_rays;
@@ -750,6 +760,15 @@ impl fmt::Display for RenderStats {
             )?;
             if r.sss_walks > 0 {
                 writeln!(f, "  {:<28} {}", "subsurface walk rays", count(r.sss_rays))?;
+            }
+            if r.cutout_rays > 0 {
+                writeln!(
+                    f,
+                    "  {:<28} {} ({} hits passed through)",
+                    "cutout rays",
+                    count(r.cutout_rays),
+                    count(r.cutout_passes)
+                )?;
             }
             writeln!(f, "  {:<28} {}", "total ray queries", count(r.total_rays()))?;
             // Throughput needs the render phase alone, not the whole run:

@@ -267,6 +267,18 @@ pub struct Leaf {
     pub normal: Option<Slot>,
     /// The leaf's `tangent`, when authored.
     pub tangent: Option<Slot>,
+    /// An angle, in radians, the tangent is turned by about the leaf's
+    /// normal — right-handed, so a positive angle turns it toward
+    /// `normal × tangent`. `None` leaves the tangent as it is.
+    ///
+    /// This is what a surface node's `rotate3d` of its tangent reduces to
+    /// (`standard_surface`'s `specular_rotation` / `coat_rotation`, glTF's
+    /// `anisotropy_rotation`): the node rotates the *authored* tangent about
+    /// the leaf's own `normal` input and the BSDF then projects it onto that
+    /// normal's plane, which is the same as turning the projected tangent. A
+    /// tangent the host supplies (`Tworld`) has no program slot to rotate, so
+    /// the rotation is carried beside it instead of folded into it.
+    pub rotation: Option<Slot>,
 }
 
 /// One node of the closure tree.
@@ -366,6 +378,12 @@ pub struct Closures {
     pub volume: Option<Volume>,
     /// The surface's `thin_walled` (0 or 1), when authored.
     pub thin_walled: Option<Slot>,
+    /// The surface's presence — MaterialX `surface`'s `opacity`, which every
+    /// surface node feeds (`geometry_opacity`, `standard_surface`'s
+    /// luminance of `opacity`, glTF's `alpha` through `alpha_mode`). `None`
+    /// when it folds to 1: the surface is opaque and the host never asks.
+    /// A host clamps it to [0, 1] and reads a non-finite value as opaque.
+    pub opacity: Option<Slot>,
     /// Authored inputs the renderer cannot represent, and closures it
     /// approximates, for one warning per material.
     pub reported: BTreeSet<String>,
@@ -476,6 +494,9 @@ impl Closures {
                     if let Some(s) = &mut l.tangent {
                         f(s);
                     }
+                    if let Some(s) = &mut l.rotation {
+                        f(s);
+                    }
                     l.bsdf.for_each_slot(&mut f);
                 }
                 Closure::Mix { mix, .. } => f(mix),
@@ -499,6 +520,9 @@ impl Closures {
         }
         if let Some(t) = &mut self.thin_walled {
             f(t);
+        }
+        if let Some(o) = &mut self.opacity {
+            f(o);
         }
     }
 
@@ -588,8 +612,10 @@ fn shader(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) {
             if let Some(t) = c.optional_input(node, "thin_walled") {
                 out.thin_walled = Some(t);
             }
+            // `surface`'s opacity, the one every surface node's graph ends
+            // in: carried as the surface's presence, which the host honours.
             if authored_away(c, node, "opacity", Val::ONE) {
-                out.reported.insert("opacity (no cutout)".into());
+                out.opacity = c.optional_input(node, "opacity");
             }
         }
         "open_pbr_surface" | "standard_surface" | "gltf_pbr" => {
@@ -832,6 +858,7 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
         weight,
         normal,
         tangent,
+        rotation: None,
     })
 }
 

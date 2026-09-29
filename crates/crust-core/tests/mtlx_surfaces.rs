@@ -8,8 +8,8 @@ use crust_core::closure::{self, Lobe, Prepared};
 use crust_core::materialx::{self, Loaded};
 use crust_core::rt::Geometry;
 use crust_core::{
-    Emissive, HitRecord, LightList, Material, PathSampler, Ray, SamplingStrategy, Vec3A, Volumes,
-    WorldBuilder, ray_color,
+    AreaLight, Emissive, HitRecord, LightList, MASK_INDIRECT, MASK_SHADOW, Material, OpenPBR,
+    PathSampler, Ray, SamplingStrategy, SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -337,22 +337,433 @@ fn an_open_pbr_coat_normal_perturbs_only_the_coat() {
     assert_eq!(coats, 1, "exactly the coat leaf is tilted");
 }
 
+/// The luminance MaterialX's `luminance` node takes by default (ACEScg).
+fn acescg_luminance(c: Vec3A) -> f32 {
+    c.dot(Vec3A::new(0.2722287, 0.6740818, 0.0536895))
+}
+
 #[test]
-fn authored_opacity_is_reported_not_applied() {
+fn standard_surface_opacity_is_the_luminance_of_its_colour() {
     let l = load(
         "opacity",
         r#"<standard_surface name="s" type="surfaceshader">
-             <input name="opacity" type="color3" value="0.3, 0.3, 0.3" />
+             <input name="opacity" type="color3" value="0.2, 0.5, 0.8" />
            </standard_surface>"#,
     );
     assert!(
-        l.reported.iter().any(|r| r.starts_with("opacity")),
-        "{:?}",
+        l.reported.is_empty(),
+        "applied, not reported: {:?}",
         l.reported
     );
-    // Opaque all the same: nothing transmits.
+    assert!(l.material.has_cutout());
     let p = l.material.probe(&straight_down(), &hit(0.5, 0.5));
+    let expected = acescg_luminance(Vec3A::new(0.2, 0.5, 0.8));
+    assert!(
+        near(p.opacity, expected, 1e-6),
+        "{} vs {expected}",
+        p.opacity
+    );
+    // A cutout is presence, not transmission: the surface itself is opaque.
     assert!(!p.closure.transmits());
+}
+
+#[test]
+fn an_opaque_surface_has_no_cutout() {
+    for (tag, doc) in [
+        (
+            "std",
+            r#"<standard_surface name="s" type="surfaceshader" />"#,
+        ),
+        (
+            "opbr",
+            r#"<open_pbr_surface name="s" type="surfaceshader">
+                 <input name="geometry_opacity" type="float" value="1" />
+               </open_pbr_surface>"#,
+        ),
+        // OPAQUE never reads alpha, whatever alpha is.
+        (
+            "gltf",
+            r#"<texcoord name="tc" type="vector2" />
+               <extract name="u" type="float">
+                 <input name="in" type="vector2" nodename="tc" />
+                 <input name="index" type="integer" value="0" />
+               </extract>
+               <gltf_pbr name="s" type="surfaceshader">
+                 <input name="alpha" type="float" nodename="u" />
+                 <input name="alpha_mode" type="integer" value="0" />
+               </gltf_pbr>"#,
+        ),
+    ] {
+        let l = load(tag, doc);
+        assert!(!l.material.has_cutout(), "{tag}");
+        assert_eq!(l.material.opacity(&straight_down(), &hit(0.1, 0.5)), 1.0);
+    }
+}
+
+#[test]
+fn open_pbr_geometry_opacity_is_the_presence() {
+    let l = load(
+        "gopacity",
+        r#"<open_pbr_surface name="s" type="surfaceshader">
+             <input name="geometry_opacity" type="float" value="0.25" />
+           </open_pbr_surface>"#,
+    );
+    assert!(l.reported.is_empty(), "{:?}", l.reported);
+    assert!(l.material.has_cutout());
+    assert_eq!(l.material.opacity(&straight_down(), &hit(0.5, 0.5)), 0.25);
+}
+
+#[test]
+fn gltf_alpha_follows_alpha_mode() {
+    // `alpha` = u, so one document covers both sides of the cutoff.
+    let doc = |mode: &str| {
+        format!(
+            r#"<texcoord name="tc" type="vector2" />
+               <extract name="u" type="float">
+                 <input name="in" type="vector2" nodename="tc" />
+                 <input name="index" type="integer" value="0" />
+               </extract>
+               <gltf_pbr name="s" type="surfaceshader">
+                 <input name="alpha" type="float" nodename="u" />
+                 <input name="alpha_cutoff" type="float" value="0.5" />
+                 {mode}
+               </gltf_pbr>"#
+        )
+    };
+    let opacity = |l: &Loaded, u: f32| l.material.opacity(&straight_down(), &hit(u, 0.5));
+    // MASK: all or nothing about the cutoff, which is inclusive.
+    let mask = load(
+        "mask",
+        &doc(r#"<input name="alpha_mode" type="integer" value="1" />"#),
+    );
+    assert!(mask.reported.is_empty(), "{:?}", mask.reported);
+    assert_eq!(opacity(&mask, 0.3), 0.0);
+    assert_eq!(opacity(&mask, 0.5), 1.0);
+    assert_eq!(opacity(&mask, 0.7), 1.0);
+    // BLEND: alpha itself.
+    let blend = load(
+        "blend",
+        &doc(r#"<input name="alpha_mode" type="integer" value="2" />"#),
+    );
+    assert_eq!(opacity(&blend, 0.3), 0.3);
+    // A mode that does not fold goes through the graph's two `ifequal`s:
+    // mode = 2u picks OPAQUE at u = 0, MASK at u = 0.5 and BLEND at u = 1.
+    let live = load(
+        "live",
+        &format!(
+            r#"<multiply name="mode" type="float">
+                 <input name="in1" type="float" nodename="u" />
+                 <input name="in2" type="float" value="2" />
+               </multiply>
+               {}"#,
+            doc(r#"<input name="alpha_mode" type="integer" nodename="mode" />"#)
+        ),
+    );
+    assert!(live.material.has_cutout());
+    assert_eq!(opacity(&live, 0.0), 1.0, "OPAQUE ignores alpha = 0");
+    assert_eq!(opacity(&live, 0.5), 1.0, "MASK at alpha = cutoff");
+    assert_eq!(opacity(&live, 1.0), 1.0, "BLEND at alpha = 1");
+}
+
+#[test]
+fn a_surface_node_opacity_is_the_presence() {
+    let l = load(
+        "surface",
+        r#"<oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+           <surface name="s" type="surfaceshader">
+             <input name="bsdf" type="BSDF" nodename="d" />
+             <input name="opacity" type="float" value="0.4" />
+           </surface>"#,
+    );
+    assert!(l.reported.is_empty(), "{:?}", l.reported);
+    assert!(near(
+        l.material.opacity(&straight_down(), &hit(0.5, 0.5)),
+        0.4,
+        0.0
+    ));
+}
+
+/// A black cutout sphere in the white furnace. A ray that passes through it
+/// crosses it twice, so at opacity `a` it sees the environment with
+/// probability `(1 − a)²` and the absorber otherwise.
+#[test]
+fn a_cutout_passes_its_share_of_the_furnace() {
+    let l = load(
+        "cutout_furnace",
+        r#"<open_pbr_surface name="s" type="surfaceshader">
+             <input name="base_color" type="color3" value="0, 0, 0" />
+             <input name="specular_weight" type="float" value="0" />
+             <input name="geometry_opacity" type="float" value="0.5" />
+           </open_pbr_surface>"#,
+    );
+    for (offset, r) in FURNACE_OFFSETS.iter().zip(furnace(&l)) {
+        assert!(
+            (r - Vec3A::splat(0.25)).abs().max_element() < 0.04,
+            "offset {offset}: {r} vs 0.25"
+        );
+    }
+}
+
+/// A floor under a sphere light, with a black cutout sheet between them at
+/// opacity 0.5: the shadow side takes `1 − opacity` through the sheet, the
+/// bounce side passes it with that probability, and every strategy must see
+/// half the unoccluded light. This is the pair a cutout has to keep: NEE's
+/// transmittance and the bounce side's pass-through describe the same
+/// visibility, or the MIS strategies disagree.
+#[test]
+fn every_sampling_strategy_agrees_through_a_cutout() {
+    let sheet = load(
+        "sheet",
+        r#"<gltf_pbr name="s" type="surfaceshader">
+             <input name="base_color" type="color3" value="0, 0, 0" />
+             <input name="metallic" type="float" value="0" />
+             <input name="specular" type="float" value="0" />
+             <input name="alpha" type="float" value="0.5" />
+             <input name="alpha_mode" type="integer" value="2" />
+           </gltf_pbr>"#,
+    );
+    let quad = |y: f32, half: f32| Geometry::TriangleMesh {
+        vertices: vec![
+            Vec3A::new(-half, y, -half),
+            Vec3A::new(half, y, -half),
+            Vec3A::new(half, y, half),
+            Vec3A::new(-half, y, half),
+        ],
+        indices: vec![[0, 2, 1], [0, 3, 2]],
+        normals: None,
+    };
+    let scene = |occluded: bool| {
+        let mut world = WorldBuilder::new();
+        let mut lights = LightList::new();
+        world.attach(
+            quad(0.0, 50.0),
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        if occluded {
+            world.attach(quad(2.5, 50.0), sheet.material.clone());
+        }
+        let emitter = Arc::new(Emissive::new(Vec3A::splat(40.0)));
+        let (center, radius) = (Vec3A::new(0.0, 3.5, 0.0), 0.5);
+        let id = world.attach_masked(
+            Geometry::Sphere { center, radius },
+            emitter.clone(),
+            MASK_SHADOW | MASK_INDIRECT,
+        );
+        lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
+        (world.commit(), lights)
+    };
+    let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
+    let mean = |world: &crust_core::World, lights: &LightList, s: SamplingStrategy, n: i32| {
+        let mut sum = 0.0f64;
+        for i in 0..n {
+            sum += ray_color(
+                &ray,
+                world,
+                lights,
+                &Volumes::default(),
+                3,
+                s,
+                PathSampler::new(1, 2, 0, i),
+            )
+            .x as f64;
+        }
+        sum / n as f64
+    };
+    let (open, open_lights) = scene(false);
+    let (world, lights) = scene(true);
+    assert!(world.has_cutouts() && !open.has_cutouts());
+    let reference = 0.5 * mean(&open, &open_lights, SamplingStrategy::PowerMis, 8192);
+    assert!(reference > 0.0);
+    for (s, n, tol) in [
+        (SamplingStrategy::PowerMis, 8192, 0.05),
+        (SamplingStrategy::LightOnly, 8192, 0.05),
+        // BSDF sampling alone has to find a small light by chance: noisier.
+        (SamplingStrategy::BsdfOnly, 65_536, 0.12),
+    ] {
+        let m = mean(&world, &lights, s, n);
+        assert!(
+            (m - reference).abs() < tol * reference,
+            "{s:?}: {m} vs {reference}"
+        );
+    }
+}
+
+/// An opaque sheet between a floor and its light blocks every shadow ray,
+/// in a world with no cutout (the any-hit answer stands) and in one with a
+/// cutout elsewhere (the re-walk meets the opaque sheet and stops). Light
+/// sampling alone then sees nothing: the bounce side meets a black sheet.
+#[test]
+fn an_opaque_occluder_blocks_shadow_rays_with_or_without_cutouts() {
+    let ghost = load(
+        "far_ghost",
+        r#"<open_pbr_surface name="s" type="surfaceshader">
+             <input name="geometry_opacity" type="float" value="0.5" />
+           </open_pbr_surface>"#,
+    );
+    let quad = |y: f32, half: f32| Geometry::TriangleMesh {
+        vertices: vec![
+            Vec3A::new(-half, y, -half),
+            Vec3A::new(half, y, -half),
+            Vec3A::new(half, y, half),
+            Vec3A::new(-half, y, half),
+        ],
+        indices: vec![[0, 2, 1], [0, 3, 2]],
+        normals: None,
+    };
+    let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5));
+    for (sheet, cutout_elsewhere) in [(false, false), (true, false), (true, true)] {
+        let mut world = WorldBuilder::new();
+        let mut lights = LightList::new();
+        world.attach(
+            quad(0.0, 50.0),
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        if sheet {
+            world.attach(quad(2.5, 50.0), Arc::new(OpenPBR::diffuse(Vec3A::ZERO)));
+        }
+        if cutout_elsewhere {
+            world.attach(
+                Geometry::Sphere {
+                    center: Vec3A::new(0.0, -10.0, 0.0),
+                    radius: 1.0,
+                },
+                ghost.material.clone(),
+            );
+        }
+        let emitter = Arc::new(Emissive::new(Vec3A::splat(40.0)));
+        let (center, radius) = (Vec3A::new(0.0, 3.5, 0.0), 0.5);
+        let id = world.attach_masked(
+            Geometry::Sphere { center, radius },
+            emitter.clone(),
+            MASK_SHADOW | MASK_INDIRECT,
+        );
+        lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
+        let world = world.commit();
+        assert_eq!(world.has_cutouts(), cutout_elsewhere);
+        let n = 1024;
+        let mut sum = 0.0f64;
+        for i in 0..n {
+            sum += ray_color(
+                &ray,
+                &world,
+                &lights,
+                &Volumes::default(),
+                3,
+                SamplingStrategy::LightOnly,
+                PathSampler::new(1, 2, 0, i),
+            )
+            .x as f64;
+        }
+        let mean = sum / n as f64;
+        if sheet {
+            assert!(mean < 1e-3, "cutouts elsewhere {cutout_elsewhere}: {mean}");
+        } else {
+            assert!(mean > 0.1, "the open floor is lit: {mean}");
+        }
+    }
+}
+
+/// The tangent a leaf shades with, by category.
+fn tangents(l: &Loaded, category: &str) -> Vec<Vec3A> {
+    find(&leaves(l, 0.5, 0.5), category)
+        .iter()
+        .map(|p| p.frame.t)
+        .collect()
+}
+
+fn same_direction(a: Vec3A, b: Vec3A) -> bool {
+    (a - b).abs().max_element() < 1e-5
+}
+
+/// `standard_surface` turns its tangent by `specular_rotation` of a full turn
+/// about the normal — clockwise seen from above, since `rotate3d` is
+/// Rodrigues' formula at minus its angle — and only where the lobe is
+/// anisotropic. The coat turns by its own rotation, the diffuse not at all.
+#[test]
+fn standard_surface_rotates_its_anisotropic_tangents() {
+    let l = load(
+        "rotate",
+        r#"<standard_surface name="s" type="surfaceshader">
+             <input name="metalness" type="float" value="0.5" />
+             <input name="specular_anisotropy" type="float" value="0.5" />
+             <input name="specular_rotation" type="float" value="0.25" />
+             <input name="coat" type="float" value="1" />
+             <input name="coat_anisotropy" type="float" value="0.3" />
+             <input name="coat_rotation" type="float" value="0.125" />
+           </standard_surface>"#,
+    );
+    assert!(l.reported.is_empty(), "{:?}", l.reported);
+    let quarter = Vec3A::new(0.0, -1.0, 0.0);
+    for t in tangents(&l, "conductor_bsdf") {
+        assert!(same_direction(t, quarter), "metal {t}");
+    }
+    let eighth = Vec3A::new(0.5f32.sqrt(), -(0.5f32.sqrt()), 0.0);
+    let ts = tangents(&l, "dielectric_bsdf");
+    assert_eq!(ts.len(), 2, "specular and coat");
+    assert!(
+        ts.iter().any(|t| same_direction(*t, quarter)),
+        "specular {ts:?}"
+    );
+    assert!(ts.iter().any(|t| same_direction(*t, eighth)), "coat {ts:?}");
+    for t in tangents(&l, "oren_nayar_diffuse_bsdf") {
+        assert!(same_direction(t, Vec3A::X), "diffuse {t}");
+    }
+
+    // Isotropic: the graph's `ifgreater` keeps the tangent.
+    let iso = load(
+        "rotate_iso",
+        r#"<standard_surface name="s" type="surfaceshader">
+             <input name="specular_rotation" type="float" value="0.25" />
+           </standard_surface>"#,
+    );
+    for t in tangents(&iso, "dielectric_bsdf") {
+        assert!(same_direction(t, Vec3A::X), "isotropic {t}");
+    }
+}
+
+/// glTF's `anisotropy_rotation` is radians counter-clockwise from the
+/// tangent toward the bitangent, on every base leaf; the clearcoat keeps the
+/// authored tangent, as its graph does.
+#[test]
+fn gltf_rotates_its_base_tangent_not_the_clearcoat() {
+    let l = load(
+        "gltf_rotate",
+        r#"<gltf_pbr name="s" type="surfaceshader">
+             <input name="metallic" type="float" value="0.5" />
+             <input name="anisotropy_strength" type="float" value="0.6" />
+             <input name="anisotropy_rotation" type="float" value="1.5707964" />
+             <input name="clearcoat" type="float" value="1" />
+           </gltf_pbr>"#,
+    );
+    assert!(l.reported.is_empty(), "{:?}", l.reported);
+    let ts = tangents(&l, "generalized_schlick_bsdf");
+    assert_eq!(ts.len(), 2, "reflection and metal");
+    for t in ts {
+        assert!(same_direction(t, Vec3A::Y), "base {t}");
+    }
+    for t in tangents(&l, "dielectric_bsdf") {
+        assert!(same_direction(t, Vec3A::X), "clearcoat {t}");
+    }
+}
+
+/// A rotated anisotropic lobe samples and evaluates in the same turned
+/// frame, so it stays bounded in the furnace like the unrotated one.
+#[test]
+fn a_rotated_anisotropic_metal_is_bounded_in_the_furnace() {
+    let l = load(
+        "rotate_furnace",
+        r#"<standard_surface name="s" type="surfaceshader">
+             <input name="base_color" type="color3" value="1, 1, 1" />
+             <input name="metalness" type="float" value="1" />
+             <input name="specular_roughness" type="float" value="0.4" />
+             <input name="specular_anisotropy" type="float" value="0.9" />
+             <input name="specular_rotation" type="float" value="0.3" />
+           </standard_surface>"#,
+    );
+    for (offset, r) in FURNACE_OFFSETS.iter().zip(furnace(&l)) {
+        assert!(r.max_element() < 1.02, "offset {offset}: {r}");
+        assert!(r.min_element() > 0.8, "offset {offset}: {r}");
+    }
 }
 
 #[test]

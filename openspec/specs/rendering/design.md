@@ -119,6 +119,35 @@ consumed as ordinary dependencies:
      depth and records no vertex; its free flights draw from `K_SSS` off the entry
      vertex (stratified on the first step, incidental after). A walk that finds no
      exit ends the path as absorbed. Design and traps: materials `design.md`.
+   - **Cutouts** (`Material::opacity`, MaterialX surfaces' `opacity` only). A hit on a
+     material with `has_cutout` is *present* with probability equal to its opacity
+     (`present_hit`, one `pcg::Rng` off `K_CUTOUT` per vertex); otherwise the segment
+     carries on along the **same ray** from just past it (`past(t)`, relative), so `t`,
+     the carried medium, the volume regions and the ray cone still measure from the
+     segment's origin and the free-flight competition stays exact. A surface passed
+     through is no vertex — no depth, no emission, no MIS record — and the previous
+     vertex's record meets whatever the segment does reach, so bounce-hit emission
+     behind a cutout keeps its weight. The shadow side is its twin
+     (`cutout_transmittance`): `Π(1 − opacity)` over every crossing, deterministic,
+     and 0 at the first opaque hit. The two estimate the same visibility, which is
+     what keeps NEE and the bounce side describing one integrand
+     (`every_sampling_strategy_agrees_through_a_cutout`, in
+     `crust-core/tests/mtlx_surfaces.rs`). Both are `#[cold]` and out of line, and
+     gated on `World::has_cutouts` (any material's `has_cutout`, fixed at commit): a
+     world without one takes exactly the old code, bit for bit. With one, a shadow ray
+     still asks the any-hit query first and walks hit by hit only when it is blocked,
+     since an open segment crosses no cutout either. Three traps kept the "no cost
+     without a cutout" promise from being free, each measured on cornellbox
+     (callgrind, 2 spp): stepping past a hit by raising `t_min` broke the `(0.001, ∞)`
+     constant propagation into the kernel, so both walks restart the ray at the hit
+     instead (`restarted`, the subsurface walk's trick); an `if` yielding the hit from
+     either arm copied the whole `Option<WorldHit>` at every vertex (+0.8%), so the
+     hit is patched in place; and the extra code tipped `trace_path` over LLVM's
+     inline threshold (+1.4% out of line), so it is `#[inline(always)]` into
+     `render_pixel`. What is left is +0.04% against the tree before cutouts (+0.43%
+     against that tree with the same attribute, which on its own saved 0.4%);
+     `materialx_basic` runs +0.64%, of which 0.13% is the per-leaf rotation check in
+     the closure collapse walk. Every sample scene without a cutout renders bit-identically.
    - **Volume regions** (`volume.rs`): free-standing smoke/fog/absorption/fire volumes
      held on `Renderer.volumes`, *outside* the surface BVH so their bounds never occlude
      shadow rays. Each `VolumeRegion` is an oriented box (composed prim xform) with a
