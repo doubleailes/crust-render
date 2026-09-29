@@ -506,6 +506,13 @@
   `g = 0` reflects 0.93, 0.6 at `g = 0.9` reflects 0.70) —
   `high_anisotropy_over_reflects_boundedly`. Negative anisotropy walks as
   isotropic (the fit has no `g < 0` branch).
+- **The walk scores lower on the Material Fidelity suite than the model it
+  replaced.** Every subsurface material there fell 2.5–6 dB against
+  `materialx-glsl` (`ketchup` 26.8 → 20.7) and 1.6–7.5 dB against `materialx-osl`.
+  No reference in the suite is known to trace a random walk, and the old model
+  scored the same whatever the radius, so this does not show the walk is wrong.
+  Settling it needs a random-walk reference (Typhoon, or Cycles' random walk);
+  `docs/material_fidelity.md` § Subsurface has the table.
 - **A walk sees its own `geom_id` only.** A mesh split into several geometries
   (one per material subset) is several media: a walk entering one does not
   exit through another, and meets it as nothing. Nested objects inside the
