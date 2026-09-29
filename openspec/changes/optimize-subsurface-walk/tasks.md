@@ -22,4 +22,4 @@
 
 - [x] 4.1 `docs/subsurface_walk.md` with the cost breakdown, the experiments, the ranked recommendations and the references, linked from `docs/architecture.md` § Further reading; verified by the page existing and the link resolving
 - [x] 4.2 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` on crust-core, and `cargo test -p crust-core` all clean with the pinned toolchain; verified by their exit codes
-- [ ] 4.3 Re-record goldens for scenes with a `subsurface_bsdf` (`scripts/check_images.sh record`) once the branch merges; verified by `check_images.sh check` passing on the new goldens
+- [x] 4.3 Golden A/B over every sample scene: goldens recorded with the pre-change binary (`scripts/check_images.sh record`, 16 spp) and checked with this one — 25 of 26 scenes bit-identical, only `materialx_subsurface` differs (noise level; `openpbr_showcase`'s native subsurface is the tinted diffuse and is unchanged) — then the new binary recorded and checked against its own goldens, all 26 identical (`check_images.sh check` exit 0). Goldens are not versioned: whoever keeps a local set re-records `materialx_subsurface` only

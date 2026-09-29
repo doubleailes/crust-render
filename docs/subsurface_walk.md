@@ -159,7 +159,8 @@ Equal-sample noise against a 2048-spp reference of the fixture (`relmse`, the
 | 32 | 2.3196e-2 | 2.3195e-2 |
 
 Both halve from 16 to 32 spp, as unbiased estimators do, and the roulette costs no
-measurable variance. Base vs prototype at 16 spp differ in 28 % of pixels with RMSE 3.0e-4, almost
+measurable variance. Across the 26 sample scenes (`scripts/check_images.sh`, 16 spp)
+only `materialx_subsurface` re-renders differently; the other 25 are bit-identical. Base vs prototype at 16 spp differ in 28 % of pixels with RMSE 3.0e-4, almost
 all at the last ulp (the reordered transmittance arithmetic); the roulette's
 reweighting shows as isolated differences of a few 1e-3. Cornellbox, which never walks,
 executes 2 663 960 177 instructions before and 2 663 964 522 after (+0.0002 %), so the

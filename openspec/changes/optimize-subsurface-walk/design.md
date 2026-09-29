@@ -87,6 +87,8 @@ Walk-level experiments (§ 2) showed which changes pay and which do not.
 
 ## Migration Plan
 
-None: no file format, setting or flag changes. Goldens of scenes with a
-`subsurface_bsdf` need re-recording (noise-level change); every other golden is
-bit-identical.
+None: no file format, setting or flag changes. Of the 26 sample scenes only
+`materialx_subsurface` re-renders differently (noise level), so a local golden set
+re-records that one; the other 25 were checked bit-identical with
+`scripts/check_images.sh`, `openpbr_showcase`'s native subsurface included (it is
+the tinted diffuse, not a walk).
