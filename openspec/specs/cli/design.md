@@ -99,6 +99,15 @@ cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 
 cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_basic.mtlx mtlx_ceramic 0.25 0.5
 
+# ...and across a whole MaterialX corpus: Ben Houston's Material Fidelity suite,
+# 826 materials scored by PSNR against MaterialXView's render (~70 min on 4
+# cores). Fetches the suite at a pinned revision into .fidelity/, renders,
+# writes the report, and exits non-zero if any material fell more than 0.5 dB
+# below scripts/material_fidelity/baseline.json. See docs/material_fidelity.md.
+scripts/material_fidelity/fidelity.sh                             # init, build, run, report, check
+scripts/material_fidelity/fidelity.sh run --materials noise3d     # a subset, then `check`
+scripts/material_fidelity/fidelity.sh goldeneye -k noise3d        # through Goldeneye: FLIP + HTML report
+
 # It goes through `FileAssets`, not just `UvTexture`, so `CRUST_TEX_STREAM` is
 # honoured and the `emission` column shows the range an HDR texture actually
 # carries -- a preloaded texel clips to 1.0 and a streamed one does not. This

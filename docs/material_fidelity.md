@@ -20,21 +20,72 @@ operator for, not shading; the `nodes/*` group (17.5 dB) is where that shows.
 
 ## Running it
 
+One script runs the whole suite, end to end:
+
 ```bash
-git clone https://github.com/bhouston/material-fidelity
-git clone https://github.com/bhouston/material-samples \
-    material-fidelity/submodules/material-samples        # 4.5 GB, includes the reference PNGs (no LFS)
-pip install numpy pillow pygltflib OpenEXR
-cargo build --release
-scripts/material_fidelity/run.py --suite material-fidelity --out fidelity-out      # ~85 min on 4 cores
-scripts/material_fidelity/run.py --suite material-fidelity --materials noise3d     # a subset (substring or re:...)
-scripts/material_fidelity/summarize.py --suite material-fidelity fidelity-out/results.json
+scripts/material_fidelity/fidelity.sh            # init, build, run, report, check: ~70 min on 4 cores
 ```
 
-`run.py` writes `crust.png` beside each material, following the suite's
-`<renderer>.png` convention, so the suite's own viewer (`pnpm viewer`) can show it
-next to the others. `results.json` keeps PSNR, time, the render log and the logged
-unsupported nodes for each material.
+| step | what it does |
+|---|---|
+| `init` | clones material-fidelity at the pinned revision into `.fidelity/` (gitignored), then the one submodule crust needs, `mtlx-sample-library` (~900 MB: documents, textures, every renderer's images), at the revision the suite pins, over https (its `.gitmodules` says SSH); creates a venv with `numpy`, `pillow>=11.3` (AVIF), `pygltflib`, `OpenEXR` |
+| `build` | `cargo build --release -p crust-render` |
+| `run [run.py args]` | renders and scores every material into `.fidelity/out/results.json`; `--materials noise3d` / `re:^input_` selects by leaf directory, as the suite's own CLI does |
+| `report` | `summarize.py` → `.fidelity/out/report.md`: the tables below |
+| `check [check.py args]` | fails if any material fell more than 0.5 dB below `scripts/material_fidelity/baseline.json`, or errors where it rendered |
+| `baseline` | accepts the run: rewrites `baseline.json` (commit it with the change that moved it) |
+| `goldeneye [pytest args]` | the same fixtures through [Goldeneye](#through-goldeneye) |
+
+`FIDELITY_ROOT` moves the work directory, `SUITE_REV` picks another suite
+revision (bump `PINNED_SUITE_REV` and `baseline.json` together), `PYTHON` uses an
+interpreter that already has the dependencies. Every step is also a plain script
+(`run.py`, `summarize.py`, `check.py`, `goldeneye_suite.py`, each with `--help`)
+over the helpers in `suite.py`.
+
+`run.py` writes into each material directory what the suite's own renderers
+write: `crust.avif` (encoded as the suite encodes every render, AVIF quality 90,
+4:4:4), `crust.json` (its render report: status and log lines) and a `crust`
+entry in `metrics.json`. `--no-write-suite` leaves the checkout alone. The suite's
+viewer (`pnpm viewer`) lists only its built-in renderers, so showing crust there
+takes one entry in its `packages/samples/src/built-in-renderers.ts`.
+`results.json` keeps, per material, the PSNR of the AVIF (`psnr`, the number the
+suite would publish) and of the same pixels before encoding (`psnr_lossless`), the
+time, the render log and the nodes crust logged as unsupported.
+
+The baseline is what makes the suite usable as a regression check. The score is
+against an external reference, so an absolute threshold would fail hundreds of
+materials for gaps already known (below); `check` fails only on a material that
+moved *away* from the reference. A render is deterministic for a given binary,
+so any movement is the change's.
+
+### Through Goldeneye
+
+[Goldeneye](https://github.com/anderslanglands/goldeneye) is the pytest-based USD
+render regression runner behind Typhoon, NVIDIA's OpenUSD reference renderer. Its
+AOUSD materials conformance suite (over 1200 tests) credits this Material
+Fidelity suite (Anders Langlands, *A Reference Renderer for OpenUSD
+Interoperability*).
+`fidelity.sh goldeneye` exports the suite as a Goldeneye project in
+`.fidelity/goldeneye` (`goldeneye_suite.py`), installs Goldeneye into the venv
+without its Typhoon dependency, and runs `pytest` with a `crust` renderer
+profile. Each case is scored by mean FLIP against the decoded `materialx-glsl`
+reference (default threshold 0.1), with a FLIP map per case and an HTML report
+(`goldeneye view` in that directory).
+
+The fixtures are the same shot layer `run.py` renders, with relative asset paths
+and a `RenderProduct` named after the case. So a Hydra renderer driven by
+`usdrender --outputRoot` (Goldeneye's default Typhoon command) renders them
+unchanged, for a side-by-side with a reference path tracer; it ignores the
+`crust:*` attributes, so its ball shadows itself. `fidelity.sh goldeneye-accept`
+turns the latest run's failures into per-case expected failures
+(`<case>.goldeneye.toml`, naming the nodes crust logged as unsupported), which is
+how Goldeneye carries known gaps. After that a run fails only on a case that
+passed before.
+
+The profile's render command is `goldeneye_suite.py render`, not `crust-render`
+directly, for two reasons. crust does not create the output's directory, which
+`usdrender` does. And FLIP's EXR reader (tinyexr) crashes on crust's tiled EXRs,
+so the wrapper rewrites each one as a scanline EXR with the same pixels.
 
 ## The scene contract, and how crust meets it
 
