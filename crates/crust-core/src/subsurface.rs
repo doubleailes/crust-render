@@ -59,10 +59,6 @@ const MIN_ALPHA: f32 = 0.2;
 const BIAS: f32 = 1e-4;
 const EXTINCTION_EPS: f32 = 1e-6;
 const THROUGHPUT_EPS: f32 = 1e-6;
-/// Foreign surfaces a single walk segment may pass before it gives up on
-/// finding its own. Typhoon traces the owner's prototype scene alone; crust's
-/// world is one BVH, so a segment steps past other geometry instead.
-const MAX_SKIPS: u32 = 16;
 
 /// What a subsurface leaf hands the tracer when the closure selects it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,6 +238,13 @@ const TRACE_T_MIN: f32 = 0.001;
 /// Closest hit on `owner` from `pos` along the unit `dir` within
 /// `(t_min, t_max)`, stepping past every other geometry. The record's `t`
 /// is measured from `pos`.
+///
+/// Typhoon traces the owner's prototype scene alone; crust's world is one
+/// BVH, so a segment steps past foreign surfaces instead, as many as lie in
+/// the segment. There is deliberately no cap: a capped search read "too many
+/// foreign surfaces" as "no boundary", and a walk past nine spheres embedded in
+/// its object carried on outside it. It terminates because `t_max` is finite
+/// and every step advances by at least `BIAS` (relative, at large `t`).
 #[allow(clippy::too_many_arguments)]
 fn trace_owner(
     world: &World,
@@ -253,7 +256,10 @@ fn trace_owner(
     time: f32,
     cost: &mut WalkCost,
 ) -> Option<HitRecord> {
-    for _ in 0..=MAX_SKIPS {
+    if !t_max.is_finite() {
+        return None;
+    }
+    while t_min < t_max {
         cost.rays += 1;
         let shift = t_min - TRACE_T_MIN;
         let ray = Ray::new(pos + dir * shift, dir)
@@ -267,7 +273,9 @@ fn trace_owner(
         if hit.geom_id == owner {
             return Some(HitRecord { t, ..hit.rec });
         }
-        t_min = t + BIAS;
+        // Past this surface; relative at large `t`, where `BIAS` is below
+        // an ulp and would not move the search.
+        t_min = t + BIAS.max(t.abs() * 1e-6);
     }
     None
 }

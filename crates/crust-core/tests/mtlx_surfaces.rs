@@ -730,3 +730,56 @@ fn a_short_walk_reflects_its_colour_in_the_furnace() {
         assert!(err < 0.025, "furnace mean {mean}");
     }
 }
+
+/// The walk enters through the dielectric that is live at the hit, not the
+/// first one in the tree: under a `mix` whose factor (here the `u`
+/// coordinate) is 0, the foreground interface contributes nothing and must
+/// not set the entry's IOR.
+#[test]
+fn an_inactive_dielectric_does_not_set_the_walk_entry() {
+    let l = load(
+        "sssiface",
+        r#"<texcoord name="tc" type="vector2" />
+           <extract name="u" type="float">
+             <input name="in" type="vector2" nodename="tc" />
+             <input name="index" type="integer" value="0" />
+           </extract>
+           <dielectric_bsdf name="glossy" type="BSDF">
+             <input name="ior" type="float" value="2.5" />
+             <input name="roughness" type="vector2" value="0.05, 0.05" />
+           </dielectric_bsdf>
+           <dielectric_bsdf name="satin" type="BSDF">
+             <input name="ior" type="float" value="1.3" />
+             <input name="roughness" type="vector2" value="0.3, 0.3" />
+           </dielectric_bsdf>
+           <mix name="coat" type="BSDF">
+             <input name="fg" type="BSDF" nodename="glossy" />
+             <input name="bg" type="BSDF" nodename="satin" />
+             <input name="mix" type="float" nodename="u" />
+           </mix>
+           <subsurface_bsdf name="sss" type="BSDF">
+             <input name="color" type="color3" value="0.8, 0.6, 0.5" />
+             <input name="radius" type="vector3" value="0.1, 0.1, 0.1" />
+           </subsurface_bsdf>
+           <layer name="stack" type="BSDF">
+             <input name="top" type="BSDF" nodename="coat" />
+             <input name="base" type="BSDF" nodename="sss" />
+           </layer>
+           <surface name="s" type="surfaceshader">
+             <input name="bsdf" type="BSDF" nodename="stack" />
+           </surface>"#,
+    );
+    let entry_ior = |u: f32| {
+        leaves(&l, u, 0.5)
+            .iter()
+            .find_map(|p| match p.lobe {
+                Lobe::Subsurface { ior, .. } => Some(ior),
+                _ => None,
+            })
+            .expect("a walk leaf")
+    };
+    assert!(near(entry_ior(0.0), 1.3, 1e-5), "{}", entry_ior(0.0));
+    assert!(near(entry_ior(1.0), 2.5, 1e-5), "{}", entry_ior(1.0));
+    // Mostly background: the heavier branch sets the interface.
+    assert!(near(entry_ior(0.2), 1.3, 1e-5), "{}", entry_ior(0.2));
+}
