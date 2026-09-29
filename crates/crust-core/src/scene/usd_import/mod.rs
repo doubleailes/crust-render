@@ -191,8 +191,10 @@ struct ImportCtx<'a> {
     /// The stage file, for resolving asset paths against its directory.
     stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
-    /// resolved (a chunk's mask may exclude what they name).
-    index: &'a Stage,
+    /// resolved (a chunk's mask may exclude what they name). Dropped as soon
+    /// as the links are resolved, before the top-level BVH commit that is
+    /// the import's memory peak.
+    index: Option<Stage>,
     assets: &'a dyn AssetLoader,
 }
 
@@ -358,7 +360,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // is the light that grew it.
         if ctx.lights.count() > lights_before {
             ctx.links
-                .light_added(ctx.index, stage, prim.path(), lights_before);
+                .light_added(ctx.index.as_ref(), stage, prim.path(), lights_before);
         }
 
         // Recurse. We push children onto the stack unconditionally; the
@@ -563,7 +565,7 @@ pub(crate) fn load_scene(
         links: LightLinks::default(),
         settings,
         stage_path: path,
-        index: &index,
+        index: Some(index),
         assets,
     };
 
@@ -675,6 +677,7 @@ pub(crate) fn load_scene(
     // Likewise every receiver has been seen, so a light's link can be judged
     // against all of them; before `commit`, which freezes geometry masks.
     std::mem::take(&mut ctx.links).resolve(&mut ctx.lights, &mut ctx.world, &mut ctx.volumes);
+    drop(ctx.index.take());
     if !domes_seen_by_camera {
         debug!(
             "domeLightCameraVisibility = false: every light at infinity is hidden from the camera"

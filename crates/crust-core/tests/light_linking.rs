@@ -336,6 +336,14 @@ fn an_unlinked_receiver_is_black_under_every_strategy() {
 
 /// NEE alone and BSDF sampling alone must reach the same answer on the
 /// linked receiver: both sides apply the same filter.
+///
+/// 1024 spp on purpose. The 16 spp rule for image comparisons (`CLAUDE.md`)
+/// exists because above `min_samples_per_pixel` the adaptive early stop
+/// makes a one-ulp change cascade; `settings` pins `minSamplesPerPixel` to the
+/// sample count and the variance threshold to 0, so nothing adapts here. And
+/// this is not a regression diff but a test that two *different* estimators
+/// have the same mean, which needs enough samples for their noise (BSDF-only
+/// finding a small light is the noisy one) to fall well inside 5%.
 #[test]
 fn nee_only_and_bsdf_only_agree_on_a_linked_receiver() {
     let (nee, _) = hero_and_floor(&render(linked_scene("light", 1024)));
@@ -578,4 +586,118 @@ fn authored_high_mask_bits_are_kept_without_links() {
     assert!(scene.world.occluded(&ray, 1e-3, 100.0));
     let shadow = Ray::new(Vec3A::new(0.0, 0.0, 10.0), -Vec3A::Z).with_mask(MASK_SHADOW);
     assert!(scene.world.occluded(&shadow, 1e-3, 100.0));
+}
+
+/// A link authored only in a payload on an existing light prim: the index
+/// stage (payloads unloaded) has the prim but not the link, so it must not be
+/// the one the link is read on. (The payload authors `includeRoot = 0`
+/// alone: a relationship target outside the arc's namespace, such as
+/// `</World/Hero>`, is not mapped through a payload.)
+#[test]
+fn a_link_authored_in_a_payload_is_honoured() {
+    write_stage(
+        "payload_links_layer",
+        r#"#usda 1.0
+def Xform "World"
+{
+    def SphereLight "Key"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+    }
+}
+"#,
+    );
+    let body = r#"    def Camera "Cam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        double3 xformOp:translate = (0, 6, 0)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+    def Mesh "Floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
+    }
+    def Sphere "Hero"
+    {
+        double radius = 1
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "Key" (
+        prepend payload = @payload_links_layer.usda@</World/Key>
+    )
+    {
+        float inputs:radius = 1
+        float inputs:intensity = 20
+        double3 xformOp:translate = (1, 4, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+"#;
+    let scene = load("payload_links", body, &settings("power", 16, 16));
+    // Read on the index stage the link would be the default and Key would
+    // light everything; the payload's link includes nothing.
+    assert_eq!(scene.lights.count(), 0, "the payload's link is read");
+    let (hero, floor) = hero_and_floor(&render(scene));
+    assert_eq!((hero, floor), (0.0, 0.0));
+}
+
+/// A volume region a light's `lightLink` excludes gets nothing from it, on
+/// the NEE side and on the phase-sampled bounce side alike.
+#[test]
+fn a_volume_excluded_by_a_light_link_is_not_lit() {
+    let body = |links: &str| {
+        format!(
+            r#"    def Camera "Cam"
+    {{
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        double3 xformOp:translate = (0, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+    def Cube "Fog"
+    {{
+        double size = 3
+        token crust:volume:type = "homogeneous"
+        color3f crust:volume:sigmaS = (1, 1, 1)
+        color3f crust:volume:sigmaA = (0, 0, 0)
+    }}
+    def SphereLight "Key"
+    {{
+        float inputs:radius = 1
+        float inputs:intensity = 20
+        {links}
+        double3 xformOp:translate = (0, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }}
+"#
+        )
+    };
+    let exclude = "prepend rel collection:lightLink:excludes = </World/Fog>";
+    for (strategy, depth) in [("power", 1), ("bsdf", 2)] {
+        let lit = render(load(
+            &format!("fog_lit_{strategy}"),
+            &body(""),
+            &settings_at_depth(strategy, 16, 8, depth),
+        ));
+        let dark = render(load(
+            &format!("fog_excluded_{strategy}"),
+            &body(exclude),
+            &settings_at_depth(strategy, 16, 8, depth),
+        ));
+        assert!(
+            centre(&lit).max_element() > 0.0,
+            "{strategy}: the fog is lit"
+        );
+        assert_eq!(
+            centre(&dark),
+            Vec3A::ZERO,
+            "{strategy}: excluded, it is dark"
+        );
+    }
 }

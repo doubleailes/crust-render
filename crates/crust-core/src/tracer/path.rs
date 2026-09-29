@@ -299,6 +299,8 @@ pub(super) enum PrevVertex<'a> {
         pos: Vec3A,
         /// Solid-angle pdf of the sampled phase direction.
         pdf: PdfSolidAngle,
+        /// The light-link class of the volume region scattered in.
+        class: u16,
     },
 }
 
@@ -327,8 +329,7 @@ fn bounce_emission_weight(
     // nothing on this side, exactly as NEE there skips it.
     let (from, class, competing) = match prev {
         PrevVertex::Surface(p) => (p.pos, p.class, p.continuous().then_some(p.pdf)),
-        // A volume-region scatter belongs to no prim: every light reaches it.
-        PrevVertex::Phase { pos, pdf } => (*pos, EVERY_CLASS, Some(*pdf)),
+        PrevVertex::Phase { pos, pdf, class } => (*pos, *class, Some(*pdf)),
     };
     // Nothing competes after a delta bounce, and without links nothing can
     // filter it either: skip the light lookup, as before links existed.
@@ -408,16 +409,17 @@ pub(super) fn escaped_emission(
     // strategy and the emission is taken whole.
     let competing = match prev {
         Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf)),
-        Some(PrevVertex::Phase { pos, pdf }) => Some((*pos, *pdf)),
+        Some(PrevVertex::Phase { pos, pdf, .. }) => Some((*pos, *pdf)),
         // Primary rays, and rays leaving a carried-medium scatter, run no
         // NEE — full weight, exactly as `prev = None` means elsewhere.
         None => None,
     };
-    // The receiver whose light links apply: the surface the ray left. The
-    // camera and a volume scatter have none, and see every light.
+    // The receiver whose light links apply: the surface or volume region
+    // the ray left. The camera has none, and sees every light.
     let class = match prev {
         Some(PrevVertex::Surface(p)) => p.class,
-        _ => EVERY_CLASS,
+        Some(PrevVertex::Phase { class, .. }) => *class,
+        None => EVERY_CLASS,
     };
     let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
     // The pmf at the vertex the escaping ray left: the one its NEE picked with.
@@ -656,6 +658,7 @@ fn volume_nee<const PROFILE: bool>(
     p: Vec3A,
     wi: Vec3A,
     phase: &PhaseMix,
+    class: u16,
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -669,10 +672,14 @@ fn volume_nee<const PROFILE: bool>(
     }
     let _p = profile::scope_if::<PROFILE>(Section::VolumeLighting);
     let nee = vertex.new_domain(K_NEE).draw_sample_f32::<4>();
-    // A volume-region scatter belongs to no prim, so every light reaches it.
+    // As at a surface: a light that does not illuminate this region gives
+    // nothing, and its pick probability stays what it was.
     let Some((index, pmf)) = lights.pick_index_at(p, nee[0]) else {
         return Vec3A::ZERO;
     };
+    if !lights.illuminates(index, class) {
+        return Vec3A::ZERO;
+    }
     let light = lights.light(index);
     let Some(s) = light.sample_li(p, nee[1], nee[2]) else {
         return Vec3A::ZERO;
@@ -854,6 +861,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 weight,
                 phase,
                 emitted,
+                class,
                 ..
             } => {
                 stats.volume_scatters += 1;
@@ -866,6 +874,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     p,
                     wi,
                     &phase,
+                    class,
                     world,
                     volumes,
                     lights,
@@ -914,6 +923,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 prev = Some(PrevVertex::Phase {
                     pos: p,
                     pdf: PdfSolidAngle::from_measure(phase_pdf),
+                    class,
                 });
                 stats.vertices += 1;
                 records.push(vrec);

@@ -12,6 +12,7 @@
 //! occlude shadow rays and no placeholder boundary material is needed.
 
 use crate::aabb::AABB;
+use crate::light::EVERY_CLASS;
 use crate::medium::hg_phase;
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Mat4, Vec3, Vec3A};
@@ -196,6 +197,10 @@ pub struct VolumeRegion {
     /// [`MASK_ALL`] by default. Shadow linking rewrites its shadow bits, so a
     /// light whose `shadowLink` excludes the region is not attenuated by it.
     pub mask: RayMask,
+    /// The light-link class of the prim that authored the region, as a
+    /// geometry's is ([`crate::World::light_class`]); [`EVERY_CLASS`] unless
+    /// some light authors a `lightLink`.
+    pub light_class: u16,
 }
 
 impl VolumeRegion {
@@ -248,6 +253,7 @@ impl VolumeRegion {
             field,
             majorant_sigma_t,
             mask: MASK_ALL,
+            light_class: EVERY_CLASS,
         }
     }
 
@@ -372,6 +378,10 @@ pub enum VolumeEvent {
         /// walk weights at each emission point. Must NOT be attenuated
         /// again by the caller.
         emitted: Vec3A,
+        /// The light-link class of the region(s) at `p`: theirs when every
+        /// region there agrees, [`EVERY_CLASS`] when overlapping regions of
+        /// different classes share the point.
+        class: u16,
     },
     /// The segment was crossed without a real collision.
     Passthrough {
@@ -465,6 +475,7 @@ impl Volumes {
             let mut sigma_s_x = Vec3A::ZERO;
             let mut sigma_t_x = Vec3A::ZERO;
             let mut lobes: Vec<(f32, f32)> = Vec::new();
+            let mut class: Option<u16> = None;
             for &(i, a, b) in &spans {
                 if t < a || t > b {
                     continue;
@@ -474,6 +485,10 @@ impl Volumes {
                 if d <= 0.0 {
                     continue;
                 }
+                class = Some(match class {
+                    Some(c) if c != region.light_class => EVERY_CLASS,
+                    _ => region.light_class,
+                });
                 let ss = region.sigma_s * d;
                 sigma_s_x += ss;
                 sigma_t_x += region.sigma_t_at_density(d);
@@ -496,6 +511,7 @@ impl Volumes {
                     weight: w * sigma_s_x / (majorant * p_scatter),
                     phase: PhaseMix { lobes },
                     emitted,
+                    class: class.unwrap_or(EVERY_CLASS),
                 };
             }
             // Null/absorb combined: per-channel numerators are

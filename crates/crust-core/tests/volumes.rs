@@ -564,8 +564,11 @@ fn a_pure_scatterer_collides_with_the_right_probability() {
                 weight,
                 phase,
                 emitted,
+                class,
             } => {
                 scatters += 1;
+                // No light authors a link: the region is every class's.
+                assert_eq!(class, crust_core::EVERY_CLASS);
                 // The walk starts exactly at the entry distance; an
                 // exponential step can round to zero.
                 assert!((4.0..6.0).contains(&t), "scatter outside the box at t={t}");

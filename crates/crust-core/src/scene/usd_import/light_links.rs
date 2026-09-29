@@ -131,6 +131,38 @@ pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<Membe
     Some(MembershipQuery::new(map))
 }
 
+/// A link collection's authored opinions, as far as membership depends on
+/// them — what two stages must agree on to be interchangeable for it.
+#[derive(PartialEq)]
+struct Opinions {
+    includes: Vec<sdf::Path>,
+    excludes: Vec<sdf::Path>,
+    include_root: Option<bool>,
+    expansion_rule: Option<String>,
+    expression: bool,
+}
+
+fn opinions(prim: &Prim, name: &str) -> Opinions {
+    let prop = |suffix: &str| format!("collection:{name}:{suffix}");
+    let targets = |suffix: &str| {
+        prim.relationship(prop(suffix))
+            .targets()
+            .unwrap_or_default()
+    };
+    Opinions {
+        includes: targets("includes"),
+        excludes: targets("excludes"),
+        include_root: custom_bool(prim, &prop("includeRoot")),
+        expansion_rule: super::attrs::custom_token(prim, &prop("expansionRule")),
+        expression: prim
+            .attribute(prop("membershipExpression"))
+            .get_at::<sdf::Value>(eval_time())
+            .ok()
+            .flatten()
+            .is_some(),
+    }
+}
+
 /// Whether some strict ancestor of `path` is a native instance, i.e. `path`
 /// names geometry inside a prototype.
 fn inside_instance(stage: &Stage, path: &sdf::Path) -> bool {
@@ -203,24 +235,50 @@ impl LightLinks {
     /// Records a light just added at `index` of the import's light list, if
     /// either of its links restricts it.
     ///
-    /// The collections are read on `whole` (the index stage, payloads
-    /// unloaded) when the light is there, and on the traversed `chunk`
-    /// otherwise: a streamed chunk is composed under a population mask that
-    /// keeps only its own subtree, so a collection nested in another
-    /// subtree (a rig's `Scope` of light groups, say) would resolve to
-    /// nothing on it. A light only a payload brings in is read on its chunk.
+    /// Two stages can answer, and each can be wrong. The traversed `chunk`
+    /// has every opinion, payloads included, but a streamed chunk is
+    /// composed under a population mask that keeps only its own subtree, so
+    /// a collection nested in another subtree (a rig's `Scope` of light
+    /// groups, say) resolves to nothing there. `whole`, the index stage, has
+    /// every subtree but no payload, so a link a payload authors is missing
+    /// there. So `whole` is used only when it holds the light's link
+    /// opinions exactly as the chunk does; otherwise the chunk is, and a
+    /// nested collection it cannot see is warned about.
     pub(super) fn light_added(
         &mut self,
-        whole: &Stage,
+        whole: Option<&Stage>,
         chunk: &Stage,
         path: &sdf::Path,
         index: usize,
     ) {
-        let on_whole = prim_at(whole, path.clone());
-        let (stage, prim) = if on_whole.is_valid().unwrap_or(false) {
-            (whole, on_whole)
-        } else {
-            (chunk, prim_at(chunk, path.clone()))
+        let on_chunk = prim_at(chunk, path.clone());
+        let same = |w: &Stage| {
+            let on_whole = prim_at(w, path.clone());
+            let agrees = on_whole.is_valid().unwrap_or(false)
+                && ["lightLink", "shadowLink"]
+                    .iter()
+                    .all(|n| opinions(&on_whole, n) == opinions(&on_chunk, n));
+            agrees.then_some(on_whole)
+        };
+        let (stage, prim) = match whole.and_then(|w| same(w).map(|p| (w, p))) {
+            Some(found) => found,
+            None => {
+                for name in ["lightLink", "shadowLink"] {
+                    let missing = opinions(&on_chunk, name).includes.into_iter().find(|t| {
+                        openusd::usd::is_collection_api_path(t).is_some_and(|(owner, _)| {
+                            !prim_at(chunk, owner).is_valid().unwrap_or(false)
+                        })
+                    });
+                    if let Some(t) = missing {
+                        warn!(
+                            "{path}: collection:{name} is authored in a payload and includes \
+                             {t}, which this chunk of the streamed import does not compose — \
+                             that nested collection contributes nothing"
+                        );
+                    }
+                }
+                (chunk, on_chunk)
+            }
         };
         let light = link_query(stage, &prim, "lightLink");
         let shadow = link_query(stage, &prim, "shadowLink");
@@ -326,6 +384,9 @@ impl LightLinks {
                     }
                 }
                 world.set_light_classes(table);
+                for &(v, id) in &self.volumes {
+                    volumes[v as usize].light_class = class_of[id as usize] as u16;
+                }
                 for (bit, (index, p)) in linked.iter().enumerate() {
                     let mut set = vec![0u64; classes.len().div_ceil(64)];
                     let mut members = 0;
