@@ -329,7 +329,8 @@ From the `crust-core` crate description:
   **`profile.rs`** is the other half of Guerilla's page, the *Render Profile*:
   named `Section`s (`MainLoop`, `GeneratePrimary`, `Trace`, `Occlusion`,
   `Volume`, `EvalBsdfs`, `RunShader`, `Texture`, `TextureLoad`,
-  `SurfaceLighting`, `VolumeLighting`, `Bounce`, `Contributions`) in four
+  `SurfaceLighting`, `VolumeLighting`, `Bounce`, `Subsurface`, `Contributions`) in
+  four
   categories, recorded per thread into a call tree and merged by
   `profile::flush()` once per tile (per pixel in scanline mode), reported flat,
   by category and by execution tree with Guerilla's `local` / `total` / `glob.`

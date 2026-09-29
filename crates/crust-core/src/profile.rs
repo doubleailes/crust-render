@@ -96,13 +96,16 @@ pub enum Section {
     VolumeLighting,
     /// Choosing the continuation: BSDF or guide sampling, and roulette.
     Bounce,
+    /// A subsurface random walk, entry to exit record: its free flights,
+    /// owner-only ray casts and channel MIS.
+    Subsurface,
     /// The backward gather folding a path's vertices into its radiance
     /// (and emitting guiding training samples).
     Contributions,
 }
 
 impl Section {
-    pub const ALL: [Section; 13] = [
+    pub const ALL: [Section; 14] = [
         Section::MainLoop,
         Section::GeneratePrimary,
         Section::Trace,
@@ -115,6 +118,7 @@ impl Section {
         Section::SurfaceLighting,
         Section::VolumeLighting,
         Section::Bounce,
+        Section::Subsurface,
         Section::Contributions,
     ];
 
@@ -132,6 +136,7 @@ impl Section {
             Section::SurfaceLighting => "SurfaceLighting",
             Section::VolumeLighting => "VolumeLighting",
             Section::Bounce => "Bounce",
+            Section::Subsurface => "Subsurface",
             Section::Contributions => "Contributions",
         }
     }
@@ -146,6 +151,7 @@ impl Section {
             | Section::SurfaceLighting
             | Section::VolumeLighting
             | Section::Bounce
+            | Section::Subsurface
             | Section::Contributions => Category::Integrator,
         }
     }
