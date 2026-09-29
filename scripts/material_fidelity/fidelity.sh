@@ -27,7 +27,7 @@
 #   PYTHON          interpreter that already has the dependencies (skips the venv)
 #   CARGO           cargo command (default: cargo)
 #
-# A full run renders 826 materials at 64 spp, about 5 s each on 4 cores: ~70 min.
+# A full run renders 826 materials at 64 spp, about 6 s each on 4 cores: ~80 min.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

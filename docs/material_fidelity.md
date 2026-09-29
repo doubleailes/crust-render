@@ -2,28 +2,31 @@
 
 Ben Houston's [Material Fidelity suite](https://github.com/bhouston/material-fidelity)
 renders 826 MaterialX materials on one shader ball under one fixed setup and scores
-each renderer against MaterialXView's GLSL render (`materialx-glsl.png`) by PSNR
-over 8-bit RGB. This page is crust's run of the **full** suite, measured on
-2026-09-28 at crust `a2a11cb` (the `add-mtlx-surface-shaders` closure-tree
-evaluator), material-samples `36422cb`.
+each renderer against MaterialXView's GLSL render (`materialx-glsl.avif`) by PSNR
+over 8-bit RGB. This page is crust's run of the **full** suite with
+`scripts/material_fidelity/fidelity.sh`, measured on 2026-09-29 at crust `37d4ee8`
+(the random-walk `subsurface_bsdf`), material-fidelity `fe4de1e`,
+mtlx-sample-library `8f8ce2e`. That run is `scripts/material_fidelity/baseline.json`.
 
-**Headline: the surface groups now score level with Blender.** Every document's
+**Headline: the surface groups score level with Blender.** Every document's
 surface is a `standard_surface` (649), `gltf_pbr` (91) or `open_pbr_surface` (86)
-node. Crust now expands each one into the closure tree of its MaterialX nodegraph
+node. Crust expands each one into the closure tree of its MaterialX nodegraph
 and evaluates that tree with MaterialX's own layering (see
 `openspec/specs/materials/design.md` § MaterialX). The `surfaces/*` groups score
-24.1–24.6 dB against `blender-new`'s 24.6–25.1, and `showcase/open_pbr_surface`
-scores above it. The first run, at `2b80992`, read none of these documents: every
-ball rendered with the fallback material, and the suite mean was 14.44 dB. It is
-now 20.02 dB. What remains is mostly **pattern nodes** crust's compiler has no
-operator for, not shading; the `nodes/*` group (17.5 dB) is where that shows.
+24.1–24.4 dB against `blender-new`'s 24.6–25.1. The first run, at `2b80992`, read
+none of these documents: every ball rendered with the fallback material, and the
+suite mean was 14.44 dB. It is now 19.97 dB. What remains is mostly **pattern
+nodes** crust's compiler has no operator for, not shading; the `nodes/*` group
+(17.6 dB) is where that shows. The one shading model that moved since the
+previous run, subsurface, moved *away* from both of the suite's references
+(below).
 
 ## Running it
 
 One script runs the whole suite, end to end:
 
 ```bash
-scripts/material_fidelity/fidelity.sh            # init, build, run, report, check: ~70 min on 4 cores
+scripts/material_fidelity/fidelity.sh            # init, build, run, report, check: ~80 min on 4 cores
 ```
 
 | step | what it does |
@@ -110,65 +113,94 @@ crust binaries.
 
 ## Results
 
-PSNR in dB against `materialx-glsl.png`, higher is better. 767 of 826 materials
+PSNR in dB against `materialx-glsl.avif`, higher is better. 767 of 826 materials
 ship a reference. The other columns are the suite's own published renders of the
-same materials, scored by the same code. No render failed; no surface node is
-logged as unsupported.
+same materials, scored by the same code (`materialx-osl` is MaterialX's OSL
+backend, rendered by OSL's `testrender`). No render failed; no surface node is
+logged as unsupported. The crust column scores `crust.avif`, as the suite scores
+every renderer; before encoding the mean is 19.96 dB, so the codec costs crust
+nothing measurable.
 
-| group | n | crust mean | crust median | blender-new mean | blender-nodes mean | threejs-new mean |
-|---|---|---|---|---|---|---|
-| **all** | 767 | 20.02 | 19.71 | 26.37 | 27.37 | 30.26 |
-| nodes | 478 | 17.53 | 17.03 | 27.37 | 28.90 | 31.37 |
-| showcase/gltf_pbr | 5 | 21.26 | 20.40 | 22.25 | 22.28 | 25.85 |
-| showcase/open_pbr_surface | 8 | 23.32 | 24.71 | 22.75 | 22.79 | 26.41 |
-| showcase/standard_surface | 16 | 21.76 | 20.02 | 24.60 | 26.25 | 29.18 |
-| surfaces/gltf_pbr | 85 | 24.09 | 24.35 | 24.63 | 24.65 | 28.38 |
-| surfaces/open_pbr_surface | 77 | 24.56 | 25.68 | 24.69 | 24.70 | 28.38 |
-| surfaces/standard_surface | 98 | 24.48 | 25.40 | 25.11 | 25.18 | 28.84 |
-| surface: `gltf_pbr` | 90 | 23.93 | 24.31 | 24.50 | 24.52 | 28.24 |
-| surface: `open_pbr_surface` | 85 | 24.45 | 25.67 | 24.50 | 24.52 | 28.20 |
-| surface: `standard_surface` | 592 | 18.79 | 18.38 | 26.92 | 28.21 | 30.88 |
+| group | n | crust mean | crust median | blender-new mean | blender-nodes mean | materialx-osl mean | threejs-new mean |
+|---|---|---|---|---|---|---|---|
+| **all** | 767 | 19.97 | 19.71 | 26.31 | 27.30 | 23.54 | 32.52 |
+| nodes | 478 | 17.55 | 17.23 | 27.31 | 28.82 | 24.03 | 34.22 |
+| showcase/gltf_pbr | 5 | 21.24 | 20.40 | 22.23 | 22.27 | 20.90 | 26.39 |
+| showcase/open_pbr_surface | 8 | 21.94 | 21.49 | 22.73 | 22.77 | 22.48 | 26.63 |
+| showcase/standard_surface | 16 | 21.72 | 20.04 | 24.54 | 26.16 | 22.76 | 30.89 |
+| surfaces/gltf_pbr | 85 | 24.05 | 24.36 | 24.59 | 24.61 | 22.73 | 29.44 |
+| surfaces/open_pbr_surface | 77 | 24.37 | 25.73 | 24.65 | 24.66 | 22.55 | 29.46 |
+| surfaces/standard_surface | 98 | 24.27 | 25.42 | 25.07 | 25.14 | 22.96 | 30.39 |
+| surface: `gltf_pbr` | 90 | 23.90 | 24.33 | 24.46 | 24.48 | 22.62 | 29.27 |
+| surface: `open_pbr_surface` | 85 | 24.15 | 25.56 | 24.47 | 24.48 | 22.54 | 29.19 |
+| surface: `standard_surface` | 592 | 18.78 | 18.42 | 26.86 | 28.14 | 23.82 | 33.50 |
 
-Against the first run (fallback everywhere), group means moved: `surfaces/gltf_pbr`
-14.21 → 24.09, `surfaces/open_pbr_surface` 16.02 → 24.56, `surfaces/standard_surface`
-16.78 → 24.48, `showcase/*` 12.6–13.5 → 21.3–23.3, `nodes` 13.85 → 17.53. Every
-`surfaces/*` and `showcase/*` group is within 3 dB of `blender-new`; the widest gap
-is `showcase/standard_surface` (−2.84 dB), where `marble_solid`, `brick_procedural`
-and the two `onyx_hextiled` samples depend on missing pattern nodes (`fractal3d`,
-`hsvtorgb`, `hextiledimage`).
+Against the previous run (`a2a11cb`, material-samples `36422cb`, PNG images) no
+group moved by more than 0.21 dB, except `showcase/open_pbr_surface`: 23.32 →
+21.94, all of it from `ketchup` and `pearl`. The subsurface isolates account for
+most of the 0.2 dB the `surfaces/open_pbr_surface` and `surfaces/standard_surface`
+groups lost. See "Subsurface" below.
 
 Lowest crust PSNR:
 
-| material | crust | blender-new | blender-nodes | threejs-new |
-|---|---|---|---|---|
-| `showcase/standard_surface/marble_solid` | 8.585 | 20.172 | 25.025 | 32.519 |
-| `surfaces/standard_surface/marble_solid` | 8.585 | 20.172 | 25.025 | 32.519 |
-| `nodes/artistic_ior_diag_red_white_edge` | 8.609 | 32.715 | 32.717 | - |
-| `nodes/image_format_avif` | 8.858 | 9.755 | 9.756 | 10.185 |
-| `nodes/image_format_svg` | 8.858 | 8.887 | 8.887 | 10.177 |
-| `nodes/image_format_webp` | 8.858 | 9.744 | 9.744 | 10.167 |
-| `nodes/asin_degenerate_out_of_domain_vector4` | 9.379 | 30.676 | 30.717 | 22.774 |
-| `nodes/acos_degenerate_out_of_domain_vector4` | 9.428 | 31.096 | 31.128 | 22.775 |
-| `surfaces/gltf_pbr/boombox` | 10.28 | 25.441 | 25.537 | 28.891 |
-| `nodes/splittb_compare_center_shift` | 10.432 | 24.223 | 24.252 | 30.14 |
+| material | crust | blender-new | blender-nodes | materialx-osl | threejs-new |
+|---|---|---|---|---|---|
+| `showcase/standard_surface/marble_solid` | 8.574 | 20.184 | 25.005 | 23.377 | 34.86 |
+| `surfaces/standard_surface/marble_solid` | 8.574 | 20.184 | 25.005 | 23.377 | 34.86 |
+| `nodes/artistic_ior_diag_red_white_edge` | 8.622 | 32.551 | 32.552 | 29.396 | 39.221 |
+| `nodes/image_format_avif` | 8.871 | 9.755 | 9.756 | - | 9.929 |
+| `nodes/image_format_svg` | 8.871 | 8.893 | 8.893 | 27.466 | 9.922 |
+| `nodes/image_format_webp` | 8.871 | 9.743 | 9.743 | 10.021 | 9.916 |
+| `nodes/asin_degenerate_out_of_domain_vector4` | 9.389 | 30.551 | 30.589 | 26.8 | 22.812 |
+| `nodes/acos_degenerate_out_of_domain_vector4` | 9.437 | 30.962 | 30.994 | 26.294 | 22.831 |
+| `surfaces/gltf_pbr/boombox` | 10.284 | 25.406 | 25.503 | 23.225 | 29.465 |
+| `nodes/splittb_compare_center_shift` | 10.429 | 24.217 | 24.247 | 22.1 | 32.112 |
 
 Highest crust PSNR:
 
-| material | crust | blender-new | blender-nodes | threejs-new |
-|---|---|---|---|---|
-| `surfaces/gltf_pbr/feature_emission` | 36.035 | 39.067 | 39.052 | 37.183 |
-| `surfaces/standard_surface/greysphere` | 34.661 | 36.672 | 36.823 | 34.026 |
-| `nodes/remap_degenerate_vector4` | 34.146 | 36.076 | 36.135 | 33.373 |
-| `surfaces/standard_surface/feature_emission` | 34.001 | 36.012 | 36.098 | 38.416 |
-| `surfaces/open_pbr_surface/input_base_weight` | 33.173 | 35.841 | 36.046 | 33.839 |
-| `surfaces/standard_surface/input_emission` | 32.324 | 33.114 | 33.037 | 34.539 |
-| `surfaces/standard_surface/graph_base_color_image_mask` | 32.05 | 33.321 | 33.409 | 34.857 |
-| `surfaces/standard_surface/standard_surface_sweep_sheen_0_00` | 31.922 | 33.149 | 33.242 | 35.528 |
-| `surfaces/gltf_pbr/input_emissive_strength` | 31.918 | 32.949 | 32.921 | 34.386 |
-| `surfaces/gltf_pbr/input_iridescence` | 31.869 | 32.509 | 32.56 | 31.408 |
+| material | crust | blender-new | blender-nodes | materialx-osl | threejs-new |
+|---|---|---|---|---|---|
+| `surfaces/gltf_pbr/feature_emission` | 35.56 | 38.426 | 38.417 | 34.49 | 36.665 |
+| `surfaces/standard_surface/greysphere` | 34.095 | 36.27 | 36.387 | 25.003 | 37.372 |
+| `nodes/remap_degenerate_vector4` | 33.642 | 35.722 | 35.776 | 24.969 | 37.556 |
+| `surfaces/standard_surface/feature_emission` | 33.565 | 35.698 | 35.774 | 31.809 | 38.603 |
+| `surfaces/open_pbr_surface/input_base_weight` | 32.82 | 35.534 | 35.708 | 24.138 | 36.338 |
+| `surfaces/standard_surface/input_emission` | 32.063 | 32.995 | 32.922 | 31.47 | 34.312 |
+| `surfaces/gltf_pbr/input_emissive_strength` | 31.802 | 32.855 | 32.826 | 31.285 | 34.212 |
+| `surfaces/standard_surface/graph_base_color_image_mask` | 31.74 | 33.121 | 33.216 | 25.531 | 36.704 |
+| `surfaces/standard_surface/standard_surface_sweep_sheen_0_25` | 31.705 | 31.119 | 31.194 | 24.756 | 34.514 |
+| `surfaces/standard_surface/standard_surface_sweep_sheen_0_00` | 31.702 | 32.978 | 33.061 | 24.932 | 37.128 |
 
-`image_format_avif/svg/webp` score about 10 dB for **every** renderer: their reference
-is itself a failed texture load.
+`image_format_avif/svg/webp` score about 10 dB for **every** renderer (OSL aside on
+`svg`): their reference is itself a failed texture load.
+
+### Subsurface: the random walk moved away from both references
+
+The baseline gate found this on its first use. Rendered with the commit before the
+random walk (`a080d1a`), every subsurface material scores higher against
+`materialx-glsl`:
+
+| material | random walk | before (`a080d1a`) | change |
+|---|---|---|---|
+| `showcase/open_pbr_surface/ketchup` | 20.74 | 26.83 | +6.09 |
+| `showcase/open_pbr_surface/pearl` | 21.82 | 26.67 | +4.85 |
+| `surfaces/open_pbr_surface/feature_subsurface` | 20.10 | 24.87 | +4.77 |
+| `surfaces/open_pbr_surface/input_subsurface_radius` | 20.33 | 24.87 | +4.54 |
+| `surfaces/standard_surface/feature_subsurface` | 20.03 | 24.18 | +4.15 |
+| `surfaces/open_pbr_surface/input_subsurface_scatter_anisotropy` | 21.17 | 24.87 | +3.70 |
+| `surfaces/standard_surface/input_subsurface_scale` | 20.87 | 24.18 | +3.31 |
+| `surfaces/standard_surface/input_subsurface_anisotropy` | 21.47 | 24.18 | +2.71 |
+| `surfaces/standard_surface/input_subsurface_radius` | 21.70 | 24.18 | +2.48 |
+
+The earlier model scores the same 24.18 / 24.87 whatever the radius, scale or
+anisotropy: it ignored them, and so does the reference. Against `materialx-osl`
+instead of the GLSL render the walk is also 1.6–7.5 dB lower than the earlier
+model. `blender-new` (Cycles) is above both on `ketchup` and below both on
+`pearl`, so it is no tie-breaker either. No render in the suite is
+known to trace a subsurface random walk, so this score cannot decide which model
+is right. It says only that the walk is not what these references show. What
+would decide it is a random-walk reference: Cycles with its random-walk
+subsurface forced on, or Typhoon.
 
 ## What still stands between crust and the reference
 
@@ -201,9 +233,11 @@ is itself a failed texture load.
 | `fractal3d` | 12 | `fractal3d` |
 | `splitlr` | 11 | `colorcorrect_edge_contrast_negative` |
 
-   `colorcorrect` (10 materials) and `heighttonormal` (5) have since gained
-   operators (`openspec/specs/materials/design.md`); the suite has not been re-run
-   to measure them, and the table above predates that change.
+   `colorcorrect` (10 materials) and `heighttonormal` (5) have operators now and are
+   no longer on the list. The render log's own count (`report.md`) is lower than the
+   static scan for the harness nodes (`separate2` 145, `fract` 113, `combine4` 11):
+   the compiler stops at the first node it cannot compile, so it never reaches the
+   rest of the graph.
 
    Plus: `splittb` (11), `fractal2d` (10), `rotate3d` (10), `worleynoise2d` (10), `worleynoise3d` (10), `gltf_normalmap` (8), `transformnormal` (8), `noise2d` (7), `noise3d` (7), `rotate2d` (7), `ramptb` (6), `cellnoise2d` (5), `cellnoise3d` (5), `checkerboard` (5), `gltf_image` (5), `transformvector` (5), `ifequal` (5), `determinant` (4), `ramplr` (4), `circle` (3), `transpose` (3), `switch` (3), `blackbody` (2), `ifgreatereq` (2), `bump` (2), `burn` (2), `difference` (2), `dodge` (2), `hsvtorgb` (2), `and` (2), `or` (2), `xor` (2), `invertmatrix` (2), `minus` (2), `ramp` (2), `ramp4` (2), `rgbtohsv` (2), `unpremult` (2), `gltf_colorimage` (2), `open_pbr_anisotropy` (2), `crossproduct` (1), `distance` (1), `frame` (1), `hextilednormalmap` (1), `not` (1), `overlay` (1), `ramp_gradient` (1), `reflect` (1), `refract` (1), `round` (1), `safepower` (1), `saturate` (1), `screen` (1), `tan` (1), `time` (1), `transformpoint` (1), `gltf_iridescence_thickness` (1).
 
@@ -216,15 +250,18 @@ is itself a failed texture load.
    literal, so a connected one (`textured` feeds it through `convert`) fell back to
    identity. It now folds, and `textured` went from 17.9 to 28.4 dB.
 2. **What the closure tree reports rather than renders**, per the change's spec:
-   - opacity / alpha has no cutout: `input_alpha_mode_mask` (−17.7 dB against
-     `blender-new`), `input_alpha_cutoff` (−12.6), `opacity_mask` (−11.7) and
-     `alpha_mode_mask` (−8.7) are the largest shading shortfalls in the suite;
+   - opacity / alpha has no cutout: `input_alpha_mode_mask` (−17.3 dB against
+     `blender-new`), `input_alpha_cutoff` (−12.4), `opacity_mask` (−11.6) and
+     `alpha_mode_mask` (−8.6) are the largest shading shortfalls in the suite;
    - OpenPBR fuzz is Zeltner sheen, evaluated as Imageworks / Charlie: the fuzz sweeps
-     sit 5–8 dB below `blender-new` (`sweep_fuzz_roughness_0_25` −8.4,
-     `input_fuzz_sheenlike` −5.6, `velvet` −5.3);
-   - anisotropy rotation. (Subsurface was on this list: `subsurface_bsdf` is a
-     random walk now, which this run predates.)
-3. **Two more pattern gaps worth naming.** `greysphere_calibration` (−6.6 dB)
+     sit 5–8 dB below `blender-new` (`sweep_fuzz_roughness_0_25` −8.2,
+     `input_fuzz_sheenlike` −5.5, `velvet` −5.2);
+   - anisotropy rotation.
+
+   Subsurface is rendered now, as a random walk, and scores 2.5–6 dB below the
+   model it replaced (see "Subsurface" above). That is a question about the
+   references, not a closure the tree leaves out.
+3. **Two more pattern gaps worth naming.** `greysphere_calibration` (−6.4 dB)
    places its colour chart with `place2d`, which crust does not have; the
    `gltf_*` image samples use the `gltf_image` / `gltf_colorimage` /
    `gltf_normalmap` wrappers, which are pattern nodes crust does not have yet.
