@@ -300,8 +300,11 @@
   unchanged, so `density` and the bounce side still describe one strategy),
   `bounce_emission_weight` and `escaped_emission` zero it against the vertex the
   bounce *left* (`PrevBounce::class`), including after a delta bounce, and
-  `light_cache::train` skips it. A volume-region scatter belongs to no prim and is
-  lit by every light (`EVERY_CLASS`), and so is the camera. The cost is wasted NEE
+  `light_cache::train` skips it. A volume region has a class too
+  (`VolumeRegion::light_class`): volume NEE skips an excluding light, and a phase
+  scatter's bounce and escape are judged against it (`PrevVertex::Phase::class`).
+  A point where overlapping regions of different classes meet is lit by every
+  light (`EVERY_CLASS`), and so is the camera, which has no receiver. The cost is wasted NEE
   picks on unlinked lights. Per-class renormalisation of the pick is the fix, and
   it is a `density` / `pmf` pair change (a follow-up).
 - **Shadow linking** (design D3 of the change). Occluder classes are encoded in

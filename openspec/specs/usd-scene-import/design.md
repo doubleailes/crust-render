@@ -84,11 +84,18 @@ cycles broken) is the reference's. Two traps:
   path; ids are handed out in traversal order, so that run covers every geometry
   the prim emits. Judging the instance or instancer prim, never a prototype's
   `/__Prototype_N` path, keeps the answer independent of instancing and streaming.
-- **Collections are read on the index stage** (payloads unloaded, kept alive
-  through traversal) when the light is there, and on its chunk otherwise. On a
-  chunk, the population mask leaves out prims outside the subtree, so a nested
-  collection in another scope resolved to nothing. Both production rigs (the
-  island's, ALab's) come in through sublayers and references, not payloads.
+- **Two stages, each wrong somewhere.** A streamed chunk has every opinion,
+  payloads included, but its population mask leaves out prims outside the
+  subtree, so a nested collection in another scope resolves to nothing there.
+  The index stage (payloads unloaded) has every subtree but no payload, so a link
+  a payload authors on an existing light is missing there. So a light's
+  collections are read on the index stage only when its link opinions
+  (`includes`, `excludes`, `includeRoot`, `expansionRule`, `membershipExpression`)
+  are the same there as on the chunk, and on the chunk otherwise, with a warning
+  if it nests a collection the chunk does not compose. The index stage is
+  dropped right after link resolution, before `flush_meshes` and the top-level
+  commit that is the import's memory peak. Both production rigs (the island's,
+  ALab's) come in through sublayers and references, not payloads.
 
 After the last chunk, and before `flush_meshes` / `commit`, `LightLinks::resolve`
 evaluates every distinct path against every linked light, and:

@@ -23,6 +23,8 @@ const DEFAULT_VARIANCE: f32 = 0.05;
 const DEFAULT_FRAME: isize = 0;
 const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
 const DEFAULT_GUIDING_PROB: f32 = 0.5;
+/// Hydra's default for `domeLightCameraVisibility`: the camera sees domes.
+const DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY: bool = true;
 
 /// A camera the render was told to use, and who said so — which decides what
 /// happens if it is not on the stage.
@@ -79,12 +81,12 @@ pub(super) fn render_settings_camera(stage: &Stage) -> Option<sdf::Path> {
 /// author; how they illuminate is unchanged.
 pub(super) fn dome_light_camera_visibility(stage: &Stage) -> bool {
     let Some(path) = render_settings_path(stage) else {
-        return true;
+        return DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY;
     };
     let prim = prim_at(stage, path);
     custom_bool(&prim, "crust:domeLightCameraVisibility")
         .or_else(|| custom_bool(&prim, "domeLightCameraVisibility"))
-        .unwrap_or(true)
+        .unwrap_or(DEFAULT_DOME_LIGHT_CAMERA_VISIBILITY)
 }
 
 pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
