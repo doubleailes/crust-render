@@ -366,6 +366,7 @@ fn disney_to_openpbr(
     if let Some(v) = f("inputs:specularTransmission").or_else(|| f("inputs:refractionGain")) {
         o.transmission_weight = v;
     }
+    // A cutout (`Material::opacity`), not transmission.
     if let Some(v) = f("inputs:alpha") {
         o.geometry_opacity = v;
     }

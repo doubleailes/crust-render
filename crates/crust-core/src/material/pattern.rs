@@ -64,6 +64,17 @@ pub(crate) trait PatternMaterial: Send + Sync {
     fn constant_emission(&self) -> Option<&OpenPBR> {
         None
     }
+
+    /// [`Material::has_cutout`].
+    fn pattern_has_cutout(&self) -> bool {
+        false
+    }
+
+    /// [`Material::opacity`].
+    fn pattern_opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
+        let _ = (r_in, rec);
+        1.0
+    }
 }
 
 impl<T: PatternMaterial> Material for T {
@@ -117,6 +128,14 @@ impl<T: PatternMaterial> Material for T {
 
     fn uv_primvar(&self) -> Option<&str> {
         self.pattern_uv_primvar()
+    }
+
+    fn has_cutout(&self) -> bool {
+        self.pattern_has_cutout()
+    }
+
+    fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
+        self.pattern_opacity(r_in, rec)
     }
 
     fn emitted(&self) -> Vec3A {

@@ -594,6 +594,61 @@ fn openpbr_defaults_follow_the_spec() {
     assert!(!o.uses_uv());
 }
 
+/// `geometry_opacity` is the host's cutout, which the integrator honours:
+/// a black sphere at 0.5 in a white furnace is seen through with the chance
+/// of passing both its crossings, `(1 − 0.5)²`.
+#[test]
+fn openpbr_geometry_opacity_is_a_cutout() {
+    use crust_core::{LightList, SamplingStrategy, Volumes, ray_color};
+    let r = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z);
+    assert!(!OpenPBR::default().has_cutout());
+    let mut ghost = OpenPBR::diffuse(Vec3A::ZERO);
+    ghost.geometry_opacity = 0.5;
+    assert!(ghost.has_cutout());
+    assert_eq!(ghost.opacity(&r, &HitRecord::default()), 0.5);
+    let nan = OpenPBR {
+        geometry_opacity: f32::NAN,
+        ..Default::default()
+    };
+    assert!(!nan.has_cutout(), "non-finite is opaque");
+
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        },
+        Arc::new(ghost),
+    );
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 50.0,
+        },
+        Arc::new(Emissive::new(Vec3A::ONE)),
+    );
+    let world = world.commit();
+    assert!(world.has_cutouts());
+    let n = 4096;
+    let mut sum = Vec3A::ZERO;
+    for i in 0..n {
+        sum += ray_color(
+            &r,
+            &world,
+            &LightList::new(),
+            &Volumes::default(),
+            8,
+            SamplingStrategy::PowerMis,
+            PathSampler::new(2, 3, 0, i),
+        );
+    }
+    let mean = sum / n as f32;
+    assert!(
+        (mean - Vec3A::splat(0.25)).abs().max_element() < 0.03,
+        "{mean}"
+    );
+}
+
 #[test]
 fn openpbr_emission_is_colour_times_luminance() {
     let o = OpenPBR {

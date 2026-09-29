@@ -2257,8 +2257,28 @@ fn preview_surface_opacity_refracts_unless_it_is_a_cutout() {
             float outputs:r
         }"#,
     );
+    // A textured mask under `opacityThreshold = 0.5`, reading its fallback.
+    let masked = |name: &str, fallback: f32| {
+        material(
+            name,
+            &format!(
+                "float inputs:opacity.connect = </W/Looks/{name}/T.outputs:r>\n            \
+                 float inputs:opacityThreshold = 0.5"
+            ),
+            &format!(
+                r#"
+        def Shader "T"
+        {{
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @missing_mask.exr@
+            float4 inputs:fallback = ({fallback}, 0, 0, 1)
+            float outputs:r
+        }}"#
+            ),
+        )
+    };
     let stage = format!(
-        "#usda 1.0\n(\n    defaultPrim = \"W\"\n)\ndef Xform \"W\"\n{{\ndef Scope \"Looks\"\n{{{}{}{}{}\n}}\ndef Xform \"Geo\"\n{{{}{}{}{}\n}}\n}}\n",
+        "#usda 1.0\n(\n    defaultPrim = \"W\"\n)\ndef Xform \"W\"\n{{\ndef Scope \"Looks\"\n{{{}{}{}{}{}{}\n}}\ndef Xform \"Geo\"\n{{{}{}{}{}{}{}\n}}\n}}\n",
         material("Glass", "float inputs:opacity = 0", ""),
         textured,
         material(
@@ -2267,10 +2287,14 @@ fn preview_surface_opacity_refracts_unless_it_is_a_cutout() {
             ""
         ),
         material("Opaque", "", ""),
+        masked("MaskedOut", 0.2),
+        masked("MaskedIn", 0.8),
         quad("A", -4.0, "Glass"),
         quad("B", -2.0, "Textured"),
         quad("C", 0.0, "Cutout"),
         quad("D", 2.0, "Opaque"),
+        quad("E", 4.0, "MaskedOut"),
+        quad("F", 6.0, "MaskedIn"),
     );
     let path = dir.join("opacity.usda");
     std::fs::write(&path, stage).expect("write stage");
@@ -2301,6 +2325,25 @@ fn preview_surface_opacity_refracts_unless_it_is_a_cutout() {
     );
     assert_eq!(through(0.5), Vec3A::ZERO, "a cutout does not refract");
     assert_eq!(through(2.5), Vec3A::ZERO, "the default opacity is opaque");
+
+    // Presence: a cutout is kept whole at or above the threshold and
+    // discarded below it; translucency is no cutout at all.
+    let presence = |x: f32| -> Option<f32> {
+        let r =
+            Ray::new(Vec3A::new(x, 0.5, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
+        let hit = scene
+            .world
+            .intersect(&r, 0.001, f32::INFINITY)
+            .expect("hits the quad");
+        hit.mat.has_cutout().then(|| hit.mat.opacity(&r, &hit.rec))
+    };
+    assert!(scene.world.has_cutouts());
+    assert_eq!(presence(-3.5), None, "translucent glass");
+    assert_eq!(presence(-1.5), None, "textured translucency");
+    assert_eq!(presence(0.5), Some(0.0), "constant 0 under 0.5");
+    assert_eq!(presence(2.5), None, "opaque");
+    assert_eq!(presence(4.5), Some(0.0), "textured 0.2 under 0.5");
+    assert_eq!(presence(6.5), Some(1.0), "textured 0.8 over 0.5");
 }
 
 /// Bindings are inherited from ancestors and resolved for the `full` purpose,

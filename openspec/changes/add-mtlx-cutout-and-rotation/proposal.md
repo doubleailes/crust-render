@@ -51,6 +51,8 @@ average in Typhoon).
   than reported.
 - `rendering`: the integrator treats a cutout as stochastic presence, on both
   the bounce and the shadow side.
+- `usd-scene-import`: `crust:openpbr` `geometryOpacity`, PxrDisney `alpha` and
+  `UsdPreviewSurface` `opacityThreshold` are cutouts rather than ignored.
 
 ## Impact
 
@@ -60,9 +62,11 @@ average in Typhoon).
   +0.04%, `materialx_basic` +0.64%.
 - In a scene with a cutout, every blocked shadow ray is re-walked by closest
   hits, since the kernel has no any-hit filter. The cost stays in those scenes.
-- Native `crust:openpbr` `geometryOpacity`, PxrDisney `alpha` and
-  `UsdPreviewSurface` `opacityThreshold` still render opaque. The hook is
-  generic; turning them on changes other importers' output (Moana among them)
-  and is left to its own change.
+- **Native cutouts too.** `OpenPBR`'s `geometry_opacity` answers the same hook,
+  so `crust:openpbr` `geometryOpacity` and PxrDisney `alpha` (the Moana island)
+  become cutouts, and a `UsdPreviewSurface` under `opacityThreshold > 0`
+  becomes the spec's mask: a constant thresholded into `geometry_opacity`, a
+  texture sampled and thresholded per hit. Moana renders change wherever it
+  authors `alpha` below 1; accepted as the reference moving, not a regression.
 - Depends on `add-mtlx-random-walk-subsurface` being archived first: its
   reporting requirement is the one this change modifies.

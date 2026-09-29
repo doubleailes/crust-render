@@ -485,10 +485,11 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
   are refused and reported rather than approximated into a plausible glow at the wrong
   intensity.
 - **MaterialX closures are MaterialX's, approximations named.** Zeltner sheen is
-  evaluated as Imageworks; a tree above eight leaves is refused. Opacity cutouts are
-  MaterialX's only (native `crust:openpbr` `geometryOpacity` and a `UsdPreviewSurface`
-  `opacityThreshold` are still opaque), and in a scene that has one, every blocked
-  shadow ray is re-walked hit by hit (the kernel has no any-hit filter). `subsurface_bsdf` is a random walk
+  evaluated as Imageworks; a tree above eight leaves is refused. Opacity cutouts
+  (MaterialX opacity, `crust:openpbr` `geometryOpacity`, PxrDisney `alpha`, a
+  `UsdPreviewSurface` under `opacityThreshold`) are stochastic presence; in a scene that
+  has one, every blocked shadow ray is re-walked hit by hit (the kernel has no any-hit
+  filter). `subsurface_bsdf` is a random walk
   (a port of NVIDIA Typhoon's, Chiang remap + Dwivedi guiding) confined to the object
   it entered, and like Typhoon's it reflects a little less than its colour; the native
   `crust:openpbr` subsurface is still a tinted diffuse. crust's native
