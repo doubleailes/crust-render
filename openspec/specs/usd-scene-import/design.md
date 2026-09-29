@@ -143,7 +143,7 @@ Schema mapping:
   `UsdGeomSphere` → analytic `Sphere` geometry.
 - **Subdivision surfaces** (`scene/subdiv.rs`, via the pure-Rust
   [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
-  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned by git tag). Read from
+  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, from crates.io, ≥ 0.1.4). Read from
   USD, never from a crust attribute on the prim: every mesh is a subdivision surface
   unless its `subdivisionScheme` is `none`, with an unauthored scheme taking the schema
   fallback, `catmullClark` → Catmark (`bilinear` → Bilinear, `loop` → Loop on
@@ -183,12 +183,13 @@ Schema mapping:
   - `creaseIndices` / `creaseLengths` / `creaseSharpnesses` (per-run or per-edge
     sharpness, 10 = infinite), `cornerIndices` / `cornerSharpnesses`,
     `interpolateBoundary` and `faceVaryingLinearInterpolation` are honoured;
-    `holeIndices` is not. **Gaps:** `cornersPlus2` is refined without its
-    concave-corner sharpening — opensubdiv-rs 0.1 implements its junctions and darts
-    only — so a concave face-varying UV corner comes out smoothed (warned once per
-    load); and a `loop` mesh whose material reads Ptex is not refined, because Loop
-    builds no face table and its refined triangles would be read as cage face ids (it
-    renders its smooth cage, with a warning).
+    `holeIndices` is not. `cornersPlus2`'s concave-corner sharpening needs
+    opensubdiv-rs ≥ 0.1.4 (0.1.3 implemented its junctions and darts only, so a
+    concave UV corner came out smoothed; pinned by
+    `corners_plus2_pins_a_concave_uv_corner`, which fails on 0.1.3). **Gap:** a
+    `loop` mesh whose material reads Ptex is not refined, because Loop builds no
+    face table and its refined triangles would be read as cage face ids (it renders
+    its smooth cage, with a warning).
   - Refinement happens in `mesh_source`, *before* interning, so every path (direct
     bake, deferred instance-vs-bake, prototypes) sees it exactly once and `MeshKey`
     dedupes on the refined arrays, the refined chart included. **Trap:** at level 0

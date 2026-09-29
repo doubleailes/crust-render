@@ -32,7 +32,7 @@ openusd = { version = "0.7", default-features = false }
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
 # Catmull-Clark subdivision at USD import.
-opensubdiv-rs = "0.1"
+opensubdiv-rs = "0.1.4"
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }

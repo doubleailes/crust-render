@@ -30,10 +30,6 @@ textures. Ptex lookups SHALL keep addressing the authored cage's face ids; a
 `loop` mesh whose material reads Ptex SHALL therefore render as its smooth cage
 with a warning rather than refine.
 
-Known gap: `cornersPlus2` is refined without its concave-corner sharpening (the
-subdivision library implements its junction and dart rules only), and SHALL be
-warned about once per load.
-
 #### Scenario: Loop mesh with a Ptex texture
 
 - **WHEN** a `loop` mesh whose material reads a Ptex texture is loaded at level 1

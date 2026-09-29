@@ -995,6 +995,78 @@ mod tests {
         }
     }
 
+    /// `cornersPlus2` pins a concave UV corner (opensubdiv-rs ≥ 0.1.4). A 2×2
+    /// grid whose faces F0-F2 form one L-shaped island and F3 another: at
+    /// the centre vertex the L's value spans three faces — a reflex corner —
+    /// and F3's spans one. `cornersPlus2` keeps the L's value where it was
+    /// authored, `cornersPlus1` smooths it along the island boundary.
+    #[test]
+    fn corners_plus2_pins_a_concave_uv_corner() {
+        let points: Vec<Vec3f> = (0..3)
+            .flat_map(|j| (0..3).map(move |i| Vec3f::from([i as f32, j as f32, 0.0])))
+            .collect();
+        let counts = vec![4; 4];
+        let indices = vec![0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7];
+        // The layout of opensubdiv-rs's own `L_ISLAND` fixture.
+        let values = [
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [1.0, 0.0],
+            [0.0, 0.5],
+            [0.5, 0.5],
+            [1.0, 0.4],
+            [0.0, 1.0],
+            [0.6, 1.0],
+            [0.5, 0.5],
+            [1.0, 0.5],
+            [1.0, 1.0],
+            [0.5, 1.0],
+        ];
+        let value_indices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 8, 9, 10, 11];
+        let centre_uv_on_the_l = |linear| {
+            let req = SubdivRequest {
+                uvs: Some(UvChannel {
+                    values: &values,
+                    indices: Some(&value_indices),
+                    face_varying: true,
+                    linear,
+                }),
+                ..request(1)
+            };
+            let out = subdivide(&points, &counts, &indices, &req).unwrap();
+            let uvs = out.uvs.as_ref().unwrap();
+            // A refined face-vertex at the centre point, on a face of the L
+            // (every face but F3 = [1, 2]²).
+            let mut offset = 0;
+            for &n in &out.counts {
+                let face = &out.indices[offset..offset + n as usize];
+                let centre = face.iter().fold([0.0f32; 2], |c, &p| {
+                    let q = out.points[p as usize];
+                    [c[0] + q.x / n as f32, c[1] + q.y / n as f32]
+                });
+                let on_l = !(centre[0] > 1.0 && centre[1] > 1.0);
+                for (k, &p) in face.iter().enumerate() {
+                    let q = out.points[p as usize];
+                    if on_l && (q.x - 1.0).abs() < 1e-5 && (q.y - 1.0).abs() < 1e-5 {
+                        return uv_at(uvs, offset + k, p as usize);
+                    }
+                }
+                offset += n as usize;
+            }
+            panic!("no refined face-vertex at the centre on the L");
+        };
+        let pinned = centre_uv_on_the_l(sdc::FVarLinearInterpolation::CornersPlus2);
+        assert!(
+            (pinned[0] - 0.5).abs() < 1e-5 && (pinned[1] - 0.5).abs() < 1e-5,
+            "cornersPlus2 keeps the concave corner at (0.5, 0.5), got {pinned:?}"
+        );
+        let smoothed = centre_uv_on_the_l(sdc::FVarLinearInterpolation::CornersPlus1);
+        assert!(
+            (smoothed[0] - 0.5).abs() > 1e-3 || (smoothed[1] - 0.5).abs() > 1e-3,
+            "cornersPlus1 smooths the concave corner, got {smoothed:?}"
+        );
+    }
+
     #[test]
     fn vertex_chart_refines_like_the_points() {
         let (points, counts, indices) = flat_quad();

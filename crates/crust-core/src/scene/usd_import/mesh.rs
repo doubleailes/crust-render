@@ -167,9 +167,6 @@ pub(super) struct SubdivPolicy {
     /// about: once per load, since a per-prim warning would scale with the
     /// scene.
     legacy_warned: bool,
-    /// Whether a refined chart authoring `cornersPlus2` has been warned
-    /// about, once per load for the same reason.
-    corners_plus2_warned: bool,
 }
 
 impl SubdivPolicy {
@@ -178,7 +175,6 @@ impl SubdivPolicy {
             level,
             enabled: crate::config().subdiv,
             legacy_warned: false,
-            corners_plus2_warned: false,
         }
     }
 }
@@ -942,25 +938,11 @@ pub(super) fn mesh_source(
     // surface then renders on the material's constant inputs, as every
     // subdivided mesh did before charts were refined.
     let chart = uvs.as_ref().and_then(|uv| {
-        let linear = face_varying_linear(mesh);
-        if uv.face_varying
-            && linear == opensubdiv_rs::sdc::FVarLinearInterpolation::CornersPlus2
-            && !policy.corners_plus2_warned
-        {
-            policy.corners_plus2_warned = true;
-            warn!(
-                "Mesh at {} (and possibly others): faceVaryingLinearInterpolation = \
-                 cornersPlus2 is refined without its concave-corner sharpening \
-                 (opensubdiv-rs does not implement it) — a concave UV corner \
-                 renders smoothed",
-                prim.path()
-            );
-        }
         let channel = subdiv::UvChannel {
             values: &uv.values,
             indices: uv.indices.as_deref(),
             face_varying: uv.face_varying,
-            linear,
+            linear: face_varying_linear(mesh),
         };
         let n_entries = if uv.face_varying {
             indices.len()
