@@ -1141,6 +1141,10 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // (Replaced only when it walks: passing the sample through a `match`
         // or a rebinding moves all of it at every vertex.)
         if let Some(sample) = bounce.take_if(|s| s.subsurface.is_some()) {
+            // A `--profile` section like `Trace` or `EvalBsdfs`, one per walk
+            // rather than per ray: monomorphised on `PROFILE`, it compiles
+            // away when profiling is off (cornellbox: +0.0002% instructions),
+            // and `--stats` keeps its integer counters (`sss_*`) either way.
             let _p = profile::scope_if::<PROFILE>(Section::Subsurface);
             bounce = walk_subsurface(world, &hit, &ray, &sp, sample, v, sss_exit, stats);
             sss_pending = bounce.is_some();
