@@ -307,8 +307,11 @@
     `_ApproxWeight`) is a delta event carrying `weight / p` and an entry
     direction: a refraction through the interface above the leaf
     (`closure::subsurface_entry`, Typhoon's `SampleSubsurfaceEntry`) — the
-    nearest dielectric a `layer` puts over it, whose IOR and GGX alpha the
-    collapse walk carries down (`interface_of`), else Typhoon's closure
+    nearest *live* dielectric a `layer` puts over it, whose IOR and GGX alpha
+    the collapse walk carries down (`interface_of`: a leaf at weight 0, a
+    `mix` branch at factor 0 and a `multiply` by 0 are skipped as the collapse
+    drops them, and a live `mix` asks its heavier branch first — a coat
+    textured to 0 at the hit must not set the entry), else Typhoon's closure
     defaults, IOR 1.5 and roughness 0.5. The interface's energy is already in
     the leaf's weight (the layer's throughput); the entry only picks a
     direction. The tracer then runs the walk (`subsurface.rs`, a port of
@@ -317,11 +320,17 @@
     correction, per-bounce channel MIS, forward and backward Dwivedi guiding
     with the extended first ray finding the opposite interface, the similarity
     relation after 9 bounces, 256 bounces at most. It traces the owner's
-    `geom_id` alone, stepping past every other surface, and the path resumes at
+    `geom_id` alone, stepping past every other surface in a segment however
+    many there are (a search capped at 16 read nine embedded spheres as "no
+    boundary"; `many_embedded_objects_do_not_hide_the_boundary`), and the path
+    resumes at
     the exit on a white Lambertian with no emission (`ExitLambertian`,
     Typhoon's and Cycles' synthetic exit), weighted by the walk's throughput.
     The walk is one surface event: it spends no path depth, records no vertex
-    of its own and runs no NEE inside. A zero radius falls back to the diffuse
+    of its own and runs no NEE inside. Only `trace_path` runs walks: the
+    learned light cache's training paths stop at a subsurface sample, whose
+    ray is an entry, not a bounce — followed as one it crossed the object and
+    trained receivers on its far inside. A zero radius falls back to the diffuse
     in the leaf's colour that the leaf used to be. Verified in numbers: on a
     semi-infinite slab with a cosine-weighted entry the walk reflects its
     colour to within 0.02 for `g ≤ 0.6` and albedos up to 0.9, a chromatic

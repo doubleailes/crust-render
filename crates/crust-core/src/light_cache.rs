@@ -248,6 +248,14 @@ pub(crate) fn train(
                     let Some(sample) = sp.scatter_importance(&ray, vertex.new_domain(2)) else {
                         break;
                     };
+                    // A subsurface sample's ray is the entry into a random
+                    // walk, not a bounce: followed as one, it would cross the
+                    // object and train receivers on its far inside. The walk
+                    // is the tracer's; training stops here, as it does at an
+                    // absorbed sample.
+                    if sample.subsurface.is_some() {
+                        break;
+                    }
                     ray = sample.ray.with_time(ray.time()).with_mask(MASK_INDIRECT);
                 }
             }

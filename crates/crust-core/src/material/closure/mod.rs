@@ -323,11 +323,16 @@ const DEFAULT_INTERFACE: Interface = Interface {
     alpha: 0.25,
 };
 
-/// The first dielectric leaf a layer's top reaches, as an entry interface.
+/// The live dielectric a layer's top reaches, as an entry interface —
+/// the leaf that contributes, not merely the first one in the tree. A leaf
+/// at weight 0, a `mix` branch at factor 0 and a `multiply` by 0 are skipped
+/// exactly as the collapse walk drops them (a coat whose weight is textured
+/// to 0 there must not set the entry's IOR); of a live `mix`, the heavier
+/// branch is asked first.
 fn interface_of(cl: &Closures, id: NodeId, slots: &[Val]) -> Option<Interface> {
     match &cl.nodes[id as usize] {
         Closure::Leaf(leaf) => match &leaf.bsdf {
-            Bsdf::Dielectric { ior, roughness, .. } => {
+            Bsdf::Dielectric { ior, roughness, .. } if slots[leaf.weight as usize].x() > 0.0 => {
                 let ior = slots[*ior as usize].x();
                 let ior = if ior.is_finite() { ior.max(1.0) } else { 1.5 };
                 let (ax, ay) = alphas(slots[*roughness as usize]);
@@ -338,9 +343,20 @@ fn interface_of(cl: &Closures, id: NodeId, slots: &[Val]) -> Option<Interface> {
             }
             _ => None,
         },
-        Closure::Multiply { input, .. } => interface_of(cl, *input, slots),
-        Closure::Mix { fg, bg, .. } => {
-            interface_of(cl, *fg, slots).or_else(|| interface_of(cl, *bg, slots))
+        Closure::Multiply { input, weight } => {
+            let k = sanitize(slots[*weight as usize].rgb());
+            (k.max_element() > 0.0)
+                .then(|| interface_of(cl, *input, slots))
+                .flatten()
+        }
+        Closure::Mix { fg, bg, mix } => {
+            let m = slots[*mix as usize].x().clamp(0.0, 1.0);
+            let fg = (m > 0.0).then_some(*fg);
+            let bg = (m < 1.0).then_some(*bg);
+            let (first, second) = if m >= 0.5 { (fg, bg) } else { (bg, fg) };
+            first
+                .and_then(|b| interface_of(cl, b, slots))
+                .or_else(|| second.and_then(|b| interface_of(cl, b, slots)))
         }
         Closure::Layer { top, .. } => interface_of(cl, *top, slots),
         Closure::Add { a, b } => {

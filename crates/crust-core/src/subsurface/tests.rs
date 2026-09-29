@@ -203,6 +203,57 @@ fn walk_ignores_foreign_geometry() {
     assert!(exits > 512);
 }
 
+/// However many foreign surfaces lie in a segment, the owner's boundary
+/// behind them is still found: twelve spheres stacked down the entry ray put
+/// 24 crossings ahead of the far side, past the 16 the search used to allow
+/// before it read "no boundary" and the walk carried on outside its object.
+#[test]
+fn many_embedded_objects_do_not_hide_the_boundary() {
+    let mut geoms = vec![Geometry::Sphere {
+        center: Vec3A::new(0.0, 0.0, -20.0),
+        radius: 20.0,
+    }];
+    for k in 0..12 {
+        geoms.push(Geometry::Sphere {
+            center: Vec3A::new(0.0, 0.0, -2.0 - 3.0 * k as f32),
+            radius: 1.0,
+        });
+    }
+    let world = world_of(geoms);
+    // A mean free path far beyond the 40-unit object: nearly every walk's
+    // first flight runs straight through to the far side.
+    let entry = SubsurfaceEntry {
+        dir: -Vec3A::Z,
+        albedo: Vec3A::splat(0.9),
+        radius: Vec3A::splat(1000.0),
+        anisotropy: 0.0,
+    };
+    let mut cost = WalkCost::default();
+    let n = 256;
+    let mut far_side = 0;
+    for i in 0..n {
+        let s = PathSampler::new(0, 0, 0, i);
+        if let Some(exit) = random_walk(
+            &world,
+            0,
+            Vec3A::ZERO,
+            Vec3A::Z,
+            true,
+            &entry,
+            0.0,
+            s,
+            &mut cost,
+        ) && exit.rec.p.z < -39.9
+        {
+            far_side += 1;
+        }
+    }
+    assert!(
+        far_side > n * 9 / 10,
+        "{far_side} of {n} walks exited the far side"
+    );
+}
+
 /// Dwivedi's inverse CDF draws exactly the density `eval_phase_dwivedi`
 /// reports — the guided pdf in the walk's MIS depends on it.
 #[test]
