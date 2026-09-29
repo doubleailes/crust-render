@@ -475,26 +475,7 @@ fn cutout_shadow(
     stats: &mut RayStats,
 ) -> Vec3A {
     let t_max = distance - 0.001;
-    let mut through = 0.0;
-    let (mut t, mut segment) = (0.0, ray.clone());
-    let mut kept = 1.0;
-    for _ in 0..MAX_CUTOUT_CROSSINGS {
-        stats.cutout_rays += 1;
-        let hit = world.intersect(&segment, 0.001, f32::INFINITY);
-        let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
-            through = kept;
-            break;
-        };
-        if !h.mat.has_cutout() {
-            break;
-        }
-        kept *= 1.0 - h.mat.opacity(ray, &h.rec);
-        if kept <= 0.0 {
-            break;
-        }
-        t += h.rec.t;
-        segment = restarted(ray, t);
-    }
+    let through = cutout_through(world, ray, t_max, stats);
     if through == 0.0 {
         stats.shadow_occluded += 1;
         return Vec3A::ZERO;
@@ -504,6 +485,54 @@ fn cutout_shadow(
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
     through * volumes.transmittance(ray, 0.001, t_max, &mut rng)
+}
+
+/// The fraction of the segment `(0.001, t_max)` of `ray` that cutouts let
+/// through: `Π (1 − opacity)` over every hit, or 0 at the first hit on a
+/// material without a cutout. It follows at most [`MAX_CUTOUT_CROSSINGS`]
+/// cutouts and then asks once more, where any hit blocks — the same bound
+/// [`pass_cutouts`] keeps, which treats the hit past its last crossing as
+/// present, so a stack exactly that deep is clear on both sides.
+///
+/// Shared by NEE ([`cutout_shadow`]) and the learned light cache's training,
+/// whose shadow rays must see the visibility the integrator does.
+pub(crate) fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
+    let (mut t, mut segment) = (0.0, ray.clone());
+    let mut kept = 1.0;
+    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+        stats.cutout_rays += 1;
+        let hit = world.intersect(&segment, 0.001, f32::INFINITY);
+        let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
+            return kept;
+        };
+        if crossing == MAX_CUTOUT_CROSSINGS || !h.mat.has_cutout() {
+            return 0.0;
+        }
+        kept *= 1.0 - h.mat.opacity(ray, &point_sampled(&h.rec));
+        if kept <= 0.0 {
+            return 0.0;
+        }
+        t += h.rec.t;
+        segment = restarted(ray, t);
+    }
+    unreachable!("the last crossing returns")
+}
+
+/// `rec` with no texture footprint: opacity is point-sampled on both sides.
+///
+/// A path meets a cutout with a ray cone and a shadow ray has none, so a
+/// filtered opacity would answer the bounce side from a coarser mip level
+/// than NEE for the same connection, and the two MIS strategies would
+/// estimate different visibilities. Point sampling is also the geometry
+/// itself: a mip level of an alpha mask is a blurred mask, where
+/// stochastic presence already averages the real one over the pixel.
+#[inline]
+fn point_sampled(rec: &HitRecord) -> HitRecord {
+    HitRecord {
+        uv_width: 0.0,
+        face_width: 0.0,
+        ..*rec
+    }
 }
 
 /// Makes `hit`, a segment's closest hit, the one it actually ends at: each
@@ -533,7 +562,7 @@ fn pass_cutouts<'w>(
         if !h.mat.has_cutout() {
             break;
         }
-        let opacity = h.mat.opacity(ray, &h.rec);
+        let opacity = h.mat.opacity(ray, &point_sampled(&h.rec));
         if opacity >= 1.0 {
             break;
         }

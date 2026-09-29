@@ -123,18 +123,26 @@ consumed as ordinary dependencies:
      `OpenPBR`'s `geometry_opacity` — `crust:openpbr` `geometryOpacity`, PxrDisney
      `alpha` — and a `UsdPreviewSurface` under `opacityThreshold`). A hit on a
      material with `has_cutout` is *present* with probability equal to its opacity
-     (`present_hit`, one `pcg::Rng` off `K_CUTOUT` per vertex); otherwise the segment
-     carries on along the **same ray** from just past it (`past(t)`, relative), so `t`,
-     the carried medium, the volume regions and the ray cone still measure from the
-     segment's origin and the free-flight competition stays exact. A surface passed
+     (`pass_cutouts`, one `pcg::Rng` off `K_CUTOUT` per vertex); otherwise the segment
+     carries on along the **same line**: the ray is restarted at the hit (`restarted`,
+     still asking `(0.001, ∞)`) and the hit's `t` is added back onto the next one, so
+     `t`, the carried medium, the volume regions and the ray cone still measure from
+     the segment's origin and the free-flight competition stays exact. A surface passed
      through is no vertex — no depth, no emission, no MIS record — and the previous
      vertex's record meets whatever the segment does reach, so bounce-hit emission
      behind a cutout keeps its weight. The shadow side is its twin
-     (`cutout_transmittance`): `Π(1 − opacity)` over every crossing, deterministic,
-     and 0 at the first opaque hit. The two estimate the same visibility, which is
-     what keeps NEE and the bounce side describing one integrand
+     (`cutout_through`, under `cutout_shadow`): `Π(1 − opacity)` over every crossing,
+     deterministic, and 0 at the first opaque hit. The two estimate the same
+     visibility, which is what keeps NEE and the bounce side describing one integrand
      (`every_sampling_strategy_agrees_through_a_cutout`, in
-     `crust-core/tests/mtlx_surfaces.rs`). Both are `#[cold]` and out of line, and
+     `crust-core/tests/mtlx_surfaces.rs`), and two details keep it so. The opacity is
+     **point-sampled** on both sides (`point_sampled` zeroes the footprint): a path
+     carries a ray cone and a shadow ray none, so a filtered alpha map answered the
+     bounce from a coarser mip level than NEE for the same connection
+     (`cutout_opacity_ignores_the_ray_footprint`). And both follow at most 256
+     crossings and treat the hit past them as present, so a stack exactly that deep is
+     clear to both (`a_cutout_stack_at_the_crossing_limit_is_clear_on_both_sides`).
+     The learned light cache's training shadow rays go through `cutout_through` too. Both are `#[cold]` and out of line, and
      gated on `World::has_cutouts` (any material's `has_cutout`, fixed at commit): a
      world without one takes exactly the old code, bit for bit. With one, a shadow ray
      still asks the any-hit query first and walks hit by hit only when it is blocked,

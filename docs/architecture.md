@@ -131,10 +131,12 @@ other. The pairs:
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.
-- **Cutouts.** A hit a path passes through (`present_hit`, probability
-  `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_transmittance`)
-  are one visibility, both asked of `Material::opacity`, both gated on
-  `World::has_cutouts`; change one and NEE and the bounce side disagree.
+- **Cutouts.** A hit a path passes through (`pass_cutouts`, probability
+  `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_through`, behind
+  `cutout_shadow` and the light cache's training) are one visibility: both ask
+  `Material::opacity` point-sampled, both follow at most 256 crossings, both
+  are gated on `World::has_cutouts`; change one and NEE and the bounce side
+  disagree.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines.
   Each is pinned by a test that compares bits, not tolerances.

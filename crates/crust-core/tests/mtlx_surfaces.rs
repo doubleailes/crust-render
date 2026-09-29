@@ -9,7 +9,8 @@ use crust_core::materialx::{self, Loaded};
 use crust_core::rt::Geometry;
 use crust_core::{
     AreaLight, Emissive, HitRecord, LightList, MASK_INDIRECT, MASK_SHADOW, Material, OpenPBR,
-    PathSampler, Ray, SamplingStrategy, SphereShape, Vec3A, Volumes, WorldBuilder, ray_color,
+    PathSampler, Ray, RayCone, SamplingStrategy, ScatterSample, SphereShape, UvMap, Vec3A, Volumes,
+    World, WorldBuilder, ray_color,
 };
 use std::sync::Arc;
 
@@ -661,6 +662,203 @@ fn an_opaque_occluder_blocks_shadow_rays_with_or_without_cutouts() {
             assert!(mean > 0.1, "the open floor is lit: {mean}");
         }
     }
+}
+
+/// `n` horizontal unit-chart sheets of half-size `half`, from `y0` up in
+/// steps of `dy`, as one mesh: its vertices and triangles.
+fn sheets(n: usize, y0: f32, dy: f32, half: f32) -> (Vec<Vec3A>, Vec<[u32; 3]>) {
+    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    for k in 0..n {
+        let y = y0 + k as f32 * dy;
+        let b = vertices.len() as u32;
+        vertices.extend([
+            Vec3A::new(-half, y, -half),
+            Vec3A::new(half, y, -half),
+            Vec3A::new(half, y, half),
+            Vec3A::new(-half, y, half),
+        ]);
+        indices.extend([[b, b + 2, b + 1], [b, b + 3, b + 2]]);
+    }
+    (vertices, indices)
+}
+
+/// A diffuse floor under a sphere light at y = 5, with `extra` attached
+/// between them, and the mean of `n` light-only (or bounce-only) samples of
+/// the floor seen from below the sheets.
+fn floor_under_light(
+    extra: impl FnOnce(&mut WorldBuilder),
+    s: SamplingStrategy,
+    n: i32,
+    cone: RayCone,
+) -> (World, f64) {
+    let mut world = WorldBuilder::new();
+    let mut lights = LightList::new();
+    let (v, i) = sheets(1, 0.0, 0.0, 50.0);
+    world.attach(
+        Geometry::TriangleMesh {
+            vertices: v,
+            indices: i,
+            normals: None,
+        },
+        Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+    );
+    extra(&mut world);
+    let emitter = Arc::new(Emissive::new(Vec3A::splat(80.0)));
+    let (center, radius) = (Vec3A::new(0.0, 5.0, 0.0), 0.5);
+    let id = world.attach_masked(
+        Geometry::Sphere { center, radius },
+        emitter.clone(),
+        MASK_SHADOW | MASK_INDIRECT,
+    );
+    lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
+    let world = world.commit();
+    let ray = Ray::new(Vec3A::new(0.5, 2.0, 0.5), Vec3A::new(-0.5, -2.0, -0.5)).with_cone(cone);
+    let mut sum = 0.0f64;
+    for i in 0..n {
+        sum += ray_color(
+            &ray,
+            &world,
+            &lights,
+            &Volumes::default(),
+            3,
+            s,
+            PathSampler::new(1, 2, 0, i),
+        )
+        .x as f64;
+    }
+    (world, sum / n as f64)
+}
+
+/// A segment follows 256 cutouts on either side. A stack exactly that deep of
+/// fully absent sheets is therefore clear to a shadow ray as it is to a
+/// path, which passes all 256 and meets what lies beyond; one sheet more is
+/// where both stop, and the stack reads as blocked.
+#[test]
+fn a_cutout_stack_at_the_crossing_limit_is_clear_on_both_sides() {
+    let absent = |n: usize| {
+        move |w: &mut WorldBuilder| {
+            let (vertices, indices) = sheets(n, 2.2, 0.004, 50.0);
+            let ghost = OpenPBR {
+                geometry_opacity: 0.0,
+                ..OpenPBR::diffuse(Vec3A::ZERO)
+            };
+            w.attach(
+                Geometry::TriangleMesh {
+                    vertices,
+                    indices,
+                    normals: None,
+                },
+                Arc::new(ghost),
+            );
+        }
+    };
+    let (open_world, open) =
+        floor_under_light(|_| {}, SamplingStrategy::LightOnly, 256, RayCone::default());
+    assert!(!open_world.has_cutouts() && open > 0.1, "{open}");
+    let (world, at_limit) = floor_under_light(
+        absent(256),
+        SamplingStrategy::LightOnly,
+        256,
+        RayCone::default(),
+    );
+    assert!(world.has_cutouts());
+    assert!(
+        (at_limit - open).abs() < 1e-3 * open,
+        "256 absent sheets: {at_limit} vs {open}"
+    );
+    let (_, past_limit) = floor_under_light(
+        absent(257),
+        SamplingStrategy::LightOnly,
+        256,
+        RayCone::default(),
+    );
+    assert!(past_limit < 0.05 * open, "257 absent sheets: {past_limit}");
+}
+
+/// A black sheet whose opacity depends on the texture footprint it is asked
+/// with: absent under a filtered lookup, present under a point sample.
+struct FootprintMask;
+
+impl Material for FootprintMask {
+    fn scatter_importance(&self, _: &Ray, _: &HitRecord, _: PathSampler) -> Option<ScatterSample> {
+        None
+    }
+
+    fn uses_uv(&self) -> bool {
+        true
+    }
+
+    fn has_cutout(&self) -> bool {
+        true
+    }
+
+    fn opacity(&self, _: &Ray, rec: &HitRecord) -> f32 {
+        if rec.uv_width > 0.0 { 0.0 } else { 1.0 }
+    }
+}
+
+/// Paths carry a ray cone and shadow rays none, so a cutout's opacity is
+/// point-sampled on both sides; asked with each ray's own footprint, a
+/// minified alpha map would read a coarser level for the bounce than for
+/// NEE, and the two strategies would see different visibility. Here that
+/// difference is total: point-sampled, the sheet is present to both and the
+/// floor is unlit under either strategy.
+#[test]
+fn cutout_opacity_ignores_the_ray_footprint() {
+    let sheet = |w: &mut WorldBuilder| {
+        let (vertices, indices) = sheets(1, 2.5, 0.0, 50.0);
+        let mut uv = UvMap {
+            uvs: vec![
+                [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0]],
+                [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            ],
+            tangents: Vec::new(),
+            density: Vec::new(),
+        };
+        uv.build_density(&vertices, &indices);
+        let id = w.attach(
+            Geometry::TriangleMesh {
+                vertices,
+                indices,
+                normals: None,
+            },
+            Arc::new(FootprintMask),
+        );
+        w.set_uv_map(id, Arc::new(uv), false);
+    };
+    let cone = RayCone {
+        width: 0.01,
+        spread: 0.01,
+    };
+    let (_, open) = floor_under_light(|_| {}, SamplingStrategy::PowerMis, 256, cone);
+    assert!(open > 0.1, "{open}");
+    for s in [SamplingStrategy::LightOnly, SamplingStrategy::BsdfOnly] {
+        let (_, m) = floor_under_light(sheet, s, 1024, cone);
+        assert!(m < 0.01 * open, "{s:?}: {m} vs {open} unoccluded");
+    }
+}
+
+/// OPAQUE never reads `alpha`, so its connection is not compiled: an
+/// unsupported node behind it is not reported, where under BLEND it is.
+#[test]
+fn an_opaque_gltf_does_not_compile_its_alpha() {
+    let doc = |mode: u32| {
+        format!(
+            r#"<fractal3d name="noise" type="float" />
+               <gltf_pbr name="s" type="surfaceshader">
+                 <input name="alpha" type="float" nodename="noise" />
+                 <input name="alpha_mode" type="integer" value="{mode}" />
+               </gltf_pbr>"#
+        )
+    };
+    let opaque = load("opaque_alpha", &doc(0));
+    assert!(opaque.unsupported.is_empty(), "{:?}", opaque.unsupported);
+    let blend = load("blend_alpha", &doc(2));
+    assert!(
+        blend.unsupported.iter().any(|u| u == "fractal3d"),
+        "{:?}",
+        blend.unsupported
+    );
 }
 
 /// The tangent a leaf shades with, by category.
