@@ -775,6 +775,36 @@ fn a_cutout_stack_at_the_crossing_limit_is_clear_on_both_sides() {
     assert!(past_limit < 0.05 * open, "257 absent sheets: {past_limit}");
 }
 
+/// Passing a cutout must not skip what lies just behind it. A fully absent
+/// sheet with an opaque black one half a millimetre above it: the black one
+/// blocks the light from both sampling strategies, as it would alone. (A
+/// segment restarted at the cutout itself, with the tracer's 0.001 offset,
+/// stepped straight over it.)
+#[test]
+fn a_surface_just_behind_a_cutout_is_not_skipped() {
+    let pair = |w: &mut WorldBuilder| {
+        let mesh = |y: f32| {
+            let (vertices, indices) = sheets(1, y, 0.0, 50.0);
+            Geometry::TriangleMesh {
+                vertices,
+                indices,
+                normals: None,
+            }
+        };
+        let ghost = OpenPBR {
+            geometry_opacity: 0.0,
+            ..OpenPBR::diffuse(Vec3A::ZERO)
+        };
+        w.attach(mesh(2.5), Arc::new(ghost));
+        w.attach(mesh(2.5005), Arc::new(OpenPBR::diffuse(Vec3A::ZERO)));
+    };
+    let (_, open) = floor_under_light(|_| {}, SamplingStrategy::PowerMis, 256, RayCone::default());
+    for s in [SamplingStrategy::LightOnly, SamplingStrategy::BsdfOnly] {
+        let (_, m) = floor_under_light(pair, s, 1024, RayCone::default());
+        assert!(m < 0.01 * open, "{s:?}: {m} vs {open} unoccluded");
+    }
+}
+
 /// A black sheet whose opacity depends on the texture footprint it is asked
 /// with: absent under a filtered lookup, present under a point sample.
 struct FootprintMask;
