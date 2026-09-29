@@ -529,6 +529,13 @@
     are drawn from literals with at most three decimals, so genosl's `%f`
     printing and crust's parse give both sides bit-identical inputs, and lanes
     must agree to 1e-5 relative (the two sides use different `libm`s). The
+    width must agree exactly: a `float` zero where a `vector4` was due matches
+    four zero lanes but reads as a scalar in `luminance`, `normalize`,
+    `dotproduct`, `combine2` and the JIT's width inference. The fixture header
+    states its signature and per-signature case counts, and
+    `the_fixture_is_complete` holds the fixture to them, so a regeneration that
+    lost rows cannot pass by checking less (the script also writes nothing
+    unless every case ran). The
     first run found sixteen node categories that differed, every one of them
     something a render would show as a plausible value. Apart from the guards
     below, they were crust bugs and were fixed to the reference (the JIT
@@ -541,17 +548,28 @@
     - `sign(0)` was 1 (Rust's `f32::signum` answers ±1 for ±0); the
       surface builders' `ifgreater` select, which leaned on it to send
       equality to `in2`, now tests `sign(value1 − value2)` instead;
-    - `modulo` truncated (`%`) where MaterialX floors: `-0.2 mod 1` is 0.8;
+    - `modulo` truncated (`%`) where MaterialX floors: `-0.2 mod 1` is 0.8.
+      It is OSL's `x − y·floor(x / y)`, whose rounding the reference has
+      (`-1 mod -0.2` is 0, not the exact −0.19999999), except where that
+      quotient overflows for finite operands (`1 mod 1e-40`, −inf), where the
+      exact remainder `%`, floored, takes over;
     - `power` clamped a negative base to 0, where OSL's `safe_pow` takes
       integer exponents of it (`(-3)^2 = 9`), and `0^-1` was +inf, now 0;
     - `smoothstep` and `clamp` disagreed when `low > high` (OSL's
       `smoothstep` tests `x < low`, then `x >= high`; its `clamp` is
       `max(min(x, high), low)`);
-    - `luminance` ignored `lumacoeffs` and dropped a `color4`'s alpha;
+    - `luminance` ignored `lumacoeffs`, dropped a `color4`'s alpha and
+      returned a `color3`'s grey as a `float`;
+    - an unauthored input was a `float` whatever the node's type, so an
+      `add_color3` over nothing but defaults came out one lane wide (191
+      signatures, found once the test compared widths). `Compiler::input_or`
+      now widens a `float` default to the node's width, which changes no lane;
     - `dotproduct` and `normalize` of a `vector4` read three lanes, and of a
       `vector2` read a third lane that was not the value's;
     - `combine2` took lane 0 of each operand, so `color4CF`, `vector4VF` and
-      `vector4VV` lost lanes; `convert` to a `color4` / `vector4` left alpha 0
+      `vector4VV` lost lanes (the `vector4` signatures are told apart by the
+      connected producers' types, since the parser reads an input with no
+      `type` as a `float`); `convert` to a `color4` / `vector4` left alpha 0
       instead of 1, and widening kept whatever the producing op left in the
       new lanes;
     - `normalmap` ignored the second component of a `vector2` scale;

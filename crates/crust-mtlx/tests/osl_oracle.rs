@@ -193,17 +193,56 @@ fn deviation(case: &Case, i: usize, want: f32) -> Option<&'static str> {
     }
 }
 
+/// The fixture header's `N random cases per signature, S signatures`.
+fn declared_coverage() -> (usize, usize) {
+    let line = FIXTURE
+        .lines()
+        .find(|l| l.contains("random cases per signature"))
+        .expect("the fixture header states its coverage");
+    let number_before = |word: &str| -> usize {
+        let head = &line[..line
+            .find(word)
+            .unwrap_or_else(|| panic!("no {word:?} in {line:?}"))];
+        head.split_whitespace()
+            .last()
+            .and_then(|n| n.trim_start_matches(',').parse().ok())
+            .unwrap_or_else(|| panic!("no count before {word:?} in {line:?}"))
+    };
+    (
+        number_before("random cases per signature"),
+        number_before("signatures."),
+    )
+}
+
+/// Every signature the generator enumerated is in the fixture with all its
+/// cases — the defaults case plus the random ones, per output — so a
+/// fixture that lost rows cannot pass by checking less.
+#[test]
+fn the_fixture_is_complete() {
+    let (random, signatures) = declared_coverage();
+    let mut per_output: BTreeMap<(&str, Option<&str>), usize> = BTreeMap::new();
+    for case in cases() {
+        *per_output.entry((case.nodedef, case.output)).or_default() += 1;
+    }
+    let nodedefs: std::collections::BTreeSet<&str> = per_output.keys().map(|k| k.0).collect();
+    assert_eq!(nodedefs.len(), signatures, "signatures in the fixture");
+    for ((nd, output), n) in &per_output {
+        assert_eq!(*n, random + 1, "{nd} {output:?}: cases");
+    }
+}
+
 #[test]
 fn nodes_match_the_materialx_osl_reference() {
     let cases = cases();
-    assert!(cases.len() > 1000, "fixture has only {} cases", cases.len());
 
     let mut failures: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut deviations: BTreeMap<&str, usize> = BTreeMap::new();
     for case in &cases {
         let got = eval(case);
         let lanes: Vec<f32> = (0..case.expected.len()).map(|i| got.v[i]).collect();
-        let mut wrong = false;
+        // The width is part of the value: a `float` zero where a `vector4`
+        // was due matches four zero lanes but reads as a scalar downstream.
+        let mut wrong = got.arity as usize != case.expected.len();
         for (i, (&g, &w)) in lanes.iter().zip(&case.expected).enumerate() {
             if close(g, w) {
                 continue;
@@ -223,10 +262,11 @@ fn nodes_match_the_materialx_osl_reference() {
             .map(|((n, _, _), t)| format!("{n}={t}"))
             .collect();
         failures.entry(case.nodedef).or_default().push(format!(
-            "line {}: {}{} -> crust {lanes:?}, OSL {:?}",
+            "line {}: {}{} -> crust {lanes:?} ({} lanes), OSL {:?}",
             case.line,
             inputs.join(" "),
             case.output.map(|o| format!(" [{o}]")).unwrap_or_default(),
+            got.arity,
             case.expected
         ));
     }

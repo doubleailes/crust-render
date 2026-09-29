@@ -580,12 +580,7 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
                 BinOp::Pow => a.zip(b, safe_pow),
                 BinOp::Min => a.zip(b, f32::min),
                 BinOp::Max => a.zip(b, f32::max),
-                // MaterialX's `modulo` is OSL's `mod`, which floors
-                // (`-0.2 mod 1` is `0.8`) where Rust's `%` truncates; a
-                // zero divisor returns the dividend, as OSL's does.
-                BinOp::Modulo => {
-                    a.zip(b, |x, y| if y != 0.0 { x - y * (x / y).floor() } else { x })
-                }
+                BinOp::Modulo => a.zip(b, floored_mod),
             }
         }
         // `bg·(1−m) + fg·m`. Written as two weighted terms rather
@@ -627,12 +622,12 @@ fn apply(op: &Op, slots: &[Val], ctx: &ShadeCtx) -> Val {
         Op::Luminance { a, coeffs } => {
             let a = g(*a);
             let l = a.rgb().dot(g(*coeffs).rgb());
-            // `color4` keeps its alpha; `color3` is the grey `(l, l, l)`,
-            // which a `float` broadcasts to.
+            // The input's width: `color3` is the grey `(l, l, l)`, and
+            // `color4` keeps its alpha.
             if a.arity == 4 {
                 Val::vec4(l, l, l, a.v[3])
             } else {
-                Val::float(l)
+                Val::float(l).broadcast_to(a.arity)
             }
         }
         Op::NormalMap { a, scale } => normal_map(g(*a), g(*scale), ctx).into(),
@@ -841,6 +836,32 @@ fn combine2(a: Val, b: Val) -> Val {
     Val {
         v,
         arity: (na + nb) as u8,
+    }
+}
+
+/// MaterialX's `modulo`, OSL's `mod`: floored, so the result takes the
+/// divisor's sign (`-0.2 mod 1` is `0.8`) where Rust's `%` truncates, and a
+/// zero divisor returns the dividend, as OSL's does.
+///
+/// OSL's `x − y·floor(x / y)` is kept wherever its quotient is finite, so
+/// the rounding matches the reference (at `-1 mod -0.2` the quotient rounds
+/// to 5 and the result to 0, a period away from the exact −0.19999999). Its
+/// quotient overflows for some finite operands, though (`1 mod 1e-40` would
+/// be `−inf`), and there the exact remainder `%` takes over, moved by one `y`
+/// when its sign is the dividend's rather than the divisor's.
+fn floored_mod(x: f32, y: f32) -> f32 {
+    if y == 0.0 {
+        return x;
+    }
+    let q = (x / y).floor();
+    if q.is_finite() {
+        return x - y * q;
+    }
+    let r = x % y;
+    if r != 0.0 && (r < 0.0) != (y < 0.0) {
+        r + y
+    } else {
+        r
     }
 }
 
@@ -1068,6 +1089,16 @@ impl<'a> Compiler<'a> {
     pub fn input_or(&mut self, node: &Node, name: &str, default: Val) -> u32 {
         match node.input(name) {
             Some(i) => self.compile_input(node, i),
+            // The nodedef's default is typed: an unauthored `in1` of an
+            // `add_color3` is a colour3 zero, not a `float` one, and an op over
+            // nothing but defaults must come out at the node's width. A
+            // `float` default's lanes already hold its value, so widening it
+            // changes no lane — only what a width-reading consumer
+            // (`luminance`, `normalize`, `dotproduct`, `combine2`) sees. Not
+            // `convert`, whose input width is what decides the alpha.
+            None if default.arity == 1 && node.category != "convert" => {
+                self.constant(default.broadcast_to(arity_of(&node.type_name)))
+            }
             None => self.constant(default),
         }
     }
@@ -1078,6 +1109,24 @@ impl<'a> Compiler<'a> {
     pub fn optional_input(&mut self, node: &Node, name: &str) -> Option<u32> {
         let i = node.input(name)?;
         Some(self.compile_input(node, i))
+    }
+
+    /// The width an authored input carries: its producer's declared type
+    /// when it is connected, since the parser reads an input with no `type`
+    /// attribute as a `float` whatever feeds it, and the input's own type for
+    /// a literal. A multioutput producer's outputs are not typed in the
+    /// document, so there the input's declaration is all there is.
+    fn input_arity(&self, node: &Node, input: &Input) -> u8 {
+        let scope = node.graph.clone().unwrap_or_default();
+        let producer = match &input.source {
+            Source::Node { name, .. } => self.doc.find(&scope, name),
+            Source::Graph { graph, output } => self.doc.graph_output(graph, output).map(|c| c.node),
+            Source::Value(_) => None,
+        };
+        match producer {
+            Some(p) if p.type_name != "multioutput" => arity_of(&p.type_name),
+            _ => arity_of(&input.type_name),
+        }
     }
 
     fn compile_input(&mut self, node: &Node, input: &Input) -> u32 {
@@ -1254,11 +1303,12 @@ impl<'a> Compiler<'a> {
                 // The signature fixes each operand's width — `(float, float)`
                 // → `vector2`, `(color3, float)` → `color4`, and for a
                 // `vector4` `(vector3, float)` or `(vector2, vector2)`, told
-                // apart by whichever input declares its type. Each operand is
-                // converted to its width first, so the concatenation is exact
-                // whatever produced it (an unauthored `in1` is a zero `float`,
-                // which must still fill three lanes of a `color4`).
-                let declared = |n: &str| node.input(n).map(|i| arity_of(&i.type_name));
+                // apart by either input's width (see `Compiler::input_arity`).
+                // Each operand is converted to its width first, so the
+                // concatenation is exact whatever produced it (an unauthored
+                // `in1` is a zero, which must still fill three lanes of a
+                // `color4`).
+                let declared = |n: &str| node.input(n).map(|i| self.input_arity(node, i));
                 let (na, nb) = match arity {
                     4 if declared("in1") == Some(2) || declared("in2") == Some(2) => (2, 2),
                     4 => (3, 1),
