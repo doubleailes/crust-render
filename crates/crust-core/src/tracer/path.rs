@@ -1141,6 +1141,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // (Replaced only when it walks: passing the sample through a `match`
         // or a rebinding moves all of it at every vertex.)
         if let Some(sample) = bounce.take_if(|s| s.subsurface.is_some()) {
+            let _p = profile::scope_if::<PROFILE>(Section::Subsurface);
             bounce = walk_subsurface(world, &hit, &ray, &sp, sample, v, sss_exit, stats);
             sss_pending = bounce.is_some();
         }

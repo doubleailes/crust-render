@@ -262,6 +262,7 @@ Still open, roughly in order of payoff:
 | every feature in depth, with measurements, history and known gaps | `openspec/specs/*/design.md` |
 | light sampling survey, roadmap and baselines | `docs/light_sampling.md` |
 | shading cost and the MaterialX JIT plan | `docs/shading_performance.md` |
+| the subsurface random walk: cost breakdown, measured variants, roadmap | `docs/subsurface_walk.md` |
 | colour space of every input | `docs/color_management.md` |
 | Ptex streaming design and figures | `docs/ptex_streaming.md` |
 | SIMD audit | `docs/simd.md` |

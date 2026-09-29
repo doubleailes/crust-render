@@ -324,7 +324,15 @@
     2016's albedo inversion with the 0.2 albedo floor and its throughput
     correction, per-bounce channel MIS, forward and backward Dwivedi guiding
     with the extended first ray finding the opposite interface, the similarity
-    relation after 9 bounces, 256 bounces at most. It traces the owner's
+    relation after 9 bounces, 256 bounces at most. Two additions over the port,
+    both measured in `docs/subsurface_walk.md`: a scatter whose every channel has
+    fallen under 0.05 survives a roulette with probability `peak / 0.05`
+    (floor 0.05) and is reweighted — unbiased, 10–15% fewer steps for a
+    chromatic medium such as skin, no measurable variance; and the
+    backward-stretched transmittance is `exp(−σt)² / exp(−σ(1 − c/ν)t)` rather
+    than a third exponential per channel, six `expf` a step instead of nine
+    (the quotient yields to the exponential when either term is below 1e-18).
+    It traces the owner's
     `geom_id` alone, stepping past every other surface in a segment however
     many there are (a search capped at 16 read nine embedded spheres as "no
     boundary"; `many_embedded_objects_do_not_hide_the_boundary`), and the path
@@ -366,7 +374,10 @@
       index in its padding rather than the walk's parameters; inlined, or as
       an `Option<WalkExit>`, each of those cost cornellbox about 1%. What is
       left is +0.49% instructions on cornellbox (callgrind, 2 spp), and every
-      sample scene without a subsurface leaf renders bit-identically.
+      sample scene without a subsurface leaf renders bit-identically. The walk
+      is its own `--profile` section (`Subsurface`, opened only when a walk
+      runs: cornellbox +0.0002%); without one it hid in `MainLoop`'s local
+      time, 34% of the fixture's thread time.
   - **Throughput tables are ported, not regenerated.** The dielectric throughput
     is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
     (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),

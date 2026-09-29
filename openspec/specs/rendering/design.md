@@ -116,8 +116,8 @@ consumed as ordinary dependencies:
      `RandomWalkSSS`), multiplies the entry record's factor by its throughput, and
      makes the exit the next vertex — shaded on a white `ExitLambertian`, with NEE and
      an ordinary bounce, `prev = None` and no emission of its own. The walk spends no
-     depth and records no vertex; its free flights draw from `K_SSS` off the entry
-     vertex (stratified on the first step, incidental after). A walk that finds no
+     depth and records no vertex; its free flights and in-walk roulette draw from
+     `K_SSS` off the entry vertex (stratified on the first step, incidental after). A walk that finds no
      exit ends the path as absorbed. Design and traps: materials `design.md`.
    - **Cutouts** (`Material::opacity`: MaterialX surfaces' `opacity`, native
      `OpenPBR`'s `geometry_opacity` — `crust:openpbr` `geometryOpacity`, PxrDisney
