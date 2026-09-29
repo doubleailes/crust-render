@@ -35,8 +35,8 @@ scripts/material_fidelity/fidelity.sh            # init, build, run, report, che
 | `build` | `cargo build --release -p crust-render` |
 | `run [run.py args]` | renders and scores every material into `.fidelity/out/results.json`; `--materials noise3d` / `re:^input_` selects by leaf directory, as the suite's own CLI does |
 | `report` | `summarize.py` → `.fidelity/out/report.md`: the tables below |
-| `check [check.py args]` | fails if any material fell more than 0.5 dB below `scripts/material_fidelity/baseline.json`, or errors where it rendered |
-| `baseline` | accepts the run: rewrites `baseline.json` (commit it with the change that moved it) |
+| `check [check.py args]` | fails if any material fell more than 0.5 dB below `scripts/material_fidelity/baseline.json`, errors where it rendered, or is no longer scored (its reference went missing) |
+| `baseline` | accepts the run: rewrites `baseline.json` (commit it with the change that moved it). A `--materials` run is refused, since it would drop every unselected material from the gate; `baseline --partial` merges it in instead |
 | `goldeneye [pytest args]` | the same fixtures through [Goldeneye](#through-goldeneye) |
 
 `FIDELITY_ROOT` moves the work directory, `SUITE_REV` picks another suite
@@ -106,10 +106,15 @@ environment. At 180° those pixels score **34.2 dB** against the reference, agai
 (MaterialXView filters the environment it displays). So MaterialXView's lat-long seam
 is where crust (−Z at `u = 0.5`) puts the image centre. The UV flip was checked on
 `uv_debug_texcoord_rgb`. Crust ran at 64 spp (32 minimum, adaptive),
-`maxDepth` 12 and `indirectClamp 0`: about 5 s a material. This is a score against
-an external reference, not a regression check: noise costs PSNR, so it wants more
-samples, not the 16 spp that `check_images.sh` pins for bit-identity between two
-crust binaries.
+`maxDepth` 12 and `indirectClamp 0`: about 6 s a material. This is a score against
+an external reference, so noise costs PSNR and it wants more samples, not the
+16 spp that `check_images.sh` pins for bit-identity between two crust binaries.
+Measured on 30 materials, 16 spp scores 0.34 dB lower on average than 64 spp, and
+up to 1.37 dB lower on the materials that match best (`input_base_weight`,
+`greysphere`). That is the noise, not the shading, and it is more than `check`'s
+0.5 dB tolerance. The adaptive cascade the 16 spp rule guards against is harmless
+here: `check` compares scores with a tolerance, not pixels for bit-identity, and
+an unchanged binary still reproduces its images exactly.
 
 ## Results
 

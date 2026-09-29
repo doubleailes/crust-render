@@ -84,6 +84,27 @@ def render(argv):
     return 0
 
 
+def prune(sdir, fixtures, references):
+    """After a full export, remove what an earlier export left for a material the
+    suite no longer has (or no longer ships a reference for): its fixture, the
+    fixture's `.goldeneye.toml`, its reference. Goldeneye would collect a stale
+    fixture as a case. A `--materials` export cannot tell stale from unselected,
+    so it prunes nothing."""
+    removed = 0
+    for f in sdir.rglob("*.usda"):
+        if f.is_relative_to(sdir / "_assets") or f.is_relative_to(sdir / "reference") or f in fixtures:
+            continue
+        f.unlink()
+        f.with_suffix(".goldeneye.toml").unlink(missing_ok=True)
+        removed += 1
+    for f in (sdir / "reference").rglob("*.png"):
+        if f not in references:
+            f.unlink()
+            removed += 1
+    if removed:
+        print(f"pruned {removed} stale fixtures and references")
+
+
 EXPECTED_MARKER = "# goldeneye_suite.py --expect-failures"
 UNSUPPORTED = re.compile(r"no operator for node type\(s\) (.+?) \u2014")
 
@@ -187,6 +208,7 @@ def main():
         f"default_flip_threshold = {args.flip_threshold}\n")
 
     written = refs = 0
+    fixtures, references = set(), set()
     for mtlx in suite.find_materials(root, args.materials):
         name = suite.surface_material_name(mtlx)
         if name is None:
@@ -200,6 +222,7 @@ def main():
             max_depth=args.max_depth, product=f"{rel.as_posix()}.exr",
             self_shadow=args.self_shadow, layer_dir=fixture.parent))
         written += 1
+        fixtures.add(fixture)
         ref = suite.renderer_image(mtlx.parent, suite.REFERENCE_NAME)
         if ref is not None:
             out = sdir / "reference" / rel.with_suffix(".png")
@@ -207,7 +230,10 @@ def main():
             if not out.exists() or out.stat().st_mtime < ref.stat().st_mtime:
                 Image.open(ref).convert("RGB").save(out)
             refs += 1
+            references.add(out)
     print(f"{written} fixtures, {refs} references -> {sdir}")
+    if not args.materials:
+        prune(sdir, fixtures, references)
     if args.expect_failures:
         expect_failures(sdir, args.expect_failures)
     print(f"run: cd {proj} && pytest {SUITE_NAME}   (renderer profile: goldeneye.crust.toml)")

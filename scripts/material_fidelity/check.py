@@ -6,12 +6,13 @@ would fail most materials for gaps that are known (see
 docs/material_fidelity.md). What a change must not do is move a material *away*
 from the reference. This is Goldeneye's expected-failure idea turned into
 numbers: the baseline records where every material stands, and the check fails
-only on a material that got worse than it by more than `--tolerance` dB, or that
-rendered before and errors now.
+only on a material that got worse than it by more than `--tolerance` dB, that
+rendered before and errors now, or that was scored before and is not now.
 
     check.py results.json                       # compare with baseline.json beside this script
     check.py results.json --update              # accept: rewrite the baseline from this run
     check.py results.json --baseline other.json --tolerance 1.0
+    check.py results.json --update --partial    # accept a --materials run for those materials only
 
 Exit status: 0 clean, 1 regressions, 2 usage / missing baseline. A PSNR of
 `null` means the image matched the reference exactly and ranks above any value.
@@ -46,6 +47,8 @@ def main():
     ap.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     ap.add_argument("--tolerance", type=float, default=0.5, help="dB a material may drop before it fails")
     ap.add_argument("--update", action="store_true", help="rewrite the baseline from these results")
+    ap.add_argument("--partial", action="store_true",
+                    help="with --update: replace only the materials in these results, keep the rest")
     ap.add_argument("--suite-rev", help="material-fidelity revision, recorded with --update")
     args = ap.parse_args()
 
@@ -55,10 +58,28 @@ def main():
     current = {r["material"]: r for r in results}
 
     if args.update:
-        scored = {m: r["psnr"] for m, r in sorted(current.items()) if r.get("status") != "error" and "psnr" in r}
-        errors = sorted(m for m, r in current.items() if r.get("status") == "error")
+        scored = {m: r["psnr"] for m, r in current.items() if r.get("status") != "error" and "psnr" in r}
+        errors = {m for m, r in current.items() if r.get("status") == "error"}
         # Rendered, but the suite ships no reference to score them against.
-        unscored = sorted(set(current) - set(scored) - set(errors))
+        unscored = set(current) - set(scored) - errors
+        if args.baseline.exists():
+            old = json.loads(args.baseline.read_text())
+            kept = (set(old["psnr"]) | set(old.get("errors", [])) | set(old.get("unscored", []))) - set(current)
+            if kept and not args.partial:
+                # A `--materials` run accepted as the baseline would stop guarding every
+                # material it did not select.
+                print(f"refusing to update: {len(kept)} baseline materials are not in these results "
+                      f"(e.g. {sorted(kept)[0]}); run the whole suite, or pass --partial to replace "
+                      "only the materials that were run", file=sys.stderr)
+                return 2
+            for m in kept:
+                if m in old["psnr"]:
+                    scored[m] = old["psnr"][m]
+                elif m in old.get("errors", []):
+                    errors.add(m)
+                else:
+                    unscored.add(m)
+        scored, errors, unscored = dict(sorted(scored.items())), sorted(errors), sorted(unscored)
         meta = {**run_meta, "crust": crust_revision()}
         if args.suite_rev:
             meta["suite"] = args.suite_rev
@@ -76,7 +97,7 @@ def main():
             print(f"warning: baseline {k}={base['meta'][k]!r}, this run {k}={run_meta[k]!r}; "
                   "the comparison is not like for like", file=sys.stderr)
 
-    regressed, broke, improved, fixed, new = [], [], [], [], []
+    regressed, broke, unscored, improved, fixed, new = [], [], [], [], [], []
     for m, r in sorted(current.items()):
         if r.get("status") == "skipped":
             continue
@@ -90,6 +111,9 @@ def main():
                     regressed.append((m, base["psnr"][m], r["psnr"], d))
                 elif d > args.tolerance:
                     improved.append((m, base["psnr"][m], r["psnr"], d))
+            else:
+                # Rendered but not scored: the reference it was scored against is gone.
+                unscored.append(m)
         elif m in base.get("errors", []):
             if not errored:
                 fixed.append(m)
@@ -113,6 +137,10 @@ def main():
         print(f"\nERRORS ({len(broke)}):")
         for m, e in broke:
             print(f"  {m}: {e}")
+    if unscored:
+        print(f"\nSCORED IN THE BASELINE, NOT NOW ({len(unscored)}; is the reference missing?):")
+        for m in unscored:
+            print(f"  {m}")
     table("improved", improved)
     if fixed:
         print(f"\nnow render ({len(fixed)}): " + ", ".join(fixed))
@@ -121,8 +149,9 @@ def main():
     compared = len(current) - len(new)
     print(f"\n{compared} compared with {args.baseline.name} (crust {base['meta'].get('crust')}), "
           f"tolerance {args.tolerance} dB: {len(regressed)} regressed, {len(broke)} errors, "
+          f"{len(unscored)} unscored, "
           f"{len(improved)} improved" + (f"; {len(missing)} baseline materials not in this run" if missing else ""))
-    return 1 if regressed or broke else 0
+    return 1 if regressed or broke or unscored else 0
 
 
 if __name__ == "__main__":

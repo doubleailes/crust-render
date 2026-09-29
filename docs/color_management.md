@@ -296,6 +296,22 @@ piecewise curve in the forward direction. Comparing renders numerically should
 always use the EXR (`examples/exr_diff`), never the PNG, since the PNG has both
 clamped and re-encoded.
 
+### Scoring images outside the renderer (`scripts/material_fidelity`)
+
+The Material Fidelity harness reads images the engine never sees. It compares them
+the way the suite does, as 8-bit **sRGB code values**, and never linearises them:
+
+| Image | Read at | Assumed | Verdict |
+| --- | --- | --- | --- |
+| `<renderer>.avif` reference or peer render (current suite) | `suite.load_rgb8` (Pillow / libavif) | sRGB primaries, piecewise sRGB curve, 8-bit | ✅ how the suite writes them: its sRGB PNG, re-encoded by `sharp` (AVIF q90, 4:4:4). The files carry no `colr` box, so the YUV→RGB matrix is the decoder default; `sharp` and libavif agree on it |
+| `<renderer>.png` reference (older suite layout) | same | sRGB, 8-bit | ✅ the suite's own output encoding |
+| crust's EXR | `suite.read_exr_rgb` → `linear_to_srgb8` | scene-linear Rec.709 | ✅ clamp, piecewise sRGB OETF, 8 bits: the suite's "no tone mapping, sRGB" contract, not the CLI's PNG |
+| Goldeneye reference PNG | `goldeneye_suite.py` (decoded from the AVIF) | sRGB, 8-bit | ✅ Goldeneye's LDR path applies the same OETF to the EXR before FLIP |
+
+PSNR on code values is the suite's metric (`metrics.ts`), so it is reproduced
+as is. It weights errors perceptually, not radiometrically: 1 dB in the shadows
+and 1 dB in the highlights are different amounts of light.
+
 ## Known gaps
 
 **1. `UsdPreviewSurface` colours are not decoded.** `diffuseColor` and

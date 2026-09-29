@@ -79,9 +79,13 @@ def render_one(mtlx, args, shots):
     ref = suite.renderer_image(mdir, suite.REFERENCE_NAME)
     # Follow the reference's format, so an older PNG checkout gets `crust.png`.
     ext = ref.suffix if ref is not None else suite.IMAGE_EXTS[0]
-    out_img = (mdir if args.write_suite else shots) / (
-        f"{suite.RENDERER_NAME}{ext}" if args.write_suite
-        else str(mtlx.relative_to(args.materials_root).parent).replace("/", "__") + ext)
+    # One name per document, directory and file stem both: the shot, its EXR and,
+    # under --no-write-suite, its image. (In the suite, `crust.avif` is per directory,
+    # as every renderer's image is: the suite keeps one document per directory.)
+    stem = str(mtlx.relative_to(args.materials_root).with_suffix("")).replace("/", "__")
+    # `.crust` keeps it apart from the tone-mapped `<stem>.png` crust writes beside its EXR.
+    out_img = (mdir / f"{suite.RENDERER_NAME}{ext}" if args.write_suite
+               else shots / f"{stem}.{suite.RENDERER_NAME}{ext}")
     report = {"material": str(mtlx.relative_to(args.materials_root)), "image": str(out_img)}
     rgb8 = None
     if args.skip_existing and out_img.exists():
@@ -91,7 +95,6 @@ def render_one(mtlx, args, shots):
         if name is None:
             report.update(status="error", error="no <surfacematerial> in document")
             return report
-        stem = str(mtlx.relative_to(args.materials_root)).replace("/", "__")[: -len(".mtlx")]
         shot = shots / f"{stem}.usda"
         exr = shots / f"{stem}.exr"
         shot.write_text(suite.shot_layer(
