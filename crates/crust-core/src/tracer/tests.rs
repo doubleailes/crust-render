@@ -230,3 +230,90 @@ fn nothing_at_infinity_is_black() {
         Vec3A::ZERO
     );
 }
+
+/// The cross-neighbour rule on a hand-built index buffer, so the numbers
+/// are exact: only a still-sampling up/down/left/right neighbour more than
+/// the tolerance above `p` holds it.
+#[test]
+fn a_cross_neighbour_holds_a_pixel_only_past_the_tolerance() {
+    use super::held_by_neighbour;
+    let (w, h) = (3usize, 3usize);
+    let (x, y) = (1usize, 1usize);
+    let t = 1.0f32;
+    let own = 0.5f32;
+    let mut index = vec![own; w * h];
+    let active = vec![true; w * h];
+    // Left neighbour at exactly `own + t`: not held.
+    index[y * w + x - 1] = own + t;
+    assert!(!held_by_neighbour(&index, &active, w, h, x, y, t));
+    // ...and a hair above it: held.
+    index[y * w + x - 1] = own + t + 1e-3;
+    assert!(held_by_neighbour(&index, &active, w, h, x, y, t));
+    // A stopped neighbour never holds, whatever its index.
+    let mut stopped = active.clone();
+    stopped[y * w + x - 1] = false;
+    index[y * w + x - 1] = f32::INFINITY;
+    assert!(!held_by_neighbour(&index, &stopped, w, h, x, y, t));
+    // A negative tolerance ignores every neighbour.
+    assert!(!held_by_neighbour(&index, &active, w, h, x, y, -1.0));
+    // A diagonal neighbour at +∞ does not hold.
+    index[y * w + x - 1] = own;
+    index[(y - 1) * w + x - 1] = f32::INFINITY;
+    index[(y + 1) * w + x + 1] = f32::INFINITY;
+    assert!(!held_by_neighbour(&index, &active, w, h, x, y, t));
+    // Each of the four cross neighbours holds on its own, +∞ included.
+    for q in [
+        y * w + x - 1,
+        y * w + x + 1,
+        (y - 1) * w + x,
+        (y + 1) * w + x,
+    ] {
+        let mut idx = vec![own; w * h];
+        idx[q] = f32::INFINITY;
+        assert!(held_by_neighbour(&idx, &active, w, h, x, y, t), "{q}");
+    }
+}
+
+/// A neighbour outside the image is ignored: corners and edges compare
+/// only the neighbours they have.
+#[test]
+fn neighbours_outside_the_image_are_ignored() {
+    use super::held_by_neighbour;
+    let (w, h) = (2usize, 1usize);
+    let index = [0.5f32, 0.5];
+    let active = [true, true];
+    assert!(!held_by_neighbour(&index, &active, w, h, 0, 0, 1.0));
+    assert!(!held_by_neighbour(&index, &active, w, h, 1, 0, 1.0));
+    let index = [0.5f32, 5.0];
+    assert!(held_by_neighbour(&index, &active, w, h, 0, 0, 1.0));
+}
+
+/// The round schedule (design D8): deterministic, every batch at least 4,
+/// none more than a quarter of what was taken before it, and the last one
+/// ending exactly at the budget.
+#[test]
+fn batch_schedule_grows_a_quarter_a_round_and_ends_at_the_budget() {
+    use super::batch_schedule;
+    let s = batch_schedule(1024, 32);
+    assert_eq!(s, batch_schedule(1024, 32), "deterministic");
+    assert_eq!(
+        s.first(),
+        Some(&40),
+        "first batch is the floor of 4 raised to 32/4"
+    );
+    assert_eq!(s.last(), Some(&1024));
+    assert_eq!(s.len(), 16, "{s:?}");
+    let mut taken = 32;
+    for &next in &s {
+        let batch = next - taken;
+        assert!(batch >= 4 || next == 1024, "{s:?}");
+        assert!(batch <= (taken / 4).max(4), "{s:?}");
+        taken = next;
+    }
+    // Small budgets: the batch floor of 4 applies, capped at the budget.
+    assert_eq!(batch_schedule(64, 32), vec![40, 50, 62, 64]);
+    assert_eq!(batch_schedule(10, 4), vec![8, 10]);
+    // Never reaching the first check: nothing to schedule.
+    assert!(batch_schedule(16, 32).is_empty());
+    assert!(batch_schedule(32, 32).is_empty());
+}

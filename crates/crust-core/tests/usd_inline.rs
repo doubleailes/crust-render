@@ -2350,3 +2350,37 @@ def Scope "Render"
     assert_eq!(infinite_seen(&scene, crust_core::MASK_INDIRECT), 1);
     assert!(!scene.lights.escapes_to_backdrop(MASK_CAMERA));
 }
+
+#[test]
+fn adaptive_neighbour_tolerance_defaults_to_one_and_refuses_nan() {
+    let unauthored = load_with_settings("tolerance_default", "", SETTINGS);
+    assert_eq!(unauthored.settings.adaptive_neighbour_tolerance(), 1.0);
+    let nan = load_with_settings(
+        "tolerance_nan",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        float crust:adaptiveNeighbourTolerance = nan
+    }
+}
+"#,
+    );
+    assert_eq!(nan.settings.adaptive_neighbour_tolerance(), 1.0);
+    let off = load_with_settings(
+        "tolerance_off",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        float crust:adaptiveNeighbourTolerance = -1
+    }
+}
+"#,
+    );
+    assert_eq!(off.settings.adaptive_neighbour_tolerance(), -1.0);
+}

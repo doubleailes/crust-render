@@ -367,7 +367,9 @@ Schema mapping:
   made that mistake.
 - `UsdRenderSettings` gives `resolution`; per-render params live as custom attrs in the
   `crust:` namespace (`crust:samplesPerPixel`, `crust:maxDepth`, `crust:minSamplesPerPixel`,
-  `crust:varianceThreshold`, `crust:frame`, `crust:samplingStrategy` token = `power` |
+  `crust:varianceThreshold`, `crust:adaptiveNeighbourTolerance` float (index units,
+  default 1, negative disables the cross-neighbour comparison, non-finite warns and
+  keeps 1), `crust:frame`, `crust:samplingStrategy` token = `power` |
   `balance` | `light` | `bsdf`, `crust:lightSelection` token = `uniform` | `power` | `learned`,
   `crust:pixelFilter` token = `box` | `triangle` |
   `gaussian` | `blackman` | `mitchell` + `crust:pixelFilterRadius` float,

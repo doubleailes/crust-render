@@ -87,7 +87,8 @@ pub use stats::{
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
-    DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings, Renderer, SamplingStrategy, ray_color,
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings,
+    Renderer, SamplingStrategy, ray_color,
 };
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

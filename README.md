@@ -57,7 +57,9 @@ feature-by-feature comparison against Embree's intersection kernels, and
   - Pure-Rust Practical Path Guiding (SD-tree), one-sample MIS with the BSDF
 - ⚡ **Adaptive Sampling**
   - Pixels stop early once their relative standard error drops below
-    `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples)
+    `crust:varianceThreshold` (after `crust:minSamplesPerPixel` samples,
+    floored at `⌈√spp⌉`), have seen some light, and no cross neighbour is
+    much less converged (`crust:adaptiveNeighbourTolerance`)
 - 🌫️ **Volume Rendering**
   - Free-standing smoke/fog/absorption/fire volume regions (homogeneous,
     procedural fBm noise, or an inline voxel grid), with NEE + MIS at
@@ -253,6 +255,7 @@ def RenderSettings "settings" {
     int crust:maxDepth = 32
     int crust:minSamplesPerPixel = 32
     float crust:varianceThreshold = 0.05
+    float crust:adaptiveNeighbourTolerance = 1.0  # index units; negative = per-pixel stop
     int crust:frame = 0
     bool crust:pathGuiding = false
     int crust:guidingTrainIterations = 8

@@ -20,7 +20,9 @@ mod settings;
 use path::{K_CAMERA, K_TIME, ray_cones_enabled, trace_path};
 
 pub use path::ray_color;
-pub use settings::{DEFAULT_INDIRECT_CLAMP, RenderSettings, SamplingStrategy};
+pub use settings::{
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, RenderSettings, SamplingStrategy,
+};
 
 pub(crate) use path::PathScratch;
 
@@ -401,31 +403,78 @@ impl Renderer {
     /// One full-frame pass at `spp` samples per pixel. Returns the image,
     /// whatever training samples the pass recorded (empty unless a training
     /// `GuidingContext` is supplied), and the pass's [`PassStats`].
+    ///
+    /// The work unit is a 16×16 tile or a `width`×1 row; the two differ in
+    /// nothing but the tile list, and a render mode is scheduling only. A
+    /// non-adaptive (training) pass is one sweep of every unit to `spp`. An
+    /// adaptive pass first sweeps every pixel to the first check point, then
+    /// runs **rounds** over a full-frame convergence-index buffer: each
+    /// round freezes every pixel's index and whether it is still sampling,
+    /// decides against that frozen buffer which pixels stop (their own
+    /// test, and the cross-neighbour rule of [`held_by_neighbour`]), then
+    /// traces the next batch of samples ([`batch_schedule`]) for the pixels
+    /// still active. Nothing writes the buffer while a decision reads it,
+    /// so no decision depends on the order the units run in, and tiles and
+    /// scanlines stay bit-identical with the comparison on. Each pixel
+    /// draws the same sample indices, and checks at the same `taken`
+    /// values, as it would if it ran alone.
     fn render_pass(
         &self,
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
     ) -> (Buffer, PassSamples, PassStats) {
-        let mut buffer = Buffer::new(self.settings.width, self.settings.height);
+        let (w, h) = (self.settings.width, self.settings.height);
+        let mut buffer = Buffer::new(w, h);
         let mut all_samples = PassSamples::default();
         let mut variance_sum = 0.0f64;
         let mut rays = RayStats::default();
-        let mut var_map = vec![0.0f64; self.settings.width * self.settings.height];
-        let pixel_count = (self.settings.width * self.settings.height) as f64;
+        let mut var_map = vec![0.0f64; w * h];
+        let pixel_count = (w * h) as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
         // Read once per pass and dispatched to one of two monomorphisations
         // of the integrator (see `profile::scope_if`), so an unprofiled
         // render carries no trace of the profiler.
         let profiling = profile::enabled();
+
+        let threshold = self.settings.variance_threshold as f64;
+        let tolerance = self.settings.adaptive_neighbour_tolerance;
+        let adaptive = cfg.adaptive && threshold > 0.0;
+        // The minimum grows with the budget: an authored minimum of 8 at
+        // 1024 spp takes at least 32. A floor, not a default, so that the
+        // unauthored 32 still keeps a 16 spp render (the goldens) from ever
+        // stopping early. Two at least, or there is no variance to test.
+        let min_spp = self
+            .settings
+            .min_samples_per_pixel
+            .max((cfg.spp as f64).sqrt().ceil() as u32)
+            .max(2);
+        // Checks happen every 4th sample from the minimum on, so the first
+        // one is at the smallest multiple of 4 that is at least `min_spp` —
+        // if the budget reaches that far at all.
+        let first_check = min_spp.next_multiple_of(4);
+        let sweep_to = if adaptive {
+            cfg.spp.min(first_check)
+        } else {
+            cfg.spp
+        };
+        // Rounds: one decision plus one batch each, until the budget is
+        // spent. None when adaptive sampling is off or never gets to check.
+        let schedule = if adaptive {
+            batch_schedule(cfg.spp, first_check)
+        } else {
+            Vec::new()
+        };
+        let rounds = schedule.len();
+
         // Per *pass*, never per pixel or per ray: a guided render runs a
         // handful of these and an ordinary one exactly one, so the whole
         // block costs nothing an integrator would notice.
         let pass_start = std::time::Instant::now();
         debug!(
-            "pass: {} spp, seed {}, {}, adaptive {} (min {} spp, variance threshold {}), \
-             filter {} radius {}, strategy {:?}, guiding {}",
+            "pass: {} spp, seed {}, {}, adaptive {} (min {} spp, variance threshold {}, \
+             neighbour tolerance {}, {} rounds), filter {} radius {}, strategy {:?}, guiding {}",
             cfg.spp,
             cfg.seed,
             if cfg.tiled {
@@ -434,8 +483,10 @@ impl Renderer {
                 "scanlines"
             },
             cfg.adaptive,
-            self.settings.min_samples_per_pixel,
+            min_spp,
             self.settings.variance_threshold,
+            tolerance,
+            rounds,
             self.settings.pixel_filter.name(),
             self.settings.pixel_filter.radius(),
             self.settings.sampling_strategy,
@@ -446,186 +497,173 @@ impl Renderer {
             },
         );
 
-        if cfg.tiled {
-            let tiles = generate_tiles(self.settings.width, self.settings.height, TILE); // tile size: 16x16
-            let total = tiles.len() as u64;
-            // Incremented and reported under one lock, so the callback sees
-            // completions in increasing order even though tiles finish on
-            // many threads at once (see `ProgressCallback`). Taken once per
-            // tile, which no render will notice.
-            let done = std::sync::Mutex::new(0u64);
-            // Per pixel: its colour, variance, and where its training samples
-            // end in the tile's one sample buffer.
-            type TileOut = (Vec<(Vec3A, f64, u32)>, Vec<SampleData>, RayStats);
-            let results: Vec<TileOut> = tiles
-                .par_iter()
-                .map(|tile| {
-                    let mut pixels = Vec::with_capacity(tile.width * tile.height);
-                    let mut samples = Vec::new();
-                    // Private to this tile, so no two threads share a
-                    // counter and there is nothing to synchronise. The path
-                    // scratch has the same ownership story: one buffer serves
-                    // every sample of every pixel in the tile.
-                    let mut tile_rays = RayStats::default();
-                    let mut scratch = PathScratch::new(self.settings.max_depth as usize);
-                    for j in tile.y..tile.y + tile.height {
-                        for i in tile.x..tile.x + tile.width {
-                            let (color, v) = if profiling {
-                                self.render_pixel::<true>(
-                                    i,
-                                    j,
-                                    &cfg,
-                                    &filter,
-                                    gctx,
-                                    &mut samples,
-                                    &mut scratch,
-                                    &mut tile_rays,
-                                )
-                            } else {
-                                self.render_pixel::<false>(
-                                    i,
-                                    j,
-                                    &cfg,
-                                    &filter,
-                                    gctx,
-                                    &mut samples,
-                                    &mut scratch,
-                                    &mut tile_rays,
-                                )
-                            };
-                            pixels.push((color, v, samples.len() as u32));
-                        }
-                    }
-                    // Once per tile, and a no-op unless `--profile` is on.
-                    profile::flush();
-                    if let Some(cb) = progress {
-                        let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
-                        *n += 1;
-                        cb(*n, total);
-                    }
-                    (pixels, samples, tile_rays)
-                })
-                .collect();
-            // Tiles finish in tile order, but what the pass hands on — the
-            // guiding field's training samples and the pass variance, an f64
-            // sum — is gathered in *scanline* order (rows top-down, pixels
-            // left to right), exactly as the scanline path gathers it. Both
-            // are order-dependent in floating point (the SD-tree accumulates
-            // the samples it is given), so this is what keeps a guided render
-            // bit-identical whichever order the pixels were rendered in.
-            //
-            // The tile results are replayed in that order straight from the
-            // tile grid (`generate_tiles` emits tile rows by increasing `y`,
-            // each left to right, so walking it backwards by row gives rows
-            // in scanline order). Nothing full-frame is copied to do it: the
-            // samples stay in the tile buffers, and only their scanline-order
-            // runs are recorded, one per tile per row.
-            let w = self.settings.width;
-            let training = results.iter().any(|(_, s, _)| !s.is_empty());
-            for (_, _, tile_rays) in &results {
-                rays.merge(tile_rays);
+        let tiles = if cfg.tiled {
+            generate_tiles(w, h, TILE)
+        } else {
+            generate_rows(w, h)
+        };
+        let mut units: Vec<Unit> = tiles.into_iter().map(Unit::new).collect();
+        let total = units.len() as u64 + rounds as u64;
+        // Incremented and reported under one lock, so the callback sees
+        // completions in increasing order even though units finish on many
+        // threads at once (see `ProgressCallback`). Taken once per unit,
+        // which no render will notice.
+        let done = std::sync::Mutex::new(0u64);
+        let report = |n: &mut u64| {
+            *n += 1;
+            if let Some(cb) = progress {
+                cb(*n, total);
             }
-            let tiles_x = w.div_ceil(TILE);
-            for ty in (0..tiles.len() / tiles_x.max(1)).rev() {
-                let row = ty * tiles_x..(ty + 1) * tiles_x;
-                let (y0, rows) = (tiles[row.start].y, tiles[row.start].height);
-                for j in (y0..y0 + rows).rev() {
-                    for k in row.clone() {
-                        let tile = &tiles[k];
-                        let pixels = &results[k].0;
-                        for i in tile.x..tile.x + tile.width {
-                            let p = (j - tile.y) * tile.width + (i - tile.x);
-                            let (color, var, end) = pixels[p];
-                            buffer.set_pixel(i, j, color);
-                            var_map[j * w + i] = var;
-                            variance_sum += var;
-                            // Where this pixel's samples sit in its tile's
-                            // buffer: from where the previous pixel's ended.
-                            let start = if p == 0 { 0 } else { pixels[p - 1].2 };
-                            if training && end > start {
-                                all_samples.push_run(k as u32, start, end);
+        };
+        let scratch = || PathScratch::new(self.settings.max_depth as usize);
+
+        // First sweep: every pixel to the first check point (or to the
+        // budget). The path scratch is held per rayon worker rather than
+        // per unit; one buffer serves every sample of every pixel it sees.
+        units
+            .par_iter_mut()
+            .for_each_init(scratch, |scratch, unit| {
+                unit.for_each_pixel(|i, j, work, st| {
+                    if profiling {
+                        self.advance_pixel::<true>(
+                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
+                        );
+                    } else {
+                        self.advance_pixel::<false>(
+                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
+                        );
+                    }
+                    st.finish_round(cfg.spp, threshold);
+                });
+                // Once per unit, and a no-op unless `--profile` is on.
+                profile::flush();
+                report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+            });
+
+        // The frozen buffers the decisions read: every pixel's index and
+        // whether it is still sampling, in image order.
+        let mut index = vec![f32::INFINITY; w * h];
+        let mut active = vec![false; w * h];
+        for &target in &schedule {
+            let mut any_active = false;
+            for unit in &units {
+                unit.for_each_pixel_ref(|i, j, st| {
+                    index[j * w + i] = st.index;
+                    active[j * w + i] = !st.stopped;
+                    any_active |= !st.stopped;
+                });
+            }
+            if !any_active {
+                break;
+            }
+            let (index, active) = (&index, &active);
+            units
+                .par_iter_mut()
+                .for_each_init(scratch, |scratch, unit| {
+                    unit.for_each_pixel(|i, j, work, st| {
+                        if st.stopped {
+                            return;
+                        }
+                        // The stop rule: past the minimum (always, by now), its
+                        // own test, and no still-sampling cross neighbour much
+                        // less converged than it is.
+                        if st.converged {
+                            if held_by_neighbour(index, active, w, h, i, j, tolerance) {
+                                st.held = true;
+                            } else {
+                                st.stopped = true;
+                                return;
                             }
                         }
-                    }
-                }
-            }
-            all_samples.buffers = results.into_iter().map(|(_, s, _)| s).collect();
-        } else {
-            // Rows are the work unit, and each worker writes its row of the
-            // buffer and of the variance map in place: `par_chunks_mut` hands
-            // out disjoint `&mut` rows, so there is no lock, no atomic and no
-            // per-row fork/join barrier — the borrow checker is what proves
-            // two workers never touch the same pixel.
-            let w = self.settings.width;
-            let total = self.settings.height as u64;
-            // Incremented and reported under one lock, as the tiles do, so the
-            // callback sees rows complete in increasing count.
-            let done = std::sync::Mutex::new(0u64);
-            let rows: Vec<(Vec<SampleData>, RayStats)> = buffer
-                .pixels_mut()
-                .par_chunks_mut(w)
-                .zip(var_map.par_chunks_mut(w))
-                .enumerate()
-                .map(|(j, (pixels, vars))| {
-                    let mut scratch = PathScratch::new(self.settings.max_depth as usize);
-                    let mut row_rays = RayStats::default();
-                    let mut samples = Vec::new();
-                    for i in 0..w {
-                        let (c, v) = if profiling {
-                            self.render_pixel::<true>(
-                                i,
-                                j,
-                                &cfg,
-                                &filter,
-                                gctx,
-                                &mut samples,
-                                &mut scratch,
-                                &mut row_rays,
-                            )
+                        if profiling {
+                            self.advance_pixel::<true>(
+                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
+                            );
                         } else {
-                            self.render_pixel::<false>(
-                                i,
-                                j,
-                                &cfg,
-                                &filter,
-                                gctx,
-                                &mut samples,
-                                &mut scratch,
-                                &mut row_rays,
-                            )
-                        };
-                        pixels[i] = c;
-                        vars[i] = v;
-                    }
-                    // Once per row, and a no-op unless `--profile` is on.
+                            self.advance_pixel::<false>(
+                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
+                            );
+                        }
+                        st.finish_round(cfg.spp, threshold);
+                    });
                     profile::flush();
-                    if let Some(cb) = progress {
-                        let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
-                        *n += 1;
-                        cb(*n, total);
+                });
+            report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        // An early finish still walks the callback to the total, one step at
+        // a time, as the contract says.
+        {
+            let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
+            while *n < total {
+                report(&mut n);
+            }
+        }
+
+        // Units finish in unit order, but what the pass hands on — the
+        // guiding field's training samples and the pass variance, an f64
+        // sum — is gathered in *scanline* order (rows top-down, pixels left
+        // to right), whichever the unit shape. Both are order-dependent in
+        // floating point (the SD-tree accumulates the samples it is given),
+        // so this is what keeps a guided render bit-identical whichever
+        // order the pixels were rendered in.
+        //
+        // The unit results are replayed in that order straight from the
+        // tile grid (`generate_tiles` and `generate_rows` emit tile rows by
+        // increasing `y`, each left to right, so walking it backwards by
+        // row gives rows in scanline order). Nothing full-frame is copied
+        // to do it: the samples stay in the unit buffers, and only their
+        // scanline-order runs are recorded, one per unit per row.
+        let training = units.iter().any(|u| !u.work.samples.is_empty());
+        let tiles_x = units.iter().take_while(|u| u.tile.y == 0).count().max(1);
+        for unit in &units {
+            rays.merge(&unit.work.rays);
+        }
+        for ty in (0..units.len() / tiles_x).rev() {
+            let row = ty * tiles_x..(ty + 1) * tiles_x;
+            let (y0, rows) = (units[row.start].tile.y, units[row.start].tile.height);
+            for j in (y0..y0 + rows).rev() {
+                for k in row.clone() {
+                    let unit = &units[k];
+                    let tile = &unit.tile;
+                    for i in tile.x..tile.x + tile.width {
+                        let p = (j - tile.y) * tile.width + (i - tile.x);
+                        let st = &unit.pixels[p];
+                        let (color, var) = st.estimate();
+                        buffer.set_pixel(i, j, color);
+                        var_map[j * w + i] = var;
+                        variance_sum += var;
+                        if cfg.adaptive {
+                            rays.adaptive_pixels += 1;
+                            rays.adaptive_samples += st.taken as u64;
+                            if st.taken < cfg.spp {
+                                rays.early_stopped += 1;
+                            }
+                            if st.held {
+                                rays.neighbour_held += 1;
+                            }
+                            rays.spp_min = if rays.adaptive_pixels == 1 {
+                                st.taken
+                            } else {
+                                rays.spp_min.min(st.taken)
+                            };
+                            rays.spp_max = rays.spp_max.max(st.taken);
+                        }
+                        // Where this pixel's samples sit in its unit's
+                        // buffer: from where the previous pixel's ended.
+                        let start = if p == 0 {
+                            0
+                        } else {
+                            unit.pixels[p - 1].samples_end
+                        };
+                        let end = st.samples_end;
+                        if training && end > start {
+                            all_samples.push_run(k as u32, start, end);
+                        }
                     }
-                    (samples, row_rays)
-                })
-                .collect();
-            // What is order-dependent in floating point — the pass variance,
-            // an f64 sum, and the training samples the SD-tree accumulates —
-            // is gathered serially in scanline order (rows top-down, pixels
-            // left to right), exactly as the tiled path gathers it.
-            for (j, (samples, row_rays)) in rows.iter().enumerate().rev() {
-                rays.merge(row_rays);
-                // Pixel by pixel into the one running sum: a per-row partial
-                // would round differently.
-                for &v in &var_map[j * w..(j + 1) * w] {
-                    variance_sum += v;
-                }
-                // A row's samples are already in pixel order in its own
-                // buffer: one run per row.
-                if !samples.is_empty() {
-                    all_samples.push_run(j as u32, 0, samples.len() as u32);
                 }
             }
-            all_samples.buffers = rows.into_iter().map(|(s, _)| s).collect();
         }
+        all_samples.buffers = units.into_iter().map(|u| u.work.samples).collect();
 
         let elapsed = pass_start.elapsed();
         debug!(
@@ -659,32 +697,24 @@ impl Renderer {
         )
     }
 
+    /// Traces pixel `(i, j)`'s samples from `state.taken` up to `target`,
+    /// accumulating into `state` and the unit's sample buffer and counters.
+    /// A sample depends only on `(i, j, seed, sample index)`, never on when
+    /// it is traced, so advancing in steps is the same as one loop.
     #[allow(clippy::too_many_arguments)]
-    fn render_pixel<const PROFILE: bool>(
+    fn advance_pixel<const PROFILE: bool>(
         &self,
         i: usize,
         j: usize,
         cfg: &PassConfig,
         filter: &FilterSampler,
         gctx: Option<&GuidingContext>,
-        samples: &mut Vec<SampleData>,
+        unit: &mut UnitWork,
         scratch: &mut PathScratch,
-        stats: &mut RayStats,
-    ) -> (Vec3A, f64) {
+        state: &mut PixelState,
+        target: u32,
+    ) {
         let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
-        let mut sum = Vec3A::ZERO;
-        // FIS weight sum (see `filter.rs`): the pixel estimate is the
-        // weighted average Σwᵢ·Lᵢ / Σwᵢ. For box and triangle every wᵢ is
-        // exactly 1.0, so the sum is exactly `taken as f32` and the estimate
-        // is the plain mean — box at radius 0.5 stays bit-identical to the
-        // historical unweighted, unfiltered estimator.
-        let mut weight_sum = 0.0f32;
-        let mut lum_sum = 0.0f64;
-        let mut lum_sq = 0.0f64;
-
-        let threshold = self.settings.variance_threshold as f64;
-        let min_spp = self.settings.min_samples_per_pixel.max(2);
-        let mut taken = 0u32;
 
         // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
         // with an extra domain so images wider/taller than 256 stay fully
@@ -712,7 +742,7 @@ impl Renderer {
                 .pixel_span(self.settings.width, self.settings.height)
         });
 
-        for sample in 0..cfg.spp {
+        for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
                 .new_domain(tile);
@@ -751,7 +781,7 @@ impl Renderer {
                 r = r.with_cone(crate::RayCone { width: 0.0, spread });
             }
             drop(primary);
-            stats.camera_rays += 1;
+            unit.rays.camera_rays += 1;
             let color = trace_path::<PROFILE>(
                 &r,
                 &self.world,
@@ -762,60 +792,215 @@ impl Renderer {
                 self.settings.indirect_clamp,
                 root,
                 gctx,
-                samples,
+                &mut unit.samples,
                 scratch,
-                stats,
+                &mut unit.rays,
             ) * (wx * wy);
-            sum += color;
-            weight_sum += wx * wy;
+            state.sum += color;
+            state.weight_sum += wx * wy;
             let lum = luminance(color) as f64;
-            lum_sum += lum;
-            lum_sq += lum * lum;
-            taken = sample + 1;
-
-            // Adaptive early stop: once past the minimum budget, quit as soon
-            // as the relative standard error of the pixel mean is below the
-            // threshold. Checked every 4th sample to amortize the cost.
-            if cfg.adaptive && threshold > 0.0 && taken >= min_spp && taken.is_multiple_of(4) {
-                let n = taken as f64;
-                let var_of_mean = ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0);
-                let mean = (lum_sum / n).max(1e-4);
-                if var_of_mean.sqrt() / mean < threshold {
-                    break;
-                }
-            }
+            state.lum_sum += lum;
+            state.lum_sq += lum * lum;
         }
+        state.taken = target;
+        state.samples_end = unit.samples.len() as u32;
+    }
+}
 
-        if cfg.adaptive {
-            stats.adaptive_pixels += 1;
-            stats.adaptive_samples += taken as u64;
-            if taken < cfg.spp {
-                stats.early_stopped += 1;
-            }
-            stats.spp_min = if stats.adaptive_pixels == 1 {
-                taken
-            } else {
-                stats.spp_min.min(taken)
-            };
-            stats.spp_max = stats.spp_max.max(taken);
+/// One pixel's accumulators across the rounds of a pass, plus where it
+/// stands in the adaptive stop rule.
+#[derive(Clone, Copy)]
+struct PixelState {
+    sum: Vec3A,
+    /// FIS weight sum (see `filter.rs`): the pixel estimate is the
+    /// weighted average Σwᵢ·Lᵢ / Σwᵢ. For box and triangle every wᵢ is
+    /// exactly 1.0, so the sum is exactly `taken as f32` and the estimate
+    /// is the plain mean — box at radius 0.5 stays bit-identical to the
+    /// historical unweighted, unfiltered estimator.
+    weight_sum: f32,
+    lum_sum: f64,
+    lum_sq: f64,
+    taken: u32,
+    /// Where this pixel's training samples end in its unit's buffer.
+    samples_end: u32,
+    /// Convergence index at `taken` samples: relative standard error of the
+    /// mean over the threshold, `+∞` before the pixel has seen light. The
+    /// value its neighbours compare against — f32, so every decision is a
+    /// function of one stored number per pixel.
+    index: f32,
+    /// Passed its own test at `taken` samples — the f64 comparison, kept
+    /// apart from the rounded index so a pixel at the boundary decides
+    /// exactly as it did when it ran alone.
+    converged: bool,
+    stopped: bool,
+    /// Held back by a less converged neighbour at least once.
+    held: bool,
+}
+
+impl PixelState {
+    fn new() -> Self {
+        PixelState {
+            sum: Vec3A::ZERO,
+            weight_sum: 0.0,
+            lum_sum: 0.0,
+            lum_sq: 0.0,
+            taken: 0,
+            samples_end: 0,
+            index: f32::INFINITY,
+            converged: false,
+            stopped: false,
+            held: false,
         }
+    }
 
-        // Unbiased variance of the pixel-mean luminance.
-        let n = taken as f64;
-        let variance = if taken >= 2 {
-            ((lum_sq - lum_sum * lum_sum / n) / (n - 1.0) / n).max(0.0)
+    /// Unbiased variance of the pixel-mean luminance over `taken` samples.
+    fn var_of_mean(&self) -> f64 {
+        let n = self.taken as f64;
+        ((self.lum_sq - self.lum_sum * self.lum_sum / n) / (n - 1.0) / n).max(0.0)
+    }
+
+    /// After a round's samples: out of budget stops the pixel; otherwise
+    /// its own test and its index are recomputed for the next decision.
+    fn finish_round(&mut self, spp: u32, threshold: f64) {
+        if self.taken >= spp {
+            self.stopped = true;
+            return;
+        }
+        // Zero-signal gate. A pixel whose every sample so far is exactly
+        // zero has a measured variance of zero, which the test below would
+        // read as perfect convergence — but nothing has been observed, and
+        // the pixel would be written black whatever the budget (ALab's
+        // glassware, where most paths legitimately carry nothing). The
+        // gate is on `lum_sq`, not `lum_sum`: Mitchell's negative filter
+        // lobes can leave a lit pixel with `lum_sum <= 0`, whereas a sum of
+        // squares is zero exactly when every sample's luminance was.
+        if self.taken < 2 || self.lum_sq <= 0.0 {
+            self.index = f32::INFINITY;
+            self.converged = false;
+            return;
+        }
+        let n = self.taken as f64;
+        let mean = (self.lum_sum / n).max(1e-4);
+        let rel = self.var_of_mean().sqrt() / mean;
+        self.converged = rel < threshold;
+        self.index = (rel / threshold) as f32;
+    }
+
+    /// The pixel's colour and the variance of its mean luminance.
+    fn estimate(&self) -> (Vec3A, f64) {
+        let variance = if self.taken >= 2 {
+            self.var_of_mean()
         } else {
             f64::INFINITY
         };
         // Weighted-average film estimator. A Mitchell pixel whose few
         // samples all landed on negative lobes could zero the denominator;
         // the plain mean is the sane fallback there.
-        let mean = if weight_sum > 0.0 {
-            sum / weight_sum
+        let mean = if self.weight_sum > 0.0 {
+            self.sum / self.weight_sum
         } else {
-            sum / taken as f32
+            self.sum / self.taken as f32
         };
         (mean, variance)
+    }
+}
+
+/// The `taken` count every active pixel reaches after each round of an
+/// adaptive pass at `spp`, once the first sweep has brought it to
+/// `first_check`. Empty when the budget never reaches the first check.
+///
+/// Batches grow 25% a round — `max(4, taken / 4)` — so a 1024 spp pass from
+/// 32 runs 16 rounds rather than 248: each round is a fork/join whose tail
+/// (the last unit finishing while every other worker idles) cost 8% of a
+/// cornellbox render at a fixed batch of 4, with callgrind counting fewer
+/// instructions, not more. The price is overshoot: a pixel that converges
+/// mid-batch stops at the batch's end, at most 25% past what it had taken.
+/// A pure function of its inputs, computed once per pass, so the round
+/// count — and the progress total — is known before the pass starts.
+fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
+    let mut schedule = Vec::new();
+    let mut taken = first_check;
+    while taken < spp {
+        taken = spp.min(taken + (taken / 4).max(4));
+        schedule.push(taken);
+    }
+    schedule
+}
+
+/// The cross-neighbour rule: is pixel `(x, y)` held back by one of its up,
+/// down, left or right neighbours that is still sampling and whose
+/// convergence index exceeds its own by more than `tolerance`? One-sided —
+/// a more converged neighbour never holds — and absolute, in index units.
+/// A stopped neighbour never holds: converged or out of budget, more
+/// samples here would not change it. Diagonals are not compared, and a
+/// neighbour outside the image does not exist. A negative tolerance skips
+/// the comparison altogether, so "off" is the per-pixel stop with no
+/// dependence on neighbour values. `+∞ − finite = +∞` holds; two `+∞`
+/// pixels never get here, since each fails its own test.
+fn held_by_neighbour(
+    index: &[f32],
+    active: &[bool],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    tolerance: f32,
+) -> bool {
+    if tolerance < 0.0 {
+        return false;
+    }
+    let own = index[y * width + x];
+    let holds = |q: usize| active[q] && index[q] - own > tolerance;
+    (x > 0 && holds(y * width + x - 1))
+        || (x + 1 < width && holds(y * width + x + 1))
+        || (y > 0 && holds((y - 1) * width + x))
+        || (y + 1 < height && holds((y + 1) * width + x))
+}
+
+/// What a work unit's samples write besides the pixel accumulators: its
+/// training samples and its counters. Private to the unit, so no two
+/// threads share a counter and there is nothing to synchronise.
+#[derive(Default)]
+struct UnitWork {
+    samples: Vec<SampleData>,
+    rays: RayStats,
+}
+
+/// One work unit of a pass — a tile or a row — and its pixels' state.
+struct Unit {
+    tile: Tile,
+    /// Row-major within the tile.
+    pixels: Vec<PixelState>,
+    work: UnitWork,
+}
+
+impl Unit {
+    fn new(tile: Tile) -> Self {
+        Unit {
+            pixels: vec![PixelState::new(); tile.width * tile.height],
+            tile,
+            work: UnitWork::default(),
+        }
+    }
+
+    /// Every pixel of the unit, with its image coordinates, alongside the
+    /// unit's own buffers.
+    fn for_each_pixel(&mut self, mut f: impl FnMut(usize, usize, &mut UnitWork, &mut PixelState)) {
+        let tile = &self.tile;
+        for (p, st) in self.pixels.iter_mut().enumerate() {
+            let (i, j) = (tile.x + p % tile.width, tile.y + p / tile.width);
+            f(i, j, &mut self.work, st);
+        }
+    }
+
+    fn for_each_pixel_ref(&self, mut f: impl FnMut(usize, usize, &PixelState)) {
+        for (p, st) in self.pixels.iter().enumerate() {
+            let (i, j) = (
+                self.tile.x + p % self.tile.width,
+                self.tile.y + p / self.tile.width,
+            );
+            f(i, j, st);
+        }
     }
 }
 
@@ -874,6 +1059,20 @@ struct Tile {
 
 /// Edge length of a render tile, in pixels.
 const TILE: usize = 16;
+
+/// The scanline work units: one `width`×1 tile per row, in the same order
+/// `generate_tiles` emits (rows by increasing `y`), so both unit shapes
+/// replay in scanline order through the one gather.
+fn generate_rows(image_width: usize, image_height: usize) -> Vec<Tile> {
+    (0..image_height)
+        .map(|y| Tile {
+            x: 0,
+            y,
+            width: image_width,
+            height: 1,
+        })
+        .collect()
+}
 
 /// The tile grid, in tile rows from `y = 0` up, each row left to right —
 /// the order `render_pass` relies on to replay tiles in scanline order.
