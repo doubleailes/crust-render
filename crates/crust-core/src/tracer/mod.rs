@@ -452,8 +452,10 @@ impl Renderer {
             .max(2);
         // Checks happen every 4th sample from the minimum on, so the first
         // one is at the smallest multiple of 4 that is at least `min_spp` —
-        // if the budget reaches that far at all.
-        let first_check = min_spp.next_multiple_of(4);
+        // if the budget reaches that far at all. Checked: a minimum within 3
+        // of `u32::MAX` must saturate, not wrap to a check point of 0 that
+        // would let every pixel stop after 4 samples.
+        let first_check = min_spp.checked_next_multiple_of(4).unwrap_or(u32::MAX);
         let sweep_to = if adaptive {
             cfg.spp.min(first_check)
         } else {
@@ -921,7 +923,9 @@ fn batch_schedule(spp: u32, first_check: u32) -> Vec<u32> {
     let mut schedule = Vec::new();
     let mut taken = first_check;
     while taken < spp {
-        taken = spp.min(taken + (taken / 4).max(4));
+        // Add the smaller of the batch and what is left, never the batch
+        // and then a cap: `taken + batch` can overflow near `u32::MAX`.
+        taken += (taken / 4).max(4).min(spp - taken);
         schedule.push(taken);
     }
     schedule

@@ -2384,3 +2384,22 @@ def Scope "Render"
     );
     assert_eq!(off.settings.adaptive_neighbour_tolerance(), -1.0);
 }
+
+/// `-1 as u32` is `u32::MAX`; a negative minimum is refused, not cast.
+#[test]
+fn a_negative_minimum_sample_count_falls_back_to_the_default() {
+    let scene = load_with_settings(
+        "negative_min_spp",
+        "",
+        r#"
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int crust:minSamplesPerPixel = -1
+    }
+}
+"#,
+    );
+    assert_eq!(scene.settings.min_samples_per_pixel(), 32);
+}
