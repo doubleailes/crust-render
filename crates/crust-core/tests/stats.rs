@@ -4,7 +4,7 @@
 use crust_core::rt::{MemoryFootprint, PrimitiveBreakdown};
 use crust_core::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, RayStats, RenderSettings, RenderStats,
-    SceneCounters, peak_memory_bytes,
+    SceneCounters, current_memory_bytes, peak_memory_bytes,
 };
 use std::time::Duration;
 
@@ -63,6 +63,10 @@ fn memory_sample_now_reads_the_process_on_linux() {
         assert!(m.rss.is_some_and(|b| b > 0));
         assert!(m.peak.is_some_and(|b| b > 0));
         assert!(peak_memory_bytes().is_some());
+        assert!(current_memory_bytes().is_some());
+        // Guaranteed by the kernel because both come from one read of
+        // `/proc/self/status`; across two reads the high-water mark can
+        // lag the RSS while other test threads allocate.
         assert!(
             m.peak.unwrap() >= m.rss.unwrap(),
             "peak is a high-water mark"

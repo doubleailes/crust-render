@@ -20,7 +20,7 @@
 def Xform "World"
 {
     def Xform "Teapot" (
-        prepend references = @MaterialXTeapotLion-1.0/Teapot/teapot.usda@
+        prepend references = @/home/philippe.llerena/Workspace/samples/MaterialXTeapotLion-1.0/Teapot/teapot.usda@
     )
     {
         double3 xformOp:translate = (-0.12, 0.06, 0)
@@ -28,7 +28,7 @@ def Xform "World"
     }
 
     def Xform "Lion" (
-        prepend references = @MaterialXTeapotLion-1.0/Lion/lion.usda@
+        prepend references = @/home/philippe.llerena/Workspace/samples/MaterialXTeapotLion-1.0/Lion/lion.usda@
     )
     {
         double3 xformOp:translate = (0.15, -0.10, 0)
