@@ -364,7 +364,15 @@ Acceptance, measured with `--stats` rather than modelled:
    0.2.0: non-manifold neighbourhoods, irregular faces on an unsharpened
    (`VtxBoundaryInterpolation::None`) boundary, and the Bilinear scheme; single-crease
    patches for *semi-sharp* creases are not ported, so those are isolated to the cap.
-   crust-core requires 0.2.0 from this change on. It also touches the two-level traversal, the deterministic-build
+   The gaps the reference covers are filed upstream:
+   [#10](https://github.com/doubleailes/OpenSubdiv-rs/issues/10) non-manifold patches,
+   [#11](https://github.com/doubleailes/OpenSubdiv-rs/issues/11) single-crease patches,
+   [#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12) Loop patches and
+   adaptive refinement, [#13](https://github.com/doubleailes/OpenSubdiv-rs/issues/13)
+   stencil tables over adaptive hierarchies (the route to cheap per-sample limit
+   evaluation), [#14](https://github.com/doubleailes/OpenSubdiv-rs/issues/14) the
+   `smooth` triangle rule USD's `triangleSubdivisionRule` names. crust-core requires
+   0.2.0 from this change on. It also touches the two-level traversal, the deterministic-build
    requirement (a cache fills in ray order; the tessellation itself must be
    deterministic per patch) and the material side tables. That is a change of its own,
    and it is easier after this one, since the record/table split is what a lazily
