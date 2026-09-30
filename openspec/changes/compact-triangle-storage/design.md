@@ -352,12 +352,19 @@ Acceptance, measured with `--stats` rather than modelled:
    per-patch BVHs in a shared, budgeted cache (`CRUST_TESS_CACHE_MB`). Memory becomes
    independent of the level, as Embree's subdivision geometry is. Not bit-identical to
    uniform refinement: patch evaluation and level-by-level stencils sum in different
-   orders, and opensubdiv-rs has not yet ported Gregory caps for creased or boundary
-   irregular neighbourhoods (those faces fall to bilinear quads, an approximation
-   confined to them; the reference's `GregoryConverter` covers boundary, sharp and
-   valence-2 corners, so this is reported upstream as
+   orders. The patch table's coverage was the other blocker: opensubdiv-rs 0.1.4
+   capped only smooth interior extraordinary vertices with Gregory patches and dropped
+   every creased or boundary irregular face to a bilinear quad. That was reported as
    [doubleailes/OpenSubdiv-rs#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8)
-   and is a prerequisite of that change). It also touches the two-level traversal, the deterministic-build
+   and fixed in 0.2.0 (2026-09-30), which caps irregular boundary corners, corners on
+   infinitely sharp creases, sharp corners and darts as the reference's
+   `GregoryConverter` does, treats infinitely sharp creases as boundaries of regular
+   B-spline patches (`useInfSharpPatch`), and takes the reference's own edge-point
+   coefficients at extraordinary vertices. What still falls to `PatchType::Quads` in
+   0.2.0: non-manifold neighbourhoods, irregular faces on an unsharpened
+   (`VtxBoundaryInterpolation::None`) boundary, and the Bilinear scheme; single-crease
+   patches for *semi-sharp* creases are not ported, so those are isolated to the cap.
+   crust-core requires 0.2.0 from this change on. It also touches the two-level traversal, the deterministic-build
    requirement (a cache fills in ray order; the tessellation itself must be
    deterministic per patch) and the material side tables. That is a change of its own,
    and it is easier after this one, since the record/table split is what a lazily
