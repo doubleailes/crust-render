@@ -354,7 +354,10 @@ Acceptance, measured with `--stats` rather than modelled:
    uniform refinement: patch evaluation and level-by-level stencils sum in different
    orders, and opensubdiv-rs has not yet ported Gregory caps for creased or boundary
    irregular neighbourhoods (those faces fall to bilinear quads, an approximation
-   confined to them). It also touches the two-level traversal, the deterministic-build
+   confined to them; the reference's `GregoryConverter` covers boundary, sharp and
+   valence-2 corners, so this is reported upstream as
+   [doubleailes/OpenSubdiv-rs#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8)
+   and is a prerequisite of that change). It also touches the two-level traversal, the deterministic-build
    requirement (a cache fills in ray order; the tessellation itself must be
    deterministic per patch) and the material side tables. That is a change of its own,
    and it is easier after this one, since the record/table split is what a lazily
