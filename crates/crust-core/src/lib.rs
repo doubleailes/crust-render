@@ -83,7 +83,7 @@ pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets, UsdImportOptions};
 pub use stats::{
     ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats, RayStats, RenderStats,
-    SceneCounters, TextureCacheStats, peak_memory_bytes,
+    SceneCounters, TextureCacheStats, current_memory_bytes, peak_memory_bytes,
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
