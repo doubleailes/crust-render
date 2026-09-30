@@ -251,6 +251,13 @@ stop the pixel too soon, worst under indirect light).
   moved (rectlight: 76.8% → 21.1% of pixels stopped early, the black penumbra
   pixels being the trap itself; motionblur: 67.3% → 62.9%, 250 pixels held by a
   neighbour). Any later change that touches the stop rule will move them again.
+  That the rectlight change is bias removed rather than noise added is the
+  CLAUDE.md 1/√N check, against a 4096 spp adaptive-off reference: the old rule's
+  RMSE **plateaus** (2.96e-3 → 2.68e-3 → 2.66e-3 at 16 / 64 / 256 spp, relMSE
+  3.1e-4 → 2.3e-4 → 2.3e-4) while the new rule's keeps falling (2.68e-3 →
+  2.23e-3 → 1.89e-3, relMSE 2.5e-4 → 1.5e-4 → 1.1e-4). The fall is slower than
+  1/√N because a pixel stops at 5% relative error by construction — the
+  ordinary adaptive floor, not the trap.
 - **The convergence index and the cross-neighbour tolerance** (Guerilla's model).
   Each pixel of the adaptive pass carries an f32 index `e = relative error /
   threshold`: below 1 when it passes its own test, `+∞` before it has seen light.
@@ -337,6 +344,18 @@ smaller work units in the rounds (an 8×8 tile's tail is a quarter of a 16×16
 tile's), not fewer rounds; not done, since on the production-sized scene the
 rounds already measure as noise and on cornellbox the 5–7% is a 0.5 s render.
 Skipping units with no active pixel does not touch the tail either.
+
+The full-frame state is the other cost: `PixelState` is 64 B (`Vec3A`
+alignment), plus 5 B of index/active buffers, per pixel. At 3840×2160 the render
+phase's peak RSS went from 442 MB to 755 MB (cornellbox, 8 spp) — about +500 MB,
+as the design's estimate predicted. If it ever matters, `sum` as an unaligned
+`[f32; 3]` and dropping `samples_end` outside training passes bring it to 48 B.
+Checked and holding elsewhere: tiles ↔ scanlines are `exr_diff`-identical on
+cornellbox at 128 spp with `t = 1`, and on `cornellbox_guided.usda` (training
+passes non-adaptive, the final pass adaptive under the guiding field); Mitchell,
+the one filter with negative weights, renders rectlight with a finite error and
+the same black half as the triangle filter, which is what the `lum_sq` gate is
+for.
 
 Traps already fallen into: the per-pixel loop hid the all-zero stop for as long as
 adaptive sampling existed, because a black pixel in glass looks like a shadow; and
