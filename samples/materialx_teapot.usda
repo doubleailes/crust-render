@@ -20,7 +20,7 @@
 def Xform "World"
 {
     def "Teapot" (
-        prepend references = @MaterialXTeapotLion-1.0/Teapot/teapot.usda@
+        prepend references = @/home/philippe.llerena/Workspace/samples/MaterialXTeapotLion-1.0/Teapot/teapot.usda@
     )
     {
     }
