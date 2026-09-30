@@ -86,8 +86,9 @@ crust-render::main
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
 routine; a render mode is scheduling only, and tiles vs scanlines are
-bit-identical by construction. The adaptive (final) pass runs in rounds of 4
-samples over a full-frame convergence-index buffer, so a pixel stops only
+bit-identical by construction. The adaptive (final) pass runs in rounds (batches
+that grow 25% a round, `max(4, taken / 4)`, capped at the budget) over a
+full-frame convergence-index buffer, so a pixel stops only
 when its cross neighbours are not much less converged than it is
 (`crust:adaptiveNeighbourTolerance`, default 1, negative to compare nothing);
 a pixel that has seen no light never stops early, and the minimum is floored

@@ -317,3 +317,19 @@ fn batch_schedule_grows_a_quarter_a_round_and_ends_at_the_budget() {
     assert!(batch_schedule(16, 32).is_empty());
     assert!(batch_schedule(32, 32).is_empty());
 }
+
+/// A budget near `u32::MAX` must schedule without overflowing: targets
+/// strictly increase and the last one is the budget.
+#[test]
+fn batch_schedule_survives_a_budget_near_u32_max() {
+    use super::batch_schedule;
+    let spp = u32::MAX - 1;
+    let s = batch_schedule(spp, u32::MAX - 6);
+    assert_eq!(s, vec![spp]);
+    let s = batch_schedule(spp, 4);
+    assert_eq!(s.last(), Some(&spp));
+    assert!(s.windows(2).all(|w| w[0] < w[1]), "strictly increasing");
+    assert!(s.len() < 200, "{}", s.len());
+    // A minimum past the budget schedules nothing.
+    assert!(batch_schedule(64, u32::MAX).is_empty());
+}

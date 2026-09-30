@@ -274,8 +274,8 @@ full-frame state (`PixelState`: the accumulators, `taken`, the index, `converged
 first check point (the smallest multiple of 4 at or above the effective minimum,
 capped at the budget); each round then freezes every pixel's index and whether it
 is still sampling into two image-order buffers, decides against that frozen buffer
-which pixels stop (`held_by_neighbour`), and traces 4 more samples for the pixels
-still active. Nothing writes the buffer while a decision reads it, so no decision
+which pixels stop (`held_by_neighbour`), and traces the next batch — `max(4,
+taken / 4)` samples, capped at the budget — for the pixels still active. Nothing writes the buffer while a decision reads it, so no decision
 depends on the order the units run in — tiles and scanlines stay bit-identical
 with the comparison on (pinned by `tiles_and_scanlines_agree_under_the_neighbour_comparison`).
 The batch grows 25% a round (`batch_schedule`: `max(4, taken / 4)`, capped at
@@ -302,14 +302,18 @@ comparison's purpose, and `--stats` prints "adaptive: held by neighbour" so the
 cost is visible. Measured 2026-09-30 on ALab frame 1004 at 1024 spp, authored
 minimum 8 (a shot layer over `entry.usda`), 640×360:
 
-| rule | exact-zero pixels | stopped early | mean spp | held | Render |
-|------|------------------:|--------------:|---------:|-----:|-------:|
+| rule | exact-zero pixels | stopped early | mean spp | held | single run |
+|------|------------------:|--------------:|---------:|-----:|-----------:|
 | before this change | 7,233 (3.1%) | 21.4% | 925.9 | — | 185 s |
 | `t = −1`, batch 4 (gate + floor only) | 0 | 17.9% | 961.7 | 0 | 209 s* |
 | `t = 1`, batch 4 | 0 | 8.7% | 992.1 | 23,472 (10.2%) | 206 s |
 | `t = 1`, growing batch (shipped) | 0 | 6.1% | 998.7 | 19,476 (8.5%) | 203 s |
 
-(*that run overlapped a goldens check; the others were alone.) The black speckle
+The pixel counts are exact. The last column is one un-interleaved run each,
+minutes apart (*and that one overlapped a goldens check), so it says only that
+the rule's cost is of the order of the extra samples — not a timing comparison,
+which per CLAUDE.md needs `bench_ab.sh`; the interleaved numbers are the ones
+below. The black speckle
 over the glassware is gone at either tolerance; what remains on the glass is
 caustic fireflies through the dielectric, integrator noise. The samples the
 guards spend are the 4–8% of mean spp above, of which the growing batch's

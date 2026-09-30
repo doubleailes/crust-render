@@ -128,8 +128,16 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let prim = prim_at(stage, path);
     let spp = custom_i32(&prim, "crust:samplesPerPixel").unwrap_or(DEFAULT_SPP as i32) as u32;
     let max_depth = custom_i32(&prim, "crust:maxDepth").unwrap_or(DEFAULT_MAX_DEPTH as i32) as u32;
-    let min_spp =
-        custom_i32(&prim, "crust:minSamplesPerPixel").unwrap_or(DEFAULT_MIN_SPP as i32) as u32;
+    // A negative minimum is refused rather than cast: `-1 as u32` is
+    // `u32::MAX`, which would overflow the first check point.
+    let min_spp = match custom_i32(&prim, "crust:minSamplesPerPixel") {
+        Some(n) if n < 0 => {
+            warn!("crust:minSamplesPerPixel = {n} is negative — using {DEFAULT_MIN_SPP}");
+            DEFAULT_MIN_SPP
+        }
+        Some(n) => n as u32,
+        None => DEFAULT_MIN_SPP,
+    };
     let variance = custom_f32(&prim, "crust:varianceThreshold").unwrap_or(DEFAULT_VARIANCE);
     let frame = custom_i32(&prim, "crust:frame").unwrap_or(DEFAULT_FRAME as i32) as isize;
 
