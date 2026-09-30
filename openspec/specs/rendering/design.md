@@ -326,6 +326,31 @@ caustic fireflies through the dielectric, integrator noise. The samples the
 guards spend are the 4–8% of mean spp above, of which the growing batch's
 overshoot is 0.7%.
 
+**Why the default tolerance is 1.** A sweep on the same ALab frame (1024 spp,
+min 8), each render diffed against an adaptive-off 1024 spp render of the same
+frame, so the error is what stopping cost at that tolerance:
+
+| `t` | stopped early | held | mean spp | saved | RMSE vs off | relMSE |
+|----:|--------------:|-----:|---------:|------:|------------:|-------:|
+| −1 (per-pixel) | 13.9% | — | 975.7 | 4.7% | 1.30e-2 | 4.9e-4 |
+| 0 | 1.0% | 13.5% | 1018.2 | 0.6% | 1.56e-3 | 7.2e-6 |
+| 0.5 | 5.3% | 9.5% | 1003.2 | 2.0% | 4.83e-3 | 6.7e-5 |
+| **1** | 6.1% | 8.5% | 998.7 | 2.5% | 4.98e-3 | 7.7e-5 |
+| 2 | 7.1% | 7.1% | 995.1 | 2.8% | 5.52e-3 | 9.2e-5 |
+| 4 | 10.2% | 4.7% | 988.4 | 3.5% | 9.61e-3 | 2.0e-4 |
+
+The per-pixel stop saves twice the samples of `t = 1` for 6.4× the error, and
+its glass still carries *dark* (not zero) speckle: pixels that saw one or two
+dim hits and passed their own test — the sparse-but-non-zero case the gate
+alone cannot catch, and the reason the comparison exists. `t = 0` holds so
+much that it saves nothing. Between 0.5 and 1 the error is flat; from 2 it
+rises faster than the savings, and at 4 it has nearly doubled. So 1 sits at
+the knee: neither eager nor lax on this scene. Note the savings themselves are
+small here — at threshold 0.05 few pixels of a glass-heavy dome-lit frame
+converge within 1024 samples, and all six renders took 198–206 s — so the
+tolerance decides *what the few stopped pixels look like*, not the render
+time.
+
 The rounds themselves cost time even when they change nothing. `bench_ab.sh`,
 pre-change binary against `t = −1`, min / mean of interleaved runs, cornellbox
 at 64 spp (bit-identical output at batch 4, so pure scheduling): **+8.1% /
