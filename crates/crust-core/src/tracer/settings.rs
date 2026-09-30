@@ -14,6 +14,13 @@ use crate::pdf::PdfSolidAngle;
 /// unbiased estimator.
 pub const DEFAULT_INDIRECT_CLAMP: f32 = 10.0;
 
+/// The adaptive neighbour tolerance a render gets unless the stage
+/// (`crust:adaptiveNeighbourTolerance`) says otherwise — see
+/// [`RenderSettings::with_adaptive_neighbour_tolerance`]. One index unit:
+/// a pixel waits for a cross neighbour that is more than one threshold of
+/// relative error behind it.
+pub const DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE: f32 = 1.0;
+
 /// How the integrator combines its two direct-lighting strategies — light
 /// sampling (NEE) and BSDF/phase sampling — into one estimate. The two MIS
 /// variants weight each strategy's samples with a Veach heuristic; the
@@ -128,6 +135,10 @@ pub struct RenderSettings {
     // mean drops below `variance_threshold` (0 disables early stopping).
     pub(super) min_samples_per_pixel: u32,
     pub(super) variance_threshold: f32,
+    // How far a still-sampling cross neighbour's convergence index may sit
+    // above a pixel's own before it holds the pixel back (see
+    // `with_adaptive_neighbour_tolerance`). Negative: no comparison.
+    pub(super) adaptive_neighbour_tolerance: f32,
     pub(super) frame: isize,
     // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).
     pub(super) guiding: bool,
@@ -165,6 +176,7 @@ impl RenderSettings {
             height,
             min_samples_per_pixel,
             variance_threshold,
+            adaptive_neighbour_tolerance: DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
             frame,
             guiding: false,
             guiding_train_iterations: 4,
@@ -255,6 +267,32 @@ impl RenderSettings {
     /// is off.
     pub fn indirect_clamp(&self) -> Option<f32> {
         self.indirect_clamp
+    }
+
+    /// How much less converged a still-sampling cross neighbour (up, down,
+    /// left, right) may be before it holds a pixel back, in units of the
+    /// convergence index (`relative standard error / variance_threshold`,
+    /// so `1` means "one threshold of relative error"). Defaults to
+    /// [`DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE`]. A negative value skips the
+    /// comparison, and each pixel then stops exactly as it would alone —
+    /// the A/B side. A non-finite value keeps the default.
+    pub fn with_adaptive_neighbour_tolerance(mut self, tolerance: f32) -> Self {
+        if tolerance.is_finite() {
+            self.adaptive_neighbour_tolerance = tolerance;
+        }
+        self
+    }
+
+    pub fn adaptive_neighbour_tolerance(&self) -> f32 {
+        self.adaptive_neighbour_tolerance
+    }
+
+    pub fn min_samples_per_pixel(&self) -> u32 {
+        self.min_samples_per_pixel
+    }
+
+    pub fn variance_threshold(&self) -> f32 {
+        self.variance_threshold
     }
 
     pub fn get_dimensions(&self) -> (usize, usize) {

@@ -97,10 +97,36 @@ the state of the pixels around it. Rejected: the halo belongs to other work
 units, so either tiles would wait on each other or the result would depend
 on schedule order, which breaks the tiles ↔ scanlines bit-identity pair.
 
-*Alternative, larger or growing batches:* fewer rounds, but the check points
-would move, and a negative tolerance would no longer match today's stop.
-Batches of 4 keep the match. If round overhead turns out to matter, revisit
-this after measuring.
+*Batch size:* the first implementation used batches of 4 throughout, so
+that the check points stayed where the per-pixel loop had them and a
+negative tolerance could be proved bit-identical to the pre-change binary
+(it was: cornellbox 64 spp, `exr_diff` all zeros). Measured, the rounds then
+cost **+8.1% min / +8.9% mean** wall-clock on that same bit-identical render
+(`bench_ab.sh`), with callgrind counting 0.5% *fewer* instructions — the
+cost is the fork/join tail of `(spp − first_check) / 4` rounds and colder
+caches, not work. D8 replaces the fixed batch.
+
+**D8: batches grow 25% a round.** After the first sweep, round `r` traces
+`batch = max(4, taken / 4)` samples per active pixel, capped at the budget,
+where `taken` is the count every active pixel shares at the start of the
+round. From 32 at 1024 spp that is 16 rounds instead of 248. The cost is
+overshoot: a pixel that would have stopped at the next multiple of 4 now
+stops at the end of its batch, at most 25% past what it had taken (Cycles'
+doubling schedule overshoots by up to 100%; 25% keeps the samples spent on
+already-converged pixels small next to the barrier savings). The schedule
+is a pure function of `(spp, first_check)`, computed once up front, so the
+number of rounds — and the progress total (D6) — is known before the pass
+starts. What stays pinned: every pixel draws the same sample indices
+whatever the schedule; a negative tolerance still means "exactly the
+samples the pixel would take alone", since alone it would follow the same
+schedule; tiles and scanlines stay bit-identical. What is retired: the
+bit-identity of `t < 0` with the pre-change per-pixel loop above the first
+check point. It held at batch 4, which was its purpose (task 5.2); it is not
+a standing invariant.
+
+*Alternative, finer work units in late rounds:* shortens each barrier's
+tail without moving the check points. Set aside: it keeps the same number
+of barriers, and the tail is per barrier.
 
 **D4: the cross-neighbour rule.** Pixel `p` stops in a round when all of the
 following hold:
@@ -151,11 +177,12 @@ the minimum to 4 at 16 spp, making the goldens early-stop and cascade (the
 `check_images.sh` / CLAUDE.md rule).
 
 **D6: progress.** The first sweep reports once per work unit, as today.
-Each later round reports one tick, and the total is units plus the maximum
-number of rounds. If the pass ends early, the remaining ticks are emitted so
-that `completed` reaches `total`, still increasing by one per report as the
-rendering spec requires. That is at most `(N − first_check) / 4` extra
-callbacks.
+Each later round reports one tick, and the total is units plus the length
+of the batch schedule (D8). If the pass ends early, the remaining ticks are
+emitted so that `completed` reaches `total`, still increasing by one per
+report as the rendering spec requires. The counter advances whether or not
+a callback is attached — the walk-to-total loop otherwise never ends on a
+render without one (a trap already fallen into).
 
 **D7: tests pin the rules, not the ALab image.** Each test:
 
@@ -173,16 +200,25 @@ callbacks.
 - End to end: a flat image with one noisy pixel, where the noisy pixel's
   four cross neighbours take more samples at `t = 1` than at `t < 0`.
 - A tiled render equals a scanline render, bit for bit, with `t = 1`.
-- That a negative tolerance reproduces today's code is proved outside the
-  test suite, by `exr_diff` against the pre-change binary (tasks).
+- The batch schedule (D8): deterministic, every batch at least 4, each at
+  most 25% of the samples taken before it, the last one ending exactly at
+  the budget; and the round count it implies is the progress total.
+- That a negative tolerance reproduced the pre-change code was proved once,
+  outside the test suite, by `exr_diff` against the pre-change binary at
+  batch 4 (task 5.2). With growing batches that comparison no longer holds
+  and is not repeated.
 
 ## Risks / Trade-offs
 
-- [Round overhead: up to `N/4` parallel barriers per pass, e.g. 254 at 1024
-  spp, and late rounds leave few active pixels per work unit] → Measure with
-  `bench_ab.sh` on cornellbox and ALab, negative tolerance against the base
-  binary. If it matters, skip work units with no active pixel without
-  touching them, and consider growing batches (D3) as a follow-up.
+- [Round overhead: measured at batch 4 as +8.1% min / +8.9% mean on
+  cornellbox 64 spp and +6.6% / +13.6% on ALab 64 spp (`bench_ab.sh`, base
+  against `t = −1`), a barrier-tail cost rather than instructions] → D8's
+  growing batches cut the round count by an order of magnitude; re-measure
+  the same A/B after it (tasks, section 7).
+- [Overshoot from growing batches: a converged pixel takes up to 25% more
+  samples than it needs] → Bounded by the growth rate; the ALab probe's mean
+  spp at `t = 1` before (992.1) and after is the measurement. If it grows
+  more than the barrier savings are worth, lower the rate.
 - [Per-pixel state is now full-frame: about 48 B of accumulators plus 4 B of
   index per pixel, roughly 110 MB at 1920×1080] → Acceptable next to the
   scene; keep the fields that are already f64 as f64 so the off side stays

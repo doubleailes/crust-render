@@ -204,14 +204,140 @@ consumed as ordinary dependencies:
    pass's own noisy mean, which would correlate numerator and denominator and break
    the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
    unguided (training passes still blend in; every pass is unbiased either way).
-5. **Adaptive sampling**: pixels stop early once they hold `crust:minSamplesPerPixel`
-   samples and the relative standard error of the pixel mean drops below
-   `crust:varianceThreshold` (0 disables). Applies to main/final passes, never to
-   guiding training passes.
+5. **Adaptive sampling**: pixels stop early once they hold the effective minimum
+   (`crust:minSamplesPerPixel`, floored at `⌈√spp⌉`), have seen some light, their
+   relative standard error is below `crust:varianceThreshold` (0 disables), and no
+   still-sampling cross neighbour is more than `crust:adaptiveNeighbourTolerance`
+   less converged. Applies to main/final passes, never to guiding training passes.
+   See "Adaptive sampling" below for the rounds and the traps.
 6. The CLI writes the linear EXR to the `-o` path and a tone-mapped sRGB PNG next to it
    (same path, `.png` extension) — e.g. `-o renders/foo.exr` produces `renders/foo.exr`
    and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
    crate only produces the `Buffer`.
+
+## Adaptive sampling
+
+The final pass stops a pixel once the relative standard error of its mean
+luminance, `sqrt(var_of_mean) / max(mean, 1e-4)`, is below
+`crust:varianceThreshold`, checked every 4th sample from the minimum on. Three
+guards sit on top of that test, each the answer to a bias it has (Kirk & Arvo,
+SIGGRAPH '91; Tamstorf & Jensen, EGWR '97: when the samples that decide whether
+to stop are also averaged into the image, early samples that happen to agree
+stop the pixel too soon, worst under indirect light).
+
+- **The all-zero trap.** A pixel whose first `min` samples are all exactly zero
+  has a measured variance of zero, passes the test at once and is written black,
+  whatever the budget. On ALab frame 1004 (1024 spp, authored minimum 8) that left
+  3,124 pixels at exactly 0.0, speckled over the glassware, where most paths
+  legitimately carry nothing — shadow rays cannot see lights through a
+  dielectric. With adaptive sampling off the speckles fall away as 1/spp (803 at
+  32 spp, 136 at 128): a bias of the stop rule, not noise of the integrator. The
+  **zero-signal gate** refuses the stop until the pixel has recorded a sample
+  with non-zero luminance: its convergence index is `+∞` until then. The gate
+  tests `lum_sq > 0`, not `lum_sum`: Mitchell's negative filter lobes can leave
+  a lit pixel with `lum_sum <= 0`, whereas a sum of squares is zero exactly when
+  every sample's luminance was. Only the all-zero case is degenerate — with `k`
+  equal hits among `n` samples the relative error is about `sqrt((1 − k/n)/k)`,
+  so a single hit reads as 1 and the stop needs roughly `1/threshold²` hits.
+- **The √spp floor.** The effective minimum is
+  `max(crust:minSamplesPerPixel, ⌈√spp⌉, 2)`, computed per pass from the pass's
+  budget (after `-s`), so an authored 8 at 1024 spp takes at least 32 (Cycles
+  uses the same √spp). A *floor* on the authored value, not a default when it is
+  unauthored: a √spp default would drop the minimum to 4 at 16 spp, and the
+  goldens (`check_images.sh`, 16 spp) rely on the unauthored 32 so that no pixel
+  ever stops early — above that, a one-ulp change moves a pixel's budget and
+  cascades. Two sample scenes author a lower minimum (`rectlight` 4, `motionblur`
+  8) and therefore *do* early-stop at 16 spp; they are the two goldens this change
+  moved (rectlight: 76.8% → 21.1% of pixels stopped early, the black penumbra
+  pixels being the trap itself; motionblur: 67.3% → 62.9%, 250 pixels held by a
+  neighbour). Any later change that touches the stop rule will move them again.
+- **The convergence index and the cross-neighbour tolerance** (Guerilla's model).
+  Each pixel of the adaptive pass carries an f32 index `e = relative error /
+  threshold`: below 1 when it passes its own test, `+∞` before it has seen light.
+  A pixel stops only if, in addition, none of its four cross neighbours (up, down,
+  left, right; no diagonals, no radius) that is *still sampling* has an index more
+  than `crust:adaptiveNeighbourTolerance` (default 1) above its own:
+  `e_q − e_p ≤ t`. One-sided (a more converged neighbour never holds), absolute in
+  index units (both sides are already normalised by the threshold), and stopped
+  neighbours never hold — converged or out of budget, more samples beside them
+  change nothing, which bounds the cost at the edge of a truly black region. A
+  held pixel keeps its own `e`, so holding never chains. A negative tolerance
+  skips the comparison entirely: "off" is the per-pixel stop with no dependence on
+  neighbour values, and the A/B side. The own-pixel test stays the f64 comparison;
+  the rounded f32 index feeds only the comparison between neighbours, so a pixel
+  at the boundary decides exactly as it did alone.
+
+**Rounds.** A neighbour comparison is impossible when each pixel runs its whole
+sample loop inside its work unit, so the adaptive pass runs in global rounds over
+full-frame state (`PixelState`: the accumulators, `taken`, the index, `converged`,
+`stopped`, `held` — about 60 B per pixel). A first sweep brings every pixel to the
+first check point (the smallest multiple of 4 at or above the effective minimum,
+capped at the budget); each round then freezes every pixel's index and whether it
+is still sampling into two image-order buffers, decides against that frozen buffer
+which pixels stop (`held_by_neighbour`), and traces 4 more samples for the pixels
+still active. Nothing writes the buffer while a decision reads it, so no decision
+depends on the order the units run in — tiles and scanlines stay bit-identical
+with the comparison on (pinned by `tiles_and_scanlines_agree_under_the_neighbour_comparison`).
+The batch grows 25% a round (`batch_schedule`: `max(4, taken / 4)`, capped at
+the budget), so a 1024 spp pass from 32 runs 16 rounds rather than 248; a pixel
+that converges mid-batch overshoots by at most 25% of what it had taken (on ALab
+that cost 0.7% of mean spp). The schedule is a pure function of `(spp,
+first_check)`, computed once, so the round count and the progress total are
+known up front. With a fixed batch of 4 the check points sat exactly where the
+per-pixel loop had them, and `t < 0` was proved bit-identical to the pre-change
+binary (cornellbox 64 spp, minimum 32: `exr_diff` all zeros, 102,171 pixels
+stopped early on both); the growing batch retires that comparison, which had
+served its purpose. What stays pinned: the same sample indices whatever the
+schedule, "exactly the samples the pixel would take alone" under `t < 0`, and
+tiles ↔ scanlines. Work units are tiles or rows as before — rows are now
+`width`×1 tiles through the one gather — with one `PathScratch` per rayon
+worker (`for_each_init`). Progress reports one tick per unit in the first
+sweep, then one per round; an early finish walks the remaining ticks so
+`completed` reaches `total` one step at a time, and the counter advances
+whether or not a callback is attached.
+
+**Costs.** Truly black pixels now run the full budget, and hold their lit cross
+neighbours while they do; pixels beside noise take more samples — that is the
+comparison's purpose, and `--stats` prints "adaptive: held by neighbour" so the
+cost is visible. Measured 2026-09-30 on ALab frame 1004 at 1024 spp, authored
+minimum 8 (a shot layer over `entry.usda`), 640×360:
+
+| rule | exact-zero pixels | stopped early | mean spp | held | Render |
+|------|------------------:|--------------:|---------:|-----:|-------:|
+| before this change | 7,233 (3.1%) | 21.4% | 925.9 | — | 185 s |
+| `t = −1`, batch 4 (gate + floor only) | 0 | 17.9% | 961.7 | 0 | 209 s* |
+| `t = 1`, batch 4 | 0 | 8.7% | 992.1 | 23,472 (10.2%) | 206 s |
+| `t = 1`, growing batch (shipped) | 0 | 6.1% | 998.7 | 19,476 (8.5%) | 203 s |
+
+(*that run overlapped a goldens check; the others were alone.) The black speckle
+over the glassware is gone at either tolerance; what remains on the glass is
+caustic fireflies through the dielectric, integrator noise. The samples the
+guards spend are the 4–8% of mean spp above, of which the growing batch's
+overshoot is 0.7%.
+
+The rounds themselves cost time even when they change nothing. `bench_ab.sh`,
+pre-change binary against `t = −1`, min / mean of interleaved runs, cornellbox
+at 64 spp (bit-identical output at batch 4, so pure scheduling): **+8.1% /
++8.9%** at a fixed batch of 4, **+7.0% / +4.8%** with the growing batch (4
+rounds instead of 8); ALab at 64 spp (where the zero gate also fires): +6.6% /
++13.6% at batch 4, −7.6% / −0.8% with the growing batch — noise. It is not
+work: callgrind (`RAYON_NUM_THREADS=1`, cornellbox 64 spp, `t = −1`, batch 4)
+counts 112.72 G instructions for the rounds against 113.32 G before, every
+integrator function identical to the instruction. It is the fork/join tail of
+each round: the last unit of a round leaves every other worker idle. Halving the
+round count barely moved cornellbox because the tail is proportional to one
+unit's work *in that round*, so summed over the pass it is about one unit's
+share of everything traced after the first sweep, whatever the batch schedule —
+growing batches only save the fixed per-barrier cost. What would shorten it is
+smaller work units in the rounds (an 8×8 tile's tail is a quarter of a 16×16
+tile's), not fewer rounds; not done, since on the production-sized scene the
+rounds already measure as noise and on cornellbox the 5–7% is a 0.5 s render.
+Skipping units with no active pixel does not touch the tail either.
+
+Traps already fallen into: the per-pixel loop hid the all-zero stop for as long as
+adaptive sampling existed, because a black pixel in glass looks like a shadow; and
+the rounds' progress counter must advance whether or not a callback is attached,
+or the walk-to-total loop never ends on a render without one.
 
 ## QMC sampling through the domain tree
 

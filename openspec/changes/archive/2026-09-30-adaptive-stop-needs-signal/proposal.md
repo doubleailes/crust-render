@@ -41,17 +41,21 @@ that model.
   `crust:adaptiveNeighbourTolerance` (index units, default 1), controls
   this. A negative tolerance is the per-pixel stop, which is the A/B side.
 - The final pass samples in rounds, with the full-frame index buffer updated
-  between rounds, instead of each pixel running its whole loop alone.
-  Scheduling only: with a negative tolerance, every pixel takes exactly the
-  samples it takes today.
+  between rounds, instead of each pixel running its whole loop alone. The
+  batch grows 25% a round after the first check point, so a 1024 spp pass
+  runs about 16 rounds rather than 248. Scheduling only: with a negative
+  tolerance, every pixel takes exactly the samples it would take alone.
 - Regression tests: a scene with no light never stops early; the √spp floor;
   a less converged cross neighbour holds a pixel and a diagonal one does not;
   a negative tolerance matches the per-pixel stop; tiles and scanlines stay
   bit-identical with the comparison on.
 - Truly black pixels, and pixels next to noisy ones, now take more samples.
   That is the cost of the fix. On ALab the zero gate alone rendered the
-  256 spp A/B in the same time (117 s against 120 s); the rounds and the
-  neighbour comparison need their own measurement (tasks).
+  256 spp A/B in the same time (117 s against 120 s); at 1024 spp the full
+  rule took the mean from 925.9 to 992.1 spp (185 s → 206 s) and removed
+  every exact-zero pixel (7,233 → 0). The rounds themselves, at a fixed
+  batch of 4, cost +8% wall-clock on an otherwise bit-identical render — the
+  barrier tail, not instructions — which is why the batch now grows.
 
 ## Capabilities
 

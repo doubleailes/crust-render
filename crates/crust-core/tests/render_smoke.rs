@@ -795,3 +795,126 @@ fn light_geometry_hidden_from_camera_rays_still_lights_the_scene() {
     let floor = buf.get_pixel(3, 0);
     assert!(floor.max_element() > 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive sampling: the stop rule
+// ---------------------------------------------------------------------------
+
+/// A flat emissive image of radiance `l` (a sphere enclosing the camera),
+/// adaptive on: `spp` allowed, authored minimum `min`, threshold 0.01,
+/// neighbour tolerance `t`.
+fn flat_adaptive_scene(l: f32, w: usize, h: usize, spp: u32, min: u32, t: f32) -> Renderer {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 100.0,
+        },
+        Arc::new(Emissive::new(Vec3A::splat(l))),
+    );
+    let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
+    let settings =
+        RenderSettings::new(spp, 2, w, h, min, 0.01, 0).with_adaptive_neighbour_tolerance(t);
+    Renderer::new(camera, world.commit(), LightList::new(), settings)
+}
+
+/// A pixel whose every sample is exactly zero has a measured variance of
+/// zero, which is not convergence: nothing has been observed. An empty
+/// world must therefore take its whole budget everywhere.
+#[test]
+fn adaptive_sampling_never_stops_a_pixel_that_has_seen_no_light() {
+    let (w, h, spp) = (6, 5, 64);
+    let world = WorldBuilder::new();
+    let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
+    let settings = RenderSettings::new(spp, 2, w, h, 4, 0.01, 0);
+    let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
+    let (buf, stats) = r.render_with_stats(false, &|_, _| {});
+    assert_eq!(buffer_sum(&buf, w, h), 0.0, "an empty world is black");
+    assert_eq!(stats.early_stopped, 0, "{stats:?}");
+    assert_eq!((stats.spp_min, stats.spp_max), (spp, spp), "{stats:?}");
+    assert_eq!(stats.camera_rays, (w * h) as u64 * spp as u64);
+}
+
+/// The minimum grows with the budget: an authored minimum of 8 at 1024 spp
+/// is floored at √1024 = 32, even on an image that converges at once.
+#[test]
+fn adaptive_minimum_is_floored_at_sqrt_spp() {
+    let (w, h) = (4, 4);
+    let r = flat_adaptive_scene(1.0, w, h, 1024, 8, -1.0);
+    let (_, stats) = r.render_with_stats(false, &|_, _| {});
+    assert_eq!(stats.early_stopped, (w * h) as u64, "{stats:?}");
+    assert!(stats.spp_min >= 32, "{stats:?}");
+    assert!(stats.spp_max < 1024, "{stats:?}");
+}
+
+/// A flat image with one noisy pixel: a small emitter that only the centre
+/// pixel's samples sometimes hit. At `t = 1` its four cross neighbours wait
+/// for it; at `t = -1` they stop as soon as they converge.
+fn one_noisy_pixel_scene(w: usize, h: usize, spp: u32, t: f32) -> Renderer {
+    let mut world = WorldBuilder::new();
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::ZERO,
+            radius: 100.0,
+        },
+        Arc::new(Emissive::new(Vec3A::ONE)),
+    );
+    // A small, very bright ball in front of the centre pixel, covering
+    // about a quarter of it: the pixel's samples split between 1 and 400.
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::new(0.0, 0.0, -10.0),
+            radius: 0.3,
+        },
+        Arc::new(Emissive::new(Vec3A::splat(400.0))),
+    );
+    let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
+    let settings = RenderSettings::new(spp, 2, w, h, 4, 0.01, 0)
+        .with_pixel_filter(PixelFilter::BoxFilter { radius: 0.5 })
+        .with_adaptive_neighbour_tolerance(t);
+    Renderer::new(camera, world.commit(), LightList::new(), settings)
+}
+
+#[test]
+fn a_less_converged_cross_neighbour_holds_a_pixel() {
+    let (w, h, spp) = (7, 7, 1024);
+    let (buf, on) = one_noisy_pixel_scene(w, h, spp, 1.0).render_with_stats(false, &|_, _| {});
+    let (_, off) = one_noisy_pixel_scene(w, h, spp, -1.0).render_with_stats(false, &|_, _| {});
+    let centre = buf.get_pixel(3, 3);
+    assert!(
+        centre.x > 1.5,
+        "the centre pixel must see the bright ball: {centre}"
+    );
+    assert!(
+        buf.get_pixel(1, 1).abs_diff_eq(Vec3A::ONE, 1e-5),
+        "the rest of the image is flat"
+    );
+    // Off: the 48 flat pixels stop at the first check past the effective
+    // minimum (32 at 1024 spp); only the centre keeps going.
+    assert!(off.early_stopped >= (w * h) as u64 - 1, "{off:?}");
+    assert_eq!(off.neighbour_held, 0, "{off:?}");
+    // On: the four cross neighbours of the noisy pixel are held while it
+    // is still sampling, so the pass spends more samples, and exactly those
+    // four pixels are counted as held.
+    assert_eq!(on.neighbour_held, 4, "{on:?}");
+    assert!(
+        on.adaptive_samples > off.adaptive_samples,
+        "held neighbours take more samples: {} vs {}",
+        on.adaptive_samples,
+        off.adaptive_samples
+    );
+}
+
+/// The neighbour comparison reads a buffer no pixel writes during the
+/// decision, so the schedule cannot leak into it: tiles and scanlines agree
+/// bit for bit with the comparison on.
+#[test]
+fn tiles_and_scanlines_agree_under_the_neighbour_comparison() {
+    let (w, h, spp) = (20, 18, 256);
+    let rows = one_noisy_pixel_scene(w, h, spp, 1.0);
+    let (a, sa) = rows.render_with_stats(false, &|_, _| {});
+    let (b, sb) = rows.render_with_stats(true, &|_, _| {});
+    assert!(buffers_equal(&a, &b, w, h));
+    assert_eq!(sa, sb);
+    assert!(sa.neighbour_held > 0, "{sa:?}");
+}

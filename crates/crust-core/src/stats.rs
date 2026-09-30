@@ -212,6 +212,10 @@ pub struct RayStats {
     pub early_stopped: u64,
     pub spp_min: u32,
     pub spp_max: u32,
+    /// Pixels that passed their own convergence test but were held back,
+    /// at least once, by a less converged cross neighbour (see
+    /// `RenderSettings::with_adaptive_neighbour_tolerance`).
+    pub neighbour_held: u64,
 }
 
 impl RayStats {
@@ -271,6 +275,7 @@ impl RayStats {
         self.adaptive_pixels += o.adaptive_pixels;
         self.adaptive_samples += o.adaptive_samples;
         self.early_stopped += o.early_stopped;
+        self.neighbour_held += o.neighbour_held;
         self.ended_absorbed += o.ended_absorbed;
         self.volume_scatters += o.volume_scatters;
         self.medium_scatters += o.medium_scatters;
@@ -905,6 +910,14 @@ impl fmt::Display for RenderStats {
                     r.spp_min,
                     r.adaptive_samples as f64 / r.adaptive_pixels as f64,
                     r.spp_max
+                )?;
+                writeln!(
+                    f,
+                    "  {:<28} {} of {} pixels ({:.1}%)",
+                    "adaptive: held by neighbour",
+                    count(r.neighbour_held),
+                    count(r.adaptive_pixels),
+                    share(r.neighbour_held, r.adaptive_pixels)
                 )?;
             }
             writeln!(

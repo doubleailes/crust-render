@@ -176,13 +176,29 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     // the engine default; an authored 0 leaves the estimator unbiased.
     let indirect_clamp =
         custom_f32(&prim, "crust:indirectClamp").unwrap_or(crate::tracer::DEFAULT_INDIRECT_CLAMP);
+    // Adaptive sampling's cross-neighbour tolerance, in convergence-index
+    // units; negative turns the comparison off. A non-finite value cannot
+    // be compared against, so it is refused rather than silently disabling
+    // the guard.
+    let neighbour_tolerance = match custom_f32(&prim, "crust:adaptiveNeighbourTolerance") {
+        Some(t) if t.is_finite() => t,
+        Some(t) => {
+            warn!(
+                "crust:adaptiveNeighbourTolerance = {t} is not finite — using {}",
+                crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
+            );
+            crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE
+        }
+        None => crate::tracer::DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
+    };
 
     // What the stage asked for, before the CLI's own overrides. Every field
     // here silently falls back to a default when unauthored, so this is the
     // line that separates "the scene set it" from "nobody did".
     debug!(
         "RenderSettings at {}: {w}x{h}, {spp} spp (min {min_spp}, variance threshold \
-         {variance}), max depth {max_depth}, frame {frame}, strategy {strategy:?}, \
+         {variance}, neighbour tolerance {neighbour_tolerance}), max depth {max_depth}, \
+         frame {frame}, strategy {strategy:?}, \
          light selection {light_selection:?}, filter {} radius {}, indirect clamp {}, guiding {}",
         prim.path(),
         filter.name(),
@@ -204,6 +220,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)
         .with_indirect_clamp(indirect_clamp)
+        .with_adaptive_neighbour_tolerance(neighbour_tolerance)
 }
 
 /// Warns when `time` lies outside the stage's authored

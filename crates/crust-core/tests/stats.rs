@@ -250,6 +250,7 @@ fn ray_stats_merge_adds_every_counter() {
         early_stopped: 1,
         spp_min: 16,
         spp_max: 16,
+        neighbour_held: 1,
     };
     let b = RayStats {
         camera_rays: 10,
@@ -276,6 +277,7 @@ fn ray_stats_merge_adds_every_counter() {
         early_stopped: 0,
         spp_min: 8,
         spp_max: 32,
+        neighbour_held: 2,
     };
     a.merge(&b);
     assert_eq!(a.camera_rays, 11);
@@ -298,6 +300,7 @@ fn ray_stats_merge_adds_every_counter() {
         (a.adaptive_pixels, a.adaptive_samples, a.early_stopped),
         (3, 56, 1)
     );
+    assert_eq!(a.neighbour_held, 3);
     // Min and max, not sums.
     assert_eq!((a.spp_min, a.spp_max), (8, 32));
     // Merging the empty stats is the identity.
