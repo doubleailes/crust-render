@@ -50,10 +50,26 @@ pub struct MemorySample {
 }
 
 impl MemorySample {
+    /// Both figures from **one** read of `/proc/self/status`. The kernel
+    /// only guarantees `VmHWM >= VmRSS` within a single read (it reports
+    /// `max(hiwater_rss, current rss)`); the high-water mark is updated
+    /// lazily and RSS is batched per thread, so two separate reads can
+    /// return an RSS above the peak while other threads allocate. `None`
+    /// for both anywhere procfs is not available.
     pub fn now() -> Self {
-        MemorySample {
-            rss: current_memory_bytes(),
-            peak: peak_memory_bytes(),
+        #[cfg(target_os = "linux")]
+        {
+            let Some(status) = read_proc_status() else {
+                return MemorySample::default();
+            };
+            MemorySample {
+                rss: parse_proc_status_bytes(&status, "VmRSS:"),
+                peak: parse_proc_status_bytes(&status, "VmHWM:"),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            MemorySample::default()
         }
     }
 }
@@ -538,10 +554,17 @@ impl RenderStats {
     }
 }
 
-/// Reads one `VmXxx:` field of `/proc/self/status`, in bytes.
+/// One snapshot of `/proc/self/status`. Fields that must agree with each
+/// other (`VmRSS` and `VmHWM`) are parsed from the same snapshot with
+/// [`parse_proc_status_bytes`], never from two reads.
 #[cfg(target_os = "linux")]
-fn proc_status_bytes(field: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+fn read_proc_status() -> Option<String> {
+    std::fs::read_to_string("/proc/self/status").ok()
+}
+
+/// One `VmXxx:` field of a `/proc/self/status` snapshot, in bytes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_status_bytes(status: &str, field: &str) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix(field) {
             let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
@@ -549,6 +572,12 @@ fn proc_status_bytes(field: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Reads one `VmXxx:` field of `/proc/self/status`, in bytes.
+#[cfg(target_os = "linux")]
+fn proc_status_bytes(field: &str) -> Option<u64> {
+    parse_proc_status_bytes(&read_proc_status()?, field)
 }
 
 /// Peak resident set size in bytes, if the platform can report it.
@@ -569,7 +598,9 @@ pub fn peak_memory_bytes() -> Option<u64> {
 
 /// Currently resident set size in bytes. Paired with
 /// [`peak_memory_bytes`], the difference exposes transient allocation:
-/// memory a phase took and gave back.
+/// memory a phase took and gave back. To compare the two, take them from
+/// one [`MemorySample::now`] rather than calling both: each call reads
+/// procfs afresh, and across reads the peak may lag the RSS.
 pub fn current_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -1415,5 +1446,28 @@ mod tests {
     fn human_bytes_scales_to_gibibytes() {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2 * 1024 * 1024 * 1024), "2.00 GiB");
+    }
+
+    #[test]
+    fn parse_proc_status_bytes_reads_fields_from_one_snapshot() {
+        // Field order and the trailing unit follow the real file; the
+        // prefix match must not mistake `VmRSS` for `VmHWM`, nor the
+        // `Rss*` breakdown lines for `VmRSS`.
+        let status = "Name:\tcrust-render\nVmPeak:\t  900000 kB\nVmSize:\t  800000 kB\n\
+                      VmHWM:\t  300000 kB\nVmRSS:\t  200000 kB\nRssAnon:\t  150000 kB\n\
+                      RssFile:\t   50000 kB\nThreads:\t8\n";
+        assert_eq!(
+            parse_proc_status_bytes(status, "VmRSS:"),
+            Some(200_000 * 1024)
+        );
+        assert_eq!(
+            parse_proc_status_bytes(status, "VmHWM:"),
+            Some(300_000 * 1024)
+        );
+        assert_eq!(parse_proc_status_bytes(status, "VmSwap:"), None);
+        assert_eq!(
+            parse_proc_status_bytes("VmRSS:\t  bogus kB\n", "VmRSS:"),
+            None
+        );
     }
 }
