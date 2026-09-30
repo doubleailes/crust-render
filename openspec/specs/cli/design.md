@@ -102,6 +102,14 @@ cargo run --release -p crust-render --example scene_bounds -- scene.usda
 cargo run --release -p crust-render --example tex_probe -- texture.ptx
 cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 y1]
 
+# Does a MaterialX node compute what MaterialX's reference implementation does?
+# The replay needs nothing installed; regenerating the reference values needs
+# `pip install materialx` and an OSL built with -DUSE_FAST_MATH=0
+# -DOSL_BUILD_TESTS=1 (the script refuses a fast-math build; the build recipe is
+# under "Node semantics are checked" in openspec/specs/materials/design.md).
+cargo test -p crust-mtlx --test osl_oracle -- --nocapture   # prints the guard counts
+OSL_ROOT=/path/to/osl scripts/osl_oracle.py                 # rewrites tests/data/osl_oracle.txt
+
 # What OpenPBR parameters does a MaterialX graph actually reduce to? A wrong
 # albedo decode is a plausible pastel and a wrong mask is a plausible blend, so
 # a MaterialX surface cannot be checked by eye -- this prints the numbers at a

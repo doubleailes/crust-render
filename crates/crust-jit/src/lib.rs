@@ -383,15 +383,6 @@ impl Gen<'_> {
         self.b.ins().select(ok, q, z)
     }
 
-    /// `f32::clamp`: `if x < lo { x = lo }; if x > hi { x = hi }`.
-    fn clamp(&mut self, x: Value, lo: f32, hi: f32) -> Value {
-        let (lo, hi) = (self.f32(lo), self.f32(hi));
-        let below = self.b.ins().fcmp(FloatCC::LessThan, x, lo);
-        let x = self.b.ins().select(below, lo, x);
-        let above = self.b.ins().fcmp(FloatCC::GreaterThan, x, hi);
-        self.b.ins().select(above, hi, x)
-    }
-
     /// An operand's lanes and width, if its width is known.
     fn operand(&mut self, slot: u32) -> Option<(Lanes, u8)> {
         let n = self.arity[slot as usize]?;
@@ -498,12 +489,12 @@ impl Gen<'_> {
             } => Some(fallback.arity),
             Op::TexCoord { .. } => Some(2),
             Op::Normal | Op::ViewDirection | Op::Position => Some(3),
-            // `normalize` returns a `vector3` — or, for a zero-length input,
-            // the input itself, whose width is only equal when it is 3.
+            // `normalize` keeps its operand's width, except that a `float`
+            // becomes a `vector3` — unless it is zero, and returned as is.
             Op::Unary {
                 op: UnOp::Normalize,
                 a,
-            } => (w(a) == Some(3)).then_some(3),
+            } => w(a).filter(|&n| n != 1),
             Op::Unary { a, .. } => w(a),
             Op::Binary { a, b, .. } => max(&[a, b]),
             Op::Mix { fg, bg, m } => max(&[fg, bg, m]),
@@ -518,13 +509,15 @@ impl Gen<'_> {
             } => max(&[a, in_low, in_high, out_low, out_high]),
             Op::Invert { a, amount } => max(&[a, amount]),
             Op::Convert { arity, .. } => Some((*arity).clamp(1, 4)),
-            Op::Extract { .. } | Op::DotProduct { .. } | Op::Luminance { .. } => Some(1),
+            Op::Extract { .. } | Op::DotProduct { .. } => Some(1),
+            // The grey keeps its input's width (and a `color4` its alpha).
+            Op::Luminance { a, .. } => w(a),
             Op::Combine3 { .. }
             | Op::NormalMap { .. }
             | Op::ArtisticIor { .. }
             | Op::HsvAdjust { .. }
             | Op::HeightToNormal { .. } => Some(3),
-            Op::Combine2 { .. } => Some(2),
+            Op::Combine2 { a, b } => Some(w(a)? + w(b)?).map(|n| n.min(4)),
         }
     }
 
@@ -605,9 +598,19 @@ impl Gen<'_> {
                 let (a, amt) = (self.operand(*a)?, self.operand(*amount)?);
                 self.zip(amt, a, |g, m, x| g.b.ins().fsub(m, x))
             }
+            // A `float` keeps its (broadcast) lanes; a wider value's new
+            // lanes are zero, and one in the fourth; to a `float`, lane 0.
             Op::Convert { a, arity } => {
-                let (lanes, _) = self.operand(*a)?;
-                (lanes, (*arity).clamp(1, 4))
+                let (mut lanes, n) = self.operand(*a)?;
+                let arity = (*arity).clamp(1, 4);
+                if n > 1 && arity == 1 {
+                    lanes = [lanes[0]; 4];
+                } else if n > 1 {
+                    for (i, lane) in lanes.iter_mut().enumerate().skip(n as usize) {
+                        *lane = self.f32(if i == 3 { 1.0 } else { 0.0 });
+                    }
+                }
+                (lanes, arity)
             }
             Op::Extract { a, index } => {
                 let (lanes, _) = self.operand(*a)?;
@@ -618,34 +621,43 @@ impl Gen<'_> {
                 let z = self.f32(0.0);
                 ([a.0[0], b.0[0], c.0[0], z], 3)
             }
+            // The lanes of `a`, then of `b`, zero after.
             Op::Combine2 { a, b } => {
-                let (a, b) = (self.operand(*a)?, self.operand(*b)?);
-                let z = self.f32(0.0);
-                ([a.0[0], b.0[0], z, z], 2)
+                let ((a, na), (b, nb)) = (self.operand(*a)?, self.operand(*b)?);
+                let (na, nb) = (na as usize, (nb as usize).min(4 - na as usize));
+                let mut lanes = [self.f32(0.0); 4];
+                lanes[..na].copy_from_slice(&a[..na]);
+                lanes[na..na + nb].copy_from_slice(&b[..nb]);
+                (lanes, (na + nb) as u8)
             }
-            // a.zip(lo, −).zip(hi.zip(lo, −), |x, d| guarded (x/d).clamp(0,1))
-            //  .map(|t| t·t·(3 − 2t))
+            // Per lane: `x < lo` → 0, else `x >= hi` → 1, else with
+            // t = (x − lo) / (hi − lo), t·t·(3 − 2t). The ramp is computed
+            // unconditionally and discarded by the selects where a test won,
+            // so its division by an empty interval never reaches a result.
             Op::Smoothstep { a, low, high } => {
                 let (a, lo, hi) = (self.operand(*a)?, self.operand(*low)?, self.operand(*high)?);
-                let x = self.zip(a, lo, |g, x, l| g.b.ins().fsub(x, l));
-                let d = self.zip(hi, lo, |g, h, l| g.b.ins().fsub(h, l));
-                let t = self.zip(x, d, |g, x, d| {
-                    let ad = g.b.ins().fabs(d);
-                    let k = g.f32(GUARD);
-                    let ok = g.b.ins().fcmp(FloatCC::GreaterThan, ad, k);
-                    let q = g.b.ins().fdiv(x, d);
-                    let q = g.clamp(q, 0.0, 1.0);
-                    let z = g.f32(0.0);
-                    g.b.ins().select(ok, q, z)
+                let n = a.1.max(lo.1).max(hi.1);
+                let wide = |(l, k): (Lanes, u8)| if k == 1 && n > 1 { [l[0]; 4] } else { l };
+                let (a, lo, hi) = (wide(a), wide(lo), wide(hi));
+                let lanes = [0, 1, 2, 3].map(|i| {
+                    let (x, l, h) = (a[i], lo[i], hi[i]);
+                    let num = self.b.ins().fsub(x, l);
+                    let den = self.b.ins().fsub(h, l);
+                    let t = self.b.ins().fdiv(num, den);
+                    let tt = self.b.ins().fmul(t, t);
+                    let two = self.f32(2.0);
+                    let three = self.f32(3.0);
+                    let tw = self.b.ins().fmul(two, t);
+                    let r = self.b.ins().fsub(three, tw);
+                    let ramp = self.b.ins().fmul(tt, r);
+                    let one = self.f32(1.0);
+                    let at_top = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, x, h);
+                    let upper = self.b.ins().select(at_top, one, ramp);
+                    let zero = self.f32(0.0);
+                    let below = self.b.ins().fcmp(FloatCC::LessThan, x, l);
+                    self.b.ins().select(below, zero, upper)
                 });
-                self.map(t, |g, t| {
-                    let tt = g.b.ins().fmul(t, t);
-                    let two = g.f32(2.0);
-                    let three = g.f32(3.0);
-                    let tw = g.b.ins().fmul(two, t);
-                    let r = g.b.ins().fsub(three, tw);
-                    g.b.ins().fmul(tt, r)
-                })
+                (lanes, n)
             }
             _ => return None,
         })

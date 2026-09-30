@@ -515,6 +515,101 @@
     preloaded decoder narrows to 8 bits, so an HDR emission texture probed
     through it reads 1.0 whatever the file holds, and a probe that cannot see
     the range is worse than no probe because it answers confidently.
+  - **Node semantics are checked against the reference implementation.**
+    `crust-mtlx/tests/osl_oracle.rs` replays 4 420 one-node cases through
+    `Compiler` + `Program::eval` and compares every lane with the value
+    MaterialX's own OSL code generator (`genosl`) produces for the same
+    document, compiled by `oslc` and run once by `testshade`. That covers all
+    259 stdlib signatures of the pattern nodes crust compiles, over the six
+    value types it models, with a zero-input "defaults" case plus 16 seeded
+    random ones each (a fifth of the inputs are left unauthored, so defaults
+    are also checked in combination). The expected values live in
+    `tests/data/osl_oracle.txt` (committed, ~360 KiB), so `cargo test` needs
+    neither OSL nor MaterialX; `scripts/osl_oracle.py` regenerates it. Inputs
+    are drawn from literals with at most three decimals, so genosl's `%f`
+    printing and crust's parse give both sides bit-identical inputs, and lanes
+    must agree to 1e-5 relative (the two sides use different `libm`s). The
+    width must agree exactly: a `float` zero where a `vector4` was due matches
+    four zero lanes but reads as a scalar in `luminance`, `normalize`,
+    `dotproduct`, `combine2` and the JIT's width inference. The fixture header
+    states its signature and per-signature case counts, and
+    `the_fixture_is_complete` holds the fixture to them, so a regeneration that
+    lost rows cannot pass by checking less (the script also writes nothing
+    unless every case ran). The
+    first run found sixteen node categories that differed, every one of them
+    something a render would show as a plausible value. Apart from the guards
+    below, they were crust bugs and were fixed to the reference (the JIT
+    followed wherever it inlines the op, and `crust-jit/tests/jit.rs` checks it
+    still bit for bit):
+    - unauthored defaults: `multiply` / `divide` / `power` / `modulo` default
+      `in1` to **0**, not 1; `ln` defaults `in` to 1 (crust used 0, so an
+      unauthored `ln` was −69); `artistic_ior`'s reflectivity is
+      (0.944, 0.776, 0.373), not the two-decimal rounding;
+    - `sign(0)` was 1 (Rust's `f32::signum` answers ±1 for ±0); the
+      surface builders' `ifgreater` select, which leaned on it to send
+      equality to `in2`, now tests `sign(value1 − value2)` instead;
+    - `modulo` truncated (`%`) where MaterialX floors: `-0.2 mod 1` is 0.8.
+      It is OSL's `x − y·floor(x / y)`, whose rounding the reference has
+      (`-1 mod -0.2` is 0, not the exact −0.19999999), except where that
+      quotient overflows for finite operands (`1 mod 1e-40`, −inf), where the
+      exact remainder `%`, floored, takes over;
+    - `power` clamped a negative base to 0, where OSL's `safe_pow` takes
+      integer exponents of it (`(-3)^2 = 9`), and `0^-1` was +inf, now 0;
+    - `smoothstep` and `clamp` disagreed when `low > high` (OSL's
+      `smoothstep` tests `x < low`, then `x >= high`; its `clamp` is
+      `max(min(x, high), low)`);
+    - `luminance` ignored `lumacoeffs`, dropped a `color4`'s alpha and
+      returned a `color3`'s grey as a `float`;
+    - an unauthored input was a `float` whatever the node's type, so an
+      `add_color3` over nothing but defaults came out one lane wide (191
+      signatures, found once the test compared widths). `Compiler::input_or`
+      now widens a `float` default to the node's width, which changes no lane;
+    - `dotproduct` and `normalize` of a `vector4` read three lanes, and of a
+      `vector2` read a third lane that was not the value's;
+    - `combine2` took lane 0 of each operand, so `color4CF`, `vector4VF` and
+      `vector4VV` lost lanes (the `vector4` signatures are told apart by the
+      connected producers' types, since the parser reads an input with no
+      `type` as a `float`); `convert` to a `color4` / `vector4` left alpha 0
+      instead of 1, and widening kept whatever the producing op left in the
+      new lanes;
+    - `normalmap` ignored the second component of a `vector2` scale;
+    - `ln` of a non-positive value is now OSL's `ln(FLT_MIN)` = −87.34, not
+      −69 (the same finite guard, the reference's constant);
+    - `artistic_ior` blended the IOR as `x + (y − x)·t`, which at the default
+      white edge leaves `n_max`'s rounding (~70) in `n_min`: 7e-5 relative.
+    Rendered, the fixes move three sample scenes, all through the
+    `artistic_ior` blend: `check_images.sh` (16 spp, old binary against new)
+    finds every other scene bit-identical, and restoring the old blend alone
+    makes those three bit-identical too. Each holds a metal whose conductor is
+    an `artistic_ior` — `materialx_basic`'s dirtied metal (6.6% of pixels, at
+    most 1.5e-7 absolute, relmse 4e-16) and the metal `standard_surface`s of
+    `materialx_cutout` (19%, 1.7e-5, 1.5e-14) and `materialx_surfaces`
+    (7.6%, 4.6e-5, 1.5e-15) — the blend's rounding. The DPEL teapot and lion
+    render identically.
+    What still differs is six guards, each a rule in the test's `deviation()`
+    that names the one input condition it applies to (91 lanes in all):
+    a zero divisor in `divide` gives 0 and an empty `remap` input range gives
+    `outlow`, not ±inf / NaN (an infinity survives every later multiply and
+    reaches the framebuffer); `modulo` by zero returns the dividend, as OSL's
+    float `mod` does, where its vector `mod` gives NaN; `normalmap`'s decoded
+    z is raised to 1e-4, keeping the normal off the tangent plane;
+    `artistic_ior` clamps `edge_color` to [0, 1] (outside it the IOR
+    extrapolates to negative values); and an unauthored `convert` input is a
+    zero `float`, because crust never reads the `nodedef` attribute and nothing
+    else tells `convert_color3_color4` from `convert_float_color4` (alpha 0,
+    not 1). **Regenerating** needs OSL built from source with
+    `-DUSE_FAST_MATH=0 -DOSL_BUILD_TESTS=1`: the default build compiles OIIO's
+    approximate `acos` / `asin` / `pow` into the runtime, off by ~2e-5 —
+    enough to fail every inverse-trig case — and no run-time option turns it
+    off (`testshade --options opt_fastmath=0` is silently accepted and does
+    nothing). The script checks `acos(0.5)` and refuses such a build. OSL
+    1.13.9's exact path also does not compile as shipped: four float calls
+    (`safe_asin`, `safe_acos` in `liboslexec/llvm_ops.cpp`, `safe_log2`,
+    `safe_log10` in `include/OSL/dual.h`) need an `OIIO::` qualifier. On
+    Ubuntu 24.04 the dependencies are the distribution's
+    `libopenimageio-dev`, `llvm-17-dev`, `libclang-17-dev`, `libboost-dev`,
+    `libpugixml-dev`, `flex` and `bison`, plus an empty `/usr/include/opencv4`
+    (OIIO's CMake config names it); MaterialX is `pip install materialx`.
   - Sample scenes: `samples/materialx_basic.usda` + `.mtlx` (self-contained, 20
     KiB of textures, what `tests/usd_scene.rs` runs against; its `mtlx_lacquer`
     is a two-dielectric stack whose interfaces stay separate leaves — α 0.02 at
@@ -638,9 +733,16 @@
   `<nodedef>` custom node *implementations* are not, so a graph instantiating one
   gets that input at a constant (reported). The pattern operators the Material
   Fidelity suite still lacks are listed in `docs/material_fidelity.md`. No
-  `<look>` / `<materialassign>`: bindings come from USD. Two parser quirks
-  predate the tree: `sign(0)` is 1 where GLSL's is 0, and two nodes with the same
-  name in one scope collide.
+  `<look>` / `<materialassign>`: bindings come from USD. One parser quirk
+  predates the tree: two nodes with the same name in one scope collide.
+- **The OSL oracle covers the pattern nodes only** (§ MaterialX, "Node
+  semantics are checked"): `image` / `tiledimage` (a texture file), `texcoord`,
+  `normal`, `position` and `viewdirection` (the shading globals) are not in it,
+  nor are `hsvadjust`, `colorcorrect` and `heighttonormal` (not yet in the
+  script's `CATEGORIES`), nor anything the closure and surface builders
+  (`bsdf.rs`, `surface.rs`) emit, which the pattern ops they lower to are
+  checked through. `integer`, `boolean` and matrix signatures are not generated
+  because crust has no such values.
 - **Stdlib nodegraphs lowered by hand.** `colorcorrect` (`color3`) is compiled to
   `NG_colorcorrect_color3`'s own chain (`hsvadjust` → `saturate` → `range` gamma →
   lift → gain → `contrast` → exposure) out of existing ops plus `HsvAdjust`, with a

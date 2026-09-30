@@ -309,16 +309,17 @@ impl B<'_, '_> {
     /// MaterialX's `ifgreater`: `in1` where `value1 > value2`, else `in2`.
     ///
     /// Built from existing operators so the JIT needs nothing new:
-    /// `m = max(sign(value2 − value1), 0)` is 1 exactly when `value1` is *not*
-    /// greater — Rust's `signum(+0.0)` is 1, which is what makes equality pick
-    /// `in2` — and `mix(fg = in2, bg = in1, m)` is exact at `m ∈ {0, 1}` for
-    /// finite operands (every divide and log in the program is kept finite).
+    /// `m = max(sign(value1 − value2), 0)` is 1 exactly when `value1` is
+    /// greater — MaterialX's `sign(0)` is 0, and `x − x` is `+0`, which is
+    /// what makes equality pick `in2` — and `mix(fg = in1, bg = in2, m)` is
+    /// exact at `m ∈ {0, 1}` for finite operands (every divide and log in the
+    /// program is kept finite).
     fn gt(&mut self, v1: Slot, v2: Slot, in1: Slot, in2: Slot) -> Slot {
-        let d = self.sub(v2, v1);
+        let d = self.sub(v1, v2);
         let s = self.un(UnOp::Sign, d);
         let zero = self.k(0.0);
         let m = self.bin(BinOp::Max, s, zero);
-        self.mix(in2, in1, m)
+        self.mix(in1, in2, m)
     }
 
     /// MaterialX's `ifgreatereq`: `in1` where `value1 ≥ value2`, else `in2` —
@@ -1079,7 +1080,7 @@ fn standard_surface(b: &mut B<'_, '_>) {
     let thin_walled = b.get("thin_walled");
     b.out.thin_walled = Some(thin_walled);
     let opacity = b.get("opacity");
-    let luminance = b.c.emit(Op::Luminance { a: opacity }); // opacity_luminance(_float)
+    let luminance = b.c.luminance(opacity); // opacity_luminance(_float)
     b.set_opacity(luminance); // shader_constructor.opacity
 }
 

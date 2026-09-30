@@ -138,8 +138,10 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
     let operands = [f, c3, c4, v2, k, zero, kc, neg];
     for &a in &operands {
         push(Op::Unary { op: UnOp::Abs, a });
-        push(Op::Convert { a, arity: 3 });
-        push(Op::Convert { a, arity: 1 });
+        // Every target width: narrowing, and widening's zero / one fill.
+        for arity in 1..=4 {
+            push(Op::Convert { a, arity });
+        }
         for index in [0, 2, 7] {
             push(Op::Extract { a, index });
         }
@@ -169,6 +171,12 @@ fn every_inlined_op_matches_across_widths_and_edge_values() {
                 a,
                 low: zero,
                 high: zero,
+            });
+            // Inverted edges, where the `x < low` / `x >= high` tests decide.
+            push(Op::Smoothstep {
+                a,
+                low: kc,
+                high: b,
             });
             push(Op::Remap {
                 a,
