@@ -1,0 +1,55 @@
+## 1. Baseline
+
+- [ ] 1.1 Record goldens for every sample scene with the current binary (`scripts/check_images.sh record <dir>`, 16 spp, `--indirect-clamp 0`) and keep that binary for `bench_ab.sh`; verified by one EXR per sample in `<dir>`
+- [ ] 1.2 Record `--stats` for `gen_subdiv_stress.py` at level 3 (kernel 416.89 MiB = 196 B/triangle: nodes 80, normals 48, packets 49, BVH 15, leaves 4; commit peak 808.79 MiB against a 284 MiB traverse RSS) and for `samples/subdivision.usda` at `--subdiv-level 4`; verified by the numbers copied into the design record's baseline table
+- [ ] 1.3 Callgrind `Bvh::hit` / `intersect_leaf` instruction counts on cornellbox and materialx_basic at `-s 2`, single thread, as the codegen baseline for D1–D3; verified by the counts noted for task 8.2
+
+## 2. Kernel: records and shared tables (D1, D3, D5)
+
+- [ ] 2.1 `TriangleRecord { geom_id, prim_id, v: [u32; 3], mask }` in `prim.rs` and a size test pinning 24 B; `PrimNode` loses its `Triangle` variant and a test pins it at ≤ 64 B; verified by `cargo test -p crust-rt`
+- [ ] 2.2 `SceneBuilder::commit` concatenates every `TriangleMesh` into `vertices: Box<[[f32; 3]]>`, `normals: Box<[[f32; 3]]>` and `records: Box<[TriangleRecord]>` with global indices and a per-geometry `normals_base`, moving each geometry's arrays before the build, erroring past `u32::MAX` vertices; verified by a test on two meshes (one with normals, one without) reading back every vertex and normal by global index
+- [ ] 2.3 `PrimSource` (records + tables + remaining `PrimNode`s) answering `bbox`, `clipped_aabb`, `as_triangle` by index; `build_subtree`, `collapse` and `push_leaf` read through it; verified by `build_twice_is_identical` and the kernel test suite
+- [ ] 2.4 `PrimRef` and `Node` as `[f32; 6] + u32` (32 B, size-tested); subtrees written into a pre-sized arena with in-place child offset fix-up, `merge` removed; verified by `build_twice_is_identical`, every BVH test, and the commit-peak measurement of task 8.1
+- [ ] 2.5 `hit_from_barycentric` and the `f64` tie-break read the record and gather normals / vertices from the tables; geometric-normal fallback from the lane's vertices; verified by `simd_matches_scalar_bitwise` and by `check_images.sh check` against 1.1 being bit-identical on every sample
+- [ ] 2.6 `Scene::triangle_vertices(geom_id, prim_id) -> Option<[Vec3A; 3]>`, local space for an instanced scene; verified by a test on a baked and an instanced mesh comparing against the attached arrays
+
+## 3. Kernel: indexed packets (D2)
+
+- [ ] 3.1 `Tri4i` (96 B, size-tested): per-lane vertex indices, record ids, `active`, masks; `intersect` gathers into the same nine `Vec4`s and calls the shared lane code; `Leaf` carries the layout bit; verified by `tri4i_matches_tri4_bitwise` over 100 000 random rays against random triangle sets, `fallback` lanes compared too
+- [ ] 3.2 `Config::tri_packets: gathered | indexed | auto` (`CRUST_TRI_PACKETS`, default `auto`), threaded to `commit()`; `auto` picks `Tri4i` above `INDEXED_PACKETS_FROM` triangles; verified by a config test per spelling and a commit test reading the footprint's per-layout rows
+- [ ] 3.3 Set `INDEXED_PACKETS_FROM` from `ray_throughput` and `ray_throughput --large` A/Bs (min-of-10, `gathered` vs `indexed` on each tree size); verified by the table in the design record and by `indexed` not being slower than `gathered` at the sizes where `auto` selects it
+- [ ] 3.4 `scripts/test_simd_matrix.sh -p crust-rt` clean under both `CRUST_TRI_PACKETS` values; verified by its exit code
+
+## 4. Kernel: packet-aware leaves (D4)
+
+- [ ] 4.1 `Config::bvh_packet_sah` (`CRUST_BVH_PACKET_SAH`, default on); the leaf decision charges all-triangle ranges `ceil(count / 4)` and other ranges `count`; verified by a build test on 8 coplanar triangles yielding one leaf of two full packets with the switch on and more with it off
+- [ ] 4.2 Noise proof: for every sample scene render on / off at 16, 64 and 256 spp with `--indirect-clamp 0`, `exr_diff` relmse between the two must fall as 1/√N and never plateau; verified by the table in the design record (a scene that plateaus blocks the default until explained)
+- [ ] 4.3 Lane fill and node bytes per primitive on the stress grid, `subdivision.usda` level 4, and ALab or Kitchen_set (on/off), from `--stats`; `bench_ab.sh` on / off on every sample; verified by the numbers in the design record and fill ≥ 80 % on the irregular scene
+- [ ] 4.4 Re-record goldens with the switch on, in the same commit as 4.2's proof, with `check_images.sh check` under `CRUST_BVH_PACKET_SAH=0` still bit-identical to 1.1; verified by both script runs
+
+## 5. Importer: on-demand and indexed side tables (D6)
+
+- [ ] 5.1 `World` keeps each geometry's placement (`l2w`, identity for baked) and exposes the hit triangle's world-space vertices through `Scene::triangle_vertices`; verified by a test on an instanced mesh
+- [ ] 5.2 `UvMap` becomes `values` + `corners`; `resolve` computes the tangent and density at the hit with `build_tangents`' and `triangle_density`'s formulas; the stored `tangents` / `density` vectors are removed; verified by `tangents_on_demand_match_the_table` and `densities_on_demand_match_the_table` (old table vs on-demand, bitwise, on every UV-textured sample) and by `check_images.sh check`
+- [ ] 5.3 Normal maps on instanced meshes shade with a tangent frame; `textures/spec.md` loses that gap; verified by an inline-USD test placing a normal-mapped mesh twice and checking the shading normal differs from the geometric one, and by a render of `samples/instancing.usda` with a normal-mapped material
+- [ ] 5.4 `SubdivFaces` returns `SubFace { base, origin, depth, rotation }` per refined face (8 B) from the refiner's child relations; `FaceMap` stores `sub_faces: Option<Vec<SubFace>>` and `resolve` reconstructs corners; the Ptex face-varying channel and the second refiner pass for a `none` chart are removed; verified by `sub_face_corners_match_the_refined_channel` (bitwise, all six rules, the creased cube and a 3-ring cage) and by `ptex_quads.usda` at `--subdiv-level 2` bit-identical to 1.1
+- [ ] 5.5 `MeshGeom`, `MeshSource`, `SubdividedMesh`, `Geometry::TriangleMesh` carry `[f32; 3]` positions and normals; `bake_verts` / `bake_normals` / `smooth_normals` adapt; verified by `cargo test --workspace` and `check_images.sh check`
+- [ ] 5.6 `subdivide()` drops the refiner before the limit copies; `subdivision_memory_probe` ceilings lowered to the measured values and the `SubFace` case added; verified by the probe passing at the new ceilings and failing at the old numbers minus 30 %
+
+## 6. `--stats` (D8)
+
+- [ ] 6.1 `MemoryFootprint` gains `vertices`, `vertex_normals` (per vertex), `triangle_records`, `packets_gathered`, `packets_indexed`, `lanes` / `lanes_filled`; the report prints them plus `lanes filled` (%) and `bytes per triangle`; verified by a stats test on a two-mesh scene checking every row and the arithmetic
+- [ ] 6.2 `cli/design.md` cookbook gains the memory-layout recipe (`CRUST_TRI_PACKETS` × `CRUST_BVH_PACKET_SAH` on the stress grid); verified by running each line
+
+## 7. Switches and records
+
+- [ ] 7.1 `docs/architecture.md`: rows for `CRUST_TRI_PACKETS` and `CRUST_BVH_PACKET_SAH`, the bit-identity pair "`Tri4` ↔ `Tri4i`" and "stored ↔ on-demand tangents and sub-face corners" under Invariants, the build transient item in the debt register updated; verified by `grep -n CRUST_TRI_PACKETS docs/architecture.md`
+- [ ] 7.2 `intersection-kernel/design.md` (storage layout, packet layouts and threshold table, leaf cost, build transient, footprint rows), `usd-scene-import/design.md` (subdivision memory table re-measured, sub-faces, D4 of the subdivision change retired), `textures/design.md` (tangents on instances), `cli/design.md`; the memory baseline and acceptance tables filled with measured numbers; verified by every "target" in this change's `design.md` § Memory model having a measured value beside it
+
+## 8. Acceptance
+
+- [ ] 8.1 Stress grid level 3: kernel ≤ 110 B/triangle (`gathered`) and ≤ 85 (`indexed`); commit peak minus traverse RSS ≤ 260 MiB; verified by `--stats` output quoted in the design record
+- [ ] 8.2 Callgrind: `Bvh::hit` + `intersect_leaf` within 1 % of 1.3 on cornellbox and materialx_basic with `gathered`; verified by the two counts
+- [ ] 8.3 `bench_ab.sh` old binary vs new over every sample: min and mean within noise, and no scene slower by more than 3 % in min; verified by the script's table in the design record
+- [ ] 8.4 DPEL teapot level 2 and, where a machine holds it, ALab level 1: kernel and peak RSS per the design record's acceptance rows; verified by `--stats`
+- [ ] 8.5 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast`, the nightly `bvh8` leg, `openspec validate compact-triangle-storage --strict`; verified by their exit codes
