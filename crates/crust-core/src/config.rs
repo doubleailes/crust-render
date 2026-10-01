@@ -56,7 +56,8 @@ use tracing::warn;
 /// with — see `crust_rt::PacketLayout`. Both answer every query
 /// bit-identically; `gathered` is the layout before indexed packets existed
 /// (the honest A/B side), `indexed` halves the packet bytes and gathers
-/// vertices at every test, `auto` chooses per tree by triangle count.
+/// vertices at every test (a quarter fewer kernel bytes per triangle for
+/// 13–30% slower traversal), `auto` is the measured default, gathered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TriPackets {
     Gathered,

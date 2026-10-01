@@ -33,10 +33,12 @@ attached `f32`s: nothing is quantized.
 A tree's triangle packets SHALL be either gathered (each lane holds its vertices) or
 indexed (each lane holds vertex indices and gathers from the shared table at test
 time). The two layouts SHALL return bit-identical hits, tie-break lanes included, and
-both SHALL remain bit-identical to the scalar intersector. `commit()` SHALL choose
-indexed packets for trees above a triangle-count threshold; the `CRUST_TRI_PACKETS`
-switch (`gathered` | `indexed` | `auto`, default `auto`) SHALL force either layout on
-every tree, `gathered` being the behaviour before this change.
+both SHALL remain bit-identical to the scalar intersector. The default (`auto`) SHALL
+be the gathered layout: measured in and out of cache, the indexed layout is slower at
+every tree size (13–30 %), so it is the explicit memory trade for a scene that
+otherwise does not fit. The `CRUST_TRI_PACKETS` switch (`gathered` | `indexed` |
+`auto`, default `auto`) SHALL select the layout on every tree, `gathered` being the
+behaviour before this change.
 
 #### Scenario: Forcing a layout
 
@@ -47,9 +49,10 @@ every tree, `gathered` being the behaviour before this change.
 
 #### Scenario: Indexed packets cost half of gathered ones
 
-- **WHEN** a tree is committed under `indexed`
-- **THEN** its packet bytes are half those of the same tree under `gathered`, and
-  every other footprint row is unchanged
+- **WHEN** the subdivision stress scene is committed under `indexed`
+- **THEN** its packet bytes are half those of the same tree under `gathered` (50.03
+  against 104.41 MiB), every other footprint row is unchanged, and the kernel holds
+  79 bytes per triangle against 104
 
 ### Requirement: Leaves are sized for packets
 

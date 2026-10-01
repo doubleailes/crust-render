@@ -1586,10 +1586,9 @@ fn packet_layouts_are_bit_identical() {
     assert!(hits > 200, "only {hits} hits");
 }
 
-/// `Auto` picks by triangle count: small scenes gather, scenes past the
-/// threshold index.
+/// `Auto` is the measured default, the gathered layout.
 #[test]
-fn auto_layout_gathers_small_scenes() {
+fn auto_layout_gathers() {
     let (v, t) = grid(4);
     let mut b = SceneBuilder::new();
     b.attach(mesh(v, t));

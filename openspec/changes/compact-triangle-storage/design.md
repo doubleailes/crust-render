@@ -189,19 +189,27 @@ the same call.
 *Alternative rejected:* keep `PrimNode::Triangle` and only drop its vertices. The enum
 would still be sized by `CurvePrim` (48 B) plus tag, and every triangle would pay it.
 
-**D2 — Two packet layouts, bit-identical, chosen per tree.** `Tri4` stays as it is
-(192 B, nine `Vec4`s of gathered vertices, per-lane record ids and masks). `Tri4i` is
-96 B: `[[u32; 3]; 4]` vertex indices, `[u32; 4]` record ids, `active`, the three mask
-words. Its `intersect` gathers the twelve vertices into the same nine `Vec4`s and calls
-the same code, so the arithmetic — and therefore every bit, `fallback` lanes
-included — is identical; `tri4i_matches_tri4_bitwise` pins it, and the existing
-`simd_matches_scalar_bitwise` pins both against the scalar test. At `commit()` a tree
-with more than `INDEXED_PACKETS_FROM` triangles takes `Tri4i`; below it, `Tri4`. The
-threshold is set by `ray_throughput --large` A/Bs, on the finding in `docs/simd.md`
-that in-cache and out-of-cache trees answer layout questions oppositely; the design
-record gets the numbers. `CRUST_TRI_PACKETS=gathered|indexed|auto` (default `auto`)
-forces a side; `gathered` on every tree is the behaviour this replaces, so the A/B is
-honest. A leaf's packets are one layout: `Leaf` gains a bit, not a per-packet tag.
+**D2 — Two packet layouts, bit-identical; the default is gathered.** `Tri4` stays as
+it is (192 B, nine `Vec4`s of gathered vertices, per-lane record ids and masks).
+`Tri4i` is 92 B: `[[u32; 3]; 4]` vertex indices and the same lane masks. Its
+`intersect` gathers the twelve vertices into the same nine `Vec4`s and calls the same
+lane code, so the arithmetic — and therefore every bit, `fallback` lanes included — is
+identical; `tri4i_matches_tri4_bitwise` and `packet_layouts_are_bit_identical` pin it,
+and `simd_matches_scalar_bitwise` pins both against the scalar test. The layout is
+per tree (`commit_with`), and `CRUST_TRI_PACKETS=gathered|indexed|auto` selects it;
+`gathered` on every tree is the behaviour this replaces, so the A/B is honest.
+*Measured outcome (task 3.3), against the expectation written here first:* the
+proposal assumed a tree too large for the cache would favour the smaller packet, on
+`docs/simd.md`'s finding that out-of-cache trees answer layout questions oppositely.
+They do not here. `ray_throughput --layout` in cache: indexed 1–8 % slower; the
+4 M-triangle out-of-cache soup (581 → 451 MiB kernel): intersect 9.48 → 12.32 s,
+occluded 8.21 → 11.23 s (−30 %); the stress-grid render 7.20 → 6.27 Mray/s (−13 %) for
+104 → 79 kernel bytes per triangle. Twelve dependent vertex loads per packet test cost
+more than the 100 bytes of bandwidth they save. So `auto` is gathered, and `indexed`
+is the explicit trade for a scene that otherwise does not fit — a quarter of the
+kernel's bytes per triangle for a tenth to a third of its traversal speed.
+*Alternative not taken:* a per-tree size threshold, which the measurement left with
+no value.
 
 **D3 — Normals interpolate from the per-vertex table through the record.** On a
 candidate hit, `hit_from_barycentric` reads the record, gathers three normals by its
@@ -293,9 +301,9 @@ spatial splits, lane fill `φ`), kernel-resident bytes per triangle:
 | primitive node / record | 80 | 24 | 24 |
 | normals | 48 | 6 | 6 |
 | vertices | (in the node) | 6 | 6 |
-| packets | 49 (`48·r/φ`) | `48·r/φ` ≈ 49 | `24·r/φ` ≈ 25 |
+| packets | 49 (`48·r/φ`) | `48·r/φ` ≈ 49 | `23·r/φ` ≈ 25 |
 | BVH nodes + leaves | 19 | 19 | 19 |
-| **total** | **196** | **~104** | **~80** |
+| **total** | **196** | **~104** (measured 104.2) | **~80** (measured 78.6) |
 
 On ALab-shaped geometry (`φ ≈ 0.48`, nodes 65 B per primitive) D4 is the larger term:
 bringing `φ` to ~0.85 and leaves to 4–8 triangles is worth ~120 B per triangle on its
