@@ -150,7 +150,7 @@ other. The pairs:
   compares bits, not tolerances.
 - **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
   mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
-  kernel's shared vertices and an 8-byte cell at the hit; the tests that pin
+  kernel's shared vertices and a 4-byte cell at the hit; the tests that pin
   them against the tables they replaced must keep passing if either formula
   moves.
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the

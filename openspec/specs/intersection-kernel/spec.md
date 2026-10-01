@@ -138,7 +138,8 @@ between their renders SHALL fall as 1/√N with the sample count.
 
 - **WHEN** six overlapping triangles that no split separates well are committed with the
   switch on
-- **THEN** they form one leaf of two full packets; with it off they form more than one leaf
+- **THEN** they form one leaf of two packets, the second with two inactive lanes; with
+  it off they form more than one leaf
 
 #### Scenario: Lane fill is reported
 
