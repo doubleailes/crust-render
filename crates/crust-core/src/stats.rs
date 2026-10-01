@@ -760,17 +760,45 @@ impl fmt::Display for RenderStats {
                 human_bytes(fp.total() as u64)
             )?;
             for (label, bytes) in [
+                ("vertices", fp.vertices),
+                ("vertex normals", fp.vertex_normals),
+                ("triangle records", fp.triangle_records),
+                ("triangle packets", fp.packets),
                 ("primitive nodes", fp.prim_nodes),
                 ("boxed primitives", fp.boxed_prims),
-                ("vertex normals", fp.vertex_normals),
                 ("BVH nodes", fp.bvh_nodes),
-                ("triangle packets", fp.packets),
                 ("leaf indices", fp.indices),
                 ("leaves", fp.leaves),
+                ("geometry tables", fp.geometry_tables),
             ] {
                 if bytes > 0 {
                     writeln!(f, "    {:<26} {}", label, human_bytes(bytes as u64))?;
                 }
+            }
+            // How well the packets are used, and the one number a layout
+            // change is judged by: kernel bytes per resident triangle.
+            if fp.lanes > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {:.1}% ({} of {})",
+                    "lanes filled",
+                    100.0 * fp.lanes_filled as f64 / fp.lanes as f64,
+                    thousands(fp.lanes_filled),
+                    thousands(fp.lanes)
+                )?;
+            }
+            let triangles = if s.unique.is_empty() {
+                s.top_level.triangles
+            } else {
+                s.unique.triangles
+            };
+            if triangles > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {:.1}",
+                    "bytes per triangle",
+                    fp.total() as f64 / triangles as f64
+                )?;
             }
         }
         if let Some(peak) = peak_memory_bytes() {

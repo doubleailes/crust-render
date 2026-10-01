@@ -5,11 +5,10 @@
 //! the same however `rayon::join` interleaves the subtrees.
 
 use crate::aabb::AABB;
-use crate::prim::PrimNode;
 
 use super::{
     BINS, MAX_DEPTH, MAX_LEAF, MIN_LEAF, MIN_LEAF_PACKED, Node, PARALLEL_THRESHOLD, PrimRef,
-    SBVH_ALPHA, SBVH_MAX_DEPTH, Subtree,
+    Primitives, SBVH_ALPHA, SBVH_MAX_DEPTH, Subtree,
 };
 
 pub(super) fn surface_area(b: &AABB) -> f32 {
@@ -176,7 +175,7 @@ fn best_object_split(refs: &[PrimRef]) -> Option<ObjSplit> {
 /// a bin contribute their *clipped* bounds to it (entry/exit counting), so
 /// the candidate children reflect what duplication would actually produce.
 pub(super) fn best_spatial_split(
-    prims: &[PrimNode],
+    prims: &Primitives,
     refs: &[PrimRef],
     bbox: &AABB,
 ) -> Option<SpatSplit> {
@@ -229,8 +228,8 @@ pub(super) fn best_spatial_split(
         let mut last = b0;
         for b in b0..=b1 {
             let (bin_lo, bin_hi) = (lo + b as f32 * width, lo + (b + 1) as f32 * width);
-            if let Some(c) = prims[r.idx as usize]
-                .clipped_aabb(axis, bin_lo, bin_hi)
+            if let Some(c) = prims
+                .clipped_aabb(r.idx, axis, bin_lo, bin_hi)
                 .and_then(|c| intersect_aabb(&c, &r.bbox))
             {
                 add(b, c);
@@ -288,7 +287,7 @@ pub(super) fn best_spatial_split(
 /// (locally indexed — `merge` rebases children). `root_area` normalizes
 /// the SBVH overlap test.
 pub(super) fn build_subtree(
-    prims: &[PrimNode],
+    prims: &Primitives,
     mut refs: Vec<PrimRef>,
     depth: usize,
     root_area: f32,
@@ -341,9 +340,8 @@ pub(super) fn build_subtree(
             } else if r.bbox.minimum[s.axis] >= s.pos {
                 right.push(r);
             } else {
-                let prim = &prims[r.idx as usize];
-                if let Some(c) = prim
-                    .clipped_aabb(s.axis, f32::NEG_INFINITY, s.pos)
+                if let Some(c) = prims
+                    .clipped_aabb(r.idx, s.axis, f32::NEG_INFINITY, s.pos)
                     .and_then(|c| intersect_aabb(&c, &r.bbox))
                 {
                     left.push(PrimRef {
@@ -351,8 +349,8 @@ pub(super) fn build_subtree(
                         idx: r.idx,
                     });
                 }
-                if let Some(c) = prim
-                    .clipped_aabb(s.axis, s.pos, f32::INFINITY)
+                if let Some(c) = prims
+                    .clipped_aabb(r.idx, s.axis, s.pos, f32::INFINITY)
                     .and_then(|c| intersect_aabb(&c, &r.bbox))
                 {
                     right.push(PrimRef {
@@ -408,7 +406,7 @@ pub(super) fn build_subtree(
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
 /// fallback: object-partition when possible, else leaf.
 fn object_partition_or_leaf(
-    prims: &[PrimNode],
+    prims: &Primitives,
     refs: Vec<PrimRef>,
     bbox: AABB,
     object: Option<ObjSplit>,
@@ -435,11 +433,8 @@ fn object_partition_or_leaf(
 /// The leaf-size floor for this range: [`MIN_LEAF_PACKED`] when every
 /// reference is a triangle (so the leaf becomes exactly one SIMD packet),
 /// [`MIN_LEAF`] otherwise.
-fn min_leaf_for(prims: &[PrimNode], refs: &[PrimRef]) -> usize {
-    if refs
-        .iter()
-        .all(|r| prims[r.idx as usize].as_triangle().is_some())
-    {
+fn min_leaf_for(prims: &Primitives, refs: &[PrimRef]) -> usize {
+    if refs.iter().all(|r| prims.is_triangle(r.idx)) {
         MIN_LEAF_PACKED
     } else {
         MIN_LEAF

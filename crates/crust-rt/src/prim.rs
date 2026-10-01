@@ -6,7 +6,6 @@ use crate::aabb::{AABB, triangle_aabb};
 use crate::curve::rounded_cone_intersect;
 use crate::ray::{Ray, RayMask};
 use crate::scene::Scene;
-use crate::triangle::{clip_triangle_aabb, triangle_intersect};
 use glam::{Affine3A, Mat3A, Vec3A};
 use std::sync::Arc;
 
@@ -25,15 +24,11 @@ pub(crate) struct PrimHit {
 }
 
 pub(crate) trait Prim: Send + Sync {
-    /// `normals` is the owning [`Bvh`](crate::bvh::Bvh)'s shading-normal
-    /// table, which only a triangle reads (see [`TrianglePrim::normals`]).
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormals]) -> Option<PrimHit>;
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit>;
 
     /// Boolean occlusion variant; overridden where cheaper than `hit`.
-    /// Occlusion reports no normal, so the table is not needed: the one
-    /// primitive that reads it (a triangle) overrides this.
     fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        self.hit(ray, t_min, t_max, &[]).is_some()
+        self.hit(ray, t_min, t_max).is_some()
     }
 
     fn bbox(&self) -> AABB;
@@ -58,92 +53,104 @@ fn masked_out(ray: &Ray, mask: RayMask) -> bool {
 }
 
 // ---------------------------------------------------------------------
-// Triangle (optionally with per-vertex shading normals)
+// Triangle record
 // ---------------------------------------------------------------------
 
-pub(crate) struct TrianglePrim {
-    pub v0: Vec3A,
-    pub v1: Vec3A,
-    pub v2: Vec3A,
+/// One triangle of a committed scene: *which* vertices, not the vertices
+/// themselves. The positions live once in the owning
+/// [`Bvh`](crate::bvh::Bvh)'s shared vertex table, which the SIMD packets
+/// and this record both index, and a per-vertex shading normal, when the
+/// geometry has them, sits at the same offset in the normal table.
+///
+/// 24 bytes (pinned by `a_triangle_record_is_24_bytes`). The previous
+/// layout copied the three vertices into an 80-byte primitive node that
+/// traversal never read — packets carried their own copy — and held a
+/// third copy of each vertex's normal per triangle corner; a subdivided
+/// mesh paid 128 bytes per triangle for what this plus half a vertex now
+/// holds in 36.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TriangleRecord {
+    /// Global indices into the scene's vertex table, or
+    /// [`DEGENERATE_VERTEX`] in every slot for a triangle whose attached
+    /// indices were out of range — kept so `prim_id`s stay dense, never
+    /// built over or hit.
+    pub v: [u32; 3],
     pub geom_id: u32,
     pub prim_id: u32,
     pub mask: RayMask,
-    /// Index of this triangle's per-vertex shading normals in its
-    /// [`Bvh`](crate::bvh::Bvh)'s normal table, or [`NO_NORMALS`]; the
-    /// reported normal interpolates them by the hit barycentrics when
-    /// present.
-    ///
-    /// A side table rather than an inline `Option<[Vec3A; 3]>`, which is
-    /// 64 bytes whether or not it holds anything, made every triangle 128
-    /// bytes, and — being the largest variant — every `PrimNode` too; now
-    /// they are 64 and 80. The
-    /// normals are read once per closest hit, after traversal; the vertices
-    /// on every test. A sentinel rather than an `Option`, because here the
-    /// layout is the point: `Option<u32>` would take the struct past 64.
-    pub normals: u32,
 }
 
-/// Three per-vertex shading normals, one [`TrianglePrim`]'s entry in its
-/// BVH's normal table.
-pub(crate) type VertexNormals = [Vec3A; 3];
+/// The vertex index of a [`TriangleRecord`] that refers to no vertex.
+pub(crate) const DEGENERATE_VERTEX: u32 = u32::MAX;
 
-/// [`TrianglePrim::normals`] for a triangle with no shading normals.
+impl TriangleRecord {
+    #[inline]
+    pub(crate) fn is_degenerate(&self) -> bool {
+        self.v[0] == DEGENERATE_VERTEX
+    }
+}
+
+/// Where one geometry's triangles, vertices and normals start in its
+/// scene's shared tables. Indexed by `geom_id`; a geometry that is not a
+/// triangle mesh holds the defaults.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GeomTable {
+    /// First entry of this geometry in the vertex table.
+    pub vertex_base: u32,
+    /// First entry of this geometry in the normal table, or
+    /// [`NO_NORMALS`] when the geometry has no shading normals. A vertex at
+    /// `vertex_base + k` has its normal at `normal_base + k`.
+    pub normal_base: u32,
+    /// First [`TriangleRecord`] of this geometry; `prim_id` offsets it.
+    pub tri_base: u32,
+}
+
+/// [`GeomTable::normal_base`] for a geometry without shading normals.
 pub(crate) const NO_NORMALS: u32 = u32::MAX;
 
-impl TrianglePrim {
-    /// Completes a hit whose `(t, u, v)` are already known — the shared tail
-    /// of the scalar and the 4-wide SIMD intersectors, so both derive the
-    /// reported normal the same way.
-    pub(crate) fn hit_from_barycentric(
-        &self,
-        normals: &[VertexNormals],
-        t: f32,
-        u: f32,
-        v: f32,
-    ) -> Option<PrimHit> {
-        // `NO_NORMALS` is past the end of every table.
-        let outward = match normals.get(self.normals as usize) {
-            Some([n0, n1, n2]) => (*n0 * (1.0 - u - v) + *n1 * u + *n2 * v).normalize(),
-            None => {
-                let n = (self.v1 - self.v0).cross(self.v2 - self.v0);
-                if n == Vec3A::ZERO {
-                    return None; // degenerate sliver
-                }
-                n.normalize()
-            }
-        };
-        Some(PrimHit {
-            t,
-            outward,
-            u,
-            v,
-            geom_id: self.geom_id,
-            prim_id: self.prim_id,
-        })
+impl Default for GeomTable {
+    fn default() -> Self {
+        GeomTable {
+            vertex_base: 0,
+            normal_base: NO_NORMALS,
+            tri_base: 0,
+        }
     }
 }
 
-impl Prim for TrianglePrim {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormals]) -> Option<PrimHit> {
-        if masked_out(ray, self.mask) {
-            return None;
+/// Completes a triangle hit whose `(t, u, v)` are already known — the
+/// shared tail of the scalar and the 4-wide SIMD intersectors, so both
+/// derive the reported normal the same way. `normals` is the triangle's
+/// three per-vertex shading normals when its geometry has them; without
+/// them the geometric normal of `verts` is reported, and a sliver whose
+/// cross product is exactly zero reports no hit at all.
+#[inline]
+pub(crate) fn triangle_hit_from_barycentric(
+    rec: &TriangleRecord,
+    verts: &[Vec3A; 3],
+    normals: Option<[Vec3A; 3]>,
+    t: f32,
+    u: f32,
+    v: f32,
+) -> Option<PrimHit> {
+    let outward = match normals {
+        Some([n0, n1, n2]) => (n0 * (1.0 - u - v) + n1 * u + n2 * v).normalize(),
+        None => {
+            let n = (verts[1] - verts[0]).cross(verts[2] - verts[0]);
+            if n == Vec3A::ZERO {
+                return None; // degenerate sliver
+            }
+            n.normalize()
         }
-        let (t, u, v) = triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max)?;
-        self.hit_from_barycentric(normals, t, u, v)
-    }
-
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        !masked_out(ray, self.mask)
-            && triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max).is_some()
-    }
-
-    fn bbox(&self) -> AABB {
-        triangle_aabb(self.v0, self.v1, self.v2)
-    }
-
-    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
-        clip_triangle_aabb(self.v0, self.v1, self.v2, axis, min, max)
-    }
+    };
+    Some(PrimHit {
+        t,
+        outward,
+        u,
+        v,
+        geom_id: rec.geom_id,
+        prim_id: rec.prim_id,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -158,13 +165,7 @@ pub(crate) struct SpherePrim {
 }
 
 impl Prim for SpherePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -219,13 +220,7 @@ pub(crate) struct DiskPrim {
 }
 
 impl Prim for DiskPrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -279,13 +274,7 @@ pub(crate) struct CylinderPrim {
 }
 
 impl Prim for CylinderPrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -341,8 +330,12 @@ impl Prim for CylinderPrim {
 // ---------------------------------------------------------------------
 
 pub(crate) struct CurvePrim {
-    pub p0: Vec3A,
-    pub p1: Vec3A,
+    /// Unpadded on purpose: with `Vec3A` endpoints this is 64 bytes and,
+    /// as the largest inline variant, sizes every `PrimNode` at 80; at 48
+    /// the enum is 64 (`a_triangle_record_is_24_bytes` pins it). The two
+    /// conversions on a hit are nothing beside the cone intersection.
+    pub p0: [f32; 3],
+    pub p1: [f32; 3],
     pub r0: f32,
     pub r1: f32,
     pub geom_id: u32,
@@ -351,18 +344,19 @@ pub(crate) struct CurvePrim {
 }
 
 impl Prim for CurvePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
-        let (t, outward) =
-            rounded_cone_intersect(ray, self.p0, self.p1, self.r0, self.r1, t_min, t_max)?;
+        let (t, outward) = rounded_cone_intersect(
+            ray,
+            Vec3A::from_array(self.p0),
+            Vec3A::from_array(self.p1),
+            self.r0,
+            self.r1,
+            t_min,
+            t_max,
+        )?;
         Some(PrimHit {
             t,
             outward,
@@ -375,12 +369,12 @@ impl Prim for CurvePrim {
 
     fn bbox(&self) -> AABB {
         let a = AABB::new(
-            self.p0 - Vec3A::splat(self.r0),
-            self.p0 + Vec3A::splat(self.r0),
+            Vec3A::from_array(self.p0) - Vec3A::splat(self.r0),
+            Vec3A::from_array(self.p0) + Vec3A::splat(self.r0),
         );
         let b = AABB::new(
-            self.p1 - Vec3A::splat(self.r1),
-            self.p1 + Vec3A::splat(self.r1),
+            Vec3A::from_array(self.p1) - Vec3A::splat(self.r1),
+            Vec3A::from_array(self.p1) + Vec3A::splat(self.r1),
         );
         AABB::surrounding_box(a, b)
     }
@@ -407,13 +401,7 @@ pub(crate) struct CubicCurvePrim {
 }
 
 impl Prim for CubicCurvePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -548,13 +536,7 @@ impl InstancePrim {
 }
 
 impl Prim for InstancePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -625,7 +607,6 @@ impl Prim for InstancePrim {
 /// nothing. The other three stay inline: none of them are worth an
 /// allocation on their own.
 pub(crate) enum PrimNode {
-    Triangle(TrianglePrim),
     Sphere(SpherePrim),
     Disk(DiskPrim),
     Cylinder(CylinderPrim),
@@ -641,28 +622,20 @@ pub(crate) enum PrimNode {
 
 impl PrimNode {
     #[inline]
-    pub(crate) fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         match self {
-            PrimNode::Triangle(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Sphere(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Disk(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Cylinder(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Curve(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Instance(p) => p.hit(ray, t_min, t_max, normals),
+            PrimNode::Sphere(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Disk(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Cylinder(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Curve(p) => p.hit(ray, t_min, t_max),
+            PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max),
+            PrimNode::Instance(p) => p.hit(ray, t_min, t_max),
         }
     }
 
     #[inline]
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         match self {
-            PrimNode::Triangle(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Disk(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Cylinder(p) => p.hit_any(ray, t_min, t_max),
@@ -675,7 +648,6 @@ impl PrimNode {
     #[inline]
     pub(crate) fn bbox(&self) -> AABB {
         match self {
-            PrimNode::Triangle(p) => p.bbox(),
             PrimNode::Sphere(p) => p.bbox(),
             PrimNode::Disk(p) => p.bbox(),
             PrimNode::Cylinder(p) => p.bbox(),
@@ -685,19 +657,9 @@ impl PrimNode {
         }
     }
 
-    /// `Some` for triangles only — see `Prim::as_triangle`.
-    #[inline]
-    pub(crate) fn as_triangle(&self) -> Option<&TrianglePrim> {
-        match self {
-            PrimNode::Triangle(p) => Some(p),
-            _ => None,
-        }
-    }
-
     #[inline]
     pub(crate) fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
         match self {
-            PrimNode::Triangle(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Sphere(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Disk(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Cylinder(p) => p.clipped_aabb(axis, min, max),

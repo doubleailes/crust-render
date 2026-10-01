@@ -135,6 +135,7 @@ impl RayShear {
 /// the guarantee epsilon-based Möller-Trumbore lacks. Edge functions that
 /// come out exactly 0.0 in f32 are recomputed in f64, which resolves the
 /// on-edge ties consistently.
+#[cfg(test)]
 pub(crate) fn triangle_intersect(
     ray: &Ray,
     v0: Vec3A,
@@ -222,9 +223,9 @@ pub(crate) fn triangle_intersect_sheared(
 /// stays finite and the lanes are dropped by `active`).
 pub(crate) struct Tri4 {
     v: [[Vec4; 3]; 3],
-    /// Index into the BVH's primitive array per lane — how a hit gets back
-    /// to its shading normals and IDs.
-    pub prim: [u32; 4],
+    /// Index into the BVH's triangle records per lane — how a hit gets
+    /// back to its vertices, shading normals and IDs.
+    pub rec: [u32; 4],
     /// Bit `k` set iff lane `k` holds a real triangle.
     pub active: u32,
     /// AND / OR of the active lanes' visibility masks. Together they give a
@@ -258,7 +259,7 @@ impl Tri4 {
     pub(crate) fn new(tris: &[(Vec3A, Vec3A, Vec3A, u32, RayMask)]) -> Self {
         debug_assert!(!tris.is_empty() && tris.len() <= 4);
         let mut v = [[Vec4::ZERO; 3]; 3];
-        let mut prim = [u32::MAX; 4];
+        let mut rec = [u32::MAX; 4];
         let mut masks = [RayMask::NONE; 4];
         let mut active = 0u32;
         let mut mask_and = RayMask::ALL;
@@ -276,7 +277,7 @@ impl Tri4 {
                 v[2][axis][lane] = v2[axis];
             }
             if lane < tris.len() {
-                prim[lane] = pi;
+                rec[lane] = pi;
                 masks[lane] = mask;
                 active |= 1 << lane;
                 mask_and &= mask;
@@ -285,7 +286,7 @@ impl Tri4 {
         }
         Tri4 {
             v,
-            prim,
+            rec,
             active,
             mask_and,
             mask_or,

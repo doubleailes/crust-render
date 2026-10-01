@@ -1337,6 +1337,10 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
             + small.leaves
             + small.packets
             + small.indices
+            + small.triangle_records
+            + small.vertices
+            + small.vertex_normals
+            + small.geometry_tables
     );
     assert!(small.total() > 0);
 
@@ -1347,6 +1351,11 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     assert!(big.total() > small.total());
     assert!(big.packets > 0, "triangles are packed into SIMD packets");
     assert_eq!(small.packets, 0, "a sphere leaf has no triangle packet");
+    // A 31x31 grid of 961 vertices and 1 800 triangles, stored once each.
+    assert_eq!(big.vertices, 961 * 12);
+    assert_eq!(big.triangle_records, 1800 * 24);
+    assert_eq!(big.vertex_normals, 0);
+    assert!(big.lanes_filled >= 1800 && big.lanes_filled <= big.lanes);
 }
 
 #[test]
@@ -1415,4 +1424,87 @@ fn bounds_cover_every_attached_geometry() {
     assert!(bb.minimum.x <= -6.0 && bb.maximum.x >= 1.0);
     assert!(bb.minimum.y <= -1.0 && bb.maximum.y >= 1.0);
     assert!(bb.minimum.z <= -1.0 && bb.maximum.z >= 9.5);
+}
+
+/// Every vertex and normal a mesh attaches is stored once, exactly, and
+/// reachable from a hit: a scene of two meshes — one with normals, one
+/// without — answers `triangle_vertices` with the attached vertices by
+/// `(geom_id, prim_id)`, and a hit on the smooth mesh carries the same
+/// normal, bit for bit, as interpolating the three attached normals by the
+/// hit's barycentrics.
+#[test]
+fn shared_tables_hand_back_the_attached_vertices_and_normals() {
+    let (flat_v, flat_t) = grid(3);
+    let (v, t, n) = tessellated_sphere(6, 12);
+    let mut b = SceneBuilder::new();
+    let flat = b.attach(mesh(flat_v.clone(), flat_t.clone()));
+    let smooth = b.attach(Geometry::TriangleMesh {
+        vertices: v.clone(),
+        indices: t.clone(),
+        normals: Some(n.clone()),
+    });
+    let scene = b.commit();
+
+    for (geom, verts, tris) in [(flat, &flat_v, &flat_t), (smooth, &v, &t)] {
+        for (prim, [i0, i1, i2]) in tris.iter().enumerate() {
+            let got = scene
+                .triangle_vertices(geom, prim as u32)
+                .expect("every attached triangle is addressable");
+            assert_eq!(
+                got,
+                [
+                    verts[*i0 as usize],
+                    verts[*i1 as usize],
+                    verts[*i2 as usize]
+                ],
+                "geometry {geom} triangle {prim}"
+            );
+        }
+        assert!(scene.triangle_vertices(geom, tris.len() as u32).is_none());
+    }
+    assert!(scene.triangle_vertices(99, 0).is_none());
+
+    let mut rng = Rng::new(11);
+    for _ in 0..200 {
+        let d = dir(&mut rng);
+        let ray = Ray::new(d * 5.0, -d);
+        let hit = scene
+            .intersect(&ray, 0.001, 100.0)
+            .expect("aimed at the sphere's centre");
+        assert_eq!(hit.geom_id, smooth);
+        let [i0, i1, i2] = t[hit.prim_id as usize];
+        let expect = (n[i0 as usize] * (1.0 - hit.u - hit.v)
+            + n[i1 as usize] * hit.u
+            + n[i2 as usize] * hit.v)
+            .normalize();
+        let expect = if hit.front_face { expect } else { -expect };
+        assert_eq!(
+            hit.normal.to_array().map(f32::to_bits),
+            expect.to_array().map(f32::to_bits),
+            "shading normal is interpolated from the attached normals, exactly"
+        );
+    }
+}
+
+/// An instanced scene answers `triangle_vertices` in its own (local)
+/// space, whatever the placement — the host applies the transform.
+#[test]
+fn triangle_vertices_of_an_instanced_scene_are_local() {
+    let (v, t) = grid(2);
+    let mut proto = SceneBuilder::new();
+    let id = proto.attach(mesh(v.clone(), t.clone()));
+    let proto = Arc::new(proto.commit());
+    let mut b = SceneBuilder::new();
+    b.attach(instance(
+        Arc::clone(&proto),
+        Affine3A::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+    ));
+    let world = b.commit();
+    let [i0, i1, i2] = t[3];
+    assert_eq!(
+        proto.triangle_vertices(id, 3),
+        Some([v[i0 as usize], v[i1 as usize], v[i2 as usize]])
+    );
+    // The instance itself is not a triangle mesh of the outer scene.
+    assert!(world.triangle_vertices(0, 3).is_none());
 }
