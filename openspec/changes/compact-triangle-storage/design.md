@@ -352,27 +352,29 @@ Acceptance, measured with `--stats` rather than modelled:
    per-patch BVHs in a shared, budgeted cache (`CRUST_TESS_CACHE_MB`). Memory becomes
    independent of the level, as Embree's subdivision geometry is. Not bit-identical to
    uniform refinement: patch evaluation and level-by-level stencils sum in different
-   orders. The patch table's coverage was the other blocker: opensubdiv-rs 0.1.4
-   capped only smooth interior extraordinary vertices with Gregory patches and dropped
-   every creased or boundary irregular face to a bilinear quad. That was reported as
-   [doubleailes/OpenSubdiv-rs#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8)
-   and fixed in 0.2.0 (2026-09-30), which caps irregular boundary corners, corners on
-   infinitely sharp creases, sharp corners and darts as the reference's
-   `GregoryConverter` does, treats infinitely sharp creases as boundaries of regular
-   B-spline patches (`useInfSharpPatch`), and takes the reference's own edge-point
-   coefficients at extraordinary vertices. What still falls to `PatchType::Quads` in
-   0.2.0: non-manifold neighbourhoods, irregular faces on an unsharpened
-   (`VtxBoundaryInterpolation::None`) boundary, and the Bilinear scheme; single-crease
-   patches for *semi-sharp* creases are not ported, so those are isolated to the cap.
-   The gaps the reference covers are filed upstream:
-   [#10](https://github.com/doubleailes/OpenSubdiv-rs/issues/10) non-manifold patches,
-   [#11](https://github.com/doubleailes/OpenSubdiv-rs/issues/11) single-crease patches,
-   [#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12) Loop patches and
-   adaptive refinement, [#13](https://github.com/doubleailes/OpenSubdiv-rs/issues/13)
-   stencil tables over adaptive hierarchies (the route to cheap per-sample limit
-   evaluation), [#14](https://github.com/doubleailes/OpenSubdiv-rs/issues/14) the
-   `smooth` triangle rule USD's `triangleSubdivisionRule` names. crust-core requires
-   0.2.0 from this change on. It also touches the two-level traversal, the deterministic-build
+   orders. The patch table's coverage was the other blocker, and is now closed:
+   opensubdiv-rs 0.1.4 capped only smooth interior extraordinary vertices with
+   Gregory patches; 0.2.0 (2026-09-30, [#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8))
+   added caps on boundaries, infinitely sharp creases, sharp corners and darts, and
+   `useInfSharpPatch`; 0.3.0 (2026-10-01) closed the rest of the list filed against
+   the reference — [#10](https://github.com/doubleailes/OpenSubdiv-rs/issues/10)
+   patches over non-manifold spans, [#11](https://github.com/doubleailes/OpenSubdiv-rs/issues/11)
+   single-crease patches for semi-sharp creases (`AdaptiveOptions::with_single_crease_patch`),
+   [#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12) Loop box-spline patches,
+   Gregory triangles and adaptive refinement, [#13](https://github.com/doubleailes/OpenSubdiv-rs/issues/13)
+   stencil tables over adaptive hierarchies and `LimitStencilTableFactory` (limit
+   position and derivatives at any `(ptex face, u, v)`, factorised to the base cage —
+   the route to one sparse dot product per tessellation sample), and
+   [#14](https://github.com/doubleailes/OpenSubdiv-rs/issues/14) the `smooth`
+   triangle rule USD's `triangleSubdivisionRule` names. `PatchType::Quads` now
+   appears only on unsharpened (`VtxBoundaryInterpolation::None`) boundaries and under
+   the Bilinear scheme, where the reference defines no limit surface either; the
+   crate's remaining roadmap item is the GPU back-ends, which this CPU renderer does not
+   need. Two 0.3.0 behaviour changes reach the uniform path crust uses today and are
+   checked by the dependency bump: Loop's refined children are ordered as the
+   reference's `TriRefinement` orders them, and non-manifold edges are made infinitely
+   sharp at the base level as `applyComponentTagsAndBoundarySharpness` does.
+   crust-core requires 0.3.0 from this change on. It also touches the two-level traversal, the deterministic-build
    requirement (a cache fills in ray order; the tessellation itself must be
    deterministic per patch) and the material side tables. That is a change of its own,
    and it is easier after this one, since the record/table split is what a lazily
