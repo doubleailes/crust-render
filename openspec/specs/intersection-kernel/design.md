@@ -62,13 +62,47 @@
   handed back to the scalar path for its f64 tie-break — watertightness intact. The
   packet and scalar intersectors are **bit-identical** (pinned by
   `simd_matches_scalar_bitwise`); change one and you must change the other.
-  A triangle's per-vertex shading normals are a side table too (`Bvh::normals`, indexed
-  by `TrianglePrim::normals`, `NO_NORMALS` when absent): inline as an
-  `Option<[Vec3A; 3]>` they made every triangle — and, as the largest variant, every
-  `PrimNode` — 128 bytes; now 64 and 80, pinned by `a_triangle_is_one_cache_line`.
-  They are read once per closest hit, after traversal. It costs `Bvh::hit` ~1% more
-  instructions (the 80-byte stride, the table argument) and saves 22% of cornellbox's
-  kernel memory; out of cache (`ray_throughput --large`) it is 0–6% faster.
+  **Triangles are stored once** (`compact-triangle-storage`). A committed scene holds
+  one shared vertex table and one per-vertex normal table (`[f32; 3]` each, unpadded),
+  a 24-byte `TriangleRecord` per triangle (three global vertex indices, `geom_id`,
+  `prim_id`, mask — `a_triangle_record_is_24_bytes`) and a 12-byte `GeomTable` per
+  geometry saying where its vertices, normals and records start. Packet lanes index
+  records; `PrimNode` keeps only the primitives that are not triangles and is 64 bytes
+  (the linear curve segment stores its endpoints unpadded so the enum is not 80). A
+  record stays even when its attached indices were out of range (`DEGENERATE_VERTEX`,
+  so `prim_id`s remain dense) but is never built over, and neither is a sliver of a
+  normal-less geometry whose geometric normal is exactly zero: closest-hit rejected
+  such a sliver on every candidate anyway, so excluding it at commit changes no
+  reported hit and lets the candidate path store four values and nothing else. A hit's
+  normal is derived once, for the lane that won (`Bvh::resolve`), by interpolating the
+  three per-vertex normals through the record or taking the geometric normal of its
+  gathered vertices — the same arithmetic on the same `f32`s as before, so every
+  sample renders bit-identical (`check_images.sh check` against goldens recorded
+  before the change). `Scene::triangle_vertices(geom_id, prim_id)` hands an
+  application the attached vertices of a hit triangle (local space in an instanced
+  scene), which is what lets it derive per-hit quantities instead of storing them.
+  Measured on the `gen_subdiv_stress.py` grid at level 3 (2.23 M triangles): kernel
+  memory 416.89 → 221.44 MiB, **196 → 104 bytes per triangle** (records 24, packets 49,
+  vertices 6, normals 6, nodes 15, leaves 4), peak RSS 808.79 → 572 MiB;
+  `subdivision.usda` at level 4: 199 → 107 bytes per triangle.
+  The history this replaces: the per-corner normal side table (`PrimNode` 128 → 80
+  bytes, cornellbox kernel memory −22%) and before it the inline `Option<[Vec3A; 3]>`.
+  **Trap, found by per-line callgrind:** with the triangle variant gone the `PrimNode`
+  dispatch became small enough for LLVM to inline into `Bvh::hit` — curve subdivision,
+  cone intersection and the instance descent with it — and the traversal loop grew by
+  a third and spilled its stack: +6% instructions on cornellbox and +17% on
+  materialx_basic with a byte-identical tree. `PrimNode::hit` / `hit_any` are
+  `inline(never)`; with that, `Bvh::hit` (with its instance recursion) is 953.4 M
+  instructions on cornellbox against the baseline's 1 001.6 M (−4.8%) and 291.9 M
+  against 282.9 M on materialx_basic (+3.2%, a ten-triangle scene where per-query
+  setup dominates). Moving the once-per-query `resolve` out of line as well was
+  measured and is worse (+7% / +15%).
+  The build reads vertices through `Primitives` rather than from a per-triangle copy,
+  `PrimRef` is 28 bytes and the binary `Node` 32 (`a_build_reference_is_28_bytes`;
+  both were 48 with `Vec3A` bounds), the leaf, packet and index tables are sized
+  exactly from the binary leaves before any is emitted, and `merge` splices the right
+  subtree into the left's vectors instead of allocating a third. Decisions are
+  unchanged (`build_is_deterministic`).
   `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
   while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
   the measurements, and why `std::simd` is not used by default (nightly-only; the
