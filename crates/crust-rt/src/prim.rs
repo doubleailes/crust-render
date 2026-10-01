@@ -537,6 +537,22 @@ impl InstancePrim {
         }
     }
 
+    /// World bounds of this instance, recomputed — an instance keeps none
+    /// once its tree is built. Exact for a moving instance (the union of its
+    /// endpoint placements, as at commit); through `w2l.inverse()` for a
+    /// static one, so possibly a few ulps off the build's box. For
+    /// diagnostics only. `None` for an empty inner scene.
+    pub(crate) fn approx_world_bounds(&self) -> Option<AABB> {
+        let inner = self.scene.bounds()?;
+        Some(match &self.motion {
+            Some(m) => AABB::surrounding_box(
+                transformed_aabb(&inner, &m.l2w),
+                transformed_aabb(&inner, &m.l2w_end),
+            ),
+            None => transformed_aabb(&inner, &self.w2l.inverse()),
+        })
+    }
+
     fn to_local(&self, ray: &Ray, w2l: &Affine3A) -> Ray {
         Ray {
             origin: w2l.transform_point3a(ray.origin),
