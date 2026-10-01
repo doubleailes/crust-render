@@ -27,13 +27,15 @@
 
 use build::{build_subtree, surface_area, union_all};
 use collapse::{LeafData, collapse};
-use glam::Vec3A;
 
-use crate::aabb::AABB;
-use crate::prim::{PrimHit, PrimNode, TrianglePrim, VertexNormals};
+use crate::aabb::{AABB, triangle_aabb};
+use crate::prim::{
+    GeomTable, NO_NORMALS, PrimHit, PrimNode, TriangleRecord, triangle_hit_from_barycentric,
+};
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
-use crate::triangle::{RayShear, Tri4};
+use crate::triangle::{RayShear, Tri4, clip_triangle_aabb, triangle_intersect_sheared};
+use glam::Vec3A;
 
 /// Diagnostic traversal counters, compiled out unless the
 /// `traversal-stats` feature is on — they sit in the innermost loop.
@@ -191,6 +193,84 @@ impl WideNode {
     }
 }
 
+/// Everything a scene expands into before its tree is built: the triangle
+/// records with the vertex and normal tables they index, the per-geometry
+/// table that says where each geometry's entries start, and the primitives
+/// that are not triangles. [`Bvh::new`] takes it by value and boxes it.
+///
+/// The build sees one index space over all of it: `0..tris.len()` are
+/// records, `tris.len()..` are `prims` — see [`Primitives::is_triangle`].
+#[derive(Default)]
+pub(crate) struct Primitives {
+    pub(crate) tris: Vec<TriangleRecord>,
+    /// Every triangle mesh's vertices, concatenated in attach order.
+    pub(crate) vertices: Vec<[f32; 3]>,
+    /// Per-vertex shading normals of the meshes that have them, each mesh's
+    /// run parallel to its vertex run (`GeomTable::normal_base`).
+    pub(crate) normals: Vec<[f32; 3]>,
+    pub(crate) geoms: Vec<GeomTable>,
+    pub(crate) prims: Vec<PrimNode>,
+}
+
+impl Primitives {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.tris.len() + self.prims.len()
+    }
+
+    #[inline]
+    pub(crate) fn is_triangle(&self, idx: u32) -> bool {
+        (idx as usize) < self.tris.len()
+    }
+
+    /// The three vertices of record `rec`, gathered from the table.
+    #[inline]
+    pub(crate) fn tri_verts(&self, rec: &TriangleRecord) -> [Vec3A; 3] {
+        [
+            Vec3A::from_array(self.vertices[rec.v[0] as usize]),
+            Vec3A::from_array(self.vertices[rec.v[1] as usize]),
+            Vec3A::from_array(self.vertices[rec.v[2] as usize]),
+        ]
+    }
+
+    /// Bounds of the primitive at build index `idx`; `None` for a record
+    /// the build must not reference: one whose attached indices were out of
+    /// range, or — on a geometry without shading normals — a sliver whose
+    /// geometric normal is exactly zero. Closest-hit traversal rejected
+    /// such a sliver on every candidate hit (it has no normal to report), so
+    /// leaving it out of the tree changes no reported hit and spares every
+    /// candidate the vertex gather that check cost. A geometry with normals
+    /// keeps its slivers: they shade by interpolation and were never
+    /// rejected.
+    pub(crate) fn bbox(&self, idx: u32) -> Option<AABB> {
+        if self.is_triangle(idx) {
+            let r = &self.tris[idx as usize];
+            if r.is_degenerate() {
+                return None;
+            }
+            let [a, b, c] = self.tri_verts(r);
+            if self.geoms[r.geom_id as usize].normal_base == NO_NORMALS
+                && (b - a).cross(c - a) == Vec3A::ZERO
+            {
+                return None;
+            }
+            Some(triangle_aabb(a, b, c))
+        } else {
+            Some(self.prims[idx as usize - self.tris.len()].bbox())
+        }
+    }
+
+    /// `Prim::clipped_aabb` over the unified index space.
+    pub(crate) fn clipped_aabb(&self, idx: u32, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        if self.is_triangle(idx) {
+            let [a, b, c] = self.tri_verts(&self.tris[idx as usize]);
+            clip_triangle_aabb(a, b, c, axis, min, max)
+        } else {
+            self.prims[idx as usize - self.tris.len()].clipped_aabb(axis, min, max)
+        }
+    }
+}
+
 /// A finished tree. Its tables are boxed slices, not `Vec`s: it is immutable, and
 /// a box can neither grow nor hold capacity slack the memory footprint would
 /// have to count.
@@ -200,14 +280,23 @@ pub(crate) struct Bvh {
     leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf.
     packets: Box<[Tri4]>,
-    /// The one-at-a-time primitives of each leaf; spatial splits may list a
-    /// primitive in more than one leaf.
+    /// The one-at-a-time primitives of each leaf, as indices into `prims`;
+    /// spatial splits may list a primitive in more than one leaf.
     indices: Box<[u32]>,
-    /// The primitives, stored once each, in input order.
+    /// Triangle records, stored once each, in input order; packet lanes
+    /// index them.
+    tris: Box<[TriangleRecord]>,
+    /// The shared vertex table every record and (indexed) packet reads.
+    vertices: Box<[[f32; 3]]>,
+    /// Per-vertex shading normals, see [`Primitives::normals`].
+    normals: Box<[[f32; 3]]>,
+    geoms: Box<[GeomTable]>,
+    /// The primitives that are not triangles, stored once each, in input
+    /// order.
     prims: Box<[PrimNode]>,
-    /// Per-vertex shading normals of the triangles that have them, indexed
-    /// by [`TrianglePrim::normals`](crate::prim::TrianglePrim).
-    normals: Box<[VertexNormals]>,
+    /// Records that refer to no vertex (out-of-range input), kept only so
+    /// `prim_id`s stay dense; not primitives for counting purposes.
+    n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
 }
@@ -233,40 +322,177 @@ struct Subtree {
     indices: Vec<u32>,
 }
 
+/// What closest-hit traversal carries while it searches: a scalar
+/// primitive's finished hit, or a packet lane whose normal is still to be
+/// derived (see `Bvh::resolve`).
+#[derive(Clone, Copy)]
+enum Candidate {
+    Prim(PrimHit),
+    Lane { rec: u32, t: f32, u: f32, v: f32 },
+}
+
+impl Candidate {
+    #[inline]
+    fn t(&self) -> f32 {
+        match self {
+            Candidate::Prim(h) => h.t,
+            Candidate::Lane { t, .. } => *t,
+        }
+    }
+}
+
 impl Bvh {
-    /// `normals` is the table the triangles among `prims` index.
-    pub(crate) fn new(prims: Vec<PrimNode>, normals: Vec<VertexNormals>) -> Self {
-        let refs: Vec<PrimRef> = prims
-            .iter()
-            .enumerate()
-            .map(|(i, p)| PrimRef {
-                bbox: p.bbox(),
-                idx: i as u32,
-            })
+    pub(crate) fn new(input: Primitives) -> Self {
+        // One reference per primitive, in input order (the order decides
+        // ties, so it is part of the build's determinism); degenerate
+        // records get none.
+        let refs: Vec<PrimRef> = (0..input.len() as u32)
+            .filter_map(|i| input.bbox(i).map(|bbox| PrimRef { bbox, idx: i }))
             .collect();
 
         let (wide, collected, root_bbox) = if refs.is_empty() {
             (Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
-            let subtree = build_subtree(&prims, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+            let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox));
+            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input);
             (wide, collected, Some(root_bbox))
         };
 
+        let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
         Bvh {
             wide: wide.into_boxed_slice(),
             leaves: collected.leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
             indices: collected.indices.into_boxed_slice(),
-            prims: prims.into_boxed_slice(),
-            normals: normals.into_boxed_slice(),
+            tris: input.tris.into_boxed_slice(),
+            n_degenerate,
+            vertices: input.vertices.into_boxed_slice(),
+            normals: input.normals.into_boxed_slice(),
+            geoms: input.geoms.into_boxed_slice(),
+            prims: input.prims.into_boxed_slice(),
             root_bbox,
         }
     }
 
+    /// The three vertices of a record, gathered from the shared table.
+    #[inline]
+    fn tri_verts(&self, rec: &TriangleRecord) -> [Vec3A; 3] {
+        [
+            Vec3A::from_array(self.vertices[rec.v[0] as usize]),
+            Vec3A::from_array(self.vertices[rec.v[1] as usize]),
+            Vec3A::from_array(self.vertices[rec.v[2] as usize]),
+        ]
+    }
+
+    /// The record's three per-vertex shading normals, when its geometry has
+    /// them.
+    #[inline]
+    fn tri_normals(&self, rec: &TriangleRecord) -> Option<[Vec3A; 3]> {
+        let g = &self.geoms[rec.geom_id as usize];
+        if g.normal_base == NO_NORMALS {
+            return None;
+        }
+        let at = |vi: u32| {
+            let k = (g.normal_base + (vi - g.vertex_base)) as usize;
+            Vec3A::from_array(self.normals[k])
+        };
+        Some([at(rec.v[0]), at(rec.v[1]), at(rec.v[2])])
+    }
+
+    /// The hit a candidate stands for, its normal derived now — once, for
+    /// the lane that won — rather than for every lane that briefly held the
+    /// record: the interpolated shading normal through the record's vertex
+    /// indices when the geometry has normals, else the geometric normal.
+    /// Exactly what `triangle_hit_from_barycentric` computes from the same
+    /// inputs, and it cannot meet the zero cross product that function
+    /// rejects, because `Primitives::bbox` keeps such slivers out of the
+    /// tree.
+    #[inline]
+    fn resolve(&self, c: Candidate) -> PrimHit {
+        match c {
+            Candidate::Prim(h) => h,
+            Candidate::Lane { rec, t, u, v } => {
+                let rec = &self.tris[rec as usize];
+                let outward = match self.tri_normals(rec) {
+                    Some([n0, n1, n2]) => (n0 * (1.0 - u - v) + n1 * u + n2 * v).normalize(),
+                    None => {
+                        let [a, b, c] = self.tri_verts(rec);
+                        let n = (b - a).cross(c - a);
+                        debug_assert!(n != Vec3A::ZERO, "slivers are excluded at commit");
+                        n.normalize()
+                    }
+                };
+                PrimHit {
+                    t,
+                    outward,
+                    u,
+                    v,
+                    geom_id: rec.geom_id,
+                    prim_id: rec.prim_id,
+                }
+            }
+        }
+    }
+
+    /// The scalar test of one record — the packet lanes' `f64` tie-break.
+    #[inline]
+    fn tri_hit(
+        &self,
+        rec_idx: u32,
+        ray: &Ray,
+        shear: &RayShear,
+        t_min: f32,
+        t_max: f32,
+    ) -> Option<PrimHit> {
+        let rec = &self.tris[rec_idx as usize];
+        if !ray.mask.sees(rec.mask) {
+            return None;
+        }
+        let verts = self.tri_verts(rec);
+        let (t, u, v) = triangle_intersect_sheared(
+            shear, ray.origin, verts[0], verts[1], verts[2], t_min, t_max,
+        )?;
+        triangle_hit_from_barycentric(rec, &verts, self.tri_normals(rec), t, u, v)
+    }
+
+    #[inline]
+    fn tri_hit_any(
+        &self,
+        rec_idx: u32,
+        ray: &Ray,
+        shear: &RayShear,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        let rec = &self.tris[rec_idx as usize];
+        if !ray.mask.sees(rec.mask) {
+            return false;
+        }
+        let [a, b, c] = self.tri_verts(rec);
+        triangle_intersect_sheared(shear, ray.origin, a, b, c, t_min, t_max).is_some()
+    }
+
+    /// The vertices of triangle `prim_id` of geometry `geom_id`, or `None`
+    /// when there is no such triangle (a non-mesh geometry, an id past the
+    /// end, or a triangle whose attached indices were out of range).
+    pub(crate) fn triangle_vertices(&self, geom_id: u32, prim_id: u32) -> Option<[Vec3A; 3]> {
+        let g = self.geoms.get(geom_id as usize)?;
+        let rec = self.tris.get(g.tri_base.checked_add(prim_id)? as usize)?;
+        if rec.geom_id != geom_id || rec.is_degenerate() {
+            return None;
+        }
+        Some(self.tri_verts(rec))
+    }
+
     pub(crate) fn prim_count(&self) -> usize {
-        self.prims.len()
+        self.triangle_count() + self.prims.len()
+    }
+
+    /// Triangles that refer to real vertices.
+    #[inline]
+    fn triangle_count(&self) -> usize {
+        self.tris.len() - self.n_degenerate
     }
 
     /// `(count, sum of bbox diagonals, max diagonal)` over top-level
@@ -279,20 +505,30 @@ impl Bvh {
     pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
         let mut sum = 0.0f32;
         let mut max = 0.0f32;
-        for p in &self.prims {
-            let b = p.bbox();
+        let mut n = 0usize;
+        let mut add = |b: AABB| {
             let d = (b.maximum - b.minimum).length();
             sum += d;
             max = max.max(d);
+            n += 1;
+        };
+        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
+            let [a, b, c] = self.tri_verts(r);
+            add(triangle_aabb(a, b, c));
         }
-        (self.prims.len(), sum, max)
+        for p in &self.prims {
+            add(p.bbox());
+        }
+        (n, sum, max)
     }
 
     pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
-        let mut b = PrimitiveBreakdown::default();
+        let mut b = PrimitiveBreakdown {
+            triangles: self.triangle_count(),
+            ..PrimitiveBreakdown::default()
+        };
         for p in &self.prims {
             match p {
-                PrimNode::Triangle(_) => b.triangles += 1,
                 PrimNode::Sphere(_) => b.spheres += 1,
                 PrimNode::Disk(_) => b.disks += 1,
                 PrimNode::Cylinder(_) => b.cylinders += 1,
@@ -319,7 +555,16 @@ impl Bvh {
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.indices += size_of_val(&*self.indices);
+        acc.triangle_records += size_of_val(&*self.tris);
+        acc.vertices += size_of_val(&*self.vertices);
         acc.vertex_normals += size_of_val(&*self.normals);
+        acc.geometry_tables += size_of_val(&*self.geoms);
+        acc.lanes += 4 * self.packets.len();
+        acc.lanes_filled += self
+            .packets
+            .iter()
+            .map(|p| p.active.count_ones() as usize)
+            .sum::<usize>();
         for p in &self.prims {
             match p {
                 PrimNode::Instance(i) => {
@@ -346,9 +591,9 @@ impl Bvh {
         visited: &mut std::collections::HashSet<usize>,
         acc: &mut PrimitiveBreakdown,
     ) {
+        acc.triangles += self.triangle_count();
         for p in &self.prims {
             match p {
-                PrimNode::Triangle(_) => acc.triangles += 1,
                 PrimNode::Sphere(_) => acc.spheres += 1,
                 PrimNode::Disk(_) => acc.disks += 1,
                 PrimNode::Cylinder(_) => acc.cylinders += 1,
@@ -393,7 +638,7 @@ impl Bvh {
         }
         tstat!(QUERIES, 1);
         let mut closest = t_max;
-        let mut best: Option<PrimHit> = None;
+        let mut best: Option<Candidate> = None;
 
         // Splat the ray into SoA lanes once for the whole traversal
         // instead of once per visited node, and likewise derive the Woop
@@ -437,7 +682,7 @@ impl Bvh {
                     && let Some(hit) =
                         self.intersect_leaf(node.child[l], ray, shear.as_ref(), t_min, closest)
                 {
-                    closest = hit.t;
+                    closest = hit.t();
                     best = Some(hit);
                 }
             }
@@ -449,7 +694,7 @@ impl Bvh {
             }
         }
 
-        best
+        best.map(|c| self.resolve(c))
     }
 
     /// Closest hit within one leaf: the 4-wide triangle packets first (four
@@ -462,13 +707,13 @@ impl Bvh {
         shear: Option<&RayShear>,
         t_min: f32,
         t_max: f32,
-    ) -> Option<PrimHit> {
+    ) -> Option<Candidate> {
         let leaf = &self.leaves[leaf_idx as usize];
         tstat!(LEAVES_VISITED, 1);
         tstat!(PACKET_TESTS, leaf.pkt_count as u64);
         tstat!(PRIM_TESTS, leaf.idx_count as u64);
         let mut closest = t_max;
-        let mut best: Option<PrimHit> = None;
+        let mut best: Option<Candidate> = None;
 
         let first = leaf.pkt_first as usize;
         for packet in &self.packets[first..first + leaf.pkt_count as usize] {
@@ -486,44 +731,34 @@ impl Bvh {
                 if out.t[lane] > closest {
                     continue;
                 }
-                let tri = self.triangle(packet.prim[lane]);
-                if let Some(hit) =
-                    tri.hit_from_barycentric(&self.normals, out.t[lane], out.u[lane], out.v[lane])
-                {
-                    closest = hit.t;
-                    best = Some(hit);
-                }
+                closest = out.t[lane];
+                best = Some(Candidate::Lane {
+                    rec: packet.rec[lane],
+                    t: out.t[lane],
+                    u: out.u[lane],
+                    v: out.v[lane],
+                });
             }
             // Lanes sitting exactly on an edge: the f64 tie-break is scalar.
             let mut fb = out.fallback;
             while fb != 0 {
                 let lane = fb.trailing_zeros() as usize;
                 fb &= fb - 1;
-                let pi = packet.prim[lane] as usize;
-                if let Some(hit) = self.prims[pi].hit(ray, t_min, closest, &self.normals) {
+                if let Some(hit) = self.tri_hit(packet.rec[lane], ray, shear, t_min, closest) {
                     closest = hit.t;
-                    best = Some(hit);
+                    best = Some(Candidate::Prim(hit));
                 }
             }
         }
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest, &self.normals) {
+            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
                 closest = hit.t;
-                best = Some(hit);
+                best = Some(Candidate::Prim(hit));
             }
         }
         best
-    }
-
-    /// The triangle a packet lane came from. Packets are only built from
-    /// primitives that answered `as_triangle`, so this always resolves.
-    #[inline]
-    fn triangle(&self, prim_idx: u32) -> &TrianglePrim {
-        self.prims[prim_idx as usize]
-            .as_triangle()
-            .expect("packet lanes are built from triangles only")
     }
 
     /// Early-exit occlusion traversal: no ordering, returns on the first
@@ -582,7 +817,7 @@ impl Bvh {
             while fb != 0 {
                 let lane = fb.trailing_zeros() as usize;
                 fb &= fb - 1;
-                if self.prims[packet.prim[lane] as usize].hit_any(ray, t_min, t_max) {
+                if self.tri_hit_any(packet.rec[lane], ray, shear, t_min, t_max) {
                     return true;
                 }
             }

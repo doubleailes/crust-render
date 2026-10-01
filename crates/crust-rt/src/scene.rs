@@ -3,10 +3,10 @@
 //! `intersect` / `occluded`.
 
 use crate::aabb::AABB;
-use crate::bvh::Bvh;
+use crate::bvh::{Bvh, Primitives};
 use crate::prim::{
-    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, NO_NORMALS,
-    PrimHit, PrimNode, SpherePrim, TrianglePrim, VertexNormals, transformed_aabb,
+    CubicCurvePrim, CurvePrim, CylinderPrim, DEGENERATE_VERTEX, DiskPrim, GeomTable, InstancePrim,
+    NO_ID_OFFSET, PrimHit, PrimNode, SpherePrim, TriangleRecord, transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Affine3A, Vec3A};
@@ -32,19 +32,30 @@ pub struct CurveSegment {
 /// from here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryFootprint {
-    /// The `PrimNode` arrays — every primitive, whatever its kind.
+    /// The `PrimNode` arrays — every primitive that is not a triangle.
     pub prim_nodes: usize,
     /// Payloads of the boxed variants (instances, cubic curves).
     pub boxed_prims: usize,
     /// 4-wide BVH nodes.
     pub bvh_nodes: usize,
     pub leaves: usize,
-    /// Triangle SIMD packets.
+    /// Triangle SIMD packets (gathered layout: the vertices, SoA).
     pub packets: usize,
     /// Leaf primitive indices.
     pub indices: usize,
-    /// Per-vertex shading normals of the triangles that carry them.
+    /// Triangle records: vertex indices, ids and mask, 24 bytes each.
+    pub triangle_records: usize,
+    /// The shared vertex table, 12 bytes per vertex.
+    pub vertices: usize,
+    /// Per-vertex shading normals of the meshes that carry them, 12 bytes
+    /// per vertex.
     pub vertex_normals: usize,
+    /// The per-geometry table (where each geometry's entries start).
+    pub geometry_tables: usize,
+    /// Packet lanes in total — a count, not bytes, so `total` ignores it.
+    pub lanes: usize,
+    /// Packet lanes holding a triangle; `lanes_filled / lanes` is the fill.
+    pub lanes_filled: usize,
 }
 
 impl MemoryFootprint {
@@ -55,7 +66,10 @@ impl MemoryFootprint {
             + self.leaves
             + self.packets
             + self.indices
+            + self.triangle_records
+            + self.vertices
             + self.vertex_normals
+            + self.geometry_tables
     }
 }
 
@@ -329,49 +343,79 @@ impl SceneBuilder {
             .iter()
             .map(|(g, _, _)| Self::prim_upper_bound(g))
             .sum();
-        let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
-        let mut vertex_normals: Vec<VertexNormals> = Vec::new();
+        let n_tris: usize = self
+            .geoms
+            .iter()
+            .map(|(g, _, _)| match g {
+                Geometry::TriangleMesh { indices, .. } => indices.len(),
+                _ => 0,
+            })
+            .sum();
+        let n_verts: usize = self
+            .geoms
+            .iter()
+            .map(|(g, _, _)| match g {
+                Geometry::TriangleMesh { vertices, .. } => vertices.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(
+            n_verts < u32::MAX as usize,
+            "{n_verts} vertices in one scene: the shared vertex table is indexed by u32"
+        );
+        let mut input = Primitives {
+            tris: Vec::with_capacity(n_tris),
+            vertices: Vec::with_capacity(n_verts),
+            normals: Vec::new(),
+            geoms: Vec::with_capacity(self.geoms.len()),
+            prims: Vec::with_capacity(total - n_tris),
+        };
         let mut has_motion = false;
         // Largest id a hit in this scene can report. Every geometry can
         // report its own id; labels can report more (see below).
         let mut max_hit_id = n_geoms.saturating_sub(1);
         for (geom_id, (geom, mask, label)) in self.geoms.into_iter().enumerate() {
             let geom_id = geom_id as u32;
+            let mut table = GeomTable {
+                vertex_base: input.vertices.len() as u32,
+                tri_base: input.tris.len() as u32,
+                ..GeomTable::default()
+            };
             match geom {
                 Geometry::TriangleMesh {
                     vertices,
                     indices,
                     normals,
                 } => {
-                    for (prim_id, tri) in indices.into_iter().enumerate() {
-                        let [i0, i1, i2] = tri;
-                        let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
-                        if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
-                            continue;
-                        }
-                        let tri_normals = normals
-                            .as_ref()
-                            .and_then(|ns| {
-                                (i0 < ns.len() && i1 < ns.len() && i2 < ns.len())
-                                    .then(|| [ns[i0], ns[i1], ns[i2]])
-                            })
-                            .map_or(NO_NORMALS, |n| {
-                                vertex_normals.push(n);
-                                (vertex_normals.len() - 1) as u32
-                            });
-                        prims.push(PrimNode::Triangle(TrianglePrim {
-                            v0: vertices[i0],
-                            v1: vertices[i1],
-                            v2: vertices[i2],
-                            normals: tri_normals,
+                    // Normals are per vertex, parallel to the vertex run,
+                    // and only when the array covers every vertex — a
+                    // short one is ignored whole, as the per-triangle
+                    // check it replaces ignored each triangle it fell
+                    // short of.
+                    let n = vertices.len();
+                    let vertex_base = table.vertex_base;
+                    input.vertices.extend(vertices.iter().map(|v| v.to_array()));
+                    if let Some(ns) = normals.filter(|ns| ns.len() >= n) {
+                        table.normal_base = input.normals.len() as u32;
+                        input.normals.extend(ns[..n].iter().map(|v| v.to_array()));
+                    }
+                    for (prim_id, [i0, i1, i2]) in indices.into_iter().enumerate() {
+                        let in_range = (i0 as usize) < n && (i1 as usize) < n && (i2 as usize) < n;
+                        let v = if in_range {
+                            [vertex_base + i0, vertex_base + i1, vertex_base + i2]
+                        } else {
+                            [DEGENERATE_VERTEX; 3]
+                        };
+                        input.tris.push(TriangleRecord {
+                            v,
                             geom_id,
                             prim_id: prim_id as u32,
-                            mask,
-                        }));
+                            mask: if in_range { mask } else { RayMask::NONE },
+                        });
                     }
                 }
                 Geometry::Sphere { center, radius } => {
-                    prims.push(PrimNode::Sphere(SpherePrim {
+                    input.prims.push(PrimNode::Sphere(SpherePrim {
                         center,
                         radius,
                         geom_id,
@@ -393,7 +437,7 @@ impl SceneBuilder {
                     {
                         continue;
                     }
-                    prims.push(PrimNode::Disk(DiskPrim {
+                    input.prims.push(PrimNode::Disk(DiskPrim {
                         center,
                         normal: normal.normalize(),
                         radius,
@@ -412,7 +456,7 @@ impl SceneBuilder {
                     {
                         continue;
                     }
-                    prims.push(PrimNode::Cylinder(CylinderPrim {
+                    input.prims.push(PrimNode::Cylinder(CylinderPrim {
                         p0,
                         axis: (p1 - p0) / length,
                         length,
@@ -423,9 +467,9 @@ impl SceneBuilder {
                 }
                 Geometry::RoundCurves { segments } => {
                     for (prim_id, s) in segments.into_iter().enumerate() {
-                        prims.push(PrimNode::Curve(CurvePrim {
-                            p0: s.p0,
-                            p1: s.p1,
+                        input.prims.push(PrimNode::Curve(CurvePrim {
+                            p0: s.p0.to_array(),
+                            p1: s.p1.to_array(),
                             r0: s.r0,
                             r1: s.r1,
                             geom_id,
@@ -436,14 +480,16 @@ impl SceneBuilder {
                 }
                 Geometry::CubicCurves { segments } => {
                     for (prim_id, s) in segments.into_iter().enumerate() {
-                        prims.push(PrimNode::CubicCurve(Box::new(CubicCurvePrim {
-                            cp: s.cp,
-                            r0: s.r0,
-                            r1: s.r1,
-                            geom_id,
-                            prim_id: prim_id as u32,
-                            mask,
-                        })));
+                        input
+                            .prims
+                            .push(PrimNode::CubicCurve(Box::new(CubicCurvePrim {
+                                cp: s.cp,
+                                r0: s.r0,
+                                r1: s.r1,
+                                geom_id,
+                                prim_id: prim_id as u32,
+                                mask,
+                            })));
                     }
                 }
                 Geometry::Instance {
@@ -495,7 +541,7 @@ impl SceneBuilder {
                             (geom_id, base)
                         }
                     };
-                    prims.push(PrimNode::Instance(Box::new(InstancePrim {
+                    input.prims.push(PrimNode::Instance(Box::new(InstancePrim {
                         scene,
                         l2w: transform,
                         normal_mat: w2l.matrix3.transpose(),
@@ -508,9 +554,10 @@ impl SceneBuilder {
                     })));
                 }
             }
+            input.geoms.push(table);
         }
         Scene {
-            bvh: Bvh::new(prims, vertex_normals),
+            bvh: Bvh::new(input),
             n_geoms,
             has_motion,
             max_hit_id,
@@ -670,6 +717,19 @@ impl Scene {
         let (n, sum, max) = self.bvh.primitive_extent_sum();
         let mean = if n == 0 { 0.0 } else { sum / n as f32 };
         (n, scene_diag, mean, max)
+    }
+
+    /// The three vertices of triangle `prim_id` of the triangle mesh
+    /// `geom_id`, in this scene's own space — local space for a scene that
+    /// is placed through instances. `None` when `geom_id` is not a
+    /// triangle mesh of this scene, `prim_id` is past its triangles, or
+    /// the triangle's attached indices were out of range.
+    ///
+    /// What lets an application derive per-hit quantities (a tangent
+    /// frame, a texture density) from the geometry it attached instead of
+    /// storing them per triangle.
+    pub fn triangle_vertices(&self, geom_id: u32, prim_id: u32) -> Option<[Vec3A; 3]> {
+        self.bvh.triangle_vertices(geom_id, prim_id)
     }
 
     /// Exact resident bytes of this scene and every distinct scene it

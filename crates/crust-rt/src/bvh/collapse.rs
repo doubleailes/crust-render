@@ -3,11 +3,10 @@
 
 use glam::Vec3A;
 
-use crate::prim::PrimNode;
 use crate::triangle::Tri4;
 
 use super::build::surface_area;
-use super::{LANES, Leaf, Node, WideNode};
+use super::{LANES, Leaf, Node, Primitives, WideNode};
 
 /// Everything the collapse pass emits besides the nodes themselves: one
 /// [`Leaf`] per leaf lane, the triangle packets those leaves run, and the
@@ -26,25 +25,25 @@ impl LeafData {
     ///
     /// Packets are emitted contiguously per leaf, so a leaf's packets are
     /// one linear sweep of memory at traversal time.
-    pub(super) fn push_leaf(&mut self, range: &[u32], prims: &[PrimNode]) -> u32 {
+    pub(super) fn push_leaf(&mut self, range: &[u32], prims: &Primitives) -> u32 {
         let pkt_first = self.packets.len() as u32;
         let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, crate::ray::RayMask)> = Vec::with_capacity(4);
         let idx_first = self.indices.len() as u32;
         let mut idx_count = 0u32;
 
         for &pi in range {
-            match prims[pi as usize].as_triangle() {
-                Some(t) => {
-                    batch.push((t.v0, t.v1, t.v2, pi, t.mask));
-                    if batch.len() == 4 {
-                        self.packets.push(Tri4::new(&batch));
-                        batch.clear();
-                    }
+            if prims.is_triangle(pi) {
+                let rec = &prims.tris[pi as usize];
+                let [v0, v1, v2] = prims.tri_verts(rec);
+                batch.push((v0, v1, v2, pi, rec.mask));
+                if batch.len() == 4 {
+                    self.packets.push(Tri4::new(&batch));
+                    batch.clear();
                 }
-                None => {
-                    self.indices.push(pi);
-                    idx_count += 1;
-                }
+            } else {
+                // Scalar primitives are indexed within their own table.
+                self.indices.push(pi - prims.tris.len() as u32);
+                idx_count += 1;
             }
         }
         if !batch.is_empty() {
@@ -72,7 +71,7 @@ impl LeafData {
 pub(super) fn collapse(
     binary: &[Node],
     indices: &[u32],
-    prims: &[PrimNode],
+    prims: &Primitives,
 ) -> (Vec<WideNode>, LeafData) {
     // A binary tree of `n` nodes has `(n + 1) / 2` leaves, and a full
     // `LANES`-wide tree over `L` leaves needs `(L - 1) / (LANES - 1)`
@@ -114,7 +113,7 @@ fn leaf_range<'a>(node: &Node, indices: &'a [u32]) -> &'a [u32] {
 fn collapse_node(
     binary: &[Node],
     indices: &[u32],
-    prims: &[PrimNode],
+    prims: &Primitives,
     b_idx: u32,
     out: &mut Vec<WideNode>,
     data: &mut LeafData,

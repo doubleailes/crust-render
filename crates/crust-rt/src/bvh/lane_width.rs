@@ -1,11 +1,10 @@
 use glam::Vec3A;
 
-use crate::prim::{PrimNode, TrianglePrim};
 use crate::ray::MASK_ALL;
 
 use super::*;
 
-fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
+fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
     let mut v = Vec::new();
     for r in 0..=rings {
         let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
@@ -19,7 +18,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
         }
     }
     let row = segs + 1;
-    let mut out: Vec<PrimNode> = Vec::new();
+    let mut out = Primitives::default();
     let mut id = 0u32;
     for r in 0..rings {
         for s in 0..segs {
@@ -30,15 +29,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
                 (r + 1) * row + s,
             );
             for (i, j, k) in [(a, b, c), (a, c, d)] {
-                out.push(PrimNode::Triangle(TrianglePrim {
-                    v0: v[i],
-                    v1: v[j],
-                    v2: v[k],
-                    normals: crate::prim::NO_NORMALS,
-                    geom_id: 0,
-                    prim_id: id,
-                    mask: MASK_ALL,
-                }));
+                out.push_triangle([v[i], v[j], v[k]], 0, id, MASK_ALL);
                 id += 1;
             }
         }
@@ -58,7 +49,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
 /// it fails and says the trade-off has changed.
 #[test]
 fn eight_wide_packets_would_not_reduce_vector_rounds() {
-    let bvh = Bvh::new(uv_sphere_prims(80, 40), Vec::new());
+    let bvh = Bvh::new(uv_sphere_prims(80, 40));
     let per_leaf: Vec<usize> = bvh
         .leaves
         .iter()
