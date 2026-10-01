@@ -274,7 +274,7 @@ pub(super) fn collect_proto_parts(
                 radius,
             });
             parts.push(ProtoPart::leaf(
-                Arc::new(b.commit()),
+                Arc::new(b.commit_with(crate::packet_layout())),
                 this_local,
                 mask,
                 material,
@@ -294,7 +294,7 @@ pub(super) fn collect_proto_parts(
                     });
                 }
                 parts.push(ProtoPart::leaf(
-                    Arc::new(b.commit()),
+                    Arc::new(b.commit_with(crate::packet_layout())),
                     this_local,
                     mask,
                     material,
@@ -350,7 +350,9 @@ pub(super) fn collect_proto_parts(
 /// end of the walk (see `collect_proto_parts`). Never attached to anything.
 fn placeholder_scene() -> Arc<RtScene> {
     static EMPTY: std::sync::OnceLock<Arc<RtScene>> = std::sync::OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit())))
+    Arc::clone(
+        EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit_with(crate::packet_layout()))),
+    )
 }
 
 /// Expands a `PointInstancer` found *inside* a prototype into one part.
@@ -440,7 +442,7 @@ fn nested_instancer_parts(
         return Vec::new();
     }
     vec![ProtoPart {
-        scene: Arc::new(sub.commit()),
+        scene: Arc::new(sub.commit_with(crate::packet_layout())),
         local,
         mask,
         slots: slots.into(),
@@ -489,7 +491,7 @@ fn group_parts(parts: &[ProtoPart]) -> Option<ProtoPart> {
         return None;
     }
     Some(ProtoPart {
-        scene: Arc::new(b.commit()),
+        scene: Arc::new(b.commit_with(crate::packet_layout())),
         local: GMat4::IDENTITY,
         mask,
         slots: slots.into(),

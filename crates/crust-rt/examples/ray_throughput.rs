@@ -9,7 +9,12 @@
 //! ```text
 //! cargo run --release -p crust-rt --example ray_throughput
 //! cargo run --release -p crust-rt --example ray_throughput -- --large [MTRIS]
+//! cargo run --release -p crust-rt --example ray_throughput -- --layout indexed [--large [MTRIS]]
 //! ```
+//!
+//! `--layout gathered|indexed|auto` commits every scene with that triangle
+//! packet layout (default `auto`), which is how the two are A/B'd per tree
+//! size.
 //!
 //! The default scenes are small enough that their whole BVH stays in cache,
 //! so they measure the node test's arithmetic. `--large` adds two scenes
@@ -21,7 +26,7 @@
 //! bounces, and there are more of them so the touched working set is large
 //! too. Building takes tens of seconds and a few GiB.
 
-use crust_rt::{Geometry, Ray, Scene, SceneBuilder};
+use crust_rt::{Geometry, PacketLayout, Ray, Scene, SceneBuilder};
 use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
 use std::time::Instant;
@@ -72,7 +77,7 @@ fn triangle_scene() -> Scene {
             }
         }
     }
-    b.commit()
+    commit(b)
 }
 
 fn sphere_grid_scene() -> Scene {
@@ -87,13 +92,13 @@ fn sphere_grid_scene() -> Scene {
             }
         }
     }
-    b.commit()
+    commit(b)
 }
 
 fn instance_scene() -> Scene {
     let mut inner = SceneBuilder::new();
     inner.attach(uv_sphere(Vec3A::ZERO, 1.0, 24, 12));
-    let inner = Arc::new(inner.commit());
+    let inner = Arc::new(commit(inner));
     let mut b = SceneBuilder::new();
     for x in -2..=2 {
         for y in -2..=2 {
@@ -108,7 +113,7 @@ fn instance_scene() -> Scene {
             }
         }
     }
-    b.commit()
+    commit(b)
 }
 
 /// A tiny deterministic generator for the large scenes (the same LCG as
@@ -154,7 +159,7 @@ fn soup_scene(n: usize) -> Scene {
         indices,
         normals: None,
     });
-    b.commit()
+    commit(b)
 }
 
 /// `count` instances of eight distinct sphere prototypes (1-4 k triangles
@@ -166,7 +171,7 @@ fn instance_field_scene(count: usize) -> Scene {
         .map(|k| {
             let mut p = SceneBuilder::new();
             p.attach(uv_sphere(Vec3A::ZERO, 1.0, 32 + 8 * k, 16 + 4 * k));
-            Arc::new(p.commit())
+            Arc::new(commit(p))
         })
         .collect();
     let side = 2.0 * LARGE_HALF;
@@ -188,7 +193,7 @@ fn instance_field_scene(count: usize) -> Scene {
             transform_end: None,
         });
     }
-    b.commit()
+    commit(b)
 }
 
 fn ray_batch(count: usize, extent: f32) -> Vec<Ray> {
@@ -268,6 +273,13 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
     }
 }
 
+/// The packet layout every scene below commits with (`--layout`).
+static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
+
+fn commit(b: SceneBuilder) -> Scene {
+    b.commit_with(*LAYOUT.get().unwrap_or(&PacketLayout::Auto))
+}
+
 fn main() {
     let tri = triangle_scene();
     println!("tri_spheres: {} triangles", tri.primitive_count());
@@ -275,7 +287,17 @@ fn main() {
     probe("sphere_grid", &sphere_grid_scene(), 14.0);
     probe("instances", &instance_scene(), 7.0);
 
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().map(String::as_str) == Some("--layout") {
+        args.next();
+        let layout = match args.next().as_deref() {
+            Some("gathered") => PacketLayout::Gathered,
+            Some("indexed") => PacketLayout::Indexed,
+            Some("auto") => PacketLayout::Auto,
+            other => panic!("--layout wants gathered|indexed|auto, got {other:?}"),
+        };
+        LAYOUT.set(layout).expect("set once");
+    }
     if args.next().as_deref() == Some("--large") {
         let mtris: f64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(8.0);
         let n = (mtris * 1e6) as usize;

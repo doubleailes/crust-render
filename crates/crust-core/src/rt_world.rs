@@ -656,7 +656,7 @@ impl WorldBuilder {
     pub fn commit(self) -> World {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
         World {
-            scene: self.rt.commit(),
+            scene: self.rt.commit_with(crate::packet_layout()),
             materials: self.materials,
             faces: self.faces,
             cutouts,

@@ -213,16 +213,11 @@ pub(crate) fn triangle_intersect_sheared(
     Some((t_scaled * inv_det, e1 * inv_det, e2 * inv_det))
 }
 
-/// Four triangles in structure-of-arrays layout: `v[i][axis]` holds vertex
-/// `i`'s `axis` component across all four lanes, so the whole packet is
-/// nine `Vec4`s and the intersector never shuffles.
-///
-/// Packets are built per BVH leaf at commit time. A leaf with a triangle
-/// count that is not a multiple of four leaves the tail lanes inactive
-/// (their vertices are set to the last real triangle's, so the arithmetic
-/// stays finite and the lanes are dropped by `active`).
-pub(crate) struct Tri4 {
-    v: [[Vec4; 3]; 3],
+/// What both packet layouts carry beside their lanes: which lanes hold a
+/// triangle, each lane's record and visibility mask, and the two combined
+/// masks that answer the common cases in one compare each.
+#[derive(Clone, Copy)]
+pub(crate) struct LaneMasks {
     /// Index into the BVH's triangle records per lane — how a hit gets
     /// back to its vertices, shading normals and IDs.
     pub rec: [u32; 4],
@@ -237,55 +232,21 @@ pub(crate) struct Tri4 {
     masks: [RayMask; 4],
 }
 
-/// Per-lane outcome of [`Tri4::intersect`].
-pub(crate) struct Hit4 {
-    /// Lanes that hit; their `t`/`u`/`v` entries are valid.
-    pub hits: u32,
-    /// Lanes where an edge function came out exactly 0.0. The f64 tie-break
-    /// that keeps adjacent triangles watertight is inherently scalar, so
-    /// these lanes carry no verdict here — the caller must re-test them
-    /// with [`triangle_intersect_sheared`]. Rare in practice (it takes a
-    /// ray passing exactly through an edge or vertex), so the branch costs
-    /// nothing on real geometry.
-    pub fallback: u32,
-    pub t: [f32; 4],
-    pub u: [f32; 4],
-    pub v: [f32; 4],
-}
-
-impl Tri4 {
-    /// Packs up to four triangles. `tris` shorter than 4 leaves the tail
-    /// lanes inactive.
-    pub(crate) fn new(tris: &[(Vec3A, Vec3A, Vec3A, u32, RayMask)]) -> Self {
-        debug_assert!(!tris.is_empty() && tris.len() <= 4);
-        let mut v = [[Vec4::ZERO; 3]; 3];
+impl LaneMasks {
+    fn new(lanes: &[(u32, RayMask)]) -> Self {
         let mut rec = [u32::MAX; 4];
         let mut masks = [RayMask::NONE; 4];
         let mut active = 0u32;
         let mut mask_and = RayMask::ALL;
         let mut mask_or = RayMask::NONE;
-        for lane in 0..4 {
-            // Inactive tail lanes duplicate the last real triangle: the
-            // lane is masked off anyway, and duplicating keeps the values
-            // finite (a zeroed lane would be a degenerate triangle whose
-            // edge functions are all exactly 0.0, needlessly tripping the
-            // f64 fallback on every query).
-            let (v0, v1, v2, pi, mask) = tris[lane.min(tris.len() - 1)];
-            for axis in 0..3 {
-                v[0][axis][lane] = v0[axis];
-                v[1][axis][lane] = v1[axis];
-                v[2][axis][lane] = v2[axis];
-            }
-            if lane < tris.len() {
-                rec[lane] = pi;
-                masks[lane] = mask;
-                active |= 1 << lane;
-                mask_and &= mask;
-                mask_or |= mask;
-            }
+        for (lane, &(r, mask)) in lanes.iter().enumerate() {
+            rec[lane] = r;
+            masks[lane] = mask;
+            active |= 1 << lane;
+            mask_and &= mask;
+            mask_or |= mask;
         }
-        Tri4 {
-            v,
+        LaneMasks {
             rec,
             active,
             mask_and,
@@ -311,10 +272,88 @@ impl Tri4 {
         }
         m
     }
+}
 
-    /// Intersects all four triangles at once. Every step is the `Vec4`
-    /// transcription of the scalar path above, in the same order, so a
-    /// lane's `t`/`u`/`v` are bit-identical to the scalar result.
+/// Four triangles in structure-of-arrays layout: `v[i][axis]` holds vertex
+/// `i`'s `axis` component across all four lanes, so the whole packet is
+/// nine `Vec4`s and the intersector never shuffles. The *gathered* layout:
+/// a copy of the vertices, the fastest in cache, 192 bytes.
+///
+/// Packets are built per BVH leaf at commit time. A leaf with a triangle
+/// count that is not a multiple of four leaves the tail lanes inactive
+/// (their vertices are set to the last real triangle's, so the arithmetic
+/// stays finite and the lanes are dropped by `active`).
+pub(crate) struct Tri4 {
+    v: [[Vec4; 3]; 3],
+    pub lanes: LaneMasks,
+}
+
+/// Four triangles as vertex *indices* into the scene's shared vertex table:
+/// the *indexed* layout, 92 bytes, which gathers the same nine `Vec4`s as
+/// [`Tri4`] holds at every test (twelve loads) and then runs the same code.
+/// Half the packet bytes of the gathered layout for a tree too large to be
+/// in cache anyway, where traffic rather than arithmetic bounds traversal;
+/// bit-identical to it by construction (`tri4i_matches_tri4_bitwise`),
+/// inactive tail lanes duplicating the last real triangle's indices exactly
+/// as the gathered packet duplicates its vertices.
+pub(crate) struct Tri4i {
+    v: [[u32; 3]; 4],
+    pub lanes: LaneMasks,
+}
+
+/// One triangle as a packet constructor sees it: vertices, their indices,
+/// the record and the visibility mask.
+pub(crate) struct PacketTri {
+    pub verts: [Vec3A; 3],
+    pub idx: [u32; 3],
+    pub rec: u32,
+    pub mask: RayMask,
+}
+
+/// Per-lane outcome of [`Tri4::intersect`] and [`Tri4i::intersect`].
+pub(crate) struct Hit4 {
+    /// Lanes that hit; their `t`/`u`/`v` entries are valid.
+    pub hits: u32,
+    /// Lanes where an edge function came out exactly 0.0. The f64 tie-break
+    /// that keeps adjacent triangles watertight is inherently scalar, so
+    /// these lanes carry no verdict here — the caller must re-test them
+    /// with [`triangle_intersect_sheared`]. Rare in practice (it takes a
+    /// ray passing exactly through an edge or vertex), so the branch costs
+    /// nothing on real geometry.
+    pub fallback: u32,
+    pub t: [f32; 4],
+    pub u: [f32; 4],
+    pub v: [f32; 4],
+}
+
+impl Tri4 {
+    /// Packs up to four triangles. `tris` shorter than 4 leaves the tail
+    /// lanes inactive.
+    pub(crate) fn new(tris: &[PacketTri]) -> Self {
+        debug_assert!(!tris.is_empty() && tris.len() <= 4);
+        let mut v = [[Vec4::ZERO; 3]; 3];
+        for lane in 0..4 {
+            // Inactive tail lanes duplicate the last real triangle: the
+            // lane is masked off anyway, and duplicating keeps the values
+            // finite (a zeroed lane would be a degenerate triangle whose
+            // edge functions are all exactly 0.0, needlessly tripping the
+            // f64 fallback on every query).
+            let t = &tris[lane.min(tris.len() - 1)];
+            for (i, vi) in v.iter_mut().enumerate() {
+                for (axis, slot) in vi.iter_mut().enumerate() {
+                    slot[lane] = t.verts[i][axis];
+                }
+            }
+        }
+        let lanes: Vec<(u32, RayMask)> = tris.iter().map(|t| (t.rec, t.mask)).collect();
+        Tri4 {
+            v,
+            lanes: LaneMasks::new(&lanes),
+        }
+    }
+
+    /// Intersects all four triangles at once.
+    #[inline]
     pub(crate) fn intersect(
         &self,
         sh: &RayShear,
@@ -322,77 +361,124 @@ impl Tri4 {
         t_min: f32,
         t_max: f32,
     ) -> Hit4 {
-        let mut m = self.visible_lanes(ray_mask);
+        let m = self.lanes.visible_lanes(ray_mask);
         if m == 0 {
             return Hit4::MISS;
         }
+        intersect_lanes(&self.v, m, sh, t_min, t_max)
+    }
+}
 
-        let (kx, ky, kz) = (sh.kx, sh.ky, sh.kz);
-
-        // Vertices relative to the ray origin, sheared into ray space.
-        let akz = kz.of(&self.v[0]) - sh.okz;
-        let bkz = kz.of(&self.v[1]) - sh.okz;
-        let ckz = kz.of(&self.v[2]) - sh.okz;
-        let ax = (kx.of(&self.v[0]) - sh.okx) - sh.sx4 * akz;
-        let ay = (ky.of(&self.v[0]) - sh.oky) - sh.sy4 * akz;
-        let bx = (kx.of(&self.v[1]) - sh.okx) - sh.sx4 * bkz;
-        let by = (ky.of(&self.v[1]) - sh.oky) - sh.sy4 * bkz;
-        let cx = (kx.of(&self.v[2]) - sh.okx) - sh.sx4 * ckz;
-        let cy = (ky.of(&self.v[2]) - sh.oky) - sh.sy4 * ckz;
-
-        // Signed 2D edge functions; e0 is opposite v0, etc.
-        let e0 = bx * cy - by * cx;
-        let e1 = cx * ay - cy * ax;
-        let e2 = ax * by - ay * bx;
-
-        let zero = Vec4::ZERO;
-        // Lanes sitting exactly on an edge go to the scalar f64 path, and
-        // leave the SIMD verdict entirely — a lane the sign test below
-        // rejects may well be a hit once the ties are resolved in f64.
-        let fallback =
-            m & (e0.cmpeq(zero).bitmask() | e1.cmpeq(zero).bitmask() | e2.cmpeq(zero).bitmask());
-        m &= !fallback;
-
-        // Inside iff the three edge functions share a sign.
-        let neg = e0.cmplt(zero).bitmask() | e1.cmplt(zero).bitmask() | e2.cmplt(zero).bitmask();
-        let pos = e0.cmpgt(zero).bitmask() | e1.cmpgt(zero).bitmask() | e2.cmpgt(zero).bitmask();
-        m &= !(neg & pos);
-
-        let det = e0 + e1 + e2;
-        m &= !det.cmpeq(zero).bitmask();
-        if m == 0 {
-            return Hit4 {
-                hits: 0,
-                fallback,
-                ..Hit4::MISS
-            };
+impl Tri4i {
+    /// Packs up to four triangles by index; see [`Tri4::new`].
+    pub(crate) fn new(tris: &[PacketTri]) -> Self {
+        debug_assert!(!tris.is_empty() && tris.len() <= 4);
+        let v: [[u32; 3]; 4] = std::array::from_fn(|lane| tris[lane.min(tris.len() - 1)].idx);
+        let lanes: Vec<(u32, RayMask)> = tris.iter().map(|t| (t.rec, t.mask)).collect();
+        Tri4i {
+            v,
+            lanes: LaneMasks::new(&lanes),
         }
+    }
 
-        // Scaled hit distance, range-tested without a division. The scalar
-        // path branches on det's sign; here the same test is a single
-        // sign-flip: `t_scaled * sign(det)` compared against
-        // `t_min * |det|` and `t_max * |det|`.
-        let t_scaled = e0 * (sh.sz4 * akz) + e1 * (sh.sz4 * bkz) + e2 * (sh.sz4 * ckz);
-        let abs_det = det.abs();
-        let ts = Vec4::select(det.cmplt(zero), -t_scaled, t_scaled);
-        m &= ts.cmpge(Vec4::splat(t_min) * abs_det).bitmask();
-        m &= ts.cmple(Vec4::splat(t_max) * abs_det).bitmask();
+    /// Gathers the lanes from `vertices` and intersects them — the same
+    /// arithmetic as [`Tri4::intersect`] on the same `f32`s.
+    #[inline]
+    pub(crate) fn intersect(
+        &self,
+        vertices: &[[f32; 3]],
+        sh: &RayShear,
+        ray_mask: RayMask,
+        t_min: f32,
+        t_max: f32,
+    ) -> Hit4 {
+        let m = self.lanes.visible_lanes(ray_mask);
         if m == 0 {
-            return Hit4 {
-                hits: 0,
-                fallback,
-                ..Hit4::MISS
-            };
+            return Hit4::MISS;
         }
+        let mut v = [[Vec4::ZERO; 3]; 3];
+        for (lane, idx) in self.v.iter().enumerate() {
+            for (i, vi) in v.iter_mut().enumerate() {
+                let p = vertices[idx[i] as usize];
+                vi[0][lane] = p[0];
+                vi[1][lane] = p[1];
+                vi[2][lane] = p[2];
+            }
+        }
+        intersect_lanes(&v, m, sh, t_min, t_max)
+    }
+}
 
-        let inv_det = Vec4::ONE / det;
-        Hit4 {
-            hits: m,
+/// The 4-wide Woop test over lanes already in SoA form. Every step is the
+/// `Vec4` transcription of the scalar path above, in the same order, so a
+/// lane's `t`/`u`/`v` are bit-identical to the scalar result.
+#[inline]
+fn intersect_lanes(v: &[[Vec4; 3]; 3], mut m: u32, sh: &RayShear, t_min: f32, t_max: f32) -> Hit4 {
+    let (kx, ky, kz) = (sh.kx, sh.ky, sh.kz);
+
+    // Vertices relative to the ray origin, sheared into ray space.
+    let akz = kz.of(&v[0]) - sh.okz;
+    let bkz = kz.of(&v[1]) - sh.okz;
+    let ckz = kz.of(&v[2]) - sh.okz;
+    let ax = (kx.of(&v[0]) - sh.okx) - sh.sx4 * akz;
+    let ay = (ky.of(&v[0]) - sh.oky) - sh.sy4 * akz;
+    let bx = (kx.of(&v[1]) - sh.okx) - sh.sx4 * bkz;
+    let by = (ky.of(&v[1]) - sh.oky) - sh.sy4 * bkz;
+    let cx = (kx.of(&v[2]) - sh.okx) - sh.sx4 * ckz;
+    let cy = (ky.of(&v[2]) - sh.oky) - sh.sy4 * ckz;
+
+    // Signed 2D edge functions; e0 is opposite v0, etc.
+    let e0 = bx * cy - by * cx;
+    let e1 = cx * ay - cy * ax;
+    let e2 = ax * by - ay * bx;
+
+    let zero = Vec4::ZERO;
+    // Lanes sitting exactly on an edge go to the scalar f64 path, and
+    // leave the SIMD verdict entirely — a lane the sign test below
+    // rejects may well be a hit once the ties are resolved in f64.
+    let fallback =
+        m & (e0.cmpeq(zero).bitmask() | e1.cmpeq(zero).bitmask() | e2.cmpeq(zero).bitmask());
+    m &= !fallback;
+
+    // Inside iff the three edge functions share a sign.
+    let neg = e0.cmplt(zero).bitmask() | e1.cmplt(zero).bitmask() | e2.cmplt(zero).bitmask();
+    let pos = e0.cmpgt(zero).bitmask() | e1.cmpgt(zero).bitmask() | e2.cmpgt(zero).bitmask();
+    m &= !(neg & pos);
+
+    let det = e0 + e1 + e2;
+    m &= !det.cmpeq(zero).bitmask();
+    if m == 0 {
+        return Hit4 {
+            hits: 0,
             fallback,
-            t: (t_scaled * inv_det).to_array(),
-            u: (e1 * inv_det).to_array(),
-            v: (e2 * inv_det).to_array(),
-        }
+            ..Hit4::MISS
+        };
+    }
+
+    // Scaled hit distance, range-tested without a division. The scalar
+    // path branches on det's sign; here the same test is a single
+    // sign-flip: `t_scaled * sign(det)` compared against
+    // `t_min * |det|` and `t_max * |det|`.
+    let t_scaled = e0 * (sh.sz4 * akz) + e1 * (sh.sz4 * bkz) + e2 * (sh.sz4 * ckz);
+    let abs_det = det.abs();
+    let ts = Vec4::select(det.cmplt(zero), -t_scaled, t_scaled);
+    m &= ts.cmpge(Vec4::splat(t_min) * abs_det).bitmask();
+    m &= ts.cmple(Vec4::splat(t_max) * abs_det).bitmask();
+    if m == 0 {
+        return Hit4 {
+            hits: 0,
+            fallback,
+            ..Hit4::MISS
+        };
+    }
+
+    let inv_det = Vec4::ONE / det;
+    Hit4 {
+        hits: m,
+        fallback,
+        t: (t_scaled * inv_det).to_array(),
+        u: (e1 * inv_det).to_array(),
+        v: (e2 * inv_det).to_array(),
     }
 }
 
@@ -479,6 +565,95 @@ pub(crate) fn clip_triangle_aabb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test's `(v0, v1, v2, record, mask)` tuple as a packet input, with
+    /// vertex indices that only `packet_table` makes meaningful.
+    fn packet_tris(tris: &[(Vec3A, Vec3A, Vec3A, u32, RayMask)]) -> Vec<PacketTri> {
+        tris.iter()
+            .enumerate()
+            .map(|(i, &(a, b, c, rec, mask))| PacketTri {
+                verts: [a, b, c],
+                idx: [3 * i as u32, 3 * i as u32 + 1, 3 * i as u32 + 2],
+                rec,
+                mask,
+            })
+            .collect()
+    }
+
+    /// The vertex table `packet_tris`'s indices address.
+    fn packet_table(tris: &[(Vec3A, Vec3A, Vec3A, u32, RayMask)]) -> Vec<[f32; 3]> {
+        tris.iter()
+            .flat_map(|&(a, b, c, _, _)| [a.to_array(), b.to_array(), c.to_array()])
+            .collect()
+    }
+
+    /// The indexed layout gathers exactly the lanes the gathered layout
+    /// holds, so every verdict — hit, tie-break fallback, `t`, `u`, `v` —
+    /// is bit-identical between the two on random packets and rays.
+    #[test]
+    fn tri4i_matches_tri4_bitwise() {
+        let mut state = 0x5151_1234u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut hits = 0;
+        for round in 0..4000 {
+            let n = 1 + round % 4;
+            let tris: Vec<(Vec3A, Vec3A, Vec3A, u32, RayMask)> = (0..n)
+                .map(|i| {
+                    let base = Vec3A::new(next(), next(), next()) * 4.0;
+                    (
+                        base + Vec3A::new(next(), next(), next()),
+                        base + Vec3A::new(next(), next(), next()),
+                        base + Vec3A::new(next(), next(), next()),
+                        i as u32,
+                        if i % 3 == 1 {
+                            crate::ray::MASK_SHADOW
+                        } else {
+                            crate::ray::MASK_ALL
+                        },
+                    )
+                })
+                .collect();
+            let inputs = packet_tris(&tris);
+            let gathered = Tri4::new(&inputs);
+            let indexed = Tri4i::new(&inputs);
+            let table = packet_table(&tris);
+
+            let origin = Vec3A::new(next(), next(), next()) * 6.0;
+            let pick = ((next() + 0.5) * n as f32) as usize % n;
+            let (v0, v1, v2, _, _) = tris[pick];
+            let dir = if next() > 0.0 {
+                (v0 + (v1 - v0) * 0.3 + (v2 - v0) * 0.3) - origin
+            } else {
+                Vec3A::new(next(), next(), next())
+            };
+            if dir.length_squared() < 1e-8 {
+                continue;
+            }
+            let r = ray(origin, dir.normalize());
+            let sh = RayShear::new(&r);
+            for mask in [
+                crate::ray::MASK_ALL,
+                crate::ray::MASK_SHADOW,
+                crate::ray::MASK_CAMERA,
+            ] {
+                let a = gathered.intersect(&sh, mask, 0.001, f32::INFINITY);
+                let b = indexed.intersect(&table, &sh, mask, 0.001, f32::INFINITY);
+                assert_eq!(a.hits, b.hits);
+                assert_eq!(a.fallback, b.fallback);
+                assert_eq!(a.t.map(f32::to_bits), b.t.map(f32::to_bits));
+                assert_eq!(a.u.map(f32::to_bits), b.u.map(f32::to_bits));
+                assert_eq!(a.v.map(f32::to_bits), b.v.map(f32::to_bits));
+                hits += a.hits.count_ones();
+            }
+        }
+        assert!(
+            hits > 2000,
+            "only {hits} lane hits: the rays miss too often to test anything"
+        );
+    }
 
     fn ray(o: Vec3A, d: Vec3A) -> Ray {
         Ray::new(o, d)
@@ -593,7 +768,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let packet = Tri4::new(&tris);
+            let packet = Tri4::new(&packet_tris(&tris));
 
             let origin = Vec3A::new(next(), next(), next()) * 6.0;
             // Half the rays are aimed at a barycentric point of one of the
@@ -662,7 +837,7 @@ mod tests {
             (tri.0, tri.1, tri.2, 0u32, crate::ray::MASK_ALL),
             (tri.0, tri.2, tri.1, 1u32, crate::ray::MASK_ALL),
         ];
-        let packet = Tri4::new(&cases);
+        let packet = Tri4::new(&packet_tris(&cases));
         for (t_min, t_max) in [
             (0.001, 4.9),
             (5.1, 100.0),
@@ -695,8 +870,8 @@ mod tests {
             0u32,
             crate::ray::MASK_ALL,
         )];
-        let packet = Tri4::new(&one);
-        assert_eq!(packet.active, 0b0001);
+        let packet = Tri4::new(&packet_tris(&one));
+        assert_eq!(packet.lanes.active, 0b0001);
         let r = ray(Vec3A::ZERO, Vec3A::Z);
         let out = packet.intersect(
             &RayShear::new(&r),
@@ -730,7 +905,7 @@ mod tests {
             tri(6.0, 1, MASK_SHADOW),
             tri(7.0, 2, MASK_ALL),
         ];
-        let packet = Tri4::new(&cases);
+        let packet = Tri4::new(&packet_tris(&cases));
         let r = ray(Vec3A::ZERO, Vec3A::Z);
         let sh = RayShear::new(&r);
         assert_eq!(

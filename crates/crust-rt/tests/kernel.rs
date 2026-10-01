@@ -1512,3 +1512,87 @@ fn triangle_vertices_of_an_instanced_scene_are_local() {
     // The instance itself is not a triangle mesh of the outer scene.
     assert!(world.triangle_vertices(0, 3).is_none());
 }
+
+/// The gathered and the indexed packet layouts answer every query with the
+/// same bits: a scene committed both ways, probed by random rays with
+/// closest-hit and occlusion queries, agrees on `t`, barycentrics, normal
+/// and ids exactly. The indexed scene holds half the packet bytes.
+#[test]
+fn packet_layouts_are_bit_identical() {
+    use crust_rt::PacketLayout;
+    let (v, t, n) = tessellated_sphere(24, 48);
+    let (gv, gt) = grid(16);
+    let build = |layout: PacketLayout| {
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::TriangleMesh {
+            vertices: arrays(&v),
+            indices: t.clone(),
+            normals: Some(arrays(&n)),
+        });
+        b.attach(mesh(
+            gv.iter()
+                .map(|p| *p * 4.0 - Vec3A::new(2.0, 2.0, 3.0))
+                .collect(),
+            gt.clone(),
+        ));
+        b.attach(sphere(Vec3A::new(0.0, 0.0, 2.5), 0.4));
+        b.commit_with(layout)
+    };
+    let gathered = build(PacketLayout::Gathered);
+    let indexed = build(PacketLayout::Indexed);
+    let fg = gathered.memory_footprint();
+    let fi = indexed.memory_footprint();
+    assert!(fg.packets > 0 && fg.packets_indexed == 0);
+    assert!(fi.packets == 0 && fi.packets_indexed > 0);
+    assert!(
+        fi.packets_indexed * 2 <= fg.packets,
+        "{} vs {}",
+        fi.packets_indexed,
+        fg.packets
+    );
+    assert_eq!(fi.total() - fi.packets_indexed, fg.total() - fg.packets);
+
+    let mut rng = Rng::new(77);
+    let mut hits = 0;
+    for _ in 0..3000 {
+        let o = vec3(&mut rng, -4.0, 4.0);
+        let d = dir(&mut rng);
+        let ray = Ray::new(o, d);
+        let a = gathered.intersect(&ray, 0.001, 50.0);
+        let b = indexed.intersect(&ray, 0.001, 50.0);
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                hits += 1;
+                assert_eq!(x.t.to_bits(), y.t.to_bits());
+                assert_eq!(x.u.to_bits(), y.u.to_bits());
+                assert_eq!(x.v.to_bits(), y.v.to_bits());
+                assert_eq!(
+                    x.normal.to_array().map(f32::to_bits),
+                    y.normal.to_array().map(f32::to_bits)
+                );
+                assert_eq!(
+                    (x.geom_id, x.prim_id, x.front_face),
+                    (y.geom_id, y.prim_id, y.front_face)
+                );
+            }
+            (None, None) => {}
+            _ => panic!("layouts disagree on whether {o:?} {d:?} hits"),
+        }
+        assert_eq!(
+            gathered.occluded(&ray, 0.001, 3.0),
+            indexed.occluded(&ray, 0.001, 3.0)
+        );
+    }
+    assert!(hits > 200, "only {hits} hits");
+}
+
+/// `Auto` picks by triangle count: small scenes gather, scenes past the
+/// threshold index.
+#[test]
+fn auto_layout_gathers_small_scenes() {
+    let (v, t) = grid(4);
+    let mut b = SceneBuilder::new();
+    b.attach(mesh(v, t));
+    let fp = b.commit().memory_footprint();
+    assert!(fp.packets > 0 && fp.packets_indexed == 0);
+}

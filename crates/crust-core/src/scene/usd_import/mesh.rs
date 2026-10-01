@@ -350,7 +350,7 @@ fn commit_mesh(geom: MeshGeom) -> RtScene {
         indices: geom.tris,
         normals: geom.normals,
     });
-    b.commit()
+    b.commit_with(crate::packet_layout())
 }
 
 pub(super) fn emit_mesh(

@@ -22,6 +22,27 @@ pub struct CurveSegment {
     pub r1: f32,
 }
 
+/// How a committed scene stores its triangle packets — see
+/// [`SceneBuilder::commit_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PacketLayout {
+    /// Each packet carries its four triangles' vertices (192 bytes): the
+    /// fastest in cache. The layout before indexed packets existed.
+    Gathered,
+    /// Each packet carries vertex indices (92 bytes) and gathers from the
+    /// scene's shared vertex table at every test; bit-identical hits.
+    Indexed,
+    /// `Indexed` for a scene with more than [`INDEXED_PACKETS_FROM`]
+    /// triangles, `Gathered` below — where a tree is large enough that
+    /// memory traffic rather than arithmetic bounds traversal.
+    #[default]
+    Auto,
+}
+
+/// The triangle count above which [`PacketLayout::Auto`] picks the indexed
+/// layout.
+pub const INDEXED_PACKETS_FROM: usize = 1_000_000;
+
 /// Exact bytes a committed [`Scene`] holds, by structure — the kernel's
 /// side of a memory report. Counts `capacity`, not `len`, because unused
 /// capacity is resident too, and deduplicates shared instanced scenes so
@@ -39,8 +60,10 @@ pub struct MemoryFootprint {
     /// 4-wide BVH nodes.
     pub bvh_nodes: usize,
     pub leaves: usize,
-    /// Triangle SIMD packets (gathered layout: the vertices, SoA).
+    /// Triangle SIMD packets of the gathered layout (the vertices, SoA).
     pub packets: usize,
+    /// Triangle SIMD packets of the indexed layout (vertex indices).
+    pub packets_indexed: usize,
     /// Leaf primitive indices.
     pub indices: usize,
     /// Triangle records: vertex indices, ids and mask, 24 bytes each.
@@ -65,6 +88,7 @@ impl MemoryFootprint {
             + self.bvh_nodes
             + self.leaves
             + self.packets
+            + self.packets_indexed
             + self.indices
             + self.triangle_records
             + self.vertices
@@ -328,9 +352,18 @@ impl SceneBuilder {
         }
     }
 
-    /// Expands every geometry into primitives and builds the BVH.
+    /// Expands every geometry into primitives and builds the BVH, choosing
+    /// the packet layout by size ([`PacketLayout::Auto`]).
     #[must_use = "the committed scene is the only way to intersect it"]
     pub fn commit(self) -> Scene {
+        self.commit_with(PacketLayout::Auto)
+    }
+
+    /// [`SceneBuilder::commit`] with the triangle packet layout chosen by the
+    /// caller. Either layout answers every query bit-identically; they
+    /// differ in resident bytes and in what bounds traversal.
+    #[must_use = "the committed scene is the only way to intersect it"]
+    pub fn commit_with(self, layout: PacketLayout) -> Scene {
         let n_geoms = self.geoms.len() as u32;
         // Size the primitive array exactly once, from the total the
         // geometries will expand into, instead of letting per-geometry
@@ -560,8 +593,14 @@ impl SceneBuilder {
             }
             input.geoms.push(table);
         }
+        let layout = match layout {
+            PacketLayout::Gathered => crate::bvh::Layout::Gathered,
+            PacketLayout::Indexed => crate::bvh::Layout::Indexed,
+            PacketLayout::Auto if n_tris > INDEXED_PACKETS_FROM => crate::bvh::Layout::Indexed,
+            PacketLayout::Auto => crate::bvh::Layout::Gathered,
+        };
         Scene {
-            bvh: Bvh::new(input),
+            bvh: Bvh::new(input, layout),
             n_geoms,
             has_motion,
             max_hit_id,
