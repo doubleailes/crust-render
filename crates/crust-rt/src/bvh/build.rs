@@ -42,26 +42,38 @@ pub(super) fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
 
 /// Splices `left`/`right` under a fresh internal node, rewriting the
 /// children's local node indices and leaf offsets into the merged frame.
+///
+/// Built *in* `left`'s vectors rather than into fresh ones: a third
+/// allocation of `1 + left + right` while both children were still alive
+/// put the whole tree in memory twice at the root merge, which on a
+/// subdivided scene was the commit's peak. Shifting `left`'s nodes up by
+/// one to make room for the parent is a memmove per level, O(n log n) in
+/// all, and nothing against the SAH work that produced them.
 pub(super) fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
-    let mut nodes = Vec::with_capacity(1 + left.nodes.len() + right.nodes.len());
-    let right_node_offset = 1 + left.nodes.len() as u32;
-    nodes.push(Node::new(bbox, right_node_offset, 0));
-    for mut n in left.nodes {
+    let Subtree {
+        mut nodes,
+        mut indices,
+    } = left;
+    let n_left = nodes.len() as u32;
+    let right_node_offset = 1 + n_left;
+    nodes.reserve_exact(1 + right.nodes.len());
+    // The left child's internal nodes point one further once the parent
+    // sits in front of them.
+    for n in nodes.iter_mut() {
         if n.count == 0 {
             n.first_or_right += 1;
         }
-        nodes.push(n);
     }
-    let leaf_offset = left.indices.len() as u32;
-    for mut n in right.nodes {
+    nodes.insert(0, Node::new(bbox, right_node_offset, 0));
+    let leaf_offset = indices.len() as u32;
+    nodes.extend(right.nodes.into_iter().map(|mut n| {
         if n.count == 0 {
             n.first_or_right += right_node_offset;
         } else {
             n.first_or_right += leaf_offset;
         }
-        nodes.push(n);
-    }
-    let mut indices = left.indices;
+        n
+    }));
     // Exact: `extend` alone would grow by doubling, and the slack of every
     // merge up the recursion would be alive at once.
     indices.reserve_exact(right.indices.len());
