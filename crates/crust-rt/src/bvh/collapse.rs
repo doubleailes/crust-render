@@ -46,7 +46,7 @@ impl LeafData {
                 }
             } else {
                 // Scalar primitives are indexed within their own table.
-                self.indices.push(pi - prims.tris.len() as u32);
+                self.indices.push(prims.resident_id(pi));
                 idx_count += 1;
             }
         }
