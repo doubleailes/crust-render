@@ -178,6 +178,7 @@ fn kernel_footprint_is_reported_by_structure() {
         scene: SceneCounters {
             footprint: MemoryFootprint {
                 prim_nodes: 4096,
+                instances: 960,
                 bvh_nodes: 2048,
                 packets: 0,
                 ..Default::default()

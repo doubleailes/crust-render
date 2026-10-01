@@ -30,7 +30,8 @@ use collapse::{LeafData, collapse};
 
 use crate::aabb::{AABB, triangle_aabb};
 use crate::prim::{
-    GeomTable, NO_NORMALS, PrimHit, PrimNode, TriangleRecord, triangle_hit_from_barycentric,
+    CubicCurvePrim, GeomTable, InstancePrim, NO_NORMALS, Prim, PrimHit, PrimNode, TriangleRecord,
+    clip_box, triangle_hit_from_barycentric,
 };
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
@@ -232,7 +233,12 @@ pub(crate) enum Layout {
 /// that are not triangles. [`Bvh::new`] takes it by value and boxes it.
 ///
 /// The build sees one index space over all of it: `0..tris.len()` are
-/// records, `tris.len()..` are `prims` — see [`Primitives::is_triangle`].
+/// records, `tris.len() + k` is the `k`-th non-triangle *in attach order* —
+/// see [`Primitives::is_triangle`]. The non-triangles live in one array per
+/// kind, so `order` says where each one went. Keeping the attach order is
+/// what keeps the build's references, its ties and its leaf order — and so
+/// every query result — exactly what they were when all of them shared one
+/// array.
 #[derive(Default)]
 pub(crate) struct Primitives {
     pub(crate) tris: Vec<TriangleRecord>,
@@ -242,13 +248,91 @@ pub(crate) struct Primitives {
     /// run parallel to its vertex run (`GeomTable::normal_base`).
     pub(crate) normals: Vec<[f32; 3]>,
     pub(crate) geoms: Vec<GeomTable>,
+    /// Spheres, disks, cylinders and linear curve segments.
     pub(crate) prims: Vec<PrimNode>,
+    /// Instances, inline (no box, no `PrimNode` slot).
+    pub(crate) instances: Vec<InstancePrim>,
+    /// World bounds of `instances[i]`. Build-only: the finished tree's
+    /// parent lane holds the same box, so the BVH drops this.
+    pub(crate) instance_bounds: Vec<AABB>,
+    /// Cubic curve spans, inline.
+    pub(crate) cubics: Vec<CubicCurvePrim>,
+    /// Build-only: the resident id ([`kind_tagged`]) of the `k`-th
+    /// non-triangle in attach order.
+    pub(crate) order: Vec<u32>,
+}
+
+/// A leaf's scalar (non-packet) primitive reference: the kind in the top two
+/// bits, the index into that kind's array below.
+const KIND_SHIFT: u32 = 30;
+const INDEX_MASK: u32 = (1 << KIND_SHIFT) - 1;
+const KIND_NODE: u32 = 0;
+const KIND_INSTANCE: u32 = 1;
+const KIND_CUBIC: u32 = 2;
+
+/// The resident id of the `index`-th primitive of `kind`.
+fn kind_tagged(kind: u32, index: usize) -> u32 {
+    assert!(
+        index <= INDEX_MASK as usize,
+        "one BVH holds more than {INDEX_MASK} primitives of one kind"
+    );
+    (kind << KIND_SHIFT) | index as u32
 }
 
 impl Primitives {
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.tris.len() + self.prims.len()
+        self.tris.len() + self.order.len()
+    }
+
+    /// Appends an analytic primitive, in attach order.
+    pub(crate) fn push_node(&mut self, p: PrimNode) {
+        self.order.push(kind_tagged(KIND_NODE, self.prims.len()));
+        self.prims.push(p);
+    }
+
+    /// Appends an instance and its world bounds, in attach order.
+    pub(crate) fn push_instance(&mut self, p: InstancePrim, bounds: AABB) {
+        self.order
+            .push(kind_tagged(KIND_INSTANCE, self.instances.len()));
+        self.instances.push(p);
+        self.instance_bounds.push(bounds);
+    }
+
+    /// Appends a cubic curve span, in attach order.
+    pub(crate) fn push_cubic(&mut self, p: CubicCurvePrim) {
+        self.order.push(kind_tagged(KIND_CUBIC, self.cubics.len()));
+        self.cubics.push(p);
+    }
+
+    /// `(count, sum of bbox diagonals, max diagonal)`: every triangle that
+    /// refers to real vertices, then every other primitive in attach order —
+    /// the order (and so the `f32` sum) the shared array used to give.
+    pub(crate) fn extent_sum(&self) -> (usize, f32, f32) {
+        let mut sum = 0.0f32;
+        let mut max = 0.0f32;
+        let mut n = 0usize;
+        let mut add = |b: AABB| {
+            let d = (b.maximum - b.minimum).length();
+            sum += d;
+            max = max.max(d);
+            n += 1;
+        };
+        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
+            let [a, b, c] = self.tri_verts(r);
+            add(triangle_aabb(a, b, c));
+        }
+        for k in 0..self.order.len() {
+            let idx = (self.tris.len() + k) as u32;
+            add(self.bbox(idx).expect("only triangles can lack bounds"));
+        }
+        (n, sum, max)
+    }
+
+    /// The resident id a leaf stores for non-triangle build index `idx`.
+    #[inline]
+    pub(crate) fn resident_id(&self, idx: u32) -> u32 {
+        self.order[idx as usize - self.tris.len()]
     }
 
     #[inline]
@@ -289,7 +373,13 @@ impl Primitives {
             }
             Some(triangle_aabb(a, b, c))
         } else {
-            Some(self.prims[idx as usize - self.tris.len()].bbox())
+            let id = self.resident_id(idx);
+            let i = (id & INDEX_MASK) as usize;
+            Some(match id >> KIND_SHIFT {
+                KIND_INSTANCE => self.instance_bounds[i],
+                KIND_CUBIC => self.cubics[i].bbox(),
+                _ => self.prims[i].bbox(),
+            })
         }
     }
 
@@ -299,7 +389,13 @@ impl Primitives {
             let [a, b, c] = self.tri_verts(&self.tris[idx as usize]);
             clip_triangle_aabb(a, b, c, axis, min, max)
         } else {
-            self.prims[idx as usize - self.tris.len()].clipped_aabb(axis, min, max)
+            let id = self.resident_id(idx);
+            let i = (id & INDEX_MASK) as usize;
+            match id >> KIND_SHIFT {
+                KIND_INSTANCE => clip_box(self.instance_bounds[i], axis, min, max),
+                KIND_CUBIC => self.cubics[i].clipped_aabb(axis, min, max),
+                _ => self.prims[i].clipped_aabb(axis, min, max),
+            }
         }
     }
 }
@@ -316,8 +412,9 @@ pub(crate) struct Bvh {
     packets: Box<[Tri4]>,
     packets_i: Box<[Tri4i]>,
     layout: Layout,
-    /// The one-at-a-time primitives of each leaf, as indices into `prims`;
-    /// spatial splits may list a primitive in more than one leaf.
+    /// The one-at-a-time primitives of each leaf, as kind-tagged ids into
+    /// `prims` / `instances` / `cubics`; spatial splits may list a primitive
+    /// in more than one leaf.
     indices: Box<[u32]>,
     /// Triangle records, stored once each, in input order; packet lanes
     /// index them.
@@ -327,14 +424,19 @@ pub(crate) struct Bvh {
     /// Per-vertex shading normals, see [`Primitives::normals`].
     normals: Box<[[f32; 3]]>,
     geoms: Box<[GeomTable]>,
-    /// The primitives that are not triangles, stored once each, in input
-    /// order.
+    /// The analytic primitives, stored once each, in input order.
     prims: Box<[PrimNode]>,
+    /// Instances, 96 bytes each, inline.
+    instances: Box<[InstancePrim]>,
+    /// Cubic curve spans, inline.
+    cubics: Box<[CubicCurvePrim]>,
     /// Records that refer to no vertex (out-of-range input), kept only so
     /// `prim_id`s stay dense; not primitives for counting purposes.
     n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
+    /// See [`Bvh::primitive_extent_sum`].
+    extents: (usize, f32, f32),
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -416,6 +518,7 @@ impl Bvh {
         };
 
         let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
+        let extents = input.extent_sum();
         Bvh {
             wide: wide.into_boxed_slice(),
             leaves: collected.leaves.into_boxed_slice(),
@@ -429,8 +532,12 @@ impl Bvh {
             normals: input.normals.into_boxed_slice(),
             geoms: input.geoms.into_boxed_slice(),
             prims: input.prims.into_boxed_slice(),
+            instances: input.instances.into_boxed_slice(),
+            cubics: input.cubics.into_boxed_slice(),
             root_bbox,
+            extents,
         }
+        // `input.order` and `input.instance_bounds` drop here: build-only.
     }
 
     /// The three vertices of a record, gathered from the shared table.
@@ -546,7 +653,7 @@ impl Bvh {
     }
 
     pub(crate) fn prim_count(&self) -> usize {
-        self.triangle_count() + self.prims.len()
+        self.triangle_count() + self.prims.len() + self.instances.len() + self.cubics.len()
     }
 
     /// Triangles that refer to real vertices.
@@ -555,31 +662,17 @@ impl Bvh {
         self.tris.len() - self.n_degenerate
     }
 
-    /// `(count, sum of bbox diagonals, max diagonal)` over top-level
-    /// primitives — feeds [`crate::Scene::primitive_extents`].
     #[cfg(feature = "traversal-stats")]
-    pub(crate) fn prims(&self) -> &[PrimNode] {
-        &self.prims
+    pub(crate) fn instances(&self) -> &[InstancePrim] {
+        &self.instances
     }
 
+    /// `(count, sum of bbox diagonals, max diagonal)` over top-level
+    /// primitives — feeds [`crate::Scene::primitive_extents`]. Measured at
+    /// build time ([`Primitives::extent_sum`]): the resident instances no
+    /// longer carry their bounds.
     pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
-        let mut sum = 0.0f32;
-        let mut max = 0.0f32;
-        let mut n = 0usize;
-        let mut add = |b: AABB| {
-            let d = (b.maximum - b.minimum).length();
-            sum += d;
-            max = max.max(d);
-            n += 1;
-        };
-        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
-            let [a, b, c] = self.tri_verts(r);
-            add(triangle_aabb(a, b, c));
-        }
-        for p in &self.prims {
-            add(p.bbox());
-        }
-        (n, sum, max)
+        self.extents
     }
 
     pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
@@ -587,17 +680,22 @@ impl Bvh {
             triangles: self.triangle_count(),
             ..PrimitiveBreakdown::default()
         };
+        self.count_non_triangles(&mut b);
+        b
+    }
+
+    /// Adds this BVH's own non-triangle primitives to `b`, by kind.
+    fn count_non_triangles(&self, b: &mut PrimitiveBreakdown) {
+        b.instances += self.instances.len();
+        b.cubic_curve_spans += self.cubics.len();
         for p in &self.prims {
             match p {
                 PrimNode::Sphere(_) => b.spheres += 1,
                 PrimNode::Disk(_) => b.disks += 1,
                 PrimNode::Cylinder(_) => b.cylinders += 1,
                 PrimNode::Curve(_) => b.curve_segments += 1,
-                PrimNode::CubicCurve(_) => b.cubic_curve_spans += 1,
-                PrimNode::Instance(_) => b.instances += 1,
             }
         }
-        b
     }
 
     /// Adds this BVH's resident bytes to `acc`, descending into each
@@ -631,18 +729,14 @@ impl Bvh {
                     .map(|p| p.lanes.active.count_ones() as usize),
             )
             .sum::<usize>();
-        for p in &self.prims {
-            match p {
-                PrimNode::Instance(i) => {
-                    acc.boxed_prims += size_of::<crate::prim::InstancePrim>();
-                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
-                        i.scene.accumulate_footprint_into(visited, acc);
-                    }
-                }
-                PrimNode::CubicCurve(_) => {
-                    acc.boxed_prims += size_of::<crate::prim::CubicCurvePrim>();
-                }
-                _ => {}
+        acc.instances += size_of_val(&*self.instances);
+        acc.cubic_spans += size_of_val(&*self.cubics);
+        for i in &self.instances {
+            if i.motion.is_some() {
+                acc.instances += size_of::<crate::prim::InstanceMotion>();
+            }
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_footprint_into(visited, acc);
             }
         }
     }
@@ -658,20 +752,40 @@ impl Bvh {
         acc: &mut PrimitiveBreakdown,
     ) {
         acc.triangles += self.triangle_count();
-        for p in &self.prims {
-            match p {
-                PrimNode::Sphere(_) => acc.spheres += 1,
-                PrimNode::Disk(_) => acc.disks += 1,
-                PrimNode::Cylinder(_) => acc.cylinders += 1,
-                PrimNode::Curve(_) => acc.curve_segments += 1,
-                PrimNode::CubicCurve(_) => acc.cubic_curve_spans += 1,
-                PrimNode::Instance(i) => {
-                    acc.instances += 1;
-                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
-                        i.scene.accumulate_unique_into(visited, acc);
-                    }
-                }
+        self.count_non_triangles(acc);
+        for i in &self.instances {
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_unique_into(visited, acc);
             }
+        }
+    }
+
+    /// Closest hit on a leaf's scalar (non-packet) primitive, by its
+    /// kind-tagged id.
+    ///
+    /// Out of line on purpose (the trap `compact-triangle-storage` measured):
+    /// inlined, curve subdivision, cone intersection and the instance
+    /// descent spill `Bvh::hit`'s traversal loop — +6% instructions on
+    /// cornellbox, +17% on materialx_basic. The packet path, which is the
+    /// hot one, never comes here.
+    #[inline(never)]
+    fn scalar_hit(&self, id: u32, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        let i = (id & INDEX_MASK) as usize;
+        match id >> KIND_SHIFT {
+            KIND_INSTANCE => self.instances[i].hit(ray, t_min, t_max),
+            KIND_CUBIC => self.cubics[i].hit(ray, t_min, t_max),
+            _ => self.prims[i].hit(ray, t_min, t_max),
+        }
+    }
+
+    /// Out of line for the same reason as [`Bvh::scalar_hit`].
+    #[inline(never)]
+    fn scalar_hit_any(&self, id: u32, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        let i = (id & INDEX_MASK) as usize;
+        match id >> KIND_SHIFT {
+            KIND_INSTANCE => self.instances[i].hit_any(ray, t_min, t_max),
+            KIND_CUBIC => self.cubics[i].hit_any(ray, t_min, t_max),
+            _ => self.prims[i].hit_any(ray, t_min, t_max),
         }
     }
 
@@ -827,7 +941,7 @@ impl Bvh {
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest) {
+            if let Some(hit) = self.scalar_hit(pi, ray, t_min, closest) {
                 closest = hit.t;
                 best = Some(Candidate::Prim(hit));
             }
@@ -951,7 +1065,7 @@ impl Bvh {
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
+            if self.scalar_hit_any(pi, ray, t_min, t_max) {
                 return true;
             }
         }

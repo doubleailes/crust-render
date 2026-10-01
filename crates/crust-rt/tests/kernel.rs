@@ -1328,6 +1328,80 @@ fn unique_breakdown_equals_top_level_without_instancing() {
     );
 }
 
+/// `n` static instances cost 96 bytes each, inline, and nothing else grows
+/// with `n`: the instanced scene is counted once. (Spec: intersection-kernel,
+/// "Instances and cubic curve spans are stored inline".)
+#[test]
+fn static_instances_cost_96_bytes_each() {
+    let inner = unit_sphere_scene();
+    let at = |n: usize| {
+        let mut b = SceneBuilder::new();
+        for i in 0..n {
+            b.attach(Geometry::Instance {
+                scene: inner.clone(),
+                transform: Affine3A::from_translation(Vec3::X * (3.0 * i as f32)),
+                transform_end: None,
+            });
+        }
+        b.commit().memory_footprint()
+    };
+    let (few, many) = (at(5), at(37));
+    assert_eq!(few.instances, 96 * 5);
+    assert_eq!(many.instances, 96 * 37);
+    assert_eq!(
+        many.prim_nodes, few.prim_nodes,
+        "the sphere is counted once"
+    );
+    assert_eq!(many.cubic_spans + many.triangle_records, 0);
+}
+
+/// A moving instance also holds its two endpoint transforms, boxed; a
+/// static one does not.
+#[test]
+fn only_moving_instances_pay_for_their_endpoints() {
+    let inner = unit_sphere_scene();
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::Instance {
+        scene: inner.clone(),
+        transform: Affine3A::IDENTITY,
+        transform_end: Some(Box::new(Affine3A::from_translation(Vec3::X))),
+    });
+    b.attach(Geometry::Instance {
+        scene: inner,
+        transform: Affine3A::from_translation(Vec3::Y * 3.0),
+        transform_end: None,
+    });
+    let fp = b.commit().memory_footprint();
+    assert_eq!(
+        fp.instances,
+        2 * 96 + 2 * 64,
+        "two instances, one pair of endpoints"
+    );
+}
+
+/// `n` cubic curve spans cost 96 bytes each, inline.
+#[test]
+fn cubic_spans_cost_96_bytes_each() {
+    let n = 23;
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::CubicCurves {
+        segments: (0..n)
+            .map(|i| {
+                let p0 = Vec3A::new(i as f32, 0.0, 0.0);
+                let p1 = p0 + Vec3A::Y;
+                CubicCurveSegment {
+                    cp: [p0, p0.lerp(p1, 1.0 / 3.0), p0.lerp(p1, 2.0 / 3.0), p1],
+                    r0: 0.1,
+                    r1: 0.1,
+                }
+            })
+            .collect(),
+    });
+    let fp = b.commit().memory_footprint();
+    assert_eq!(fp.cubic_spans, 96 * n);
+    assert_eq!(fp.prim_nodes, 0);
+}
+
 #[test]
 fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     let mut small = SceneBuilder::new();
@@ -1336,7 +1410,8 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     assert_eq!(
         small.total(),
         small.prim_nodes
-            + small.boxed_prims
+            + small.instances
+            + small.cubic_spans
             + small.bvh_nodes
             + small.leaves
             + small.packets

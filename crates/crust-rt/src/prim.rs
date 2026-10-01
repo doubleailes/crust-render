@@ -36,15 +36,22 @@ pub(crate) trait Prim: Send + Sync {
     /// Conservative bounds of the part inside the axis slab, for the
     /// BVH's spatial splits. Default: bbox clipped to the slab.
     fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
-        let b = self.bbox();
-        if b.minimum[axis] > max || b.maximum[axis] < min {
-            return None;
-        }
-        let mut c = b;
-        c.minimum[axis] = c.minimum[axis].max(min);
-        c.maximum[axis] = c.maximum[axis].min(max);
-        Some(c)
+        clip_box(self.bbox(), axis, min, max)
     }
+}
+
+/// `b` clipped to the slab `min..=max` on `axis`, or `None` outside it: the
+/// default spatial-split bound of a primitive with no exact clip. Shared by
+/// [`Prim::clipped_aabb`] and the instances, whose bounds live beside them
+/// rather than in them.
+pub(crate) fn clip_box(b: AABB, axis: usize, min: f32, max: f32) -> Option<AABB> {
+    if b.minimum[axis] > max || b.maximum[axis] < min {
+        return None;
+    }
+    let mut c = b;
+    c.minimum[axis] = c.minimum[axis].max(min);
+    c.maximum[axis] = c.maximum[axis].min(max);
+    Some(c)
 }
 
 #[inline]
@@ -432,30 +439,34 @@ impl Prim for CubicCurvePrim {
 
 pub(crate) struct InstancePrim {
     pub scene: Arc<Scene>,
-    /// Local-to-world at shutter time 0.
-    pub l2w: Affine3A,
-    /// Cached world-to-local and inverse-transpose at time 0.
+    /// World-to-local at shutter time 0 — the only transform a static
+    /// instance keeps. Rays go into local space through it, and the normal
+    /// matrix is its linear part transposed: exact, so it is recomputed per
+    /// hit rather than cached.
     pub w2l: Affine3A,
-    pub normal_mat: Mat3A,
-    /// Local-to-world at shutter time 1, when the instance moves.
+    /// The endpoint placements of a moving instance; `None` for the
+    /// overwhelming majority, which are static.
     ///
-    /// Boxed for the same reason as [`crate::Geometry::Instance`]'s
-    /// `transform_end`, and it matters far more here: `Geometry` values
-    /// are transient build inputs, whereas an `InstancePrim` is resident
-    /// for the whole render. Inline, the `Option` costs 80 bytes on every
-    /// instance — a scene with tens of millions of static placements pays
-    /// gigabytes for a field none of them use.
-    pub l2w_end: Option<Box<Affine3A>>,
-    pub bounds: AABB,
+    /// Boxed because an `InstancePrim` is resident for the whole render:
+    /// inline, the two transforms would cost 128 bytes on every instance —
+    /// on a scene with tens of millions of static placements, gigabytes
+    /// for fields none of them use.
+    pub motion: Option<Box<InstanceMotion>>,
     /// What a hit inside reports when `id_offset` is [`NO_ID_OFFSET`]: the
     /// instance's own id, or the id [`crate::InstanceHitId::As`] asked for.
     pub geom_id: u32,
     /// [`crate::InstanceHitId::Offset`]'s base, added to the inner hit's id;
     /// [`NO_ID_OFFSET`] when the instance reports `geom_id` instead. Fits in
-    /// the padding the 16-byte-aligned transforms already leave, so
+    /// the padding the 16-byte-aligned transform already leaves, so
     /// forwarding costs no resident memory (pinned by a test).
     pub id_offset: u32,
     pub mask: RayMask,
+}
+
+/// Local-to-world at shutter times 0 and 1 of a moving instance.
+pub(crate) struct InstanceMotion {
+    pub l2w: Affine3A,
+    pub l2w_end: Affine3A,
 }
 
 /// [`InstancePrim::id_offset`] for an instance that does not forward.
@@ -515,12 +526,14 @@ pub(crate) fn transformed_aabb(local: &AABB, m: &Affine3A) -> AABB {
 impl InstancePrim {
     /// World-to-local and normal transform at the ray's shutter time.
     fn transforms_at(&self, time: f32) -> (Affine3A, Mat3A) {
-        match &self.l2w_end {
-            Some(end) if time > 0.0 => {
-                let w2l = lerp_affine(&self.l2w, end.as_ref(), time).inverse();
+        match &self.motion {
+            Some(m) if time > 0.0 => {
+                let w2l = lerp_affine(&m.l2w, &m.l2w_end, time).inverse();
                 (w2l, w2l.matrix3.transpose())
             }
-            _ => (self.w2l, self.normal_mat),
+            // The expression `normal_mat` used to be cached from; a
+            // transpose is exact, so recomputing it changes nothing.
+            _ => (self.w2l, self.w2l.matrix3.transpose()),
         }
     }
 
@@ -535,8 +548,11 @@ impl InstancePrim {
     }
 }
 
-impl Prim for InstancePrim {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+/// Not a [`Prim`]: an instance keeps no bounds once its tree is built (the
+/// build reads them from `Primitives::instance_bounds`), so these are
+/// inherent.
+impl InstancePrim {
+    pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -567,7 +583,7 @@ impl Prim for InstancePrim {
         Some(hit)
     }
 
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+    pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         if masked_out(ray, self.mask) {
             return false;
         }
@@ -581,74 +597,50 @@ impl Prim for InstancePrim {
         crate::bvh::stats::leave_instance();
         occluded
     }
-
-    fn bbox(&self) -> AABB {
-        self.bounds
-    }
 }
 
 // ---------------------------------------------------------------------
-// PrimNode: a closed, unboxed sum of the prim kinds.
+// PrimNode: the analytic primitives, a closed unboxed sum.
 // ---------------------------------------------------------------------
 
-/// The BVH's actual primitive storage. A trait object (`Box<dyn Prim>`)
-/// puts every primitive in its own heap allocation — fine for a handful
-/// of meshes, but a dense `PointInstancer`-free curve archive (xgen
-/// "grass"/"groundcover") attaches tens of millions of individual curve
-/// segments, and tens of millions of separate small allocations cost real
-/// memory in allocator bookkeeping alone, on top of losing locality
-/// during traversal. `PrimNode` stores the same four kinds inline in one
-/// contiguous `Vec`, dispatching by match instead of vtable.
+/// Storage for the analytic primitives: spheres, disks, cylinders and
+/// linear curve segments, inline in one contiguous array and dispatched by
+/// match instead of vtable. (A dense curve archive attaches tens of millions
+/// of segments; one allocation each would cost real memory in allocator
+/// bookkeeping alone.)
 ///
-/// `Instance` is boxed because `InstancePrim` (two cached transforms plus
-/// an optional motion-blur end transform) is far larger than the other
-/// three variants — an enum's size is its largest variant's, so leaving
-/// it inline would make every triangle and curve pay Instance's size for
-/// nothing. The other three stay inline: none of them are worth an
-/// allocation on their own.
+/// Instances and cubic curve spans used to be boxed variants here: their
+/// payloads are larger than every other kind, so an enum would make every
+/// slot pay their size. They now have arrays of their own (`Primitives`),
+/// which costs neither a box nor a slot.
 pub(crate) enum PrimNode {
     Sphere(SpherePrim),
     Disk(DiskPrim),
     Cylinder(CylinderPrim),
     Curve(CurvePrim),
-    /// Boxed for the same reason as `Instance`: at 4 `Vec3A` control
-    /// points, this is bigger than every other variant, and an enum's
-    /// size is its largest variant's — inlining it would tax every
-    /// triangle, sphere and linear-curve segment everywhere in the
-    /// kernel for a variant most of them will never be.
-    CubicCurve(Box<CubicCurvePrim>),
-    Instance(Box<InstancePrim>),
 }
 
 impl PrimNode {
-    /// Out of line on purpose. With the triangle variant gone the enum
-    /// became small enough for LLVM to inline this dispatch — curve
-    /// subdivision, cone intersection and the instance descent — into
-    /// `Bvh::hit`, which grew by a third and spilled its traversal loop
-    /// (callgrind: +6% on cornellbox, +17% on materialx_basic with an
-    /// identical tree). A call per scalar primitive test is what the base
-    /// paid; the packet path, which is the hot one, never comes here.
-    #[inline(never)]
+    /// Inlined into the BVH's out-of-line `scalar_hit`, which is what the
+    /// traversal calls: that function, not this one, keeps the analytic and
+    /// instance code out of `Bvh::hit`.
+    #[inline]
     pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         match self {
             PrimNode::Sphere(p) => p.hit(ray, t_min, t_max),
             PrimNode::Disk(p) => p.hit(ray, t_min, t_max),
             PrimNode::Cylinder(p) => p.hit(ray, t_min, t_max),
             PrimNode::Curve(p) => p.hit(ray, t_min, t_max),
-            PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max),
-            PrimNode::Instance(p) => p.hit(ray, t_min, t_max),
         }
     }
 
-    #[inline(never)]
+    #[inline]
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         match self {
             PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Disk(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Cylinder(p) => p.hit_any(ray, t_min, t_max),
             PrimNode::Curve(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::CubicCurve(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Instance(p) => p.hit_any(ray, t_min, t_max),
         }
     }
 
@@ -659,8 +651,6 @@ impl PrimNode {
             PrimNode::Disk(p) => p.bbox(),
             PrimNode::Cylinder(p) => p.bbox(),
             PrimNode::Curve(p) => p.bbox(),
-            PrimNode::CubicCurve(p) => p.bbox(),
-            PrimNode::Instance(p) => p.bbox(),
         }
     }
 
@@ -671,8 +661,6 @@ impl PrimNode {
             PrimNode::Disk(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Cylinder(p) => p.clipped_aabb(axis, min, max),
             PrimNode::Curve(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::CubicCurve(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Instance(p) => p.clipped_aabb(axis, min, max),
         }
     }
 }

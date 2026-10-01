@@ -609,9 +609,9 @@ fn bake_verts(verts: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
 }
 
 /// Local-space shading normals into world space: the inverse transpose —
-/// exactly the matrix the kernel's instance path applies (`normal_mat` in
-/// `crust-rt`), so a baked placement shades identically to an instanced one,
-/// mirrors included.
+/// exactly the matrix the kernel's instance path applies (`w2l`'s linear part
+/// transposed, in `crust-rt`), so a baked placement shades identically to an
+/// instanced one, mirrors included.
 fn bake_normals(normals: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
     let m = l2w.matrix3.inverse().transpose();
     normals
