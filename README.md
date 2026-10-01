@@ -74,6 +74,10 @@ feature-by-feature comparison against Embree's intersection kernels, and
 
 ## 🚀 Getting Started
 
+The **user documentation** — every command-line flag, every `CRUST_*`
+environment variable and every `crust:*` USD attribute — is a Zola site in
+[`site/`](site/), published at <https://doubleailes.github.io/crust-render/>.
+
 ### 🔧 Build and Run
 
 Scenes are loaded from **USD** (`.usda`, `.usdc`, `.usdz`) via the pure-Rust
@@ -443,7 +447,10 @@ cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
 ```
 
 `CRUST_*` environment variables switch individual optimizations off for A/B
-comparison; [`docs/architecture.md`](docs/architecture.md#environment-switches) lists them.
+comparison; [`docs/architecture.md`](docs/architecture.md#environment-switches) lists them,
+and the user documentation's
+[Environment variables](site/content/docs/reference/environment-variables.md) page explains
+each one.
 
 ### Known limitations
 

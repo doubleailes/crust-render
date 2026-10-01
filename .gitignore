@@ -16,3 +16,6 @@ samples/ALab
 *.tx
 .fidelity/
 __pycache__/
+
+# Zola build output of the user documentation (site/)
+/site/public/

@@ -1,0 +1,68 @@
+name: Docs
+
+# The user documentation in site/: a Zola site on the AdiDoks theme (a git
+# submodule in site/themes/adidoks). A pull request that touches it is built,
+# which also checks every internal link and anchor; a push to the default
+# branch builds it and publishes it to the gh-pages branch, which GitHub Pages
+# serves (Settings -> Pages -> "Deploy from a branch", gh-pages, / (root)).
+#
+# Zola is pinned through the action's tag: v0.21.0 ships Zola 0.21.0. Zola
+# 0.23 cannot parse the AdiDoks templates, so do not move to an unpinned
+# @master. To preview locally, install the same Zola and run `zola serve` in
+# site/.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "site/**"
+      - ".gitmodules"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - ".gitmodules"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build
+        uses: shalzz/zola-deploy-action@90cd842959b82e0c012601be18ae249d6cdb1669 # v0.21.0
+        env:
+          BUILD_DIR: site
+          BUILD_ONLY: true
+
+  deploy:
+    name: deploy
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build and publish to gh-pages
+        uses: shalzz/zola-deploy-action@90cd842959b82e0c012601be18ae249d6cdb1669 # v0.21.0
+        env:
+          BUILD_DIR: site
+          PAGES_BRANCH: gh-pages
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

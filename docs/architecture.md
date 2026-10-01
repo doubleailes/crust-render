@@ -199,7 +199,8 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_PTEX_STREAM_MIN_MB` | 8 | `crust-assets/ptex_stream.rs` | files smaller than this preload even when streaming |
 | `CRUST_PTEX_STREAM_MIPSPACE` | `linear` | `crust-assets/ptex_stream.rs` | `file`: accept the file's own mip chain (otherwise a mipmapped `.ptx` preloads) |
 
-Adding a switch: give it a field on `Config` and a line here, and make the
+Adding a switch: give it a field on `Config`, a line here and a section in the user
+documentation (`site/content/docs/reference/environment-variables.md`), and make the
 "off" side the behaviour it replaced so the switch is an honest A/B.
 
 ## Tests and verification

@@ -141,8 +141,17 @@ logged per ray, pixel or sample. `--stats` output is an event on `STATS_TARGET`,
 
 **Environment switches** exist to A/B an optimization against the behaviour it replaced.
 Adding one: a field on `crust_core::Config` (`crust-core/src/config.rs`, the only place
-the environment is read), a row in `docs/architecture.md` § Environment switches, and
-make the "off" side the old behaviour so the A/B is honest.
+the environment is read), a row in `docs/architecture.md` § Environment switches, a
+section in the user documentation (`site/`, below), and make the "off" side the old
+behaviour so the A/B is honest.
+
+**User documentation** is the Zola + AdiDoks site in `site/` (theme is a git submodule;
+`.github/workflows/docs.yml` builds it on PRs and publishes it to `gh-pages`). It
+describes every CLI flag (`reference/command-line.md`), every `CRUST_*` switch
+(`reference/environment-variables.md`) and every `crust:*` USD attribute (`usd/`). A
+change that adds, removes or changes the default of any of those updates its page in the
+same change. Build it with Zola 0.21 (`zola build` in `site/`; 0.23 cannot parse the
+theme), which also checks every internal link and anchor.
 
 **Unbiased measurements** need `--indirect-clamp 0`: the default firefly clamp (10) is the
 one biased setting. Record goldens with the same setting on both sides of an A/B.
