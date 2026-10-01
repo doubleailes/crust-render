@@ -1379,6 +1379,32 @@ fn a_smooth_mesh_stores_its_triangles_and_normals_once() {
     assert_eq!(fp.triangle_records, 24 * n_tris);
 }
 
+/// Only normals an accepted smooth triangle uses are resident: unused
+/// points, triangles skipped for bad indices, and meshes with no triangles
+/// add nothing to the table.
+#[test]
+fn unused_vertex_normals_are_not_resident() {
+    let (mut v, mut t) = grid(4);
+    let used = v.len();
+    // Unused points with normals, and a triangle the commit skips.
+    v.extend((0..100).map(|i| Vec3A::new(5.0 + i as f32, 0.0, 0.0)));
+    t.push([0, 1, 10_000]);
+    let n = v.len();
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::TriangleMesh {
+        vertices: v,
+        indices: t,
+        normals: Some(vec![Vec3A::Z; n]),
+    });
+    b.attach(Geometry::TriangleMesh {
+        vertices: vec![Vec3A::ZERO; 50],
+        indices: Vec::new(),
+        normals: Some(vec![Vec3A::Z; 50]),
+    });
+    let fp = b.commit().memory_footprint();
+    assert_eq!(fp.vertex_normals, 12 * used);
+}
+
 /// `n` static instances cost 96 bytes each, inline, and nothing else per
 /// instance: the instanced scene itself is counted once.
 #[test]

@@ -352,19 +352,28 @@ impl SceneBuilder {
                     indices,
                     normals,
                 } => {
-                    // The mesh's normals go into the table once, per vertex;
-                    // each triangle then names its three by index. Offset by
-                    // where this mesh's normals start.
-                    let normal_base = vertex_normals.len();
+                    // A mesh's normals go into the table once per vertex, and
+                    // only for the vertices a smooth triangle actually uses:
+                    // `slot[i]` is where vertex `i`'s normal landed, appended
+                    // the first time a triangle needs it. Each triangle then
+                    // names its three by index. A normal no accepted triangle
+                    // uses (an unused point, a skipped triangle) is never
+                    // resident.
                     let n_normals = normals.as_ref().map_or(0, Vec::len);
-                    if let Some(ns) = &normals {
-                        assert!(
-                            u32::try_from(normal_base + ns.len()).is_ok_and(|n| n < u32::MAX),
-                            "more than {} vertex normals in one scene",
-                            u32::MAX - 1
-                        );
-                        vertex_normals.extend(ns.iter().map(|n| n.to_array()));
-                    }
+                    let mut slot = vec![u32::MAX; n_normals];
+                    let mut resident = |i: usize, table: &mut Vec<VertexNormal>| {
+                        if slot[i] == u32::MAX {
+                            slot[i] = u32::try_from(table.len())
+                                .ok()
+                                .filter(|&n| n < u32::MAX)
+                                .unwrap_or_else(|| {
+                                    panic!("more than {} vertex normals in one scene", u32::MAX - 1)
+                                });
+                            let ns = normals.as_ref().expect("i < n_normals implies normals");
+                            table.push(ns[i].to_array());
+                        }
+                        slot[i]
+                    };
                     for (prim_id, tri) in indices.into_iter().enumerate() {
                         let [i0, i1, i2] = tri;
                         let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
@@ -374,7 +383,7 @@ impl SceneBuilder {
                         // Smooth only when all three corners have a normal;
                         // otherwise this one triangle shades flat.
                         let tri_normals = if i0 < n_normals && i1 < n_normals && i2 < n_normals {
-                            [i0, i1, i2].map(|i| (normal_base + i) as u32)
+                            [i0, i1, i2].map(|i| resident(i, &mut vertex_normals))
                         } else {
                             NO_NORMALS
                         };
