@@ -80,14 +80,32 @@ pub(super) fn collapse(
     // one's; an uneven tree that needs more just grows the vector.
     let leaves = binary.len().div_ceil(2);
     let mut out = Vec::with_capacity(leaves.saturating_sub(1) / (LANES - 1) + 1);
-    let mut data = LeafData::default();
+    // The leaf tables are sized exactly from the binary leaves before any
+    // is emitted: a packet is 192 bytes, and letting the vector double
+    // meant up to twice the packets' final size was alive at the build's
+    // peak, on top of the binary tree still being read.
+    let mut n_packets = 0usize;
+    let mut n_indices = 0usize;
+    for leaf in binary.iter().filter(|n| n.count > 0) {
+        let tris = leaf_range(leaf, indices)
+            .iter()
+            .filter(|&&i| prims.is_triangle(i))
+            .count();
+        n_packets += tris.div_ceil(4);
+        n_indices += leaf.count as usize - tris;
+    }
+    let mut data = LeafData {
+        leaves: Vec::with_capacity(leaves),
+        packets: Vec::with_capacity(n_packets),
+        indices: Vec::with_capacity(n_indices),
+    };
     if binary.is_empty() {
         return (out, data);
     }
     if binary[0].count > 0 {
         // Single-leaf tree.
         let mut w = WideNode::empty();
-        w.set_lane_bounds(0, &binary[0].bbox);
+        w.set_lane_bounds(0, &binary[0].bbox());
         w.child[0] = data.push_leaf(leaf_range(&binary[0], indices), prims);
         w.mark_leaf(0);
         out.push(w);
@@ -131,7 +149,7 @@ fn collapse_node(
         let mut best: Option<(usize, f32)> = None;
         for (i, &k) in kids.iter().enumerate().take(n_kids) {
             if binary[k as usize].count == 0 {
-                let a = surface_area(&binary[k as usize].bbox);
+                let a = surface_area(&binary[k as usize].bbox());
                 if best.is_none_or(|(_, ba)| a > ba) {
                     best = Some((i, a));
                 }
@@ -146,7 +164,7 @@ fn collapse_node(
 
     for (lane, &kid) in kids.iter().enumerate().take(n_kids) {
         let k = kid as usize;
-        let bounds = binary[k].bbox;
+        let bounds = binary[k].bbox();
         out[slot].set_lane_bounds(lane, &bounds);
         if binary[k].count > 0 {
             out[slot].child[lane] = data.push_leaf(leaf_range(&binary[k], indices), prims);

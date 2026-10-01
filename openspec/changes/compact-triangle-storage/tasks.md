@@ -1,17 +1,17 @@
 ## 1. Baseline
 
-- [ ] 1.1 Record goldens for every sample scene with the current binary (`scripts/check_images.sh record <dir>`, 16 spp, `--indirect-clamp 0`) and keep that binary for `bench_ab.sh`; verified by one EXR per sample in `<dir>`
-- [ ] 1.2 Record `--stats` for `gen_subdiv_stress.py` at level 3 (kernel 416.89 MiB = 196 B/triangle: nodes 80, normals 48, packets 49, BVH 15, leaves 4; commit peak 808.79 MiB against a 284 MiB traverse RSS) and for `samples/subdivision.usda` at `--subdiv-level 4`; verified by the numbers copied into the design record's baseline table
-- [ ] 1.3 Callgrind `Bvh::hit` / `intersect_leaf` instruction counts on cornellbox and materialx_basic at `-s 2`, single thread, as the codegen baseline for D1–D3; verified by the counts noted for task 8.2
+- [x] 1.1 Record goldens for every sample scene with the current binary (`scripts/check_images.sh record <dir>`, 16 spp, `--indirect-clamp 0`) and keep that binary for `bench_ab.sh`; verified by one EXR per sample in `<dir>`
+- [x] 1.2 Record `--stats` for `gen_subdiv_stress.py` at level 3 (kernel 416.89 MiB = 196 B/triangle: nodes 80, normals 48, packets 49, BVH 15, leaves 4; commit peak 808.79 MiB against a 284 MiB traverse RSS) and for `samples/subdivision.usda` at `--subdiv-level 4` (15 376 triangles, kernel 2.92 MiB = 199 B/triangle); verified by the numbers copied into the design record's baseline table
+- [x] 1.3 Callgrind `Bvh::hit` / `intersect_leaf` instruction counts on cornellbox and materialx_basic at `-s 2`, single thread, as the codegen baseline for D1–D3; verified by the counts noted for task 8.2 (`Bvh::hit` + its instance recursion: cornellbox 947 550 540, materialx_basic 282 853 419)
 
 ## 2. Kernel: records and shared tables (D1, D3, D5)
 
-- [ ] 2.1 `TriangleRecord { geom_id, prim_id, v: [u32; 3], mask }` in `prim.rs` and a size test pinning 24 B; `PrimNode` loses its `Triangle` variant and a test pins it at ≤ 64 B; verified by `cargo test -p crust-rt`
-- [ ] 2.2 `SceneBuilder::commit` concatenates every `TriangleMesh` into `vertices: Box<[[f32; 3]]>`, `normals: Box<[[f32; 3]]>` and `records: Box<[TriangleRecord]>` with global indices and a per-geometry `normals_base`, moving each geometry's arrays before the build, erroring past `u32::MAX` vertices; verified by a test on two meshes (one with normals, one without) reading back every vertex and normal by global index
-- [ ] 2.3 `PrimSource` (records + tables + remaining `PrimNode`s) answering `bbox`, `clipped_aabb`, `as_triangle` by index; `build_subtree`, `collapse` and `push_leaf` read through it; verified by `build_twice_is_identical` and the kernel test suite
+- [x] 2.1 `TriangleRecord { geom_id, prim_id, v: [u32; 3], mask }` in `prim.rs` and a size test pinning 24 B; `PrimNode` loses its `Triangle` variant and a test pins it at ≤ 64 B; verified by `cargo test -p crust-rt`
+- [x] 2.2 `SceneBuilder::commit` concatenates every `TriangleMesh` into `vertices: Box<[[f32; 3]]>`, `normals: Box<[[f32; 3]]>` and `records: Box<[TriangleRecord]>` with global indices and a per-geometry `normals_base`, moving each geometry's arrays before the build, erroring past `u32::MAX` vertices; verified by a test on two meshes (one with normals, one without) reading back every vertex and normal by global index
+- [x] 2.3 `PrimSource` (records + tables + remaining `PrimNode`s) answering `bbox`, `clipped_aabb`, `as_triangle` by index; `build_subtree`, `collapse` and `push_leaf` read through it; verified by `build_twice_is_identical` and the kernel test suite
 - [ ] 2.4 `PrimRef` and `Node` as `[f32; 6] + u32` (32 B, size-tested); subtrees written into a pre-sized arena with in-place child offset fix-up, `merge` removed; verified by `build_twice_is_identical`, every BVH test, and the commit-peak measurement of task 8.1
-- [ ] 2.5 `hit_from_barycentric` and the `f64` tie-break read the record and gather normals / vertices from the tables; geometric-normal fallback from the lane's vertices; verified by `simd_matches_scalar_bitwise` and by `check_images.sh check` against 1.1 being bit-identical on every sample
-- [ ] 2.6 `Scene::triangle_vertices(geom_id, prim_id) -> Option<[Vec3A; 3]>`, local space for an instanced scene; verified by a test on a baked and an instanced mesh comparing against the attached arrays
+- [x] 2.5 `hit_from_barycentric` and the `f64` tie-break read the record and gather normals / vertices from the tables; geometric-normal fallback from the lane's vertices; verified by `simd_matches_scalar_bitwise` and by `check_images.sh check` against 1.1 being bit-identical on every sample
+- [x] 2.6 `Scene::triangle_vertices(geom_id, prim_id) -> Option<[Vec3A; 3]>`, local space for an instanced scene; verified by a test on a baked and an instanced mesh comparing against the attached arrays
 
 ## 3. Kernel: indexed packets (D2)
 

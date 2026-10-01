@@ -43,7 +43,7 @@ fn a_reference_wider_than_its_primitive_does_not_outvote_its_own_bounds() {
     };
     // The lie: a reference spanning the whole node for a triangle that
     // only reaches x = 0.05.
-    let refs = vec![PrimRef { bbox: node, idx: 0 }];
+    let refs = vec![PrimRef::new(node, 0)];
 
     // Must not panic, and must not claim a split whose right side holds
     // references but no geometry.
@@ -355,6 +355,14 @@ fn wide_node_is_two_cache_lines() {
 /// `PrimNode` is sized by the linear curve segment (48 bytes) plus its tag;
 /// it was 80 while triangles carried their vertices in it, and 128 with the
 /// normals inline too.
+/// The build's transient is set by what it holds per reference, so the two
+/// per-reference structures stay unpadded.
+#[test]
+fn a_build_reference_is_28_bytes() {
+    assert_eq!(std::mem::size_of::<PrimRef>(), 28);
+    assert_eq!(std::mem::size_of::<Node>(), 32);
+}
+
 #[test]
 fn a_triangle_record_is_24_bytes() {
     assert_eq!(std::mem::size_of::<TriangleRecord>(), 24);
@@ -426,10 +434,7 @@ fn collapse_widens_the_tree() {
 fn collapsed_tables_hold_no_spare_capacity() {
     for prims in [sphere_grid(6), diagonal_shards(40)] {
         let refs: Vec<PrimRef> = (0..prims.len() as u32)
-            .map(|i| PrimRef {
-                bbox: prims.bbox(i).expect("no degenerate records here"),
-                idx: i,
-            })
+            .map(|i| PrimRef::new(prims.bbox(i).expect("no degenerate records here"), i))
             .collect();
         let root = union_all(&refs);
         let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
