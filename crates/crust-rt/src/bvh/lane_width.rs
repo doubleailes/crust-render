@@ -37,19 +37,21 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
     out
 }
 
-/// Records *why* the packets are 4 wide and not 8.
+/// Records what 8-wide packets would buy, now that leaves can hold two.
 ///
-/// The obvious next step from a 4-wide leaf intersector is an 8-wide one
-/// (AVX2). It would buy nothing here: with `MIN_LEAF_PACKED` at 4 and
-/// the SAH free to split above it, no leaf on a dense mesh holds more
-/// than four triangles, so a leaf already costs exactly one 4-lane
-/// round — and one 8-lane round, with half the lanes idle. This test
-/// asserts that equality, so if a future retune makes leaves bigger
-/// (raising `MIN_LEAF_PACKED`, or `MAX_LEAF` with a cheaper leaf cost)
-/// it fails and says the trade-off has changed.
+/// Until the packet-aware leaf cost (`CommitOptions::packet_sah`) no leaf on
+/// a dense mesh held more than four triangles, so an 8-wide leaf intersector
+/// (AVX2) would have run exactly as many vector rounds as the 4-wide one with
+/// half its lanes idle — the equality this test used to pin. Leaves of five to
+/// eight triangles now exist where splitting them would have made two
+/// half-empty packets, and on those an 8-wide packet would merge two rounds
+/// into one. The saving is bounded by the share of such leaves, which this
+/// test measures and bounds; the reasons the kernel stays at 128 bits
+/// (`docs/simd.md`: nightly-only `std::simd`, and in-cache BVH8 measured
+/// slower) are unchanged by it.
 #[test]
-fn eight_wide_packets_would_not_reduce_vector_rounds() {
-    let bvh = Bvh::new(uv_sphere_prims(80, 40), Layout::Gathered);
+fn eight_wide_packets_would_save_at_most_the_two_packet_leaves() {
+    let bvh = Bvh::new(uv_sphere_prims(80, 40), Layout::Gathered, true);
     let per_leaf: Vec<usize> = bvh
         .leaves
         .iter()
@@ -64,15 +66,24 @@ fn eight_wide_packets_would_not_reduce_vector_rounds() {
     let max = per_leaf.iter().copied().max().unwrap_or(0);
     assert!(max > 0, "no triangles ended up in leaves");
     assert!(
-        max <= 4,
-        "a leaf holds {max} triangles — 8-wide packets are now worth evaluating"
+        max <= MAX_LEAF,
+        "a leaf holds {max} triangles, past MAX_LEAF"
     );
 
     let rounds4: usize = per_leaf.iter().map(|n| n.div_ceil(4)).sum();
     let rounds8: usize = per_leaf.iter().map(|n| n.div_ceil(8)).sum();
+    let two_packet = per_leaf.iter().filter(|&&n| n > 4).count();
+    let saving = 1.0 - rounds8 as f64 / rounds4 as f64;
+    println!(
+        "leaves {} (two-packet {two_packet}), rounds 4-wide {rounds4} / 8-wide {rounds8}: \
+         8-wide would save {:.1}%",
+        per_leaf.len(),
+        100.0 * saving
+    );
+    assert!(rounds8 <= rounds4);
     assert_eq!(
-        rounds4, rounds8,
-        "8-wide packets would cut vector rounds {rounds4} -> {rounds8}; \
-         widening the leaf intersector is worth revisiting"
+        rounds4 - rounds8,
+        two_packet,
+        "8-wide packets save exactly one round per two-packet leaf"
     );
 }

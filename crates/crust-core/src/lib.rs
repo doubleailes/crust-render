@@ -60,10 +60,14 @@ pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{Config, PtexMipSpace, TriPackets, config};
 
-/// The triangle packet layout every kernel scene commits with — the
-/// `CRUST_TRI_PACKETS` switch, read once.
-pub fn packet_layout() -> crust_rt::PacketLayout {
-    config().tri_packets.into()
+/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
+/// `CRUST_BVH_PACKET_SAH` switches, read once.
+pub fn commit_options() -> crust_rt::CommitOptions {
+    let c = config();
+    crust_rt::CommitOptions {
+        layout: c.tri_packets.into(),
+        packet_sah: c.bvh_packet_sah,
+    }
 }
 pub use environment::EnvironmentMap;
 pub use error::Error;

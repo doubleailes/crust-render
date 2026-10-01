@@ -398,7 +398,7 @@ impl Candidate {
 }
 
 impl Bvh {
-    pub(crate) fn new(input: Primitives, layout: Layout) -> Self {
+    pub(crate) fn new(input: Primitives, layout: Layout, packet_sah: bool) -> Self {
         // One reference per primitive, in input order (the order decides
         // ties, so it is part of the build's determinism); degenerate
         // records get none.
@@ -410,7 +410,7 @@ impl Bvh {
             (Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
-            let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox));
+            let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox), packet_sah);
             let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input, layout);
             (wide, collected, Some(root_bbox))
         };
