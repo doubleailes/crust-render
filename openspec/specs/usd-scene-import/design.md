@@ -354,7 +354,9 @@ Schema mapping:
   (pinned pixel-identical on the samples). openusd's own xformable composition (the
   `compose_xform_ops` fallback) has no default arm and keeps its historical 0.0. A frame
   also sets the sampler's frame seed (its integer part, over `crust:frame`), so a
-  sequence gets independent noise per frame, and a frame outside an authored
+  sequence gets independent noise per frame (the seed is hashed before it reaches
+  OpenQMC — a raw frame number only shifts the pattern a pixel per frame; see
+  `rendering` § QMC sampling), and a frame outside an authored
   `startTimeCode..endTimeCode` warns (USD holds the end samples; it is usually a typo).
   A non-finite frame is refused in `load_scene` with `Error::InvalidFrame` (and earlier
   by the CLI's `parse_frame`): `NaN` compares false against the range, so it would

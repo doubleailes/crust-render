@@ -21,6 +21,32 @@ pub const DEFAULT_INDIRECT_CLAMP: f32 = 10.0;
 /// relative error behind it.
 pub const DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE: f32 = 1.0;
 
+/// The OpenQMC `frame` argument a render's samplers are built with, from the
+/// frame index (`crust:frame` / `--frame`).
+///
+/// The frame must not reach OpenQMC as it is. `State64Bit::new` adds it to the
+/// pattern seed, and `pixel_decorrelate` then adds the pixel id
+/// (`x + 256·y`) to that same seed before hashing, so frame `f` at pixel `x`
+/// draws exactly what frame 0 drew at pixel `x + f`: an image sequence seeded
+/// with consecutive frame numbers got one noise pattern sliding a pixel to the
+/// right per frame, not independent noise. Hashing the frame first puts
+/// consecutive frames' seeds arbitrarily far apart, so no pixel of one frame
+/// shares a pattern with a nearby pixel of the next.
+///
+/// murmur3's `fmix32` finaliser: a bijection with `fmix32(0) == 0`, so frame 0
+/// — every render that sets no frame — draws exactly what it always did. The
+/// top two bits are dropped so OpenQMC's `frame + index_key` (`index_key =
+/// sample >> 16`, at most `2^15`) cannot overflow `i32`.
+pub(crate) fn sampler_frame_seed(frame: isize) -> i32 {
+    let mut h = frame as u32;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    (h >> 2) as i32
+}
+
 /// How the integrator combines its two direct-lighting strategies — light
 /// sampling (NEE) and BSDF/phase sampling — into one estimate. The two MIS
 /// variants weight each strategy's samples with a Veach heuristic; the
@@ -203,6 +229,11 @@ impl RenderSettings {
 
     pub fn frame(&self) -> isize {
         self.frame
+    }
+
+    /// The frame as the samplers' seed — see [`sampler_frame_seed`].
+    pub(crate) fn sampler_seed(&self) -> i32 {
+        sampler_frame_seed(self.frame)
     }
 
     /// Enable (or disable) path guiding with the given number of training

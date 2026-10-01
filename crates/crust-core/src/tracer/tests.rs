@@ -333,3 +333,51 @@ fn batch_schedule_survives_a_budget_near_u32_max() {
     // A minimum past the budget schedules nothing.
     assert!(batch_schedule(64, u32::MAX).is_empty());
 }
+
+/// The first sample a pixel draws in a 64×64 block, at one OpenQMC `frame`
+/// argument, keyed by its bits.
+fn first_samples(frame: i32) -> std::collections::HashMap<[u32; 4], (i32, i32)> {
+    let mut out = std::collections::HashMap::new();
+    for j in 0..64 {
+        for i in 0..64 {
+            let s = crate::PathSampler::new(i, j, frame, 0).draw_sample_f32::<4>();
+            out.insert(s.map(f32::to_bits), (i, j));
+        }
+    }
+    out
+}
+
+/// The trap `sampler_frame_seed` exists for: OpenQMC adds the frame and the
+/// pixel id into one seed, so a raw frame number shifts the whole pattern
+/// one pixel to the right per frame — the noise of an image sequence drifts
+/// across the screen instead of changing.
+#[test]
+fn raw_frame_numbers_slide_the_noise_pattern() {
+    for frame in 1..4 {
+        let s = crate::PathSampler::new(10, 20, frame, 0).draw_sample_f32::<4>();
+        let t = crate::PathSampler::new(10 + frame, 20, 0, 0).draw_sample_f32::<4>();
+        assert_eq!(s, t, "frame {frame} is frame 0 shifted by {frame} pixels");
+    }
+}
+
+/// With the frame hashed, consecutive frames share no pixel pattern with each
+/// other anywhere in a block, and frame 0 keeps its historical seed.
+#[test]
+fn sampler_frame_seed_decorrelates_consecutive_frames() {
+    use super::settings::sampler_frame_seed;
+    assert_eq!(sampler_frame_seed(0), 0, "frame 0 renders as it always did");
+    let frames: Vec<isize> = (-2..8).chain(1000..1010).collect();
+    let mut seen: std::collections::HashMap<[u32; 4], isize> = Default::default();
+    for &f in &frames {
+        let seed = sampler_frame_seed(f);
+        assert!(
+            (0..=i32::MAX - (1 << 15)).contains(&seed),
+            "frame {f}: seed {seed}"
+        );
+        for (bits, (i, j)) in first_samples(seed) {
+            if let Some(g) = seen.insert(bits, f) {
+                panic!("frame {f} pixel ({i}, {j}) repeats a sample of frame {g}");
+            }
+        }
+    }
+}

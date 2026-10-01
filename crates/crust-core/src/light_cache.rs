@@ -144,7 +144,7 @@ pub(crate) fn train(
     lights: &LightList,
     width: usize,
     height: usize,
-    frame: isize,
+    seed: i32,
 ) -> Option<LightCache> {
     let n = lights.count();
     // Only over a power table: with none, `LightList::density` divides by
@@ -182,7 +182,7 @@ pub(crate) fn train(
                 // skipped for tile 0, which leaves every grid up to 256 — every
                 // render up to 1024 pixels across, the ones measured in
                 // `docs/light_sampling.md` §3.12 — drawing exactly what it did.
-                let base = PathSampler::new(i as i32, j as i32, frame as i32, 0);
+                let base = PathSampler::new(i as i32, j as i32, seed, 0);
                 let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
                 let base = if tile == 0 {
                     base

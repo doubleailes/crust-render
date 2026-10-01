@@ -266,6 +266,10 @@ The five samples with a uniformly scaled `SphereLight`, relMSE at 16 spp:
   - `light_visibility` renders in 5 ms, too little to time.
 - **It is unbiased**, checked with **independent sampler seeds**. `-f N` on a
   stage with no time samples renders the same image under frame seed N.
+  (At the time these were measured the frame reached OpenQMC unhashed, which
+  makes frame N frame 0's pattern shifted N pixels: a different sequence per
+  pixel, so the comparisons hold, but not fully independent seeds. See
+  `openspec/specs/rendering/design.md` § QMC sampling.)
   - A 1024 spp `veach_mis` from the area-sampling binary (`-f 1`) and one from
     the cone binary (`-f 2`) differ by relMSE 1.9e-4. That is under what two
     independent renders of one image should differ by, roughly the sum of their

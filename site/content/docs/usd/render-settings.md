@@ -186,6 +186,9 @@ values are raised to a minimum of 0.01.
 Seeds the sampler, so that successive frames of an animation get different noise patterns
 instead of the same one. It doesn't choose which time is rendered.
 
+The frame number is hashed into the seed, so consecutive frames get unrelated noise. Frame
+0 keeps the seed it always had: a render that sets no frame doesn't change.
+
 [`--frame`](@/docs/reference/command-line.md#frame) chooses the time and replaces this
 seed with the frame number.
 

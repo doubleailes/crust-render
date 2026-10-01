@@ -391,7 +391,7 @@ or the walk-to-total loop never ends on a render without one.
 
 Sampling goes through the **`openqmc`** crate's native domain-tree API (see the workspace
 layout above). The integrator (`tracer/path.rs`) threads the sampler *by value* — no stateful
-`&mut dyn Sampler`: `render_pixel` builds a root `PathSampler::new(x, y, frame, index)` per
+`&mut dyn Sampler`: `render_pixel` builds a root `PathSampler::new(x, y, seed, index)` per
 sample (with an extra `new_domain(tile)` so images wider/taller than 256 stay decorrelated,
 since OpenQMC's pixel decorrelation tiles at 256), draws the camera dims from a `K_CAMERA`
 domain, and hands the root to `trace_path`. Each path vertex derives `path.new_domain(depth)`
@@ -401,6 +401,20 @@ they are handed. Unbounded/incidental draws — Russian roulette, volume delta-t
 carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
+
+**The frame is hashed before it seeds anything** (`sampler_frame_seed` in
+`tracer/settings.rs`, used by the final pass, the guiding passes and the learned light
+cache's training grid). OpenQMC's `State64Bit::new` adds `frame` to the pattern seed and
+`pixel_decorrelate` then adds the pixel id `x + 256·y` to the same seed, so a raw frame
+number is a pixel shift: frame `f` at pixel `x` draws exactly what frame 0 drew at
+`x + f`. Until 2026-10-01 the frame went in raw, and an image sequence's noise slid one
+pixel to the right per frame instead of changing (pinned by
+`raw_frame_numbers_slide_the_noise_pattern`). The hash is murmur3's `fmix32`, which keeps
+frame 0 at seed 0 — every render that sets no frame is bit-identical to before — and its
+top two bits are dropped so OpenQMC's `frame + (index >> 16)` cannot overflow `i32`.
+Measurements that used `-f N` as "independent seeds" before that date (`docs/light_sampling.md`)
+compared pixel-shifted copies of one pattern: still a different sequence per pixel, but not
+the independent seeds they were described as.
 
 ## Known gaps: path guiding
 

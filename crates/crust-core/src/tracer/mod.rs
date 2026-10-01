@@ -133,7 +133,7 @@ impl Renderer {
                 &lights,
                 settings.width,
                 settings.height,
-                settings.frame,
+                settings.sampler_seed(),
             ) {
                 Some(cache) => {
                     debug!(
@@ -213,7 +213,7 @@ impl Renderer {
     fn final_pass_config(&self, tiled: bool) -> PassConfig {
         PassConfig {
             spp: self.settings.samples_per_pixel,
-            seed: self.settings.frame as u32,
+            seed: self.settings.sampler_seed() as u32,
             tiled,
             adaptive: true,
         }
@@ -258,7 +258,7 @@ impl Renderer {
             ..GuidingConfig::default()
         };
         let mut field = GuidingField::new(bounds, cfg);
-        let base_seed = self.settings.frame as u32;
+        let base_seed = self.settings.sampler_seed() as u32;
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
         // (per-pixel variance map, seconds) of the first pass (untrained
         // field → effectively unguided) and of the last training pass
