@@ -242,7 +242,11 @@ Schema mapping:
     traversal peaks at 1.16 GiB while the SBVH build over the baked result peaks at
     2.19 GiB. That is the pre-existing build transient (see "Known gaps: geometry and
     acceleration" in `openspec/specs/intersection-kernel/design.md`), which
-    subdivision merely feeds 4^L× more triangles.
+    subdivision merely feeds 4^L× more triangles. Those figures predate
+    `compact-triangle-storage`; after it the same level-3 grid holds 202.86 MiB of
+    kernel memory instead of 416.89 (95.5 bytes per refined triangle instead of 196),
+    its traverse-phase RSS is 223 MiB instead of 284 (unpadded importer arrays) and its
+    whole-process peak 508 MiB instead of 809.
   - The DPEL MaterialX teapot (three `catmullClark` cages, 32 504 quads, faceVarying
     `st` under `boundaries`), measured with `--stats`:
 

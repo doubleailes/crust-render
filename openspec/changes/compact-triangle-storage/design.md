@@ -303,25 +303,30 @@ spatial splits, lane fill `φ`), kernel-resident bytes per triangle:
 | vertices | (in the node) | 6 | 6 |
 | packets | 49 (`48·r/φ`) | `48·r/φ` ≈ 49 | `23·r/φ` ≈ 25 |
 | BVH nodes + leaves | 19 | 19 | 19 |
-| **total** | **196** | **~104** (measured 104.2) | **~80** (measured 78.6) |
+| **total** | **196** | **~104** (measured 104.2; 95.5 with packet-sized leaves) | **~80** (measured 78.6) |
 
 On ALab-shaped geometry (`φ ≈ 0.48`, nodes 65 B per primitive) D4 is the larger term:
 bringing `φ` to ~0.85 and leaves to 4–8 triangles is worth ~120 B per triangle on its
 own before D1–D3 remove another ~100.
 
-Acceptance, measured with `--stats` rather than modelled:
+Acceptance, measured with `--stats` rather than modelled (outcome in brackets):
 
 - stress grid, level 3: kernel ≤ 110 B per triangle with `CRUST_TRI_PACKETS=gathered`,
   ≤ 85 with `indexed`; commit-phase peak minus traverse-phase RSS at most two thirds of
-  today's 390 MiB;
+  today's [met: 95.5 gathered with packet-sized leaves, 78.6 indexed; peak minus
+  traverse RSS 285 MiB against 524 before, 54 %; whole-process peak 809 → 508 MiB];
 - DPEL teapot, level 2 (1.04 M triangles, textured): kernel from 212.95 MiB to ≤ 115
   MiB; the importer's UV tables from 44 B to ≤ 20 B per triangle (the `Traverse prims`
-  RSS delta against `CRUST_SUBDIV=0`);
+  RSS delta against `CRUST_SUBDIV=0`) [not measured: the teapot payload and ALab are
+  not in this checkout; the per-triangle tables went 24 + 16 + 4 → 12 + 4 by
+  construction];
 - ALab frame 1004 at level 1, on a machine that holds it: kernel from 19.64 GiB to
-  ≤ 11 GiB, lanes filled ≥ 80 %;
-- `bench_ab.sh` over the sample scenes within noise for `gathered`; the `indexed`
-  threshold chosen so that `ray_throughput --large` is not slower than `gathered` at
-  the sizes where it engages.
+  ≤ 11 GiB, lanes filled ≥ 80 % [not measured, same reason];
+- `bench_ab.sh` over the sample scenes within noise for `gathered` [met: eight samples,
+  base against the records build, min −4.5 % to +3.4 %, the latter a 0.56 s render];
+  the `indexed` threshold chosen so that `ray_throughput --large` is not slower than
+  `gathered` at the sizes where it engages [no such size exists: indexed is 30 %
+  slower out of cache, so `auto` is gathered and `indexed` an opt-in].
 
 ## Risks / Trade-offs
 
