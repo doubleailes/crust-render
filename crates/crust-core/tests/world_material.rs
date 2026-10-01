@@ -1356,3 +1356,77 @@ fn instanced_meshes_get_tangents_through_their_placement() {
         hit.rec.tangent
     );
 }
+
+/// Two placements of one prototype through an instancer's group report the
+/// same forwarded slot id with different transforms, so the hit names the
+/// slot, not the placement traversed: neither gets a tangent frame (nor the
+/// vertices of whatever sits at that id in the top-level scene) and both
+/// still carry their UV.
+#[test]
+fn forwarded_placements_sharing_a_slot_get_no_tangent() {
+    let mut inner = crust_core::rt::SceneBuilder::new();
+    inner.attach(quad());
+    let inner = Arc::new(inner.commit());
+
+    let mut b = WorldBuilder::new();
+    // The slot both placements report into, as the importer reserves it.
+    let slot = b.reserve_slot(emissive(1.0), crust_core::MASK_ALL);
+    b.set_uv_map(slot, Arc::new(quad_uv_map()), false);
+    let placements = [
+        glam::Affine3A::from_translation(glam::Vec3::new(5.0, 0.0, 0.0)),
+        glam::Affine3A::from_rotation_translation(
+            glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            glam::Vec3::new(-5.0, 0.0, 0.0),
+        ),
+    ];
+    for l2w in placements {
+        b.attach_labelled(
+            Geometry::Instance {
+                scene: Arc::clone(&inner),
+                transform: l2w,
+                transform_end: None,
+            },
+            emissive(1.0),
+            crust_core::MASK_ALL,
+            crust_core::rt::InstanceHitId::As(slot),
+        );
+    }
+    let world = b.commit();
+    for origin in [Vec3A::new(5.5, 0.5, -1.0), Vec3A::new(-5.5, 0.5, -1.0)] {
+        let hit = world
+            .intersect(&Ray::new(origin, Vec3A::Z), 1e-3, 10.0)
+            .expect("the placed quad is hit");
+        assert_eq!(hit.geom_id, slot, "hits report the forwarded slot");
+        assert!(hit.rec.has_uv, "the slot's chart still resolves");
+        assert_eq!(hit.rec.tangent, Vec3A::ZERO, "no frame without a placement");
+    }
+}
+
+/// A motion-blurred instance is intersected through a transform interpolated
+/// at the ray's time, which no retained start transform reproduces, so it
+/// gets no tangent frame either.
+#[test]
+fn motion_blurred_instances_get_no_tangent() {
+    let mut inner = crust_core::rt::SceneBuilder::new();
+    inner.attach(quad());
+    let inner = Arc::new(inner.commit());
+
+    let mut b = WorldBuilder::new();
+    let id = b.attach(
+        Geometry::Instance {
+            scene: inner,
+            transform: glam::Affine3A::from_translation(glam::Vec3::new(5.0, 0.0, 0.0)),
+            transform_end: Some(Box::new(glam::Affine3A::from_translation(glam::Vec3::new(
+                6.0, 0.0, 0.0,
+            )))),
+        },
+        emissive(1.0),
+    );
+    b.set_uv_map(id, Arc::new(quad_uv_map()), false);
+    let world = b.commit();
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(5.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .expect("the moving quad is hit at time 0");
+    assert!(hit.rec.has_uv);
+    assert_eq!(hit.rec.tangent, Vec3A::ZERO);
+}

@@ -31,8 +31,13 @@ openusd = { version = "0.7", default-features = false }
 # core crate in openusd 0.7 and ship separately, versioned in lockstep.
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
-# Catmull-Clark subdivision at USD import.
-opensubdiv-rs = "0.3.0"
+# Catmull-Clark subdivision at USD import. A git dependency pinned to a release
+# tag because `Cargo.lock` is not checked in, so a plain version requirement
+# would let fresh builds resolve any later compatible release — the same
+# reasoning as `ptex` in the workspace manifest. The tag is the commit the
+# crates.io 0.3.0 release was published from: zero dependencies,
+# `forbid(unsafe_code)`.
+opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0.3.0" }
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }
