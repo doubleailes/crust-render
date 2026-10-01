@@ -254,6 +254,17 @@ Paid down since, from `docs/rust_leverage.md`: environment parsing is one
 typed `Config` (`crust-core/src/config.rs`) instead of nineteen hand-rolled
 reads, some cached and some re-read per prim or texture open.
 
+Paid down by `compact-triangle-storage` (2026-10-01): the kernel stored every
+triangle three times (an 80-byte primitive node with its own vertex copy, the
+SIMD packet, and three unshared per-corner normals) and the importer kept
+per-corner UV, tangent and Ptex-corner tables beside it. Triangles are now
+24-byte records over shared vertex and per-vertex normal tables, the build's
+references and nodes are unpadded, leaf tables are sized exactly, subtrees
+merge in place, leaves are sized by packet rounds, tangents and Ptex sub-face
+corners are derived at the hit. The subdivision stress grid went from 196 to
+96 kernel bytes per triangle and from 809 to 508 MiB peak RSS, bit-identical
+(up to exact-tie hits under the packet leaf rule).
+
 Still open, roughly in order of payoff:
 
 1. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
@@ -268,7 +279,15 @@ Still open, roughly in order of payoff:
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
    `PROFILE` and some helpers are `inline(always)` for measured reasons
-   (`profile.rs`).
+   (`profile.rs`). `compact-triangle-storage` found the inverse trap too:
+   shrinking `PrimNode` let LLVM inline the scalar dispatch into `Bvh::hit`
+   and spill its loop; `PrimNode::hit` is `inline(never)` for that reason.
+4. **The SBVH build still materialises the binary tree.** References and
+   nodes are 28 and 32 bytes and subtrees merge in place, but the commit's
+   peak is still the binary tree plus the collapsed one; a builder that
+   emits wide nodes directly (fused collapsing) is the remaining lever, and
+   the composed USD stage, not the kernel, is most of a production scene's
+   peak.
 
 ## Further reading
 
