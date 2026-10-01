@@ -38,8 +38,8 @@
 
 ## 6. `--stats` (D8)
 
-- [ ] 6.1 `MemoryFootprint` gains `vertices`, `vertex_normals` (per vertex), `triangle_records`, `packets_gathered`, `packets_indexed`, `lanes` / `lanes_filled`; the report prints them plus `lanes filled` (%) and `bytes per triangle`; verified by a stats test on a two-mesh scene checking every row and the arithmetic
-- [ ] 6.2 `cli/design.md` cookbook gains the memory-layout recipe (`CRUST_TRI_PACKETS` × `CRUST_BVH_PACKET_SAH` on the stress grid); verified by running each line
+- [x] 6.1 `MemoryFootprint` gains `vertices`, `vertex_normals` (per vertex), `triangle_records`, `packets` / `packets_indexed`, `geometry_tables`, `lanes` / `lanes_filled`; the report prints them plus `lanes filled` (%) and `bytes per triangle`; verified by `report_shows_the_geometry_layout` (every row, the fill and the per-triangle arithmetic)
+- [x] 6.2 `cli/design.md` cookbook gains the memory-layout recipe (`CRUST_TRI_PACKETS` on the stress grid; `CRUST_BVH_PACKET_SAH` joins it with section 4); verified by running each line
 
 ## 7. Switches and records
 
