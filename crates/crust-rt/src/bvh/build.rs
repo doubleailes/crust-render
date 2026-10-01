@@ -5,7 +5,7 @@
 //! the same however `rayon::join` interleaves the subtrees.
 
 use crate::aabb::AABB;
-use crate::prim::PrimNode;
+use crate::prim::BuildPrim;
 
 use super::{
     BINS, MAX_DEPTH, MAX_LEAF, MIN_LEAF, MIN_LEAF_PACKED, Node, PARALLEL_THRESHOLD, PrimRef,
@@ -176,7 +176,7 @@ fn best_object_split(refs: &[PrimRef]) -> Option<ObjSplit> {
 /// a bin contribute their *clipped* bounds to it (entry/exit counting), so
 /// the candidate children reflect what duplication would actually produce.
 pub(super) fn best_spatial_split(
-    prims: &[PrimNode],
+    prims: &[BuildPrim],
     refs: &[PrimRef],
     bbox: &AABB,
 ) -> Option<SpatSplit> {
@@ -288,7 +288,7 @@ pub(super) fn best_spatial_split(
 /// (locally indexed — `merge` rebases children). `root_area` normalizes
 /// the SBVH overlap test.
 pub(super) fn build_subtree(
-    prims: &[PrimNode],
+    prims: &[BuildPrim],
     mut refs: Vec<PrimRef>,
     depth: usize,
     root_area: f32,
@@ -408,7 +408,7 @@ pub(super) fn build_subtree(
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
 /// fallback: object-partition when possible, else leaf.
 fn object_partition_or_leaf(
-    prims: &[PrimNode],
+    prims: &[BuildPrim],
     refs: Vec<PrimRef>,
     bbox: AABB,
     object: Option<ObjSplit>,
@@ -435,7 +435,7 @@ fn object_partition_or_leaf(
 /// The leaf-size floor for this range: [`MIN_LEAF_PACKED`] when every
 /// reference is a triangle (so the leaf becomes exactly one SIMD packet),
 /// [`MIN_LEAF`] otherwise.
-fn min_leaf_for(prims: &[PrimNode], refs: &[PrimRef]) -> usize {
+fn min_leaf_for(prims: &[BuildPrim], refs: &[PrimRef]) -> usize {
     if refs
         .iter()
         .all(|r| prims[r.idx as usize].as_triangle().is_some())

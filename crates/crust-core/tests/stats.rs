@@ -177,7 +177,7 @@ fn kernel_footprint_is_reported_by_structure() {
     let s = RenderStats {
         scene: SceneCounters {
             footprint: MemoryFootprint {
-                prim_nodes: 4096,
+                triangle_records: 4096,
                 bvh_nodes: 2048,
                 packets: 0,
                 ..Default::default()
@@ -188,7 +188,7 @@ fn kernel_footprint_is_reported_by_structure() {
     };
     let out = s.report();
     assert!(out.contains("kernel memory"), "{out}");
-    assert!(out.contains("primitive nodes"), "{out}");
+    assert!(out.contains("triangle records"), "{out}");
     assert!(out.contains("BVH nodes"), "{out}");
     assert!(!out.contains("triangle packets"), "zero rows are skipped");
     // No footprint at all: the block is absent.

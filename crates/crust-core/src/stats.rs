@@ -755,8 +755,10 @@ impl fmt::Display for RenderStats {
                 human_bytes(fp.total() as u64)
             )?;
             for (label, bytes) in [
-                ("primitive nodes", fp.prim_nodes),
-                ("boxed primitives", fp.boxed_prims),
+                ("triangle records", fp.triangle_records),
+                ("instances", fp.instances),
+                ("cubic curve spans", fp.cubic_spans),
+                ("other primitives", fp.other_prims),
                 ("vertex normals", fp.vertex_normals),
                 ("BVH nodes", fp.bvh_nodes),
                 ("triangle packets", fp.packets),

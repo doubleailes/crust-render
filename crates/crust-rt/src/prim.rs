@@ -27,7 +27,7 @@ pub(crate) struct PrimHit {
 pub(crate) trait Prim: Send + Sync {
     /// `normals` is the owning [`Bvh`](crate::bvh::Bvh)'s shading-normal
     /// table, which only a triangle reads (see [`TrianglePrim::normals`]).
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormals]) -> Option<PrimHit>;
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormal]) -> Option<PrimHit>;
 
     /// Boolean occlusion variant; overridden where cheaper than `hit`.
     /// Occlusion reports no normal, so the table is not needed: the one
@@ -68,49 +68,95 @@ pub(crate) struct TrianglePrim {
     pub geom_id: u32,
     pub prim_id: u32,
     pub mask: RayMask,
-    /// Index of this triangle's per-vertex shading normals in its
+    /// Indices of this triangle's three per-vertex shading normals in its
     /// [`Bvh`](crate::bvh::Bvh)'s normal table, or [`NO_NORMALS`]; the
     /// reported normal interpolates them by the hit barycentrics when
     /// present.
-    ///
-    /// A side table rather than an inline `Option<[Vec3A; 3]>`, which is
-    /// 64 bytes whether or not it holds anything, made every triangle 128
-    /// bytes, and — being the largest variant — every `PrimNode` too; now
-    /// they are 64 and 80. The
-    /// normals are read once per closest hit, after traversal; the vertices
-    /// on every test. A sentinel rather than an `Option`, because here the
-    /// layout is the point: `Option<u32>` would take the struct past 64.
-    pub normals: u32,
+    pub normals: [u32; 3],
 }
 
-/// Three per-vertex shading normals, one [`TrianglePrim`]'s entry in its
-/// BVH's normal table.
-pub(crate) type VertexNormals = [Vec3A; 3];
+/// One per-vertex shading normal, an entry of a BVH's normal table. Stored
+/// as `[f32; 3]` rather than `Vec3A`: it is read once per closest hit, so
+/// the 4 bytes of alignment padding a `Vec3A` carries would be pure waste
+/// on a table that holds every smooth mesh's normals.
+pub(crate) type VertexNormal = [f32; 3];
 
 /// [`TrianglePrim::normals`] for a triangle with no shading normals.
-pub(crate) const NO_NORMALS: u32 = u32::MAX;
+pub(crate) const NO_NORMALS: [u32; 3] = [u32::MAX; 3];
 
 impl TrianglePrim {
+    /// The resident part of this triangle: everything but its vertices,
+    /// which live only in the BVH's SIMD packets once it is built.
+    pub(crate) fn record(&self) -> TriRecord {
+        TriRecord {
+            geom_id: self.geom_id,
+            prim_id: self.prim_id,
+            mask: self.mask,
+            normals: self.normals,
+        }
+    }
+
+    fn vertices(&self) -> [Vec3A; 3] {
+        [self.v0, self.v1, self.v2]
+    }
+}
+
+impl Prim for TrianglePrim {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormal]) -> Option<PrimHit> {
+        self.record()
+            .hit(self.vertices(), ray, t_min, t_max, normals)
+    }
+
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        self.record().hit_any(self.vertices(), ray, t_min, t_max)
+    }
+
+    fn bbox(&self) -> AABB {
+        triangle_aabb(self.v0, self.v1, self.v2)
+    }
+
+    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
+        clip_triangle_aabb(self.v0, self.v1, self.v2, axis, min, max)
+    }
+}
+
+/// What a built BVH keeps of a triangle: its ids, its mask and its normal
+/// indices — 24 bytes. The vertices are not here: every triangle sits in at
+/// least one `Tri4` packet, which already holds them exactly, so a hit reads
+/// them from the lane it came from (`Tri4::lane_vertices`) when it needs
+/// them at all (the scalar tie-break, and the geometric normal of a
+/// triangle without shading normals).
+pub(crate) struct TriRecord {
+    pub geom_id: u32,
+    pub prim_id: u32,
+    pub mask: RayMask,
+    pub normals: [u32; 3],
+}
+
+impl TriRecord {
     /// Completes a hit whose `(t, u, v)` are already known — the shared tail
     /// of the scalar and the 4-wide SIMD intersectors, so both derive the
-    /// reported normal the same way.
+    /// reported normal the same way. `vertices` is only called for a
+    /// triangle without shading normals.
+    #[inline]
     pub(crate) fn hit_from_barycentric(
         &self,
-        normals: &[VertexNormals],
+        normals: &[VertexNormal],
+        vertices: impl FnOnce() -> [Vec3A; 3],
         t: f32,
         u: f32,
         v: f32,
     ) -> Option<PrimHit> {
-        // `NO_NORMALS` is past the end of every table.
-        let outward = match normals.get(self.normals as usize) {
-            Some([n0, n1, n2]) => (*n0 * (1.0 - u - v) + *n1 * u + *n2 * v).normalize(),
-            None => {
-                let n = (self.v1 - self.v0).cross(self.v2 - self.v0);
-                if n == Vec3A::ZERO {
-                    return None; // degenerate sliver
-                }
-                n.normalize()
+        let outward = if self.normals == NO_NORMALS {
+            let [v0, v1, v2] = vertices();
+            let n = (v1 - v0).cross(v2 - v0);
+            if n == Vec3A::ZERO {
+                return None; // degenerate sliver
             }
+            n.normalize()
+        } else {
+            let [n0, n1, n2] = self.normals.map(|i| Vec3A::from_array(normals[i as usize]));
+            (n0 * (1.0 - u - v) + n1 * u + n2 * v).normalize()
         };
         Some(PrimHit {
             t,
@@ -121,28 +167,34 @@ impl TrianglePrim {
             prim_id: self.prim_id,
         })
     }
-}
 
-impl Prim for TrianglePrim {
-    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, normals: &[VertexNormals]) -> Option<PrimHit> {
+    /// The scalar intersection of this triangle, whose vertices the caller
+    /// supplies (from its packet lane, or from the build-time triangle).
+    #[inline]
+    pub(crate) fn hit(
+        &self,
+        [v0, v1, v2]: [Vec3A; 3],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+        normals: &[VertexNormal],
+    ) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
-        let (t, u, v) = triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max)?;
-        self.hit_from_barycentric(normals, t, u, v)
+        let (t, u, v) = triangle_intersect(ray, v0, v1, v2, t_min, t_max)?;
+        self.hit_from_barycentric(normals, || [v0, v1, v2], t, u, v)
     }
 
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        !masked_out(ray, self.mask)
-            && triangle_intersect(ray, self.v0, self.v1, self.v2, t_min, t_max).is_some()
-    }
-
-    fn bbox(&self) -> AABB {
-        triangle_aabb(self.v0, self.v1, self.v2)
-    }
-
-    fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
-        clip_triangle_aabb(self.v0, self.v1, self.v2, axis, min, max)
+    #[inline]
+    pub(crate) fn hit_any(
+        &self,
+        [v0, v1, v2]: [Vec3A; 3],
+        ray: &Ray,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        !masked_out(ray, self.mask) && triangle_intersect(ray, v0, v1, v2, t_min, t_max).is_some()
     }
 }
 
@@ -158,13 +210,7 @@ pub(crate) struct SpherePrim {
 }
 
 impl Prim for SpherePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -219,13 +265,7 @@ pub(crate) struct DiskPrim {
 }
 
 impl Prim for DiskPrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -279,13 +319,7 @@ pub(crate) struct CylinderPrim {
 }
 
 impl Prim for CylinderPrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -351,13 +385,7 @@ pub(crate) struct CurvePrim {
 }
 
 impl Prim for CurvePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -407,13 +435,7 @@ pub(crate) struct CubicCurvePrim {
 }
 
 impl Prim for CubicCurvePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -444,30 +466,40 @@ impl Prim for CubicCurvePrim {
 
 pub(crate) struct InstancePrim {
     pub scene: Arc<Scene>,
-    /// Local-to-world at shutter time 0.
-    pub l2w: Affine3A,
-    /// Cached world-to-local and inverse-transpose at time 0.
+    /// World-to-local at shutter time 0. The only transform a static
+    /// instance keeps: rays go into local space through it, and the normal
+    /// matrix is its linear part transposed — exact, so it is recomputed per
+    /// hit rather than cached.
     pub w2l: Affine3A,
-    pub normal_mat: Mat3A,
-    /// Local-to-world at shutter time 1, when the instance moves.
+    /// The endpoint placements of a moving instance; `None` for the
+    /// overwhelming majority, which are static.
     ///
-    /// Boxed for the same reason as [`crate::Geometry::Instance`]'s
-    /// `transform_end`, and it matters far more here: `Geometry` values
-    /// are transient build inputs, whereas an `InstancePrim` is resident
-    /// for the whole render. Inline, the `Option` costs 80 bytes on every
-    /// instance — a scene with tens of millions of static placements pays
-    /// gigabytes for a field none of them use.
-    pub l2w_end: Option<Box<Affine3A>>,
-    pub bounds: AABB,
+    /// Boxed because an `InstancePrim` is resident for the whole render:
+    /// inline, the two transforms would cost 128 bytes on every instance —
+    /// on a scene with tens of millions of static placements, gigabytes
+    /// for fields none of them use.
+    pub motion: Option<Box<InstanceMotion>>,
     /// What a hit inside reports when `id_offset` is [`NO_ID_OFFSET`]: the
     /// instance's own id, or the id [`crate::InstanceHitId::As`] asked for.
     pub geom_id: u32,
     /// [`crate::InstanceHitId::Offset`]'s base, added to the inner hit's id;
-    /// [`NO_ID_OFFSET`] when the instance reports `geom_id` instead. Fits in
-    /// the padding the 16-byte-aligned transforms already leave, so
-    /// forwarding costs no resident memory (pinned by a test).
+    /// [`NO_ID_OFFSET`] when the instance reports `geom_id` instead.
     pub id_offset: u32,
     pub mask: RayMask,
+}
+
+/// Local-to-world at shutter times 0 and 1 of a moving instance.
+pub(crate) struct InstanceMotion {
+    pub l2w: Affine3A,
+    pub l2w_end: Affine3A,
+}
+
+/// An instance as the BVH build sees it: the resident [`InstancePrim`] plus
+/// its world bounds, which only the build reads — once the tree exists, the
+/// parent node's lane holds the same box.
+pub(crate) struct BuildInstance {
+    pub prim: InstancePrim,
+    pub bounds: AABB,
 }
 
 /// [`InstancePrim::id_offset`] for an instance that does not forward.
@@ -527,12 +559,12 @@ pub(crate) fn transformed_aabb(local: &AABB, m: &Affine3A) -> AABB {
 impl InstancePrim {
     /// World-to-local and normal transform at the ray's shutter time.
     fn transforms_at(&self, time: f32) -> (Affine3A, Mat3A) {
-        match &self.l2w_end {
-            Some(end) if time > 0.0 => {
-                let w2l = lerp_affine(&self.l2w, end.as_ref(), time).inverse();
+        match &self.motion {
+            Some(m) if time > 0.0 => {
+                let w2l = lerp_affine(&m.l2w, &m.l2w_end, time).inverse();
                 (w2l, w2l.matrix3.transpose())
             }
-            _ => (self.w2l, self.normal_mat),
+            _ => (self.w2l, self.w2l.matrix3.transpose()),
         }
     }
 
@@ -547,14 +579,8 @@ impl InstancePrim {
     }
 }
 
-impl Prim for InstancePrim {
-    fn hit(
-        &self,
-        ray: &Ray,
-        t_min: f32,
-        t_max: f32,
-        _normals: &[VertexNormals],
-    ) -> Option<PrimHit> {
+impl InstancePrim {
+    pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         if masked_out(ray, self.mask) {
             return None;
         }
@@ -585,7 +611,7 @@ impl Prim for InstancePrim {
         Some(hit)
     }
 
-    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+    pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         if masked_out(ray, self.mask) {
             return false;
         }
@@ -599,6 +625,16 @@ impl Prim for InstancePrim {
         crate::bvh::stats::leave_instance();
         occluded
     }
+}
+
+impl Prim for BuildInstance {
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32, _normals: &[VertexNormal]) -> Option<PrimHit> {
+        self.prim.hit(ray, t_min, t_max)
+    }
+
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        self.prim.hit_any(ray, t_min, t_max)
+    }
 
     fn bbox(&self) -> AABB {
         self.bounds
@@ -606,90 +642,68 @@ impl Prim for InstancePrim {
 }
 
 // ---------------------------------------------------------------------
-// PrimNode: a closed, unboxed sum of the prim kinds.
+// BuildPrim: every primitive kind, as the BVH build consumes it.
 // ---------------------------------------------------------------------
 
-/// The BVH's actual primitive storage. A trait object (`Box<dyn Prim>`)
-/// puts every primitive in its own heap allocation — fine for a handful
-/// of meshes, but a dense `PointInstancer`-free curve archive (xgen
-/// "grass"/"groundcover") attaches tens of millions of individual curve
-/// segments, and tens of millions of separate small allocations cost real
-/// memory in allocator bookkeeping alone, on top of losing locality
-/// during traversal. `PrimNode` stores the same four kinds inline in one
-/// contiguous `Vec`, dispatching by match instead of vtable.
+/// A primitive as the BVH *build* sees it: a closed, unboxed sum, so the
+/// SBVH can bound and clip any kind (triangles keep their vertices here,
+/// for exact spatial clipping). It is transient — [`Prims::from_build`]
+/// moves every one into the resident per-kind arrays once the tree exists,
+/// and the triangles leave their vertices behind in the packets.
 ///
-/// `Instance` is boxed because `InstancePrim` (two cached transforms plus
-/// an optional motion-blur end transform) is far larger than the other
-/// three variants — an enum's size is its largest variant's, so leaving
-/// it inline would make every triangle and curve pay Instance's size for
-/// nothing. The other three stay inline: none of them are worth an
-/// allocation on their own.
-pub(crate) enum PrimNode {
+/// `Instance` and `CubicCurve` stay boxed *here* for the reason they always
+/// were: an enum is sized by its largest variant, and a build over millions
+/// of triangles should not pay an instance's size per triangle. Resident,
+/// each kind has its own array and none is boxed.
+pub(crate) enum BuildPrim {
     Triangle(TrianglePrim),
     Sphere(SpherePrim),
     Disk(DiskPrim),
     Cylinder(CylinderPrim),
     Curve(CurvePrim),
-    /// Boxed for the same reason as `Instance`: at 4 `Vec3A` control
-    /// points, this is bigger than every other variant, and an enum's
-    /// size is its largest variant's — inlining it would tax every
-    /// triangle, sphere and linear-curve segment everywhere in the
-    /// kernel for a variant most of them will never be.
     CubicCurve(Box<CubicCurvePrim>),
-    Instance(Box<InstancePrim>),
+    Instance(Box<BuildInstance>),
 }
 
-impl PrimNode {
-    #[inline]
+impl BuildPrim {
+    /// The brute-force reference the BVH tests compare traversal against.
+    #[cfg(test)]
     pub(crate) fn hit(
         &self,
         ray: &Ray,
         t_min: f32,
         t_max: f32,
-        normals: &[VertexNormals],
+        normals: &[VertexNormal],
     ) -> Option<PrimHit> {
         match self {
-            PrimNode::Triangle(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Sphere(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Disk(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Cylinder(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Curve(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::CubicCurve(p) => p.hit(ray, t_min, t_max, normals),
-            PrimNode::Instance(p) => p.hit(ray, t_min, t_max, normals),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
-        match self {
-            PrimNode::Triangle(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Disk(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Cylinder(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Curve(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::CubicCurve(p) => p.hit_any(ray, t_min, t_max),
-            PrimNode::Instance(p) => p.hit_any(ray, t_min, t_max),
+            BuildPrim::Triangle(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::Sphere(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::Disk(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::Cylinder(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::Curve(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::CubicCurve(p) => p.hit(ray, t_min, t_max, normals),
+            BuildPrim::Instance(p) => p.hit(ray, t_min, t_max, normals),
         }
     }
 
     #[inline]
     pub(crate) fn bbox(&self) -> AABB {
         match self {
-            PrimNode::Triangle(p) => p.bbox(),
-            PrimNode::Sphere(p) => p.bbox(),
-            PrimNode::Disk(p) => p.bbox(),
-            PrimNode::Cylinder(p) => p.bbox(),
-            PrimNode::Curve(p) => p.bbox(),
-            PrimNode::CubicCurve(p) => p.bbox(),
-            PrimNode::Instance(p) => p.bbox(),
+            BuildPrim::Triangle(p) => p.bbox(),
+            BuildPrim::Sphere(p) => p.bbox(),
+            BuildPrim::Disk(p) => p.bbox(),
+            BuildPrim::Cylinder(p) => p.bbox(),
+            BuildPrim::Curve(p) => p.bbox(),
+            BuildPrim::CubicCurve(p) => p.bbox(),
+            BuildPrim::Instance(p) => p.bbox(),
         }
     }
 
-    /// `Some` for triangles only — see `Prim::as_triangle`.
+    /// `Some` for triangles only.
     #[inline]
     pub(crate) fn as_triangle(&self) -> Option<&TrianglePrim> {
         match self {
-            PrimNode::Triangle(p) => Some(p),
+            BuildPrim::Triangle(p) => Some(p),
             _ => None,
         }
     }
@@ -697,13 +711,172 @@ impl PrimNode {
     #[inline]
     pub(crate) fn clipped_aabb(&self, axis: usize, min: f32, max: f32) -> Option<AABB> {
         match self {
-            PrimNode::Triangle(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Sphere(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Disk(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Cylinder(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Curve(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::CubicCurve(p) => p.clipped_aabb(axis, min, max),
-            PrimNode::Instance(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Triangle(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Sphere(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Disk(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Cylinder(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Curve(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::CubicCurve(p) => p.clipped_aabb(axis, min, max),
+            BuildPrim::Instance(p) => p.clipped_aabb(axis, min, max),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Prims: the resident primitives, one array per kind.
+// ---------------------------------------------------------------------
+
+/// The analytic primitives that have no array of their own: few in any real
+/// scene (UsdLux shapes, linear curve segments), so one enum serves them.
+pub(crate) enum OtherPrim {
+    Sphere(SpherePrim),
+    Disk(DiskPrim),
+    Cylinder(CylinderPrim),
+    Curve(CurvePrim),
+}
+
+impl OtherPrim {
+    #[inline]
+    fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        match self {
+            OtherPrim::Sphere(p) => p.hit(ray, t_min, t_max, &[]),
+            OtherPrim::Disk(p) => p.hit(ray, t_min, t_max, &[]),
+            OtherPrim::Cylinder(p) => p.hit(ray, t_min, t_max, &[]),
+            OtherPrim::Curve(p) => p.hit(ray, t_min, t_max, &[]),
+        }
+    }
+
+    #[inline]
+    fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        match self {
+            OtherPrim::Sphere(p) => p.hit_any(ray, t_min, t_max),
+            OtherPrim::Disk(p) => p.hit_any(ray, t_min, t_max),
+            OtherPrim::Cylinder(p) => p.hit_any(ray, t_min, t_max),
+            OtherPrim::Curve(p) => p.hit_any(ray, t_min, t_max),
+        }
+    }
+}
+
+/// A leaf's scalar (non-packet) primitive reference: the kind in the top
+/// two bits, the index into that kind's array below. Triangles never appear
+/// here — every triangle is in a packet.
+pub(crate) type PrimRefId = u32;
+const KIND_SHIFT: u32 = 30;
+const INDEX_MASK: u32 = (1 << KIND_SHIFT) - 1;
+const KIND_OTHER: u32 = 0;
+const KIND_INSTANCE: u32 = 1;
+const KIND_CUBIC: u32 = 2;
+
+/// The resident primitives of one BVH, stored once each, in input order
+/// within each kind. Every array is exactly as long as its kind's count.
+#[derive(Default)]
+pub(crate) struct Prims {
+    /// Indexed by `Tri4::prim[lane]`.
+    pub tris: Box<[TriRecord]>,
+    pub instances: Box<[InstancePrim]>,
+    pub cubics: Box<[CubicCurvePrim]>,
+    pub others: Box<[OtherPrim]>,
+    /// Per-vertex shading normals, indexed by [`TriRecord::normals`].
+    pub normals: Box<[VertexNormal]>,
+}
+
+impl Prims {
+    /// For each build primitive, the id the finished tree refers to it by:
+    /// a triangle's index into `tris` (what its packet lane stores), or a
+    /// kind-tagged [`PrimRefId`] for everything else. Pure in the input
+    /// order, so the build stays deterministic.
+    pub(crate) fn resident_ids(build: &[BuildPrim]) -> Vec<u32> {
+        let mut next = [0u32; 4]; // tris, other, instance, cubic
+        let tagged = |kind: u32, n: &mut u32| {
+            assert!(
+                *n <= INDEX_MASK,
+                "one BVH holds more than {INDEX_MASK} primitives of one kind"
+            );
+            let id = (kind << KIND_SHIFT) | *n;
+            *n += 1;
+            id
+        };
+        build
+            .iter()
+            .map(|p| match p {
+                BuildPrim::Triangle(_) => {
+                    let id = next[0];
+                    next[0] = id.checked_add(1).expect("too many triangles in one BVH");
+                    id
+                }
+                BuildPrim::Instance(_) => tagged(KIND_INSTANCE, &mut next[2]),
+                BuildPrim::CubicCurve(_) => tagged(KIND_CUBIC, &mut next[3]),
+                _ => tagged(KIND_OTHER, &mut next[1]),
+            })
+            .collect()
+    }
+
+    /// Moves the build primitives into their resident arrays, in the order
+    /// [`Prims::resident_ids`] numbered them. Triangle vertices are dropped:
+    /// the packets hold them.
+    pub(crate) fn from_build(build: Vec<BuildPrim>, normals: Vec<VertexNormal>) -> Prims {
+        let (mut n_tri, mut n_inst, mut n_cubic, mut n_other) = (0, 0, 0, 0);
+        for p in &build {
+            match p {
+                BuildPrim::Triangle(_) => n_tri += 1,
+                BuildPrim::Instance(_) => n_inst += 1,
+                BuildPrim::CubicCurve(_) => n_cubic += 1,
+                _ => n_other += 1,
+            }
+        }
+        let mut tris = Vec::with_capacity(n_tri);
+        let mut instances = Vec::with_capacity(n_inst);
+        let mut cubics = Vec::with_capacity(n_cubic);
+        let mut others = Vec::with_capacity(n_other);
+        for p in build {
+            match p {
+                BuildPrim::Triangle(t) => tris.push(t.record()),
+                BuildPrim::Instance(i) => instances.push(i.prim),
+                BuildPrim::CubicCurve(c) => cubics.push(*c),
+                BuildPrim::Sphere(p) => others.push(OtherPrim::Sphere(p)),
+                BuildPrim::Disk(p) => others.push(OtherPrim::Disk(p)),
+                BuildPrim::Cylinder(p) => others.push(OtherPrim::Cylinder(p)),
+                BuildPrim::Curve(p) => others.push(OtherPrim::Curve(p)),
+            }
+        }
+        Prims {
+            tris: tris.into_boxed_slice(),
+            instances: instances.into_boxed_slice(),
+            cubics: cubics.into_boxed_slice(),
+            others: others.into_boxed_slice(),
+            normals: normals.into_boxed_slice(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.tris.len() + self.instances.len() + self.cubics.len() + self.others.len()
+    }
+
+    /// Closest hit on a leaf's scalar primitive.
+    ///
+    /// Kept out of line on purpose: inlined, it pulls the instance path —
+    /// which re-enters `Bvh::hit` — into the traversal loop, and the bigger
+    /// frame stopped LLVM from building the traversal stack in place. That
+    /// cost ~7% of `Bvh::hit`'s instructions on cornellbox, more than the
+    /// call does.
+    #[inline(never)]
+    pub(crate) fn hit(&self, id: PrimRefId, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+        let i = (id & INDEX_MASK) as usize;
+        match id >> KIND_SHIFT {
+            KIND_INSTANCE => self.instances[i].hit(ray, t_min, t_max),
+            KIND_CUBIC => self.cubics[i].hit(ray, t_min, t_max, &[]),
+            _ => self.others[i].hit(ray, t_min, t_max),
+        }
+    }
+
+    /// Out of line for the same reason as [`Prims::hit`].
+    #[inline(never)]
+    pub(crate) fn hit_any(&self, id: PrimRefId, ray: &Ray, t_min: f32, t_max: f32) -> bool {
+        let i = (id & INDEX_MASK) as usize;
+        match id >> KIND_SHIFT {
+            KIND_INSTANCE => self.instances[i].hit_any(ray, t_min, t_max),
+            KIND_CUBIC => self.cubics[i].hit_any(ray, t_min, t_max),
+            _ => self.others[i].hit_any(ray, t_min, t_max),
         }
     }
 }

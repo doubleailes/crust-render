@@ -253,7 +253,7 @@ crust's own arithmetic. Grepping the machine code for `vfmadd` would not do:
 `m128_neg_mul_sub` in its SSE2 backend), so `Vec3A::cross` — and so
 `Affine3A::inverse` — become `vfnmadd` under `+fma`. Those arrive as explicit
 `llvm.fma` calls, which the check counts but allows: they sit in the
-geometric normal (`TrianglePrim::hit`) and motion-instance inverses, off the
+geometric normal (`TriRecord::hit_from_barycentric`) and motion-instance inverses, off the
 edge-function path, so every bitwise pair above still holds *within* a build.
 What they do mean is that an FMA build shades very slightly different normals
 from an SSE2 one — images are comparable bit for bit only between binaries

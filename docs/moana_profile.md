@@ -292,6 +292,61 @@ What is left is not the sky rig. Candidates, none measured yet:
 
 Same wall time as before (about 5:10 to 5:20) and the same peak RSS (51.5 GiB).
 
+## Memory: storing resident geometry once
+
+Measured 2026-10-01 for `compact-geometry-storage`.
+- **Setup:** the island at `bb53ff2` against the change, `shotCam`, `-s 1 --stats`,
+  Ptex streamed (`CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file`) so that Ptex is
+  not the dominant variable, under an RSS guard that kills the process at 56 GiB (on a
+  61 GiB machine).
+- **The starting point:** with Ptex preloaded (the default), level 0 peaks at
+  **43.1 GiB**, 6.02 GiB of which is Ptex. Streaming takes that to 37.3 GiB.
+
+| level 0, Ptex streamed | before | after | |
+|---|---|---|---|
+| kernel memory | 26.58 GiB | **13.85 GiB** | **−12.73 GiB** |
+| · triangle records (was: primitive nodes) | 8.04 GiB | 1.36 GiB | 80 → 24 B per triangle, and instances and curves no longer take a slot |
+| · instances + cubic spans (was: boxed primitives) | 7.90 GiB | 2.47 + 1.73 GiB | 320 → 96 B per instance, 176 → 96 B per span |
+| · vertex normals | 2.72 GiB | 0.38 GiB | per vertex, not per corner |
+| · BVH nodes, packets, leaves, indices | 7.95 GiB | 7.95 GiB | unchanged |
+| peak RSS | 37.29 GiB | **26.06 GiB** | −11.23 GiB |
+
+**Speed is not paid for the memory; it gets better.** `bench_ab.sh`, alternating the
+two binaries on the island at `-s 4` (2 reps each), timed `Render`:
+
+| | min | mean |
+|---|---|---|
+| before | 1.390 s | 1.418 s |
+| after | 0.951 s | 0.965 s |
+| Δ | −31.6% | −31.9% |
+
+callgrind cannot see this gain. On cornellbox, which fits in cache, the change is
++0.15% instructions, and the default `bench_ab.sh` scenes move within ±2.5% (noise).
+The island's gain is cache behaviour: a closest hit reads a 24-byte record instead of
+an 80-byte one, and an instance descent reads a 96-byte inline payload instead of
+chasing a box.
+
+The kernel figure lands within 2% of the design's estimate (about 13.6 GiB, struct
+sizes × counts). The render is bit-identical: the island and ALab frames above diff to
+0 pixels, and so does every checked-in sample, and both Kitchen_set variants, at 16 spp.
+
+**Level 1 still does not fit.** `--subdiv-level 1`, with Ptex streamed, was killed at
+the 56 GiB guard both times, still in `Traverse prims`. Before the change it was
+killed at 6:27; after it, at 8:17. The change moves the wall, but the level-1 import
+does not reach `Commit` on this machine. What is left at that point is not only kernel
+memory:
+- the importer's per-triangle side tables (`FaceMap` / `UvMap`: corner UVs,
+  densities, Ptex face ids, and 24 B of sub-face UVs per refined triangle);
+- the refiner's transient (about 313 B per refined face);
+- the build transient.
+
+`compact-triangle-layout` (no packets) and `adaptive-subdivision` are the proposed next
+steps. Counting the non-kernel memory in `--stats` would show which of these comes
+first.
+
+ALab (level 0, same flags) went from 6.87 to 4.28 GiB of kernel memory and from 28.65
+to 26.34 GiB peak. Its peak is dominated by what the kernel does not own.
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance

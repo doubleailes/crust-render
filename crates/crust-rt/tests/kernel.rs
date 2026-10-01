@@ -1331,8 +1331,10 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     let small = small.commit().memory_footprint();
     assert_eq!(
         small.total(),
-        small.prim_nodes
-            + small.boxed_prims
+        small.triangle_records
+            + small.instances
+            + small.cubic_spans
+            + small.other_prims
             + small.bvh_nodes
             + small.leaves
             + small.packets
@@ -1347,6 +1349,58 @@ fn memory_footprint_total_sums_its_fields_and_grows_with_geometry() {
     assert!(big.total() > small.total());
     assert!(big.packets > 0, "triangles are packed into SIMD packets");
     assert_eq!(small.packets, 0, "a sphere leaf has no triangle packet");
+}
+
+/// Resident geometry is stored once: a smooth mesh costs at most 24 bytes
+/// per triangle (its record) plus 12 per normal-carrying vertex, outside
+/// the tree itself and the SIMD packets, which are the only copy of the
+/// vertices. (Spec: intersection-kernel, "Resident geometry is stored once".)
+#[test]
+fn a_smooth_mesh_stores_its_triangles_and_normals_once() {
+    let (v, t) = grid(40);
+    let (n_verts, n_tris) = (v.len(), t.len());
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::TriangleMesh {
+        normals: Some(vec![Vec3A::Z; n_verts]),
+        vertices: v,
+        indices: t,
+    });
+    let fp = b.commit().memory_footprint();
+    let outside_tree = fp.total() - fp.bvh_nodes - fp.leaves - fp.indices - fp.packets;
+    assert!(
+        outside_tree <= 24 * n_tris + 12 * n_verts,
+        "{outside_tree} bytes for {n_tris} triangles and {n_verts} vertices"
+    );
+    assert_eq!(
+        fp.vertex_normals,
+        12 * n_verts,
+        "one normal per vertex, not per corner"
+    );
+    assert_eq!(fp.triangle_records, 24 * n_tris);
+}
+
+/// `n` static instances cost 96 bytes each, inline, and nothing else per
+/// instance: the instanced scene itself is counted once.
+#[test]
+fn static_instances_cost_96_bytes_each() {
+    let inner = unit_sphere_scene();
+    let n = 37;
+    let mut b = SceneBuilder::new();
+    for i in 0..n {
+        b.attach(Geometry::Instance {
+            scene: inner.clone(),
+            transform: Affine3A::from_translation(Vec3::X * (3.0 * i as f32)),
+            transform_end: None,
+        });
+    }
+    let fp = b.commit().memory_footprint();
+    let inner_fp = inner.memory_footprint();
+    assert_eq!(fp.instances, 96 * n);
+    assert_eq!(fp.triangle_records + fp.cubic_spans, 0);
+    assert_eq!(
+        fp.other_prims, inner_fp.other_prims,
+        "the sphere is counted once"
+    );
 }
 
 #[test]

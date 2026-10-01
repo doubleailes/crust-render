@@ -1,7 +1,7 @@
 use glam::Vec3A;
 
 use crate::aabb::AABB;
-use crate::prim::{PrimHit, PrimNode, SpherePrim, TrianglePrim};
+use crate::prim::{BuildPrim, PrimHit, SpherePrim, TrianglePrim};
 use crate::ray::{MASK_ALL, Ray};
 
 use super::build::*;
@@ -34,7 +34,7 @@ fn a_reference_wider_than_its_primitive_does_not_outvote_its_own_bounds() {
         prim_id: 0,
         mask: MASK_ALL,
     };
-    let prims = vec![PrimNode::Triangle(tri)];
+    let prims = vec![BuildPrim::Triangle(tri)];
     let node = AABB {
         minimum: Vec3A::new(0.0, 0.0, 0.0),
         maximum: Vec3A::new(1.0, 1.0, 1.0),
@@ -94,12 +94,12 @@ fn traversal_stack_interleaves_across_the_boundary() {
     assert_eq!(s.pop(), None);
 }
 
-fn sphere_grid(n: i32) -> Vec<PrimNode> {
-    let mut out: Vec<PrimNode> = Vec::new();
+fn sphere_grid(n: i32) -> Vec<BuildPrim> {
+    let mut out: Vec<BuildPrim> = Vec::new();
     for x in 0..n {
         for y in 0..n {
             for z in 0..n {
-                out.push(PrimNode::Sphere(SpherePrim {
+                out.push(BuildPrim::Sphere(SpherePrim {
                     center: Vec3A::new(x as f32, y as f32, z as f32) * 3.0,
                     radius: 0.5,
                     geom_id: (x * n * n + y * n + z) as u32,
@@ -114,11 +114,11 @@ fn sphere_grid(n: i32) -> Vec<PrimNode> {
 /// Long thin diagonal triangles — the geometry spatial splits exist
 /// for. Built so object splits alone leave heavily overlapping
 /// children.
-fn diagonal_shards(n: i32) -> Vec<PrimNode> {
-    let mut out: Vec<PrimNode> = Vec::new();
+fn diagonal_shards(n: i32) -> Vec<BuildPrim> {
+    let mut out: Vec<BuildPrim> = Vec::new();
     for i in 0..n {
         let o = i as f32 * 0.35;
-        out.push(PrimNode::Triangle(TrianglePrim {
+        out.push(BuildPrim::Triangle(TrianglePrim {
             v0: Vec3A::new(o, o, o),
             v1: Vec3A::new(o + 10.0, o + 10.0, o + 10.2),
             v2: Vec3A::new(o + 10.0, o + 10.3, o + 10.0),
@@ -131,7 +131,7 @@ fn diagonal_shards(n: i32) -> Vec<PrimNode> {
     out
 }
 
-fn linear_scan(prims: &[PrimNode], ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
+fn linear_scan(prims: &[BuildPrim], ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
     let mut closest = t_max;
     let mut best = None;
     for p in prims {
@@ -143,7 +143,7 @@ fn linear_scan(prims: &[PrimNode], ray: &Ray, t_min: f32, t_max: f32) -> Option<
     best
 }
 
-fn assert_matches_linear(objects: impl Fn() -> Vec<PrimNode>) {
+fn assert_matches_linear(objects: impl Fn() -> Vec<BuildPrim>) {
     let bvh = Bvh::new(objects(), Vec::new());
     let reference = objects();
 
@@ -208,9 +208,9 @@ fn spatial_splits_duplicate_references() {
     let bvh = Bvh::new(diagonal_shards(64), Vec::new());
     let refs = bvh.leaf_ref_count();
     assert!(
-        refs > bvh.prims.len(),
+        refs > bvh.prim_count(),
         "no reference duplication: {refs} leaf references for {} prims",
-        bvh.prims.len()
+        bvh.prim_count()
     );
 }
 
@@ -239,7 +239,7 @@ fn triangles_are_packed_into_simd_lanes() {
     mixed.extend(sphere_grid(2));
     let bvh = Bvh::new(mixed, Vec::new());
     assert!(!bvh.packets.is_empty() && !bvh.indices.is_empty());
-    assert!(bvh.leaf_ref_count() >= bvh.prims.len());
+    assert!(bvh.leaf_ref_count() >= bvh.prim_count());
 }
 
 /// Packet lanes must average close to 4 on a dense mesh — a packing
@@ -293,14 +293,22 @@ fn wide_node_is_two_cache_lines() {
     assert_eq!(std::mem::align_of::<WideNode>(), 16);
 }
 
-/// A triangle is its three vertices and four ids — one cache line — with its
-/// shading normals in the BVH's side table. A `PrimNode` is that plus its
-/// tag, 80 bytes; it was 128 with the normals inline. (A linear curve
-/// segment is 64 bytes too, so 80 is also what the curves alone would cost.)
+/// What a built BVH keeps per primitive, pinned because each figure is
+/// multiplied by tens of millions on a production scene:
+///
+/// - a triangle is a 24-byte record (ids, mask, three normal indices) plus
+///   its share of a 192-byte `Tri4` packet, which is the only copy of its
+///   vertices (it used to be an 80-byte `PrimNode` *and* the packet);
+/// - an instance is 96 bytes inline (it used to be a 240-byte box behind an
+///   80-byte `PrimNode`);
+/// - a cubic curve span is 96 bytes inline (it used to be boxed behind an
+///   80-byte `PrimNode` too).
 #[test]
-fn a_triangle_is_one_cache_line() {
-    assert_eq!(std::mem::size_of::<TrianglePrim>(), 64);
-    assert_eq!(std::mem::size_of::<PrimNode>(), 80);
+fn resident_primitives_are_their_pinned_sizes() {
+    assert_eq!(std::mem::size_of::<crate::prim::TriRecord>(), 24);
+    assert_eq!(std::mem::size_of::<crate::prim::InstancePrim>(), 96);
+    assert_eq!(std::mem::size_of::<crate::prim::CubicCurvePrim>(), 96);
+    assert_eq!(std::mem::size_of::<crate::triangle::Tri4>(), 192);
 }
 
 /// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
@@ -376,7 +384,8 @@ fn collapsed_tables_hold_no_spare_capacity() {
             .collect();
         let root = union_all(&refs);
         let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
-        let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+        let ids = crate::prim::Prims::resident_ids(&prims);
+        let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims, &ids);
         assert_eq!(wide.capacity(), wide.len());
         assert_eq!(collected.leaves.capacity(), collected.leaves.len());
         assert_eq!(collected.packets.capacity(), collected.packets.len());

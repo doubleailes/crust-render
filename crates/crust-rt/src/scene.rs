@@ -5,8 +5,9 @@
 use crate::aabb::AABB;
 use crate::bvh::Bvh;
 use crate::prim::{
-    CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstancePrim, NO_ID_OFFSET, NO_NORMALS,
-    PrimHit, PrimNode, SpherePrim, TrianglePrim, VertexNormals, transformed_aabb,
+    BuildInstance, BuildPrim, CubicCurvePrim, CurvePrim, CylinderPrim, DiskPrim, InstanceMotion,
+    InstancePrim, NO_ID_OFFSET, NO_NORMALS, PrimHit, SpherePrim, TrianglePrim, VertexNormal,
+    transformed_aabb,
 };
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Affine3A, Vec3A};
@@ -32,10 +33,15 @@ pub struct CurveSegment {
 /// from here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryFootprint {
-    /// The `PrimNode` arrays — every primitive, whatever its kind.
-    pub prim_nodes: usize,
-    /// Payloads of the boxed variants (instances, cubic curves).
-    pub boxed_prims: usize,
+    /// Per-triangle records: ids, mask and normal indices. A triangle's
+    /// vertices are in its packets, not here.
+    pub triangle_records: usize,
+    /// Instances, including the end transforms of the moving ones.
+    pub instances: usize,
+    /// Cubic curve spans.
+    pub cubic_spans: usize,
+    /// Spheres, disks, cylinders and linear curve segments.
+    pub other_prims: usize,
     /// 4-wide BVH nodes.
     pub bvh_nodes: usize,
     pub leaves: usize,
@@ -43,14 +49,17 @@ pub struct MemoryFootprint {
     pub packets: usize,
     /// Leaf primitive indices.
     pub indices: usize,
-    /// Per-vertex shading normals of the triangles that carry them.
+    /// Per-vertex shading normals of the meshes that carry them, stored
+    /// once per vertex.
     pub vertex_normals: usize,
 }
 
 impl MemoryFootprint {
     pub fn total(&self) -> usize {
-        self.prim_nodes
-            + self.boxed_prims
+        self.triangle_records
+            + self.instances
+            + self.cubic_spans
+            + self.other_prims
             + self.bvh_nodes
             + self.leaves
             + self.packets
@@ -329,8 +338,8 @@ impl SceneBuilder {
             .iter()
             .map(|(g, _, _)| Self::prim_upper_bound(g))
             .sum();
-        let mut prims: Vec<PrimNode> = Vec::with_capacity(total);
-        let mut vertex_normals: Vec<VertexNormals> = Vec::new();
+        let mut prims: Vec<BuildPrim> = Vec::with_capacity(total);
+        let mut vertex_normals: Vec<VertexNormal> = Vec::new();
         let mut has_motion = false;
         // Largest id a hit in this scene can report. Every geometry can
         // report its own id; labels can report more (see below).
@@ -343,23 +352,33 @@ impl SceneBuilder {
                     indices,
                     normals,
                 } => {
+                    // The mesh's normals go into the table once, per vertex;
+                    // each triangle then names its three by index. Offset by
+                    // where this mesh's normals start.
+                    let normal_base = vertex_normals.len();
+                    let n_normals = normals.as_ref().map_or(0, Vec::len);
+                    if let Some(ns) = &normals {
+                        assert!(
+                            u32::try_from(normal_base + ns.len()).is_ok_and(|n| n < u32::MAX),
+                            "more than {} vertex normals in one scene",
+                            u32::MAX - 1
+                        );
+                        vertex_normals.extend(ns.iter().map(|n| n.to_array()));
+                    }
                     for (prim_id, tri) in indices.into_iter().enumerate() {
                         let [i0, i1, i2] = tri;
                         let (i0, i1, i2) = (i0 as usize, i1 as usize, i2 as usize);
                         if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
                             continue;
                         }
-                        let tri_normals = normals
-                            .as_ref()
-                            .and_then(|ns| {
-                                (i0 < ns.len() && i1 < ns.len() && i2 < ns.len())
-                                    .then(|| [ns[i0], ns[i1], ns[i2]])
-                            })
-                            .map_or(NO_NORMALS, |n| {
-                                vertex_normals.push(n);
-                                (vertex_normals.len() - 1) as u32
-                            });
-                        prims.push(PrimNode::Triangle(TrianglePrim {
+                        // Smooth only when all three corners have a normal;
+                        // otherwise this one triangle shades flat.
+                        let tri_normals = if i0 < n_normals && i1 < n_normals && i2 < n_normals {
+                            [i0, i1, i2].map(|i| (normal_base + i) as u32)
+                        } else {
+                            NO_NORMALS
+                        };
+                        prims.push(BuildPrim::Triangle(TrianglePrim {
                             v0: vertices[i0],
                             v1: vertices[i1],
                             v2: vertices[i2],
@@ -371,7 +390,7 @@ impl SceneBuilder {
                     }
                 }
                 Geometry::Sphere { center, radius } => {
-                    prims.push(PrimNode::Sphere(SpherePrim {
+                    prims.push(BuildPrim::Sphere(SpherePrim {
                         center,
                         radius,
                         geom_id,
@@ -393,7 +412,7 @@ impl SceneBuilder {
                     {
                         continue;
                     }
-                    prims.push(PrimNode::Disk(DiskPrim {
+                    prims.push(BuildPrim::Disk(DiskPrim {
                         center,
                         normal: normal.normalize(),
                         radius,
@@ -412,7 +431,7 @@ impl SceneBuilder {
                     {
                         continue;
                     }
-                    prims.push(PrimNode::Cylinder(CylinderPrim {
+                    prims.push(BuildPrim::Cylinder(CylinderPrim {
                         p0,
                         axis: (p1 - p0) / length,
                         length,
@@ -423,7 +442,7 @@ impl SceneBuilder {
                 }
                 Geometry::RoundCurves { segments } => {
                     for (prim_id, s) in segments.into_iter().enumerate() {
-                        prims.push(PrimNode::Curve(CurvePrim {
+                        prims.push(BuildPrim::Curve(CurvePrim {
                             p0: s.p0,
                             p1: s.p1,
                             r0: s.r0,
@@ -436,7 +455,7 @@ impl SceneBuilder {
                 }
                 Geometry::CubicCurves { segments } => {
                     for (prim_id, s) in segments.into_iter().enumerate() {
-                        prims.push(PrimNode::CubicCurve(Box::new(CubicCurvePrim {
+                        prims.push(BuildPrim::CubicCurve(Box::new(CubicCurvePrim {
                             cp: s.cp,
                             r0: s.r0,
                             r1: s.r1,
@@ -495,16 +514,21 @@ impl SceneBuilder {
                             (geom_id, base)
                         }
                     };
-                    prims.push(PrimNode::Instance(Box::new(InstancePrim {
-                        scene,
-                        l2w: transform,
-                        normal_mat: w2l.matrix3.transpose(),
-                        w2l,
-                        l2w_end: transform_end,
+                    prims.push(BuildPrim::Instance(Box::new(BuildInstance {
+                        prim: InstancePrim {
+                            scene,
+                            w2l,
+                            motion: transform_end.map(|end| {
+                                Box::new(InstanceMotion {
+                                    l2w: transform,
+                                    l2w_end: *end,
+                                })
+                            }),
+                            geom_id,
+                            id_offset,
+                            mask,
+                        },
                         bounds,
-                        geom_id,
-                        id_offset,
-                        mask,
                     })));
                 }
             }
@@ -570,17 +594,30 @@ impl Scene {
     ) -> Vec<(u32, AABB, usize, usize)> {
         let mut sharing = std::collections::HashMap::<*const Scene, usize>::new();
         let mut found = Vec::new();
-        for p in self.bvh.prims() {
-            if let PrimNode::Instance(inst) = p {
-                *sharing.entry(Arc::as_ptr(&inst.scene)).or_insert(0) += 1;
-                if ids.contains(&inst.geom_id) {
-                    found.push((
-                        inst.geom_id,
-                        inst.bounds,
-                        Arc::as_ptr(&inst.scene),
-                        inst.scene.primitive_count(),
-                    ));
-                }
+        for inst in self.bvh.instances() {
+            *sharing.entry(Arc::as_ptr(&inst.scene)).or_insert(0) += 1;
+            if ids.contains(&inst.geom_id) {
+                // Instances no longer keep their bounds once built, so the
+                // box is recomputed: through the inverse of `w2l`, or the
+                // two endpoints of a moving one. Approximate (an inverse of
+                // an inverse), which is fine for a diagnostic.
+                let inner = inst
+                    .scene
+                    .bounds()
+                    .unwrap_or(AABB::new(Vec3A::ZERO, Vec3A::ZERO));
+                let bounds = match &inst.motion {
+                    Some(m) => AABB::surrounding_box(
+                        transformed_aabb(&inner, &m.l2w),
+                        transformed_aabb(&inner, &m.l2w_end),
+                    ),
+                    None => transformed_aabb(&inner, &inst.w2l.inverse()),
+                };
+                found.push((
+                    inst.geom_id,
+                    bounds,
+                    Arc::as_ptr(&inst.scene),
+                    inst.scene.primitive_count(),
+                ));
             }
         }
         found
@@ -1617,7 +1654,7 @@ mod tests {
     /// tens of millions of `InstancePrim`s, so a byte here is gigabytes.
     #[test]
     fn instance_prim_is_not_grown_by_forwarding() {
-        assert_eq!(std::mem::size_of::<InstancePrim>(), 240);
+        assert_eq!(std::mem::size_of::<InstancePrim>(), 96);
     }
 
     #[test]

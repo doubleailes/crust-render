@@ -122,7 +122,8 @@ without the other (full list: `docs/architecture.md` § Invariants):
   the same density — structural now: both come from the one
   `LightShape::solid_angle_sampler(from)`. A non-finite density is refused on both
   sides (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
-- Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
+- Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles
+  (which read their vertices from the packet lane, the only resident copy);
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines (a render
   mode is scheduling only); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
 - Anything keyed on a prototype path is scoped by the stage epoch

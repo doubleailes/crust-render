@@ -30,7 +30,7 @@ use collapse::{LeafData, collapse};
 use glam::Vec3A;
 
 use crate::aabb::AABB;
-use crate::prim::{PrimHit, PrimNode, TrianglePrim, VertexNormals};
+use crate::prim::{BuildPrim, PrimHit, Prims, TriRecord, VertexNormal};
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
 use crate::triangle::{RayShear, Tri4};
@@ -200,16 +200,19 @@ pub(crate) struct Bvh {
     leaves: Box<[Leaf]>,
     /// 4-wide triangle packets, grouped per leaf.
     packets: Box<[Tri4]>,
-    /// The one-at-a-time primitives of each leaf; spatial splits may list a
-    /// primitive in more than one leaf.
+    /// The one-at-a-time primitives of each leaf, as kind-tagged references
+    /// into `prims`; spatial splits may list a primitive in more than one
+    /// leaf.
     indices: Box<[u32]>,
-    /// The primitives, stored once each, in input order.
-    prims: Box<[PrimNode]>,
-    /// Per-vertex shading normals of the triangles that have them, indexed
-    /// by [`TrianglePrim::normals`](crate::prim::TrianglePrim).
-    normals: Box<[VertexNormals]>,
+    /// The primitives, stored once each, one array per kind. Triangles keep
+    /// no vertices there: the packets are their only copy.
+    prims: Prims,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
+    /// `(count, sum of bbox diagonals, max diagonal)` over the primitives,
+    /// measured at build time: the resident triangles no longer carry the
+    /// vertices to measure them from.
+    extents: (usize, f32, f32),
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -234,8 +237,8 @@ struct Subtree {
 }
 
 impl Bvh {
-    /// `normals` is the table the triangles among `prims` index.
-    pub(crate) fn new(prims: Vec<PrimNode>, normals: Vec<VertexNormals>) -> Self {
+    /// `normals` is the per-vertex table the triangles among `prims` index.
+    pub(crate) fn new(prims: Vec<BuildPrim>, normals: Vec<VertexNormal>) -> Self {
         let refs: Vec<PrimRef> = prims
             .iter()
             .enumerate()
@@ -244,24 +247,27 @@ impl Bvh {
                 idx: i as u32,
             })
             .collect();
+        let extents = extent_sum(&refs);
+        let ids = Prims::resident_ids(&prims);
 
         let (wide, collected, root_bbox) = if refs.is_empty() {
             (Vec::new(), LeafData::default(), None)
         } else {
             let root_bbox = union_all(&refs);
             let subtree = build_subtree(&prims, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims);
+            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &prims, &ids);
             (wide, collected, Some(root_bbox))
         };
+        drop(ids);
 
         Bvh {
             wide: wide.into_boxed_slice(),
             leaves: collected.leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
             indices: collected.indices.into_boxed_slice(),
-            prims: prims.into_boxed_slice(),
-            normals: normals.into_boxed_slice(),
+            prims: Prims::from_build(prims, normals),
             root_bbox,
+            extents,
         }
     }
 
@@ -269,69 +275,65 @@ impl Bvh {
         self.prims.len()
     }
 
-    /// `(count, sum of bbox diagonals, max diagonal)` over top-level
-    /// primitives — feeds [`crate::Scene::primitive_extents`].
+    /// The resident instances, for diagnostics that describe them.
     #[cfg(feature = "traversal-stats")]
-    pub(crate) fn prims(&self) -> &[PrimNode] {
-        &self.prims
+    pub(crate) fn instances(&self) -> &[crate::prim::InstancePrim] {
+        &self.prims.instances
     }
 
+    /// `(count, sum of bbox diagonals, max diagonal)` over top-level
+    /// primitives — feeds [`crate::Scene::primitive_extents`].
     pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
-        let mut sum = 0.0f32;
-        let mut max = 0.0f32;
-        for p in &self.prims {
-            let b = p.bbox();
-            let d = (b.maximum - b.minimum).length();
-            sum += d;
-            max = max.max(d);
-        }
-        (self.prims.len(), sum, max)
+        self.extents
     }
 
     pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
         let mut b = PrimitiveBreakdown::default();
-        for p in &self.prims {
-            match p {
-                PrimNode::Triangle(_) => b.triangles += 1,
-                PrimNode::Sphere(_) => b.spheres += 1,
-                PrimNode::Disk(_) => b.disks += 1,
-                PrimNode::Cylinder(_) => b.cylinders += 1,
-                PrimNode::Curve(_) => b.curve_segments += 1,
-                PrimNode::CubicCurve(_) => b.cubic_curve_spans += 1,
-                PrimNode::Instance(_) => b.instances += 1,
-            }
-        }
+        self.count_into(&mut b);
         b
     }
 
+    /// Adds this BVH's own primitives to `b`, by kind.
+    fn count_into(&self, b: &mut PrimitiveBreakdown) {
+        use crate::prim::OtherPrim;
+        b.triangles += self.prims.tris.len();
+        b.instances += self.prims.instances.len();
+        b.cubic_curve_spans += self.prims.cubics.len();
+        for p in &self.prims.others {
+            match p {
+                OtherPrim::Sphere(_) => b.spheres += 1,
+                OtherPrim::Disk(_) => b.disks += 1,
+                OtherPrim::Cylinder(_) => b.cylinders += 1,
+                OtherPrim::Curve(_) => b.curve_segments += 1,
+            }
+        }
+    }
+
     /// Adds this BVH's resident bytes to `acc`, descending into each
-    /// distinct instanced scene once. Uses `capacity`, not `len`: unused
-    /// capacity is resident too, and over-allocation is exactly the kind
-    /// of waste a memory report should not hide.
+    /// distinct instanced scene once. Every table is a boxed slice, so its
+    /// size is exactly what is resident.
     pub(crate) fn accumulate_footprint(
         &self,
         visited: &mut std::collections::HashSet<usize>,
         acc: &mut crate::scene::MemoryFootprint,
     ) {
         use std::mem::size_of_val;
-        acc.prim_nodes += size_of_val(&*self.prims);
+        let p = &self.prims;
+        acc.triangle_records += size_of_val(&*p.tris);
+        acc.instances += size_of_val(&*p.instances);
+        acc.cubic_spans += size_of_val(&*p.cubics);
+        acc.other_prims += size_of_val(&*p.others);
+        acc.vertex_normals += size_of_val(&*p.normals);
         acc.bvh_nodes += size_of_val(&*self.wide);
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
         acc.indices += size_of_val(&*self.indices);
-        acc.vertex_normals += size_of_val(&*self.normals);
-        for p in &self.prims {
-            match p {
-                PrimNode::Instance(i) => {
-                    acc.boxed_prims += size_of::<crate::prim::InstancePrim>();
-                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
-                        i.scene.accumulate_footprint_into(visited, acc);
-                    }
-                }
-                PrimNode::CubicCurve(_) => {
-                    acc.boxed_prims += size_of::<crate::prim::CubicCurvePrim>();
-                }
-                _ => {}
+        for i in &p.instances {
+            if i.motion.is_some() {
+                acc.instances += size_of::<crate::prim::InstanceMotion>();
+            }
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_footprint_into(visited, acc);
             }
         }
     }
@@ -346,20 +348,10 @@ impl Bvh {
         visited: &mut std::collections::HashSet<usize>,
         acc: &mut PrimitiveBreakdown,
     ) {
-        for p in &self.prims {
-            match p {
-                PrimNode::Triangle(_) => acc.triangles += 1,
-                PrimNode::Sphere(_) => acc.spheres += 1,
-                PrimNode::Disk(_) => acc.disks += 1,
-                PrimNode::Cylinder(_) => acc.cylinders += 1,
-                PrimNode::Curve(_) => acc.curve_segments += 1,
-                PrimNode::CubicCurve(_) => acc.cubic_curve_spans += 1,
-                PrimNode::Instance(i) => {
-                    acc.instances += 1;
-                    if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
-                        i.scene.accumulate_unique_into(visited, acc);
-                    }
-                }
+        self.count_into(acc);
+        for i in &self.prims.instances {
+            if visited.insert(std::sync::Arc::as_ptr(&i.scene) as usize) {
+                i.scene.accumulate_unique_into(visited, acc);
             }
         }
     }
@@ -487,9 +479,13 @@ impl Bvh {
                     continue;
                 }
                 let tri = self.triangle(packet.prim[lane]);
-                if let Some(hit) =
-                    tri.hit_from_barycentric(&self.normals, out.t[lane], out.u[lane], out.v[lane])
-                {
+                if let Some(hit) = tri.hit_from_barycentric(
+                    &self.prims.normals,
+                    || packet.lane_vertices(lane),
+                    out.t[lane],
+                    out.u[lane],
+                    out.v[lane],
+                ) {
                     closest = hit.t;
                     best = Some(hit);
                 }
@@ -499,8 +495,14 @@ impl Bvh {
             while fb != 0 {
                 let lane = fb.trailing_zeros() as usize;
                 fb &= fb - 1;
-                let pi = packet.prim[lane] as usize;
-                if let Some(hit) = self.prims[pi].hit(ray, t_min, closest, &self.normals) {
+                let tri = self.triangle(packet.prim[lane]);
+                if let Some(hit) = tri.hit(
+                    packet.lane_vertices(lane),
+                    ray,
+                    t_min,
+                    closest,
+                    &self.prims.normals,
+                ) {
                     closest = hit.t;
                     best = Some(hit);
                 }
@@ -509,7 +511,7 @@ impl Bvh {
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if let Some(hit) = self.prims[pi as usize].hit(ray, t_min, closest, &self.normals) {
+            if let Some(hit) = self.prims.hit(pi, ray, t_min, closest) {
                 closest = hit.t;
                 best = Some(hit);
             }
@@ -517,13 +519,11 @@ impl Bvh {
         best
     }
 
-    /// The triangle a packet lane came from. Packets are only built from
-    /// primitives that answered `as_triangle`, so this always resolves.
+    /// The triangle a packet lane came from: packet lanes index the
+    /// triangle records directly.
     #[inline]
-    fn triangle(&self, prim_idx: u32) -> &TrianglePrim {
-        self.prims[prim_idx as usize]
-            .as_triangle()
-            .expect("packet lanes are built from triangles only")
+    fn triangle(&self, prim_idx: u32) -> &TriRecord {
+        &self.prims.tris[prim_idx as usize]
     }
 
     /// Early-exit occlusion traversal: no ordering, returns on the first
@@ -582,7 +582,8 @@ impl Bvh {
             while fb != 0 {
                 let lane = fb.trailing_zeros() as usize;
                 fb &= fb - 1;
-                if self.prims[packet.prim[lane] as usize].hit_any(ray, t_min, t_max) {
+                let tri = self.triangle(packet.prim[lane]);
+                if tri.hit_any(packet.lane_vertices(lane), ray, t_min, t_max) {
                     return true;
                 }
             }
@@ -590,12 +591,24 @@ impl Bvh {
 
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
-            if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
+            if self.prims.hit_any(pi, ray, t_min, t_max) {
                 return true;
             }
         }
         false
     }
+}
+
+/// `(count, sum of bbox diagonals, max diagonal)` over the build references.
+fn extent_sum(refs: &[PrimRef]) -> (usize, f32, f32) {
+    let mut sum = 0.0f32;
+    let mut max = 0.0f32;
+    for r in refs {
+        let d = (r.bbox.maximum - r.bbox.minimum).length();
+        sum += d;
+        max = max.max(d);
+    }
+    (refs.len(), sum, max)
 }
 
 /// Finite reciprocal of every direction component: zero (and denormal-tiny)

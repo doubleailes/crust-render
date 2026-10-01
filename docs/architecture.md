@@ -137,7 +137,9 @@ other. The pairs:
   `Material::opacity` point-sampled, both follow at most 256 crossings, both
   are gated on `World::has_cutouts`; change one and NEE and the bounce side
   disagree.
-- **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
+- **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test, which
+  reads its vertices back from the packet lane (`Tri4::lane_vertices`) — the
+  packets are the only resident copy of a triangle's positions;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines.
   Each is pinned by a test that compares bits, not tolerances.
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the

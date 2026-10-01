@@ -1,11 +1,11 @@
 use glam::Vec3A;
 
-use crate::prim::{PrimNode, TrianglePrim};
+use crate::prim::{BuildPrim, TrianglePrim};
 use crate::ray::MASK_ALL;
 
 use super::*;
 
-fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
+fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<BuildPrim> {
     let mut v = Vec::new();
     for r in 0..=rings {
         let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
@@ -19,7 +19,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
         }
     }
     let row = segs + 1;
-    let mut out: Vec<PrimNode> = Vec::new();
+    let mut out: Vec<BuildPrim> = Vec::new();
     let mut id = 0u32;
     for r in 0..rings {
         for s in 0..segs {
@@ -30,7 +30,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Vec<PrimNode> {
                 (r + 1) * row + s,
             );
             for (i, j, k) in [(a, b, c), (a, c, d)] {
-                out.push(PrimNode::Triangle(TrianglePrim {
+                out.push(BuildPrim::Triangle(TrianglePrim {
                     v0: v[i],
                     v1: v[j],
                     v2: v[k],

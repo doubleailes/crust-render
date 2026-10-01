@@ -22,7 +22,7 @@
   the one-id version of Embree's `instID[]` stack. It lets a host place a prototype of
   many parts as one instance and still tell the parts apart. The importer relies on it
   (`docs/moana_profile.md`). The offset sits in `InstancePrim`'s alignment padding (pinned
-  at 240 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
+  at 96 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
   parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
   glam + rayon; deliberately swappable for Embree bindings behind the same seam.
 
@@ -62,13 +62,41 @@
   handed back to the scalar path for its f64 tie-break — watertightness intact. The
   packet and scalar intersectors are **bit-identical** (pinned by
   `simd_matches_scalar_bitwise`); change one and you must change the other.
-  A triangle's per-vertex shading normals are a side table too (`Bvh::normals`, indexed
-  by `TrianglePrim::normals`, `NO_NORMALS` when absent): inline as an
-  `Option<[Vec3A; 3]>` they made every triangle — and, as the largest variant, every
-  `PrimNode` — 128 bytes; now 64 and 80, pinned by `a_triangle_is_one_cache_line`.
-  They are read once per closest hit, after traversal. It costs `Bvh::hit` ~1% more
-  instructions (the 80-byte stride, the table argument) and saves 22% of cornellbox's
-  kernel memory; out of cache (`ray_throughput --large`) it is 0–6% faster.
+  **Resident geometry is stored once** (`compact-geometry-storage`). The build runs over
+  transient `BuildPrim`s (full triangles, so the SBVH can clip them); once the tree is
+  collapsed, `Prims::from_build` moves them into one array per kind, and leaves refer
+  to them by resident id (`Prims::resident_ids`: a packet lane holds an index into
+  `tris`, a scalar leaf entry a kind-tagged `u32`, two bits of kind and 30 of index).
+  What each primitive then costs, pinned by `resident_primitives_are_their_pinned_sizes`:
+  - **a triangle** is a 24-byte `TriRecord` (ids, mask, three normal indices) plus its
+    share of the 192-byte `Tri4` packets. The packets are the *only* copy of its
+    vertices: the scalar f64 tie-break and the geometric-normal fallback read them back
+    with `Tri4::lane_vertices`, which returns the exact `f32`s `Tri4::new` received, so
+    `simd_matches_scalar_bitwise` now runs its scalar side on them. (Before: an 80-byte
+    `PrimNode` holding the vertices a second time, *and* the packet.)
+  - **shading normals** are one `[f32; 3]` per vertex of each smooth mesh, appended once
+    at commit; the record's triplet indexes them. A triangle is smooth only when all
+    three of its corners have a normal, exactly the old per-triangle rule. (Before: a
+    48-byte copy per triangle, so each shared vertex's normal about six times.)
+  - **an instance** is a 96-byte `InstancePrim`, inline: the inner scene, `w2l`, the
+    ids and mask, and an `Option<Box<InstanceMotion>>` with both endpoint `l2w`s for
+    the moving ones. The normal matrix is `w2l.matrix3.transpose()`, recomputed per
+    hit (a transpose is exact), and the world bounds live only on the
+    `BuildInstance`. (Before: a 240-byte box behind an 80-byte `PrimNode`.)
+  - **a cubic curve span** is its 96-byte `CubicCurvePrim`, inline (before: boxed
+    behind an 80-byte `PrimNode`). Spheres, disks, cylinders and linear curve
+    segments share one small `OtherPrim` enum.
+
+  Measured 2026-10-01: the Moana island's kernel memory 26.58 → 13.85 GiB (peak RSS
+  37.3 → 26.1 GiB) and its render 32% faster in an interleaved `bench_ab.sh` (cache
+  behaviour: callgrind sees +0.15% instructions on cornellbox); Kitchen_set's
+  105.6 → 64.5 MiB (normals 20.1 → 2.6 MiB). Details in `docs/moana_profile.md`.
+  Every checked-in sample renders bit-identical. **Trap:** `Prims::hit` /
+  `hit_any` (the scalar, non-packet leaf entries) are `#[inline(never)]`. Inlined,
+  they pulled the instance path — which re-enters `Bvh::hit` — into the traversal
+  loop, and the bigger frame stopped LLVM building `TraversalStack` in place: its
+  constructor went from 59 M to 127 M instructions on cornellbox, +7% for `Bvh::hit`.
+  Out of line, the change is +0.15% instructions overall.
   `MIN_LEAF_PACKED` (4) is the leaf floor for all-triangle ranges so packets fill,
   while non-packable prims keep `MIN_LEAF` (2) — see `docs/simd.md` for the audit,
   the measurements, and why `std::simd` is not used by default (nightly-only; the

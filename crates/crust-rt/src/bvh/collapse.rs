@@ -3,7 +3,7 @@
 
 use glam::Vec3A;
 
-use crate::prim::PrimNode;
+use crate::prim::BuildPrim;
 use crate::triangle::Tri4;
 
 use super::build::surface_area;
@@ -11,7 +11,9 @@ use super::{LANES, Leaf, Node, WideNode};
 
 /// Everything the collapse pass emits besides the nodes themselves: one
 /// [`Leaf`] per leaf lane, the triangle packets those leaves run, and the
-/// re-ordered one-at-a-time primitive indices.
+/// re-ordered one-at-a-time primitive references. Both speak the resident
+/// ids of [`crate::prim::Prims::resident_ids`]: a packet lane holds an index
+/// into `Prims::tris`, an entry of `indices` a kind-tagged reference.
 #[derive(Default)]
 pub(super) struct LeafData {
     pub(super) leaves: Vec<Leaf>,
@@ -26,7 +28,7 @@ impl LeafData {
     ///
     /// Packets are emitted contiguously per leaf, so a leaf's packets are
     /// one linear sweep of memory at traversal time.
-    pub(super) fn push_leaf(&mut self, range: &[u32], prims: &[PrimNode]) -> u32 {
+    pub(super) fn push_leaf(&mut self, range: &[u32], prims: &[BuildPrim], ids: &[u32]) -> u32 {
         let pkt_first = self.packets.len() as u32;
         let mut batch: Vec<(Vec3A, Vec3A, Vec3A, u32, crate::ray::RayMask)> = Vec::with_capacity(4);
         let idx_first = self.indices.len() as u32;
@@ -35,14 +37,14 @@ impl LeafData {
         for &pi in range {
             match prims[pi as usize].as_triangle() {
                 Some(t) => {
-                    batch.push((t.v0, t.v1, t.v2, pi, t.mask));
+                    batch.push((t.v0, t.v1, t.v2, ids[pi as usize], t.mask));
                     if batch.len() == 4 {
                         self.packets.push(Tri4::new(&batch));
                         batch.clear();
                     }
                 }
                 None => {
-                    self.indices.push(pi);
+                    self.indices.push(ids[pi as usize]);
                     idx_count += 1;
                 }
             }
@@ -72,7 +74,8 @@ impl LeafData {
 pub(super) fn collapse(
     binary: &[Node],
     indices: &[u32],
-    prims: &[PrimNode],
+    prims: &[BuildPrim],
+    ids: &[u32],
 ) -> (Vec<WideNode>, LeafData) {
     // A binary tree of `n` nodes has `(n + 1) / 2` leaves, and a full
     // `LANES`-wide tree over `L` leaves needs `(L - 1) / (LANES - 1)`
@@ -89,12 +92,12 @@ pub(super) fn collapse(
         // Single-leaf tree.
         let mut w = WideNode::empty();
         w.set_lane_bounds(0, &binary[0].bbox);
-        w.child[0] = data.push_leaf(leaf_range(&binary[0], indices), prims);
+        w.child[0] = data.push_leaf(leaf_range(&binary[0], indices), prims, ids);
         w.mark_leaf(0);
         out.push(w);
         return (out, data);
     }
-    collapse_node(binary, indices, prims, 0, &mut out, &mut data);
+    collapse_node(binary, indices, prims, ids, 0, &mut out, &mut data);
     // These live as long as the scene, and `Bvh::accumulate_footprint`
     // counts capacity, so a growth doubling's slack would be both resident
     // and reported. Trimming costs one copy per vector at build time.
@@ -114,7 +117,8 @@ fn leaf_range<'a>(node: &Node, indices: &'a [u32]) -> &'a [u32] {
 fn collapse_node(
     binary: &[Node],
     indices: &[u32],
-    prims: &[PrimNode],
+    prims: &[BuildPrim],
+    ids: &[u32],
     b_idx: u32,
     out: &mut Vec<WideNode>,
     data: &mut LeafData,
@@ -150,10 +154,10 @@ fn collapse_node(
         let bounds = binary[k].bbox;
         out[slot].set_lane_bounds(lane, &bounds);
         if binary[k].count > 0 {
-            out[slot].child[lane] = data.push_leaf(leaf_range(&binary[k], indices), prims);
+            out[slot].child[lane] = data.push_leaf(leaf_range(&binary[k], indices), prims, ids);
             out[slot].mark_leaf(lane);
         } else {
-            let ci = collapse_node(binary, indices, prims, kid, out, data);
+            let ci = collapse_node(binary, indices, prims, ids, kid, out, data);
             out[slot].child[lane] = ci;
         }
     }

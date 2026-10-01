@@ -293,6 +293,17 @@ impl Tri4 {
         }
     }
 
+    /// Lane `lane`'s three vertices, exactly as [`Tri4::new`] received them:
+    /// packets are the only resident copy of a triangle's positions, so the
+    /// scalar tie-break and the geometric-normal fallback read them here.
+    /// Lane moves are exact, so the scalar path sees the same `f32`s it
+    /// would have read from the triangle itself.
+    #[inline]
+    pub(crate) fn lane_vertices(&self, lane: usize) -> [Vec3A; 3] {
+        let p = |i: usize| Vec3A::new(self.v[i][0][lane], self.v[i][1][lane], self.v[i][2][lane]);
+        [p(0), p(1), p(2)]
+    }
+
     /// The lanes this ray's category is allowed to see.
     #[inline]
     fn visible_lanes(&self, ray_mask: RayMask) -> u32 {
@@ -619,7 +630,10 @@ mod tests {
             let sh = RayShear::new(&r);
             let out = packet.intersect(&sh, crate::ray::MASK_ALL, 0.001, f32::INFINITY);
 
-            for (lane, &(v0, v1, v2, _, _)) in tris.iter().enumerate() {
+            for lane in 0..tris.len() {
+                // The scalar side reads the packet's own copy of the
+                // vertices — the only one the BVH keeps resident.
+                let [v0, v1, v2] = packet.lane_vertices(lane);
                 let scalar = triangle_intersect(&r, v0, v1, v2, 0.001, f32::INFINITY);
                 if out.fallback & (1 << lane) != 0 {
                     continue; // routed to the scalar path by design
@@ -645,6 +659,33 @@ mod tests {
             hits > 50,
             "only {hits} hits — the test is not exercising hits"
         );
+    }
+
+    /// A lane gives back exactly the vertices it was packed from, bit for
+    /// bit — including the padded tail of a partial packet, which repeats
+    /// the last real triangle.
+    #[test]
+    fn lane_vertices_round_trip_exactly() {
+        let tri = |k: f32| {
+            (
+                Vec3A::new(0.1 * k, -3.7e-8, 1.0e30),
+                Vec3A::new(-0.0, f32::MIN_POSITIVE, 7.25 + k),
+                Vec3A::new(1.0 / 3.0, -2.5e-41, k),
+                k as u32,
+                crate::ray::MASK_ALL,
+            )
+        };
+        let tris = [tri(1.0), tri(2.0), tri(3.0)];
+        let packet = Tri4::new(&tris);
+        for lane in 0..4 {
+            let (v0, v1, v2, _, _) = tris[lane.min(tris.len() - 1)];
+            let got = packet.lane_vertices(lane);
+            for (a, b) in got.iter().zip([v0, v1, v2]) {
+                for axis in 0..3 {
+                    assert_eq!(a[axis].to_bits(), b[axis].to_bits(), "lane {lane}");
+                }
+            }
+        }
     }
 
     /// Range tests must agree too: the packet folds the scalar path's
