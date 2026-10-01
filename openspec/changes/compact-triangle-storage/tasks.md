@@ -15,8 +15,8 @@
 
 ## 3. Kernel: indexed packets (D2)
 
-- [ ] 3.1 `Tri4i` (96 B, size-tested): per-lane vertex indices, record ids, `active`, masks; `intersect` gathers into the same nine `Vec4`s and calls the shared lane code; `Leaf` carries the layout bit; verified by `tri4i_matches_tri4_bitwise` over 100 000 random rays against random triangle sets, `fallback` lanes compared too
-- [ ] 3.2 `Config::tri_packets: gathered | indexed | auto` (`CRUST_TRI_PACKETS`, default `auto`), threaded to `commit()`; `auto` picks `Tri4i` above `INDEXED_PACKETS_FROM` triangles; verified by a config test per spelling and a commit test reading the footprint's per-layout rows
+- [x] 3.1 `Tri4i` (92 B, size-tested): per-lane vertex indices plus the shared `LaneMasks` (records, `active`, masks); `intersect` gathers into the same nine `Vec4`s and calls the shared `intersect_lanes`; the layout is per tree (`Bvh::layout`), not per leaf; verified by `tri4i_matches_tri4_bitwise` (4 000 random packets × 3 masks, hits, `fallback`, `t`/`u`/`v` bitwise) and `packet_layouts_are_bit_identical` (a committed scene, 3 000 rays, closest-hit and occlusion)
+- [x] 3.2 `Config::tri_packets: gathered | indexed | auto` (`CRUST_TRI_PACKETS`, default `auto`), every crust-core kernel commit goes through `packet_layout()` → `SceneBuilder::commit_with`; `auto` picks `Tri4i` above `crust_rt::INDEXED_PACKETS_FROM`; verified by the config test per spelling (and a bad value keeping `auto`) and `auto_layout_gathers_small_scenes` / the footprint's per-layout rows
 - [ ] 3.3 Set `INDEXED_PACKETS_FROM` from `ray_throughput` and `ray_throughput --large` A/Bs (min-of-10, `gathered` vs `indexed` on each tree size); verified by the table in the design record and by `indexed` not being slower than `gathered` at the sizes where `auto` selects it
 - [ ] 3.4 `scripts/test_simd_matrix.sh -p crust-rt` clean under both `CRUST_TRI_PACKETS` values; verified by its exit code
 
