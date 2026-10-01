@@ -621,7 +621,14 @@ pub(crate) enum PrimNode {
 }
 
 impl PrimNode {
-    #[inline]
+    /// Out of line on purpose. With the triangle variant gone the enum
+    /// became small enough for LLVM to inline this dispatch — curve
+    /// subdivision, cone intersection and the instance descent — into
+    /// `Bvh::hit`, which grew by a third and spilled its traversal loop
+    /// (callgrind: +6% on cornellbox, +17% on materialx_basic with an
+    /// identical tree). A call per scalar primitive test is what the base
+    /// paid; the packet path, which is the hot one, never comes here.
+    #[inline(never)]
     pub(crate) fn hit(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         match self {
             PrimNode::Sphere(p) => p.hit(ray, t_min, t_max),
@@ -633,7 +640,7 @@ impl PrimNode {
         }
     }
 
-    #[inline]
+    #[inline(never)]
     pub(crate) fn hit_any(&self, ray: &Ray, t_min: f32, t_max: f32) -> bool {
         match self {
             PrimNode::Sphere(p) => p.hit_any(ray, t_min, t_max),

@@ -451,6 +451,7 @@ impl Bvh {
     /// inputs, and it cannot meet the zero cross product that function
     /// rejects, because `Primitives::bbox` keeps such slivers out of the
     /// tree.
+    ///
     #[inline]
     fn resolve(&self, c: Candidate) -> PrimHit {
         match c {
@@ -479,7 +480,8 @@ impl Bvh {
     }
 
     /// The scalar test of one record — the packet lanes' `f64` tie-break.
-    #[inline]
+    /// Rare (a ray exactly through an edge), so kept out of the hot loop.
+    #[inline(never)]
     fn tri_hit(
         &self,
         rec_idx: u32,
@@ -499,7 +501,7 @@ impl Bvh {
         triangle_hit_from_barycentric(rec, &verts, self.tri_normals(rec), t, u, v)
     }
 
-    #[inline]
+    #[inline(never)]
     fn tri_hit_any(
         &self,
         rec_idx: u32,
