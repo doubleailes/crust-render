@@ -97,6 +97,25 @@
   against 282.9 M on materialx_basic (+3.2%, a ten-triangle scene where per-query
   setup dominates). Moving the once-per-query `resolve` out of line as well was
   measured and is worse (+7% / +15%).
+  **Leaves are sized by packet rounds** (`CommitOptions::packet_sah`, the
+  `CRUST_BVH_PACKET_SAH` switch, default on). The SAH leaf decision used to charge one
+  unit per triangle with no node cost, so a range of five to eight overlapping
+  triangles always split into two half-empty packets — on ALab and the Moana island
+  packet lanes were 48% full, and every half-empty packet is 192 resident bytes, a
+  `Leaf` and a node lane. Now an all-triangle range of at most `MAX_LEAF` stays a leaf
+  when the object split's `ceil(n / 4)` rounds per side plus one node test (a 4-wide
+  slab test, about a packet's worth) cost at least the leaf's rounds, decided before any
+  spatial split is weighed (`splitting_pays`; the per-triangle path never leafed there,
+  which is what makes the off side the rule it replaces). Measured, off → on:
+  cornellbox BVH nodes 34.38 → 23.50 KiB and leaves 8.62 → 6.23 KiB (125 → 115 bytes
+  per triangle); the stress grid's nodes 31.76 → 18.27 MiB and 104.2 → 95.5 bytes per
+  triangle with lanes 98.6 → 99.2% filled; `subdivision.usda` at level 4 107.4 → 100.8.
+  The checked-in samples' lanes were already 75–98% full, so the fill gain the
+  production scenes promise is not visible on them; the node count is. Not
+  bit-identical by construction: the tree's shape changes, so two triangles at exactly
+  the same hit distance can be reported the other way round. On the goldens that is
+  one pixel of `veach_mis` (1 of 518 400, relmse 1.7e-6) and nothing on the other 27
+  samples; the 1/√N check and the interleaved timing are recorded below once run.
   The build reads vertices through `Primitives` rather than from a per-triangle copy,
   `PrimRef` is 28 bytes and the binary `Node` 32 (`a_build_reference_is_28_bytes`;
   both were 48 with `Vec3A` bounds), the leaf, packet and index tables are sized

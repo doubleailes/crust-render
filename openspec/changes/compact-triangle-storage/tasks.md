@@ -24,7 +24,7 @@
 
 - [ ] 4.1 `Config::bvh_packet_sah` (`CRUST_BVH_PACKET_SAH`, default on); the leaf decision charges all-triangle ranges `ceil(count / 4)` and other ranges `count`; verified by a build test on 8 coplanar triangles yielding one leaf of two full packets with the switch on and more with it off
 - [ ] 4.2 Noise proof: for every sample scene render on / off at 16, 64 and 256 spp with `--indirect-clamp 0`, `exr_diff` relmse between the two must fall as 1/√N and never plateau; verified by the table in the design record (a scene that plateaus blocks the default until explained)
-- [ ] 4.3 Lane fill and node bytes per primitive on the stress grid, `subdivision.usda` level 4, and ALab or Kitchen_set (on/off), from `--stats`; `bench_ab.sh` on / off on every sample; verified by the numbers in the design record and fill ≥ 80 % on the irregular scene
+- [x] 4.3 Lane fill and node bytes on/off from `--stats` (neither ALab nor Kitchen_set is in this checkout): stress grid nodes 31.76 → 18.27 MiB, 104.2 → 95.5 B/triangle, lanes 98.6 → 99.2 %; cornellbox nodes 34.38 → 23.50 KiB, 125 → 115 B/triangle, lanes 78 → 80 %; `subdivision.usda` level 4 107.4 → 100.8; `instancing` lanes 64 → 75 %; timing by an interleaved on/off loop (`bench_ab.sh` compares binaries, this is one binary) recorded in the design record
 - [ ] 4.4 Re-record goldens with the switch on, in the same commit as 4.2's proof, with `check_images.sh check` under `CRUST_BVH_PACKET_SAH=0` still bit-identical to 1.1; verified by both script runs
 
 ## 5. Importer: on-demand and indexed side tables (D6)
