@@ -57,8 +57,9 @@ cargo run --release -- -i samples/curves.usda --stats
 # the one number a storage change is judged by (compact-triangle-storage:
 # 196 -> 104 gathered on the subdivision stress grid). The two switches A/B
 # the layout: `gathered` is the 192-byte packet before indexed packets existed,
-# `indexed` the 92-byte one that gathers vertices at every test (bit-identical),
-# `auto` picks indexed above crust_rt::INDEXED_PACKETS_FROM triangles.
+# `indexed` the 92-byte one that gathers vertices at every test (bit-identical;
+# 104 -> 79 B/triangle on the grid for 13% less throughput, 30% less on an
+# out-of-cache soup), `auto` the measured default, gathered.
 python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
 CRUST_TRI_PACKETS=gathered target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
 CRUST_TRI_PACKETS=indexed  target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error

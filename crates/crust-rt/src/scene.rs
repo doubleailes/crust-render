@@ -30,18 +30,21 @@ pub enum PacketLayout {
     /// fastest in cache. The layout before indexed packets existed.
     Gathered,
     /// Each packet carries vertex indices (92 bytes) and gathers from the
-    /// scene's shared vertex table at every test; bit-identical hits.
+    /// scene's shared vertex table at every test; bit-identical hits. A
+    /// memory trade, not a speed one: on the subdivision stress grid it is
+    /// 104 → 79 kernel bytes per triangle for 13% less render throughput,
+    /// and on a 4 M-triangle soup that does not fit the cache it is 22%
+    /// fewer kernel bytes for 30% slower traversal — the twelve dependent
+    /// vertex loads per packet cost more than the bandwidth they save.
     Indexed,
-    /// `Indexed` for a scene with more than [`INDEXED_PACKETS_FROM`]
-    /// triangles, `Gathered` below — where a tree is large enough that
-    /// memory traffic rather than arithmetic bounds traversal.
+    /// The measured default: `Gathered`. The expectation was that a tree
+    /// too large for the cache would favour the smaller packet; measured
+    /// with `ray_throughput --layout` in and out of cache, no size does, so
+    /// the indexed layout is an explicit opt-in for a scene that otherwise
+    /// does not fit.
     #[default]
     Auto,
 }
-
-/// The triangle count above which [`PacketLayout::Auto`] picks the indexed
-/// layout.
-pub const INDEXED_PACKETS_FROM: usize = 1_000_000;
 
 /// Exact bytes a committed [`Scene`] holds, by structure — the kernel's
 /// side of a memory report. Counts `capacity`, not `len`, because unused
@@ -352,8 +355,8 @@ impl SceneBuilder {
         }
     }
 
-    /// Expands every geometry into primitives and builds the BVH, choosing
-    /// the packet layout by size ([`PacketLayout::Auto`]).
+    /// Expands every geometry into primitives and builds the BVH with the
+    /// default packet layout ([`PacketLayout::Auto`]).
     #[must_use = "the committed scene is the only way to intersect it"]
     pub fn commit(self) -> Scene {
         self.commit_with(PacketLayout::Auto)
@@ -594,10 +597,8 @@ impl SceneBuilder {
             input.geoms.push(table);
         }
         let layout = match layout {
-            PacketLayout::Gathered => crate::bvh::Layout::Gathered,
+            PacketLayout::Gathered | PacketLayout::Auto => crate::bvh::Layout::Gathered,
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
-            PacketLayout::Auto if n_tris > INDEXED_PACKETS_FROM => crate::bvh::Layout::Indexed,
-            PacketLayout::Auto => crate::bvh::Layout::Gathered,
         };
         Scene {
             bvh: Bvh::new(input, layout),
