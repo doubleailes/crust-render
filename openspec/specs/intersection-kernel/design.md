@@ -115,7 +115,12 @@
   bit-identical by construction: the tree's shape changes, so two triangles at exactly
   the same hit distance can be reported the other way round. On the goldens that is
   one pixel of `veach_mis` (1 of 518 400, relmse 1.7e-6) and nothing on the other 27
-  samples; the 1/√N check and the interleaved timing are recorded below once run.
+  samples. The 1/√N check (`--indirect-clamp 0`, on against off): veach_mis relmse
+  4.56e-7 at 16 spp, 5.03e-8 at 64, 5.63e-9 at 256 — one or two pixels, falling faster
+  than 1/N, no plateau; cornellbox 0 / 0 / 0; instancing 0 / 0 / 3.97e-11. Interleaved
+  on/off timing, four reps, Render phase: cornellbox min 7.51 s on against 7.50 s off,
+  veach_mis 12.37 against 12.40 — neutral in cache; the stress grid's single run went
+  7.72 → 8.28 Mray/s. The goldens were re-recorded with the rule on after this check.
   The build reads vertices through `Primitives` rather than from a per-triangle copy,
   `PrimRef` is 28 bytes and the binary `Node` 32 (`a_build_reference_is_28_bytes`;
   both were 48 with `Vec3A` bounds), the leaf, packet and index tables are sized
