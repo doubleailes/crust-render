@@ -62,7 +62,7 @@ pub(super) fn emit_sphere(
             b.attach(Geometry::Sphere { center, radius });
             world.attach_masked(
                 Geometry::Instance {
-                    scene: Arc::new(b.commit_with(crate::packet_layout())),
+                    scene: Arc::new(b.commit_with(crate::commit_options())),
                     transform: Affine3A::IDENTITY,
                     transform_end: Some(Box::new(Affine3A::from_translation(v))),
                 },
@@ -327,7 +327,7 @@ pub(super) fn emit_curves(
     }
     world.attach_masked(
         Geometry::Instance {
-            scene: Arc::new(b.commit_with(crate::packet_layout())),
+            scene: Arc::new(b.commit_with(crate::commit_options())),
             transform: Affine3A::from_mat4(world_xf),
             transform_end: None,
         },

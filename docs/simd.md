@@ -66,11 +66,19 @@ of leaf occupancy on a dense mesh (80×40 UV sphere, 6400 triangles):
 vector rounds if 4-wide: 2319   if 8-wide: 2319
 ```
 
-No leaf holds more than four triangles, because the SAH is free to split
-anything above `MIN_LEAF_PACKED`. A `Tri8` packet would run the *same
-number* of vector rounds with half the lanes idle. This is pinned by
-`eight_wide_packets_would_not_reduce_vector_rounds`, which fails if a future
-retune makes leaves big enough to change the answer.
+That was the state under the per-triangle leaf cost: no leaf held more than
+four triangles, because the SAH was free to split anything above
+`MIN_LEAF_PACKED`, and a `Tri8` packet would have run the *same number* of
+vector rounds with half the lanes idle. The retune the old test warned about
+has happened — `compact-triangle-storage` sizes all-triangle leaves by packet
+tests (`CommitOptions::packet_sah`, `CRUST_BVH_PACKET_SAH`), so five to eight
+overlapping triangles now stay one leaf of two full packets instead of two
+half-empty ones. On the same sphere mesh 607 of 1 316 leaves hold two
+packets, and an 8-wide packet would merge those pairs: 1 923 → 1 316 rounds,
+31.6% fewer (`eight_wide_packets_would_save_at_most_the_two_packet_leaves`
+measures and bounds it). That changes the arithmetic of the 8-wide *leaf*
+question but not the reasons the kernel stays at 128 bits on stable; it is
+worth re-measuring the day `std::simd` or `wide` is on the table.
 
 That leaves **BVH8 nodes** — 8 child boxes per vector round, and roughly half
 the tree depth — as the one remaining place where 256-bit vectors could pay.

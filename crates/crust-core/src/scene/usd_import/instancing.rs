@@ -274,7 +274,7 @@ pub(super) fn collect_proto_parts(
                 radius,
             });
             parts.push(ProtoPart::leaf(
-                Arc::new(b.commit_with(crate::packet_layout())),
+                Arc::new(b.commit_with(crate::commit_options())),
                 this_local,
                 mask,
                 material,
@@ -294,7 +294,7 @@ pub(super) fn collect_proto_parts(
                     });
                 }
                 parts.push(ProtoPart::leaf(
-                    Arc::new(b.commit_with(crate::packet_layout())),
+                    Arc::new(b.commit_with(crate::commit_options())),
                     this_local,
                     mask,
                     material,
@@ -351,7 +351,7 @@ pub(super) fn collect_proto_parts(
 fn placeholder_scene() -> Arc<RtScene> {
     static EMPTY: std::sync::OnceLock<Arc<RtScene>> = std::sync::OnceLock::new();
     Arc::clone(
-        EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit_with(crate::packet_layout()))),
+        EMPTY.get_or_init(|| Arc::new(RtSceneBuilder::new().commit_with(crate::commit_options()))),
     )
 }
 
@@ -442,7 +442,7 @@ fn nested_instancer_parts(
         return Vec::new();
     }
     vec![ProtoPart {
-        scene: Arc::new(sub.commit_with(crate::packet_layout())),
+        scene: Arc::new(sub.commit_with(crate::commit_options())),
         local,
         mask,
         slots: slots.into(),
@@ -491,7 +491,7 @@ fn group_parts(parts: &[ProtoPart]) -> Option<ProtoPart> {
         return None;
     }
     Some(ProtoPart {
-        scene: Arc::new(b.commit_with(crate::packet_layout())),
+        scene: Arc::new(b.commit_with(crate::commit_options())),
         local: GMat4::IDENTITY,
         mask,
         slots: slots.into(),

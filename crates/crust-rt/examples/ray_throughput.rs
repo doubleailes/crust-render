@@ -26,7 +26,7 @@
 //! bounces, and there are more of them so the touched working set is large
 //! too. Building takes tens of seconds and a few GiB.
 
-use crust_rt::{Geometry, PacketLayout, Ray, Scene, SceneBuilder};
+use crust_rt::{CommitOptions, Geometry, PacketLayout, Ray, Scene, SceneBuilder};
 use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
 use std::time::Instant;
@@ -277,7 +277,10 @@ fn probe_with(name: &str, scene: &Scene, extent: f32, n_rays: usize, repeats: us
 static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 
 fn commit(b: SceneBuilder) -> Scene {
-    b.commit_with(*LAYOUT.get().unwrap_or(&PacketLayout::Auto))
+    b.commit_with(CommitOptions {
+        layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
+        ..Default::default()
+    })
 }
 
 fn main() {

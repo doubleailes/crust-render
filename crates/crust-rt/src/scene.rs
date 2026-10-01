@@ -46,6 +46,32 @@ pub enum PacketLayout {
     Auto,
 }
 
+/// What [`SceneBuilder::commit_with`] lets a caller choose about the build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitOptions {
+    /// The triangle packet layout.
+    pub layout: PacketLayout,
+    /// Size all-triangle leaves by packet tests rather than triangle tests:
+    /// a range of four or fewer triangles is one SIMD round whatever its
+    /// count, so the SAH leaf decision charges `ceil(n / 4)` per side plus
+    /// one node test for the split, and a range of five to eight triangles
+    /// whose children overlap stays one leaf of two full packets instead of
+    /// splitting into two half-empty ones. `false` is the per-triangle
+    /// leaf cost before this option existed. Either way the build is
+    /// deterministic; the two trees differ in shape, so their renders can
+    /// differ on exact-tie hits only.
+    pub packet_sah: bool,
+}
+
+impl Default for CommitOptions {
+    fn default() -> Self {
+        CommitOptions {
+            layout: PacketLayout::Auto,
+            packet_sah: true,
+        }
+    }
+}
+
 /// Exact bytes a committed [`Scene`] holds, by structure — the kernel's
 /// side of a memory report. Counts `capacity`, not `len`, because unused
 /// capacity is resident too, and deduplicates shared instanced scenes so
@@ -356,17 +382,15 @@ impl SceneBuilder {
     }
 
     /// Expands every geometry into primitives and builds the BVH with the
-    /// default packet layout ([`PacketLayout::Auto`]).
+    /// default [`CommitOptions`].
     #[must_use = "the committed scene is the only way to intersect it"]
     pub fn commit(self) -> Scene {
-        self.commit_with(PacketLayout::Auto)
+        self.commit_with(CommitOptions::default())
     }
 
-    /// [`SceneBuilder::commit`] with the triangle packet layout chosen by the
-    /// caller. Either layout answers every query bit-identically; they
-    /// differ in resident bytes and in what bounds traversal.
+    /// [`SceneBuilder::commit`] with the build choices made by the caller.
     #[must_use = "the committed scene is the only way to intersect it"]
-    pub fn commit_with(self, layout: PacketLayout) -> Scene {
+    pub fn commit_with(self, options: CommitOptions) -> Scene {
         let n_geoms = self.geoms.len() as u32;
         // Size the primitive array exactly once, from the total the
         // geometries will expand into, instead of letting per-geometry
@@ -596,12 +620,12 @@ impl SceneBuilder {
             }
             input.geoms.push(table);
         }
-        let layout = match layout {
+        let layout = match options.layout {
             PacketLayout::Gathered | PacketLayout::Auto => crate::bvh::Layout::Gathered,
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
         Scene {
-            bvh: Bvh::new(input, layout),
+            bvh: Bvh::new(input, layout, options.packet_sah),
             n_geoms,
             has_motion,
             max_hit_id,

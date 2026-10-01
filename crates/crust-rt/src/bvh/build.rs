@@ -85,6 +85,9 @@ pub(super) fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
 /// cost and the (unclipped) child bounds the overlap test needs.
 struct ObjSplit {
     pub(super) axis: usize,
+    /// References on each side, for the packet-aware leaf decision.
+    pub(super) left_count: usize,
+    pub(super) right_count: usize,
     /// Centroid-to-bin mapping: `bin = ((c - cmin) * scale) as usize`.
     pub(super) cmin: f32,
     pub(super) scale: f32,
@@ -166,6 +169,8 @@ fn best_object_split(refs: &[PrimRef]) -> Option<ObjSplit> {
         if best.as_ref().is_none_or(|b| cost < b.cost) {
             best = Some(ObjSplit {
                 axis,
+                left_count: lc,
+                right_count: rc,
                 cmin: cmin[axis],
                 scale,
                 split_bin: split,
@@ -298,15 +303,35 @@ pub(super) fn build_subtree(
     mut refs: Vec<PrimRef>,
     depth: usize,
     root_area: f32,
+    packet_sah: bool,
 ) -> Subtree {
     let bbox = union_all(&refs);
     let count = refs.len();
-    let min_leaf = min_leaf_for(prims, &refs);
+    let all_triangles = refs.iter().all(|r| prims.is_triangle(r.idx));
+    let min_leaf = if all_triangles {
+        MIN_LEAF_PACKED
+    } else {
+        MIN_LEAF
+    };
     if count <= min_leaf || depth >= MAX_DEPTH {
         return leaf(bbox, &refs);
     }
 
     let object = best_object_split(&refs);
+
+    // By packet cost a small all-triangle range whose object split does
+    // not pay is a leaf before any spatial split is weighed: chopping it
+    // would only duplicate references into packets that are half empty.
+    // (The per-triangle rule never leafed on this path; keeping that is
+    // what makes `packet_sah = false` the behaviour it replaces.)
+    if packet_sah
+        && all_triangles
+        && count <= MAX_LEAF
+        && let Some(o) = &object
+        && !splitting_pays(o, &bbox, count, true)
+    {
+        return leaf(bbox, &refs);
+    }
 
     // Consider a spatial split only when the object split's children
     // overlap enough for chopping to pay for the duplicated references.
@@ -367,14 +392,18 @@ pub(super) fn build_subtree(
         if left.is_empty() || right.is_empty() {
             let mut refs: Vec<PrimRef> = left;
             refs.extend(right);
-            return object_partition_or_leaf(prims, refs, bbox, object, depth, root_area);
+            return object_partition_or_leaf(
+                prims, refs, bbox, object, depth, root_area, packet_sah,
+            );
         }
         (left, right)
     } else {
         match object {
             Some(o) => {
                 // Leaf when splitting costs more than intersecting through.
-                if count <= MAX_LEAF && o.cost >= surface_area(&bbox) * count as f32 {
+                if count <= MAX_LEAF
+                    && !splitting_pays(&o, &bbox, count, all_triangles && packet_sah)
+                {
                     return leaf(bbox, &refs);
                 }
                 // By value: the parent's buffer is freed here rather than
@@ -393,20 +422,47 @@ pub(super) fn build_subtree(
     let parallel = left_refs.len().max(right_refs.len()) > PARALLEL_THRESHOLD;
     let (l, r) = if parallel {
         rayon::join(
-            || build_subtree(prims, left_refs, depth + 1, root_area),
-            || build_subtree(prims, right_refs, depth + 1, root_area),
+            || build_subtree(prims, left_refs, depth + 1, root_area, packet_sah),
+            || build_subtree(prims, right_refs, depth + 1, root_area, packet_sah),
         )
     } else {
         (
-            build_subtree(prims, left_refs, depth + 1, root_area),
-            build_subtree(prims, right_refs, depth + 1, root_area),
+            build_subtree(prims, left_refs, depth + 1, root_area, packet_sah),
+            build_subtree(prims, right_refs, depth + 1, root_area, packet_sah),
         )
     };
     merge(bbox, l, r)
 }
 
+/// Whether the object split beats keeping the range as one leaf.
+///
+/// Per triangle (`packets` false, the rule before `CommitOptions::packet_sah`):
+/// the split's `Σ area · count` against the leaf's `area · count`, with no
+/// node cost, so a range only stays a leaf when its children are nearly as
+/// large as it is.
+///
+/// Per packet (`packets` true, all-triangle ranges only): a leaf of `n`
+/// triangles costs `ceil(n / 4)` SIMD rounds, the split the same per side
+/// plus one node test — a 4-wide slab test, about one packet's worth — so
+/// five to eight overlapping triangles stay one leaf of two full packets
+/// instead of two half-empty ones. On the production scenes in the design
+/// records packet lanes were 48% full under the per-triangle rule, and
+/// every half-empty packet is 192 resident bytes, a `Leaf` and a node lane.
+fn splitting_pays(o: &ObjSplit, bbox: &AABB, count: usize, packets: bool) -> bool {
+    let area = surface_area(bbox);
+    if !packets {
+        return o.cost < area * count as f32;
+    }
+    let rounds = |n: usize| n.div_ceil(4) as f32;
+    let split = surface_area(&o.left_bbox) * rounds(o.left_count)
+        + surface_area(&o.right_bbox) * rounds(o.right_count)
+        + area;
+    split < area * rounds(count)
+}
+
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
 /// fallback: object-partition when possible, else leaf.
+#[allow(clippy::too_many_arguments)]
 fn object_partition_or_leaf(
     prims: &Primitives,
     refs: Vec<PrimRef>,
@@ -414,6 +470,7 @@ fn object_partition_or_leaf(
     object: Option<ObjSplit>,
     depth: usize,
     root_area: f32,
+    packet_sah: bool,
 ) -> Subtree {
     let count = refs.len();
     match object {
@@ -424,8 +481,8 @@ fn object_partition_or_leaf(
                 all.extend(r);
                 return leaf(bbox, &all);
             }
-            let left = build_subtree(prims, l, depth + 1, root_area);
-            let right = build_subtree(prims, r, depth + 1, root_area);
+            let left = build_subtree(prims, l, depth + 1, root_area, packet_sah);
+            let right = build_subtree(prims, r, depth + 1, root_area, packet_sah);
             merge(bbox, left, right)
         }
         _ => leaf(bbox, &refs),
