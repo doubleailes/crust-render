@@ -145,8 +145,12 @@
   SSE2/NEON-width, because `std::simd` is still nightly-only and crust builds on stable.
   Current practice says target AVX2 instead, so the reasons not to are recorded: merely
   *enabling* AVX2 codegen is worth 2–4% (LLVM cannot widen a 4-lane algorithm), and
-  8-wide leaf packets would buy exactly nothing because no leaf holds more than 4
-  triangles — pinned by `eight_wide_packets_would_not_reduce_vector_rounds`. **BVH8
+  8-wide leaf packets used to buy exactly nothing because no leaf held more than 4
+  triangles; with packet-sized leaves (`CommitOptions::packet_sah`, below) a leaf holds
+  up to two packets, and an 8-wide packet would merge those pairs — 31.6% fewer
+  rounds on the test sphere mesh, measured and bounded by
+  `eight_wide_packets_would_save_at_most_the_two_packet_leaves` — which changes the
+  arithmetic of the leaf question, not the toolchain reasons below. **BVH8
   nodes** were the one place 256-bit vectors might pay, and were **tried**: crust-rt's
   nightly-only **`bvh8`** feature (forwarded by crust-core and crust-render) swaps
   `bvh/lanes4.rs` (glam `Vec4`) for `bvh/lanes8.rs` (`std::simd::f32x8`) behind a

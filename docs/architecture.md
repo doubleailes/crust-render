@@ -181,6 +181,7 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
 | `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
+| `CRUST_BVH_PACKET_SAH` | on | `lib.rs` (`commit_options`) → every kernel `commit` | `0`: the per-triangle SAH leaf cost before packet-sized leaves (five to eight overlapping triangles split into two half-empty packets). Not bit-identical: the trees differ in shape, so exact-tie hits can differ; proven noise by the 1/√N check in the design record |
 | `CRUST_TRI_PACKETS` | `auto` (= `gathered`) | `lib.rs` (`packet_layout`) → every kernel `commit` | `gathered`: 192-byte vertex-carrying packets (the layout before indexed packets); `indexed`: 92-byte index packets, a quarter fewer kernel bytes per triangle for 13–30% slower traversal — the opt-in for a scene that otherwise does not fit. Bit-identical |
 | `CRUST_MTLX_OPT` | on | `material/materialx.rs` | `0`: skip constant folding / hoisting / pruning (bit-identical) |
 | `CRUST_SHADER_JIT` | on | `material/materialx.rs` | `0`: interpret MaterialX programs instead of JIT (bit-identical) |
