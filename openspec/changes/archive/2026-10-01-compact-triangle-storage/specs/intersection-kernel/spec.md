@@ -35,7 +35,7 @@ indexed (each lane holds vertex indices and gathers from the shared table at tes
 time). The two layouts SHALL return bit-identical hits, tie-break lanes included, and
 both SHALL remain bit-identical to the scalar intersector. The default (`auto`) SHALL
 be the gathered layout: measured in and out of cache, the indexed layout is slower at
-every tree size (13–30 %), so it is the explicit memory trade for a scene that
+every tree size (1–8 % in cache, 30 % out of cache), so it is the explicit memory trade for a scene that
 otherwise does not fit. The `CRUST_TRI_PACKETS` switch (`gathered` | `indexed` |
 `auto`, default `auto`) SHALL select the layout on every tree, `gathered` being the
 behaviour before this change.
@@ -49,10 +49,10 @@ behaviour before this change.
 
 #### Scenario: Indexed packets cost half of gathered ones
 
-- **WHEN** the subdivision stress scene is committed under `indexed`
-- **THEN** its packet bytes are half those of the same tree under `gathered` (50.03
-  against 104.41 MiB), every other footprint row is unchanged, and the kernel holds
-  79 bytes per triangle against 104
+- **WHEN** the subdivision stress scene is committed at level 3 under `indexed`
+- **THEN** each packet costs 92 bytes against the gathered layout's 192, every other
+  footprint row is unchanged, and the kernel holds 78.6 bytes per triangle against
+  95.5
 
 ### Requirement: Leaves are sized for packets
 
@@ -64,10 +64,12 @@ SHALL build deterministically. The two settings MAY differ in which of two trian
 at exactly the same hit distance is reported, and in nothing else; the difference
 between their renders SHALL fall as 1/√N with the sample count.
 
-#### Scenario: Eight coplanar triangles
+#### Scenario: Overlapping triangles
 
-- **WHEN** eight triangles that no split separates well are committed with the switch on
-- **THEN** they form one leaf of two full packets; with it off they form more than one leaf
+- **WHEN** six overlapping triangles that no split separates well are committed with the
+  switch on
+- **THEN** they form one leaf of two packets, the second with two inactive lanes; with
+  it off they form more than one leaf
 
 #### Scenario: Lane fill is reported
 
@@ -83,7 +85,8 @@ between their renders SHALL fall as 1/√N with the sample count.
 every run and thread count, so a render's output does not depend on build
 scheduling. The build SHALL read triangle vertices through the shared vertex table
 rather than from a per-triangle copy, and SHALL hold at most 32 bytes per reference
-and per binary node while it runs, writing subtrees into one pre-sized arena.
+and per binary node while it runs, merging each right subtree into its left
+sibling's arrays rather than into a third allocation.
 
 #### Scenario: Building twice
 
@@ -94,4 +97,4 @@ and per binary node while it runs, writing subtrees into one pre-sized arena.
 
 - **WHEN** the subdivision stress scene is committed at level 3 with `--stats`
 - **THEN** the commit phase's peak exceeds the traverse phase's resident memory by at
-  most two thirds of what it did before this change (260 MiB against 390 MiB)
+  most two thirds of what it did before this change (measured: 285 MiB against 524)
