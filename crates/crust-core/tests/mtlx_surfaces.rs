@@ -525,10 +525,10 @@ fn every_sampling_strategy_agrees_through_a_cutout() {
     );
     let quad = |y: f32, half: f32| Geometry::TriangleMesh {
         vertices: vec![
-            Vec3A::new(-half, y, -half),
-            Vec3A::new(half, y, -half),
-            Vec3A::new(half, y, half),
-            Vec3A::new(-half, y, half),
+            [-half, y, -half],
+            [half, y, -half],
+            [half, y, half],
+            [-half, y, half],
         ],
         indices: vec![[0, 2, 1], [0, 3, 2]],
         normals: None,
@@ -603,10 +603,10 @@ fn an_opaque_occluder_blocks_shadow_rays_with_or_without_cutouts() {
     );
     let quad = |y: f32, half: f32| Geometry::TriangleMesh {
         vertices: vec![
-            Vec3A::new(-half, y, -half),
-            Vec3A::new(half, y, -half),
-            Vec3A::new(half, y, half),
-            Vec3A::new(-half, y, half),
+            [-half, y, -half],
+            [half, y, -half],
+            [half, y, half],
+            [-half, y, half],
         ],
         indices: vec![[0, 2, 1], [0, 3, 2]],
         normals: None,
@@ -666,16 +666,16 @@ fn an_opaque_occluder_blocks_shadow_rays_with_or_without_cutouts() {
 
 /// `n` horizontal unit-chart sheets of half-size `half`, from `y0` up in
 /// steps of `dy`, as one mesh: its vertices and triangles.
-fn sheets(n: usize, y0: f32, dy: f32, half: f32) -> (Vec<Vec3A>, Vec<[u32; 3]>) {
+fn sheets(n: usize, y0: f32, dy: f32, half: f32) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     for k in 0..n {
         let y = y0 + k as f32 * dy;
         let b = vertices.len() as u32;
         vertices.extend([
-            Vec3A::new(-half, y, -half),
-            Vec3A::new(half, y, -half),
-            Vec3A::new(half, y, half),
-            Vec3A::new(-half, y, half),
+            [-half, y, -half],
+            [half, y, -half],
+            [half, y, half],
+            [-half, y, half],
         ]);
         indices.extend([[b, b + 2, b + 1], [b, b + 3, b + 2]]);
     }
@@ -838,11 +838,8 @@ fn cutout_opacity_ignores_the_ray_footprint() {
     let sheet = |w: &mut WorldBuilder| {
         let (vertices, indices) = sheets(1, 2.5, 0.0, 50.0);
         let mut uv = UvMap {
-            uvs: vec![
-                [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0]],
-                [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
-            ],
-            tangents: Vec::new(),
+            values: vec![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]],
+            corners: vec![[0, 1, 2], [0, 3, 1]],
             density: Vec::new(),
         };
         uv.build_density(&vertices, &indices);

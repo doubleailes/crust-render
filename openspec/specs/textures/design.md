@@ -106,14 +106,23 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     checked in, so an upstream fix would otherwise break a fresh clone's CI.
   - `UvMap` (`rt_world.rs`) carries per-triangle **corner** UVs, not per-vertex:
     USD's `st` is usually `faceVarying`, and a vertex on a UV seam has one
-    position but two texture coordinates. Built only when the bound material
-    reports `uses_uv()` — 36 bytes a triangle that an untextured production
-    stage should not pay.
-  - **Tangents exist only on baked geometry.** A tangent frame is world-space,
-    so it can only be built once a placement is known — and a prototype shared
-    by N instances has N transforms against one table. Instanced meshes
-    therefore carry UVs (which no transform touches) and no tangent, and normal
-    maps on them fall back to the geometric normal.
+    position but two texture coordinates. Held as the chart's values plus one
+    index per triangle corner (12 bytes a triangle, plus a 4-byte density) and
+    built only when the bound material reports `uses_uv()` — a cost an
+    untextured production stage should not pay. It was 36 bytes a triangle of
+    expanded corners and a stored tangent until `compact-triangle-storage`.
+  - **Tangents are derived at the hit.** A tangent frame is world-space, so it
+    was once built per *baked* placement and stored per triangle, and a
+    prototype shared by N instances — N transforms against one table — got
+    none. Now `World` reads the hit triangle's vertices from the kernel
+    (`Scene::triangle_vertices`: the top-level scene for a baked mesh, the
+    prototype through its placement for a direct static instance) and derives
+    the tangent with the same arithmetic (`tangent_of`), so directly instanced
+    meshes shade normal maps too. What still has no frame: a prototype part
+    placed through an instancer's group, whose hit id is forwarded rather than
+    its own, and a motion-blurred instance. A mirrored baked placement's stored
+    tangent paired the swapped vertex order with unswapped corners; the derived
+    one un-swaps first (`tangent_unswaps_a_mirrored_placement`).
   - **The resolution cap is not an optimisation.** Fourteen 4096² tiles is 674
     MiB for one map, and the teapot's ceramic binds four across two materials.
     `CRUST_TEX_MAX` (default 1024) box-filters each tile down at load; tiles are
@@ -695,8 +704,9 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
 
 ## Known gaps: UV textures
 
-- **UV texture caveats.** Normal maps need a tangent,
-  which only baked single-placement geometry has (above). On the
+- **UV texture caveats.** Normal maps need a tangent, which prototype parts
+  placed through an instancer's group and motion-blurred instances still lack
+  (above). On the
   `UsdPreviewSurface` side: texture **alpha** is not carried (both samplers return
   opaque RGB, so `outputs:a` reads 1.0 before `scale`/`bias`), `UsdTransform2d` is
   not evaluated, `occlusion`/`displacement`/`specularColor` are not read, and a

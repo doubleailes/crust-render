@@ -227,11 +227,14 @@ Schema mapping:
   - **Memory, measured** (the refiner retains every level 0..L, a ×4/3 geometric series
     over the last level): `subdivide()` transiently allocates **~313 B per refined face**;
     ~560–568 B with the Ptex sub-face channel and ~536 B with a shared UV chart (each
-    face-varying channel is a full parallel hierarchy). The returned mesh holds 48 B/face;
-    88 with the Ptex table, 72 with a refined chart. Pinned by the allocation-counting
+    face-varying channel is a full parallel hierarchy). The returned mesh holds 44 B/face;
+    84 with the Ptex table, 68 with a refined chart (48 / 88 / 72 before
+    `compact-triangle-storage` unpadded the normals). Pinned by the allocation-counting
     probe `cargo test --release -p crust-core --lib subdivision_memory_probe -- --ignored
-    --nocapture --test-threads=1`, whose deterministic requested-byte ceilings sit ~25%
-    above those numbers.
+    --nocapture --test-threads=1`, whose deterministic requested-byte ceilings sit ~20%
+    above those numbers. The refiner is dropped before the result's copies are built;
+    the probe counts requested bytes, not the live peak, so that shows in RSS rather
+    than in its table.
   - End to end (`scripts/gen_subdiv_stress.py`, 1.18 M refined quads at level 3, A/B'd
     with `CRUST_SUBDIV=0`): traverse-phase peak +310 MiB, within 6% of the model.
     Kernel-resident memory scales exactly ×4 per level (34.67 MiB at level 1 →

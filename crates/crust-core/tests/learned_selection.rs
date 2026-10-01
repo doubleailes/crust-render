@@ -25,10 +25,10 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
     world.attach(
         Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(-6.0, 0.0, -6.0),
-                Vec3A::new(6.0, 0.0, -6.0),
-                Vec3A::new(6.0, 0.0, 6.0),
-                Vec3A::new(-6.0, 0.0, 6.0),
+                [-6.0, 0.0, -6.0],
+                [6.0, 0.0, -6.0],
+                [6.0, 0.0, 6.0],
+                [-6.0, 0.0, 6.0],
             ],
             indices: vec![[0, 2, 1], [0, 3, 2]],
             normals: None,

@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::material::Material;
-use crate::rt_world::{FaceMap, FanSlice, UvMap, WorldBuilder};
+use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::subdiv;
 
 use super::attrs::{custom_i32, prim_motion_translate, prim_ray_mask};
@@ -100,11 +100,11 @@ impl MeshKey {
 /// Local-space triangles of one distinct mesh, held only while that mesh
 /// might still be baked flat into the parent BVH rather than instanced.
 pub(super) struct MeshGeom {
-    pub(super) verts: Vec<Vec3A>,
+    pub(super) verts: Vec<[f32; 3]>,
     pub(super) tris: Vec<[u32; 3]>,
     /// Smooth shading normals, parallel to `verts` — only subdivided meshes
     /// carry them.
-    pub(super) normals: Option<Vec<Vec3A>>,
+    pub(super) normals: Option<Vec<[f32; 3]>>,
 }
 
 /// What the importer knows about one distinct mesh (one [`MeshKey`]).
@@ -120,14 +120,11 @@ pub(super) struct MeshSlot {
     /// every placement still needs to resolve face ids at render time. Shared
     /// by `Arc` across the placements of one distinct mesh.
     pub(super) faces: Option<Arc<FaceMap>>,
-    /// Per-triangle texture coordinates, for a mesh whose material reads
-    /// them. Lives beside `faces` and for the same reason: it has to outlive
-    /// `local`, which both baking and committing drop.
-    ///
-    /// Held *without* tangents. A tangent is world-space, so it can only be
-    /// built once a placement is known — which is per placement, not per
-    /// distinct mesh. Baking builds one into a private clone of this table;
-    /// instancing shares this one and leaves the tangents empty.
+    /// The mesh's texture chart, for a mesh whose material reads it. Lives
+    /// beside `faces` and for the same reason: it has to outlive `local`,
+    /// which both baking and committing drop. Shared by every placement —
+    /// the tangent frame, which is per placement, is derived at the hit
+    /// from the kernel's vertices rather than held here.
     pub(super) uvs: Option<Arc<UvMap>>,
     /// Set once some path needed this mesh as a real kernel scene — which
     /// prototypes always do, since an instance is the only way to place one.
@@ -218,11 +215,7 @@ impl MeshArena {
             );
             return Some(slot);
         }
-        let verts: Vec<Vec3A> = src
-            .points
-            .iter()
-            .map(|p| Vec3A::new(p.x, p.y, p.z))
-            .collect();
+        let verts: Vec<[f32; 3]> = src.points.iter().map(|p| [p.x, p.y, p.z]).collect();
         let want_faces = material.face_texture().is_some();
         let (tris, faces, uvs) = triangulate(
             &src.counts,
@@ -402,12 +395,13 @@ pub(super) fn emit_mesh(
                 prim.path()
             );
         }
-        let verts: Vec<Vec3A> = src
+        let verts: Vec<[f32; 3]> = src
             .points
             .iter()
             .map(|p| {
-                let v = world_xf.transform_point3(Vec3::new(p.x, p.y, p.z));
-                Vec3A::new(v.x, v.y, v.z)
+                world_xf
+                    .transform_point3(Vec3::new(p.x, p.y, p.z))
+                    .to_array()
             })
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
@@ -430,16 +424,11 @@ pub(super) fn emit_mesh(
                     (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
                     (_, faces) => faces,
                 };
-                // Built before the attach, because `verts` and `tris` are
-                // moved into the geometry — and buildable at all only because
-                // this path has already transformed the vertices into world
-                // space, which is the frame a tangent has to be in.
+                // Already world-space here, so the density is too and the
+                // placement scale stays at its default 1.0. This arm does not
+                // go through `MeshArena::intern`, so it is the one other
+                // place densities are built.
                 let uvs = uvs.map(|mut m| {
-                    m.build_tangents(&verts, &tris);
-                    // Already world-space here, so the density is too and the
-                    // placement scale stays at its default 1.0. This arm does
-                    // not go through `MeshArena::intern`, so it is the one
-                    // other place densities are built.
                     m.build_density(&verts, &tris);
                     Arc::new(m)
                 });
@@ -546,23 +535,11 @@ pub(super) fn flush_meshes(
                 .expect("an unbaked, uncommitted slot still holds its triangles");
             let verts = bake_verts(&geom.verts, &p.l2w);
             let tris = bake_indices(geom.tris, &p.l2w);
-            // A baked mesh has world-space vertices, so this is the one place
-            // a tangent frame can be built. The table is cloned out of the
-            // slot first: the corner UVs are shared with any other placement,
-            // but the tangents belong to *this* transform.
-            let uvs = uvs.map(|shared| {
-                let mut m = UvMap {
-                    uvs: shared.uvs.clone(),
-                    tangents: Vec::new(),
-                    // Cloned rather than rebuilt from the baked vertices:
-                    // densities live in the *local* frame, alongside the
-                    // `FaceMap` this placement shares, and the placement's
-                    // own scale is recorded separately.
-                    density: shared.density.clone(),
-                };
-                m.build_tangents(&verts, &tris);
-                Arc::new(m)
-            });
+            // The chart is shared as-is with every other placement: the
+            // tangent frame, which does belong to this transform, is derived
+            // at the hit from the baked vertices the kernel holds, and the
+            // densities live in the *local* frame alongside the `FaceMap`,
+            // with the placement's own scale recorded separately.
             world.set_geometry(
                 p.geom_id,
                 Geometry::TriangleMesh {
@@ -604,11 +581,9 @@ pub(super) fn flush_meshes(
             if let Some(map) = faces {
                 world.set_face_map(p.geom_id, map, false);
             }
-            // Shared as-is, tangents empty: the table belongs to the
-            // prototype and every placement transforms it differently, so
-            // there is no one world-space tangent to record. Texture
-            // coordinates still work; normal maps fall back to the geometric
-            // normal. See `UvMap::tangents`.
+            // Shared as-is: the tangent frame of this placement is derived
+            // at the hit through the instance's transform (`World`'s
+            // placement record), so there is nothing per placement to hold.
             if let Some(map) = uvs {
                 world.set_uv_map(p.geom_id, map, false);
             }
@@ -626,17 +601,23 @@ pub(super) fn flush_meshes(
 }
 
 /// Local-space vertices into world space.
-fn bake_verts(verts: &[Vec3A], l2w: &Affine3A) -> Vec<Vec3A> {
-    verts.iter().map(|v| l2w.transform_point3a(*v)).collect()
+fn bake_verts(verts: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
+    verts
+        .iter()
+        .map(|v| l2w.transform_point3a(Vec3A::from_array(*v)).to_array())
+        .collect()
 }
 
 /// Local-space shading normals into world space: the inverse transpose —
 /// exactly the matrix the kernel's instance path applies (`normal_mat` in
 /// `crust-rt`), so a baked placement shades identically to an instanced one,
 /// mirrors included.
-fn bake_normals(normals: &[Vec3A], l2w: &Affine3A) -> Vec<Vec3A> {
+fn bake_normals(normals: &[[f32; 3]], l2w: &Affine3A) -> Vec<[f32; 3]> {
     let m = l2w.matrix3.inverse().transpose();
-    normals.iter().map(|n| (m * *n).normalize()).collect()
+    normals
+        .iter()
+        .map(|n| (m * Vec3A::from_array(*n)).normalize().to_array())
+        .collect()
 }
 
 /// Triangle winding for baked geometry, flipped under a mirroring transform.
@@ -709,17 +690,19 @@ pub(super) struct UvSource {
 }
 
 impl UvSource {
-    /// The coordinate at face-vertex `fv`, whose point index is `point`.
-    pub(super) fn at(&self, fv: usize, point: usize) -> [f32; 2] {
+    /// The index into `values` of the coordinate at face-vertex `fv`, whose
+    /// point index is `point`; `None` when the source does not resolve it
+    /// (a negative or out-of-range entry), which reads as `(0, 0)`.
+    pub(super) fn index_at(&self, fv: usize, point: usize) -> Option<u32> {
         let i = if self.face_varying { fv } else { point };
         let i = match &self.indices {
             Some(idx) => match idx.get(i) {
                 Some(&v) if v >= 0 => v as usize,
-                _ => return [0.0, 0.0],
+                _ => return None,
             },
             None => i,
         };
-        self.values.get(i).copied().unwrap_or([0.0, 0.0])
+        (i < self.values.len()).then_some(i as u32)
     }
 }
 
@@ -795,7 +778,7 @@ pub(super) struct MeshSource {
     pub(super) indices: Vec<i32>,
     /// Smooth shading normals — `Some` iff subdivided (a cage renders
     /// faceted, exactly as before).
-    pub(super) normals: Option<Vec<Vec3A>>,
+    pub(super) normals: Option<Vec<[f32; 3]>>,
     /// Refined-face → base-cage-face mapping, `Some` iff subdivided and the
     /// material wants a face table.
     pub(super) subdiv_faces: Option<subdiv::SubdivFaces>,
@@ -1037,29 +1020,32 @@ fn remap_subdivided_faces(map: FaceMap, sub: &subdiv::SubdivFaces) -> FaceMap {
     let n = map.faces.len();
     let mut faces = Vec::with_capacity(n);
     let mut slices = Vec::with_capacity(n);
-    let mut uvs = Vec::with_capacity(n);
+    let mut subs = Vec::with_capacity(n);
     for (&refined, &slice) in map.faces.iter().zip(&map.slices) {
-        let Some(base) = sub.base_face[refined as usize] else {
-            // The face table's own sentinel: there the layout is the point.
-            faces.push(u32::MAX);
-            slices.push(FanSlice::Unmappable);
-            uvs.push([[0.0f32; 2]; 3]);
-            continue;
-        };
-        let [c0, c1, c2, c3] = sub.corner_uvs[refined as usize];
-        faces.push(base);
-        slices.push(slice);
-        uvs.push(match slice {
-            FanSlice::QuadUpper => [c0, c2, c3],
-            // Refined faces are always quads, so anything else is the lower
-            // half. (Loop never builds a face table.)
-            _ => [c0, c1, c2],
+        // A refined face with no Ptex-addressable ancestor (its cage face
+        // was not a quad), or — never seen, since the refiner halves
+        // dyadics — one whose corners are not a dyadic cell: unmappable.
+        let cell = sub.base_face[refined as usize].and_then(|base| {
+            SubFace::from_corners(&sub.corner_uvs[refined as usize]).map(|c| (base, c))
         });
+        match cell {
+            Some((base, cell)) => {
+                faces.push(base);
+                slices.push(slice);
+                subs.push(cell);
+            }
+            None => {
+                // The face table's own sentinel: there the layout is the point.
+                faces.push(u32::MAX);
+                slices.push(FanSlice::Unmappable);
+                subs.push(SubFace::default());
+            }
+        }
     }
     FaceMap {
         faces,
         slices,
-        uvs: Some(uvs),
+        sub: Some(subs),
         density: Vec::new(),
     }
 }
@@ -1125,7 +1111,11 @@ fn triangulate(
     let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut faces: Vec<u32> = Vec::new();
     let mut slices: Vec<FanSlice> = Vec::new();
-    let mut uvs: Vec<[[f32; 2]; 3]> = Vec::new();
+    let mut corners: Vec<[u32; 3]> = Vec::new();
+    // The chart's values plus one `(0, 0)` at the end for every corner the
+    // source cannot index (`UvSource::at`'s answer), so a corner is an index
+    // and never a copied value.
+    let fallback = uv_src.map_or(0, |src| src.values.len() as u32);
     let mut offset = 0usize;
     for (face, &fc) in counts.iter().enumerate() {
         let fc = fc as usize;
@@ -1153,10 +1143,11 @@ fn triangulate(
                 // which is why the fan's offsets are carried through rather
                 // than just the point indices: two faces meeting at a seam
                 // share `i0` but not its texture coordinate.
-                uvs.push([
-                    src.at(offset, i0 as usize),
-                    src.at(offset + k, i1 as usize),
-                    src.at(offset + k + 1, i2 as usize),
+                corners.push([
+                    src.index_at(offset, i0 as usize).unwrap_or(fallback),
+                    src.index_at(offset + k, i1 as usize).unwrap_or(fallback),
+                    src.index_at(offset + k + 1, i2 as usize)
+                        .unwrap_or(fallback),
                 ]);
             }
             if want_faces {
@@ -1182,19 +1173,20 @@ fn triangulate(
     let map = want_faces.then_some(FaceMap {
         faces,
         slices,
-        uvs: None,
+        sub: None,
         density: Vec::new(),
     });
-    // Tangents are left empty here: they need *world-space* vertices, which
-    // only exist once a placement is decided. See `UvMap::tangents`. The
-    // densities are left empty for the opposite reason: they want the mesh's
-    // *local* vertices, which this function does not receive, so the callers
-    // that hold them fill them in (`MeshArena::intern`, and the
-    // non-invertible bake below).
-    let uv_map = uv_src.map(|_| UvMap {
-        uvs,
-        tangents: Vec::new(),
-        density: Vec::new(),
+    // The densities are left empty: they want the mesh's *local* vertices,
+    // which this function does not receive, so the callers that hold them
+    // fill them in (`MeshArena::intern`, and the non-invertible bake above).
+    let uv_map = uv_src.map(|src| {
+        let mut values = src.values.clone();
+        values.push([0.0, 0.0]);
+        UvMap {
+            values,
+            corners,
+            density: Vec::new(),
+        }
     });
     Some((tris, map, uv_map))
 }
@@ -1208,10 +1200,10 @@ mod bake_tests {
     fn quad() -> MeshGeom {
         MeshGeom {
             verts: vec![
-                Vec3A::new(-1.0, -1.0, 0.0),
-                Vec3A::new(1.0, -1.0, 0.0),
-                Vec3A::new(1.0, 1.0, 0.0),
-                Vec3A::new(-1.0, 1.0, 0.0),
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
             ],
             tris: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,
@@ -1303,7 +1295,7 @@ mod bake_tests {
     #[test]
     fn baked_shading_normals_match_the_instanced_path() {
         // Tilted shading normals, deliberately not the geometric one.
-        let tilt = Vec3A::new(0.3, -0.2, 1.0).normalize();
+        let tilt = Vec3A::new(0.3, -0.2, 1.0).normalize().to_array();
         let normals = vec![tilt; 4];
         let geom = quad();
         let mat = || -> Arc<dyn Material> { Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))) };
@@ -1416,10 +1408,27 @@ mod face_table_tests {
         let map = remap_subdivided_faces(map.unwrap(), sub);
 
         assert_eq!(tris.len(), 8, "4 child quads, 2 triangles each");
-        let uvs = map.uvs.as_ref().expect("subdivided tables carry UVs");
+        let subs = map.sub.as_ref().expect("subdivided tables carry sub-faces");
         assert_eq!(map.faces.len(), tris.len());
-        assert_eq!(uvs.len(), tris.len());
+        assert_eq!(subs.len(), tris.len());
         assert!(map.faces.iter().all(|&f| f == 0), "one base face only");
+        // The eight-byte cell reproduces the refined channel's corners
+        // exactly: a cell's corners are dyadic and the channel halved.
+        for (t, (&refined, cell)) in map.faces.iter().zip(subs).enumerate() {
+            let _ = refined;
+            let want = sub.corner_uvs[t / 2];
+            assert_eq!(cell.corners(), want, "triangle {t}");
+        }
+        let uvs: Vec<[[f32; 2]; 3]> = (0..tris.len())
+            .map(|t| {
+                let [c0, c1, c2, c3] = subs[t].corners();
+                if t % 2 == 0 {
+                    [c0, c1, c2]
+                } else {
+                    [c0, c2, c3]
+                }
+            })
+            .collect();
 
         // Each triangle's interior resolves inside its child's quadrant of
         // the base face — quadrants are half-open squares of side 0.5.
@@ -1454,7 +1463,7 @@ mod face_table_tests {
         let map = FaceMap {
             faces: vec![0, 1],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
-            uvs: None,
+            sub: None,
             density: Vec::new(),
         };
         let sub = subdiv::SubdivFaces {

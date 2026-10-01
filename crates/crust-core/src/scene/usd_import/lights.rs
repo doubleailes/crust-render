@@ -577,7 +577,12 @@ pub(super) fn emit_rect_light(
     };
     let geom_id = ctx.world.attach_masked(
         Geometry::TriangleMesh {
-            vertices: vec![c00, c10, c11, c01],
+            vertices: vec![
+                c00.to_array(),
+                c10.to_array(),
+                c11.to_array(),
+                c01.to_array(),
+            ],
             indices,
             normals: None,
         },
