@@ -1,0 +1,7 @@
+{# A callout box using the theme's alert styles.
+   Usage: {% alert(icon="💡") %} Markdown body {% end %}
+   `kind` picks the colour: "warning" (default), "light", "dark" or "primary". #}
+<div class="alert alert-{{ kind | default(value="warning") }} d-flex" role="alert">
+  <div class="flex-shrink-1 alert-icon">{{ icon | default(value="💡") }}</div>
+  <div class="w-100">{{ body | markdown | safe }}</div>
+</div>
