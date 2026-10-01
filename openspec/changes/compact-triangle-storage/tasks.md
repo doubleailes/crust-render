@@ -18,7 +18,7 @@
 - [x] 3.1 `Tri4i` (92 B, size-tested): per-lane vertex indices plus the shared `LaneMasks` (records, `active`, masks); `intersect` gathers into the same nine `Vec4`s and calls the shared `intersect_lanes`; the layout is per tree (`Bvh::layout`), not per leaf; verified by `tri4i_matches_tri4_bitwise` (4 000 random packets × 3 masks, hits, `fallback`, `t`/`u`/`v` bitwise) and `packet_layouts_are_bit_identical` (a committed scene, 3 000 rays, closest-hit and occlusion)
 - [x] 3.2 `Config::tri_packets: gathered | indexed | auto` (`CRUST_TRI_PACKETS`, default `auto`), every crust-core kernel commit goes through `packet_layout()` → `SceneBuilder::commit_with`; `auto` picks `Tri4i` above `crust_rt::INDEXED_PACKETS_FROM`; verified by the config test per spelling (and a bad value keeping `auto`) and `auto_layout_gathers_small_scenes` / the footprint's per-layout rows
 - [x] 3.3 Measured `ray_throughput --layout` in cache and `--large 4` out of cache: indexed is slower at every size (1–8 % in cache, 30 % on the 4 M-triangle soup; stress-grid render −13 %) for 104 → 79 kernel B/triangle, so there is no threshold: `auto` is gathered and `indexed` the explicit memory trade; the design record's D2 records the numbers against the expectation it replaced
-- [ ] 3.4 `scripts/test_simd_matrix.sh -p crust-rt` clean (the kernel's own tests build both layouts explicitly, so the switch does not enter); verified by its exit code
+- [x] 3.4 `scripts/test_simd_matrix.sh -p crust-rt` clean under every codegen configuration, no FMA contraction (the kernel's own tests build both layouts explicitly, so the switch does not enter); verified by its exit code
 
 ## 4. Kernel: packet-aware leaves (D4)
 
