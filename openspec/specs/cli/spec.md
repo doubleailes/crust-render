@@ -5,18 +5,17 @@
 The command-line entry point (`crust-render` binary, `main.rs`). It parses
 arguments, builds a `Scene` from USD or a procedural fallback, runs the renderer,
 and writes the output image. This is the only user-facing surface of the tool.
-
 ## Requirements
-
 ### Requirement: Command-line argument parsing
 
 The CLI SHALL accept `-i/--input` (USD scene path), `-o/--output` (output path,
 default `output.exr`), `-l/--level` (log verbosity, default `info`),
 `--scanline` (row-order rendering instead of the default 16×16 tiles),
-`-s/--samples` (override the scene's samples-per-pixel), and `--strategy`
+`-s/--samples` (override the scene's samples-per-pixel), `--strategy`
 (override the scene's MIS sampling strategy: `power` | `balance` | `light` |
-`bsdf`). `-b/--bucket` SHALL still be accepted, for compatibility with existing
-command lines, and SHALL have no effect.
+`bsdf`), and `--subdiv-level <n>` (override the scene's subdivision refinement
+level, 0–6; clamped to 6 with a warning). `-b/--bucket` SHALL still be accepted,
+for compatibility with existing command lines, and SHALL have no effect.
 
 #### Scenario: Rendering a scene file
 
@@ -45,6 +44,13 @@ command lines, and SHALL have no effect.
 - **THEN** they override the scene's `crust:samplesPerPixel` /
   `crust:samplingStrategy` values for this render only
 
+#### Scenario: Overriding the subdivision level
+
+- **WHEN** `--subdiv-level 0` is passed on a scene whose meshes author
+  `subdivisionScheme = "catmullClark"`
+- **THEN** those meshes render as their cages, whatever the scene's
+  `crust:subdivisionLevel`
+
 ### Requirement: Procedural fallback when no input is given
 
 When no `-i/--input` is provided, the CLI SHALL render a hard-coded procedural
@@ -64,3 +70,4 @@ The CLI SHALL configure `tracing` output at the level chosen by `-l/--level`
 
 - **WHEN** the user passes `-l debug`
 - **THEN** debug-level diagnostics (scene path, settings, object counts) are logged
+
