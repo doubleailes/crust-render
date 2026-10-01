@@ -18,3 +18,16 @@ longer a gap.
 - **WHEN** a normal-mapped material is bound to a mesh prim authored twice
 - **THEN** it shades with the mapped normal, using a tangent computed at the hit from
   the prototype's vertices and the placement's transform
+
+#### Scenario: A normal map on a prototype placed through an instancer
+
+- **WHEN** a normal-mapped material is bound to a prototype part placed through a
+  `PointInstancer` or native-instancing group, or to a motion-blurred instance
+- **THEN** it shades with the geometric normal
+
+#### Scenario: A UV texture on a subdivided mesh
+
+- **WHEN** a UV-textured material is bound to a mesh with an authored
+  subdivision scheme
+- **THEN** the texture is sampled through the refined UV chart rather than
+  dropped
