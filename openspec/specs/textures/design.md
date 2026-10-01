@@ -118,9 +118,16 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     (`Scene::triangle_vertices`: the top-level scene for a baked mesh, the
     prototype through its placement for a direct static instance) and derives
     the tangent with the same arithmetic (`tangent_of`), so directly instanced
-    meshes shade normal maps too. What still has no frame: a prototype part
-    placed through an instancer's group, whose hit id is forwarded rather than
-    its own, and a motion-blurred instance. A mirrored baked placement's stored
+    meshes shade normal maps too. What still has no frame, by construction
+    (`VertexSource::Unresolved`, never a lookup against the top-level scene):
+    a prototype part placed through an instancer's group, whose hit id is a
+    forwarded slot shared by every placement of that prototype, so the hit
+    names no transform (`forwarded_placements_sharing_a_slot_get_no_tangent`);
+    and a motion-blurred instance, intersected through a transform
+    interpolated at the ray's time that no retained start transform
+    reproduces (`motion_blurred_instances_get_no_tangent`). Closing both needs
+    the kernel to hand back the traversed instance's composed transform with
+    the hit. A mirrored baked placement's stored
     tangent paired the swapped vertex order with unswapped corners; the derived
     one un-swaps first (`tangent_unswaps_a_mirrored_placement`).
   - **The resolution cap is not an optimisation.** Fourteen 4096² tiles is 674

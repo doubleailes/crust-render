@@ -429,6 +429,35 @@ pub fn tangent_of(uv: &[[f32; 2]; 3], p0: Vec3A, p1: Vec3A, p2: Vec3A) -> Vec3A 
     }
 }
 
+/// Where the vertices of a hit triangle can be read, per geometry, so a
+/// tangent frame can be derived at the hit instead of stored per triangle.
+///
+/// A hit carries `(geom_id, prim_id)` and nothing about the placement it was
+/// traversed through, so the only geometries whose vertices can be recovered
+/// are those where the id *is* the placement: a baked mesh (the top-level
+/// scene holds its world-space vertices under its own id) and a direct,
+/// unlabelled, static instance (one scene, one transform, recorded here at
+/// attach time). Everything else is `Unresolved`, deliberately: a prototype
+/// part placed through an instancer's group reports a forwarded slot id
+/// (`InstanceHitId::As` / `Offset`) that names the slot, not the placement
+/// traversed — two differently transformed placements of one prototype
+/// share it, so no transform can be recovered from the hit; and a
+/// motion-blurred instance was intersected through a transform interpolated
+/// at the ray's time, which no retained start transform reproduces. Neither
+/// consults any scene: resolving a forwarded id against the top-level scene
+/// would hand back whatever geometry happens to sit at that index. Both
+/// shade normal maps with the geometric normal, as every instance did before
+/// tangents were derived at the hit.
+enum VertexSource {
+    /// No vertices, no tangent frame.
+    Unresolved,
+    /// A baked top-level triangle mesh: the scene's own table, world space.
+    Baked,
+    /// A direct, unlabelled, static instance: that scene in local space,
+    /// carried into the world through its placement.
+    Placed(Arc<crust_rt::Scene>, Affine3A),
+}
+
 /// A geometry's side tables, plus whether its placement mirrored the winding.
 ///
 /// One struct rather than two parallel `Vec`s because the mirror flag and the
@@ -438,13 +467,9 @@ struct SideTables {
     map: Option<Arc<FaceMap>>,
     uv: Option<Arc<UvMap>>,
     swapped: bool,
-    /// For a geometry that is a direct, unlabelled, static instance of a
-    /// one-mesh scene: that scene and its placement, so a hit's vertices can
-    /// be read in local space and carried into the world. Baked meshes need
-    /// nothing (the top-level scene holds their world-space vertices);
-    /// prototype parts of instancers, which forward their ids through a
-    /// group, are not resolved and shade without a tangent frame.
-    placement: Option<(Arc<crust_rt::Scene>, Affine3A)>,
+    /// Where a hit's triangle vertices may be read from, decided when the
+    /// geometry is attached — see [`VertexSource`].
+    vertices: VertexSource,
     /// The placement's uniform scale — `cbrt(|det|)` of its linear part.
     ///
     /// Both tables' densities are in the mesh's *local* frame, so a texture
@@ -467,7 +492,7 @@ impl Default for SideTables {
             map: None,
             uv: None,
             swapped: false,
-            placement: None,
+            vertices: VertexSource::Unresolved,
             scale: 1.0,
         }
     }
@@ -523,30 +548,28 @@ impl WorldBuilder {
         mask: RayMask,
         label: InstanceHitId,
     ) -> u32 {
-        let placement = Self::direct_placement(&geometry, label);
+        let vertices = Self::vertex_source(&geometry, label);
         let id = self.rt.attach_labelled(geometry, mask, label);
         self.materials.push(material);
         self.faces.push(SideTables {
-            placement,
+            vertices,
             ..SideTables::default()
         });
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
     }
 
-    /// The scene and transform a hit's vertices can be read through — see
-    /// `SideTables::placement`.
-    fn direct_placement(
-        geometry: &Geometry,
-        label: InstanceHitId,
-    ) -> Option<(Arc<crust_rt::Scene>, Affine3A)> {
+    /// Where a hit's vertices can be read from — see [`VertexSource`] for
+    /// why only these two shapes resolve.
+    fn vertex_source(geometry: &Geometry, label: InstanceHitId) -> VertexSource {
         match geometry {
+            Geometry::TriangleMesh { .. } if label == InstanceHitId::Own => VertexSource::Baked,
             Geometry::Instance {
                 scene,
                 transform,
                 transform_end: None,
-            } if label == InstanceHitId::Own => Some((Arc::clone(scene), *transform)),
-            _ => None,
+            } if label == InstanceHitId::Own => VertexSource::Placed(Arc::clone(scene), *transform),
+            _ => VertexSource::Unresolved,
         }
     }
 
@@ -624,7 +647,7 @@ impl WorldBuilder {
     /// # Panics
     /// If `id` was never reserved.
     pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
-        self.faces[id as usize].placement = Self::direct_placement(&geometry, InstanceHitId::Own);
+        self.faces[id as usize].vertices = Self::vertex_source(&geometry, InstanceHitId::Own);
         self.rt.set_geometry(id, geometry);
     }
 
@@ -777,16 +800,17 @@ impl World {
     /// The world-space vertices of the triangle a hit landed on, in the
     /// kernel's vertex order: read from the top-level scene for a baked
     /// mesh, or through the placement of a direct instance. `None` where
-    /// neither applies — see `SideTables::placement`.
+    /// neither applies — see [`VertexSource`].
     fn world_vertices(
         &self,
         geom_id: u32,
         prim_id: u32,
         tables: &SideTables,
     ) -> Option<[Vec3A; 3]> {
-        match &tables.placement {
-            None => self.scene.triangle_vertices(geom_id, prim_id),
-            Some((scene, l2w)) => scene
+        match &tables.vertices {
+            VertexSource::Unresolved => None,
+            VertexSource::Baked => self.scene.triangle_vertices(geom_id, prim_id),
+            VertexSource::Placed(scene, l2w) => scene
                 .triangle_vertices(0, prim_id)
                 .map(|vs| vs.map(|v| l2w.transform_point3a(v))),
         }

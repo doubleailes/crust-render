@@ -247,16 +247,33 @@ beside a primitive copy.
 
 **D6 — The importer derives at the hit what it used to store per corner.**
 `Scene::triangle_vertices(geom_id, prim_id) -> Option<[Vec3A; 3]>` (local space for an
-instanced scene) is the one new kernel accessor; `World` keeps, per top-level geometry,
-the placement it already has (`l2w`, or identity for a baked mesh).
+instanced scene) is the one new kernel accessor. A hit carries `(geom_id, prim_id)` and
+nothing about the placement it was traversed through, so `World` decides at attach
+time, per geometry, where a hit's vertices may be read from (`VertexSource`): the
+top-level scene for a baked triangle mesh (its id is its placement, world space); the
+prototype scene through the one transform recorded at attach for a direct,
+unlabelled, static instance; and *nothing* for everything else. The two exclusions are
+deliberate and structural, not a missing case. A prototype part placed through an
+instancer's group reports a forwarded slot id (`InstanceHitId::As` / `Offset`) that
+names the slot, not the placement traversed — two differently transformed placements
+of one prototype share it — so no transform can be recovered from the hit, and
+resolving that id against the top-level scene would hand back whatever geometry sits
+at that index (`forwarded_placements_sharing_a_slot_get_no_tangent` pins both: zero
+tangent, UV intact, on two rotated placements of one prototype into one slot). A
+motion-blurred instance was intersected through a transform interpolated at the ray's
+time, which no retained start transform reproduces, so it resolves nothing either
+(`motion_blurred_instances_get_no_tangent`). Both shade normal maps with the geometric
+normal, exactly as every instance did before this change; closing them needs the
+kernel to return the traversed instance's composed transform at the ray's time with
+the hit, which is § Deferred item 6.
 
 - *Tangents.* `UvMap::resolve` computes `dP/du` from the three vertices and three
   corner UVs with `build_tangents`' formula, per hit, instead of reading a stored
   `Vec3A` — the same inputs, the same bits (`tangents_on_demand_match_the_table` pins it
   against the old table on every sample). Because the vertices come back in the
-  mesh's frame and the placement is known, an **instanced** mesh gets a world-space
-  tangent too, which retires the "normal maps on instanced geometry use the geometric
-  normal" gap in `textures/spec.md`.
+  mesh's frame and a direct static placement is known, a **directly instanced** mesh
+  gets a world-space tangent too, which narrows the "normal maps on instanced geometry
+  use the geometric normal" gap in `textures/spec.md` to the two cases above.
 - *Densities.* `triangle_density` (UV area over local area) is likewise computed at
   the hit; the placement scale is applied as today.
 - *Face-varying charts.* `UvMap` holds `values: Vec<[f32; 2]>` and
@@ -407,3 +424,11 @@ Acceptance, measured with `--stats` rather than modelled (outcome in brackets):
 5. **The composed USD stage.** ALab's 32 GiB peak at level 0 holds 6.87 GiB of kernel;
    most of the rest is openusd's composed stage and preloaded textures, outside this
    capability.
+6. **Hit-time instance context.** A hit reports `(geom_id, prim_id)` only, so the
+   tangent frame D6 derives stops at direct static instances: a prototype part behind
+   a forwarded slot id and a motion-blurred instance resolve no vertices and shade
+   normal maps with the geometric normal. Returning the traversed instance's composed
+   transform, interpolated at the ray's time, with the hit (what Embree's `instID` /
+   `rtcGetGeometryTransform` give) would close both; it widens `PrimHit` on every
+   query for a quantity only normal-mapped instanced hits read, so it waits for a
+   scene that needs it.
