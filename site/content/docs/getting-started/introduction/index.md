@@ -59,4 +59,5 @@ Each render writes two images:
 - [Environment variables →](@/docs/reference/environment-variables.md) Every `CRUST_*`
   switch.
 - [USD attributes →](@/docs/usd/overview.md) Every `crust:*` attribute.
+- [Architecture →](@/docs/architecture/overview.md) How Crust Render is built, and why.
 - [FAQ →](@/docs/help/faq.md) Common problems.
