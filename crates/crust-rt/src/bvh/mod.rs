@@ -99,13 +99,36 @@ const SBVH_MAX_DEPTH: usize = 32;
 
 /// Binary build node — an intermediate: the finished tree is the 4-wide
 /// [`WideNode`] array produced by collapsing these.
+///
+/// 32 bytes: the bounds are stored unpadded. As two `Vec3A`s they made
+/// this 48, and the build holds roughly one node per two references, so
+/// on a scene of 100 M references the padding alone was 800 MiB of the
+/// commit transient (`a_build_reference_is_28_bytes` pins both).
 struct Node {
-    bbox: AABB,
+    min: [f32; 3],
+    max: [f32; 3],
     /// Leaf (`count > 0`): offset of the first entry in `indices`.
     /// Internal (`count == 0`): index of the right child — the left child
     /// immediately follows the node itself in depth-first order.
     first_or_right: u32,
     count: u32,
+}
+
+impl Node {
+    #[inline]
+    fn new(bbox: AABB, first_or_right: u32, count: u32) -> Self {
+        Node {
+            min: bbox.minimum.to_array(),
+            max: bbox.maximum.to_array(),
+            first_or_right,
+            count,
+        }
+    }
+
+    #[inline]
+    fn bbox(&self) -> AABB {
+        AABB::new(Vec3A::from_array(self.min), Vec3A::from_array(self.max))
+    }
 }
 
 /// Marks an unused lane of a [`WideNode`].
@@ -303,15 +326,35 @@ pub(crate) struct Bvh {
 
 /// One build reference: conservative bounds of (a fragment of) primitive
 /// `idx`. Spatial splits shrink the bounds and duplicate the reference.
+///
+/// 28 bytes, unpadded, for the same reason as [`Node`]: the build's peak
+/// is set by the references alive across the recursion, and an `AABB` of
+/// two `Vec3A`s made this 48.
 #[derive(Clone, Copy)]
 struct PrimRef {
-    bbox: AABB,
+    min: [f32; 3],
+    max: [f32; 3],
     idx: u32,
 }
 
 impl PrimRef {
+    #[inline]
+    fn new(bbox: AABB, idx: u32) -> Self {
+        PrimRef {
+            min: bbox.minimum.to_array(),
+            max: bbox.maximum.to_array(),
+            idx,
+        }
+    }
+
+    #[inline]
+    fn bbox(&self) -> AABB {
+        AABB::new(Vec3A::from_array(self.min), Vec3A::from_array(self.max))
+    }
+
+    #[inline]
     fn centroid(&self) -> Vec3A {
-        0.5 * (self.bbox.minimum + self.bbox.maximum)
+        0.5 * (Vec3A::from_array(self.min) + Vec3A::from_array(self.max))
     }
 }
 
@@ -347,7 +390,7 @@ impl Bvh {
         // ties, so it is part of the build's determinism); degenerate
         // records get none.
         let refs: Vec<PrimRef> = (0..input.len() as u32)
-            .filter_map(|i| input.bbox(i).map(|bbox| PrimRef { bbox, idx: i }))
+            .filter_map(|i| input.bbox(i).map(|bbox| PrimRef::new(bbox, i)))
             .collect();
 
         let (wide, collected, root_bbox) = if refs.is_empty() {

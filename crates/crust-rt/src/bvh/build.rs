@@ -17,9 +17,9 @@ pub(super) fn surface_area(b: &AABB) -> f32 {
 }
 
 pub(super) fn union_all(refs: &[PrimRef]) -> AABB {
-    refs.iter()
-        .skip(1)
-        .fold(refs[0].bbox, |acc, r| AABB::surrounding_box(acc, r.bbox))
+    refs.iter().skip(1).fold(refs[0].bbox(), |acc, r| {
+        AABB::surrounding_box(acc, r.bbox())
+    })
 }
 
 /// Component-wise intersection; `None` when the boxes do not overlap.
@@ -35,11 +35,7 @@ fn intersect_aabb(a: &AABB, b: &AABB) -> Option<AABB> {
 
 pub(super) fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
     Subtree {
-        nodes: vec![Node {
-            bbox,
-            first_or_right: 0,
-            count: refs.len() as u32,
-        }],
+        nodes: vec![Node::new(bbox, 0, refs.len() as u32)],
         indices: refs.iter().map(|r| r.idx).collect(),
     }
 }
@@ -49,11 +45,7 @@ pub(super) fn leaf(bbox: AABB, refs: &[PrimRef]) -> Subtree {
 pub(super) fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
     let mut nodes = Vec::with_capacity(1 + left.nodes.len() + right.nodes.len());
     let right_node_offset = 1 + left.nodes.len() as u32;
-    nodes.push(Node {
-        bbox,
-        first_or_right: right_node_offset,
-        count: 0,
-    });
+    nodes.push(Node::new(bbox, right_node_offset, 0));
     for mut n in left.nodes {
         if n.count == 0 {
             n.first_or_right += 1;
@@ -70,6 +62,9 @@ pub(super) fn merge(bbox: AABB, left: Subtree, right: Subtree) -> Subtree {
         nodes.push(n);
     }
     let mut indices = left.indices;
+    // Exact: `extend` alone would grow by doubling, and the slack of every
+    // merge up the recursion would be alive at once.
+    indices.reserve_exact(right.indices.len());
     indices.extend(right.indices);
     Subtree { nodes, indices }
 }
@@ -126,8 +121,8 @@ fn best_object_split(refs: &[PrimRef]) -> Option<ObjSplit> {
         let b = bin_of(r);
         bin_counts[b] += 1;
         bin_bounds[b] = Some(match bin_bounds[b] {
-            Some(existing) => AABB::surrounding_box(existing, r.bbox),
-            None => r.bbox,
+            Some(existing) => AABB::surrounding_box(existing, r.bbox()),
+            None => r.bbox(),
         });
     }
 
@@ -205,12 +200,12 @@ pub(super) fn best_spatial_split(
     };
 
     for r in refs {
-        let b0 = bin_of(r.bbox.minimum[axis]);
-        let b1 = bin_of(r.bbox.maximum[axis]);
+        let b0 = bin_of(r.min[axis]);
+        let b1 = bin_of(r.max[axis]);
         if b0 == b1 {
             entry[b0] += 1;
             exit[b1] += 1;
-            add(b0, r.bbox);
+            add(b0, r.bbox());
             continue;
         }
         // Entry and exit are counted at the first and last bin the reference
@@ -230,7 +225,7 @@ pub(super) fn best_spatial_split(
             let (bin_lo, bin_hi) = (lo + b as f32 * width, lo + (b + 1) as f32 * width);
             if let Some(c) = prims
                 .clipped_aabb(r.idx, axis, bin_lo, bin_hi)
-                .and_then(|c| intersect_aabb(&c, &r.bbox))
+                .and_then(|c| intersect_aabb(&c, &r.bbox()))
             {
                 add(b, c);
                 first.get_or_insert(b);
@@ -323,9 +318,9 @@ pub(super) fn build_subtree(
         // bound, but a far tighter one than the input length twice over.
         let (mut n_left, mut n_right) = (0usize, 0usize);
         for r in &refs {
-            if r.bbox.maximum[s.axis] <= s.pos {
+            if r.max[s.axis] <= s.pos {
                 n_left += 1;
-            } else if r.bbox.minimum[s.axis] >= s.pos {
+            } else if r.min[s.axis] >= s.pos {
                 n_right += 1;
             } else {
                 n_left += 1;
@@ -335,28 +330,23 @@ pub(super) fn build_subtree(
         let mut left = Vec::with_capacity(n_left);
         let mut right = Vec::with_capacity(n_right);
         for r in refs {
-            if r.bbox.maximum[s.axis] <= s.pos {
+            if r.max[s.axis] <= s.pos {
                 left.push(r);
-            } else if r.bbox.minimum[s.axis] >= s.pos {
+            } else if r.min[s.axis] >= s.pos {
                 right.push(r);
             } else {
+                let bbox = r.bbox();
                 if let Some(c) = prims
                     .clipped_aabb(r.idx, s.axis, f32::NEG_INFINITY, s.pos)
-                    .and_then(|c| intersect_aabb(&c, &r.bbox))
+                    .and_then(|c| intersect_aabb(&c, &bbox))
                 {
-                    left.push(PrimRef {
-                        bbox: c,
-                        idx: r.idx,
-                    });
+                    left.push(PrimRef::new(c, r.idx));
                 }
                 if let Some(c) = prims
                     .clipped_aabb(r.idx, s.axis, s.pos, f32::INFINITY)
-                    .and_then(|c| intersect_aabb(&c, &r.bbox))
+                    .and_then(|c| intersect_aabb(&c, &bbox))
                 {
-                    right.push(PrimRef {
-                        bbox: c,
-                        idx: r.idx,
-                    });
+                    right.push(PrimRef::new(c, r.idx));
                 }
             }
         }
