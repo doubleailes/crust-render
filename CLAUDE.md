@@ -148,9 +148,11 @@ behaviour so the A/B is honest.
 **User documentation** is the Zola + AdiDoks site in `site/` (theme is a git submodule;
 `.github/workflows/docs.yml` builds it on PRs and publishes it to `gh-pages`). It
 describes every CLI flag (`reference/command-line.md`), every `CRUST_*` switch
-(`reference/environment-variables.md`) and every `crust:*` USD attribute (`usd/`). A
+(`reference/environment-variables.md`), every `crust:*` USD attribute (`usd/`), and the
+architecture, design choices and limitations for users (`architecture/`). A
 change that adds, removes or changes the default of any of those updates its page in the
-same change. Build it with Zola 0.21 (`zola build` in `site/`; 0.23 cannot parse the
+same change; so does one that retires a limitation or changes a design choice listed
+there. Build it with Zola 0.21 (`zola build` in `site/`; 0.23 cannot parse the
 theme), which also checks every internal link and anchor.
 
 **Unbiased measurements** need `--indirect-clamp 0`: the default firefly clamp (10) is the
