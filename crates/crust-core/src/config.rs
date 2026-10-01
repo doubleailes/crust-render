@@ -52,6 +52,52 @@ use tracing::warn;
 /// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
 /// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
 /// comes back.
+/// `CRUST_TRI_PACKETS`: which triangle packet layout a kernel scene commits
+/// with — see `crust_rt::PacketLayout`. Both answer every query
+/// bit-identically; `gathered` is the layout before indexed packets existed
+/// (the honest A/B side), `indexed` halves the packet bytes and gathers
+/// vertices at every test, `auto` chooses per tree by triangle count.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TriPackets {
+    Gathered,
+    Indexed,
+    #[default]
+    Auto,
+}
+
+impl FromStr for TriPackets {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "gathered" => Ok(TriPackets::Gathered),
+            "indexed" => Ok(TriPackets::Indexed),
+            "auto" => Ok(TriPackets::Auto),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for TriPackets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TriPackets::Gathered => "gathered",
+            TriPackets::Indexed => "indexed",
+            TriPackets::Auto => "auto",
+        })
+    }
+}
+
+impl From<TriPackets> for crust_rt::PacketLayout {
+    fn from(t: TriPackets) -> Self {
+        match t {
+            TriPackets::Gathered => crust_rt::PacketLayout::Gathered,
+            TriPackets::Indexed => crust_rt::PacketLayout::Indexed,
+            TriPackets::Auto => crust_rt::PacketLayout::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PtexMipSpace {
     /// Refuse a chain reduced in the file's encoding; preload such a texture.
@@ -98,6 +144,9 @@ pub struct Config {
     /// `CRUST_SUBDIV`: refine subdivision cages (`false`: render every cage
     /// unrefined).
     pub subdiv: bool,
+    /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
+    /// (`gathered` | `indexed` | `auto`; bit-identical either way).
+    pub tri_packets: TriPackets,
     /// `CRUST_MTLX_OPT`: fold, hoist and prune MaterialX programs (`false`:
     /// run them as compiled; bit-identical).
     pub mtlx_opt: bool,
@@ -159,6 +208,7 @@ impl Default for Config {
             stream_import: true,
             mesh_bake: true,
             subdiv: true,
+            tri_packets: TriPackets::Auto,
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
@@ -194,6 +244,12 @@ impl Config {
             stream_import: flag("CRUST_STREAM_IMPORT", d.stream_import),
             mesh_bake: flag("CRUST_MESH_BAKE", d.mesh_bake),
             subdiv: flag("CRUST_SUBDIV", d.subdiv),
+            tri_packets: env_parse(
+                &lookup,
+                "CRUST_TRI_PACKETS",
+                d.tri_packets,
+                "`gathered`, `indexed` or `auto`",
+            ),
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
             ray_cones: flag("CRUST_RAY_CONES", d.ray_cones),
@@ -395,6 +451,17 @@ mod tests {
     fn mip_space_parses_its_two_names() {
         let file = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "file")]);
         assert_eq!(file.ptex_mip_space, PtexMipSpace::File);
+        for (spelling, want) in [
+            ("gathered", TriPackets::Gathered),
+            ("indexed", TriPackets::Indexed),
+            ("auto", TriPackets::Auto),
+        ] {
+            let c =
+                Config::from_lookup(|n| (n == "CRUST_TRI_PACKETS").then(|| spelling.to_string()));
+            assert_eq!(c.tri_packets, want);
+        }
+        let bad = Config::from_lookup(|n| (n == "CRUST_TRI_PACKETS").then(|| "fast".to_string()));
+        assert_eq!(bad.tri_packets, TriPackets::Auto);
         let bad = with(&[("CRUST_PTEX_STREAM_MIPSPACE", "srgb")]);
         assert_eq!(bad.ptex_mip_space, PtexMipSpace::Linear);
         for m in [PtexMipSpace::Linear, PtexMipSpace::File] {

@@ -49,14 +49,14 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
 /// it fails and says the trade-off has changed.
 #[test]
 fn eight_wide_packets_would_not_reduce_vector_rounds() {
-    let bvh = Bvh::new(uv_sphere_prims(80, 40));
+    let bvh = Bvh::new(uv_sphere_prims(80, 40), Layout::Gathered);
     let per_leaf: Vec<usize> = bvh
         .leaves
         .iter()
         .map(|leaf| {
             bvh.packets[leaf.pkt_first as usize..(leaf.pkt_first + leaf.pkt_count) as usize]
                 .iter()
-                .map(|p| p.active.count_ones() as usize)
+                .map(|p| p.lanes.active.count_ones() as usize)
                 .sum()
         })
         .collect();

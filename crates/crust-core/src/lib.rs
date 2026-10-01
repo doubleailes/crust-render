@@ -58,7 +58,13 @@ pub use crust_rt as rt;
 pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
-pub use config::{Config, PtexMipSpace, config};
+pub use config::{Config, PtexMipSpace, TriPackets, config};
+
+/// The triangle packet layout every kernel scene commits with — the
+/// `CRUST_TRI_PACKETS` switch, read once.
+pub fn packet_layout() -> crust_rt::PacketLayout {
+    config().tri_packets.into()
+}
 pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};

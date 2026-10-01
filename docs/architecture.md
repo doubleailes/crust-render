@@ -144,8 +144,15 @@ other. The pairs:
   are gated on `World::has_cutouts`; change one and NEE and the bounce side
   disagree.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
-  JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines.
-  Each is pinned by a test that compares bits, not tolerances.
+  indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
+  `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔
+  preloaded `u8` textures; tiles ↔ scanlines. Each is pinned by a test that
+  compares bits, not tolerances.
+- **Derived, not stored.** A hit's tangent (`tangent_of`) and a subdivided
+  mesh's Ptex sub-face corners (`SubFace::corners`) are computed from the
+  kernel's shared vertices and an 8-byte cell at the hit; the tests that pin
+  them against the tables they replaced must keep passing if either formula
+  moves.
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.
@@ -174,6 +181,7 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
 | `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
+| `CRUST_TRI_PACKETS` | `auto` | `lib.rs` (`packet_layout`) → every kernel `commit` | `gathered`: every tree keeps the 192-byte vertex-carrying packets (the layout before indexed packets); `indexed`: 92-byte index packets on every tree; `auto`: indexed above `crust_rt::INDEXED_PACKETS_FROM` triangles. Bit-identical |
 | `CRUST_MTLX_OPT` | on | `material/materialx.rs` | `0`: skip constant folding / hoisting / pruning (bit-identical) |
 | `CRUST_SHADER_JIT` | on | `material/materialx.rs` | `0`: interpret MaterialX programs instead of JIT (bit-identical) |
 | `CRUST_RAY_CONES` | on | `tracer/path.rs` | `0`: zero every texture footprint (finest mip always) |

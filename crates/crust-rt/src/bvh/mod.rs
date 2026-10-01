@@ -34,7 +34,9 @@ use crate::prim::{
 };
 use crate::ray::Ray;
 use crate::scene::PrimitiveBreakdown;
-use crate::triangle::{RayShear, Tri4, clip_triangle_aabb, triangle_intersect_sheared};
+use crate::triangle::{
+    Hit4, RayShear, Tri4, Tri4i, clip_triangle_aabb, triangle_intersect_sheared,
+};
 use glam::Vec3A;
 
 /// Diagnostic traversal counters, compiled out unless the
@@ -216,6 +218,14 @@ impl WideNode {
     }
 }
 
+/// Which packet table a tree uses — the resolved form of
+/// [`crate::PacketLayout`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Gathered,
+    Indexed,
+}
+
 /// Everything a scene expands into before its tree is built: the triangle
 /// records with the vertex and normal tables they index, the per-geometry
 /// table that says where each geometry's entries start, and the primitives
@@ -301,8 +311,11 @@ pub(crate) struct Bvh {
     wide: Box<[WideNode]>,
     /// Leaf payloads, indexed by a leaf lane's `child`.
     leaves: Box<[Leaf]>,
-    /// 4-wide triangle packets, grouped per leaf.
+    /// 4-wide triangle packets, grouped per leaf; one of the two tables
+    /// is empty, per `layout`.
     packets: Box<[Tri4]>,
+    packets_i: Box<[Tri4i]>,
+    layout: Layout,
     /// The one-at-a-time primitives of each leaf, as indices into `prims`;
     /// spatial splits may list a primitive in more than one leaf.
     indices: Box<[u32]>,
@@ -385,7 +398,7 @@ impl Candidate {
 }
 
 impl Bvh {
-    pub(crate) fn new(input: Primitives) -> Self {
+    pub(crate) fn new(input: Primitives, layout: Layout) -> Self {
         // One reference per primitive, in input order (the order decides
         // ties, so it is part of the build's determinism); degenerate
         // records get none.
@@ -398,7 +411,7 @@ impl Bvh {
         } else {
             let root_bbox = union_all(&refs);
             let subtree = build_subtree(&input, refs, 0, surface_area(&root_bbox));
-            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input);
+            let (wide, collected) = collapse(&subtree.nodes, &subtree.indices, &input, layout);
             (wide, collected, Some(root_bbox))
         };
 
@@ -407,6 +420,8 @@ impl Bvh {
             wide: wide.into_boxed_slice(),
             leaves: collected.leaves.into_boxed_slice(),
             packets: collected.packets.into_boxed_slice(),
+            packets_i: collected.packets_i.into_boxed_slice(),
+            layout,
             indices: collected.indices.into_boxed_slice(),
             tris: input.tris.into_boxed_slice(),
             n_degenerate,
@@ -599,16 +614,22 @@ impl Bvh {
         acc.bvh_nodes += size_of_val(&*self.wide);
         acc.leaves += size_of_val(&*self.leaves);
         acc.packets += size_of_val(&*self.packets);
+        acc.packets_indexed += size_of_val(&*self.packets_i);
         acc.indices += size_of_val(&*self.indices);
         acc.triangle_records += size_of_val(&*self.tris);
         acc.vertices += size_of_val(&*self.vertices);
         acc.vertex_normals += size_of_val(&*self.normals);
         acc.geometry_tables += size_of_val(&*self.geoms);
-        acc.lanes += 4 * self.packets.len();
+        acc.lanes += 4 * (self.packets.len() + self.packets_i.len());
         acc.lanes_filled += self
             .packets
             .iter()
-            .map(|p| p.active.count_ones() as usize)
+            .map(|p| p.lanes.active.count_ones() as usize)
+            .chain(
+                self.packets_i
+                    .iter()
+                    .map(|p| p.lanes.active.count_ones() as usize),
+            )
             .sum::<usize>();
         for p in &self.prims {
             match p {
@@ -660,7 +681,7 @@ impl Bvh {
     /// never look at it.
     #[inline]
     fn shear(&self, ray: &Ray) -> Option<RayShear> {
-        (!self.packets.is_empty()).then(|| RayShear::new(ray))
+        (!self.packets.is_empty() || !self.packets_i.is_empty()).then(|| RayShear::new(ray))
     }
 
     /// Total primitive references held by leaves — packed SIMD lanes plus
@@ -668,7 +689,16 @@ impl Bvh {
     /// duplicated references.
     #[cfg(test)]
     fn leaf_ref_count(&self) -> usize {
-        let packed: u32 = self.packets.iter().map(|p| p.active.count_ones()).sum();
+        let packed: u32 = self
+            .packets
+            .iter()
+            .map(|p| p.lanes.active.count_ones())
+            .sum::<u32>()
+            + self
+                .packets_i
+                .iter()
+                .map(|p| p.lanes.active.count_ones())
+                .sum::<u32>();
         packed as usize + self.indices.len()
     }
 
@@ -761,37 +791,36 @@ impl Bvh {
         let mut best: Option<Candidate> = None;
 
         let first = leaf.pkt_first as usize;
-        for packet in &self.packets[first..first + leaf.pkt_count as usize] {
-            let shear = shear.expect("a leaf with packets implies the scene has triangles");
-            let out = packet.intersect(shear, ray.mask, t_min, closest);
-            let mut hits = out.hits;
-            while hits != 0 {
-                let lane = hits.trailing_zeros() as usize;
-                hits &= hits - 1;
-                // Lanes were tested against the `closest` on entry, which
-                // earlier lanes may since have shrunk. The comparison is
-                // strict-greater, not greater-or-equal, so an exact tie
-                // resolves to the later primitive exactly as a run of
-                // scalar `hit` calls would.
-                if out.t[lane] > closest {
-                    continue;
+        let range = first..first + leaf.pkt_count as usize;
+        match self.layout {
+            Layout::Gathered => {
+                for packet in &self.packets[range] {
+                    let shear = shear.expect("a leaf with packets implies the scene has triangles");
+                    let out = packet.intersect(shear, ray.mask, t_min, closest);
+                    self.lanes_hit(
+                        &packet.lanes,
+                        out,
+                        ray,
+                        shear,
+                        t_min,
+                        &mut closest,
+                        &mut best,
+                    );
                 }
-                closest = out.t[lane];
-                best = Some(Candidate::Lane {
-                    rec: packet.rec[lane],
-                    t: out.t[lane],
-                    u: out.u[lane],
-                    v: out.v[lane],
-                });
             }
-            // Lanes sitting exactly on an edge: the f64 tie-break is scalar.
-            let mut fb = out.fallback;
-            while fb != 0 {
-                let lane = fb.trailing_zeros() as usize;
-                fb &= fb - 1;
-                if let Some(hit) = self.tri_hit(packet.rec[lane], ray, shear, t_min, closest) {
-                    closest = hit.t;
-                    best = Some(Candidate::Prim(hit));
+            Layout::Indexed => {
+                for packet in &self.packets_i[range] {
+                    let shear = shear.expect("a leaf with packets implies the scene has triangles");
+                    let out = packet.intersect(&self.vertices, shear, ray.mask, t_min, closest);
+                    self.lanes_hit(
+                        &packet.lanes,
+                        out,
+                        ray,
+                        shear,
+                        t_min,
+                        &mut closest,
+                        &mut best,
+                    );
                 }
             }
         }
@@ -804,6 +833,52 @@ impl Bvh {
             }
         }
         best
+    }
+
+    /// Folds one packet's lane verdicts into the leaf's running best: hit
+    /// lanes in lane order, then the `f64` tie-break lanes.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn lanes_hit(
+        &self,
+        lanes: &crate::triangle::LaneMasks,
+        out: Hit4,
+        ray: &Ray,
+        shear: &RayShear,
+        t_min: f32,
+        closest: &mut f32,
+        best: &mut Option<Candidate>,
+    ) {
+        let mut hits = out.hits;
+        while hits != 0 {
+            let lane = hits.trailing_zeros() as usize;
+            hits &= hits - 1;
+            // Lanes were tested against the `closest` on entry, which
+            // earlier lanes may since have shrunk. The comparison is
+            // strict-greater, not greater-or-equal, so an exact tie
+            // resolves to the later primitive exactly as a run of
+            // scalar `hit` calls would.
+            if out.t[lane] > *closest {
+                continue;
+            }
+            *closest = out.t[lane];
+            *best = Some(Candidate::Lane {
+                rec: lanes.rec[lane],
+                t: out.t[lane],
+                u: out.u[lane],
+                v: out.v[lane],
+            });
+        }
+        // Lanes sitting exactly on an edge: the f64 tie-break is scalar.
+        let mut fb = out.fallback;
+        while fb != 0 {
+            let lane = fb.trailing_zeros() as usize;
+            fb &= fb - 1;
+            if let Some(hit) = self.tri_hit(lanes.rec[lane], ray, shear, t_min, *closest) {
+                *closest = hit.t;
+                *best = Some(Candidate::Prim(hit));
+            }
+        }
     }
 
     /// Early-exit occlusion traversal: no ordering, returns on the first
@@ -850,20 +925,26 @@ impl Bvh {
         let leaf = &self.leaves[leaf_idx as usize];
 
         let first = leaf.pkt_first as usize;
-        for packet in &self.packets[first..first + leaf.pkt_count as usize] {
-            // Matching `TrianglePrim::hit_any`, occlusion needs no normal:
-            // any lane in range occludes.
-            let shear = shear.expect("a leaf with packets implies the scene has triangles");
-            let out = packet.intersect(shear, ray.mask, t_min, t_max);
-            if out.hits != 0 {
-                return true;
+        let range = first..first + leaf.pkt_count as usize;
+        // Matching `tri_hit_any`, occlusion needs no normal: any lane in
+        // range occludes.
+        match self.layout {
+            Layout::Gathered => {
+                for packet in &self.packets[range] {
+                    let shear = shear.expect("a leaf with packets implies the scene has triangles");
+                    let out = packet.intersect(shear, ray.mask, t_min, t_max);
+                    if self.lanes_occlude(&packet.lanes, out, ray, shear, t_min, t_max) {
+                        return true;
+                    }
+                }
             }
-            let mut fb = out.fallback;
-            while fb != 0 {
-                let lane = fb.trailing_zeros() as usize;
-                fb &= fb - 1;
-                if self.tri_hit_any(packet.rec[lane], ray, shear, t_min, t_max) {
-                    return true;
+            Layout::Indexed => {
+                for packet in &self.packets_i[range] {
+                    let shear = shear.expect("a leaf with packets implies the scene has triangles");
+                    let out = packet.intersect(&self.vertices, shear, ray.mask, t_min, t_max);
+                    if self.lanes_occlude(&packet.lanes, out, ray, shear, t_min, t_max) {
+                        return true;
+                    }
                 }
             }
         }
@@ -871,6 +952,32 @@ impl Bvh {
         let first = leaf.idx_first as usize;
         for &pi in &self.indices[first..first + leaf.idx_count as usize] {
             if self.prims[pi as usize].hit_any(ray, t_min, t_max) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Bvh {
+    #[inline]
+    fn lanes_occlude(
+        &self,
+        lanes: &crate::triangle::LaneMasks,
+        out: Hit4,
+        ray: &Ray,
+        shear: &RayShear,
+        t_min: f32,
+        t_max: f32,
+    ) -> bool {
+        if out.hits != 0 {
+            return true;
+        }
+        let mut fb = out.fallback;
+        while fb != 0 {
+            let lane = fb.trailing_zeros() as usize;
+            fb &= fb - 1;
+            if self.tri_hit_any(lanes.rec[lane], ray, shear, t_min, t_max) {
                 return true;
             }
         }

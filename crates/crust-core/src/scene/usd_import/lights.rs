@@ -357,7 +357,7 @@ fn emit_round_light(
             },
         });
         Geometry::Instance {
-            scene: Arc::new(b.commit()),
+            scene: Arc::new(b.commit_with(crate::packet_layout())),
             transform: l2w,
             transform_end: None,
         }
