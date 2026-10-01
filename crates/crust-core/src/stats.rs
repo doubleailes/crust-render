@@ -1361,6 +1361,55 @@ mod tests {
         assert!(!out.contains("spheres"));
     }
 
+    /// The kernel-memory block names every table the triangle storage holds,
+    /// splits the packets by layout, and derives the two numbers a layout
+    /// change is judged by: the lane fill and the bytes per resident triangle.
+    #[test]
+    fn report_shows_the_geometry_layout() {
+        let fp = crate::rt::MemoryFootprint {
+            vertices: 1_200,
+            vertex_normals: 1_200,
+            triangle_records: 4_800,
+            packets: 0,
+            packets_indexed: 4_600,
+            bvh_nodes: 2_048,
+            leaves: 320,
+            geometry_tables: 24,
+            lanes: 200,
+            lanes_filled: 190,
+            ..Default::default()
+        };
+        let s = RenderStats {
+            scene: SceneCounters {
+                top_level: PrimitiveCounts {
+                    triangles: 200,
+                    ..Default::default()
+                },
+                footprint: fp,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = s.report();
+        for row in [
+            "vertices",
+            "vertex normals",
+            "triangle records",
+            "triangle packets (indexed)",
+            "geometry tables",
+        ] {
+            assert!(out.contains(row), "missing {row}: {out}");
+        }
+        assert!(!out.contains("triangle packets (gathered)"), "{out}");
+        assert!(
+            out.contains("lanes filled               95.0% (190 of 200)"),
+            "{out}"
+        );
+        // 14 192 bytes over 200 triangles.
+        assert!(out.contains("bytes per triangle         71.0"), "{out}");
+        assert_eq!(fp.total(), 14_192);
+    }
+
     #[test]
     fn unique_breakdown_is_shown_only_when_it_differs() {
         let flat = PrimitiveCounts {

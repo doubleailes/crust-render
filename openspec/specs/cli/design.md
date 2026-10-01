@@ -50,6 +50,18 @@ cargo run --release -- -i samples/animation.usda -f 5 -o frame.0005.exr
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
 cargo run --release -- -i samples/curves.usda --stats
+
+# The geometry layout: --stats lists what the kernel holds per table (vertices,
+# per-vertex normals, 24-byte triangle records, packets by layout, nodes), the
+# share of packet lanes filled, and the kernel bytes per resident triangle --
+# the one number a storage change is judged by (compact-triangle-storage:
+# 196 -> 104 gathered on the subdivision stress grid). The two switches A/B
+# the layout: `gathered` is the 192-byte packet before indexed packets existed,
+# `indexed` the 92-byte one that gathers vertices at every test (bit-identical),
+# `auto` picks indexed above crust_rt::INDEXED_PACKETS_FROM triangles.
+python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
+CRUST_TRI_PACKETS=gathered target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
+CRUST_TRI_PACKETS=indexed  target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
 # ...and inside the render: Trace vs EvalBsdfs vs Texture vs SurfaceLighting,
 # flat / by category / by execution tree. Costs render time (~15-20%, printed
 # with the report), so never take a Render time from a --profile run.
