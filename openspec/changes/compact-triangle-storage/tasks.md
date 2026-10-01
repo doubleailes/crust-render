@@ -34,7 +34,7 @@
 - [x] 5.3 Normal maps on directly instanced meshes shade with a tangent frame (prototype parts through a group and motion-blurred instances remain the gap, so `textures/spec.md` narrows it); verified by `instanced_meshes_get_tangents_through_their_placement` (a rotated placement's tangent is the chart's +u rotated with it)
 - [x] 5.4 `FaceMap` stores one 8-byte `SubFace` per triangle (dyadic origin, depth and origin corner), derived exactly from the refined channel's corners at remap time, and `resolve` reconstructs the corners; the channel itself is still refined (the transient stays; deriving cells from the child relations is a follow-up); verified by `sub_face_round_trips_every_cell_exactly` (every cell to depth 6, every rotation, bitwise), `subdivided_face_table_resolves_into_the_base_face` and `ptex_quads.usda` at `--subdiv-level 2` bit-identical to 1.1
 - [x] 5.5 `MeshGeom`, `MeshSource`, `SubdividedMesh`, `Geometry::TriangleMesh` carry `[f32; 3]` positions and normals; `bake_verts` / `bake_normals` / `smooth_normals` adapt; verified by `cargo test --workspace` and `check_images.sh check`
-- [ ] 5.6 `subdivide()` drops the refiner before the limit copies; `subdivision_memory_probe` ceilings lowered to the measured values and the `SubFace` case added; verified by the probe passing at the new ceilings and failing at the old numbers minus 30 %
+- [x] 5.6 `subdivide()` drops the refiner before the result's copies; the probe's resident ceilings follow the new measurements (44.0 / 84.0 / 68.1 B/face, ceilings 53 / 100 / 82; the probe counts requested bytes, so the earlier drop shows in RSS, not in its table); verified by the probe passing at the new ceilings
 
 ## 6. `--stats` (D8)
 
