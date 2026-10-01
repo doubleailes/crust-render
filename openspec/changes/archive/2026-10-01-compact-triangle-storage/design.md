@@ -334,11 +334,17 @@ Acceptance, measured with `--stats` rather than modelled (outcome in brackets):
   traverse RSS 285 MiB against 524 before, 54 %; whole-process peak 809 → 508 MiB];
 - DPEL teapot, level 2 (1.04 M triangles, textured): kernel from 212.95 MiB to ≤ 115
   MiB; the importer's UV tables from 44 B to ≤ 20 B per triangle (the `Traverse prims`
-  RSS delta against `CRUST_SUBDIV=0`) [not measured: the teapot payload and ALab are
-  not in this checkout; the per-triangle tables went 24 + 16 + 4 → 12 + 4 by
-  construction];
+  RSS delta against `CRUST_SUBDIV=0`) [kernel met: 110.14 MiB, 111 B per triangle,
+  lanes 82.6 %, peak 1 021.7 → 744.4 MiB; the payloads live outside the checkout, in
+  `~/Workspace/samples/`. The UV tables are not isolated by that delta, which also
+  counts the refined positions, normals and indices: it is 221.8 B per refined
+  triangle at `616c53b` (rebuilt, reproducing 212.95 MiB) and 196.2 B now, 25.6 B
+  less, against the 28 B the tables lose by construction (24 + 16 + 4 → 12 + 4) plus
+  the vertex arrays' unpadding. So the ≤ 20 B target is met by construction and
+  consistent with, not proven by, RSS];
 - ALab frame 1004 at level 1, on a machine that holds it: kernel from 19.64 GiB to
-  ≤ 11 GiB, lanes filled ≥ 80 % [not measured, same reason];
+  ≤ 11 GiB, lanes filled ≥ 80 % [met: 10.47 GiB for the same 81 836 458 triangles,
+  137 B per triangle, lanes 83.2 %; peak RSS 49.01 → 36.86 GiB];
 - `bench_ab.sh` over the sample scenes within noise for `gathered` [met: eight samples,
   base against the records build, min −4.5 % to +3.4 %, the latter a 0.56 s render];
   the `indexed` threshold chosen so that `ray_throughput --large` is not slower than

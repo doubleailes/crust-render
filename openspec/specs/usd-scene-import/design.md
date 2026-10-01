@@ -258,7 +258,13 @@ Schema mapping:
     | peak RSS | 456 MiB | 582 MiB | 1.02 GiB |
     | traverse + commit | 0.09 s | 0.32 s | 1.33 s |
 
-    Its 18 s import is texture decoding either way.
+    Its 18 s import is texture decoding either way. The table predates
+    `compact-triangle-storage`; after it (measured 2026-10-01 at `24f9458`, the
+    baseline rebuilt at `616c53b` reproducing 212.95 MiB) level 2 holds 110.14 MiB of
+    kernel (111 bytes per triangle, lanes 82.6 % filled), peaks at 744 MiB instead of
+    1.02 GiB, and its importer keeps 25.6 bytes per refined triangle less (the
+    `Traverse prims` RSS above the cage's: 206.1 → 182.3 MiB for 974 532 triangles); the
+    cage holds 6.98 MiB.
   - ALab, frame 1004, `renderCam` (its render meshes take the fallback scheme), with
     `--stats`; level 0 at 640×360 × 8 spp, level 1 at 1920×1080 × 32 spp (parse and
     memory do not depend on either):
@@ -270,7 +276,12 @@ Schema mapping:
     | peak RSS | 32.30 GiB | 49.01 GiB |
     | Parse USD stage | 2:54 | 4:07 |
 
-    Level 1 fits a 61 GiB machine with ~12 GiB to spare; level 2 would not.
+    After `compact-triangle-storage` (2026-10-01, `24f9458`, 640×360 × 1 spp) level 1
+    holds the same 81 836 458 triangles in 10.47 GiB of kernel instead of 19.64 (137
+    bytes per triangle, lanes 83.2 % filled) and peaks at 36.86 GiB instead of 49.01;
+    the parse takes 4:15.
+
+    Level 1 fits a 61 GiB machine with ~24 GiB to spare (~12 before); level 2 would not.
 - `UsdGeomBasisCurves` → an instanced `rt::Geometry::RoundCurves` batch: `linear` curves
   directly, `cubic` (bezier | bspline | catmullRom) as one `CubicCurveSegment` per span,
   converted to Bézier control points and subdivided per ray query by the kernel's cubic
