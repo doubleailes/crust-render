@@ -96,7 +96,7 @@ fn thin_slab_transmits_through_the_far_side() {
     // Two big spheres would not share a surface; a thin box mesh does.
     let (w, h) = (50.0f32, 0.02f32);
     let v = |x: f32, y: f32, z: f32| Vec3A::new(x, y, z);
-    let vertices = vec![
+    let vertices = [
         v(-w, -w, 0.0),
         v(w, -w, 0.0),
         v(w, w, 0.0),
@@ -121,7 +121,7 @@ fn thin_slab_transmits_through_the_far_side() {
         [3, 4, 0],
     ];
     let world = world_of(vec![Geometry::TriangleMesh {
-        vertices,
+        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
         indices,
         normals: None,
     }]);

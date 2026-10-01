@@ -64,10 +64,12 @@ pub(super) struct PartSlot {
     /// instancing it passed through (the kernel forwards the innermost
     /// `prim_id` unchanged).
     faces: Option<Arc<FaceMap>>,
-    /// Per-triangle texture coordinates, when this slot's material reads
-    /// them. Carried on the same terms as `faces`, and — like every instanced
-    /// placement — without tangents: the table is the prototype's and each
-    /// placement transforms it differently. See [`UvMap::tangents`].
+    /// The slot's texture chart, when its material reads one. Carried on
+    /// the same terms as `faces`. A part placed through a group forwards its
+    /// id, which `World` cannot trace back to a scene and transform, so
+    /// such a hit shades without a tangent frame (normal maps fall back to
+    /// the geometric normal there); a direct instance of a mesh gets its
+    /// tangent at the hit.
     uvs: Option<Arc<UvMap>>,
     /// Uniform scale from the slot's own geometry frame, which its tables'
     /// densities are in, to the part's frame. 1 for a leaf part; inside a

@@ -5,7 +5,7 @@
 use crust_core::rt::Geometry;
 use crust_core::{
     Emissive, FaceMap, FanSlice, HitRecord, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Material,
-    OpenPBR, PathSampler, Ray, UvMap, Vec3A, WorldBuilder, materialx,
+    OpenPBR, PathSampler, Ray, SubFace, UvMap, Vec3A, WorldBuilder, materialx, tangent_of,
 };
 use std::sync::Arc;
 
@@ -27,9 +27,13 @@ fn quad_tris() -> Vec<[u32; 3]> {
     vec![[0, 1, 2], [0, 2, 3]]
 }
 
+fn arrays(v: &[Vec3A]) -> Vec<[f32; 3]> {
+    v.iter().map(|p| p.to_array()).collect()
+}
+
 fn quad() -> Geometry {
     Geometry::TriangleMesh {
-        vertices: quad_verts(),
+        vertices: arrays(&quad_verts()),
         indices: quad_tris(),
         normals: None,
     }
@@ -213,7 +217,7 @@ fn quad_face_map() -> FaceMap {
     FaceMap {
         faces: vec![0, 0],
         slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
-        uvs: None,
+        sub: None,
         density: Vec::new(),
     }
 }
@@ -238,7 +242,7 @@ fn face_map_triangle_slice_is_the_identity_and_ngons_are_unmappable() {
     let m = FaceMap {
         faces: vec![3, 4],
         slices: vec![FanSlice::Triangle, FanSlice::Unmappable],
-        uvs: None,
+        sub: None,
         density: Vec::new(),
     };
     let (f, u, v) = m.resolve(0, 0.2, 0.3, false).unwrap();
@@ -265,13 +269,16 @@ fn face_map_clamps_to_the_unit_square() {
 }
 
 #[test]
-fn face_map_explicit_corner_uvs_interpolate() {
-    // A refined triangle covering the sub-rectangle [0.5,1]×[0,0.5] of its
-    // cage face, as a subdivided mesh would carry it.
+fn face_map_sub_face_corners_interpolate() {
+    // The lower fan half of a refined quad covering the cell [0.5,1]×[0,0.5]
+    // of its cage face, as a subdivided mesh carries it: corners (0.5,0),
+    // (1,0), (1,0.5).
+    let cell = SubFace::from_corners(&[[0.5, 0.0], [1.0, 0.0], [1.0, 0.5], [0.5, 0.5]])
+        .expect("a dyadic cell");
     let m = FaceMap {
         faces: vec![7],
-        slices: vec![FanSlice::Triangle],
-        uvs: Some(vec![[[0.5, 0.0], [1.0, 0.0], [1.0, 0.5]]]),
+        slices: vec![FanSlice::QuadLower],
+        sub: Some(vec![cell]),
         density: Vec::new(),
     };
     let (f, u, v) = m.resolve(0, 0.0, 0.0, false).unwrap();
@@ -284,11 +291,11 @@ fn face_map_explicit_corner_uvs_interpolate() {
     // Centroid.
     let (_, u, v) = m.resolve(0, 1.0 / 3.0, 1.0 / 3.0, false).unwrap();
     assert!(approx(u, 2.5 / 3.0, 1e-5) && approx(v, 0.5 / 3.0, 1e-5));
-    // Even with explicit UVs an unmappable slice is declined.
+    // Even with a cell an unmappable slice is declined.
     let n = FaceMap {
         faces: vec![7],
         slices: vec![FanSlice::Unmappable],
-        uvs: Some(vec![[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]]),
+        sub: Some(vec![cell]),
         density: Vec::new(),
     };
     assert!(n.resolve(0, 0.2, 0.2, false).is_none());
@@ -337,7 +344,7 @@ fn a_mirrored_placement_swaps_the_face_parameterisation() {
     let mut b = WorldBuilder::new();
     let id = b.attach(
         Geometry::TriangleMesh {
-            vertices: verts,
+            vertices: arrays(&verts),
             indices: tris,
             normals: None,
         },
@@ -372,11 +379,8 @@ fn a_mirrored_placement_swaps_the_face_parameterisation() {
 
 fn quad_uv_map() -> UvMap {
     UvMap {
-        uvs: vec![
-            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-            [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-        ],
-        tangents: Vec::new(),
+        values: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        corners: vec![[0, 1, 2], [0, 2, 3]],
         density: Vec::new(),
     }
 }
@@ -384,94 +388,141 @@ fn quad_uv_map() -> UvMap {
 #[test]
 fn uv_map_interpolates_corners_and_defaults_tangent_to_zero() {
     let m = quad_uv_map();
-    let ((u, v), t) = m.resolve(0, 0.5, 0.25, false).unwrap();
+    let ((u, v), t) = m.resolve(0, 0.5, 0.25, false, None).unwrap();
     assert!(approx(u, 0.75, 1e-6) && approx(v, 0.25, 1e-6));
     assert_eq!(t, Vec3A::ZERO);
-    let ((u, v), _) = m.resolve(1, 0.25, 0.5, false).unwrap();
+    let ((u, v), _) = m.resolve(1, 0.25, 0.5, false, None).unwrap();
     assert!(approx(u, 0.25, 1e-6) && approx(v, 0.75, 1e-6));
-    assert!(m.resolve(5, 0.1, 0.1, false).is_none());
+    assert!(m.resolve(5, 0.1, 0.1, false, None).is_none());
     // Not clamped: a UDIM chart addresses tiles by the integer part.
     let m = UvMap {
-        uvs: vec![[[2.0, 1.0], [3.0, 1.0], [3.0, 2.0]]],
-        tangents: Vec::new(),
+        values: vec![[2.0, 1.0], [3.0, 1.0], [3.0, 2.0]],
+        corners: vec![[0, 1, 2]],
         density: Vec::new(),
     };
-    let ((u, v), _) = m.resolve(0, 0.5, 0.5, false).unwrap();
+    let ((u, v), _) = m.resolve(0, 0.5, 0.5, false, None).unwrap();
     assert!(approx(u, 3.0, 1e-6) && approx(v, 1.5, 1e-6));
 }
 
 #[test]
 fn uv_map_swap_restores_original_vertex_order() {
     let m = quad_uv_map();
-    let a = m.resolve(0, 0.6, 0.1, false).unwrap();
-    let b = m.resolve(0, 0.1, 0.6, true).unwrap();
+    let a = m.resolve(0, 0.6, 0.1, false, None).unwrap();
+    let b = m.resolve(0, 0.1, 0.6, true, None).unwrap();
     assert_eq!(a.0, b.0);
 }
 
+/// The triangle's three world-space vertices, in the kernel's order.
+fn tri_verts(verts: &[Vec3A], tri: [u32; 3]) -> [Vec3A; 3] {
+    tri.map(|i| verts[i as usize])
+}
+
 #[test]
-fn build_tangents_follows_increasing_u() {
-    let mut m = quad_uv_map();
-    m.build_tangents(&quad_verts(), &quad_tris());
-    assert_eq!(m.tangents.len(), 2);
-    for t in &m.tangents {
-        assert!(t.abs_diff_eq(Vec3A::X, 1e-5), "{t}");
+fn tangent_follows_increasing_u() {
+    let m = quad_uv_map();
+    for (t, tri) in quad_tris().into_iter().enumerate() {
+        let (_, tangent) = m
+            .resolve(
+                t as u32,
+                0.3,
+                0.3,
+                false,
+                Some(tri_verts(&quad_verts(), tri)),
+            )
+            .unwrap();
+        assert!(tangent.abs_diff_eq(Vec3A::X, 1e-5), "{tangent}");
     }
     // A chart rotated 90°: u now grows along +Y.
-    let mut r = UvMap {
-        uvs: vec![
-            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
-            [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0]],
-        ],
-        tangents: Vec::new(),
+    let r = UvMap {
+        values: vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+        corners: vec![[0, 1, 2], [0, 2, 3]],
         density: Vec::new(),
     };
-    r.build_tangents(&quad_verts(), &quad_tris());
-    for t in &r.tangents {
-        assert!(t.abs_diff_eq(Vec3A::Y, 1e-5), "{t}");
+    for (t, tri) in quad_tris().into_iter().enumerate() {
+        let (_, tangent) = r
+            .resolve(
+                t as u32,
+                0.3,
+                0.3,
+                false,
+                Some(tri_verts(&quad_verts(), tri)),
+            )
+            .unwrap();
+        assert!(tangent.abs_diff_eq(Vec3A::Y, 1e-5), "{tangent}");
+    }
+}
+
+/// A mirrored placement swaps the kernel's second and third vertices; the
+/// tangent is still derived in the chart's original order, so it comes out
+/// as the mirrored mesh's +X.
+#[test]
+fn tangent_unswaps_a_mirrored_placement() {
+    let m = quad_uv_map();
+    let mirrored: Vec<Vec3A> = quad_verts()
+        .into_iter()
+        .map(|p| Vec3A::new(1.0 - p.x, p.y, p.z))
+        .collect();
+    for (t, [a, b, c]) in quad_tris().into_iter().enumerate() {
+        let kernel_order = tri_verts(&mirrored, [a, c, b]);
+        let (_, tangent) = m
+            .resolve(t as u32, 0.3, 0.3, true, Some(kernel_order))
+            .unwrap();
+        assert!(tangent.abs_diff_eq(-Vec3A::X, 1e-5), "{tangent}");
     }
 }
 
 #[test]
-fn build_tangents_gives_zero_for_degenerate_charts() {
-    let mut m = UvMap {
-        uvs: vec![
-            [[0.3, 0.3], [0.3, 0.3], [0.3, 0.3]],
-            [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
-        ],
-        tangents: Vec::new(),
+fn tangent_is_zero_for_degenerate_charts() {
+    let m = UvMap {
+        values: vec![[0.3, 0.3], [0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+        corners: vec![[0, 0, 0], [1, 2, 3]],
         density: Vec::new(),
     };
-    m.build_tangents(&quad_verts(), &quad_tris());
-    assert_eq!(m.tangents, vec![Vec3A::ZERO, Vec3A::ZERO]);
-    // A triangle with no UV entry at all also gets zero, never a panic.
-    let mut short = UvMap {
-        uvs: vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]],
-        tangents: Vec::new(),
+    for (t, tri) in quad_tris().into_iter().enumerate() {
+        let (_, tangent) = m
+            .resolve(
+                t as u32,
+                0.3,
+                0.3,
+                false,
+                Some(tri_verts(&quad_verts(), tri)),
+            )
+            .unwrap();
+        assert_eq!(tangent, Vec3A::ZERO);
+    }
+    // A triangle with no corner entry at all has no UVs, never a panic.
+    let short = UvMap {
+        values: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+        corners: vec![[0, 1, 2]],
         density: Vec::new(),
     };
-    short.build_tangents(&quad_verts(), &quad_tris());
-    assert_eq!(short.tangents.len(), 2);
-    assert!(short.tangents[0].abs_diff_eq(Vec3A::X, 1e-5));
-    assert_eq!(short.tangents[1], Vec3A::ZERO);
+    assert!(short.resolve(1, 0.3, 0.3, false, None).is_none());
+    assert_eq!(
+        tangent_of(
+            &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            Vec3A::ZERO,
+            Vec3A::X,
+            Vec3A::ONE
+        ),
+        Vec3A::X
+    );
 }
 
 #[test]
-fn build_tangents_is_unit_length_on_a_scaled_mesh() {
+fn tangent_is_unit_length_on_a_scaled_mesh() {
     let verts: Vec<Vec3A> = quad_verts().into_iter().map(|p| p * 7.0).collect();
-    let mut m = quad_uv_map();
-    m.build_tangents(&verts, &quad_tris());
-    for t in &m.tangents {
-        assert!(approx(t.length(), 1.0, 1e-5));
+    let m = quad_uv_map();
+    for (t, tri) in quad_tris().into_iter().enumerate() {
+        let (_, tangent) = m
+            .resolve(t as u32, 0.3, 0.3, false, Some(tri_verts(&verts, tri)))
+            .unwrap();
+        assert!(approx(tangent.length(), 1.0, 1e-5));
     }
-    // Rebuilding replaces rather than appends.
-    m.build_tangents(&verts, &quad_tris());
-    assert_eq!(m.tangents.len(), 2);
 }
 
 #[test]
 fn world_hits_carry_uv_and_tangent_from_the_uv_map() {
-    let mut m = quad_uv_map();
-    m.build_tangents(&quad_verts(), &quad_tris());
+    let m = quad_uv_map();
     let mut b = WorldBuilder::new();
     let id = b.attach(quad(), emissive(1.0));
     b.set_uv_map(id, Arc::new(m), false);
@@ -524,7 +575,7 @@ fn side_tables_are_per_geometry() {
         Geometry::TriangleMesh {
             vertices: quad_verts()
                 .into_iter()
-                .map(|p| p + Vec3A::new(2.0, 0.0, 0.0))
+                .map(|p| (p + Vec3A::new(2.0, 0.0, 0.0)).to_array())
                 .collect(),
             indices: quad_tris(),
             normals: None,
@@ -1010,7 +1061,7 @@ fn a_missing_mtlx_material_is_an_error() {
 #[test]
 fn uv_density_is_one_for_a_unit_chart_on_a_unit_quad() {
     let mut m = quad_uv_map();
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     assert_eq!(m.density.len(), 2);
     for i in 0..2 {
         assert!(approx(m.density(i), 1.0, 1e-6), "{}", m.density(i));
@@ -1022,7 +1073,10 @@ fn uv_density_scales_inversely_with_the_mesh() {
     // The chart is fixed while the mesh grows 7×, so each UV unit now covers
     // 7 world units and the density is 1/7. This is exactly the conversion a
     // footprint in world units needs to reach texel space.
-    let verts: Vec<Vec3A> = quad_verts().into_iter().map(|p| p * 7.0).collect();
+    let verts: Vec<[f32; 3]> = quad_verts()
+        .into_iter()
+        .map(|p| (p * 7.0).to_array())
+        .collect();
     let mut m = quad_uv_map();
     m.build_density(&verts, &quad_tris());
     for i in 0..2 {
@@ -1039,15 +1093,15 @@ fn uv_density_is_an_area_ratio_so_a_mirror_needs_no_swap() {
     // index swap. A density must not: exchanging two vertices flips the sign
     // of both areas and leaves their ratio alone.
     let mut m = quad_uv_map();
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     let mut mirrored = quad_uv_map();
-    mirrored.uvs = mirrored
-        .uvs
+    mirrored.corners = mirrored
+        .corners
         .iter()
-        .map(|uv| [uv[0], uv[2], uv[1]])
+        .map(|c| [c[0], c[2], c[1]])
         .collect();
     let swapped: Vec<[u32; 3]> = quad_tris().iter().map(|t| [t[0], t[2], t[1]]).collect();
-    mirrored.build_density(&quad_verts(), &swapped);
+    mirrored.build_density(&arrays(&quad_verts()), &swapped);
     assert_eq!(m.density, mirrored.density);
 }
 
@@ -1055,14 +1109,14 @@ fn uv_density_is_an_area_ratio_so_a_mirror_needs_no_swap() {
 fn uv_density_is_zero_where_there_is_no_answer() {
     let mut m = UvMap {
         // A collapsed chart, and a chart with no entry for the second tri.
-        uvs: vec![[[0.3, 0.3], [0.3, 0.3], [0.3, 0.3]]],
-        tangents: Vec::new(),
+        values: vec![[0.3, 0.3]],
+        corners: vec![[0, 0, 0]],
         density: Vec::new(),
     };
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     assert_eq!(m.density, vec![0.0, 0.0]);
     // A degenerate *world* triangle has no density either.
-    let flat = vec![Vec3A::ZERO; 4];
+    let flat = vec![[0.0f32; 3]; 4];
     let mut q = quad_uv_map();
     q.build_density(&flat, &quad_tris());
     assert_eq!(q.density, vec![0.0, 0.0]);
@@ -1078,17 +1132,17 @@ fn face_density_uses_the_half_unit_square_every_fan_slice_covers() {
     // onto a region of area exactly 0.5 — and the unit quad's triangles have
     // world area 0.5 too, so the density is exactly 1.
     let mut m = quad_face_map();
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     for i in 0..2 {
         assert!(approx(m.density(i), 1.0, 1e-6), "{}", m.density(i));
     }
     let mut tri = FaceMap {
         faces: vec![0, 1],
         slices: vec![FanSlice::Triangle, FanSlice::Triangle],
-        uvs: None,
+        sub: None,
         density: Vec::new(),
     };
-    tri.build_density(&quad_verts(), &quad_tris());
+    tri.build_density(&arrays(&quad_verts()), &quad_tris());
     for i in 0..2 {
         assert!(approx(tri.density(i), 1.0, 1e-6), "{}", tri.density(i));
     }
@@ -1100,16 +1154,15 @@ fn face_density_reads_sub_face_uvs_on_a_subdivided_mesh() {
     // its parametric area is 1/16 of the fan slice's — using the 0.5 constant
     // would over-estimate the footprint 4× per axis and send every Ptex
     // lookup on a subdivided mesh to its coarsest level.
+    let cell = SubFace::from_corners(&[[0.0, 0.0], [0.25, 0.0], [0.25, 0.25], [0.0, 0.25]])
+        .expect("a dyadic cell");
     let mut m = FaceMap {
         faces: vec![0, 0],
         slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
-        uvs: Some(vec![
-            [[0.0, 0.0], [0.25, 0.0], [0.25, 0.25]],
-            [[0.0, 0.0], [0.25, 0.25], [0.0, 0.25]],
-        ]),
+        sub: Some(vec![cell, cell]),
         density: Vec::new(),
     };
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     for i in 0..2 {
         assert!(approx(m.density(i), 0.25, 1e-6), "{}", m.density(i));
     }
@@ -1120,10 +1173,10 @@ fn face_density_is_zero_for_an_unmappable_slice() {
     let mut m = FaceMap {
         faces: vec![0, 0],
         slices: vec![FanSlice::Unmappable, FanSlice::QuadUpper],
-        uvs: None,
+        sub: None,
         density: Vec::new(),
     };
-    m.build_density(&quad_verts(), &quad_tris());
+    m.build_density(&arrays(&quad_verts()), &quad_tris());
     assert_eq!(m.density(0), 0.0);
     assert!(approx(m.density(1), 1.0, 1e-6));
 }
@@ -1261,4 +1314,45 @@ fn emitted_at_defaults_to_the_directional_emission() {
         m.coat_weight = 0.8;
         assert_eq!(m.emitted_at(&r_in, &rec, cos), m.emitted_directional(cos));
     }
+}
+
+/// A mesh placed through a direct instance shades with a tangent frame:
+/// the hit's vertices are read from the prototype in local space and
+/// carried through the placement, so a rotated instance's tangent is the
+/// chart's +u direction rotated with it. Prototype parts forwarded through
+/// a group are the remaining gap and get no frame.
+#[test]
+fn instanced_meshes_get_tangents_through_their_placement() {
+    let mut proto = WorldBuilder::new();
+    proto.attach(quad(), emissive(1.0));
+    let mut inner = crust_core::rt::SceneBuilder::new();
+    inner.attach(quad());
+    let inner = Arc::new(inner.commit());
+
+    // Rotate the quad a quarter turn about Z and move it: +u (the quad's +X)
+    // becomes world +Y.
+    let l2w = glam::Affine3A::from_rotation_translation(
+        glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::new(5.0, 0.0, 0.0),
+    );
+    let mut b = WorldBuilder::new();
+    let id = b.attach(
+        Geometry::Instance {
+            scene: inner,
+            transform: l2w,
+            transform_end: None,
+        },
+        emissive(1.0),
+    );
+    b.set_uv_map(id, Arc::new(quad_uv_map()), false);
+    let world = b.commit();
+    let hit = world
+        .intersect(&Ray::new(Vec3A::new(4.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
+        .expect("the placed quad is hit");
+    assert!(hit.rec.has_uv);
+    assert!(
+        hit.rec.tangent.abs_diff_eq(Vec3A::Y, 1e-5),
+        "{}",
+        hit.rec.tangent
+    );
 }

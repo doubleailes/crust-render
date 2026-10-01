@@ -52,7 +52,7 @@ fn uv_sphere(center: Vec3A, radius: f32, segs: usize, rings: usize) -> Geometry 
         }
     }
     Geometry::TriangleMesh {
-        vertices,
+        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
         indices,
         normals: None,
     }
@@ -150,7 +150,7 @@ fn soup_scene(n: usize) -> Scene {
     }
     let mut b = SceneBuilder::new();
     b.attach(Geometry::TriangleMesh {
-        vertices,
+        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
         indices,
         normals: None,
     });

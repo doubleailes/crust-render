@@ -8,7 +8,7 @@ use crate::hittable::HitRecord;
 use crate::material::Material;
 use crate::ray::Ray;
 use crust_rt::{AABB, Geometry, InstanceHitId, MASK_ALL, RayMask, SceneBuilder};
-use glam::Vec3A;
+use glam::{Affine3A, Vec3A};
 use std::sync::Arc;
 
 /// How one triangle sits inside the polygon it was cut from.
@@ -102,6 +102,86 @@ fn uv_area(uv: &[[f32; 2]; 3]) -> f32 {
     0.5 * (du1 * dv2 - du2 * dv1).abs()
 }
 
+/// One refined quad's place in its base-cage face: the dyadic cell
+/// `[ou, ou + 2^-depth] × [ov, ov + 2^-depth]` it covers, and which of its
+/// four corners sits at the cell's origin. Eight bytes per triangle, where
+/// the three corner coordinates it reproduces were twenty-four.
+///
+/// Every value it stands for is a dyadic fraction `k / 2^depth` with
+/// `depth ≤ 6` (the import's level cap), exact in `f32`, and the refined
+/// face-varying channel this replaces produced those same values by
+/// halving — so [`SubFace::corners`] is bit-identical to what the channel
+/// held (`sub_face_corners_match_the_refined_channel`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SubFace {
+    /// `origin_u` (bits 0–7), `origin_v` (8–15), `depth` (16–19), `rot`
+    /// (20–21): the cell's integer origin at its depth, and the corner of
+    /// the refined quad that lies at the origin.
+    packed: u32,
+}
+
+impl SubFace {
+    /// The cell holding a refined quad whose corners, in the quad's own
+    /// vertex order, are `corners`; `None` when they are not the corners of
+    /// one dyadic cell of the unit square at a depth up to 15.
+    pub fn from_corners(corners: &[[f32; 2]; 4]) -> Option<SubFace> {
+        let (mut lo_u, mut lo_v, mut hi_u, mut hi_v) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for c in corners {
+            lo_u = lo_u.min(c[0]);
+            lo_v = lo_v.min(c[1]);
+            hi_u = hi_u.max(c[0]);
+            hi_v = hi_v.max(c[1]);
+        }
+        let side = hi_u - lo_u;
+        if side <= 0.0 || side != hi_v - lo_v {
+            return None;
+        }
+        let depth = (-side.log2()).round();
+        if !(0.0..=15.0).contains(&depth) {
+            return None;
+        }
+        let scale = (1u32 << depth as u32) as f32;
+        let (ou, ov) = ((lo_u * scale).round(), (lo_v * scale).round());
+        if !(0.0..256.0).contains(&ou) || !(0.0..256.0).contains(&ov) {
+            return None;
+        }
+        let rot = corners.iter().position(|c| c[0] == lo_u && c[1] == lo_v)? as u32;
+        let sub = SubFace {
+            packed: ou as u32 | (ov as u32) << 8 | (depth as u32) << 16 | rot << 20,
+        };
+        // Only an exact round trip is a correct answer.
+        (sub.corners() == *corners).then_some(sub)
+    }
+
+    /// The four corner coordinates of the refined quad, in its own vertex
+    /// order.
+    #[inline]
+    pub fn corners(&self) -> [[f32; 2]; 4] {
+        let p = self.packed;
+        let depth = (p >> 16) & 0xF;
+        let rot = ((p >> 20) & 0x3) as usize;
+        let s = 1.0 / (1u32 << depth) as f32;
+        let ou = (p & 0xFF) as f32 * s;
+        let ov = ((p >> 8) & 0xFF) as f32 * s;
+        let cell = [[ou, ov], [ou + s, ov], [ou + s, ov + s], [ou, ov + s]];
+        // Corner `rot` of the quad is the cell's origin, so quad corner `k`
+        // is cell corner `k - rot`.
+        std::array::from_fn(|k| cell[(k + 4 - rot) & 3])
+    }
+
+    /// The corners of the triangle `slice` cuts from the quad, in the fan's
+    /// vertex order — `None` for a slice no quad has.
+    #[inline]
+    fn triangle_corners(&self, slice: FanSlice) -> Option<[[f32; 2]; 3]> {
+        let [c0, c1, c2, c3] = self.corners();
+        match slice {
+            FanSlice::QuadLower => Some([c0, c1, c2]),
+            FanSlice::QuadUpper => Some([c0, c2, c3]),
+            FanSlice::Triangle | FanSlice::Unmappable => None,
+        }
+    }
+}
+
 /// Maps each triangle of one distinct mesh back to the polygon it came from.
 ///
 /// Ptex face ids are indices into a mesh's *original* `faceVertexCounts`, but
@@ -116,13 +196,14 @@ pub struct FaceMap {
     pub faces: Vec<u32>,
     /// Which slice of that polygon's fan the triangle is.
     pub slices: Vec<FanSlice>,
-    /// Explicit per-triangle corner UVs in the source face's unit square,
-    /// index-parallel with `faces`. Subdivided meshes only: their triangles
-    /// cover a *sub*-rectangle of the base-cage face, which no fan slice can
-    /// express — `faces` then carries base-cage ids and each triangle's
-    /// corners carry its patch of the cage face. `None` for unsubdivided
-    /// meshes, whose triangles resolve through `slices` alone.
-    pub uvs: Option<Vec<[[f32; 2]; 3]>>,
+    /// Which dyadic cell of its base-cage face each triangle's refined quad
+    /// is, index-parallel with `faces`. Subdivided meshes only: their
+    /// triangles cover a *sub*-rectangle of the base-cage face, which no fan
+    /// slice can express — `faces` then carries base-cage ids and each
+    /// triangle's cell gives its corners' coordinates in the cage face.
+    /// `None` for unsubdivided meshes, whose triangles resolve through
+    /// `slices` alone.
+    pub sub: Option<Vec<SubFace>>,
     /// Face-space units per unit of local space, per triangle — see
     /// [`triangle_density`]. Empty when [`FaceMap::build_density`] was never
     /// called, which every consumer reads as "point-sample".
@@ -147,14 +228,12 @@ impl FaceMap {
         let i = prim_id as usize;
         let (&face, &slice) = (self.faces.get(i)?, self.slices.get(i)?);
         let (u, v) = if swapped { (v, u) } else { (u, v) };
-        if let Some(uvs) = &self.uvs {
-            if slice == FanSlice::Unmappable {
-                return None;
-            }
-            // Corner UVs are stored in the triangle's *original* vertex
-            // order, so the swap above already restored the barycentrics to
-            // that order and plain interpolation is right for mirrors too.
-            let [a, b, c] = *uvs.get(i)?;
+        if let Some(sub) = &self.sub {
+            // Corner coordinates come out in the triangle's *original*
+            // vertex order, so the swap above already restored the
+            // barycentrics to that order and plain interpolation is right
+            // for mirrors too.
+            let [a, b, c] = sub.get(i)?.triangle_corners(slice)?;
             let w = 1.0 - u - v;
             return Some((
                 face,
@@ -193,29 +272,29 @@ impl FaceMap {
     /// the base-cage face, so the area is `4^-L` of the constant; at level 3
     /// the constant would over-estimate the footprint 64× and every Ptex
     /// lookup on the mesh would read its 1×1 level.
-    pub fn build_density(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
+    pub fn build_density(&mut self, verts: &[[f32; 3]], tris: &[[u32; 3]]) {
         self.density.clear();
         self.density.reserve(tris.len());
         for (t, tri) in tris.iter().enumerate() {
-            let param = match (&self.uvs, self.slices.get(t)) {
+            let param = match (&self.sub, self.slices.get(t)) {
                 (_, Some(FanSlice::Unmappable)) | (_, None) => 0.0,
-                (Some(uvs), Some(_)) => match uvs.get(t) {
-                    Some(uv) => uv_area(uv),
-                    None => 0.0,
-                },
+                (Some(sub), Some(&slice)) => sub
+                    .get(t)
+                    .and_then(|f| f.triangle_corners(slice))
+                    .map_or(0.0, |uv| uv_area(&uv)),
                 (None, Some(_)) => 0.5,
             };
             self.density.push(triangle_density(
                 param,
-                verts[tri[0] as usize],
-                verts[tri[1] as usize],
-                verts[tri[2] as usize],
+                Vec3A::from_array(verts[tri[0] as usize]),
+                Vec3A::from_array(verts[tri[1] as usize]),
+                Vec3A::from_array(verts[tri[2] as usize]),
             ));
         }
     }
 }
 
-/// Per-triangle `primvars:st` texture coordinates, and the tangent frame a
+/// A mesh's `primvars:st` texture coordinates, and the tangent frame a
 /// normal map needs to be read in.
 ///
 /// Parallel to [`FaceMap`] but answering a different question: `FaceMap` maps a
@@ -223,54 +302,70 @@ impl FaceMap {
 /// this carries the mesh's UV chart, which a UDIM image set indexes. A mesh can
 /// want either, both, or neither.
 ///
-/// Corner UVs rather than a per-vertex array because USD's `st` is usually
-/// **faceVarying**: a vertex on a UV seam carries a different coordinate in
-/// each face touching it, so there is no per-point value to interpolate. Held
-/// behind an `Arc` for the same reason as `FaceMap` — one distinct mesh, many
-/// placements.
+/// The chart is its authored (or refined) values plus one index per triangle
+/// corner, because USD's `st` is usually **faceVarying**: a vertex on a UV
+/// seam carries a different coordinate in each face touching it, so there is
+/// no per-point value to interpolate — but the values themselves are shared
+/// across the faces that agree, and indexing them costs 12 bytes per triangle
+/// where expanded corners cost 24. Held behind an `Arc` for the same reason
+/// as `FaceMap` — one distinct mesh, many placements.
 pub struct UvMap {
-    /// Corner `(u, v)` per triangle, index-parallel with the triangle list
-    /// handed to the kernel, in the triangle's *original* vertex order.
-    pub uvs: Vec<[[f32; 2]; 3]>,
-    /// World-space `dP/du` per triangle, index-parallel with `uvs`.
-    ///
-    /// Empty when no tangent could be built. The importer computes these from
-    /// *world-space* vertices, which only exist for geometry it baked flat —
-    /// an instanced prototype's triangles live in prototype space, and its
-    /// placements each apply a different transform, so one table cannot hold a
-    /// world-space tangent for all of them. Such meshes therefore carry UVs
-    /// (which no transform touches) and no tangent, and normal maps on them
-    /// fall back to the geometric normal.
-    pub tangents: Vec<Vec3A>,
+    /// The chart's `(u, v)` values; the last entry is the `(0, 0)` every
+    /// corner that could not be indexed points at.
+    pub values: Vec<[f32; 2]>,
+    /// Per triangle, the index into `values` of each corner, in the
+    /// triangle's *original* vertex order.
+    pub corners: Vec<[u32; 3]>,
     /// Chart UV units per unit of local space, per triangle — see
     /// [`triangle_density`]. Empty when [`UvMap::build_density`] was never
     /// called, which every consumer reads as "point-sample".
     ///
-    /// Unlike `tangents`, this *is* built for instanced prototypes: a density
-    /// is a scalar, so one local-space table plus the placement's own scale
-    /// answers for every placement, where a world-space direction could not.
+    /// Kept as a table (4 bytes per triangle) rather than derived at the hit:
+    /// it is defined in the mesh's *local* frame, which a baked mesh no
+    /// longer has once its vertices are in world space.
     pub density: Vec<f32>,
 }
 
 impl UvMap {
+    /// The three corner coordinates of `prim_id`, in original vertex order.
+    #[inline]
+    pub fn corner_uvs(&self, prim_id: u32) -> Option<[[f32; 2]; 3]> {
+        let [a, b, c] = *self.corners.get(prim_id as usize)?;
+        Some([
+            self.values[a as usize],
+            self.values[b as usize],
+            self.values[c as usize],
+        ])
+    }
+
     /// Interpolates the hit triangle's corner UVs and returns them with the
     /// triangle's tangent, or `None` when `prim_id` is out of range.
     ///
     /// `swapped` undoes a mirrored placement's index swap exactly as
     /// [`FaceMap::resolve`] does: corner UVs are stored in original vertex
     /// order, so restoring the barycentrics to that order is all it takes.
+    ///
+    /// `verts` are the triangle's world-space vertices in the *kernel's*
+    /// order (swapped for a mirrored placement), from which the tangent is
+    /// derived here, per hit, instead of being stored per triangle; `None`
+    /// when the host cannot name them, which yields no tangent frame.
     pub fn resolve(
         &self,
         prim_id: u32,
         u: f32,
         v: f32,
         swapped: bool,
+        verts: Option<[Vec3A; 3]>,
     ) -> Option<((f32, f32), Vec3A)> {
-        let i = prim_id as usize;
-        let [a, b, c] = *self.uvs.get(i)?;
+        let [a, b, c] = self.corner_uvs(prim_id)?;
         let (u, v) = if swapped { (v, u) } else { (u, v) };
         let w = 1.0 - u - v;
-        let tangent = self.tangents.get(i).copied().unwrap_or(Vec3A::ZERO);
+        let tangent = verts.map_or(Vec3A::ZERO, |[p0, p1, p2]| {
+            // Back into the original vertex order the corners are in: a
+            // mirrored placement's bake exchanged the second and third.
+            let (p1, p2) = if swapped { (p2, p1) } else { (p1, p2) };
+            tangent_of(&[a, b, c], p0, p1, p2)
+        });
         Some((
             (
                 w * a[0] + u * b[0] + v * c[0],
@@ -278,45 +373,6 @@ impl UvMap {
             ),
             tangent,
         ))
-    }
-
-    /// Builds the per-triangle tangents from world-space vertices.
-    ///
-    /// The tangent is the standard solve of
-    /// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which
-    /// `u` grows across the triangle. A degenerate UV triangle (zero area in
-    /// texture space, which a collapsed or unwrapped-flat face produces) has
-    /// no such direction; it gets `ZERO`, which the shader reads as "no
-    /// tangent frame" rather than as a valid but arbitrary one.
-    pub fn build_tangents(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
-        self.tangents.clear();
-        self.tangents.reserve(tris.len());
-        for (t, tri) in tris.iter().enumerate() {
-            let Some(uv) = self.uvs.get(t) else {
-                self.tangents.push(Vec3A::ZERO);
-                continue;
-            };
-            let (p0, p1, p2) = (
-                verts[tri[0] as usize],
-                verts[tri[1] as usize],
-                verts[tri[2] as usize],
-            );
-            let (e1, e2) = (p1 - p0, p2 - p0);
-            let (du1, dv1) = (uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
-            let (du2, dv2) = (uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
-            let det = du1 * dv2 - du2 * dv1;
-            let t = if det.abs() > 1e-20 {
-                let tan = (e1 * dv2 - e2 * dv1) / det;
-                if tan.length_squared() > 1e-30 {
-                    tan.normalize()
-                } else {
-                    Vec3A::ZERO
-                }
-            } else {
-                Vec3A::ZERO
-            };
-            self.tangents.push(t);
-        }
     }
 
     /// Chart UV units per unit of local space for `prim_id`, or `0.0` when
@@ -328,22 +384,48 @@ impl UvMap {
 
     /// Builds the per-triangle density from the mesh's own (local) vertices.
     ///
-    /// Unlike [`UvMap::build_tangents`] this wants *local* vertices, not
-    /// world-space ones, and is therefore built once per distinct mesh rather
-    /// than once per placement — see [`triangle_density`] for why the two
-    /// differ.
-    pub fn build_density(&mut self, verts: &[Vec3A], tris: &[[u32; 3]]) {
+    /// Wants *local* vertices, not world-space ones, and is therefore built
+    /// once per distinct mesh rather than once per placement — see
+    /// [`triangle_density`] for why.
+    pub fn build_density(&mut self, verts: &[[f32; 3]], tris: &[[u32; 3]]) {
         self.density.clear();
         self.density.reserve(tris.len());
         for (t, tri) in tris.iter().enumerate() {
-            let param = self.uvs.get(t).map(uv_area).unwrap_or(0.0);
+            let param = self.corner_uvs(t as u32).map_or(0.0, |uv| uv_area(&uv));
             self.density.push(triangle_density(
                 param,
-                verts[tri[0] as usize],
-                verts[tri[1] as usize],
-                verts[tri[2] as usize],
+                Vec3A::from_array(verts[tri[0] as usize]),
+                Vec3A::from_array(verts[tri[1] as usize]),
+                Vec3A::from_array(verts[tri[2] as usize]),
             ));
         }
+    }
+}
+
+/// The tangent of one triangle: the standard solve of
+/// `[dP1; dP2] = [duv1; duv2] · [T; B]` for `T` — the direction in which `u`
+/// grows across the triangle, from its world-space vertices and corner UVs
+/// in the same vertex order. A degenerate UV triangle (zero area in texture
+/// space, which a collapsed or unwrapped-flat face produces) has no such
+/// direction; it gets `ZERO`, which the shader reads as "no tangent frame"
+/// rather than as a valid but arbitrary one.
+///
+/// Was a per-triangle table built at import; now computed at the hit from
+/// the kernel's shared vertices, with the same arithmetic.
+pub fn tangent_of(uv: &[[f32; 2]; 3], p0: Vec3A, p1: Vec3A, p2: Vec3A) -> Vec3A {
+    let (e1, e2) = (p1 - p0, p2 - p0);
+    let (du1, dv1) = (uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]);
+    let (du2, dv2) = (uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+    let det = du1 * dv2 - du2 * dv1;
+    if det.abs() > 1e-20 {
+        let tan = (e1 * dv2 - e2 * dv1) / det;
+        if tan.length_squared() > 1e-30 {
+            tan.normalize()
+        } else {
+            Vec3A::ZERO
+        }
+    } else {
+        Vec3A::ZERO
     }
 }
 
@@ -356,6 +438,13 @@ struct SideTables {
     map: Option<Arc<FaceMap>>,
     uv: Option<Arc<UvMap>>,
     swapped: bool,
+    /// For a geometry that is a direct, unlabelled, static instance of a
+    /// one-mesh scene: that scene and its placement, so a hit's vertices can
+    /// be read in local space and carried into the world. Baked meshes need
+    /// nothing (the top-level scene holds their world-space vertices);
+    /// prototype parts of instancers, which forward their ids through a
+    /// group, are not resolved and shade without a tangent frame.
+    placement: Option<(Arc<crust_rt::Scene>, Affine3A)>,
     /// The placement's uniform scale — `cbrt(|det|)` of its linear part.
     ///
     /// Both tables' densities are in the mesh's *local* frame, so a texture
@@ -378,6 +467,7 @@ impl Default for SideTables {
             map: None,
             uv: None,
             swapped: false,
+            placement: None,
             scale: 1.0,
         }
     }
@@ -433,11 +523,31 @@ impl WorldBuilder {
         mask: RayMask,
         label: InstanceHitId,
     ) -> u32 {
+        let placement = Self::direct_placement(&geometry, label);
         let id = self.rt.attach_labelled(geometry, mask, label);
         self.materials.push(material);
-        self.faces.push(SideTables::default());
+        self.faces.push(SideTables {
+            placement,
+            ..SideTables::default()
+        });
         debug_assert_eq!(id as usize + 1, self.materials.len());
         id
+    }
+
+    /// The scene and transform a hit's vertices can be read through — see
+    /// `SideTables::placement`.
+    fn direct_placement(
+        geometry: &Geometry,
+        label: InstanceHitId,
+    ) -> Option<(Arc<crust_rt::Scene>, Affine3A)> {
+        match geometry {
+            Geometry::Instance {
+                scene,
+                transform,
+                transform_end: None,
+            } if label == InstanceHitId::Own => Some((Arc::clone(scene), *transform)),
+            _ => None,
+        }
     }
 
     /// Records the per-face table for a geometry, so hits on it can report a
@@ -514,6 +624,7 @@ impl WorldBuilder {
     /// # Panics
     /// If `id` was never reserved.
     pub fn set_geometry(&mut self, id: u32, geometry: Geometry) {
+        self.faces[id as usize].placement = Self::direct_placement(&geometry, InstanceHitId::Own);
         self.rt.set_geometry(id, geometry);
     }
 
@@ -611,10 +722,13 @@ impl World {
                 .map(|(id, u, v)| crate::hittable::FaceHit { id, uv: (u, v) })
         });
         let (uv, tangent, has_uv) = match &tables.uv {
-            Some(m) => match m.resolve(h.prim_id, h.u, h.v, tables.swapped) {
-                Some((uv, tangent)) => (uv, tangent, true),
-                None => ((0.0, 0.0), Vec3A::ZERO, false),
-            },
+            Some(m) => {
+                let verts = self.world_vertices(h.geom_id, h.prim_id, tables);
+                match m.resolve(h.prim_id, h.u, h.v, tables.swapped, verts) {
+                    Some((uv, tangent)) => (uv, tangent, true),
+                    None => ((0.0, 0.0), Vec3A::ZERO, false),
+                }
+            }
             None => ((0.0, 0.0), Vec3A::ZERO, false),
         };
         // The ray's texture footprint, converted into each parameterisation
@@ -658,6 +772,24 @@ impl World {
             geom_id: h.geom_id,
             prim_id: h.prim_id,
         })
+    }
+
+    /// The world-space vertices of the triangle a hit landed on, in the
+    /// kernel's vertex order: read from the top-level scene for a baked
+    /// mesh, or through the placement of a direct instance. `None` where
+    /// neither applies — see `SideTables::placement`.
+    fn world_vertices(
+        &self,
+        geom_id: u32,
+        prim_id: u32,
+        tables: &SideTables,
+    ) -> Option<[Vec3A; 3]> {
+        match &tables.placement {
+            None => self.scene.triangle_vertices(geom_id, prim_id),
+            Some((scene, l2w)) => scene
+                .triangle_vertices(0, prim_id)
+                .map(|vs| vs.map(|v| l2w.transform_point3a(v))),
+        }
     }
 
     /// Early-exit occlusion query — the shadow-ray fast path.
@@ -764,7 +896,7 @@ mod tests {
         FaceMap {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
-            uvs: None,
+            sub: None,
             density: Vec::new(),
         }
     }
@@ -820,7 +952,7 @@ mod tests {
         let m = FaceMap {
             faces: vec![3],
             slices: vec![FanSlice::Unmappable],
-            uvs: None,
+            sub: None,
             density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
@@ -836,15 +968,45 @@ mod tests {
     /// A subdivided quad's upper-left quadrant, fan-triangulated: the child
     /// quad's corners are (0,0.5) (0.5,0.5) (0.5,1) (0,1) in the base face.
     fn sub_quad() -> FaceMap {
+        let cell = SubFace::from_corners(&[[0.0, 0.5], [0.5, 0.5], [0.5, 1.0], [0.0, 1.0]])
+            .expect("a dyadic cell");
         FaceMap {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
-            uvs: Some(vec![
-                [[0.0, 0.5], [0.5, 0.5], [0.5, 1.0]],
-                [[0.0, 0.5], [0.5, 1.0], [0.0, 1.0]],
-            ]),
+            sub: Some(vec![cell, cell]),
             density: Vec::new(),
         }
+    }
+
+    /// Every dyadic cell at every depth the import can produce, at every
+    /// rotation, round-trips through the eight bytes exactly — bit for bit,
+    /// since the corners are what the refined channel held.
+    #[test]
+    fn sub_face_round_trips_every_cell_exactly() {
+        for depth in 0..=6u32 {
+            let n = 1u32 << depth;
+            let s = 1.0 / n as f32;
+            for i in 0..n {
+                for j in 0..n {
+                    let (ou, ov) = (i as f32 * s, j as f32 * s);
+                    let base = [[ou, ov], [ou + s, ov], [ou + s, ov + s], [ou, ov + s]];
+                    for rot in 0..4 {
+                        let corners: [[f32; 2]; 4] = std::array::from_fn(|k| base[(k + rot) % 4]);
+                        let cell = SubFace::from_corners(&corners).expect("a dyadic cell");
+                        assert_eq!(
+                            cell.corners(),
+                            corners,
+                            "depth {depth} cell {i},{j} rot {rot}"
+                        );
+                    }
+                }
+            }
+        }
+        // Not a cell: a rectangle, and corners off the dyadic grid.
+        assert!(
+            SubFace::from_corners(&[[0.0, 0.0], [0.5, 0.0], [0.5, 0.25], [0.0, 0.25]]).is_none()
+        );
+        assert!(SubFace::from_corners(&[[0.1, 0.0], [0.6, 0.0], [0.6, 0.5], [0.1, 0.5]]).is_none());
     }
 
     /// Explicit UVs resolve each triangle corner to its patch of the *base*
@@ -884,7 +1046,7 @@ mod tests {
         let m = FaceMap {
             faces: vec![u32::MAX],
             slices: vec![FanSlice::Unmappable],
-            uvs: Some(vec![[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]),
+            sub: Some(vec![SubFace::default()]),
             density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);

@@ -48,10 +48,14 @@ fn unit_sphere_scene() -> Arc<Scene> {
 
 fn mesh(vertices: Vec<Vec3A>, indices: Vec<[u32; 3]>) -> Geometry {
     Geometry::TriangleMesh {
-        vertices,
+        vertices: arrays(&vertices),
         indices,
         normals: None,
     }
+}
+
+fn arrays(v: &[Vec3A]) -> Vec<[f32; 3]> {
+    v.iter().map(|p| p.to_array()).collect()
 }
 
 /// The unit quad `[0,1]²` in the z = 0 plane, fan-triangulated.
@@ -565,10 +569,10 @@ fn out_of_range_indices_are_skipped_not_panicked() {
 fn short_normal_arrays_fall_back_to_the_face_normal() {
     let mut b = SceneBuilder::new();
     b.attach(Geometry::TriangleMesh {
-        vertices: vec![Vec3A::ZERO, Vec3A::X, Vec3A::Y],
+        vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         indices: vec![[0, 1, 2]],
         // Two normals for three vertices: unusable, must be ignored.
-        normals: Some(vec![Vec3A::X, Vec3A::X]),
+        normals: Some(vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
     });
     let scene = b.commit();
     let hit = scene
@@ -582,9 +586,9 @@ fn interpolated_shading_normals_are_unit_length() {
     let (v, t, n) = tessellated_sphere(12, 24);
     let mut b = SceneBuilder::new();
     b.attach(Geometry::TriangleMesh {
-        vertices: v,
+        vertices: arrays(&v),
         indices: t,
-        normals: Some(n),
+        normals: Some(arrays(&n)),
     });
     let scene = b.commit();
     let mut rng = Rng::new(5);
@@ -1439,9 +1443,9 @@ fn shared_tables_hand_back_the_attached_vertices_and_normals() {
     let mut b = SceneBuilder::new();
     let flat = b.attach(mesh(flat_v.clone(), flat_t.clone()));
     let smooth = b.attach(Geometry::TriangleMesh {
-        vertices: v.clone(),
+        vertices: arrays(&v),
         indices: t.clone(),
-        normals: Some(n.clone()),
+        normals: Some(arrays(&n)),
     });
     let scene = b.commit();
 

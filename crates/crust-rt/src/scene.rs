@@ -105,12 +105,15 @@ pub struct CubicCurveSegment {
 /// an instanced scene may itself contain instances, and transforms,
 /// normals and ray masks compose correctly through every level.
 pub enum Geometry {
+    /// Unpadded `[f32; 3]` arrays, which is how the committed scene stores
+    /// them: a `Vec3A` is 16 bytes for 12 of data, and these arrays are
+    /// the bulk of a scene's memory.
     TriangleMesh {
-        vertices: Vec<Vec3A>,
+        vertices: Vec<[f32; 3]>,
         indices: Vec<[u32; 3]>,
         /// Optional per-vertex shading normals; hits interpolate them by
         /// the barycentrics (`SmoothTriangle` semantics).
-        normals: Option<Vec<Vec3A>>,
+        normals: Option<Vec<[f32; 3]>>,
     },
     Sphere {
         center: Vec3A,
@@ -394,10 +397,11 @@ impl SceneBuilder {
                     // short of.
                     let n = vertices.len();
                     let vertex_base = table.vertex_base;
-                    input.vertices.extend(vertices.iter().map(|v| v.to_array()));
-                    if let Some(ns) = normals.filter(|ns| ns.len() >= n) {
+                    input.vertices.extend(vertices);
+                    if let Some(mut ns) = normals.filter(|ns| ns.len() >= n) {
                         table.normal_base = input.normals.len() as u32;
-                        input.normals.extend(ns[..n].iter().map(|v| v.to_array()));
+                        ns.truncate(n);
+                        input.normals.extend(ns);
                     }
                     for (prim_id, [i0, i1, i2]) in indices.into_iter().enumerate() {
                         let in_range = (i0 as usize) < n && (i1 as usize) < n && (i2 as usize) < n;
@@ -1029,10 +1033,10 @@ mod tests {
         });
         let quad = b.attach(Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(2.0, -1.0, -1.0),
-                Vec3A::new(2.0, -1.0, 1.0),
-                Vec3A::new(2.0, 1.0, 1.0),
-                Vec3A::new(2.0, 1.0, -1.0),
+                [2.0, -1.0, -1.0],
+                [2.0, -1.0, 1.0],
+                [2.0, 1.0, 1.0],
+                [2.0, 1.0, -1.0],
             ],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,
@@ -1398,16 +1402,12 @@ mod tests {
         // at an interior point must be a blend, not the face normal.
         let mut b = SceneBuilder::new();
         b.attach(Geometry::TriangleMesh {
-            vertices: vec![
-                Vec3A::new(-1.0, -1.0, 2.0),
-                Vec3A::new(1.0, -1.0, 2.0),
-                Vec3A::new(0.0, 1.0, 2.0),
-            ],
+            vertices: vec![[-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0]],
             indices: vec![[0, 1, 2]],
             normals: Some(vec![
-                Vec3A::new(-0.5, 0.0, -1.0).normalize(),
-                Vec3A::new(0.5, 0.0, -1.0).normalize(),
-                Vec3A::new(0.0, 0.5, -1.0).normalize(),
+                Vec3A::new(-0.5, 0.0, -1.0).normalize().to_array(),
+                Vec3A::new(0.5, 0.0, -1.0).normalize().to_array(),
+                Vec3A::new(0.0, 0.5, -1.0).normalize().to_array(),
             ]),
         });
         let scene = b.commit();
@@ -1478,11 +1478,7 @@ mod tests {
     fn rotated_instance_hits_where_baked_triangle_would() {
         let mut inner = SceneBuilder::new();
         inner.attach(Geometry::TriangleMesh {
-            vertices: vec![
-                Vec3A::new(-1.0, -1.0, 0.0),
-                Vec3A::new(1.0, -1.0, 0.0),
-                Vec3A::new(0.0, 1.0, 0.0),
-            ],
+            vertices: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
             indices: vec![[0, 1, 2]],
             normals: None,
         });
@@ -1685,10 +1681,10 @@ mod tests {
         let mut inner = SceneBuilder::new();
         inner.attach(Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(-1.0, -1.0, 0.0),
-                Vec3A::new(1.0, -1.0, 0.0),
-                Vec3A::new(1.0, 1.0, 0.0),
-                Vec3A::new(-1.0, 1.0, 0.0),
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
             ],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             normals: None,

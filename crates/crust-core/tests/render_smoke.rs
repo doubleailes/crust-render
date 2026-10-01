@@ -487,10 +487,10 @@ fn every_sampling_strategy_agrees_on_direct_lighting() {
     world.attach(
         Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(-50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, 50.0),
-                Vec3A::new(-50.0, 0.0, 50.0),
+                [-50.0, 0.0, -50.0],
+                [50.0, 0.0, -50.0],
+                [50.0, 0.0, 50.0],
+                [-50.0, 0.0, 50.0],
             ],
             indices: vec![[0, 2, 1], [0, 3, 2]],
             normals: None,
@@ -551,10 +551,10 @@ fn clamp_scene(bounce_wall: bool, clamp: f32) -> Renderer {
     world.attach(
         Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(-50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, 50.0),
-                Vec3A::new(-50.0, 0.0, 50.0),
+                [-50.0, 0.0, -50.0],
+                [50.0, 0.0, -50.0],
+                [50.0, 0.0, 50.0],
+                [-50.0, 0.0, 50.0],
             ],
             indices: vec![[0, 2, 1], [0, 3, 2]],
             normals: None,
@@ -670,10 +670,10 @@ fn power_light_selection_agrees_with_uniform_in_expectation() {
     world.attach(
         Geometry::TriangleMesh {
             vertices: vec![
-                Vec3A::new(-50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, -50.0),
-                Vec3A::new(50.0, 0.0, 50.0),
-                Vec3A::new(-50.0, 0.0, 50.0),
+                [-50.0, 0.0, -50.0],
+                [50.0, 0.0, -50.0],
+                [50.0, 0.0, 50.0],
+                [-50.0, 0.0, 50.0],
             ],
             indices: vec![[0, 2, 1], [0, 3, 2]],
             normals: None,

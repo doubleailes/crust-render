@@ -139,8 +139,8 @@ pub(crate) struct SubdividedMesh {
     /// All 4s for Catmull-Clark/Bilinear, all 3s for Loop.
     pub counts: Vec<i32>,
     pub indices: Vec<i32>,
-    /// Smooth per-vertex shading normals, parallel to `points`.
-    pub normals: Vec<Vec3A>,
+    /// Smooth per-vertex shading normals, parallel to `points`, unpadded.
+    pub normals: Vec<[f32; 3]>,
     /// `Some` iff the request asked for face UVs.
     pub faces: Option<SubdivFaces>,
     /// `Some` iff the request carried a texture chart.
@@ -373,12 +373,18 @@ pub(crate) fn subdivide(
         }
     });
 
+    // Everything that needed the refiner is extracted; drop it — every
+    // level's topology, a ×4/3 of the last — before the result's own copies
+    // of the last level are made, so the two never coexist. This is the
+    // third of the transient the kernel design record costed. (`primvar`
+    // only borrows it; its last use is above.)
+    drop(refiner);
+
+    let normals = smooth_normals(&limit, &out_counts, &out_indices);
     let points: Vec<Vec3f> = limit
-        .iter()
+        .into_iter()
         .map(|p| Vec3f::from([p[0], p[1], p[2]]))
         .collect();
-    let verts_a: Vec<Vec3A> = limit.iter().map(|p| Vec3A::from_array(*p)).collect();
-    let normals = smooth_normals(&verts_a, &out_counts, &out_indices);
 
     Ok(SubdividedMesh {
         points,
@@ -397,18 +403,19 @@ pub(crate) fn subdivide(
 /// by where it happens to sit in the fan. Every sum is then normalized
 /// (zero-length sums fall back to +Y rather than yield NaNs; the kernel
 /// treats shading normals as directions only).
-pub(crate) fn smooth_normals(verts: &[Vec3A], counts: &[i32], indices: &[i32]) -> Vec<Vec3A> {
+pub(crate) fn smooth_normals(verts: &[[f32; 3]], counts: &[i32], indices: &[i32]) -> Vec<[f32; 3]> {
+    let at = |i: usize| Vec3A::from_array(verts[i]);
     let mut sums = vec![Vec3A::ZERO; verts.len()];
     let mut off = 0usize;
     for &fc in counts {
         let fc = fc as usize;
         let face = &indices[off..off + fc];
         off += fc;
-        let v0 = verts[face[0] as usize];
+        let v0 = at(face[0] as usize);
         let mut area = Vec3A::ZERO;
         for k in 1..fc - 1 {
             let (i1, i2) = (face[k] as usize, face[k + 1] as usize);
-            area += (verts[i1] - v0).cross(verts[i2] - v0);
+            area += (at(i1) - v0).cross(at(i2) - v0);
         }
         for &i in face {
             sums[i as usize] += area;
@@ -417,9 +424,9 @@ pub(crate) fn smooth_normals(verts: &[Vec3A], counts: &[i32], indices: &[i32]) -
     sums.iter()
         .map(|n| {
             if n.length_squared() > 1e-20 {
-                n.normalize()
+                n.normalize().to_array()
             } else {
-                Vec3A::Y
+                [0.0, 1.0, 0.0]
             }
         })
         .collect()
@@ -433,9 +440,9 @@ pub(crate) fn smooth_cage_normals(
     points: &[Vec3f],
     counts: &[i32],
     indices: &[i32],
-) -> Option<Vec<Vec3A>> {
+) -> Option<Vec<[f32; 3]>> {
     validate_cage(points.len(), counts, indices).ok()?;
-    let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+    let verts: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
     Some(smooth_normals(&verts, counts, indices))
 }
 
@@ -805,12 +812,12 @@ mod tests {
     #[test]
     fn smooth_cube_normals_point_along_the_corner_diagonals() {
         let (points, counts, indices) = cube();
-        let verts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
+        let verts: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
         let normals = smooth_normals(&verts, &counts, &indices);
         for (v, n) in verts.iter().zip(&normals) {
-            let expect = v.normalize();
+            let expect = Vec3A::from_array(*v).normalize();
             assert!(
-                n.dot(expect) > 0.99,
+                Vec3A::from_array(*n).dot(expect) > 0.99,
                 "corner {v:?} normal {n:?} not along its diagonal"
             );
         }
@@ -1251,15 +1258,17 @@ mod tests {
                 // amortized away; shallow levels are all fixed overhead.
                 if level >= 3 {
                     // Measured on a 64×64 cage: ~313 B/face with no
-                    // face-varying channel, ~568 with the Ptex one, ~536 with
-                    // a shared UV chart; resident 48.1 / 88.1 / 72.1 (the
+                    // face-varying channel, ~540 with the Ptex one, ~517 with
+                    // a shared UV chart; resident 44.0 / 84.0 / 68.1 (the
                     // Ptex table's 40 B/face: four corner UVs plus an
-                    // `Option<u32>` base face). Ceilings ~25% above those,
-                    // per mode, so no mode can hide under another's.
+                    // `Option<u32>` base face; the normals are 12 B per
+                    // vertex since `compact-triangle-storage`, 16 before).
+                    // Ceilings ~20% above those, per mode, so no mode can
+                    // hide under another's.
                     let (ceiling, resident_ceiling) = match mode {
-                        "no" => (400.0, 60.0),
-                        "ptex" => (700.0, 105.0),
-                        _ => (700.0, 90.0),
+                        "no" => (380.0, 53.0),
+                        "ptex" => (650.0, 100.0),
+                        _ => (620.0, 82.0),
                     };
                     assert!(
                         per_face < ceiling,

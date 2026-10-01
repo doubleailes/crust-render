@@ -44,7 +44,7 @@ fn uv_sphere(segs: usize, rings: usize) -> Geometry {
         }
     }
     Geometry::TriangleMesh {
-        vertices,
+        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
         indices,
         normals: None,
     }
