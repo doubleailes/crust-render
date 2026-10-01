@@ -338,6 +338,83 @@ that never materialises the binary tree, is the lever for it.
 ALab (level 0, same flags) went from 4.38 to 3.82 GiB of kernel memory and from 25.74
 to 25.00 GiB peak. Its peak is dominated by what the kernel does not own.
 
+## Benchmark: level 0 and level 1, both packet layouts
+
+Measured 2026-10-01 with the code at `cd11376`. The only
+kernel commit since the previous section is `24f9458`, which computes the extents
+diagnostic on request instead of at every commit. The machine was idle (load average
+under 0.5 for level 0, 3–5 on 72 cores for level 1).
+- **Setup:** `shotCam`, Ptex streamed (`CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file`),
+  `--stats`. Every A/B alternates its two sides run by run and keeps each run's whole
+  report, so time, phases and memory come from the same runs (`bench_ab.sh` keeps one
+  phase). Level 1 runs under the 56 GiB RSS guard.
+- **Images:** every pair below diffs to 0 pixels: `d06daaa` against `cd11376`, and
+  gathered against indexed in all three level-1 pairs.
+
+**Level 0, `d06daaa` against `cd11376`,** `-s 4`, two runs each:
+
+| phase | `d06daaa` min / mean | `cd11376` min / mean | Δ min / mean |
+|---|---|---|---|
+| Render (4 spp) | 0.981 / 0.993 s | 0.961 / 0.980 s | −2.0% / −1.3% |
+| Parse USD stage | 3:26.3 / 3:28.1 | 3:20.5 / 3:22.3 | −2.8% / −2.8% |
+| · Traverse prims | 2:42.6 / 2:44.2 | 2:36.7 / 2:37.9 | −3.6% / −3.8% |
+| · Load assets (Ptex) | 25.3 / 25.6 s | 25.4 / 25.4 s | flat |
+| · Commit | 17.9 / 18.0 s | 18.2 / 18.7 s | +1.8% / +3.8% |
+
+Kernel memory is 13.52 GiB on both (60.9 M triangles), and peak RSS is 23.5–23.9 GiB on
+both, moving ~0.4 GiB between runs of one binary. The render is within noise. The
+`Traverse prims` gain fits `24f9458`, since prototype scenes are committed during the
+traverse and no longer pay for the diagnostic, but `Commit` moved the other way by as
+much, and two runs cannot resolve 3%. It would take callgrind to prove it.
+
+**Level 1, memory** (`--subdiv-level 1 -s 1`, one run per layout):
+
+| | gathered (default) | `CRUST_TRI_PACKETS=indexed` | Δ |
+|---|---|---|---|
+| triangles in memory | 274 707 194 | same | 4.5× level 0 |
+| kernel memory | 36.59 GiB | **28.22 GiB** | −8.37 GiB (−23%) |
+| · triangle packets | 16.07 GiB | 7.70 GiB | the only row that moves |
+| · records / BVH nodes / vertices + normals | 6.14 / 5.18 / 3.18 GiB | same | |
+| · instances / cubic spans / leaves | 2.47 / 1.73 / 1.34 GiB | same | |
+| bytes per triangle | 143.0 | 110.3 | |
+| lanes filled | 80.4% (289 M of 359 M) | same | |
+| `Traverse prims` RSS | 41.27 GiB | 34.85 GiB | −6.42 GiB |
+| peak RSS | 51.07 GiB | **42.47 GiB** | −8.60 GiB |
+| headroom on 61 GiB | ~10 GiB | ~18.5 GiB | |
+
+The gathered row reproduces the previous section's level-1 record (36.59 GiB, 51.14
+GiB peak, 8:17 against 8:19.5 now). Three quarters of the indexed saving appears during
+`Traverse prims`, not at the final commit: the island's prototypes are committed while
+the stage is read, and their packets shrink too. The commit's transient, 41.3 → 51.1
+GiB gathered, is still the largest single step.
+
+**Level 1, speed** (`--subdiv-level 1 -s 16`, 15.08 M ray queries, gathered and indexed
+alternating, two runs each):
+
+| | gathered min / mean | indexed min / mean | Δ min / mean |
+|---|---|---|---|
+| **Render** | 3.759 / 3.869 s | 4.074 / 4.228 s | **+8.4% / +9.3%** |
+| throughput | 4.01 / 3.90 Mray/s | 3.70 / 3.57 Mray/s | |
+| · Traverse prims | 6:29.0 / 6:31.0 | 6:14.6 / 6:17.8 | −3.7% / −3.4% |
+| · Commit | 63.0 / 63.2 s | 60.3 / 61.5 s | −4.3% / −2.7% |
+| **total run** | 8:05.0 / 8:05.1 | 7:46.6 / 7:50.6 | **−3.8% / −3.0%** |
+| peak RSS | 51.20 / 51.25 GiB | 42.35 / 42.41 GiB | −8.8 GiB |
+
+- **Render:** 8–9% slower indexed, consistent across both reps (the slowest gathered
+  run beat the fastest indexed one). That falls between the in-cache 1–8% and the
+  out-of-cache 30% of `ray_throughput` (`openspec/specs/intersection-kernel/design.md`).
+- **Import:** 3–4% faster indexed in both reps and both phases. Writing 8.4 GiB less
+  packet data is the plausible cause. It is near this machine's noise at two reps, so
+  it is probable, not proven.
+- **Whole run:** indexed costs ~0.022 s of render per sample per pixel and saves ~14 s of
+  import, so on these numbers it is faster end to end below roughly 600 spp. At the
+  island's default 128 spp that is ~3 s of render for ~14 s of import and 8.8 GiB.
+
+So on a scene this size, where the import is the run, `indexed` does not lose overall.
+`auto` is still `gathered`: the "no threshold" decision compared render throughput,
+which indexed loses at every size, and one scene at two reps is not a threshold. A
+whole-run criterion would need its own proposal.
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance
@@ -370,4 +447,8 @@ target/tstats/release/crust-render -i $ISLAND --camera /island/cam/shotCam -s 1 
 # the before/after timing, interleaved (binaries built from one Cargo.lock)
 scripts/bench_ab.sh -a bin_before -b bin_after -n 2 -p Render \
     -x "--camera /island/cam/shotCam -s 4" $ISLAND
+# level 1 in either packet layout, Ptex streamed (peak ~51 GiB gathered, ~42 indexed)
+CRUST_TRI_PACKETS=indexed CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file \
+    target/release/crust-render -i $ISLAND --camera /island/cam/shotCam \
+    --subdiv-level 1 -s 16 --stats
 ```

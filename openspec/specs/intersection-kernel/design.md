@@ -97,6 +97,25 @@
   against 282.9 M on materialx_basic (+3.2%, a ten-triangle scene where per-query
   setup dominates). Moving the once-per-query `resolve` out of line as well was
   measured and is worse (+7% / +15%).
+  **Two packet layouts, bit-identical; the default is gathered.** `Tri4` (192 B, nine
+  `Vec4`s of gathered vertices plus per-lane record ids and masks) and `Tri4i` (92 B,
+  `[[u32; 3]; 4]` vertex indices and the same lane masks). `Tri4i::intersect` gathers
+  the twelve vertices into the same nine `Vec4`s and runs the same lane code, so every
+  bit, `fallback` lanes included, is identical (`tri4i_matches_tri4_bitwise`,
+  `packet_layouts_are_bit_identical`). The layout is per tree (`commit_with`), chosen
+  by `CRUST_TRI_PACKETS=gathered|indexed|auto`. The proposal expected an out-of-cache
+  tree to favour the smaller packet; it does not. `ray_throughput --layout` in cache:
+  indexed 1–8% slower; the 4 M-triangle out-of-cache soup (581 → 451 MiB of kernel):
+  intersect and occluded 30% slower; the stress-grid render 7.20 → 6.27 Mray/s (−13%)
+  for 104 → 79 kernel bytes per triangle. Twelve dependent vertex loads per packet test
+  cost more than the 100 bytes of bandwidth they save, so a size threshold has no value
+  and `auto` is gathered. On the Moana island at level 1 (2026-10-01, interleaved,
+  `-s 16`, two runs per side, `docs/moana_profile.md`): kernel 36.59 → 28.22 GiB, peak
+  RSS 51.2 → 42.4 GiB, render 8–9% slower, but import 3–4% *faster* (8.4 GiB less
+  packet data written, most of it for prototypes committed during the traverse), so the
+  whole run is 3–4% faster below roughly 600 spp. That is a whole-run argument for
+  indexed on import-bound scenes, not a render one; the threshold stays unset until a
+  proposal measures more than one scene.
   **Instances and cubic curve spans are stored inline** (`slim-instance-and-curve-storage`,
   `compact-triangle-storage`'s Deferred item 3). Each has an array of its own on
   `Primitives` / `Bvh`, so neither pays a `PrimNode` slot or a box any more:

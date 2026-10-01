@@ -143,7 +143,7 @@ bit-identical results.
 |-------|---------|
 | `auto` | the measured default, currently `gathered` |
 | `gathered` | 192-byte packets that carry their vertices. Fastest. |
-| `indexed` | 92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. |
+| `indexed` | 92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. On the Moana island at subdivision level 1 it saves 8.4 GiB of 36.6 for an 8–9% slower render, and the import gets slightly faster. |
 
 Use `indexed` when a scene doesn't otherwise fit in memory.
 
