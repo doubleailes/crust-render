@@ -711,21 +711,9 @@ impl Scene {
         for inst in self.bvh.instances() {
             *sharing.entry(Arc::as_ptr(&inst.scene)).or_insert(0) += 1;
             if ids.contains(&inst.geom_id) {
-                // Instances no longer keep their bounds once built, so the
-                // box is recomputed — through the inverse of `w2l`, or both
-                // endpoints of a moving one. Approximate (an inverse of an
-                // inverse), which a diagnostic can afford.
-                let inner = inst
-                    .scene
-                    .bounds()
+                let bounds = inst
+                    .approx_world_bounds()
                     .unwrap_or(AABB::new(Vec3A::ZERO, Vec3A::ZERO));
-                let bounds = match &inst.motion {
-                    Some(m) => AABB::surrounding_box(
-                        transformed_aabb(&inner, &m.l2w),
-                        transformed_aabb(&inner, &m.l2w_end),
-                    ),
-                    None => transformed_aabb(&inner, &inst.w2l.inverse()),
-                };
                 found.push((
                     inst.geom_id,
                     bounds,

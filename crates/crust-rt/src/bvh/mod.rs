@@ -305,30 +305,6 @@ impl Primitives {
         self.cubics.push(p);
     }
 
-    /// `(count, sum of bbox diagonals, max diagonal)`: every triangle that
-    /// refers to real vertices, then every other primitive in attach order —
-    /// the order (and so the `f32` sum) the shared array used to give.
-    pub(crate) fn extent_sum(&self) -> (usize, f32, f32) {
-        let mut sum = 0.0f32;
-        let mut max = 0.0f32;
-        let mut n = 0usize;
-        let mut add = |b: AABB| {
-            let d = (b.maximum - b.minimum).length();
-            sum += d;
-            max = max.max(d);
-            n += 1;
-        };
-        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
-            let [a, b, c] = self.tri_verts(r);
-            add(triangle_aabb(a, b, c));
-        }
-        for k in 0..self.order.len() {
-            let idx = (self.tris.len() + k) as u32;
-            add(self.bbox(idx).expect("only triangles can lack bounds"));
-        }
-        (n, sum, max)
-    }
-
     /// The resident id a leaf stores for non-triangle build index `idx`.
     #[inline]
     pub(crate) fn resident_id(&self, idx: u32) -> u32 {
@@ -435,8 +411,6 @@ pub(crate) struct Bvh {
     n_degenerate: usize,
     /// Bounds of the whole tree (the binary root's, kept through collapse).
     root_bbox: Option<AABB>,
-    /// See [`Bvh::primitive_extent_sum`].
-    extents: (usize, f32, f32),
 }
 
 /// One build reference: conservative bounds of (a fragment of) primitive
@@ -518,7 +492,6 @@ impl Bvh {
         };
 
         let n_degenerate = input.tris.iter().filter(|r| r.is_degenerate()).count();
-        let extents = input.extent_sum();
         Bvh {
             wide: wide.into_boxed_slice(),
             leaves: collected.leaves.into_boxed_slice(),
@@ -535,7 +508,6 @@ impl Bvh {
             instances: input.instances.into_boxed_slice(),
             cubics: input.cubics.into_boxed_slice(),
             root_bbox,
-            extents,
         }
         // `input.order` and `input.instance_bounds` drop here: build-only.
     }
@@ -668,11 +640,41 @@ impl Bvh {
     }
 
     /// `(count, sum of bbox diagonals, max diagonal)` over top-level
-    /// primitives — feeds [`crate::Scene::primitive_extents`]. Measured at
-    /// build time ([`Primitives::extent_sum`]): the resident instances no
-    /// longer carry their bounds.
+    /// primitives — feeds [`crate::Scene::primitive_extents`], a diagnostic.
+    /// Computed on request, never at commit: every prototype scene is
+    /// committed too, and none of them is ever asked.
+    ///
+    /// Instances keep no bounds once built, so theirs are recomputed
+    /// ([`InstancePrim::approx_world_bounds`]), and the kinds are summed one
+    /// after another rather than in attach order: the figure can differ from
+    /// the build's own boxes by a few ulps, which a diagnostic printed to a
+    /// tenth can afford.
     pub(crate) fn primitive_extent_sum(&self) -> (usize, f32, f32) {
-        self.extents
+        let mut sum = 0.0f32;
+        let mut max = 0.0f32;
+        let mut n = 0usize;
+        let mut add = |b: AABB| {
+            let d = (b.maximum - b.minimum).length();
+            sum += d;
+            max = max.max(d);
+            n += 1;
+        };
+        for r in self.tris.iter().filter(|r| !r.is_degenerate()) {
+            let [a, b, c] = self.tri_verts(r);
+            add(triangle_aabb(a, b, c));
+        }
+        for p in &self.prims {
+            add(p.bbox());
+        }
+        for p in &self.cubics {
+            add(p.bbox());
+        }
+        for i in &self.instances {
+            if let Some(b) = i.approx_world_bounds() {
+                add(b);
+            }
+        }
+        (n, sum, max)
     }
 
     pub(crate) fn primitive_breakdown(&self) -> PrimitiveBreakdown {
