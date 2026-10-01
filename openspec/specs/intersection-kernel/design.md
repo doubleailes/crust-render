@@ -22,7 +22,7 @@
   the one-id version of Embree's `instID[]` stack. It lets a host place a prototype of
   many parts as one instance and still tell the parts apart. The importer relies on it
   (`docs/moana_profile.md`). The offset sits in `InstancePrim`'s alignment padding (pinned
-  at 240 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
+  at 96 bytes). Internals: watertight Woop-2013 triangles, rounded-cone curves, and the
   parallel deterministic SBVH build collapsed to BVH4 (details below). Depends only on
   glam + rayon; deliberately swappable for Embree bindings behind the same seam.
 
@@ -91,12 +91,36 @@
   dispatch became small enough for LLVM to inline into `Bvh::hit` — curve subdivision,
   cone intersection and the instance descent with it — and the traversal loop grew by
   a third and spilled its stack: +6% instructions on cornellbox and +17% on
-  materialx_basic with a byte-identical tree. `PrimNode::hit` / `hit_any` are
-  `inline(never)`; with that, `Bvh::hit` (with its instance recursion) is 953.4 M
+  materialx_basic with a byte-identical tree. The scalar dispatch is
+  `inline(never)` (now `Bvh::scalar_hit` / `scalar_hit_any`, see below); with that, `Bvh::hit` (with its instance recursion) is 953.4 M
   instructions on cornellbox against the baseline's 1 001.6 M (−4.8%) and 291.9 M
   against 282.9 M on materialx_basic (+3.2%, a ten-triangle scene where per-query
   setup dominates). Moving the once-per-query `resolve` out of line as well was
   measured and is worse (+7% / +15%).
+  **Instances and cubic curve spans are stored inline** (`slim-instance-and-curve-storage`,
+  `compact-triangle-storage`'s Deferred item 3). Each has an array of its own on
+  `Primitives` / `Bvh`, so neither pays a `PrimNode` slot or a box any more:
+  - **an instance** is a 96-byte `InstancePrim`: the inner scene, `w2l`, the ids and
+    mask, and an `Option<Box<InstanceMotion>>` holding both endpoint `l2w`s for the
+    moving ones. The normal matrix is `w2l.matrix3.transpose()`, recomputed per hit
+    (the expression it used to be cached from — a transpose is exact). Its world
+    bounds live only in the build (`Primitives::instance_bounds`). Before: a 64-byte
+    slot plus a 240-byte box.
+  - **a cubic span** is its 96-byte `CubicCurvePrim`, inline. Before: a slot plus a
+    96-byte box.
+  - `PrimNode` keeps spheres, disks, cylinders and linear curve segments (still 64 B).
+
+  **Why the images cannot move:** the build's index space is unchanged. A transient
+  `order` table gives each non-triangle, in attach order, its kind-tagged resident id
+  (two bits of kind, 30 of index), so the references, the split ties and the leaf
+  order are exactly what one shared array gave; leaves store the tagged id and the
+  out-of-line `Bvh::scalar_hit` decodes it. Splitting by index *range* instead
+  (others, then instances, then cubics) was rejected for that reason: it reorders the
+  references whenever kinds interleave. Measured 2026-10-01 against `a50b1a8`: the
+  Moana island's kernel memory 20.02 → 13.52 GiB (peak RSS 30.3 → 23.8 GiB), ALab
+  4.38 → 3.82 GiB; every sample, the Kitchen_set pair and the island and ALab frames
+  bit-identical, in both packet layouts; callgrind −0.7% (cornellbox) and −0.6%
+  (nested_instancing) instructions overall, `Scene::occluded` −4.8% / −3.4%.
   **Leaves are sized by packet rounds** (`CommitOptions::packet_sah`, the
   `CRUST_BVH_PACKET_SAH` switch, default on). The SAH leaf decision used to charge one
   unit per triangle with no node cost, so a range of five to eight overlapping

@@ -413,7 +413,9 @@ Acceptance, measured with `--stats` rather than modelled (outcome in brackets):
    outward rounding; image-identical up to tie order. Worth ~10 B per triangle once D4
    has made leaves full — before that, the node count is the problem, not the node
    size.
-3. **The instance primitive.** `PrimNode::Instance` is an 80-byte enum slot plus a
+3. **The instance primitive.** *Taken by `slim-instance-and-curve-storage`: instances
+   and cubic spans are 96 B inline, island kernel memory 20.02 → 13.52 GiB.*
+   `PrimNode::Instance` is an 80-byte enum slot plus a
    240-byte box (`l2w`, `w2l`, `normal_mat`, `Arc`, motion). `normal_mat` is the
    transpose of `w2l`'s linear part and the two affines are `Vec3A`-padded: ~200 B
    would hold the same data. The Moana island's 39.9 M instances are 10.65 GiB of

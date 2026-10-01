@@ -292,6 +292,52 @@ What is left is not the sky rig. Candidates, none measured yet:
 
 Same wall time as before (about 5:10 to 5:20) and the same peak RSS (51.5 GiB).
 
+## Memory: instances and curve spans inline
+
+Measured 2026-10-01 for `slim-instance-and-curve-storage`, against its parent
+`a50b1a8`, which already stores each triangle once (`compact-triangle-storage`).
+- **Setup:** `shotCam`, `-s 1 --stats`, Ptex streamed
+  (`CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file`, so that Ptex is not the
+  variable), under an RSS guard that kills the process at 56 GiB on this 61 GiB machine.
+- **What it targets:** what that change left as its Deferred item 3. On the island, an
+  instance was a 64-byte `PrimNode` slot plus a 240-byte box, and a cubic curve span a
+  slot plus a 96-byte box. They are now 96 B each, inline, in arrays of their own.
+
+| level 0 | before | after | |
+|---|---|---|---|
+| kernel memory | 20.02 GiB | **13.52 GiB** | **−6.50 GiB** |
+| · primitive nodes | 2.80 GiB | 0 | 47 M slots gone (the island has no analytic primitives) |
+| · boxed primitives → instances + cubic spans | 7.90 GiB | 2.47 + 1.73 GiB | 27.6 M × 96 B, 19.3 M × 96 B |
+| · everything triangle-side | 9.32 GiB | 9.32 GiB | unchanged |
+| peak RSS | 30.28 GiB | **23.78 GiB** | −6.50 GiB |
+
+The image is bit-identical: the frame diffs to 0 pixels against the parent, as do
+ALab's, every checked-in sample, and both Kitchen_set variants.
+
+Speed does not pay for the memory.
+- **Island:** `bench_ab.sh`, alternating the two binaries at `-s 4` (2 reps each),
+  timed `Render` at 1.064 → 0.932 s minimum (−12.4%) and 1.242 → 0.948 s mean
+  (−23.7%). The mean is noisy, because one base run was slow.
+- **Default scenes:** within ±1%.
+- **callgrind:** −0.7% instructions on cornellbox and −0.6% on nested_instancing.
+  `Scene::occluded` drops 4.8% and 3.4%, because a shadow ray entering an instance no
+  longer chases a box.
+
+**Level 1 now fits.** `--subdiv-level 1`, with Ptex streamed:
+
+| level 1 | before | after |
+|---|---|---|
+| outcome | killed at the 56 GiB guard after 8:05, in `Commit` | **completes in 8:17** |
+| kernel memory | — | 36.59 GiB (143 B per triangle, 359 M packet lanes) |
+| peak RSS | > 56 GiB | **51.14 GiB** (`Traverse prims` 41.4 GiB, `Commit` peak) |
+
+The headroom is real but thin: 51 GiB of 61. The commit's transient, 41.4 → 51.1 GiB,
+is now the largest single step. `compact-triangle-storage`'s Deferred item 4, a builder
+that never materialises the binary tree, is the lever for it.
+
+ALab (level 0, same flags) went from 4.38 to 3.82 GiB of kernel memory and from 25.74
+to 25.00 GiB peak. Its peak is dominated by what the kernel does not own.
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance

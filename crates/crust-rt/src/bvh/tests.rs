@@ -135,7 +135,9 @@ impl Primitives {
         if self.geoms.len() < other.geoms.len() {
             self.geoms.resize(other.geoms.len(), GeomTable::default());
         }
-        self.prims.extend(other.prims);
+        for p in other.prims {
+            self.push_node(p);
+        }
     }
 }
 
@@ -144,7 +146,7 @@ fn sphere_grid(n: i32) -> Primitives {
     for x in 0..n {
         for y in 0..n {
             for z in 0..n {
-                out.prims.push(PrimNode::Sphere(SpherePrim {
+                out.push_node(PrimNode::Sphere(SpherePrim {
                     center: Vec3A::new(x as f32, y as f32, z as f32) * 3.0,
                     radius: 0.5,
                     geom_id: (x * n * n + y * n + z) as u32,
@@ -331,7 +333,7 @@ fn packet_aware_leaves_keep_overlapping_triangles_together() {
             vertices: prims.vertices.clone(),
             normals: Vec::new(),
             geoms: prims.geoms.clone(),
-            prims: Vec::new(),
+            ..Default::default()
         },
         Layout::Gathered,
         true,
@@ -425,6 +427,15 @@ fn a_triangle_record_is_24_bytes() {
     assert_eq!(std::mem::size_of::<TriangleRecord>(), 24);
     assert_eq!(std::mem::size_of::<PrimNode>(), 64);
     assert_eq!(std::mem::size_of::<GeomTable>(), 12);
+}
+
+/// Instances and cubic spans have arrays of their own, inline: 96 bytes
+/// each, with no `PrimNode` slot and no box (they were a 64-byte slot plus a
+/// 240- or 96-byte box). `PrimNode` stays 64, its linear-curve size.
+#[test]
+fn instances_and_cubic_spans_are_96_bytes_inline() {
+    assert_eq!(std::mem::size_of::<crate::prim::InstancePrim>(), 96);
+    assert_eq!(std::mem::size_of::<crate::prim::CubicCurvePrim>(), 96);
 }
 
 /// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
