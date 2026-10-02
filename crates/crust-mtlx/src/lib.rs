@@ -53,7 +53,7 @@ mod value;
 
 pub use bsdf::{
     Bsdf, Closure, Closures, DiffuseModel, Emission, Leaf, NodeId, ScatterMode, SheenMode, Slot,
-    ThinFilm, Volume, flatten,
+    ThinFilm, Volume, flatten, flatten_volume,
 };
 pub use eval::{
     BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
@@ -123,6 +123,12 @@ pub struct Compiled {
     pub closures: Closures,
     /// The material node's own `name`.
     pub root_name: String,
+    /// Whether the material is a volume terminal with no surface: a
+    /// `volumematerial`, or a USD material whose only terminal is `volume`.
+    /// Its boundary scatters nothing — the host treats it as a transparent
+    /// interface rays cross into and out of [`Closures::volume`], which is
+    /// how Typhoon renders a volume-only material.
+    pub volume_only: bool,
     /// Node categories the compiler had no operator for, sorted, for one
     /// warning per material instead of one per node. Those inputs fell back
     /// to a constant; the material still built.
@@ -240,10 +246,11 @@ fn displacement(
 
 /// Parses a `.mtlx` and compiles the named material node.
 ///
-/// `material_node` is the `name` of the `surfacematerial` (or `surface`) node
-/// to start from. When `None`, the first `surfacematerial` in the document is
-/// used, which is what a single-material document means. Textures and colour
-/// conversion go through `host`.
+/// `material_node` is the `name` of the `surfacematerial`, `volumematerial`
+/// (or `surface`) node to start from. When `None`, the first
+/// `surfacematerial` in the document is used, which is what a
+/// single-material document means, then the first `volumematerial`.
+/// Textures and colour conversion go through `host`.
 pub fn compile(
     path: &std::path::Path,
     material_node: Option<&str>,
@@ -259,14 +266,46 @@ pub fn compile(
             .by_category("surfacematerial")
             .next()
             .or_else(|| doc.by_category("surface").next())
+            .or_else(|| doc.by_category("volumematerial").next())
             .cloned()
             .ok_or_else(|| MtlxError::NoSuchMaterial("<any surfacematerial>".into()))?,
     };
+    if root.category == "volumematerial" {
+        return Ok(compile_terminals(&doc, None, Some(&root), host));
+    }
+    // Not in the standard `surfacematerial` signature, which pairs a surface
+    // with a `volumematerial` through a look instead; read when authored so a
+    // document carrying both on one node keeps its interior.
+    let volume = bsdf::connected_node_in(&doc, &root, "volumeshader");
+    Ok(compile_terminals(&doc, Some(&root), volume.as_ref(), host))
+}
 
-    let mut c = Compiler::new(&doc, host);
+/// Compiles a material from its terminals — what a USD `Material` is: a
+/// `surface` and a `volume` output, either of which may be absent — over an
+/// already-parsed document (a `.mtlx`, or a `UsdShade` network translated
+/// into one).
+///
+/// `surface` is a `surfacematerial`, a `surface` shader, a surface-shader
+/// node or a bare BSDF; `volume` a `volumematerial`, a `volume` shader, a
+/// `mix` of volume shaders or a bare VDF. With no surface the material is
+/// [`Compiled::volume_only`]. A `surfacematerial`'s displacement is read as
+/// [`compile`] reads it.
+pub fn compile_terminals(
+    doc: &Doc,
+    surface: Option<&Node>,
+    volume: Option<&Node>,
+    host: &Host<'_>,
+) -> Compiled {
+    let mut c = Compiler::new(doc, host);
     let mut closures = Closures::default();
-    flatten(&mut c, &root, &mut closures);
-    let displacement = displacement(&mut c, &root, &mut closures.reported);
+    let mut displaced = None;
+    if let Some(s) = surface {
+        flatten(&mut c, s, &mut closures);
+        displaced = displacement(&mut c, s, &mut closures.reported);
+    }
+    if let Some(v) = volume {
+        flatten_volume(&mut c, v, &mut closures);
+    }
     // Counted off the compiled program rather than inside the loader
     // closure: the compiler memoises, so a texture feeding three nodes is
     // loaded once, and the program is the record of what actually resolved.
@@ -283,13 +322,18 @@ pub fn compile(
         .collect::<std::collections::HashSet<_>>()
         .len();
     let unsupported: Vec<String> = c.unsupported.iter().cloned().collect();
+    let root_name = surface
+        .or(volume)
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
 
-    Ok(Compiled {
+    Compiled {
         program: c.program,
         closures,
-        root_name: root.name.clone(),
+        root_name,
+        volume_only: surface.is_none() && volume.is_some(),
         unsupported,
         textures,
-        displacement,
-    })
+        displacement: displaced,
+    }
 }

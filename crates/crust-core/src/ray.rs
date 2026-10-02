@@ -106,6 +106,13 @@ impl Ray {
         }
     }
 
+    /// The same ray travelling through `medium` instead (`None`: vacuum).
+    #[must_use = "returns a new ray; the original is unchanged"]
+    pub fn with_medium(mut self, medium: Option<Medium>) -> Ray {
+        self.medium = medium;
+        self
+    }
+
     /// Same ray with the shutter time replaced.
     #[must_use = "returns a new ray; the original is unchanged"]
     pub fn with_time(mut self, time: f32) -> Ray {

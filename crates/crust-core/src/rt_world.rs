@@ -705,6 +705,7 @@ impl WorldBuilder {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
         let straight = self.materials.iter().any(|m| m.has_straight_transmission());
         let emitters = self.transparent_emitters.contains(&true);
+        let boundaries = self.materials.iter().any(|m| m.is_medium_boundary());
         World {
             scene: self.rt.commit_with(crate::commit_options()),
             materials: self.materials,
@@ -713,6 +714,7 @@ impl WorldBuilder {
             straight,
             pass_throughs: cutouts || straight,
             bounce_pass_throughs: cutouts || straight || emitters,
+            boundaries,
             light_classes: self.light_classes,
             transparent_emitters: if emitters {
                 self.transparent_emitters
@@ -788,6 +790,9 @@ pub struct World {
     /// `pass_throughs`, or a transparent emitter exists: whether a bounce
     /// segment may pass a hit at all.
     bounce_pass_throughs: bool,
+    /// Whether any material is a medium boundary
+    /// ([`Material::is_medium_boundary`]).
+    boundaries: bool,
     light_classes: Vec<u16>,
     /// Sparse, indexed by `geom_id`; empty when no geometry is one.
     transparent_emitters: Vec<bool>,
@@ -954,6 +959,15 @@ impl World {
     #[inline]
     pub fn has_bounce_pass_throughs(&self) -> bool {
         self.bounce_pass_throughs
+    }
+
+    /// Whether any geometry's material is a medium boundary
+    /// ([`Material::is_medium_boundary`]): a volume-only material rays cross
+    /// into and out of its interior medium. When none is, every hit is a
+    /// surface and any hit occludes a shadow ray.
+    #[inline]
+    pub fn has_medium_boundaries(&self) -> bool {
+        self.boundaries
     }
 
     /// World bounds of all geometry; `None` for an empty world.

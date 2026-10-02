@@ -178,6 +178,14 @@
     (`crust-mtlx` + `material/materialx.rs`, below). Checked at each point the USD path gives up,
     not first: finding the reference means walking the prim's composition
     graph, which a stage of ordinary USD materials should not pay for.
+  - **Inline MaterialX** (`info:id = "ND_…"`) → the network translated into a
+    `crust_mtlx::Doc` and compiled as the same graph in a `.mtlx` would be
+    (`scene/usd_import/mtlx_network.rs`, § MaterialX volume terminals and inline
+    networks below). `mtlx` is the **last** surface context consulted
+    (`SURFACE_RENDER_CONTEXTS = ["", "glslfx", "mtlx"]`), so a material that also
+    authors a decodable universal or preview surface renders through that, exactly as
+    before inline networks were read; a MaterialX `volume` terminal is checked before
+    any of it, since it changes what the material *is*.
   - Unbound geometry → grey diffuse `OpenPBR`.
   - **Displacement is resolved beside the material, not inside it.** `resolve_bound`
     returns a `BoundMaterial { material, displacement }`, cached together per
@@ -827,7 +835,79 @@
     miniature, in white, and they still need probing by hand after any change
     to the tree.
 
+## MaterialX volume terminals and inline networks
+
+NVIDIA's Typhoon (hdEmbree, `typhoon/main` of NVIDIA-Omniverse/OpenUSD) has no
+`UsdVolVolume` support at all: its volumes are **materials**. A `Material`'s
+`volume` terminal is the participating medium inside the geometry it is bound to
+(`EvalSurfaceVolumeMaterial` / `ApplyVolumeToSurfaceClosure` in
+`MaterialXCpp/surfaceShaderUtils.h`), and crust follows it:
+
+- **The VDF tree** (`crust-mtlx/src/bsdf.rs`, `vdf_tree` / `volume_shader`):
+  `anisotropic_vdf` and `absorption_vdf` leaves; `mix`, `add` and `multiply`
+  over VDFs; `volume` (its `vdf` input), `mix` of two `volumeshader`s, and
+  `volumematerial`. The combinators are Typhoon's (`_EvalMixVdf`,
+  `_AddVdfClosures`, `_MultiplyVdfClosure`): coefficients combine linearly and
+  the anisotropy is the mixture weighted by each side's scattering lane sum, so
+  an absorber never drags `g` toward its own. They are **program ops**
+  (`sum_volumes`: `Mul`, `Add`, `DotProduct`, and `Div`, whose zero divisor
+  answers 0 — no scattering, no anisotropy), so a textured VDF works, the
+  optimiser folds a constant one to three constants, and the JIT needed nothing
+  new. A vacuum branch is zeros. `volume`'s `edf` is reported, not rendered.
+- **Under a surface the terminal replaces the interior** the surface described
+  through its own `transmission_*` inputs (`flatten_volume` overwrites
+  `Closures::volume`): it is the authored answer to "what is inside". It still
+  only matters below a thick, transmitting surface — `ResolvedClosure`'s rule,
+  now shared through `closure::volume_medium` — so a thin-walled or opaque
+  surface ignores it, as `ApplyVolumeToSurfaceClosure` does.
+- **With no surface the material is a medium boundary**
+  (`Compiled::volume_only` → `Material::is_medium_boundary`): Typhoon's
+  `MakeVolumeSurfaceClosure`, an opacity-0 closure flagged `isVolumeBoundary`.
+  It is not a cutout — a cutout changes no medium (§ opacity above) and
+  `pass_cutouts` would step over it — so it is its own trait method, counted by
+  the world at commit (`World::has_medium_boundaries`), and the integrator
+  crosses it (rendering record § Medium boundaries). `boundary_medium` runs the
+  whole program; a volume-only material's program is its volume network alone.
+- **Inline networks** (`scene/usd_import/mtlx_network.rs`). Typhoon receives
+  every material as a Hydra network of `ND_*` nodes, which is also how
+  `usdMtlx` composes a document into a stage. Each `Shader` becomes the `Node`
+  the XML parser would have produced: the category and type from the nodedef
+  name (`nodedef_category`: trailing signature tokens are popped — `_100`
+  versions, `color3`, `vdfC` — but a `_bsdf` / `_edf` / `_vdf` only after a
+  combinator, since on a leaf it *is* the category: `ND_mix_vdf` is `mix`,
+  `ND_anisotropic_vdf` is `anisotropic_vdf`), and each literal formatted as the
+  text of a `value` attribute and read back through `parse_literal`, so a value
+  means exactly what it would in a `.mtlx`. Connections follow `NodeGraph`
+  outputs and `Material` / `NodeGraph` interface inputs to a shader output or a
+  value (32 hops, then cut and reported); an unconnected, unauthored interface
+  input leaves the node's input unauthored, i.e. its nodedef default. `asset`
+  inputs are anchored on their authoring layer (`attribute_asset_path`) and
+  written absolute, so the texture loader's join resolves them to themselves.
+  The node's name is its prim path, which is unique by construction.
+- **Precedence.** A MaterialX `volume` terminal is read first, with the
+  `mtlx` surface (else a universal `ND_*` surface) of the same material. If the
+  surface is something else — a `UsdPreviewSurface` beside a MaterialX volume
+  — the volume is **ignored with a warning** rather than the preview surface
+  dropped: that pairing is a viewer fallback, and keeping the surface is what
+  the stage rendered as before.
+
 ## Known gaps: MaterialX
+
+- **Volume terminals are homogeneous per hit, and one at a time.** The medium
+  is evaluated once where a ray enters (a textured VDF picks its value at the
+  entry point and carries it), so a VDF cannot vary *through* the volume; for
+  that, use a volume region. Nesting and overlap follow Typhoon's single
+  `MediumState` owner (rendering record), not its planned priority-based
+  interior list (`doc/plan-volume-ids.md` there). `volume`'s `edf` is not
+  rendered. The free flight is crust's max-channel majorant, not Typhoon's
+  Chiang channel MIS, so a strongly chromatic interior is noisier than
+  Typhoon's (unbiased either way). A `PreviewSurface` beside a MaterialX
+  volume drops the volume (above).
+- **Inline networks read the nodedef by name.** A custom nodedef, or a
+  standard one whose name breaks the `ND_<category>_<signature>` pattern, is
+  translated as whatever category that parse gives, which the compiler then
+  reports as unsupported. Nodegraph-scoped names are flattened: every node is
+  addressed by its prim path.
 
 - **Approximated leaves.** A Zeltner sheen (`mode = zeltner`, OpenPBR's fuzz)
   is evaluated as Imageworks / Charlie, and reported per material when live.

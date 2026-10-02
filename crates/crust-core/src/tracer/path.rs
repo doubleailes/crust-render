@@ -11,7 +11,7 @@ use crate::aov::FirstHit;
 use crate::guiding::SampleData;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
-use crate::medium::sample_henyey_greenstein;
+use crate::medium::{Medium, hg_phase, sample_henyey_greenstein};
 use crate::pdf::PdfSolidAngle;
 use crate::profile::Section;
 use crate::ray::{Ray, RayMask, TRACE_T_MIN};
@@ -209,7 +209,25 @@ pub fn ray_color_with_light_samples(
         light_samples: light_samples.0.max(1),
         light_samples_indirect: light_samples.1.max(1),
     };
-    trace_path::<false, false>(r, &cx, sampler, &mut no_training, &mut scratch, &mut stats)
+    if world.has_medium_boundaries() {
+        trace_path::<false, false, true>(
+            r,
+            &cx,
+            sampler,
+            &mut no_training,
+            &mut scratch,
+            &mut stats,
+        )
+    } else {
+        trace_path::<false, false, false>(
+            r,
+            &cx,
+            sampler,
+            &mut no_training,
+            &mut scratch,
+            &mut stats,
+        )
+    }
 }
 
 /// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
@@ -819,17 +837,20 @@ impl MixedHairNee {
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn mixed_hair_shadow<const PROFILE: bool>(
+fn mixed_hair_shadow<const PROFILE: bool, const MEDIA: bool>(
     sp: &ShadingPoint,
     world: &World,
     volumes: &Volumes,
     ray: Ray,
     distance: f32,
     tr_pass: Vec3A,
+    inside: Option<&Enclosure>,
     vertex: PathSampler,
     stats: &mut RayStats,
 ) -> MixedHairNee {
-    let tr_wall = shadow_transmittance::<PROFILE>(world, volumes, &ray, distance, vertex, stats);
+    let tr_wall = shadow_transmittance::<PROFILE, MEDIA>(
+        world, volumes, &ray, distance, inside, vertex, stats,
+    );
     let (hair, other, hair_leaves) = sp.eval_hair_split(ray.direction());
     MixedHairNee {
         shaded: hair * tr_pass + other * tr_wall,
@@ -844,11 +865,18 @@ fn mixed_hair_shadow<const PROFILE: bool>(
 /// through every region it crosses (stochastic for heterogeneous regions,
 /// exact for homogeneous ones). MIS weights are unaffected — transmittance
 /// is part of the integrand on both strategies, not of either pdf.
-fn shadow_transmittance<const PROFILE: bool>(
+///
+/// `inside` is the enclosure the shadow ray starts in: its medium attenuates
+/// the ray until the ray leaves through the owner's boundary. A ray that
+/// starts in one, or is blocked in a world with medium boundaries, is walked
+/// hit by hit ([`medium_shadow`]). `MEDIA` is the integrator's: false in a
+/// world without boundaries, where none of that can happen.
+fn shadow_transmittance<const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     shadow_ray: &Ray,
     distance: f32,
+    inside: Option<&Enclosure>,
     vertex: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
@@ -856,7 +884,13 @@ fn shadow_transmittance<const PROFILE: bool>(
     // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
+    if MEDIA && inside.is_some() {
+        return medium_shadow(world, volumes, shadow_ray, distance, inside, vertex, stats);
+    }
     let Some(through) = visible(world, shadow_ray, distance, vertex, stats) else {
+        if MEDIA && world.has_medium_boundaries() {
+            return medium_shadow(world, volumes, shadow_ray, distance, None, vertex, stats);
+        }
         stats.shadow_occluded += 1;
         return Vec3A::ZERO;
     };
@@ -890,7 +924,21 @@ pub(crate) fn surface_visibility(
     vertex: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
-    visible(world, ray, distance, vertex, stats).unwrap_or(Vec3A::ZERO)
+    match visible(world, ray, distance, vertex, stats) {
+        Some(through) => through,
+        // A medium boundary is crossed whole: this is visibility, and the
+        // interior's transmittance is not part of it.
+        None if world.has_medium_boundaries() => through_boundaries(
+            world,
+            ray,
+            shadow_t_max(distance),
+            None,
+            false,
+            vertex,
+            stats,
+        ),
+        None => Vec3A::ZERO,
+    }
 }
 
 /// [`surface_visibility`], `None` where it is zero: NEE branches on that
@@ -953,6 +1001,163 @@ fn straight_transmittance(
 /// there so a pathological stack cannot stall a sample.
 const MAX_CUTOUT_CROSSINGS: usize = 256;
 
+/// How many medium boundaries one path may cross before it is given up as
+/// absorbed: generous (a fog bank of a hundred overlapping cards, a deep
+/// path in and out of a cloud), and only there so a ray stuck on a boundary
+/// cannot stall a sample.
+const MAX_PATH_CROSSINGS: usize = 4096;
+
+/// The medium a path entered through a **medium boundary** — a volume-only
+/// material ([`Material::is_medium_boundary`]) — and the geometry that owns
+/// it: Typhoon's `MediumState`.
+///
+/// One owner at a time, as in Typhoon: inside an enclosure no other
+/// boundary is entered and no refracting surface swaps the medium, and only
+/// a crossing of the owner's own boundary leaves it. While a path is inside
+/// one, every ray it traces carries [`Enclosure::medium`], whatever the
+/// surface it scattered from built, and every shadow ray starts in it.
+#[derive(Clone, Copy)]
+struct Enclosure {
+    medium: Medium,
+    /// The boundary's `geom_id`: crossing it again is the way out.
+    owner: u32,
+    /// The owner's light-link class: the receiver of NEE at scatter points
+    /// inside.
+    class: u16,
+}
+
+/// What crossing a medium boundary at `hit` does to the medium a ray is in:
+/// `inside` is updated in place, and the medium the continuing ray carries
+/// is returned. The rules are Typhoon's `_UpdatePathMedium`: the owner's own
+/// boundary seen from inside leaves; a front face met in vacuum enters the
+/// boundary's medium (vacuum stays vacuum); anything else — another
+/// boundary from inside an enclosure, any boundary from inside a refracting
+/// interior — is crossed without a change.
+fn cross_boundary(
+    hit: &WorldHit<'_>,
+    ray: &Ray,
+    inside: &mut Option<Enclosure>,
+    world: &World,
+) -> Option<Medium> {
+    match inside {
+        Some(e) if e.owner == hit.geom_id && !hit.rec.front_face => {
+            *inside = None;
+            None
+        }
+        Some(e) => Some(e.medium),
+        None if hit.rec.front_face && ray.medium().is_none() => {
+            let m = hit.mat.boundary_medium(ray, &point_sampled(&hit.rec))?;
+            *inside = Some(Enclosure {
+                medium: m,
+                owner: hit.geom_id,
+                class: world.light_class(hit.geom_id),
+            });
+            Some(m)
+        }
+        None => ray.medium().copied(),
+    }
+}
+
+/// [`shadow_transmittance`] in a world with medium boundaries: Typhoon's
+/// `_Visibility`. [`through_boundaries`], times the volume regions'
+/// transmittance.
+#[cold]
+#[inline(never)]
+fn medium_shadow(
+    world: &World,
+    volumes: &Volumes,
+    ray: &Ray,
+    distance: f32,
+    inside: Option<&Enclosure>,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let kept = through_boundaries(
+        world,
+        ray,
+        shadow_t_max(distance),
+        inside,
+        true,
+        vertex,
+        stats,
+    );
+    if kept == Vec3A::ZERO {
+        stats.shadow_occluded += 1;
+        return Vec3A::ZERO;
+    }
+    if volumes.is_empty() {
+        return kept;
+    }
+    let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
+    kept * volumes.transmittance(ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
+}
+
+/// The fraction of `(0.001, t_max)` of `ray` that surfaces let through in a
+/// world with medium boundaries: [`walls_through`]'s walk, hit by hit, where
+/// a boundary is crossed under [`cross_boundary`]'s rules and, when
+/// `attenuate`, the medium the ray is in at each stretch dims it by
+/// Beer–Lambert — deterministic where the path tracks free flights, the same
+/// transmittance either way. `inside` is the enclosure the ray starts in.
+#[allow(clippy::too_many_arguments)]
+fn through_boundaries(
+    world: &World,
+    ray: &Ray,
+    t_max: f32,
+    inside: Option<&Enclosure>,
+    attenuate: bool,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let mut inside = inside.copied();
+    let mut medium = inside.map(|e| e.medium);
+    let (mut t, mut segment) = (0.0, ray.clone());
+    let mut kept = Vec3A::ONE;
+    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+        stats.cutout_rays += 1;
+        let hit = world
+            .intersect(&segment, TRACE_T_MIN, f32::INFINITY)
+            .filter(|h| t + h.rec.t < t_max);
+        if attenuate && let Some(m) = &medium {
+            let end = hit.as_ref().map_or(t_max, |h| t + h.rec.t);
+            kept *= m.transmittance((end - t).max(0.0));
+        }
+        let Some(h) = hit else {
+            return kept;
+        };
+        if crossing == MAX_CUTOUT_CROSSINGS {
+            return Vec3A::ZERO;
+        }
+        if h.mat.is_medium_boundary() {
+            medium = cross_boundary(&h, &segment.clone().with_medium(medium), &mut inside, world);
+        } else {
+            let cutout = h.mat.has_cutout();
+            let straight = h.mat.has_straight_transmission();
+            if !(cutout || straight) {
+                return Vec3A::ZERO;
+            }
+            let rec = point_sampled(&h.rec);
+            let opacity = if cutout {
+                h.mat.opacity(ray, &rec)
+            } else {
+                1.0
+            };
+            kept *= if straight {
+                let sampler = vertex.new_domain(K_NEE_THIN).new_domain(crossing as i32);
+                let tr = straight_transmittance(h.mat, ray, &rec, sampler);
+                Vec3A::splat(1.0 - opacity) + opacity * tr
+            } else {
+                Vec3A::splat(1.0 - opacity)
+            };
+        }
+        if kept.max_element() <= 0.0 {
+            return Vec3A::ZERO;
+        }
+        t = resume_before(t + h.rec.t);
+        segment = restarted(ray, t);
+    }
+    unreachable!("the last crossing returns")
+}
+
 /// `ray` restarted at its own parameter `t`, in the same direction, with the
 /// cone as wide as it has grown by then: a hit on the result at `t'` is the
 /// hit on `ray` at `t + t'`.
@@ -970,6 +1175,27 @@ fn restarted(ray: &Ray, t: f32) -> Ray {
         .with_curve_exits_ignored(ray.rt().ignore_curve_exits)
         .with_cone(crate::RayCone {
             width: cone.width_at(t * ray.direction().length()),
+            spread: cone.spread,
+        })
+}
+
+/// `ray` restarted to pass its hit at `t`, as [`restarted`] at
+/// [`resume_before`]`(t)`, but with a unit direction and the step back taken
+/// in distance: the free flights ahead, and `t` at the next hit, are then
+/// distances in the medium the restart enters. A camera ray's direction is
+/// not unit (it reaches the focus plane at `t = 1`), and stepping back 0.001
+/// of *its* parameter put a hundredth of a unit of fog outside the box.
+fn restarted_past(ray: &Ray, t: f32) -> Ray {
+    let len = ray.direction().length();
+    let dir = ray.direction() / len;
+    let back = resume_before(t * len);
+    let cone = ray.cone();
+    Ray::new(ray.origin() + dir * back, dir)
+        .with_time(ray.time())
+        .with_mask(ray.mask())
+        .with_curve_exits_ignored(ray.rt().ignore_curve_exits)
+        .with_cone(crate::RayCone {
+            width: cone.width_at(back),
             spread: cone.spread,
         })
 }
@@ -1638,12 +1864,17 @@ fn collect_crossings(
 /// surface block does. With light path expressions each sample is its own
 /// `L` event at the open route vertex, so `route.vertex` must have been
 /// called first.
+///
+/// Also the NEE at a scatter inside an [`Enclosure`] (`inside`), with the
+/// enclosure's single Henyey–Greenstein lobe for `phase` — Typhoon's
+/// `_ComputeMediumDirectLighting` — through [`enclosure_nee`].
 #[allow(clippy::too_many_arguments)]
-fn volume_nee<const PROFILE: bool>(
+fn volume_nee<const PROFILE: bool, const MEDIA: bool>(
     p: Vec3A,
     wi: Vec3A,
-    phase: &PhaseMix,
+    phase: Phase<'_>,
     class: u16,
+    inside: Option<&Enclosure>,
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -1686,11 +1917,12 @@ fn volume_nee<const PROFILE: bool>(
         let shadow_ray = Ray::new(p, s.direction)
             .with_time(time)
             .with_mask(lights.shadow_mask(index));
-        let tr = shadow_transmittance::<PROFILE>(
+        let tr = shadow_transmittance::<PROFILE, MEDIA>(
             world,
             volumes,
             &shadow_ray,
             s.distance,
+            inside,
             sampler,
             stats,
         );
@@ -1737,7 +1969,7 @@ fn volume_nee<const PROFILE: bool>(
 /// at every vertex, loop taken or not (+0.96%; by reference, +1.4%).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn surface_light_sample<const PROFILE: bool>(
+fn surface_light_sample<const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -1749,6 +1981,7 @@ fn surface_light_sample<const PROFILE: bool>(
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
+    inside: Option<&Enclosure>,
     routing: Option<&RouteCtx>,
     nee_v: PathSampler,
     pick_u: f32,
@@ -1801,11 +2034,12 @@ fn surface_light_sample<const PROFILE: bool>(
                 .with_time(ray.time())
                 .with_mask(lights.shadow_mask(light_index))
                 .with_curve_exits_ignored(sp.passes_out_of_curves());
-            let tr = shadow_transmittance::<PROFILE>(
+            let tr = shadow_transmittance::<PROFILE, MEDIA>(
                 world,
                 volumes,
                 &shadow_ray,
                 ls.distance,
+                inside,
                 nee_v,
                 stats,
             );
@@ -1826,7 +2060,7 @@ fn surface_light_sample<const PROFILE: bool>(
             // already stands or falls with it. Rare, so out of line — the
             // common path stays the expression it always was.
             let mixed = if sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0 {
-                Some(mixed_hair_shadow::<PROFILE>(
+                Some(mixed_hair_shadow::<PROFILE, MEDIA>(
                     sp,
                     world,
                     volumes,
@@ -1835,6 +2069,7 @@ fn surface_light_sample<const PROFILE: bool>(
                         .with_mask(lights.shadow_mask(light_index)),
                     ls.distance,
                     shadow_tr,
+                    inside,
                     nee_v,
                     stats,
                 ))
@@ -1900,7 +2135,7 @@ fn surface_light_sample<const PROFILE: bool>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn extra_surface_light_samples<const PROFILE: bool>(
+fn extra_surface_light_samples<const PROFILE: bool, const MEDIA: bool>(
     world: &World,
     volumes: &Volumes,
     lights: &LightList,
@@ -1912,6 +2147,7 @@ fn extra_surface_light_samples<const PROFILE: bool>(
     guiding_here: Option<&GuidingContext<'_>>,
     nee_count: u32,
     exiting: bool,
+    inside: Option<&Enclosure>,
     routing: Option<&RouteCtx>,
     v: PathSampler,
     route: &mut Route,
@@ -1923,7 +2159,7 @@ fn extra_surface_light_samples<const PROFILE: bool>(
         let nee_v = nee_sampler(v, index);
         let nee_s = nee_v.new_domain(K_NEE).draw_sample_f32::<4>();
         let pick_u = stratified_pick(nee_s[0], nee_count, index);
-        total += surface_light_sample::<PROFILE>(
+        total += surface_light_sample::<PROFILE, MEDIA>(
             world,
             volumes,
             lights,
@@ -1935,6 +2171,7 @@ fn extra_surface_light_samples<const PROFILE: bool>(
             guiding_here,
             nee_count,
             exiting,
+            inside,
             routing,
             nee_v,
             pick_u,
@@ -1945,6 +2182,118 @@ fn extra_surface_light_samples<const PROFILE: bool>(
         );
     }
     total
+}
+
+/// The phase function a [`volume_nee`] connection is weighted by: a region's
+/// lobe mixture, or an enclosure's single Henyey–Greenstein lobe. An enum
+/// rather than a closure so `volume_nee` has one body: a second
+/// monomorphisation gave `LightList::pick_index_at` another call site, LLVM
+/// stopped inlining it, and cornellbox — which has neither — paid 0.6% more
+/// instructions.
+#[derive(Clone, Copy)]
+enum Phase<'a> {
+    Mix(&'a PhaseMix),
+    Hg(f32),
+}
+
+impl Phase<'_> {
+    #[inline]
+    fn pdf(self, cos_theta: f32) -> f32 {
+        match self {
+            Phase::Mix(m) => m.pdf(cos_theta),
+            Phase::Hg(g) => hg_phase(cos_theta, g),
+        }
+    }
+}
+
+/// NEE at a scatter inside an enclosure: [`volume_nee`] with its medium's
+/// lobe, its owner's light-link class, and shadow rays that start inside it.
+/// Out of line, as every medium-boundary path is: a world without one never
+/// gets here, and its integrator stays the shape it was.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn enclosure_nee<const PROFILE: bool>(
+    p: Vec3A,
+    wi: Vec3A,
+    inside: &Enclosure,
+    world: &World,
+    volumes: &Volumes,
+    lights: &LightList,
+    strategy: SamplingStrategy,
+    count: u32,
+    vertex: PathSampler,
+    time: f32,
+    routing: Option<&RouteCtx>,
+    route: &mut Route,
+    stats: &mut RayStats,
+) -> Vec3A {
+    volume_nee::<PROFILE, true>(
+        p,
+        wi,
+        Phase::Hg(inside.medium.g),
+        inside.class,
+        Some(inside),
+        world,
+        volumes,
+        lights,
+        strategy,
+        count,
+        vertex,
+        time,
+        routing,
+        route,
+        stats,
+    )
+}
+
+/// A segment's weight `w` and pre-weighted emission `e`, preceded by the
+/// medium-boundary stretches that `carried` (their transmittance and
+/// emission): the stretches' weight multiplies the segment's, and their
+/// emission comes before its own.
+#[inline(always)]
+fn carry_into(carried: Option<(Vec3A, Vec3A)>, w: Vec3A, e: Vec3A) -> (Vec3A, Vec3A) {
+    match carried {
+        Some((tr, emitted)) => (tr * w, emitted + tr * e),
+        None => (w, e),
+    }
+}
+
+/// Makes `hit` the first hit past any medium boundaries, for the one
+/// segment that is traced without free flights (the depth-exhausted
+/// emission lookup), and returns the Beer–Lambert transmittance of the media
+/// it crossed on the way — `ray`'s own up to the first boundary, then
+/// whichever each crossing leaves it in. `hit.rec.t` stays measured along
+/// `ray`, as [`pass_cutouts`] keeps it. Pass-throughs past the first
+/// boundary are met as surfaces: this lookup is the truncation at the depth
+/// cap, not a vertex.
+#[cold]
+#[inline(never)]
+fn pass_boundaries<'w>(
+    world: &'w World,
+    ray: &Ray,
+    hit: &mut Option<WorldHit<'w>>,
+    mut inside: Option<Enclosure>,
+) -> Vec3A {
+    let len = ray.direction().length();
+    let mut medium = ray.medium().copied();
+    let (mut tr, mut from) = (Vec3A::ONE, 0.0);
+    for _ in 0..MAX_CUTOUT_CROSSINGS {
+        let Some(h) = hit.as_ref() else {
+            return tr;
+        };
+        if let Some(m) = &medium {
+            tr *= m.transmittance((h.rec.t - from) * len);
+        }
+        if !h.mat.is_medium_boundary() {
+            return tr;
+        }
+        medium = cross_boundary(h, &ray.clone().with_medium(medium), &mut inside, world);
+        from = h.rec.t;
+        *hit = hit_past(world, ray, h.rec.t);
+    }
+    *hit = None;
+    Vec3A::ZERO
 }
 
 /// The integrator: an iterative path tracer in two passes. The forward walk
@@ -1968,7 +2317,7 @@ fn extra_surface_light_samples<const PROFILE: bool>(
 /// with `AOV = false` every `if AOV` block compiles away, leaving the
 /// function the beauty-only render has always run.
 #[inline(always)]
-pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
+pub(super) fn trace_path<const PROFILE: bool, const AOV: bool, const MEDIA: bool>(
     r: &Ray,
     cx: &PathContext<'_>,
     sampler: PathSampler,
@@ -2033,11 +2382,28 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     let split = &mut scratch.nee_split;
     let bounce_split = &mut scratch.bounce_split;
     let thin = &mut scratch.thin;
+    // The medium boundary's interior the path is in (see `Enclosure`), and
+    // what the stretches crossed since the last vertex carried: their
+    // transmittance and their (already weighted) region emission, folded into
+    // whatever the segment reaches next. `crossings` counts the boundaries
+    // crossed so far. Every one of those checks is behind `boundaries`, the
+    // const `MEDIA`, so a world without boundaries runs an instantiation in
+    // which none of them exists: guarded at run time instead, cornellbox ran
+    // 0.7% more instructions.
+    debug_assert_eq!(MEDIA, world.has_medium_boundaries());
+    let boundaries = MEDIA;
+    let mut enclosure: Option<Enclosure> = None;
+    let mut carry: Option<(Vec3A, Vec3A)> = None;
+    let mut crossings = 0usize;
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
         // has been pushed for it yet). Every per-event draw hangs off `v`.
-        let v = path.new_domain(records.len() as i32);
+        // A stretch that began at a medium boundary is numbered past the
+        // stretch before it — `records.len() + crossings` grows at every step
+        // either way — so it cannot repeat that stretch's draws; with nothing
+        // crossed the index is the vertex's.
+        let v = path.new_domain((records.len() + crossings) as i32);
 
         if remaining <= 0 {
             stats.ended_depth += 1;
@@ -2058,6 +2424,10 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats);
                     crossed = world.has_transparent_emitters() && !thin.crossed.is_empty();
                 }
+                // Through any medium boundaries, measuring what their
+                // interiors take on the way.
+                let medium_tr =
+                    boundaries.then(|| pass_boundaries(world, &ray, &mut hit, enclosure));
                 let arrival = if AOV {
                     let a = match routing {
                         Some(ctx) if walls => route.arrival_through(ctx, &thin.kinds),
@@ -2106,7 +2476,9 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let mut emitted = hit.mat.emitted_at(&ray, &hit.rec, cos_o);
                     if emitted.length_squared() > 0.0 {
-                        if let Some(m) = ray.medium() {
+                        if let Some(tr) = medium_tr {
+                            emitted *= tr;
+                        } else if let Some(m) = ray.medium() {
                             emitted *= m.transmittance(hit.rec.t);
                         }
                         if !volumes.is_empty() {
@@ -2198,13 +2570,18 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             let mut rng = v.new_domain(K_VOLUME).rng();
             volumes.sample_interaction(&ray, TRACE_T_MIN, t_surf.min(t_med), &mut rng)
         };
+        // What the medium-boundary stretches before this one carried, folded
+        // into the event's weight and emission below. Not into the event
+        // itself: rebinding it kept the whole `VolumeEvent` in memory at
+        // every vertex (cornellbox, +0.2% instructions).
+        let carried = if boundaries { carry.take() } else { None };
 
         // The hidden lights the segment reached before its event belong to
         // the vertex it left, like the emission at a bounce's end.
         if crossed && let Some(last) = records.last_mut() {
             collect_crossings(
                 &thin.crossed,
-                |t| medium_arrival(&ray, t),
+                |t| medium_arrival(&ray, t) * carried.map_or(Vec3A::ONE, |c| c.0),
                 &prev,
                 lights,
                 strategy,
@@ -2224,6 +2601,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 emitted,
                 class,
             } => {
+                let (weight, emitted) = carry_into(carried, weight, emitted);
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
@@ -2243,11 +2621,12 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 } else {
                     light_samples_indirect
                 };
-                let nee = volume_nee::<PROFILE>(
+                let nee = volume_nee::<PROFILE, MEDIA>(
                     p,
                     wi,
-                    &phase,
+                    Phase::Mix(&phase),
                     class,
+                    enclosure.as_ref(),
                     world,
                     volumes,
                     lights,
@@ -2327,7 +2706,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             VolumeEvent::Passthrough {
                 transmittance,
                 emitted,
-            } => (transmittance, emitted),
+            } => carry_into(carried, transmittance, emitted),
         };
 
         if t_med < t_surf {
@@ -2357,12 +2736,48 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // Subsurface vertices run no NEE (their shadow rays are
             // blocked by the enclosing surface), so `prev = None` keeps
             // the next hit's emission at full weight — the pairing that
-            // avoids double counting.
+            // avoids double counting. Inside an enclosure the boundary lets
+            // shadow rays out, so a scatter there runs NEE with its phase
+            // function, exactly as a volume-region scatter does, and the
+            // event weight moves into `atten` so it multiplies NEE too.
+            let enclosed = enclosure.filter(|e| boundaries && e.medium == medium);
+            let wi = ray.direction().normalize();
+            let nee_count = if records.is_empty() {
+                light_samples
+            } else {
+                light_samples_indirect
+            };
+            // A medium scatter is a `V` event, opened before any NEE events
+            // it runs (inside an enclosure, each light sample's `L`).
+            if routing.is_some() {
+                route.vertex(arrival_ts);
+            }
+            let (atten, nee, factor) = match &enclosed {
+                Some(e) => {
+                    let nee = enclosure_nee::<PROFILE>(
+                        pos,
+                        wi,
+                        e,
+                        world,
+                        volumes,
+                        lights,
+                        strategy,
+                        nee_count,
+                        v,
+                        ray.time(),
+                        routing,
+                        route,
+                        stats,
+                    );
+                    (vol_tr * factor, nee, Vec3A::ONE)
+                }
+                None => (vol_tr, Vec3A::ZERO, factor),
+            };
             let mut vrec = VertexRec {
-                atten: vol_tr,
+                atten,
                 segment_emit: vol_emit,
                 emit_here: Vec3A::ZERO,
-                nee: Vec3A::ZERO,
+                nee,
                 factor,
                 next_emit: Vec3A::ZERO,
                 next_emit_weight: 1.0,
@@ -2370,15 +2785,13 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 crossed_raw: Vec3A::ZERO,
                 train: None,
             };
-            beta *= vol_tr * factor;
+            beta *= atten * factor;
             let survived =
                 russian_roulette(records.len(), v, &mut beta, &mut vrec.factor, stats).is_some();
             if !survived {
                 vrec.factor = Vec3A::ZERO;
             }
             if let Some(ctx) = routing {
-                // A medium scatter is a `V` event; it runs no NEE.
-                route.vertex(arrival_ts);
                 route.bounce(std::iter::once((ctx.volume(), vrec.factor)));
             }
             if albedo_on {
@@ -2400,7 +2813,12 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 .with_mask(crate::ray::MASK_INDIRECT)
                 .with_cone(cone);
             remaining -= 1;
-            prev = None;
+            prev = enclosed.map(|e| PrevVertex::Phase {
+                pos,
+                pdf: PdfSolidAngle::from_measure(hg_phase(wi.dot(dir), medium.g).max(1e-6)),
+                class: e.class,
+                nee_count,
+            });
             continue;
         }
 
@@ -2458,6 +2876,21 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             }
             break;
         };
+        if boundaries && hit.mat.is_medium_boundary() {
+            // === Medium boundary: crossed, not shaded ===
+            // No vertex and no depth: the stretch up to here is carried into
+            // whatever the segment reaches next, and the path continues in
+            // the medium the crossing leaves it in, from just past the hit.
+            crossings += 1;
+            if crossings > MAX_PATH_CROSSINGS {
+                stats.ended_absorbed += 1;
+                break;
+            }
+            carry = Some((vol_tr * medium_arrival(&ray, hit.rec.t), vol_emit));
+            let medium = cross_boundary(&hit, &ray, &mut enclosure, world);
+            ray = restarted_past(&ray, hit.rec.t).with_medium(medium);
+            continue;
+        }
         let rec: HitRecord = hit.rec;
         let mat = hit.mat;
         // The cone's perpendicular cross-section where it met this surface.
@@ -2568,7 +3001,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // always did; the others, when there are any, from their own
         // sub-domains in `extra_surface_light_samples`.
         let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
-        let mut nee = surface_light_sample::<PROFILE>(
+        let mut nee = surface_light_sample::<PROFILE, MEDIA>(
             world,
             volumes,
             lights,
@@ -2580,6 +3013,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             guiding_here,
             nee_count,
             exiting,
+            enclosure.as_ref(),
             routing,
             v,
             stratified_pick(nee_s[0], nee_count, 0),
@@ -2589,7 +3023,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             stats,
         );
         if nee_count > 1 {
-            nee += extra_surface_light_samples::<PROFILE>(
+            nee += extra_surface_light_samples::<PROFILE, MEDIA>(
                 world,
                 volumes,
                 lights,
@@ -2601,6 +3035,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 guiding_here,
                 nee_count,
                 exiting,
+                enclosure.as_ref(),
                 routing,
                 v,
                 route,
@@ -2739,6 +3174,9 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                             ray.cone()
                                 .scattered(cone_width_here, crate::RayCone::MAX_SPREAD),
                         );
+                    if boundaries && let Some(e) = &enclosure {
+                        ray = ray.with_medium(Some(e.medium));
+                    }
                     continue;
                 }
                 prev = Some(PrevVertex::Surface(PrevBounce {
@@ -2767,6 +3205,11 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     .with_time(ray.time())
                     .with_mask(crate::ray::MASK_INDIRECT)
                     .with_cone(ray.cone().scattered(cone_width_here, sample.spread));
+                // Inside an enclosure its medium is the one the path travels
+                // in, whatever medium (or none) the surface's own ray carries.
+                if boundaries && let Some(e) = &enclosure {
+                    ray = ray.with_medium(Some(e.medium));
+                }
                 remaining -= 1;
                 continue;
             }

@@ -3651,3 +3651,46 @@ def Camera "Rig"
         ["/Rig/B/Look"]
     );
 }
+
+/// `materialx_volume.usda`: inline MaterialX networks, as Typhoon receives
+/// them. The fog cube's volume-only material is a medium boundary with the
+/// `mix_vdf` of its two VDFs inside; the glass carries its volume terminal
+/// as the interior; the copper is an inline surface alone.
+#[test]
+fn loads_materialx_volume_usda() {
+    let scene = Scene::from_usd(&sample("materialx_volume.usda")).expect("load");
+    assert!(scene.world.has_medium_boundaries());
+    let hit_at = |x: f32, y: f32| {
+        let ray = Ray::new(Vec3A::new(x, y, 8.0), -Vec3A::Z);
+        let hit = scene.world.intersect(&ray, 1e-3, 1e4).expect("a hit");
+        (ray, hit)
+    };
+    // The fog cube, above the ball inside it.
+    let (ray, fog) = hit_at(-2.4, 1.7);
+    assert!(fog.mat.is_medium_boundary());
+    let m = fog.mat.boundary_medium(&ray, &fog.rec).expect("fog");
+    // mix(fg = ink, bg = haze, 0.2).
+    let expect_a = Vec3A::splat(0.02) * 0.8 + Vec3A::new(0.8, 0.4, 0.1) * 0.2;
+    assert!(
+        (m.sigma_a - expect_a).abs().max_element() < 1e-6,
+        "{}",
+        m.sigma_a
+    );
+    assert!((m.sigma_s - Vec3A::splat(0.72)).abs().max_element() < 1e-6);
+    assert!((m.g - 0.5).abs() < 1e-6);
+    // The glass and the copper are surfaces.
+    for x in [0.0, 2.3] {
+        let (_, hit) = hit_at(x, 0.85);
+        assert_eq!(hit.mat.kind(), "MaterialX");
+        assert!(!hit.mat.is_medium_boundary());
+    }
+    let (_, glass) = hit_at(0.0, 0.9);
+    let inside = glass.mat.make_ray(&glass.rec, -Vec3A::Z);
+    let interior = inside.medium().expect("the volume terminal");
+    assert!(
+        (interior.sigma_s - Vec3A::new(1.2, 1.0, 0.8))
+            .abs()
+            .max_element()
+            < 1e-6
+    );
+}

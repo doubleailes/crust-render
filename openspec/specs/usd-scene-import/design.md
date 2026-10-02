@@ -29,6 +29,14 @@ top-level subtrees, then composes, traverses and **drops one masked stage per su
 On the island: 117.10 GiB / 13:20 → 43.76 GiB / 09:19, output pixel-identical.
 `MIN_STREAM_CHUNKS` keeps the single-stage path for scenes too small to repay the
 re-opens; `CRUST_STREAM_IMPORT=0` forces it.
+**A binding into a sibling chunk does not resolve.** A chunk's mask is its subtree
+alone, so a `Material` that is itself a top-level subtree (`/World/Fog` beside
+`/World/Box`, four or more of them) is absent from the stage that traverses the
+geometry bound to it, and resolves to grey with "not resolvable". Production stages
+keep their materials under the geometry's element (Moana) or in a stage-level scope
+reached through a referenced layer; small stages stay under `MIN_STREAM_CHUNKS`. Not
+fixed: expanding each mask by its prims' binding targets (C++ USD's
+`ExpandPopulationMask`) is the fix, and costs an extra walk of the index stage.
 The subtlety is cache keying: prototype paths (`/__Prototype_N`) are **numbered per
 composition**, so every masked stage has its own `/__Prototype_0`. Anything keyed on
 such a path must be scoped per stage, or one chunk's data is silently handed to the

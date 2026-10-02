@@ -1,0 +1,215 @@
+#usda 1.0
+(
+    doc = """MaterialX volume materials, authored inline as NVIDIA's Typhoon
+    (hdEmbree, the proposed OpenUSD reference renderer) receives them: a
+    `Material` whose `outputs:mtlx:volume` terminal drives an `ND_volume`
+    shader over a VDF network.
+
+    Left: a fog cube. Its material has **only** a volume terminal, so its
+    surface is a transparent medium boundary — rays cross it without
+    scattering and travel through the fog inside, lit by NEE through the
+    boundary — and the grey ball sitting inside it is seen through the fog.
+    The fog is `mix_vdf(anisotropic_vdf, absorption_vdf, 0.2)`: a
+    forward-scattering haze with a little blue-tinted absorption.
+
+    Middle: a glass sphere — an inline `ND_open_pbr_surface_surfaceshader`
+    with full transmission — whose volume terminal is a warm, milky
+    scattering medium. A volume terminal is the authored interior of a thick
+    surface and replaces the one the surface's own `transmission_*` inputs
+    would describe; refraction carries rays into it.
+
+    Right: the same inline OpenPBR surface network kind with no volume at
+    all, a copper metal, to show an inline surface alone.
+
+      cargo run --release -- render -i samples/materialx_volume.usda -o vol.exr --stats
+
+    `--stats` counts the medium scatters.
+    """
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Fog"
+        {
+            token outputs:mtlx:volume.connect = </World/Looks/Fog/Volume.outputs:out>
+
+            def Shader "Volume"
+            {
+                uniform token info:id = "ND_volume"
+                token inputs:vdf.connect = </World/Looks/Fog/Mix.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "Mix"
+            {
+                uniform token info:id = "ND_mix_vdf"
+                token inputs:fg.connect = </World/Looks/Fog/Ink.outputs:out>
+                token inputs:bg.connect = </World/Looks/Fog/Haze.outputs:out>
+                float inputs:mix = 0.2
+                token outputs:out
+            }
+
+            def Shader "Haze"
+            {
+                uniform token info:id = "ND_anisotropic_vdf"
+                vector3f inputs:absorption = (0.02, 0.02, 0.02)
+                vector3f inputs:scattering = (0.9, 0.9, 0.9)
+                float inputs:anisotropy = 0.5
+                token outputs:out
+            }
+
+            def Shader "Ink"
+            {
+                uniform token info:id = "ND_absorption_vdf"
+                vector3f inputs:absorption = (0.8, 0.4, 0.1)
+                token outputs:out
+            }
+        }
+
+        def Material "MurkyGlass"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/MurkyGlass/Surface.outputs:out>
+            token outputs:mtlx:volume.connect = </World/Looks/MurkyGlass/Volume.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                float inputs:base_weight = 0
+                float inputs:specular_roughness = 0.05
+                float inputs:specular_ior = 1.4
+                float inputs:transmission_weight = 1
+                bool inputs:geometry_thin_walled = false
+                token outputs:out
+            }
+
+            def Shader "Volume"
+            {
+                uniform token info:id = "ND_volume"
+                token inputs:vdf.connect = </World/Looks/MurkyGlass/Vdf.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "Vdf"
+            {
+                uniform token info:id = "ND_anisotropic_vdf"
+                vector3f inputs:absorption = (0.05, 0.3, 0.8)
+                vector3f inputs:scattering = (1.2, 1, 0.8)
+                float inputs:anisotropy = 0.2
+                token outputs:out
+            }
+        }
+
+        def Material "Copper"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Copper/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                float inputs:base_metalness = 1
+                color3f inputs:base_color = (0.95, 0.64, 0.54)
+                float inputs:specular_roughness = 0.25
+                token outputs:out
+            }
+        }
+
+        def Material "Grey"
+        {
+            token outputs:surface.connect = </World/Looks/Grey/Shader.outputs:surface>
+
+            def Shader "Shader"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.5, 0.5, 0.5)
+                float inputs:specularRoughness = 0.6
+                token outputs:surface
+            }
+        }
+    }
+
+    # A closed cube with outward-facing windings: a medium boundary must be
+    # closed, and its front faces are where rays enter.
+    def Mesh "FogBox" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/Looks/Fog>
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 4, 7, 3, 1, 2, 6, 5, 0, 1, 5, 4, 3, 7, 6, 2]
+        point3f[] points = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+        double3 xformOp:translate = (-2.4, 1.02, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "BallInFog" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.45
+        rel material:binding = </World/Looks/Grey>
+        double3 xformOp:translate = (-2.4, 0.45, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "MurkyGlass" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.9
+        rel material:binding = </World/Looks/MurkyGlass>
+        double3 xformOp:translate = (0, 0.9, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Copper" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/Copper>
+        double3 xformOp:translate = (2.3, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/Looks/Grey>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.35
+        asset inputs:texture:file = @sky_env.exr@
+        token inputs:texture:format = "latlong"
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:intensity = 90
+        float inputs:radius = 0.25
+        color3f inputs:color = (1, 0.92, 0.85)
+        double3 xformOp:translate = (1.5, 4, 2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "ShotCam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        double3 xformOp:translate = (0, 1.6, 8)
+        float xformOp:rotateX = -6
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (640, 320)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 16
+    }
+}

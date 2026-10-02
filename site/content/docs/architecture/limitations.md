@@ -2,7 +2,7 @@
 title = "Limitations"
 description = "What Crust Render does not do, or does only partly."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-02T08:00:00+00:00
 draft = false
 weight = 30
 sort_by = "weight"
@@ -35,7 +35,11 @@ render.
   animated transforms aren't blurred.
 - **No OpenVDB or `UsdVolVolume`.** Volumes are the three
   [`crust:volume:type`](@/docs/usd/volumes.md#crust-volume-type) kinds: homogeneous,
-  procedural smoke, or a voxel grid authored in USD.
+  procedural smoke, or a voxel grid authored in USD, or a homogeneous medium inside a mesh
+  through its material's [`volume` terminal](@/docs/usd/materials.md#volume-materials).
+- **Medium boundaries hold one medium at a time.** Inside a volume material's mesh, other
+  volume materials and glass don't change the medium, and a camera that starts inside one
+  doesn't see it. The mesh must be closed, with outward normals.
 - **Building the BVH of a huge scene needs extra memory for a moment.** While the
   acceleration structure is built, its peak memory can be well above what the finished
   render needs, especially with subdivision. Lowering

@@ -440,7 +440,17 @@ fn preview_displacement_of(
 /// any render-specific one. `glslfx` is the preview context and the only
 /// namespaced one crust can decode; an `ri` surface is a PxrDisneyBsdf, which
 /// `has_shader_id` catches before this call is ever reached.
-const SURFACE_RENDER_CONTEXTS: &[&str] = &["", "glslfx"];
+///
+/// `mtlx` comes last: an inline MaterialX network (`ND_*` shaders, see
+/// [`super::mtlx_network`]) is used when nothing the universal or preview
+/// context names is decodable, so a stage that already rendered through its
+/// preview surface renders exactly as before.
+const SURFACE_RENDER_CONTEXTS: &[&str] = &["", "glslfx", "mtlx"];
+
+/// Render contexts for the `volume` terminal. Only a MaterialX network can
+/// drive one (`ND_volume`, a VDF), so the universal terminal is read too, and
+/// for a shader that is not MaterialX the terminal is ignored.
+const VOLUME_RENDER_CONTEXTS: &[&str] = &["mtlx", ""];
 
 fn resolve_material_uncached(
     stage: &Stage,
@@ -498,6 +508,32 @@ fn resolve_material_uncached(
         return Arc::new(disney_to_openpbr(stage, mat_path, caches));
     }
 
+    // A `volume` terminal makes the material Typhoon's surface-volume
+    // material: the volume is the medium inside the bound geometry, under the
+    // MaterialX surface of the same network when there is one, and a
+    // transparent medium boundary when there is none.
+    if let Some(volume) = terminal_shader(mat.compute_volume_source(VOLUME_RENDER_CONTEXTS))
+        .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)))
+    {
+        let surface = terminal_shader(mat.compute_surface_source(&["mtlx"]))
+            .or_else(|| terminal_shader(mat.compute_surface_source(&[""])))
+            .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)));
+        if surface.is_none()
+            && let Some(other) =
+                terminal_shader(mat.compute_surface_source(SURFACE_RENDER_CONTEXTS))
+        {
+            warn!(
+                "Material {mat_path}: the volume terminal is MaterialX but the surface ({}) \
+                 is not — the volume is ignored",
+                shader_info_id(&other).unwrap_or_default()
+            );
+        } else if let Some(m) =
+            inline_mtlx_material(stage, mat_path, surface.as_ref(), Some(&volume), caches)
+        {
+            return m;
+        }
+    }
+
     // openusd 0.7 hands back the whole resolved terminal — every source
     // driving it, in connection order — where 0.6 returned the one shader.
     // The first source whose endpoint is a `Shader`-typed prim is that shader;
@@ -533,6 +569,10 @@ fn resolve_material_uncached(
             preview_surface_material(stage, mat_path, shader, caches)
         }
         Some("PxrDisneyBsdf") => Arc::new(disney_to_openpbr(stage, mat_path, caches)),
+        Some(id) if super::mtlx_network::is_mtlx_id(id) => {
+            inline_mtlx_material(stage, mat_path, Some(shader), None, caches)
+                .unwrap_or_else(default_material)
+        }
         Some(other) => {
             warn!(
                 "Unrecognized shader id '{}' at {} — using default grey OpenPBR",
@@ -548,6 +588,56 @@ fn resolve_material_uncached(
             default_material()
         }
     }
+}
+
+/// The first `Shader`-typed source driving a resolved terminal.
+fn terminal_shader(
+    resolved: Result<
+        Option<openusd_schemas::shade::ResolvedTerminal>,
+        openusd_schemas::SchemaError,
+    >,
+) -> Option<Shader> {
+    resolved
+        .ok()
+        .flatten()
+        .and_then(|t| t.sources().iter().find_map(TerminalSource::shader).cloned())
+}
+
+/// Builds a material from an inline MaterialX network: the shaders driving
+/// the `surface` and `volume` terminals, translated into one document
+/// ([`super::mtlx_network`]) and compiled as a `.mtlx`'s would be. Textures
+/// arrive as absolute paths, so they resolve against nothing further.
+fn inline_mtlx_material(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    surface: Option<&Shader>,
+    volume: Option<&Shader>,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Arc<dyn Material>> {
+    let net = super::mtlx_network::translate(
+        stage,
+        caches.stage_path,
+        surface.map(|s| &**s),
+        volume.map(|s| &**s),
+    );
+    if !net.reported.is_empty() {
+        warn!(
+            "Material {mat_path}: MaterialX network not fully translated — {}",
+            net.reported.join("; ")
+        );
+    }
+    let surface = net.surface.as_deref().and_then(|n| net.doc.find("", n));
+    let volume = net.volume.as_deref().and_then(|n| net.doc.find("", n));
+    if surface.is_none() && volume.is_none() {
+        return None;
+    }
+    let label = mat_path.as_str().to_string();
+    compile_mtlx(&label, std::path::Path::new("/"), caches, |host, luma| {
+        crate::materialx::from_compiled(
+            crust_mtlx::compile_terminals(&net.doc, surface, volume, host),
+            luma,
+        )
+    })
 }
 
 fn default_material() -> Arc<dyn Material> {
@@ -756,10 +846,27 @@ fn load_mtlx_material(
     node: &str,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn Material>> {
-    let dir = file
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .to_path_buf();
+    let dir = file.parent().unwrap_or(std::path::Path::new("."));
+    let label = file.display().to_string();
+    compile_mtlx(&label, dir, caches, |host, luma| {
+        crate::materialx::load_in(file, (!node.is_empty()).then_some(node), host, luma)
+    })
+}
+
+/// Compiles a MaterialX material through `compile`, handing it a host whose
+/// texture loader resolves `image` files against `dir` and whose colour
+/// conversion targets the working space, with the working space's luminance
+/// weights, and reports what the compiler could not represent. `label` names the material in the log: the
+/// `.mtlx` file, or the USD material of an inline network.
+fn compile_mtlx(
+    label: &str,
+    dir: &std::path::Path,
+    caches: &mut ImportCaches<'_>,
+    compile: impl FnOnce(
+        &crust_mtlx::Host<'_>,
+        utils::Luma,
+    ) -> Result<crate::materialx::Loaded, crate::materialx::MtlxError>,
+) -> Option<Arc<dyn Material>> {
     // `RefCell` because the loader closure is called from inside the compiler
     // while `caches` would otherwise be mutably borrowed by the outer call.
     let (working, luma) = (caches.working, caches.luma);
@@ -791,7 +898,7 @@ fn load_mtlx_material(
     // reported at 178% of the parse phase that contains it.
     let started = Instant::now();
     let before = cell.borrow().asset_time;
-    let loaded = crate::materialx::load_in(file, (!node.is_empty()).then_some(node), &host, luma);
+    let loaded = compile(&host, luma);
     let nested = cell.borrow().asset_time - before;
     // `cell` is not used past this point, which ends its borrow of `caches`.
     caches.asset_time += started.elapsed().saturating_sub(nested);
@@ -800,22 +907,19 @@ fn load_mtlx_material(
         Ok(l) => {
             if !l.unsupported.is_empty() {
                 warn!(
-                    "MaterialX {}: no operator for node type(s) {} — those inputs \
+                    "MaterialX {label}: no operator for node type(s) {} — those inputs \
                      fall back to their defaults",
-                    file.display(),
                     l.unsupported.join(", ")
                 );
             }
             if !l.reported.is_empty() {
                 warn!(
-                    "MaterialX {}: not represented — {}",
-                    file.display(),
+                    "MaterialX {label}: not represented — {}",
                     l.reported.join("; ")
                 );
             }
             debug!(
-                "MaterialX {} -> {} ({} textures resolved{})",
-                file.display(),
+                "MaterialX {label} -> {} ({} textures resolved{})",
                 l.summary,
                 l.textures,
                 if l.displacement.is_some() {
@@ -828,10 +932,7 @@ fn load_mtlx_material(
             Some(l.material)
         }
         Err(e) => {
-            warn!(
-                "MaterialX {} not usable ({e}) — falling back",
-                file.display()
-            );
+            warn!("MaterialX {label} not usable ({e}) — falling back");
             None
         }
     }
