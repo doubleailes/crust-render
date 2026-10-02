@@ -428,20 +428,22 @@ fn nested_instancer_parts(
     depth: usize,
     place: ProtoPlace,
 ) -> Vec<ProtoPart> {
-    let Some(layout) = read_instancer(prim, instancer) else {
+    let Some(layout) = read_instancer(prim, instancer, true) else {
         return Vec::new();
     };
     // Which version of its prototype each placement draws: the shared one
     // (`None`), or — in adaptive mode, inside an unshared prototype, for a
     // target this instancer places once — one built for that placement.
-    let counts = target_counts(&layout);
+    let counts = target_counts(&layout, &local);
     let adaptive = caches.meshes.subdiv.adaptive.is_some();
     let placement_versions: Vec<(usize, Option<usize>)> = layout
         .placements
         .iter()
         .enumerate()
-        .map(|(i, &(k, _))| {
-            let unshared = adaptive && counts[k] == 1 && matches!(place, ProtoPlace::Unshared(_));
+        .map(|(i, &(k, xf))| {
+            let drawn = (local * xf).determinant().abs() >= 1e-12;
+            let unshared =
+                adaptive && counts[k] == 1 && drawn && matches!(place, ProtoPlace::Unshared(_));
             (k, unshared.then_some(i))
         })
         .collect();
@@ -778,14 +780,20 @@ struct InstancerLayout {
 /// `orientations` (half) where both are authored, and `invisibleIds`
 /// prunes by `ids`, with the array index standing in as the id where `ids`
 /// is absent.
-fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLayout> {
+fn read_instancer(
+    prim: &Prim,
+    instancer: &PointInstancer,
+    report: bool,
+) -> Option<InstancerLayout> {
     let targets = match instancer.prototypes_rel().targets() {
         Ok(t) if !t.is_empty() => t,
         _ => {
-            warn!(
-                "PointInstancer at {} has no `prototypes` targets — skipped",
-                prim.path()
-            );
+            if report {
+                warn!(
+                    "PointInstancer at {} has no `prototypes` targets — skipped",
+                    prim.path()
+                );
+            }
             return None;
         }
     };
@@ -794,10 +802,12 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
         .proto_indices_attr()
         .get_at::<sdf::Value>(eval_time())
     else {
-        warn!(
-            "PointInstancer at {} has no `protoIndices` — skipped",
-            prim.path()
-        );
+        if report {
+            warn!(
+                "PointInstancer at {} has no `protoIndices` — skipped",
+                prim.path()
+            );
+        }
         return None;
     };
 
@@ -816,7 +826,7 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
         _ => Default::default(),
     };
 
-    if positions.len() < proto_indices.len() {
+    if positions.len() < proto_indices.len() && report {
         warn!(
             "PointInstancer at {}: {} protoIndices but only {} positions — extra instances skipped",
             prim.path(),
@@ -842,10 +852,12 @@ fn read_instancer(prim: &Prim, instancer: &PointInstancer) -> Option<InstancerLa
             .ok()
             .filter(|k| *k < targets.len())
         else {
-            warn!(
-                "PointInstancer at {}: protoIndices[{i}] = {proto_index} is out of range — instance skipped",
-                prim.path()
-            );
+            if report {
+                warn!(
+                    "PointInstancer at {}: protoIndices[{i}] = {proto_index} is out of range — instance skipped",
+                    prim.path()
+                );
+            }
             continue;
         };
 
@@ -942,13 +954,37 @@ fn build_parts(
     parts
 }
 
-/// How many times an instancer places each of its targets.
-fn target_counts(layout: &InstancerLayout) -> Vec<usize> {
+/// How many times an instancer at `frame` places each of its targets, counting
+/// only placements that draw: a zero-scale placement (the "hide this instance"
+/// idiom) is skipped at attachment, so it must not make a prototype shared.
+fn target_counts(layout: &InstancerLayout, frame: &GMat4) -> Vec<usize> {
     let mut counts = vec![0usize; layout.targets.len()];
-    for &(k, _) in &layout.placements {
-        counts[k] += 1;
+    for &(k, xf) in &layout.placements {
+        if (*frame * xf).determinant().abs() >= 1e-12 {
+            counts[k] += 1;
+        }
     }
     counts
+}
+
+/// The drawn placements of each target of `instancer` at world transform
+/// `world`, for [`count_placements`](super::count_placements): read quietly,
+/// since the traversal reads the same instancer again and reports it then.
+pub(super) fn instancer_target_counts(
+    prim: &Prim,
+    instancer: &PointInstancer,
+    world: &GMat4,
+) -> Vec<(String, usize)> {
+    let Some(layout) = read_instancer(prim, instancer, false) else {
+        return Vec::new();
+    };
+    let counts = target_counts(&layout, world);
+    layout
+        .targets
+        .iter()
+        .map(ToString::to_string)
+        .zip(counts)
+        .collect()
 }
 
 /// Imports a `UsdGeomPointInstancer`: every entry of the per-instance
@@ -964,24 +1000,48 @@ pub(super) fn emit_point_instancer(
     world_xf: GMat4,
     caches: &mut ImportCaches<'_>,
 ) {
-    let Some(layout) = read_instancer(prim, instancer) else {
+    let Some(layout) = read_instancer(prim, instancer, true) else {
         return;
     };
     // The version of its prototype each placement draws: the shared one, or —
     // in adaptive mode, for a target this instancer places once — one built
     // for that placement.
-    let counts = target_counts(&layout);
+    // Counted across the whole top-level subtree (`count_placements`), so a
+    // prototype two instancers each place once is shared, not built twice.
     let adaptive = caches.meshes.subdiv.adaptive.is_some();
+    let counts: Vec<u32> = layout
+        .targets
+        .iter()
+        .map(|t| {
+            if adaptive {
+                caches.placement_count(prim.path(), t)
+            } else {
+                0
+            }
+        })
+        .collect();
+    // A zero-scale placement (the "hide this instance" idiom) draws nothing:
+    // `attach_proto_parts` would skip it, so no version is built for it.
+    let drawn: Vec<bool> = layout
+        .placements
+        .iter()
+        .map(|&(_, xf)| (world_xf * xf).determinant().abs() >= 1e-12)
+        .collect();
     let placement_versions: Vec<(usize, Option<usize>)> = layout
         .placements
         .iter()
         .enumerate()
-        .map(|(i, &(k, _))| (k, (adaptive && counts[k] == 1).then_some(i)))
+        .map(|(i, &(k, _))| (k, (adaptive && counts[k] == 1 && drawn[i]).then_some(i)))
         .collect();
     // As in `nested_instancer_parts`: every prototype in uniform mode, the
     // placed versions in adaptive mode, in (prototype, version) order.
     let versions: BTreeSet<(usize, Option<usize>)> = if adaptive {
-        placement_versions.iter().copied().collect()
+        placement_versions
+            .iter()
+            .zip(&drawn)
+            .filter(|&(_, &d)| d)
+            .map(|(&v, _)| v)
+            .collect()
     } else {
         (0..layout.targets.len()).map(|k| (k, None)).collect()
     };
@@ -1007,18 +1067,20 @@ pub(super) fn emit_point_instancer(
         .iter()
         .map(|(&version, parts)| (version, parts.iter().map(|p| p.slots.len()).sum()))
         .collect();
-    let total_geometries: usize = placement_versions.iter().map(|v| part_counts[v]).sum();
+    let total_geometries: usize = placement_versions
+        .iter()
+        .filter_map(|v| part_counts.get(v))
+        .sum();
     world.reserve(total_geometries);
 
     let mut attached = 0usize;
     let first = world.count();
     for (&(_, xf), version) in layout.placements.iter().zip(&placement_versions) {
-        attached += attach_proto_parts(
-            world,
-            &proto_parts[version],
-            world_xf * xf,
-            "PointInstancer instance",
-        );
+        // A hidden placement has no version in adaptive mode.
+        let Some(parts) = proto_parts.get(version) else {
+            continue;
+        };
+        attached += attach_proto_parts(world, parts, world_xf * xf, "PointInstancer instance");
     }
 
     debug!(

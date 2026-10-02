@@ -176,8 +176,8 @@ fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
 /// descending into an instance or a `PointInstancer`, whose contents the
 /// traversal does not reach directly either.
 fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
-    let mut stack = vec![prim_at(stage, sdf::Path::abs_root())];
-    while let Some(prim) = stack.pop() {
+    let mut stack = vec![(prim_at(stage, sdf::Path::abs_root()), GMat4::IDENTITY)];
+    while let Some((prim, parent_world)) = stack.pop() {
         if prim.is_abstract().unwrap_or(false)
             || !prim.is_active().unwrap_or(true)
             || non_render_purpose(&prim).is_some()
@@ -185,18 +185,35 @@ fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
         {
             continue;
         }
+        let local = local_matrix_at(stage, &prim);
+        let world = if resets_xform_stack_at(stage, &prim) {
+            local
+        } else {
+            parent_world * local
+        };
         if prim.is_instance().unwrap_or(false)
             && let Ok(Some(proto)) = prim.prototype()
         {
-            let key = (caches.subtree_of(prim.path()), proto.to_string());
-            *caches.placements.entry(key).or_default() += 1;
+            // A zero-scale placement draws nothing (`attach_proto_parts`
+            // skips it), so it does not make its prototype shared.
+            if world.determinant().abs() >= 1e-12 {
+                let key = (caches.subtree_of(prim.path()), proto.to_string());
+                *caches.placements.entry(key).or_default() += 1;
+            }
             continue;
         }
-        if matches!(PointInstancer::get(stage, prim.path().clone()), Ok(Some(_))) {
+        if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+            let subtree = caches.subtree_of(prim.path());
+            for (target, n) in instancing::instancer_target_counts(&prim, &instancer, &world) {
+                *caches
+                    .placements
+                    .entry((subtree.clone(), target))
+                    .or_default() += n as u32;
+            }
             continue;
         }
         if let Ok(children) = prim.children() {
-            stack.extend(children);
+            stack.extend(children.into_iter().map(|c| (c, world)));
         }
     }
 }

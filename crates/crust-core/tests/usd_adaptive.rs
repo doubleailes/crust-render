@@ -716,3 +716,74 @@ fn geometry_out_of_view_is_not_refined() {
         .intersect(&Ray::new(Vec3A::ZERO, Vec3A::Z), 1e-3, 100.0);
     assert!(hit.is_some(), "the cube behind the camera is still hit");
 }
+
+/// The same prototype placed once by each of two instancers in one top-level
+/// subtree is shared: placements are counted across the subtree, not per
+/// instancer.
+#[test]
+fn a_prototype_two_instancers_place_once_each_is_shared() {
+    let body = format!(
+        r#"{CAMERA}
+    def Xform "Group" {{
+        def Xform "Protos" {{
+            token visibility = "invisible"
+            def Mesh "Box" {{
+{CUBE}
+            }}
+        }}
+        def PointInstancer "Left" {{
+            rel prototypes = [</W/Group/Protos/Box>]
+            int[] protoIndices = [0]
+            point3f[] positions = [(-3, 0, -8)]
+        }}
+        def PointInstancer "Right" {{
+            rel prototypes = [</W/Group/Protos/Box>]
+            int[] protoIndices = [0]
+            point3f[] positions = [(3, 0, -8)]
+        }}
+    }}"#
+    );
+    let path = write_stage(
+        "two_instancers",
+        &body,
+        &settings("float crust:subdivisionEdgeLength = 2"),
+    );
+    let scene = load(&path, &UsdImportOptions::default());
+    let sub = &scene.stats.subdivision;
+    assert_eq!(sub.per_face_meshes, 0, "neither placement is unshared");
+    assert!(sub.shared_meshes >= 1);
+    assert!(hit_t(&scene, (-3.0, 0.0, -8.0)).is_some());
+    assert!(hit_t(&scene, (3.0, 0.0, -8.0)).is_some());
+}
+
+/// A zero-scale placement (the "hide this instance" idiom) draws nothing, so
+/// a prototype with one visible placement beside it stays unshared.
+#[test]
+fn a_hidden_zero_scale_placement_does_not_share_a_prototype() {
+    let body = format!(
+        r#"{CAMERA}
+    def PointInstancer "Scatter" {{
+        rel prototypes = [</W/Scatter/Protos/Box>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, -6), (0, 0, -20)]
+        float3[] scales = [(1, 1, 1), (0, 0, 0)]
+        def Scope "Protos" {{
+            def Mesh "Box" {{
+{CUBE}
+            }}
+        }}
+    }}"#
+    );
+    let path = write_stage(
+        "hidden_zero_scale",
+        &body,
+        &settings("float crust:subdivisionEdgeLength = 2"),
+    );
+    let scene = load(&path, &UsdImportOptions::default());
+    let sub = &scene.stats.subdivision;
+    assert_eq!(
+        sub.per_face_meshes, 1,
+        "the visible placement is the only one"
+    );
+    assert_eq!(sub.shared_meshes, 0);
+}
