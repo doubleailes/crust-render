@@ -34,6 +34,10 @@ cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles 
 #   else the first camera found -- a wrong path errors and lists the stage's cameras),
 # --subdiv-level N (refinement level for every mesh whose subdivisionScheme is not none;
 #   overrides RenderSettings crust:subdivisionLevel, default 0 = smooth-shaded cages; max 6),
+# --subdiv-edge-length PX (adaptive subdivision: refine each subdivision mesh per placement
+#   until its mean cage edge is at most PX pixels at its nearest distance to the render
+#   camera; overrides crust:subdivisionEdgeLength; --subdiv-level becomes the ceiling,
+#   default 3; needs --camera or RenderSettings.camera, else warns and stays uniform),
 # --stats (per-phase profile + scene statistics),
 # --profile (implies --stats; adds a Guerilla-style per-section render profile),
 # --auto-tx (convert UV textures to a .tx beside the original on first use)

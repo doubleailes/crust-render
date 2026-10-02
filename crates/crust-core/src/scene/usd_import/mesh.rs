@@ -22,6 +22,7 @@ use crate::material::Material;
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::subdiv;
 
+use super::adaptive::{self, Aabb, ScreenRate};
 use super::attrs::{custom_i32, prim_motion_translate, prim_ray_mask};
 use super::time::eval_time;
 
@@ -154,8 +155,15 @@ pub(super) struct MeshArena {
 /// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
 pub(super) struct SubdivPolicy {
     /// The one refinement level, resolved by
-    /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level).
+    /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level). Unused
+    /// in adaptive mode.
     pub(super) level: u32,
+    /// Adaptive mode: each mesh's level comes from its size on screen
+    /// ([`ScreenRate`]) instead of [`SubdivPolicy::level`]. `None` is uniform.
+    pub(super) adaptive: Option<ScreenRate>,
+    /// Subdivision meshes read, by the level each was refined to: a direct
+    /// prim once per placement, a prototype's mesh once per version built.
+    pub(super) levels: Vec<u64>,
     /// `false` under `CRUST_SUBDIV=0`: every mesh renders its faceted cage,
     /// exactly as before subdivision surfaces were read at all — so, unlike
     /// level 0, not even smooth cage normals. The honest "off" side of the A/B.
@@ -170,10 +178,95 @@ impl SubdivPolicy {
     pub(super) fn new(level: u32) -> Self {
         SubdivPolicy {
             level,
+            adaptive: None,
+            levels: Vec::new(),
             enabled: crate::config().subdiv,
             legacy_warned: false,
         }
     }
+
+    /// Adaptive subdivision under `rate`.
+    pub(super) fn adaptive(rate: ScreenRate) -> Self {
+        SubdivPolicy {
+            adaptive: Some(rate),
+            ..SubdivPolicy::new(rate.max)
+        }
+    }
+
+    /// Whether `mesh` is refined at all: subdivision is on and its scheme is
+    /// not `none` (unauthored reads the schema fallback, `catmullClark`).
+    pub(super) fn refines(&self, mesh: &UsdMesh) -> bool {
+        self.enabled && subdivision_scheme(mesh) != SubdivisionScheme::None
+    }
+
+    /// The level a subdivision mesh with this cage is refined to, read for
+    /// `place`.
+    fn level_for(
+        &mut self,
+        prim: &Prim,
+        points: &[Vec3f],
+        counts: &[i32],
+        indices: &[i32],
+        place: MeshPlace<'_>,
+    ) -> u32 {
+        let level = match self.adaptive {
+            None => self.level,
+            Some(rate) => {
+                let edge = adaptive::mean_edge_length(points, counts, indices);
+                let (sigma, distance) = match place {
+                    MeshPlace::World(xf) => match Aabb::of_points(points) {
+                        Some(bounds) => (
+                            rate.sigma(xf, &bounds),
+                            Some(bounds.transformed(xf).distance_to(rate.eye)),
+                        ),
+                        None => (0.0, None),
+                    },
+                    MeshPlace::Prototype { bucket, local } => (
+                        ScreenRate::bucket_scale(bucket)
+                            * adaptive::stretch(&glam::Mat3::from_mat4(*local)),
+                        None,
+                    ),
+                };
+                let level = rate.level(edge, sigma);
+                debug!(
+                    "Mesh at {}: adaptive level {level} (mean cage edge {edge}, {} px per unit{}, \
+                     edge {} px)",
+                    prim.path(),
+                    sigma,
+                    distance.map_or(String::new(), |d| format!(" at distance {d}")),
+                    edge * sigma
+                );
+                level
+            }
+        };
+        let n = level as usize;
+        if self.levels.len() <= n {
+            self.levels.resize(n + 1, 0);
+        }
+        self.levels[n] += 1;
+        level
+    }
+}
+
+/// Where [`mesh_source`] reads a mesh for, which in adaptive mode decides its
+/// level.
+#[derive(Clone, Copy)]
+pub(super) enum MeshPlace<'a> {
+    /// A direct prim, at its world transform.
+    World(&'a GMat4),
+    /// A part of a prototype version built at rate bucket `bucket`, at `local`
+    /// in the prototype's frame.
+    Prototype { bucket: i32, local: &'a GMat4 },
+}
+
+/// A mesh's `subdivisionScheme`, unauthored (or blocked) reading the schema
+/// fallback, `catmullClark`.
+fn subdivision_scheme(mesh: &UsdMesh) -> SubdivisionScheme {
+    mesh.subdivision_scheme_attr()
+        .get_at::<SubdivisionScheme>(eval_time())
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// A direct mesh prim whose geometry is recorded but not yet attached.
@@ -371,6 +464,7 @@ pub(super) fn emit_mesh(
         want_uvs,
         material.uv_primvar(),
         &mut meshes.subdiv,
+        MeshPlace::World(&world_xf),
     ) else {
         debug!(
             "Mesh at {} missing points / faceVertexCounts / faceVertexIndices — skipped",
@@ -644,7 +738,7 @@ fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
 
 /// Reads a mesh prim's authored arrays. `None` when any of the three
 /// required attributes is missing.
-fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
+pub(super) fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
     let int_vec = |v: sdf::Value| match v {
         sdf::Value::IntVec(v) => Some(v),
         _ => None,
@@ -800,8 +894,9 @@ pub(super) struct MeshSource {
 /// how production assets mark a subdivision surface: ALab's and
 /// Kitchen_set's render meshes author neither a scheme nor normals, while
 /// ALab's polygonal display proxies author `none` and normals. It is refined
-/// to the load's one [`SubdivPolicy::level`]; at level 0 it renders its cage
-/// with smooth normals rather than faceted.
+/// to the load's one [`SubdivPolicy::level`], or in adaptive mode to the level
+/// its size on screen asks for when read for `place`; at level 0 it renders its
+/// cage with smooth normals rather than faceted.
 ///
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
@@ -812,6 +907,7 @@ pub(super) fn mesh_source(
     want_uvs: bool,
     uv_primvar: Option<&str>,
     policy: &mut SubdivPolicy,
+    place: MeshPlace<'_>,
 ) -> Option<MeshSource> {
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
@@ -837,17 +933,11 @@ pub(super) fn mesh_source(
         );
     }
 
-    // Unauthored (or blocked) reads the schema fallback, `catmullClark`.
-    let usd_scheme = mesh
-        .subdivision_scheme_attr()
-        .get_at::<SubdivisionScheme>(eval_time())
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let usd_scheme = subdivision_scheme(mesh);
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
         return Some(cage(points, counts, indices, uvs));
     }
-    let level = policy.level;
+    let level = policy.level_for(prim, &points, &counts, &indices, place);
     // Loop refinement builds no face table (Ptex addresses quad sub-faces),
     // so a Ptex lookup on its triangles would read refined face ordinals as
     // cage face ids — a plausible, wrong texture. Keep the cage instead.
@@ -1594,7 +1684,16 @@ mod subdiv_policy_tests {
             let p = sdf::path(name).unwrap();
             let prim = super::super::prim_at(&stage, p.clone());
             let mesh = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
-            let src = mesh_source(&prim, &mesh, false, false, None, &mut policy).unwrap();
+            let src = mesh_source(
+                &prim,
+                &mesh,
+                false,
+                false,
+                None,
+                &mut policy,
+                MeshPlace::World(&GMat4::IDENTITY),
+            )
+            .unwrap();
             // The fallback scheme at the policy's level 2, not the prim's.
             assert_eq!(src.counts.len(), 16, "{name}: refined at the load's level");
             // Set by the first prim, so the second finds the warning spent.

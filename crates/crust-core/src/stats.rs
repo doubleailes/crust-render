@@ -354,6 +354,26 @@ pub struct RenderStats {
     pub light_kinds: Vec<(&'static str, usize)>,
     /// The per-section render profile, when `--profile` asked for one.
     pub profile: Option<crate::profile::RenderProfile>,
+    /// Adaptive subdivision's choices; empty (and not reported) in uniform
+    /// subdivision.
+    pub subdivision: SubdivisionCounters,
+}
+
+/// What adaptive subdivision chose over a load.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubdivisionCounters {
+    /// The target edge length in pixels and the level ceiling; `None` in
+    /// uniform subdivision, which reports nothing here.
+    pub adaptive: Option<(f32, u32)>,
+    /// Subdivision meshes read, by the level each was refined to (index =
+    /// level): a direct prim once per placement, a prototype's mesh once per
+    /// version of the prototype.
+    pub levels: Vec<u64>,
+    /// Prototype versions built, one per prototype and rate bucket that was
+    /// placed, and how many of those belong to prototypes whose levels depend
+    /// on the rate (the others share one version across every placement).
+    pub prototype_versions: u64,
+    pub rate_dependent_versions: u64,
 }
 
 /// What Ptex cost over a render, under whichever backend ran.
@@ -743,6 +763,38 @@ impl fmt::Display for RenderStats {
         writeln!(f, "  {:<28} {}", "lights", thousands(s.lights))?;
         for (kind, n) in &self.light_kinds {
             writeln!(f, "    {:<26} {}", kind, thousands(*n))?;
+        }
+        if let Some((target, max)) = self.subdivision.adaptive {
+            let sub = &self.subdivision;
+            let levels: Vec<String> = sub
+                .levels
+                .iter()
+                .enumerate()
+                .filter(|&(_, &n)| n > 0)
+                .map(|(level, &n)| format!("L{level} {}", thousands(n as usize)))
+                .collect();
+            writeln!(
+                f,
+                "  {:<28} {target} px, at most level {max}",
+                "adaptive subdivision"
+            )?;
+            writeln!(
+                f,
+                "    {:<26} {}",
+                "subdivision levels",
+                if levels.is_empty() {
+                    "none".to_string()
+                } else {
+                    levels.join(" · ")
+                }
+            )?;
+            writeln!(
+                f,
+                "    {:<26} {} (rate-dependent: {})",
+                "prototype versions",
+                thousands(sub.prototype_versions as usize),
+                thousands(sub.rate_dependent_versions as usize)
+            )?;
         }
         if s.volumes > 0 {
             writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;

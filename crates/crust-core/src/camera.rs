@@ -75,6 +75,11 @@ impl Camera {
     /// what the unit test pins. The division is the caller's, per ray, because
     /// the direction is longer towards the frame edge and that pixel really
     /// does subtend a smaller angle.
+    /// The camera position at shutter open.
+    pub(crate) fn origin(&self) -> Vec3A {
+        self.origin
+    }
+
     pub fn pixel_span(&self, res_w: usize, res_h: usize) -> f32 {
         0.5 * (self.horizontal.length() / res_w.max(1) as f32
             + self.vertical.length() / res_h.max(1) as f32)

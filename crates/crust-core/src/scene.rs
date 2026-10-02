@@ -146,6 +146,15 @@ pub struct UsdImportOptions {
     /// (unauthored is USD's fallback, `catmullClark`); 0 renders each cage
     /// with smooth normals. Clamped to 6.
     pub subdivision_level: Option<u32>,
+    /// Adaptive subdivision (the CLI's `--subdiv-edge-length`), over the
+    /// stage's `crust:subdivisionEdgeLength` render setting: a target cage-edge
+    /// length in pixels. Each subdivision mesh is then refined per placement,
+    /// only as far as its size on screen asks, and
+    /// [`subdivision_level`](Self::subdivision_level) caps the level (default
+    /// 3). Needs the render camera to be named, by [`camera`](Self::camera)
+    /// or `RenderSettings.camera`; a value that is not positive and finite is
+    /// ignored with a warning.
+    pub subdivision_edge_length: Option<f32>,
     /// Leave the last composed USD stage allocated instead of freeing it.
     ///
     /// Tearing a composed stage down is not free: openusd's index cache is

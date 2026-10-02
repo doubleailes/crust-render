@@ -178,6 +178,68 @@ Schema mapping:
     Level 1 costs ALab 32 → 49 GiB peak (measured below); level 2 would cost Moana 16×
     on 60.9 M triangles and 39 GiB of kernel memory. Refinement is asked for by the
     scene's RenderSettings (the DPEL teapot wrappers set 1) or by `--subdiv-level`.
+  - **Adaptive level** (`usd_import/adaptive.rs`, opt-in): with a target edge length
+    (`crust:subdivisionEdgeLength` on the `RenderSettings` prim, or the host's
+    `UsdImportOptions::subdivision_edge_length`, the CLI's `--subdiv-edge-length`,
+    which wins) each subdivision mesh gets its level *per placement*: the smallest `L`
+    at which its mean cage edge `ē`, stretched by the placement and seen at the nearest
+    point of its bounds, projects to at most the target. `p = ē · s · f_px / d`,
+    `L = clamp(ceil(log2(p / t)), 0, max)`, with `f_px = height · focal / aperture` and
+    `d` 0 (so `L = max`) inside the bounds. The level setting becomes the ceiling,
+    `DEFAULT_ADAPTIVE_MAX_LEVEL` (3) when neither the host nor the stage sets one.
+    Every term errs toward detail: the mean edge, `ceil`, the nearest point, and a
+    stretch `s` that is the transform's exact spectral norm (`adaptive::stretch`).
+    - **Trap: the largest column norm is not a stretch bound.** The design first used
+      it; it equals the spectral norm only when the columns are orthogonal. A scale
+      applied after a rotation (diag(2, 1, 1) · R45 has columns of norm 1.58) or a shear
+      stretches some direction further than any column, so the level came out low.
+      The spectral norm is also submultiplicative, which nesting relies on
+      (`stretch_is_the_spectral_norm`).
+    - **The camera comes first.** `subdiv_policy` reads the named camera (`--camera`
+      or `RenderSettings.camera`) before the traversal, from the index stage, else
+      from a stage masked to its path with payloads loaded (`shotCam` on the island);
+      `camera::screen_projection` shares `lens` with `build_camera`, and a debug
+      assertion checks the two agree. No named camera: one warning, uniform level.
+      Orthographic does not arise: the camera importer builds only perspective.
+    - **Direct meshes** are levelled in `mesh_source` from the prim's world transform
+      and cage box (`MeshPlace::World`); `MeshKey` hashes the refined arrays, so equal
+      levels still share and unequal ones cannot collide.
+    - **Prototypes are cached per rate bucket**, `q = ceil(log2(s · f_px / d))`; the
+      caches are keyed `(epoch, path, q)`, and a mesh inside is levelled at `2^q`
+      times its prototype-relative stretch (`MeshPlace::Prototype`), never less than
+      the placement's exact rate asks. `prototype_survey` walks a prototype's cages
+      once per epoch for two things the build needs first: their **box**, which
+      bounds every version (a refined surface stays in its cage's hull) and does not
+      depend on which placement is met first — a box from the first build would; and
+      the **bucket range** where any level changes (`ScreenRate::level_range`, one
+      bucket of margin each side). Buckets clamp into it (`QRange::canonical`), and a
+      prototype with no subdivision mesh has no range, so all its placements share
+      one version. PointInstancer placements are bucketed before any version is
+      built; native instances bucket on their own. A **nested scatter** composes its
+      placement's stretch into the enclosing bucket: `ceil(log2(2^q · s)) = q + ceil(log2 s)`
+      exactly, which is also how the survey shifts an inner range. In uniform mode
+      every bucket is 0 and every prototype is still built for every target, so the
+      output and the logs are unchanged (all 30 goldens bit-identical).
+    - **Reported** by `--stats` (`adaptive subdivision`, `subdivision levels` per mesh
+      read, `prototype versions`), one INFO line, and a DEBUG line per refined mesh.
+    - **Measured** (2026-10-01, Ptex streamed, under a 56 GiB guard):
+
+      | | triangles | kernel | peak | Traverse prims |
+      |---|---|---|---|---|
+      | island, uniform L0 | 60.9 M | 13.52 GiB | 23.79 GiB | 2:37 |
+      | island, adaptive 2 px, max 3 / 4 px, max 3 / 2 px, max 2 | — | — | killed > 56 GiB | — |
+      | island, adaptive 2 px, max 1 | 187.2 M | 27.75 GiB | 38.47 GiB | 6:01 |
+      | island, uniform L1 | 274.7 M | 36.59 GiB | 51.07 GiB | 6:41 |
+      | ALab 1004, uniform L1 | 81.8 M | 10.47 GiB | 36.86 GiB | 4:04 |
+      | ALab 1004, adaptive 2 px, max 3 | 74.2 M | 9.28 GiB | 35.67 GiB | 3:26 |
+
+      ALab is the case the design was for: L0 4 678 · L1 444 · L2 272 · L3 240 mesh
+      reads, more detail near the camera than uniform L1 gives anywhere, for less
+      memory. The island is the case it is not: its terrain and beach meshes are
+      kilometres wide and pass close to `shotCam`, and a per-mesh level refines all
+      of each — at max 1 only 5 285 of 188 959 reads refine, yet they hold most of
+      the extra triangles. Render it with `--subdiv-level 1` as the ceiling. At
+      640×360 / 4 spp the capped island is indistinguishable from L0 by eye.
   - The per-prim `crust:subdivisionLevel` this replaced is read only to warn — once per
     load (`SubdivPolicy::legacy_warned`), since a per-prim warning would scale with
     the scene.
@@ -537,6 +599,22 @@ of the camera seeing the HDRI instead of the backdrop.
   other attribute, so an animated instancer does move between frames. Top-level `UsdGeomSphere` prims
   still bake their centre into world space and so ignore scale; spheres *inside* a
   prototype go through the instanced path and scale correctly.
+
+## Known gaps: adaptive subdivision
+
+- **One level per mesh.** A large mesh near the camera is refined everywhere, its far
+  end included: this is what keeps the Moana island to a ceiling of 1. Per-face
+  (feature-adaptive) refinement with crack-free transitions inside a mesh is the fix,
+  and is not implemented.
+- **No frustum term.** Off-screen geometry is levelled by distance alone, on purpose
+  (it still reflects and shadows), so a mesh behind the camera costs as much as one in
+  front.
+- **Cracks between meshes.** Two separate meshes meeting at a boundary can be refined
+  to different levels, exactly as two separately refined meshes always could.
+- **Level popping across frames.** Each frame imports at its own camera, so in a
+  sequence a mesh can change level between frames.
+- **The level ignores motion.** It is chosen at the camera's and the placement's
+  shutter-open transforms.
 
 ## Known gaps: openusd bugs and workarounds
 

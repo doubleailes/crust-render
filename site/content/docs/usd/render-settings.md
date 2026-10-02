@@ -248,6 +248,37 @@ Older scenes put `crust:subdivisionLevel` on each `Mesh`. That is no longer read
 warning is logged once, and the mesh uses the `RenderSettings` level instead.
 {% end %}
 
+With [`crust:subdivisionEdgeLength`](#crust-subdivisionedgelength) set, this is the
+highest level adaptive subdivision may choose.
+
+### crust:subdivisionEdgeLength
+
+`float`, in pixels, unset by default. CLI:
+[`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length).
+
+Turns on adaptive subdivision. Each subdivision mesh is refined only until its average
+control-cage edge, seen from the render camera at the mesh's nearest point, is at most
+this many pixels long. So a mesh filling the frame is refined and a distant one keeps its
+cage.
+
+- [`crust:subdivisionLevel`](#crust-subdivisionlevel) becomes the highest level a mesh
+  can get, 3 when it is unauthored.
+- Each placement of an instanced mesh is refined for its own distance.
+- The camera must be named by `rel camera` on this prim or by `--camera`. Otherwise a
+  warning is logged and the uniform level applies.
+- A value that is not a positive number is ignored with a warning.
+
+```usda
+def RenderSettings "settings"
+{
+    rel camera = </World/Cam>
+    float crust:subdivisionEdgeLength = 2
+}
+```
+
+`samples/subdivision_adaptive.usda` places one cube five times at growing distances,
+refined to levels 3, 3, 2, 1 and 0.
+
 ## Lights
 
 ### crust:domeLightCameraVisibility

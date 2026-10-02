@@ -415,6 +415,35 @@ So on a scene this size, where the import is the run, `indexed` does not lose ov
 which indexed loses at every size, and one scene at two reps is not a threshold. A
 whole-run criterion would need its own proposal.
 
+## Adaptive subdivision
+
+Measured 2026-10-01 for `adaptive-subdivision`, `shotCam`, Ptex streamed, `-s 4`, under
+the 56 GiB RSS guard, against the uniform runs above.
+
+| | triangles | kernel | peak RSS | Traverse prims |
+|---|---|---|---|---|
+| uniform level 0 | 60.9 M | 13.52 GiB | 23.79 GiB | 2:36.7 |
+| `--subdiv-edge-length 2` (ceiling 3), `4` (ceiling 3), `2 --subdiv-level 2` | | | killed > 56 GiB | |
+| `--subdiv-edge-length 2 --subdiv-level 1` | 187.2 M | 27.75 GiB | **38.47 GiB** | 6:01.4 |
+| uniform level 1 | 274.7 M | 36.59 GiB | 51.07 GiB | 6:41.2 |
+
+- **Capped at 1** it holds 32% fewer triangles than uniform level 1 and peaks 12.6 GiB
+  lower. Only 5 285 of 188 959 mesh reads are refined (`subdivision levels  L0 183 674 ·
+  L1 5 285`), with 544 prototype versions (509 rate-dependent), yet those meshes hold most
+  of the extra triangles.
+- **At ceiling 2 or 3 it does not fit.** A level is per mesh, chosen at the mesh's
+  nearest point, and the island's terrain and beach meshes are kilometres wide while
+  passing close to `shotCam`: each is refined in full to the ceiling. Per-face refinement
+  would fix it and is out of scope (`openspec/specs/usd-scene-import/design.md`, "Known
+  gaps: adaptive subdivision").
+- **The image** at 640×360, 4 spp, is indistinguishable from level 0 by eye. relmse 0.18
+  against level 0 is sampling divergence (two seeds of one binary differ by 1.40).
+
+ALab, by contrast, is what the design was for: at `--subdiv-edge-length 2` and the
+default ceiling of 3 it holds 74.2 M triangles against uniform level 1's 81.8 M, 9.28
+against 10.47 GiB of kernel and peaks at 35.67 against 36.86 GiB, while 240 meshes near
+the camera get level 3.
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance

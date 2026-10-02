@@ -16,6 +16,7 @@
 //! | [`xform`]      | `xformOp:*` stacks → world matrices                          |
 //! | [`camera`]     | `UsdGeomCamera`                                              |
 //! | [`mesh`]       | `UsdGeomMesh`: interning, deferred bake-vs-instance, side tables |
+//! | [`adaptive`]   | adaptive subdivision: a mesh's level from its size on screen |
 //! | [`shapes`]     | `UsdGeomSphere`, `UsdGeomBasisCurves`                        |
 //! | [`instancing`] | `PointInstancer` and native `instanceable` prototypes        |
 //! | [`lights`]     | every UsdLux light type, shaping and IES                     |
@@ -34,15 +35,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glam::Mat4 as GMat4;
-use tracing::{debug, warn};
+use glam::{Mat4 as GMat4, Vec3};
+use tracing::{debug, info, warn};
 
 use crate::camera::Camera;
 use crate::light::LightList;
 use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 use crate::scene::Scene;
-use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters};
+use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters, SubdivisionCounters};
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
@@ -56,6 +57,7 @@ use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, RectLight, SphereLight,
 };
 
+mod adaptive;
 mod attrs;
 mod camera;
 mod instancing;
@@ -70,9 +72,12 @@ mod time;
 mod volume;
 mod xform;
 
-use attrs::{custom_token, resolve_subdiv_level};
-use camera::build_camera;
-use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
+use adaptive::ScreenRate;
+use attrs::{
+    custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
+};
+use camera::{build_camera, screen_projection};
+use instancing::{ProtoPart, ProtoSurvey, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
 use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
@@ -82,7 +87,7 @@ use materials::{MaterialCache, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use settings::{
     CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
-    render_settings_camera, render_settings_subdiv_level,
+    render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
 use time::{EvalTimeScope, eval_time};
@@ -538,6 +543,15 @@ pub(crate) fn load_scene(
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
     }
+    let subdiv = subdiv_policy(
+        &index,
+        path,
+        path_str,
+        options,
+        subdiv_level,
+        wanted_camera.as_ref(),
+        &settings,
+    )?;
     if let Some(t) = time {
         // The sampler's frame seed follows the frame being rendered, so an
         // image sequence gets independent noise per frame instead of one
@@ -567,7 +581,7 @@ pub(crate) fn load_scene(
         // with identical local geometry + material share one copy of that
         // geometry — placed by an instance when it is placed more than once,
         // baked flat into the parent BVH when it is placed exactly once.
-        caches: ImportCaches::new(assets, path, subdiv_level),
+        caches: ImportCaches::new(assets, path, subdiv),
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
@@ -692,6 +706,23 @@ pub(crate) fn load_scene(
         ctx.lights.hide_infinite_from_camera();
     }
 
+    if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
+        // The two reads of one camera must agree, or every level was chosen
+        // for a viewpoint the render does not use.
+        debug_assert!(
+            (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
+            "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
+            rate.eye,
+            camera.origin()
+        );
+        stats.subdivision = SubdivisionCounters {
+            adaptive: Some((rate.target, rate.max)),
+            levels: ctx.caches.meshes.subdiv.levels.clone(),
+            prototype_versions: ctx.caches.prototype_versions,
+            rate_dependent_versions: ctx.caches.rate_dependent_versions,
+        };
+    }
+
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
 
@@ -738,6 +769,78 @@ pub(crate) fn load_scene(
     Ok(scene)
 }
 
+/// How this load refines subdivision surfaces: one `subdiv_level` for every
+/// mesh, or — when a target edge length is set — adaptively, from the render
+/// camera, which must then be resolved here, before the traversal meets it.
+///
+/// The camera is read from the index stage when it is composed there, else
+/// from a stage population-masked to its path with payloads loaded (a shot
+/// camera under a payload is the production case). Without a named camera,
+/// or when the path is not a camera, adaptive mode warns once and the uniform
+/// level applies: finding the first camera would take a traversal of its own.
+fn subdiv_policy(
+    index: &Stage,
+    path: &Path,
+    path_str: &str,
+    options: &crate::UsdImportOptions,
+    subdiv_level: u32,
+    wanted_camera: Option<&CameraChoice>,
+    settings: &RenderSettings,
+) -> Result<SubdivPolicy, crate::Error> {
+    let target = resolve_subdiv_edge_length(
+        options.subdivision_edge_length,
+        render_settings_subdiv_edge_length(index),
+    );
+    let Some(target) = target.filter(|_| crate::config().subdiv) else {
+        return Ok(SubdivPolicy::new(subdiv_level));
+    };
+    let Some(choice) = wanted_camera else {
+        warn!(
+            "Adaptive subdivision ({target} px) needs the render camera before the stage \
+             is read — name it with --camera or RenderSettings.camera. Using the uniform \
+             level {subdiv_level}"
+        );
+        return Ok(SubdivPolicy::new(subdiv_level));
+    };
+    let camera_path = choice.path().clone();
+    let projection = match screen_projection(index, &prim_at(index, camera_path.clone()), settings)
+    {
+        Some(p) => Some(p),
+        None => {
+            let started = Instant::now();
+            let stage = open_stage(path, path_str, Some(camera_path.clone()))?;
+            let p = screen_projection(&stage, &prim_at(&stage, camera_path.clone()), settings);
+            release_stage(stage, false);
+            debug!(
+                "Read {camera_path} for adaptive subdivision from a stage masked to it in {:?}",
+                started.elapsed()
+            );
+            p
+        }
+    };
+    let Some((eye, f_px)) = projection else {
+        warn!(
+            "Adaptive subdivision ({target} px): {camera_path} is not a camera on this stage. \
+             Using the uniform level {subdiv_level}"
+        );
+        return Ok(SubdivPolicy::new(subdiv_level));
+    };
+    let max = resolve_adaptive_max_level(
+        options.subdivision_level,
+        render_settings_subdiv_level(index),
+    );
+    info!(
+        "Adaptive subdivision: cage edges refined to at most {target} px through {camera_path}, \
+         up to level {max}"
+    );
+    Ok(SubdivPolicy::adaptive(ScreenRate {
+        eye,
+        f_px,
+        target,
+        max,
+    }))
+}
+
 // -----------------------------------------------------------------------
 // Import-wide state and traversal predicates
 // -----------------------------------------------------------------------
@@ -754,13 +857,23 @@ struct ImportCaches<'a> {
     /// until its representation is decided (see [`flush_meshes`]), then its
     /// committed kernel scene if it needed one.
     meshes: MeshArena,
-    /// `(epoch, prototype path)` → its parts, for both instancing
-    /// mechanisms. See [`ImportCaches::epoch`] for the epoch.
-    protos: HashMap<(u32, String), Arc<Vec<ProtoPart>>>,
+    /// `(epoch, prototype path, rate bucket)` → its parts, for both
+    /// instancing mechanisms. See [`ImportCaches::epoch`] for the epoch. The
+    /// bucket is 0 in uniform subdivision; in adaptive mode it is the version
+    /// of the prototype refined for one range of on-screen sizes (see
+    /// `instancing::placement_bucket`).
+    protos: HashMap<(u32, String, i32), Arc<Vec<ProtoPart>>>,
     /// The same prototypes as one [`ProtoPart`] each (see
     /// `instancing::group_parts`), `None` for one with no geometry. Same keys
     /// as `protos`.
-    groups: HashMap<(u32, String), Option<ProtoPart>>,
+    groups: HashMap<(u32, String, i32), Option<ProtoPart>>,
+    /// `(epoch, prototype path)` → its cage bounds and level range, for
+    /// adaptive subdivision. Empty in uniform mode.
+    surveys: HashMap<(u32, String), ProtoSurvey>,
+    /// Prototype versions built in adaptive mode, and how many of them belong
+    /// to a prototype whose levels depend on the rate.
+    prototype_versions: u64,
+    rate_dependent_versions: u64,
     /// Which stage the entries above came from.
     ///
     /// Prototype paths (`/__Prototype_N`) are numbered per composition, so
@@ -797,12 +910,15 @@ struct ImportCaches<'a> {
 }
 
 impl<'a> ImportCaches<'a> {
-    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path, subdiv_level: u32) -> Self {
+    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path, subdiv: SubdivPolicy) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
-            meshes: MeshArena::new(SubdivPolicy::new(subdiv_level)),
+            meshes: MeshArena::new(subdiv),
             protos: HashMap::new(),
             groups: HashMap::new(),
+            surveys: HashMap::new(),
+            prototype_versions: 0,
+            rate_dependent_versions: 0,
             epoch: 0,
             assets,
             stage_path,

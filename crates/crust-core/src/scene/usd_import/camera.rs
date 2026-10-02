@@ -25,15 +25,12 @@ pub(super) fn build_camera(
     let forward_v = world.transform_vector3(Vec3::NEG_Z).normalize();
     let up_v = world.transform_vector3(Vec3::Y).normalize();
 
-    let focal_length = attr_f32(&cam.focal_length_attr()).unwrap_or(50.0);
-    let horiz_aperture = attr_f32(&cam.horizontal_aperture_attr()).unwrap_or(20.955);
-    let vert_aperture_authored = attr_f32(&cam.vertical_aperture_attr());
+    let (focal_length, vert_aperture) = lens(&cam, settings);
     let f_stop = attr_f32(&cam.f_stop_attr()).unwrap_or(0.0);
     let focus_distance = attr_f32(&cam.focus_distance_attr()).unwrap_or(10.0);
 
     let (w, h) = settings.get_dimensions();
     let (w_f, h_f) = (w as f32, h as f32);
-    let vert_aperture = vert_aperture_authored.unwrap_or(horiz_aperture * h_f / w_f);
 
     let vfov_deg = 2.0 * (vert_aperture / (2.0 * focal_length)).atan().to_degrees();
     let aperture = if f_stop > 0.0 {
@@ -62,6 +59,35 @@ pub(super) fn build_camera(
         aperture,
         focus_distance,
     ))
+}
+
+/// The focal length and the vertical aperture, in the same units: the vertical
+/// aperture defaults to the horizontal one over the image's aspect ratio.
+fn lens(cam: &UsdCamera, settings: &RenderSettings) -> (f32, f32) {
+    let focal_length = attr_f32(&cam.focal_length_attr()).unwrap_or(50.0);
+    let horiz_aperture = attr_f32(&cam.horizontal_aperture_attr()).unwrap_or(20.955);
+    let (w, h) = settings.get_dimensions();
+    let vert_aperture =
+        attr_f32(&cam.vertical_aperture_attr()).unwrap_or(horiz_aperture * h as f32 / w as f32);
+    (focal_length, vert_aperture)
+}
+
+/// What adaptive subdivision needs of the render camera, read before the
+/// traversal builds it: the position and the pixels per world unit at unit
+/// distance, `image height / (2 tan(vfov / 2))` = `height · focal / aperture`.
+/// From the same attributes and the same [`lens`] as [`build_camera`], so the
+/// two describe one camera. `None` when `prim` is not a camera on `stage`.
+pub(super) fn screen_projection(
+    stage: &Stage,
+    prim: &Prim,
+    settings: &RenderSettings,
+) -> Option<(Vec3, f32)> {
+    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
+    let eye = local_to_world(stage, prim).transform_point3(Vec3::ZERO);
+    let (focal_length, vert_aperture) = lens(&cam, settings);
+    let (_, h) = settings.get_dimensions();
+    let f_px = h as f32 * focal_length / vert_aperture;
+    (f_px.is_finite() && f_px > 0.0).then_some((eye, f_px))
 }
 
 /// Composed local-to-world by walking the prim path upwards. Slower than

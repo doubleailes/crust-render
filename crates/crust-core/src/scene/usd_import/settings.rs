@@ -100,6 +100,16 @@ pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
     custom_i32(&prim, "crust:subdivisionLevel")
 }
 
+/// `crust:subdivisionEdgeLength` as authored on the `RenderSettings` prim: the
+/// stage's adaptive-subdivision target, in pixels. `None` when unauthored; the
+/// caller ([`resolve_subdiv_edge_length`](super::attrs::resolve_subdiv_edge_length))
+/// applies the host override and refuses a bad value. A geometry setting, like
+/// [`render_settings_subdiv_level`].
+pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
+    let prim = prim_at(stage, render_settings_path(stage)?);
+    custom_f32(&prim, "crust:subdivisionEdgeLength")
+}
+
 pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let Some(path) = render_settings_path(stage) else {
         return default_settings();

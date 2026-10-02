@@ -1,0 +1,119 @@
+#usda 1.0
+(
+    doc = """Adaptive subdivision: one Catmull-Clark cube cage, placed five times by a
+    PointInstancer along a row that recedes from the camera.
+
+    crust:subdivisionEdgeLength on the RenderSettings prim (8 px here) turns on
+    adaptive subdivision: each placement is refined only until its mean cage
+    edge, at the nearest point of its bounds to the render camera, projects to
+    at most that many pixels. The level setting (crust:subdivisionLevel or
+    --subdiv-level) becomes the ceiling, 3 by default. From near to far the
+    five placements are refined to levels 3, 3, 2, 1 and 0: the far cube keeps
+    its smooth cage, which covers a few pixels.
+
+    `--stats` reports the choice:
+      adaptive subdivision         8 px, at most level 3
+        subdivision levels         L0 1 · L1 1 · L2 1 · L3 2
+        prototype versions         5 (rate-dependent: 5)
+
+    --subdiv-edge-length overrides the target (2 refines everything visible to
+    the ceiling); without a target, the uniform level applies to all five."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky_gradient.exr@
+        token inputs:texture:format = "latlong"
+    }
+
+    # At the origin of the row's frame, looking down -Z. 50 mm on a 20.955 mm
+    # aperture at 320×180: one unit at distance d covers 764 / d pixels.
+    def Camera "Cam"
+    {
+        float focalLength = 50
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Materials"
+    {
+        def Material "clay"
+        {
+            token outputs:surface.connect = </World/Materials/clay/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.75, 0.55, 0.4)
+                float inputs:specularRoughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def PointInstancer "Row"
+    {
+        rel prototypes = [</World/Row/Protos/Cube>]
+        # Distances 8, 25, 60, 150 and 400 down the view, fanned from -6° to
+        # +6° so no cube hides another.
+        int[] protoIndices = [0, 0, 0, 0, 0]
+        point3f[] positions = [(-0.84, 0, -8), (-1.31, 0, -25), (0, 0, -60),
+                               (7.88, 0, -150), (42.04, 0, -400)]
+
+        def Scope "Protos"
+        {
+            def Mesh "Cube" (prepend apiSchemas = ["MaterialBindingAPI"])
+            {
+                uniform token subdivisionScheme = "catmullClark"
+                point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                                    (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [0, 1, 2, 3,
+                                           5, 4, 7, 6,
+                                           4, 0, 3, 7,
+                                           1, 5, 6, 2,
+                                           3, 2, 6, 7,
+                                           4, 5, 1, 0]
+                rel material:binding = </World/Materials/clay>
+            }
+        }
+    }
+
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-200, -1, 20), (200, -1, 20), (200, -1, -600), (-200, -1, -600)]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 1
+        float inputs:intensity = 3
+        float xformOp:rotateX = -40
+        float xformOp:rotateY = 30
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+        # Adaptive subdivision: refine each placement to at most 8 px per cage
+        # edge (--subdiv-edge-length overrides it).
+        float crust:subdivisionEdgeLength = 8
+    }
+}
