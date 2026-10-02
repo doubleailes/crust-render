@@ -631,10 +631,14 @@ pub(crate) struct TessellatedFaces {
     pub corner_uvs: Vec<[[f32; 2]; 3]>,
 }
 
-/// What [`tessellate_adaptive`] needs to size one segment of the cage: the
-/// points that span it — for a cage edge its two cage vertices then their two
-/// limit points, for a spoke of an `n`-gon its two limit end points — and it
-/// answers the segment's projected length over the target (`ℓ · σ / t`).
+/// What [`tessellate_adaptive`] needs to size one segment of the cage: the two
+/// points that span it — for a cage edge its two cage vertices (the edges are
+/// rated before any patch exists, so there is no limit point yet), for a spoke
+/// of a refined `n`-gon its two limit end points — and it answers the segment's
+/// projected length over the target (`ℓ · σ / t`). The distance and the frustum
+/// test use the box around exactly these points; `ScreenRate::segment_at` pads
+/// it by its own diagonal before culling, so a limit curve straying off its
+/// chord is not culled at the frustum's edge.
 pub(crate) type SegmentSize<'a> = dyn Fn(&[[f32; 3]]) -> f32 + 'a;
 
 /// A limit-surface tessellation, in [`SubdividedMesh`]'s shapes (all
@@ -829,6 +833,15 @@ pub(crate) fn tessellate_adaptive(
     let mut corner_uvs: Vec<[[f32; 2]; 3]> = Vec::new();
     let mut fv_values: Vec<[f32; 2]> = Vec::new();
     let mut fv_indices: Vec<i32> = Vec::new();
+    // The face-varying limit value a refined face gave each boundary point, per
+    // chart side: a corner keyed by its cage vertex and chart value, an edge
+    // point by its key and the chart values at the edge's ends. An unrefined
+    // neighbour on the same side takes it, so the chart is continuous where the
+    // two meet.
+    let mut fvar_at: HashMap<(VertexKey, u32, u32), [f32; 2]> = HashMap::new();
+    let chart_value =
+        |f: usize, k: usize| -> u32 { chart.map_or(0, |c| c.value_index(starts[f] + k) as u32) };
+    let side = |a: u32, b: u32| (a.min(b), a.max(b));
     let (mut min_rate, mut max_rate) = (u32::MAX, 0u32);
     let mut quality = [[0u64; QUALITY_BINS]; 2];
 
@@ -1055,8 +1068,39 @@ pub(crate) fn tessellate_adaptive(
                 // side's value.
                 let fv_first = fv_values.len() as i32;
                 if fvar_values.is_some() {
-                    for uv in &t.points {
-                        fv_values.push(eval_fvar(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]));
+                    // The chart values at this Ptex quad's corners and along its
+                    // cage-edge sides, for `fvar_at`.
+                    type Side = Option<(u32, u32)>;
+                    let (corner_side, edge_side): ([Side; 4], [Side; 4]) = if n == 4 {
+                        let v = |c: usize| chart_value(f, c);
+                        (
+                            [0, 1, 2, 3].map(|c| Some((v(c), v(c)))),
+                            [0, 1, 2, 3].map(|e| Some(side(v(e), v((e + 1) % 4)))),
+                        )
+                    } else {
+                        let vk = chart_value(f, k);
+                        let vn = chart_value(f, (k + 1) % n);
+                        let vp = chart_value(f, (k + n - 1) % n);
+                        (
+                            [Some((vk, vk)), Some(side(vk, vn)), None, Some(side(vp, vk))],
+                            [Some(side(vk, vn)), None, None, Some(side(vp, vk))],
+                        )
+                    };
+                    for (uv, key) in t.points.iter().zip(&t.keys) {
+                        let value = eval_fvar(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]);
+                        fv_values.push(value);
+                        let record = match *key {
+                            PointKey::Corner(c) => {
+                                corner_side[c as usize].map(|sd| (corner_key[c as usize], sd))
+                            }
+                            PointKey::Edge { edge, i } => {
+                                edge_side[edge as usize].map(|sd| (edge_key[edge as usize](i), sd))
+                            }
+                            PointKey::Interior => None,
+                        };
+                        if let Some((key, (a, b))) = record {
+                            fvar_at.entry((key, a, b)).or_insert(value);
+                        }
                     }
                 }
                 for (k, tri) in t.tris.iter().enumerate() {
@@ -1113,8 +1157,13 @@ pub(crate) fn tessellate_adaptive(
                 } else {
                     ([0.0, 0.0], [0.0, 0.0])
                 };
+                let (ia, ib) = (chart_value(f, k), chart_value(f, (k + 1) % n));
                 let (ca, cb) = (chart_at(k), chart_at((k + 1) % n));
-                ring.push((v, pa, ca));
+                let ca_limit = fvar_at
+                    .get(&(VertexKey::Cage(a), ia, ia))
+                    .copied()
+                    .unwrap_or(ca);
+                ring.push((v, pa, ca_limit));
                 // An edge point here was placed by a selected neighbour (a
                 // midpoint its `n`-gon forced): use it, or the faces would
                 // meet at a T-junction.
@@ -1158,7 +1207,12 @@ pub(crate) fn tessellate_adaptive(
                     let lerp2 = |x: [f32; 2], y: [f32; 2]| {
                         [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s]
                     };
-                    ring.push((v, lerp2(pa, pb), lerp2(ca, cb)));
+                    let (sa, sb) = side(ia, ib);
+                    let value = fvar_at
+                        .get(&(key, sa, sb))
+                        .copied()
+                        .unwrap_or_else(|| lerp2(ca, cb));
+                    ring.push((v, lerp2(pa, pb), value));
                 }
             }
             min_rate = min_rate.min(1);
@@ -1624,6 +1678,72 @@ mod tests {
         assert_eq!(triangle_quality(a, a, a), 0.0);
         assert_eq!(quality_bin(1.0), 0);
         assert_eq!(quality_bin(0.005), 4);
+    }
+
+    /// A smooth, non-affine face-varying chart with no seam, on a curved grid
+    /// whose +X half is refined: every vertex carries one chart value, whichever
+    /// face — refined or left at its cage — uses it. Under `cornersPlus1` the
+    /// limit chart differs from the authored values at interior vertices, so an
+    /// unrefined face must take its refined neighbour's value where they meet.
+    #[test]
+    fn a_smooth_chart_is_continuous_where_refined_and_cage_faces_meet() {
+        let g = 6;
+        let mut points = Vec::new();
+        let mut values = Vec::new();
+        for j in 0..=g {
+            for i in 0..=g {
+                let (x, y) = (i as f32, j as f32);
+                points.push(Vec3f::from([
+                    x,
+                    y,
+                    ((x * 0.9).sin() * (y * 0.7).cos()) * 0.5,
+                ]));
+                values.push([0.1 * x * x, (0.4 * y).sin()]);
+            }
+        }
+        let (mut counts, mut indices) = (Vec::new(), Vec::new());
+        for j in 0..g {
+            for i in 0..g {
+                let a = j * (g + 1) + i;
+                counts.push(4);
+                indices.extend_from_slice(&[a, a + 1, a + g + 2, a + g + 1]);
+            }
+        }
+        let near_x = |p: &[[f32; 3]]| {
+            if p[0][0] > 3.5 || p[1][0] > 3.5 {
+                3.5
+            } else {
+                0.5
+            }
+        };
+        for linear in [
+            sdc::FVarLinearInterpolation::CornersPlus1,
+            sdc::FVarLinearInterpolation::All,
+        ] {
+            let req = SubdivRequest {
+                uvs: Some(UvChannel {
+                    values: &values,
+                    indices: Some(&indices),
+                    face_varying: true,
+                    linear,
+                }),
+                ..request(0)
+            };
+            let t = tessellate_adaptive(&points, &counts, &indices, &req, 3, &near_x).unwrap();
+            let (fv, corners) = t.face_varying_uvs.as_ref().unwrap();
+            let mut at: std::collections::HashMap<i32, [f32; 2]> = Default::default();
+            let mut worst = 0.0f32;
+            for (&v, &c) in t.indices.iter().zip(corners) {
+                let uv = fv[c as usize];
+                let first = *at.entry(v).or_insert(uv);
+                worst = worst.max((first[0] - uv[0]).abs().max((first[1] - uv[1]).abs()));
+            }
+            assert!(
+                worst < 1e-5,
+                "{linear:?}: a vertex's chart value jumps by {worst}"
+            );
+            assert!(t.rate_range.1 > 1, "some faces are refined");
+        }
     }
 
     #[test]

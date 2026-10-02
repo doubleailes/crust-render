@@ -215,6 +215,10 @@ Schema mapping:
       Placements are counted per top-level subtree in every import mode
       (`count_placements`, `subtree_roots`) because prototype paths are renumbered per
       streamed stage — a whole-stage count would let streaming change the result.
+      `PointInstancer` targets are counted the same way, across every instancer of
+      the subtree, so a prototype two instancers each place once is shared; and only
+      placements that draw count, so a zero-scale "hidden" placement neither makes a
+      prototype shared nor gets a version of its own.
       - **Trap: what was replaced.** `adaptive-subdivision` built one prototype version
         per rate bucket at the placement's distance. Every island element is
         `instanceable` with its geometry under a payload, so its kilometre-wide terrain
