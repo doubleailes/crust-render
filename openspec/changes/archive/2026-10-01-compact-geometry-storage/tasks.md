@@ -1,3 +1,11 @@
+> **Superseded, archived unimplemented (2026-10-01).** Written against `bb53ff2`. Its goals shipped through
+> `compact-triangle-storage` (24 B triangle records, per-vertex normals reached by index, `--stats` layout rows)
+> and `slim-instance-and-curve-storage` (instances and cubic spans inline at 96 B, motion boxed). The island
+> reached 13.52 GiB of kernel memory at level 0 (this change expected about 13.6) and level 1 completes at a
+> 51 GiB peak. The one part not taken, positions held only in the packets, conflicts with the shared vertex
+> table that indexed packets and per-hit tangents read. Its delta spec was not synced: the main spec already
+> holds "Triangles are stored once" and "Instances and cubic curve spans are stored inline". No task below was run.
+
 ## 1. Baseline
 
 - [ ] 1.1 Build the parent commit's release binary into a separate target dir, and keep
