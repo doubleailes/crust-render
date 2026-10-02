@@ -242,13 +242,14 @@ pub(crate) fn train(
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.
+                                let t_max = crate::tracer::shadow_t_max(ls.distance);
                                 let mut through = 1.0;
-                                if world.occluded(&shadow, 0.001, ls.distance - 0.001) {
+                                if world.occluded(&shadow, 0.001, t_max) {
                                     through = if world.has_cutouts() {
                                         crate::tracer::cutout_through(
                                             world,
                                             &shadow,
-                                            ls.distance - 0.001,
+                                            t_max,
                                             &mut crate::stats::RayStats::default(),
                                         )
                                     } else {

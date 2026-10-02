@@ -4,7 +4,8 @@
 //! `usd_scene.rs`, which loads the checked-in sample files.
 
 use crust_core::{
-    Light, MASK_CAMERA, NoAssets, Ray, SamplingStrategy, Scene, UsdImportOptions, Vec3A,
+    Light, MASK_CAMERA, NoAssets, PathSampler, Ray, SamplingStrategy, Scene, UsdImportOptions,
+    Vec3A, Volumes, ray_color,
 };
 use std::path::PathBuf;
 
@@ -994,6 +995,64 @@ fn disk_light_is_a_one_sided_analytic_disk() {
     let behind = Vec3A::new(0.2, 0.1, 5.0);
     assert_eq!(radiance_toward(&scene, behind), Vec3A::ZERO);
     assert_eq!(assert_mis_sides_agree(&scene, behind), 0);
+}
+
+/// Mean radiance off a diffuse ground under a single face-down RectLight of
+/// `size` at `height`, seen straight down from just above the ground.
+fn ground_under_rect_light(name: &str, size: f32, height: f32) -> f32 {
+    let scene = load(
+        name,
+        &format!(
+            r#"
+    def RectLight "Sun"
+    {{
+        float inputs:width = {size}
+        float inputs:height = {size}
+        double3 xformOp:translate = (0, {height}, 0)
+        float3 xformOp:rotateXYZ = (-90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }}
+    def Mesh "Ground"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
+    }}"#
+        ),
+    );
+    let ray = Ray::new(Vec3A::new(0.0, 1.0, 0.0), -Vec3A::Y);
+    let n = 256;
+    let sum: f32 = (0..n)
+        .map(|i| {
+            ray_color(
+                &ray,
+                &scene.world,
+                &scene.lights,
+                &Volumes::default(),
+                2,
+                SamplingStrategy::PowerMis,
+                PathSampler::new(0, 0, 0, i),
+            )
+            .x
+        })
+        .sum();
+    sum / n as f32
+}
+
+/// A light far enough that the tracer's absolute 0.001 is below the f32
+/// rounding of its distance (the Moana island's 20000-unit sun quad, 3·10⁵
+/// away) lights exactly like its scaled-down twin subtending the same solid
+/// angle. The shadow ray used to end *on* the light's own surface — which is
+/// in the shadow mask — and was blocked by it most of the time.
+#[test]
+fn a_far_rect_light_does_not_shadow_itself() {
+    let near = ground_under_rect_light("rect_light_near", 20.0, 300.0);
+    let far = ground_under_rect_light("rect_light_far", 20_000.0, 300_000.0);
+    assert!(near > 0.0);
+    assert!(
+        (far - near).abs() <= 0.01 * near,
+        "far {far} vs near {near}: the far light's shadow rays hit the light"
+    );
 }
 
 #[test]

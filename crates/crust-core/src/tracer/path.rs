@@ -467,7 +467,7 @@ fn shadow_transmittance<const PROFILE: bool>(
     // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    if world.occluded(shadow_ray, 0.001, distance - 0.001) {
+    if world.occluded(shadow_ray, 0.001, shadow_t_max(distance)) {
         // Blocked — unless only cutouts block it, which the any-hit query
         // cannot tell apart. An open segment crosses no cutout either, so it
         // keeps the fast answer.
@@ -481,7 +481,7 @@ fn shadow_transmittance<const PROFILE: bool>(
         return Vec3A::ONE;
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
+    volumes.transmittance(shadow_ray, 0.001, shadow_t_max(distance), &mut rng)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -522,6 +522,18 @@ fn resume_before(t: f32) -> f32 {
     t - 0.001 + t.abs().max(1.0) * 1e-5
 }
 
+/// Where a shadow ray toward a light sample `distance` away stops: short of
+/// the light's own surface, which is in the shadow mask (lights occlude each
+/// other). The tracer's 0.001, or a relative step once that falls below the
+/// rounding of `distance` — at 3·10⁵ (the Moana island's sun quad) an `f32`
+/// ulp is 0.03, `distance − 0.001 == distance`, and the ray met the light it
+/// was aimed at most of the time. Below 100 the 0.001 is the larger step,
+/// so every nearer light gets exactly the bound it always had.
+#[inline]
+pub(crate) fn shadow_t_max(distance: f32) -> f32 {
+    (distance - 0.001).min(distance * (1.0 - 1e-5))
+}
+
 /// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
 /// in a world with cutouts: `Π (1 − opacity)` over every hit up to the light,
 /// or zero at the first hit on a material without a cutout, times the volume
@@ -538,7 +550,7 @@ fn cutout_shadow(
     vertex: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
-    let t_max = distance - 0.001;
+    let t_max = shadow_t_max(distance);
     let through = cutout_through(world, ray, t_max, stats);
     if through == 0.0 {
         stats.shadow_occluded += 1;
