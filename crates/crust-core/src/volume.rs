@@ -457,12 +457,17 @@ impl Volumes {
         }
         let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
         let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+        // `t` is the ray's parameter and the coefficients are per unit of
+        // distance, so a free flight in `t` is one in distance divided by the
+        // direction's length. A camera ray's direction is not unit: it
+        // reaches the focus plane at `t = 1`.
+        let len = ray.direction().length();
 
         let mut t = start;
         let mut w = Vec3A::ONE;
         let mut emitted = Vec3A::ZERO;
         loop {
-            t += -(1.0 - rng.next_f32()).ln() / majorant;
+            t += -(1.0 - rng.next_f32()).ln() / (majorant * len);
             if t >= end {
                 return VolumeEvent::Passthrough {
                     transmittance: w,
@@ -536,13 +541,15 @@ impl Volumes {
             return Vec3A::ONE;
         }
 
+        // Per unit of distance; see `sample_interaction`.
+        let len = ray.direction().length();
         if spans
             .iter()
             .all(|&(i, _, _)| self.regions[i].is_homogeneous())
         {
             let mut tr = Vec3A::ONE;
             for &(i, a, b) in &spans {
-                let e = self.regions[i].sigma_t_at_density(1.0) * (b - a);
+                let e = self.regions[i].sigma_t_at_density(1.0) * ((b - a) * len);
                 tr *= Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp());
             }
             return tr;
@@ -553,7 +560,7 @@ impl Volumes {
         let mut t = start;
         let mut w = Vec3A::ONE;
         loop {
-            t += -(1.0 - rng.next_f32()).ln() / majorant;
+            t += -(1.0 - rng.next_f32()).ln() / (majorant * len);
             if t >= end {
                 return w;
             }
@@ -612,6 +619,62 @@ mod tests {
         // And again — the fast path is deterministic, zero variance.
         let tr2 = volumes.transmittance(&x_ray(), 1e-3, 10.0, &mut s);
         assert_eq!(tr, tr2);
+    }
+
+    /// A ray's parameter is not a distance unless its direction is unit, and
+    /// a camera ray's is not (it reaches the focus plane at `t = 1`). Region
+    /// fog seen straight from the camera used to thin out by the focus
+    /// distance — 10× at the default — because tracking read `t` as one.
+    #[test]
+    fn tracking_measures_distance_not_the_ray_parameter() {
+        let grey = |field| {
+            Volumes::new(vec![unit_region(
+                Vec3A::splat(0.5),
+                Vec3A::splat(0.7),
+                0.0,
+                field,
+            )])
+        };
+        let long = Ray::new(Vec3A::new(-2.0, 0.0, 0.0), Vec3A::X * 10.0);
+        let expect = (-1.2f32).exp();
+        let mut s = Rng::new(7);
+        let homogeneous = grey(DensityField::Homogeneous);
+        let tr = homogeneous.transmittance(&long, 1e-4, 1.0, &mut s);
+        assert!((tr.x - expect).abs() < 1e-5, "{tr}");
+        let grid = grey(DensityField::Grid {
+            nx: 2,
+            ny: 2,
+            nz: 2,
+            data: vec![1.0; 8],
+        });
+        let n = 20_000;
+        let (mut mean, mut passed) = (0.0, 0);
+        for _ in 0..n {
+            mean += grid.transmittance(&long, 1e-4, 1.0, &mut s).x;
+            if let VolumeEvent::Passthrough { .. } =
+                homogeneous.sample_interaction(&long, 1e-4, 1.0, &mut s)
+            {
+                passed += 1;
+            }
+        }
+        let mean = mean / n as f32;
+        assert!(
+            (mean - expect).abs() < 0.01,
+            "ratio tracking {mean} vs {expect}"
+        );
+        // The analog walk crosses as often along the long ray as along a
+        // unit one over the same stretch of space.
+        let unit = Ray::new(Vec3A::new(-2.0, 0.0, 0.0), Vec3A::X);
+        let mut passed_unit = 0;
+        for _ in 0..n {
+            if let VolumeEvent::Passthrough { .. } =
+                homogeneous.sample_interaction(&unit, 1e-4, 10.0, &mut s)
+            {
+                passed_unit += 1;
+            }
+        }
+        let (a, b) = (passed as f32 / n as f32, passed_unit as f32 / n as f32);
+        assert!((a - b).abs() < 0.02, "{a} vs {b}");
     }
 
     #[test]

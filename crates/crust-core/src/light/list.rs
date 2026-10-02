@@ -384,7 +384,11 @@ impl LightList {
     }
 
     /// [`LightList::pick_at`] as an index into [`LightList::lights`].
-    #[inline]
+    ///
+    /// `inline(always)`: once the integrator grew its medium-boundary
+    /// branches LLVM stopped inlining this into NEE, and the call cost
+    /// cornellbox 0.6% of its instructions.
+    #[inline(always)]
     pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
         match self.cache.as_ref().and_then(|c| c.lookup(p)) {
             Some((pmf, cdf)) => {

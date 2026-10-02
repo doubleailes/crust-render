@@ -700,11 +700,13 @@ impl WorldBuilder {
     #[must_use = "the committed world is the only way to intersect it"]
     pub fn commit(self) -> World {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
+        let boundaries = self.materials.iter().any(|m| m.is_medium_boundary());
         World {
             scene: self.rt.commit_with(crate::commit_options()),
             materials: self.materials,
             faces: self.faces,
             cutouts,
+            boundaries,
             light_classes: self.light_classes,
         }
     }
@@ -738,6 +740,9 @@ pub struct World {
     faces: Vec<SideTables>,
     /// Whether any material has a cutout ([`Material::has_cutout`]).
     cutouts: bool,
+    /// Whether any material is a medium boundary
+    /// ([`Material::is_medium_boundary`]).
+    boundaries: bool,
     light_classes: Vec<u16>,
 }
 
@@ -852,6 +857,15 @@ impl World {
     #[inline]
     pub fn has_cutouts(&self) -> bool {
         self.cutouts
+    }
+
+    /// Whether any geometry's material is a medium boundary
+    /// ([`Material::is_medium_boundary`]): a volume-only material rays cross
+    /// into and out of its interior medium. When none is, every hit is a
+    /// surface and any hit occludes a shadow ray.
+    #[inline]
+    pub fn has_medium_boundaries(&self) -> bool {
+        self.boundaries
     }
 
     /// World bounds of all geometry; `None` for an empty world.

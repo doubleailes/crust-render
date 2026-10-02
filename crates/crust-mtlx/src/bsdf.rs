@@ -878,27 +878,211 @@ fn thin_film(c: &mut Compiler<'_>, node: &Node) -> Option<ThinFilm> {
     })
 }
 
-/// Records a VDF as the surface's interior medium.
+/// Records a VDF tree as the surface's interior medium.
 fn vdf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
+    if let Some(v) = vdf_tree(c, node, 0, out) {
+        out.volume = Some(v);
+    }
+}
+
+/// Reads a **volume terminal** into `out.volume`: a `volumematerial`, a
+/// `volume` shader, a `mix` of two volume shaders, or a bare VDF tree.
+///
+/// The volume *replaces* whatever interior the surface described through its
+/// own transmission inputs — the terminal is the authored answer to "what is
+/// inside", as in Typhoon's `ApplyVolumeToSurfaceClosure` — and like that
+/// interior it only matters below a thick, transmitting surface. A terminal
+/// that describes vacuum (a `volume` with no `vdf`) clears it. Paired with no
+/// surface at all, the host treats the material as a transparent medium
+/// boundary ([`crate::Compiled::volume_only`]).
+pub fn flatten_volume(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) {
+    out.volume = volume_shader(c, node, 0, out);
+}
+
+/// The medium a volume shader (or anything feeding one) describes, `None`
+/// for vacuum.
+fn volume_shader(
+    c: &mut Compiler<'_>,
+    node: &Node,
+    depth: usize,
+    out: &mut Closures,
+) -> Option<Volume> {
+    if too_deep(depth, out) {
+        return None;
+    }
+    let ty = node.type_name.to_ascii_lowercase();
     match node.category.as_str() {
-        "anisotropic_vdf" => {
-            out.volume = Some(Volume {
-                absorption: c.input_or(node, "absorption", Val::vec3(0.0, 0.0, 0.0)),
-                scattering: c.input_or(node, "scattering", Val::vec3(0.0, 0.0, 0.0)),
-                anisotropy: c.input_or(node, "anisotropy", Val::ZERO),
-            });
+        "volumematerial" => connected_node(c, node, "volumeshader")
+            .and_then(|n| volume_shader(c, &n, depth + 1, out)),
+        "volume" => {
+            if node.input("edf").is_some() {
+                out.reported
+                    .insert("volume edf (volume emission is not rendered)".into());
+            }
+            closure_input(c, node, "vdf", ClosureType::Vdf)
+                .and_then(|n| vdf_tree(c, &n, depth + 1, out))
         }
-        "absorption_vdf" => {
-            let zero = c.constant(Val::vec3(0.0, 0.0, 0.0));
-            out.volume = Some(Volume {
-                absorption: c.input_or(node, "absorption", Val::vec3(0.0, 0.0, 0.0)),
-                scattering: zero,
-                anisotropy: c.constant(Val::ZERO),
-            });
+        // `mix_volumeshader`: the two media blended as `mix_vdf` blends them.
+        "mix" if ty == "volumeshader" => {
+            let fg =
+                connected_node(c, node, "fg").and_then(|n| volume_shader(c, &n, depth + 1, out));
+            let bg =
+                connected_node(c, node, "bg").and_then(|n| volume_shader(c, &n, depth + 1, out));
+            let m = c.input_or(node, "mix", Val::ZERO);
+            mix_volumes(c, fg, bg, m)
+        }
+        _ => vdf_tree(c, node, depth, out),
+    }
+}
+
+/// Builds the medium a VDF tree describes, `None` for vacuum or a node there
+/// is no medium for (reported).
+///
+/// The combinators are Typhoon's (`mix_vdf`, `add_vdf`, `multiply_vdf`):
+/// coefficients combine linearly, and the anisotropy is the mixture of the
+/// branches' weighted by how much each *scatters* (the lane sum of its σₛ),
+/// so a purely absorbing branch never drags `g` toward its own. Where neither
+/// branch scatters the anisotropy is 0, which nothing reads.
+fn vdf_tree(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) -> Option<Volume> {
+    if too_deep(depth, out) {
+        return None;
+    }
+    let zero3 = Val::vec3(0.0, 0.0, 0.0);
+    match node.category.as_str() {
+        "anisotropic_vdf" => Some(Volume {
+            absorption: c.input_or(node, "absorption", zero3),
+            scattering: c.input_or(node, "scattering", zero3),
+            anisotropy: c.input_or(node, "anisotropy", Val::ZERO),
+        }),
+        "absorption_vdf" => Some(Volume {
+            absorption: c.input_or(node, "absorption", zero3),
+            scattering: c.constant(zero3),
+            anisotropy: c.constant(Val::ZERO),
+        }),
+        "mix" => {
+            let branch = |c: &mut Compiler<'_>, out: &mut Closures, name: &str| {
+                closure_input(c, node, name, ClosureType::Vdf)
+                    .and_then(|n| vdf_tree(c, &n, depth + 1, out))
+            };
+            let fg = branch(c, out, "fg");
+            let bg = branch(c, out, "bg");
+            let m = c.input_or(node, "mix", Val::ZERO);
+            mix_volumes(c, fg, bg, m)
+        }
+        "add" => {
+            let a = closure_input(c, node, "in1", ClosureType::Vdf)
+                .and_then(|n| vdf_tree(c, &n, depth + 1, out));
+            let b = closure_input(c, node, "in2", ClosureType::Vdf)
+                .and_then(|n| vdf_tree(c, &n, depth + 1, out));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let one = c.constant(Val::ONE);
+                    Some(sum_volumes(c, a, one, b, one))
+                }
+                (a, b) => a.or(b),
+            }
+        }
+        "multiply" => {
+            let (vdf, scalar) = match closure_input(c, node, "in1", ClosureType::Vdf) {
+                Some(n) => (Some(n), "in2"),
+                None => (closure_input(c, node, "in2", ClosureType::Vdf), "in1"),
+            };
+            let n = vdf?;
+            if literal_zero(node, scalar) {
+                return None;
+            }
+            let v = vdf_tree(c, &n, depth + 1, out)?;
+            let w = c.input_or(node, scalar, Val::ONE);
+            Some(Volume {
+                absorption: c.emit(Op::Binary {
+                    op: BinOp::Mul,
+                    a: v.absorption,
+                    b: w,
+                }),
+                scattering: c.emit(Op::Binary {
+                    op: BinOp::Mul,
+                    a: v.scattering,
+                    b: w,
+                }),
+                anisotropy: v.anisotropy,
+            })
         }
         other => {
             c.unsupported.insert(other.to_string());
+            None
         }
+    }
+}
+
+/// `mix(fg, bg, m)` of two media, either of which may be vacuum.
+fn mix_volumes(
+    c: &mut Compiler<'_>,
+    fg: Option<Volume>,
+    bg: Option<Volume>,
+    m: Slot,
+) -> Option<Volume> {
+    if fg.is_none() && bg.is_none() {
+        return None;
+    }
+    let vacuum = |c: &mut Compiler<'_>| Volume {
+        absorption: c.constant(Val::vec3(0.0, 0.0, 0.0)),
+        scattering: c.constant(Val::vec3(0.0, 0.0, 0.0)),
+        anisotropy: c.constant(Val::ZERO),
+    };
+    let fg = fg.unwrap_or_else(|| vacuum(c));
+    let bg = bg.unwrap_or_else(|| vacuum(c));
+    let one = c.constant(Val::ONE);
+    let inv = c.emit(Op::Invert { a: m, amount: one });
+    Some(sum_volumes(c, fg, m, bg, inv))
+}
+
+/// `wa·a + wb·b` for two media and scalar weights, with the anisotropy
+/// weighted by each side's scattering lane sum.
+fn sum_volumes(c: &mut Compiler<'_>, a: Volume, wa: Slot, b: Volume, wb: Slot) -> Volume {
+    let scaled = |c: &mut Compiler<'_>, x: Slot, w: Slot| {
+        c.emit(Op::Binary {
+            op: BinOp::Mul,
+            a: x,
+            b: w,
+        })
+    };
+    let (aa, ab) = (scaled(c, a.absorption, wa), scaled(c, b.absorption, wb));
+    let (sa, sb) = (scaled(c, a.scattering, wa), scaled(c, b.scattering, wb));
+    let absorption = c.emit(Op::Binary {
+        op: BinOp::Add,
+        a: aa,
+        b: ab,
+    });
+    let scattering = c.emit(Op::Binary {
+        op: BinOp::Add,
+        a: sa,
+        b: sb,
+    });
+    let ones = c.constant(Val::vec3(1.0, 1.0, 1.0));
+    let weight_a = c.emit(Op::DotProduct { a: sa, b: ones });
+    let weight_b = c.emit(Op::DotProduct { a: sb, b: ones });
+    let ga = scaled(c, a.anisotropy, weight_a);
+    let gb = scaled(c, b.anisotropy, weight_b);
+    let num = c.emit(Op::Binary {
+        op: BinOp::Add,
+        a: ga,
+        b: gb,
+    });
+    let den = c.emit(Op::Binary {
+        op: BinOp::Add,
+        a: weight_a,
+        b: weight_b,
+    });
+    // `Div` answers 0 for a zero divisor: no scattering, no anisotropy.
+    let anisotropy = c.emit(Op::Binary {
+        op: BinOp::Div,
+        a: num,
+        b: den,
+    });
+    Volume {
+        absorption,
+        scattering,
+        anisotropy,
     }
 }
 
@@ -1011,13 +1195,16 @@ pub(crate) fn edf_walk(
 /// For inputs that cannot be confused with an operand of another type — a
 /// `surfacematerial`'s one shader, a `surface`'s one bsdf.
 pub(crate) fn connected_node(c: &Compiler<'_>, node: &Node, name: &str) -> Option<Node> {
+    connected_node_in(c.doc, node, name)
+}
+
+/// [`connected_node`] over a document, before any compiler exists.
+pub(crate) fn connected_node_in(doc: &crate::Doc, node: &Node, name: &str) -> Option<Node> {
     let input = node.input(name)?;
     let scope = node.graph.clone().unwrap_or_default();
     match &input.source {
-        Source::Node { name, .. } => c.doc.find(&scope, name).cloned(),
-        Source::Graph { graph, output } => {
-            c.doc.graph_output(graph, output).map(|g| g.node.clone())
-        }
+        Source::Node { name, .. } => doc.find(&scope, name).cloned(),
+        Source::Graph { graph, output } => doc.graph_output(graph, output).map(|g| g.node.clone()),
         Source::Value(_) => None,
     }
 }
@@ -1289,6 +1476,160 @@ mod tests {
             cl.nodes[cl.root.unwrap() as usize],
             Closure::Leaf(_)
         ));
+    }
+
+    fn test_ctx() -> ShadeCtx {
+        ShadeCtx {
+            uv: (0.0, 0.0),
+            normal: Vec3A::Z,
+            tangent: Vec3A::X,
+            view: -Vec3A::Z,
+            position: Vec3A::ZERO,
+            uv_width: 0.0,
+        }
+    }
+
+    /// Compiles `volume` as a volume terminal (no surface) and evaluates it.
+    fn build_volume(text: &str, volume: &str) -> (Vec<Val>, Closures) {
+        let doc = Doc::parse(text).unwrap();
+        let loader = |_: &str, _: Option<&str>| None;
+        let mut c = Compiler::new(&doc, &loader);
+        let node = doc.find("", volume).unwrap().clone();
+        let mut out = Closures::default();
+        flatten_volume(&mut c, &node, &mut out);
+        let mut slots = Vec::new();
+        c.program.eval(&test_ctx(), &mut slots);
+        (slots, out)
+    }
+
+    const VDFS: &str = r#"<materialx>
+      <anisotropic_vdf name="fog" type="VDF">
+        <input name="absorption" type="vector3" value="0.1, 0.2, 0.3" />
+        <input name="scattering" type="vector3" value="1, 1, 1" />
+        <input name="anisotropy" type="float" value="0.6" />
+      </anisotropic_vdf>
+      <anisotropic_vdf name="haze" type="VDF">
+        <input name="scattering" type="vector3" value="2, 2, 2" />
+        <input name="anisotropy" type="float" value="-0.3" />
+      </anisotropic_vdf>
+      <absorption_vdf name="ink" type="VDF">
+        <input name="absorption" type="vector3" value="4, 0, 0" />
+      </absorption_vdf>
+      <mix name="mixed" type="VDF">
+        <input name="fg" type="VDF" nodename="fog" />
+        <input name="bg" type="VDF" nodename="ink" />
+        <input name="mix" type="float" value="0.25" />
+      </mix>
+      <add name="added" type="VDF">
+        <input name="in1" type="VDF" nodename="fog" />
+        <input name="in2" type="VDF" nodename="haze" />
+      </add>
+      <multiply name="scaled" type="VDF">
+        <input name="in1" type="VDF" nodename="fog" />
+        <input name="in2" type="color3" value="2, 3, 4" />
+      </multiply>
+      <volume name="vol" type="volumeshader">
+        <input name="vdf" type="VDF" nodename="mixed" />
+      </volume>
+      <volume name="vacuum" type="volumeshader" />
+      <volume name="vol_haze" type="volumeshader">
+        <input name="vdf" type="VDF" nodename="haze" />
+      </volume>
+      <mix name="vmix" type="volumeshader">
+        <input name="fg" type="volumeshader" nodename="vol_haze" />
+        <input name="bg" type="volumeshader" nodename="vacuum" />
+        <input name="mix" type="float" value="0.5" />
+      </mix>
+      <volumematerial name="mat" type="material">
+        <input name="volumeshader" type="volumeshader" nodename="vol" />
+      </volumematerial>
+    </materialx>"#;
+
+    fn medium(slots: &[Val], v: Volume) -> (Vec3A, Vec3A, f32) {
+        (
+            slots[v.absorption as usize].rgb(),
+            slots[v.scattering as usize].rgb(),
+            slots[v.anisotropy as usize].x(),
+        )
+    }
+
+    fn close(a: Vec3A, b: Vec3A) -> bool {
+        (a - b).abs().max_element() < 1e-6
+    }
+
+    #[test]
+    fn a_volume_material_reads_its_vdf() {
+        let (slots, cl) = build_volume(VDFS, "mat");
+        let (a, s, g) = medium(&slots, cl.volume.expect("a medium"));
+        // mix(fog, ink, 0.25): coefficients linear, g from the scattering side
+        // alone (ink does not scatter).
+        assert!(close(a, Vec3A::new(0.025 + 3.0, 0.05, 0.075)), "{a}");
+        assert!(close(s, Vec3A::splat(0.25)), "{s}");
+        assert!((g - 0.6).abs() < 1e-6, "{g}");
+        assert!(cl.root.is_none());
+    }
+
+    #[test]
+    fn added_vdfs_weight_anisotropy_by_scattering() {
+        let (slots, cl) = build_volume(VDFS, "added");
+        let (a, s, g) = medium(&slots, cl.volume.unwrap());
+        assert!(close(a, Vec3A::new(0.1, 0.2, 0.3)));
+        assert!(close(s, Vec3A::splat(3.0)));
+        // (0.6·3 + (−0.3)·6) / 9 = 0.
+        assert!(g.abs() < 1e-6, "{g}");
+    }
+
+    #[test]
+    fn a_multiplied_vdf_scales_both_coefficients() {
+        let (slots, cl) = build_volume(VDFS, "scaled");
+        let (a, s, g) = medium(&slots, cl.volume.unwrap());
+        assert!(close(a, Vec3A::new(0.2, 0.6, 1.2)));
+        assert!(close(s, Vec3A::new(2.0, 3.0, 4.0)));
+        assert_eq!(g, 0.6);
+    }
+
+    #[test]
+    fn a_vacuum_volume_has_no_medium_and_mixes_as_one() {
+        let (_, cl) = build_volume(VDFS, "vacuum");
+        assert!(cl.volume.is_none());
+        let (slots, cl) = build_volume(VDFS, "vmix");
+        let (a, s, g) = medium(&slots, cl.volume.unwrap());
+        assert!(close(a, Vec3A::ZERO));
+        assert!(close(s, Vec3A::splat(1.0)));
+        assert!((g + 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_volume_terminal_replaces_the_surface_interior() {
+        let doc = format!(
+            "{}{}",
+            VDFS.trim_end_matches("</materialx>"),
+            r#"<anisotropic_vdf name="glass_interior" type="VDF">
+                 <input name="absorption" type="vector3" value="9, 9, 9" />
+               </anisotropic_vdf>
+               <dielectric_bsdf name="t" type="BSDF">
+                 <input name="scatter_mode" type="string" value="T" />
+               </dielectric_bsdf>
+               <layer name="l" type="BSDF">
+                 <input name="top" type="BSDF" nodename="t" />
+                 <input name="base" type="VDF" nodename="glass_interior" />
+               </layer>
+             </materialx>"#
+        );
+        let doc = Doc::parse(&doc).unwrap();
+        let loader = |_: &str, _: Option<&str>| None;
+        let surface = doc.find("", "l").unwrap();
+        let volume = doc.find("", "vol_haze").unwrap();
+        let compiled = crate::compile_terminals(&doc, Some(surface), Some(volume), &loader);
+        assert!(!compiled.volume_only);
+        let mut slots = Vec::new();
+        compiled.program.eval(&test_ctx(), &mut slots);
+        let (a, s, _) = medium(&slots, compiled.closures.volume.unwrap());
+        assert!(close(a, Vec3A::ZERO));
+        assert!(close(s, Vec3A::splat(2.0)));
+        let alone = crate::compile_terminals(&doc, None, Some(volume), &loader);
+        assert!(alone.volume_only);
+        assert!(alone.closures.root.is_none());
     }
 
     #[test]

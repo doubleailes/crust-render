@@ -244,16 +244,17 @@ pub(crate) fn train(
                                 // the share the card lets through.
                                 let mut through = 1.0;
                                 if world.occluded(&shadow, 0.001, ls.distance - 0.001) {
-                                    through = if world.has_cutouts() {
-                                        crate::tracer::cutout_through(
-                                            world,
-                                            &shadow,
-                                            ls.distance - 0.001,
-                                            &mut crate::stats::RayStats::default(),
-                                        )
-                                    } else {
-                                        0.0
-                                    };
+                                    through =
+                                        if world.has_cutouts() || world.has_medium_boundaries() {
+                                            crate::tracer::cutout_through(
+                                                world,
+                                                &shadow,
+                                                ls.distance - 0.001,
+                                                &mut crate::stats::RayStats::default(),
+                                            )
+                                        } else {
+                                            0.0
+                                        };
                                     if through == 0.0 {
                                         continue;
                                     }

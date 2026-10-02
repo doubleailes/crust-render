@@ -143,6 +143,13 @@ other. The pairs:
   `Material::opacity` point-sampled, both follow at most 256 crossings, both
   are gated on `World::has_cutouts`; change one and NEE and the bounce side
   disagree.
+- **Medium boundaries.** A path crossing a volume-only material (the main
+  loop's boundary branch, `pass_boundaries`) and a shadow ray crossing one
+  (`medium_shadow`) change medium through the one `cross_boundary`, and both
+  are gated on `World::has_medium_boundaries`; a scatter inside an
+  `Enclosure` runs `volume_nee` and leaves `PrevVertex::Phase`, the pair a
+  region scatter keeps. Change one side and NEE and the bounce side see
+  different media.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔

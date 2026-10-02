@@ -182,6 +182,52 @@ consumed as ordinary dependencies:
      already weighted; folding it in would double-attenuate). Emission reached by a
      bounce (`next_emit`) is stored pre-multiplied by the arriving segment's attenuation.
      `volumes.is_empty()` short-circuits everything — volume-free scenes render as before.
+   - **Medium boundaries** (`tracer/path.rs`, `Enclosure` / `cross_boundary`): a
+     volume-only material (materials record § MaterialX volume terminals) is a closed
+     mesh whose interior medium the path travels in — Typhoon's
+     `_UpdatePathMedium` / `_TraceVolumeTransmission` / `_Visibility`. A segment that
+     hits one is **not a vertex**: no depth, no record, `prev` untouched. The
+     stretch up to the hit is *carried* (`carry`: its transmittance and pre-weighted
+     region emission) and folded into whatever the next segment reaches (`carried`,
+     on the `VolumeEvent` before the branches), and the ray restarts just past the hit
+     (`restarted_past`) in the medium the crossing leaves it in. The rules are
+     Typhoon's single-owner ones: a front face met in vacuum enters the boundary's
+     medium and records its `geom_id` as owner; only that owner's back face leaves;
+     inside, other boundaries are crossed unchanged; a ray already carrying a
+     refracting interior enters nothing. While inside, **every** ray the path traces
+     carries the enclosure's medium — a surface's own scattered ray (which knows
+     nothing of it) is overridden, the random walk's exit too — so an opaque object
+     in fog keeps its fog. Each stretch draws from its own vertex domain, numbered
+     `records.len() + crossed` (which grows at every step, vertex or crossing, and is
+     the plain vertex index when nothing was crossed); reusing the vertex's domain
+     made the stretch after a crossing repeat the free-flight draw of the one before. A carried-medium scatter inside
+     an enclosure runs **NEE with MIS** through `volume_nee` with the single HG lobe,
+     and leaves `PrevVertex::Phase` — the same pair as a region scatter — with the
+     event weight moved into `atten` so it multiplies NEE; outside one it keeps the
+     old no-NEE, `prev = None` pairing (a refracting interior's shadow rays are
+     blocked anyway). Shadow rays take the enclosure they start in
+     (`shadow_transmittance(.., inside, ..)`); an occluded one in a world with
+     boundaries goes to `medium_shadow`, which walks hit by hit with
+     `cross_boundary`'s rules, Beer–Lambert per stretch, cutouts as `1 − opacity`,
+     anything else blocking — deterministic where the path tracks free flights, the
+     same transmittance either way. The depth-exhausted emission lookup passes
+     boundaries with `pass_boundaries`. The light cache's training visibility sees
+     a boundary as clear. A world with no boundary renders every sample
+     bit-identically (`World::has_medium_boundaries`, hoisted into `boundaries`,
+     gates each branch); cornellbox runs +0.43% instructions (callgrind, 2 spp). Two
+     traps on the way there: making `volume_nee` generic over its phase closure gave
+     `LightList::pick_index_at` a third call site and LLVM stopped inlining it
+     (+0.6%), and the grown loop pushed `shadow_transmittance` out of line (+0.35%) —
+     the `Phase` enum, the cold `enclosure_nee` and two `inline(always)` undo both.
+     Moving the loop's medium state into `PathScratch` measured worse than locals.
+     Pinned by `tests/volume_materials.rs`: Beer–Lambert through an absorbing
+     boundary exact to the restart epsilon (σ·0.001, for unit and ×10 directions),
+     and white furnaces at 1 within 0.025 for a scattering boundary under power
+     MIS, NEE alone and BSDF alone, and with a white Lambertian ball *inside* the
+     fog. Measured against the same medium as a homogeneous `crust:volume` region
+     (a mesh cube vs the region box, floor and ball inside, 512 spp): image means
+     agree to 0.3% in the band where camera rays graze the box top, ≤0.06%
+     elsewhere — the restart epsilon.
    - A sky-gradient background when nothing is hit (attenuated by, and adding the
      emission of, any volumes the escaping segment crossed).
 4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
@@ -421,7 +467,9 @@ randomness use `openqmc::pcg::Rng`.
 ## Known gaps: volume regions
 
 - **Volume regions** (`volume.rs`) have no OpenVDB / `UsdVolVolume` import — density is
-  homogeneous, procedural fBm noise, or an inline voxel grid authored in the USDA.
+  homogeneous, procedural fBm noise, or an inline voxel grid authored in the USDA. (A
+  homogeneous medium inside an arbitrary closed mesh is a volume *material*; § Medium
+  boundaries above.)
   (`openusd-schemas` 0.7 does ship a `vol` feature — `Volume` plus `OpenVDBAsset` /
   `Field3DAsset` views — so this is now an unwritten importer rather than a missing
   dependency; it was the latter through openusd 0.6.) No volume path guiding (volume vertices push
@@ -429,8 +477,45 @@ randomness use `openqmc::pcg::Rng`.
   slower convergence, not bias). One global majorant per region — no coarse max-grid, so
   a high `densityScale` over a large box tracks slowly. Emissive volumes are not
   light-list entries: fire is found only by phase/BSDF-sampled paths (firefly risk near
-  bright emission), never by NEE. Carried-medium (subsurface) scatter vertices run no
-  NEE. Region overlap uses summed extinction (exact) with a σₛ-weighted phase mixture.
+  bright emission), never by NEE. Carried-medium scatter vertices run no NEE unless the
+  medium is a boundary's enclosure (a refracting interior's shadow rays are blocked by
+  its own surface, so NEE there would be a wasted ray per scatter). Region overlap uses
+  summed extinction (exact) with a σₛ-weighted phase mixture.
+
+## Known gaps: medium boundaries
+
+- **One owner at a time** (Typhoon's model): nested or overlapping boundaries do not
+  compose — inside one, another is crossed unchanged, and glass inside fog is
+  travelled in the fog's medium. Typhoon's planned fix, priority-ordered interior
+  lists with false-interface skipping (its `doc/plan-volume-ids.md`), is the shape
+  to follow here too.
+- **A camera inside a boundary** starts in vacuum and sees the medium only after its
+  rays leave and re-enter. Rays starting inside are not detected.
+- **Closed, outward-facing meshes only.** Entry is a front face; an open or inverted
+  mesh lets paths in without letting them out (or the reverse).
+- **Majorant free flight**, not Typhoon's Chiang channel MIS: a chromatic medium is
+  noisier, not biased. One medium value per entry (the VDF evaluated where the ray
+  enters).
+- **The restart epsilon**: a crossing restarts 0.001 short of the boundary in the new
+  medium, so each entry adds σ·0.001 of optical depth (the 0.3% above).
+
+## History: volume tracking read the ray parameter as a distance
+
+Until volume materials were measured against volume regions, `Volumes::
+sample_interaction` and `Volumes::transmittance` stepped and integrated in the
+ray's **parameter** `t` with coefficients per unit of **distance**. Every ray
+the integrator builds from a material is unit, but a camera ray is not: it
+reaches the focus plane at `t = 1`, so its length is the focus distance, 10 by
+default. Region fog seen straight from the camera was therefore ten times
+thinner than the same fog seen in a reflection or along a shadow ray — and the
+image changed with `focusDistance` on a pinhole camera (`samples/fog.usda`
+mean ×5.9 between focus 10 and 1). Both now scale by the direction's length
+(`tracking_measures_distance_not_the_ray_parameter`). Shadow and bounce rays
+are unit, so only camera segments through regions changed: `fog` and `smoke`
+re-render denser, every other sample is bit-identical. The medium-boundary
+restart normalises its ray for the same reason, and steps back 0.001 in
+*distance*: 0.001 of a camera ray's parameter put a hundredth of a unit of fog
+outside the box, which was the 1% the first A/B against regions showed.
 
 ## History: Henyey-Greenstein convention and carried-medium fixes
 
