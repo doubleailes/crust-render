@@ -43,6 +43,7 @@ attributes.
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
 | [`--subdiv-level`](#subdiv-level) | 0–6 | scene / 0 | `crust:subdivisionLevel` |
+| [`--subdiv-edge-length`](#subdiv-edge-length) | pixels | scene / off | `crust:subdivisionEdgeLength` |
 | [`--strategy`](#strategy) | name | scene / `power` | `crust:samplingStrategy` |
 | [`--light-selection`](#light-selection) | name | scene / `power` | `crust:lightSelection` |
 | [`--filter`](#filter) | name | scene / `triangle` | `crust:pixelFilter` |
@@ -159,6 +160,35 @@ unauthored `subdivisionScheme` counts as USD's default, `catmullClark`. Override
 Each level multiplies a mesh's face count by four, so even `--subdiv-level 1` can raise
 memory use a lot on a large scene. To render every mesh as its faceted cage, with no
 smooth normals, set the environment variable `CRUST_SUBDIV=0`.
+
+With [`--subdiv-edge-length`](#subdiv-edge-length), this is the highest level adaptive
+subdivision may choose instead.
+
+### subdiv-edge-length
+
+`--subdiv-edge-length <PX>`
+
+Turns on adaptive subdivision: each subdivision mesh is refined only as far as its size
+on screen asks. A mesh is refined until its average control-cage edge, seen from the
+render camera at the mesh's nearest point, is at most `PX` pixels long. Overrides
+[`crust:subdivisionEdgeLength`](@/docs/usd/render-settings.md#crust-subdivisionedgelength).
+
+- **The ceiling:** [`--subdiv-level`](#subdiv-level) (or `crust:subdivisionLevel`) is the
+  highest level a mesh can get. Without either, it is 3.
+- **Instances:** each placement of an instanced mesh gets the level its own distance asks
+  for, so near copies are refined and far ones are not. Placements that need the same
+  level still share one copy of the geometry.
+- **The camera:** it must be named before the scene is read, by [`--camera`](#camera) or
+  the stage's `RenderSettings.camera`. Without one, a warning is logged and every mesh
+  uses the uniform level.
+- **Off-screen meshes:** a mesh behind the camera is refined by its distance like any
+  other, so its reflections and shadows keep their detail.
+
+The value must be a positive number. `--stats` reports how many meshes got each level.
+
+```bash
+crust-render -i scene.usda --camera /cam --subdiv-edge-length 2
+```
 
 ## Light transport
 

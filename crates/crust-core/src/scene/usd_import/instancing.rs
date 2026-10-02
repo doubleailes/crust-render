@@ -24,21 +24,23 @@ use std::time::Instant;
 use crust_rt::{
     Geometry, InstanceHitId, RayMask, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
-use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
+use glam::{Affine3A, Mat3, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Mesh as UsdMesh, PointInstancer, Sphere as UsdSphere,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, warn};
 
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
+use super::adaptive::{Aabb, QRange, ScreenRate, mean_edge_length, stretch};
 use super::attrs::{custom_token, prim_ray_mask};
 use super::materials::resolve_material;
-use super::mesh::{mesh_source, placement_scale};
+use super::mesh::{MeshPlace, mesh_arrays, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
 use super::time::eval_time;
 use super::xform::{local_matrix_at, resets_xform_stack_at};
@@ -144,6 +146,7 @@ pub(super) fn collect_proto_parts(
     root: &Prim,
     caches: &mut ImportCaches<'_>,
     depth: usize,
+    bucket: i32,
 ) -> Vec<ProtoPart> {
     let mut parts = Vec::new();
     if depth > MAX_INSTANCE_NESTING {
@@ -161,78 +164,11 @@ pub(super) fn collect_proto_parts(
     let mut pending_meshes: Vec<(usize, u32)> = Vec::new();
 
     while let Some((prim, parent_local)) = stack.pop() {
-        // Same pruning as the top-level traversal: an inactive prim (and
-        // its subtree) is absent from the composed scene, prototype or not.
-        if !prim.is_active().unwrap_or(true) {
-            debug!(
-                "Skipping inactive prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
+        if prototype_prunes(&prim, root, true) {
             continue;
         }
-        if let Some(purpose) = non_render_purpose(&prim) {
-            debug!(
-                "Skipping {purpose}-purpose prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-            continue;
-        }
-        // Visibility counts from the prototype root down, as UsdImaging
-        // computes it for a prototype: an invisible part of a prototype is
-        // missing from every instance. No camera is taken from a prototype,
-        // so here the subtree is simply pruned.
-        if is_invisible(&prim) {
-            debug!(
-                "Skipping invisible prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-            continue;
-        }
-
-        // The prototype root's own transform is deliberately excluded: a
-        // `PointInstancer` prototype is placed entirely by its per-instance
-        // transform, and a native prototype root carries none.
-        let this_local = if prim.path() == root.path() {
-            GMat4::IDENTITY
-        } else if resets_xform_stack_at(stage, &prim) {
-            local_matrix_at(stage, &prim)
-        } else {
-            parent_local * local_matrix_at(stage, &prim)
-        };
-
+        let this_local = part_local(stage, &prim, root, parent_local);
         let mask = prim_ray_mask(&prim);
-
-        // Checked before any schema lookup, because a schema `get()` reads
-        // the prim's type name and that is exactly what aborts here.
-        //
-        // A natively-instanced prim *inside* a prototype is unreachable
-        // with openusd 0.5.0: resolving its prototype, or reading the type
-        // of any prim beneath it, trips an internal assertion
-        // (`pcp/instancing.rs`: "materialized prototype root's
-        // instanceable must be inert"), which aborts debug builds. The
-        // prim itself is safe to inspect; its contents are not. So there
-        // is no route to the geometry — not the prototype, not the proxy
-        // subtree — and the honest response is to say so and move on
-        // rather than abort. Nested *PointInstancer* is unaffected and is
-        // expanded below.
-        //
-        // Four-line repro and the full diagnosis live in
-        // `nested_native_instance_degrades_gracefully` in
-        // `crates/crust-core/tests/usd_scene.rs`. Delete this arm when
-        // upstream is fixed; `collect_proto_parts` can then splice the
-        // inner prototype's parts in with composed transforms.
-        if prim.path() != root.path() && prim.is_instance().unwrap_or(false) {
-            warn!(
-                "Nested native instance at {} skipped: openusd 0.5 cannot read \
-                 an instanceable prim's contents inside a prototype. Author it \
-                 as a PointInstancer, or flatten the inner instance.",
-                prim.path()
-            );
-            continue;
-        }
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
@@ -247,6 +183,10 @@ pub(super) fn collect_proto_parts(
                 material.uses_uv(),
                 material.uv_primvar(),
                 &mut caches.meshes.subdiv,
+                MeshPlace::Prototype {
+                    bucket,
+                    local: &this_local,
+                },
             ) && let Some(slot) = caches.meshes.intern(&prim, src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
@@ -325,6 +265,7 @@ pub(super) fn collect_proto_parts(
                 mask,
                 caches,
                 depth + 1,
+                bucket,
             ));
             // Its prototypes are reached through it, never drawn directly.
             continue;
@@ -344,6 +285,96 @@ pub(super) fn collect_proto_parts(
         parts[index].scene = caches.meshes.committed_scene(slot);
     }
     parts
+}
+
+/// Whether the prototype walk leaves `prim` and its subtree out: the same
+/// pruning as the top-level traversal (inactive, a non-render purpose,
+/// invisible), plus a native instance nested inside the prototype, which
+/// openusd cannot read. `report` logs why; the adaptive survey's second walk of
+/// the same prototype passes `false`, so a skipped prim is reported once.
+fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
+    // Same pruning as the top-level traversal: an inactive prim (and
+    // its subtree) is absent from the composed scene, prototype or not.
+    if !prim.is_active().unwrap_or(true) {
+        if report {
+            debug!(
+                "Skipping inactive prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
+        }
+        return true;
+    }
+    if let Some(purpose) = non_render_purpose(prim) {
+        if report {
+            debug!(
+                "Skipping {purpose}-purpose prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
+        }
+        return true;
+    }
+    // Visibility counts from the prototype root down, as UsdImaging
+    // computes it for a prototype: an invisible part of a prototype is
+    // missing from every instance. No camera is taken from a prototype,
+    // so here the subtree is simply pruned.
+    if is_invisible(prim) {
+        if report {
+            debug!(
+                "Skipping invisible prim {} (prototype {})",
+                prim.path(),
+                root.path()
+            );
+        }
+        return true;
+    }
+    // Checked before any schema lookup, because a schema `get()` reads
+    // the prim's type name and that is exactly what aborts here.
+    //
+    // A natively-instanced prim *inside* a prototype is unreachable
+    // with openusd 0.5.0: resolving its prototype, or reading the type
+    // of any prim beneath it, trips an internal assertion
+    // (`pcp/instancing.rs`: "materialized prototype root's
+    // instanceable must be inert"), which aborts debug builds. The
+    // prim itself is safe to inspect; its contents are not. So there
+    // is no route to the geometry — not the prototype, not the proxy
+    // subtree — and the honest response is to say so and move on
+    // rather than abort. Nested *PointInstancer* is unaffected and is
+    // expanded below.
+    //
+    // Four-line repro and the full diagnosis live in
+    // `nested_native_instance_degrades_gracefully` in
+    // `crates/crust-core/tests/usd_scene.rs`. Delete this arm when
+    // upstream is fixed; `collect_proto_parts` can then splice the
+    // inner prototype's parts in with composed transforms.
+    if prim.path() != root.path() && prim.is_instance().unwrap_or(false) {
+        if report {
+            warn!(
+                "Nested native instance at {} skipped: openusd 0.5 cannot read \
+                 an instanceable prim's contents inside a prototype. Author it \
+                 as a PointInstancer, or flatten the inner instance.",
+                prim.path()
+            );
+        }
+        return true;
+    }
+    false
+}
+
+/// `prim`'s transform in its prototype's frame, given its parent's.
+///
+/// The prototype root's own transform is deliberately excluded: a
+/// `PointInstancer` prototype is placed entirely by its per-instance
+/// transform, and a native prototype root carries none.
+fn part_local(stage: &Stage, prim: &Prim, root: &Prim, parent_local: GMat4) -> GMat4 {
+    if prim.path() == root.path() {
+        GMat4::IDENTITY
+    } else if resets_xform_stack_at(stage, prim) {
+        local_matrix_at(stage, prim)
+    } else {
+        parent_local * local_matrix_at(stage, prim)
+    }
 }
 
 /// What a prototype's mesh part holds until its kernel scene is built at the
@@ -369,6 +400,7 @@ fn placeholder_scene() -> Arc<RtScene> {
 /// scatter, so a scatter of many-part prototypes became that many identical
 /// boxes — 64 724 of them over the Moana island's dunes, 99% of a render's
 /// instance descents (`docs/moana_profile.md`).
+#[allow(clippy::too_many_arguments)]
 fn nested_instancer_parts(
     stage: &Stage,
     prim: &Prim,
@@ -377,38 +409,72 @@ fn nested_instancer_parts(
     mask: RayMask,
     caches: &mut ImportCaches<'_>,
     depth: usize,
+    bucket: i32,
 ) -> Vec<ProtoPart> {
     let Some(layout) = read_instancer(prim, instancer) else {
         return Vec::new();
     };
-    let groups: Vec<Option<ProtoPart>> = layout
-        .targets
+    // Which version of its prototype each placement draws: one per prototype
+    // in uniform mode, and in adaptive mode the bucket the enclosing version's
+    // composes to through the placement (see `nested_bucket`).
+    let placement_versions: Vec<(usize, i32)> = layout
+        .placements
         .iter()
-        .map(|target| prototype_group(stage, target, caches, depth))
+        .map(|&(k, xf)| {
+            let q = nested_bucket(
+                stage,
+                &layout.targets[k],
+                caches,
+                depth,
+                bucket,
+                &(local * xf),
+            );
+            (k, q)
+        })
+        .collect();
+    // Every prototype in uniform mode, as before buckets existed (so an
+    // unplaced prototype is still built and still reported), and only the
+    // placed versions in adaptive mode. In (prototype, bucket) order, so the
+    // build order and the slot layout below are independent of placement
+    // order.
+    let versions: BTreeSet<(usize, i32)> = if caches.meshes.subdiv.adaptive.is_some() {
+        placement_versions.iter().copied().collect()
+    } else {
+        (0..layout.targets.len()).map(|k| (k, 0)).collect()
+    };
+    let groups: BTreeMap<(usize, i32), Option<ProtoPart>> = versions
+        .into_iter()
+        .map(|(k, q)| {
+            (
+                (k, q),
+                prototype_group(stage, &layout.targets[k], caches, depth, q),
+            )
+        })
         .collect();
 
     // The placements that draw something: a prototype with no geometry, or a
     // zero-scale placement (the "hide this instance" idiom), draws nothing.
-    let drawn: Vec<(usize, GMat4)> = layout
+    let drawn: Vec<((usize, i32), GMat4)> = layout
         .placements
         .iter()
-        .filter_map(|&(k, xf)| {
-            let placement = xf * groups[k].as_ref()?.local;
-            (placement.determinant().abs() >= 1e-12).then_some((k, placement))
+        .zip(&placement_versions)
+        .filter_map(|(&(_, xf), &version)| {
+            let placement = xf * groups[&version].as_ref()?.local;
+            (placement.determinant().abs() >= 1e-12).then_some((version, placement))
         })
         .collect();
 
-    // Slots only for the prototypes something actually draws — every slot is
+    // Slots only for the versions something actually draws — every slot is
     // reserved again at each placement of this part, so a prototype placed
-    // only by hidden entries would cost ids no hit can reach — in prototype
-    // order so the layout is independent of placement order.
-    let mut first: Vec<Option<u32>> = vec![None; groups.len()];
-    for &(k, _) in &drawn {
-        first[k] = Some(0);
+    // only by hidden entries would cost ids no hit can reach — in (prototype,
+    // bucket) order so the layout is independent of placement order.
+    let mut first: BTreeMap<(usize, i32), u32> = BTreeMap::new();
+    for &(version, _) in &drawn {
+        first.insert(version, 0);
     }
     let mut slots: Vec<PartSlot> = Vec::new();
-    for (k, group) in groups.iter().enumerate() {
-        if let (Some(f), Some(g)) = (first[k].as_mut(), group) {
+    for (version, f) in first.iter_mut() {
+        if let Some(g) = &groups[version] {
             *f = slots.len() as u32;
             slots.extend(g.slots.iter().cloned());
         }
@@ -416,8 +482,8 @@ fn nested_instancer_parts(
 
     let mut sub = RtSceneBuilder::new();
     sub.reserve(drawn.len());
-    for &(k, placement) in &drawn {
-        let (Some(g), Some(f)) = (&groups[k], first[k]) else {
+    for &(version, placement) in &drawn {
+        let (Some(g), Some(&f)) = (&groups[&version], first.get(&version)) else {
             unreachable!("a drawn placement has a group and a slot range");
         };
         sub.attach_labelled(
@@ -505,12 +571,13 @@ fn prototype_group(
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
     depth: usize,
+    bucket: i32,
 ) -> Option<ProtoPart> {
-    let key = (caches.epoch, proto_path.to_string());
+    let key = (caches.epoch, proto_path.to_string(), bucket);
     if let Some(group) = caches.groups.get(&key) {
         return group.clone();
     }
-    let parts = prototype_parts(stage, proto_path, caches, depth);
+    let parts = prototype_parts(stage, proto_path, caches, depth, bucket);
     let group = group_parts(&parts);
     caches.groups.insert(key, group.clone());
     group
@@ -523,13 +590,14 @@ fn placed_parts(
     stage: &Stage,
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
+    bucket: i32,
 ) -> Arc<Vec<ProtoPart>> {
-    let parts = prototype_parts(stage, proto_path, caches, 0);
+    let parts = prototype_parts(stage, proto_path, caches, 0, bucket);
     if parts.len() < TOP_LEVEL_GROUP_MIN_PARTS {
         return parts;
     }
     Arc::new(
-        prototype_group(stage, proto_path, caches, 0)
+        prototype_group(stage, proto_path, caches, 0, bucket)
             .into_iter()
             .collect(),
     )
@@ -562,7 +630,8 @@ pub(super) fn emit_native_instance(
     world_xf: GMat4,
     caches: &mut ImportCaches<'_>,
 ) {
-    let parts = placed_parts(stage, proto_path, caches);
+    let bucket = placement_bucket(stage, proto_path, caches, &world_xf);
+    let parts = placed_parts(stage, proto_path, caches, bucket);
     let first = world.count();
     attach_proto_parts(world, &parts, world_xf, "native instance");
     debug!(
@@ -769,8 +838,9 @@ fn prototype_parts(
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
     depth: usize,
+    bucket: i32,
 ) -> Arc<Vec<ProtoPart>> {
-    let key = (caches.epoch, proto_path.to_string());
+    let key = (caches.epoch, proto_path.to_string(), bucket);
     if let Some(parts) = caches.protos.get(&key) {
         debug!(
             "Prototype {} (epoch {}): reusing {} cached part(s)",
@@ -780,9 +850,16 @@ fn prototype_parts(
         );
         return parts.clone();
     }
+    if caches.meshes.subdiv.adaptive.is_some() {
+        caches.prototype_versions += 1;
+        let survey = caches.surveys.get(&(key.0, key.1.clone()));
+        if survey.is_some_and(|s| s.range.is_some()) {
+            caches.rate_dependent_versions += 1;
+        }
+    }
     let started = Instant::now();
     let root = prim_at(stage, proto_path.clone());
-    let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth));
+    let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth, bucket));
     if parts.is_empty() {
         warn!("Prototype {} contributed no geometry", key.1);
     } else {
@@ -814,29 +891,46 @@ pub(super) fn emit_point_instancer(
     let Some(layout) = read_instancer(prim, instancer) else {
         return;
     };
-    let proto_parts: Vec<Arc<Vec<ProtoPart>>> = layout
-        .targets
+    // The version of its prototype each placement draws, grouped before any
+    // is built: one per prototype in uniform mode, one per rate bucket a
+    // placement falls in in adaptive mode.
+    let placement_versions: Vec<(usize, i32)> = layout
+        .placements
         .iter()
-        .map(|target| placed_parts(stage, target, caches))
+        .map(|&(k, xf)| {
+            let q = placement_bucket(stage, &layout.targets[k], caches, &(world_xf * xf));
+            (k, q)
+        })
+        .collect();
+    // As in `nested_instancer_parts`: every prototype in uniform mode, the
+    // placed versions in adaptive mode, in (prototype, bucket) order.
+    let versions: BTreeSet<(usize, i32)> = if caches.meshes.subdiv.adaptive.is_some() {
+        placement_versions.iter().copied().collect()
+    } else {
+        (0..layout.targets.len()).map(|k| (k, 0)).collect()
+    };
+    let proto_parts: BTreeMap<(usize, i32), Arc<Vec<ProtoPart>>> = versions
+        .into_iter()
+        .map(|(k, q)| ((k, q), placed_parts(stage, &layout.targets[k], caches, q)))
         .collect();
 
     // A dense scatter can place millions of instances in this one call;
     // reserving the exact total up front avoids both the doubling-copy
     // cost and the over-allocation of growing the geometry table
     // incrementally (see `WorldBuilder::reserve`).
-    let part_counts: Vec<usize> = proto_parts
+    let part_counts: BTreeMap<(usize, i32), usize> = proto_parts
         .iter()
-        .map(|parts| parts.iter().map(|p| p.slots.len()).sum())
+        .map(|(&version, parts)| (version, parts.iter().map(|p| p.slots.len()).sum()))
         .collect();
-    let total_geometries: usize = layout.placements.iter().map(|&(k, _)| part_counts[k]).sum();
+    let total_geometries: usize = placement_versions.iter().map(|v| part_counts[v]).sum();
     world.reserve(total_geometries);
 
     let mut attached = 0usize;
     let first = world.count();
-    for &(k, xf) in &layout.placements {
+    for (&(_, xf), version) in layout.placements.iter().zip(&placement_versions) {
         attached += attach_proto_parts(
             world,
-            &proto_parts[k],
+            &proto_parts[version],
             world_xf * xf,
             "PointInstancer instance",
         );
@@ -855,6 +949,139 @@ pub(super) fn emit_point_instancer(
             String::new()
         }
     );
+}
+
+/// What adaptive subdivision has to know of a prototype before building a
+/// version of it, from one walk of its cages ([`prototype_survey`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ProtoSurvey {
+    /// The box around its subdivision meshes' cages, nested scatters included,
+    /// in the prototype's frame. A refined surface stays within its cage's
+    /// hull, so this bounds every version, and it does not depend on which
+    /// version is built first.
+    bounds: Option<Aabb>,
+    /// The rate buckets over which any of its levels changes. `None` when it
+    /// has no subdivision mesh: then no level depends on the rate, and every
+    /// placement shares one version.
+    pub(super) range: Option<QRange>,
+}
+
+impl ProtoSurvey {
+    fn include(&mut self, bounds: Aabb, range: QRange) {
+        self.bounds = Some(self.bounds.map_or(bounds, |b| b.union(bounds)));
+        self.range = Some(self.range.map_or(range, |r| r.union(range)));
+    }
+}
+
+/// Surveys a prototype for adaptive subdivision, once per stage epoch: the
+/// same walk as [`collect_proto_parts`], reading only the cages of the meshes
+/// it would refine. Only called in adaptive mode.
+fn prototype_survey(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+) -> ProtoSurvey {
+    let key = (caches.epoch, proto_path.to_string());
+    if let Some(&survey) = caches.surveys.get(&key) {
+        return survey;
+    }
+    let Some(rate) = caches.meshes.subdiv.adaptive else {
+        return ProtoSurvey::default();
+    };
+    let mut survey = ProtoSurvey::default();
+    if depth <= MAX_INSTANCE_NESTING {
+        let root = prim_at(stage, proto_path.clone());
+        let mut stack: Vec<(Prim, GMat4)> = vec![(root.clone(), GMat4::IDENTITY)];
+        while let Some((prim, parent_local)) = stack.pop() {
+            if prototype_prunes(&prim, &root, false) {
+                continue;
+            }
+            let this_local = part_local(stage, &prim, &root, parent_local);
+            if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
+                if caches.meshes.subdiv.refines(&mesh)
+                    && let Some((points, counts, indices)) = mesh_arrays(&mesh)
+                    && let Some(cage) = Aabb::of_points(&points)
+                {
+                    let edge = mean_edge_length(&points, &counts, &indices);
+                    let range = rate.level_range(edge, stretch(&Mat3::from_mat4(this_local)));
+                    survey.include(cage.transformed(&this_local), range);
+                }
+            } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
+                if let Some(layout) = read_instancer(&prim, &instancer) {
+                    let inner: Vec<ProtoSurvey> = layout
+                        .targets
+                        .iter()
+                        .map(|t| prototype_survey(stage, t, caches, depth + 1))
+                        .collect();
+                    for &(k, xf) in &layout.placements {
+                        let (Some(bounds), Some(range)) = (inner[k].bounds, inner[k].range) else {
+                            continue;
+                        };
+                        let placement = this_local * xf;
+                        let delta = ScreenRate::bucket(stretch(&Mat3::from_mat4(placement)));
+                        survey.include(bounds.transformed(&placement), range.shifted_down(delta));
+                    }
+                }
+                continue;
+            }
+            if let Ok(children) = prim.children() {
+                for child in children {
+                    stack.push((child, this_local));
+                }
+            }
+        }
+    }
+    caches.surveys.insert(key, survey);
+    survey
+}
+
+/// The rate bucket a top-level placement of `proto_path` at `world_xf` is built
+/// at: 0 in uniform mode and for a prototype no level of which depends on the
+/// rate, else its pixels per unit at the nearest point of its cage bounds,
+/// rounded up to a power of two and clamped to the prototype's range.
+fn placement_bucket(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    world_xf: &GMat4,
+) -> i32 {
+    let Some(rate) = caches.meshes.subdiv.adaptive else {
+        return 0;
+    };
+    let survey = prototype_survey(stage, proto_path, caches, 0);
+    match (survey.bounds, survey.range) {
+        (Some(bounds), Some(range)) => {
+            range.canonical(ScreenRate::bucket(rate.sigma(world_xf, &bounds)))
+        }
+        _ => 0,
+    }
+}
+
+/// The rate bucket a placement *inside* a prototype version is built at: the
+/// enclosing version's bucket composed with the placement's stretch, so the
+/// distance is the outer placement's — the nearest point of its bounds is no
+/// farther than any part inside it. Since the outer bucket is an integer,
+/// `ceil(log2(2^q · s)) = q + ceil(log2 s)` exactly, which is what
+/// [`prototype_survey`] shifts the inner range by.
+fn nested_bucket(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+    outer: i32,
+    placement: &GMat4,
+) -> i32 {
+    if caches.meshes.subdiv.adaptive.is_none() {
+        return 0;
+    }
+    match prototype_survey(stage, proto_path, caches, depth).range {
+        Some(range) => {
+            let delta = ScreenRate::bucket(stretch(&Mat3::from_mat4(*placement)));
+            range.canonical(outer.saturating_add(delta))
+        }
+        None => 0,
+    }
 }
 
 /// A `point3f[]` / `float3[]` attribute as a plain vector.

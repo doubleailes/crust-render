@@ -87,6 +87,13 @@ struct Cli {
     /// (default 0: each cage shaded with smooth normals, unrefined). Clamped to 6.
     #[arg(long, value_name = "N")]
     subdiv_level: Option<u32>,
+    /// Adaptive subdivision: refine each subdivision mesh only until its mean
+    /// cage edge, at its nearest distance to the render camera, is at most
+    /// this many pixels long. Overrides the scene's
+    /// `crust:subdivisionEdgeLength`. `--subdiv-level` then caps the level
+    /// (default 3). Needs `--camera` or the stage's `RenderSettings.camera`.
+    #[arg(long, value_name = "PX", allow_negative_numbers = true, value_parser = parse_edge_length)]
+    subdiv_edge_length: Option<f32>,
     /// How light sampling and BSDF sampling combine. Overrides the scene's
     /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
     /// strategy alone to visualize what MIS balances between.
@@ -151,6 +158,16 @@ fn parse_radius(s: &str) -> std::result::Result<f32, String> {
         Ok(r)
     } else {
         Err(format!("{s} is not a positive, finite radius"))
+    }
+}
+
+/// `--subdiv-edge-length`'s parser: a finite, positive length in pixels.
+fn parse_edge_length(s: &str) -> std::result::Result<f32, String> {
+    let l: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if l.is_finite() && l > 0.0 {
+        Ok(l)
+    } else {
+        Err(format!("{s} is not a positive, finite length in pixels"))
     }
 }
 
@@ -369,6 +386,7 @@ fn main() -> ExitCode {
             frame: cli.frame,
             camera: cli.camera.clone(),
             subdivision_level: cli.subdiv_level,
+            subdivision_edge_length: cli.subdiv_edge_length,
             // The process renders once and exits, so freeing the composed
             // stage is pure delay before the render (45 s on ALab).
             skip_stage_teardown: true,
@@ -989,6 +1007,27 @@ mod tests {
             Cli::try_parse_from(["crust-render", "--subdiv-level", "-1"]).is_err(),
             "a level is a count"
         );
+    }
+
+    #[test]
+    fn cli_subdiv_edge_length_is_a_positive_pixel_length() {
+        let cli =
+            Cli::try_parse_from(["crust-render", "--subdiv-edge-length", "2"]).expect("valid");
+        assert_eq!(cli.subdiv_edge_length, Some(2.0));
+        assert!(
+            Cli::try_parse_from(["crust-render"])
+                .unwrap()
+                .subdiv_edge_length
+                .is_none()
+        );
+        for bad in ["0", "-1", "inf", "NaN", "fast"] {
+            let Err(err) = Cli::try_parse_from(["crust-render", "--subdiv-edge-length", bad])
+            else {
+                panic!("{bad} parsed as an edge length");
+            };
+            let err = err.to_string();
+            assert!(err.contains("--subdiv-edge-length"), "{bad}: {err}");
+        }
     }
 
     #[test]

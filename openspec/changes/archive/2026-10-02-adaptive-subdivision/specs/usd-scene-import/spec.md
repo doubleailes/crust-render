@@ -43,7 +43,8 @@ warning.
 - **WHEN** a `PointInstancer` places one subdivision prototype both near the camera
   and far from it, in adaptive mode
 - **THEN** the near placements render a more refined version than the far ones, and
-  placements whose distances ask for the same level share one version
+  placements whose distances ask for the same level share one copy of each refined
+  mesh
 
 #### Scenario: The level setting caps adaptive refinement
 

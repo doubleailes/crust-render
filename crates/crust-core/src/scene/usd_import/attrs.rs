@@ -115,6 +115,41 @@ pub(super) fn resolve_subdiv_level(host: Option<u32>, authored: Option<i32>) -> 
     level.clamp(0, i64::from(MAX_SUBDIV_LEVEL)) as u32
 }
 
+/// The ceiling on the adaptive level when neither the host nor the stage sets
+/// a level. A round number: at 3 a cage already costs 64× its faces.
+pub(super) const DEFAULT_ADAPTIVE_MAX_LEVEL: u32 = 3;
+
+/// The adaptive-subdivision target, in pixels, in the same order as the level:
+/// the host's override (`UsdImportOptions::subdivision_edge_length`, the CLI's
+/// `--subdiv-edge-length`), then `crust:subdivisionEdgeLength` on the
+/// `RenderSettings` prim. `None` means uniform subdivision. A value that is not
+/// positive and finite is ignored with a warning — falling back to the stage's
+/// when the host's is the bad one.
+pub(super) fn resolve_subdiv_edge_length(host: Option<f32>, authored: Option<f32>) -> Option<f32> {
+    let valid = |l: f32, source: &str| {
+        if l.is_finite() && l > 0.0 {
+            Some(l)
+        } else {
+            warn!(
+                "Subdivision edge length {l} from {source} is not a positive pixel length — ignored"
+            );
+            None
+        }
+    };
+    host.and_then(|l| valid(l, "the host override"))
+        .or_else(|| authored.and_then(|l| valid(l, "crust:subdivisionEdgeLength")))
+}
+
+/// The ceiling on the adaptive level: the uniform level when the host or the
+/// stage sets one (resolved and clamped as
+/// [`resolve_subdiv_level`] does), else [`DEFAULT_ADAPTIVE_MAX_LEVEL`].
+pub(super) fn resolve_adaptive_max_level(host: Option<u32>, authored: Option<i32>) -> u32 {
+    if host.is_none() && authored.is_none() {
+        return DEFAULT_ADAPTIVE_MAX_LEVEL;
+    }
+    resolve_subdiv_level(host, authored)
+}
+
 pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
     let v = prim
         .attribute(name)
@@ -230,6 +265,44 @@ pub(super) fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subdivision_edge_length_precedence_and_refusal() {
+        assert_eq!(resolve_subdiv_edge_length(None, None), None, "uniform");
+        assert_eq!(resolve_subdiv_edge_length(None, Some(4.0)), Some(4.0));
+        assert_eq!(
+            resolve_subdiv_edge_length(Some(2.0), Some(4.0)),
+            Some(2.0),
+            "the host wins"
+        );
+        assert_eq!(resolve_subdiv_edge_length(None, Some(0.0)), None);
+        assert_eq!(resolve_subdiv_edge_length(None, Some(-1.0)), None);
+        assert_eq!(resolve_subdiv_edge_length(None, Some(f32::INFINITY)), None);
+        assert_eq!(
+            resolve_subdiv_edge_length(Some(f32::NAN), Some(4.0)),
+            Some(4.0),
+            "a bad host value falls back to the stage's"
+        );
+    }
+
+    #[test]
+    fn the_adaptive_ceiling_is_the_level_setting_or_three() {
+        if !crate::config().subdiv {
+            return; // `CRUST_SUBDIV=0` forces every level to 0
+        }
+        assert_eq!(
+            resolve_adaptive_max_level(None, None),
+            DEFAULT_ADAPTIVE_MAX_LEVEL
+        );
+        assert_eq!(resolve_adaptive_max_level(Some(2), None), 2);
+        assert_eq!(resolve_adaptive_max_level(None, Some(1)), 1);
+        assert_eq!(
+            resolve_adaptive_max_level(Some(0), Some(5)),
+            0,
+            "the host wins"
+        );
+        assert_eq!(resolve_adaptive_max_level(None, Some(40)), MAX_SUBDIV_LEVEL);
+    }
 
     #[test]
     fn subdivision_level_precedence_and_clamp() {

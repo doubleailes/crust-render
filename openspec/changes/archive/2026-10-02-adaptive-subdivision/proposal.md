@@ -5,7 +5,9 @@ set that is the wrong trade at both ends:
 - **Level 1 is too much for the island as a whole.** It multiplies every Catmull-Clark
   cage by four, and did not fit in 61 GiB: killed at 56.8 GiB, still importing, on
   2026-10-01. Most of those triangles are kilometres from `shotCam` and cover a
-  fraction of a pixel.
+  fraction of a pixel. *(Since `compact-triangle-storage` and
+  `slim-instance-and-curve-storage` it fits, at a 51 GiB peak; the trade this change
+  addresses remains.)*
 - **Level 0 is too little up close.** The few hero meshes near the camera still show
   their cage silhouettes.
 
