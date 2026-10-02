@@ -998,9 +998,10 @@ fn disk_light_is_a_one_sided_analytic_disk() {
 }
 
 /// Mean radiance off a diffuse ground under a single face-down RectLight of
-/// `size` at `height`, seen straight down from just above the ground.
-fn ground_under_rect_light(name: &str, size: f32, height: f32) -> f32 {
-    let scene = load(
+/// `size` at `height`, seen straight down from just above the ground, with
+/// `extra` prims authored beside them.
+fn ground_under_rect_light(name: &str, size: f32, height: f32, extra: &str) -> f32 {
+    let mut scene = load(
         name,
         &format!(
             r#"
@@ -1017,10 +1018,12 @@ fn ground_under_rect_light(name: &str, size: f32, height: f32) -> f32 {
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-10, 0, -10), (-10, 0, 10), (10, 0, 10), (10, 0, -10)]
-    }}"#
+    }}
+    {extra}"#
         ),
     );
     let ray = Ray::new(Vec3A::new(0.0, 1.0, 0.0), -Vec3A::Y);
+    let volumes = Volumes::new(std::mem::take(&mut scene.volumes));
     let n = 256;
     let sum: f32 = (0..n)
         .map(|i| {
@@ -1028,7 +1031,7 @@ fn ground_under_rect_light(name: &str, size: f32, height: f32) -> f32 {
                 &ray,
                 &scene.world,
                 &scene.lights,
-                &Volumes::default(),
+                &volumes,
                 2,
                 SamplingStrategy::PowerMis,
                 PathSampler::new(0, 0, 0, i),
@@ -1046,12 +1049,61 @@ fn ground_under_rect_light(name: &str, size: f32, height: f32) -> f32 {
 /// in the shadow mask — and was blocked by it most of the time.
 #[test]
 fn a_far_rect_light_does_not_shadow_itself() {
-    let near = ground_under_rect_light("rect_light_near", 20.0, 300.0);
-    let far = ground_under_rect_light("rect_light_far", 20_000.0, 300_000.0);
+    let near = ground_under_rect_light("rect_light_near", 20.0, 300.0, "");
+    let far = ground_under_rect_light("rect_light_far", 20_000.0, 300_000.0, "");
     assert!(near > 0.0);
     assert!(
         (far - near).abs() <= 0.01 * near,
         "far {far} vs near {near}: the far light's shadow rays hit the light"
+    );
+}
+
+/// What stops a shadow ray short of a far light's surface does not hide what
+/// lies just in front of it: an opaque sheet one unit below the Moana-scale
+/// quad still blocks it (a 1e-5 relative backoff, three units there, let the
+/// light through), and an absorbing layer in the last quarter unit, inside
+/// even this backoff, still dims it (volumes reach the light at any
+/// distance).
+#[test]
+fn a_far_rect_light_is_blocked_and_dimmed_just_in_front_of_it() {
+    let clear = ground_under_rect_light("far_light_clear", 20_000.0, 300_000.0, "");
+    let blocked = ground_under_rect_light(
+        "far_light_blocked",
+        20_000.0,
+        300_000.0,
+        r#"
+    def Mesh "Blocker"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-12000, 299999, -12000), (-12000, 299999, 12000), (12000, 299999, 12000), (12000, 299999, -12000)]
+    }"#,
+    );
+    let dimmed = ground_under_rect_light(
+        "far_light_dimmed",
+        20_000.0,
+        300_000.0,
+        r#"
+    def Cube "Haze"
+    {
+        double size = 2
+        token crust:volume:type = "homogeneous"
+        color3f crust:volume:sigmaS = (0, 0, 0)
+        color3f crust:volume:sigmaA = (20, 20, 20)
+        double3 xformOp:translate = (0, 300000, 0)
+        float3 xformOp:scale = (12000, 0.25, 12000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }"#,
+    );
+    assert!(clear > 0.0);
+    assert!(
+        blocked <= 0.01 * clear,
+        "blocked {blocked} vs clear {clear}: a sheet one unit below the light did not block it"
+    );
+    // A quarter unit of σa = 20 below the light: transmittance e⁻⁵ straight up.
+    assert!(
+        dimmed <= 0.2 * clear,
+        "dimmed {dimmed} vs clear {clear}: the absorbing layer next to the light was skipped"
     );
 }
 

@@ -299,13 +299,20 @@ the time. With only the island's light rig over a grey ground, the sun's direct
 light came out speckled and at about 30% of its value. That explains much of the
 "cooler than RenderMan" gap: the warm key light and its hard shadows were mostly
 missing.
-- **The fix:** `shadow_t_max` in `tracer/path.rs` stops every shadow ray short by
-  the larger of 0.001 and 1e-5 × `distance`. Nearer than 100 units the bound is
+- **The fix:** `shadow_t_max` in `tracer/path.rs` stops every surface shadow ray
+  short by the larger of 0.001 and 1e-6 × `distance`, about 8 ulps. Four ulps was
+  the least that cleared an axis-aligned or a tilted quad at 3·10² to 3·10⁶ units.
+  At the sun's distance, 1e-6 leaves a 0.3-unit gap in front of the light where a
+  blocker cannot shadow it. Volume transmittance keeps `distance − 0.001`, which
+  reaches the light at any distance. Nearer than 1000 units the bound is
   unchanged, and every checked-in sample and both Kitchen_set variants stay
   bit-identical.
-- **Pinned by:** `a_far_rect_light_does_not_shadow_itself` in
-  `crust-core/tests/usd_inline.rs`. Before the fix it measured 0.000201 against
-  0.000678 for the scaled-down twin.
+- **Pinned by:** two tests in `crust-core/tests/usd_inline.rs`:
+  - `a_far_rect_light_does_not_shadow_itself`. Before the fix it measured 0.000201
+    against 0.000678 for the scaled-down twin.
+  - `a_far_rect_light_is_blocked_and_dimmed_just_in_front_of_it`: an opaque sheet
+    one unit below the light, and absorbing fog in the last quarter unit before
+    it.
 - **Stale numbers:** the island colours in the table above predate the fix and need
   re-measuring.
 

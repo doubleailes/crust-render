@@ -481,7 +481,7 @@ fn shadow_transmittance<const PROFILE: bool>(
         return Vec3A::ONE;
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    volumes.transmittance(shadow_ray, 0.001, shadow_t_max(distance), &mut rng)
+    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -527,11 +527,17 @@ fn resume_before(t: f32) -> f32 {
 /// other). The tracer's 0.001, or a relative step once that falls below the
 /// rounding of `distance` — at 3·10⁵ (the Moana island's sun quad) an `f32`
 /// ulp is 0.03, `distance − 0.001 == distance`, and the ray met the light it
-/// was aimed at most of the time. Below 100 the 0.001 is the larger step,
-/// so every nearer light gets exactly the bound it always had.
+/// was aimed at most of the time. The step is 1e-6 ≈ 8 ulps: 4 was measured
+/// to be the least that clears an axis-aligned or a tilted quad at 3·10² to
+/// 3·10⁶, and every unit more lets a blocker that close to the light through.
+/// Below 1000 the 0.001 is the larger step, so every nearer light gets
+/// exactly the bound it always had.
+///
+/// Surfaces only: volume transmittance has no light surface to stop short of
+/// and keeps `distance − 0.001`, which reaches the light at any distance.
 #[inline]
 pub(crate) fn shadow_t_max(distance: f32) -> f32 {
-    (distance - 0.001).min(distance * (1.0 - 1e-5))
+    (distance - 0.001).min(distance * (1.0 - 1e-6))
 }
 
 /// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
@@ -560,7 +566,7 @@ fn cutout_shadow(
         return Vec3A::splat(through);
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    through * volumes.transmittance(ray, 0.001, t_max, &mut rng)
+    through * volumes.transmittance(ray, 0.001, distance - 0.001, &mut rng)
 }
 
 /// The fraction of the segment `(0.001, t_max)` of `ray` that cutouts let
