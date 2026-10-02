@@ -44,6 +44,7 @@ impl Scene {
 }
 
 mod subdiv;
+mod tessellate;
 mod usd_import;
 
 impl Scene {

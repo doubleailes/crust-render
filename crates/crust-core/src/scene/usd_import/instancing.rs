@@ -24,7 +24,7 @@ use std::time::Instant;
 use crust_rt::{
     Geometry, InstanceHitId, RayMask, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
-use glam::{Affine3A, Mat3, Mat4 as GMat4, Vec3, Vec3A};
+use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
 use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
@@ -37,10 +37,9 @@ use tracing::{debug, warn};
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
-use super::adaptive::{Aabb, QRange, ScreenRate, mean_edge_length, stretch};
 use super::attrs::{custom_token, prim_ray_mask};
 use super::materials::resolve_material;
-use super::mesh::{MeshPlace, mesh_arrays, mesh_source, placement_scale};
+use super::mesh::{MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
 use super::time::eval_time;
 use super::xform::{local_matrix_at, resets_xform_stack_at};
@@ -51,6 +50,20 @@ use super::{ImportCaches, is_invisible, non_render_purpose, prim_at};
 /// each level multiplies traversal cost — so this is a backstop, set far
 /// above any plausible authoring depth.
 const MAX_INSTANCE_NESTING: usize = 8;
+
+/// How a prototype version is placed, which decides how adaptive subdivision
+/// refines its meshes (see "Only unshared geometry is adaptive" in the design
+/// record). In uniform subdivision every version is [`ProtoPlace::Shared`].
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ProtoPlace {
+    /// Placed more than once: refined to the uniform level, built once and
+    /// shared by every placement.
+    Shared,
+    /// The one placement of its prototype, whose root frame this carries to
+    /// world: refined by its size on screen, like a direct mesh, and built for
+    /// that placement alone.
+    Unshared(GMat4),
+}
 
 /// What a hit on one geometry of a [`ProtoPart`] resolves to: the material
 /// and texture tables `World` keys by `geom_id`.
@@ -146,7 +159,7 @@ pub(super) fn collect_proto_parts(
     root: &Prim,
     caches: &mut ImportCaches<'_>,
     depth: usize,
-    bucket: i32,
+    place: ProtoPlace,
 ) -> Vec<ProtoPart> {
     let mut parts = Vec::new();
     if depth > MAX_INSTANCE_NESTING {
@@ -172,6 +185,11 @@ pub(super) fn collect_proto_parts(
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let material = resolve_material(stage, &prim, caches);
+            // Unshared: the part's own world transform, for adaptive subdivision.
+            let part_world = match place {
+                ProtoPlace::Unshared(world) => Some(world * this_local),
+                ProtoPlace::Shared => None,
+            };
             // A prototype part is placed by an instance by definition, so it
             // always needs a real kernel scene — committing here is also what
             // marks the slot as ineligible for baking, so a mesh used both
@@ -183,10 +201,9 @@ pub(super) fn collect_proto_parts(
                 material.uses_uv(),
                 material.uv_primvar(),
                 &mut caches.meshes.subdiv,
-                MeshPlace::Prototype {
-                    bucket,
-                    local: &this_local,
-                },
+                part_world
+                    .as_ref()
+                    .map_or(MeshPlace::Shared, MeshPlace::World),
             ) && let Some(slot) = caches.meshes.intern(&prim, src, &material)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
@@ -265,7 +282,7 @@ pub(super) fn collect_proto_parts(
                 mask,
                 caches,
                 depth + 1,
-                bucket,
+                place,
             ));
             // Its prototypes are reached through it, never drawn directly.
             continue;
@@ -290,8 +307,8 @@ pub(super) fn collect_proto_parts(
 /// Whether the prototype walk leaves `prim` and its subtree out: the same
 /// pruning as the top-level traversal (inactive, a non-render purpose,
 /// invisible), plus a native instance nested inside the prototype, which
-/// openusd cannot read. `report` logs why; the adaptive survey's second walk of
-/// the same prototype passes `false`, so a skipped prim is reported once.
+/// openusd cannot read. `report` logs why; the placement count's walk passes `false`,
+/// so a skipped prim is reported once.
 fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
     // Same pruning as the top-level traversal: an inactive prim (and
     // its subtree) is absent from the composed scene, prototype or not.
@@ -409,52 +426,53 @@ fn nested_instancer_parts(
     mask: RayMask,
     caches: &mut ImportCaches<'_>,
     depth: usize,
-    bucket: i32,
+    place: ProtoPlace,
 ) -> Vec<ProtoPart> {
     let Some(layout) = read_instancer(prim, instancer) else {
         return Vec::new();
     };
-    // Which version of its prototype each placement draws: one per prototype
-    // in uniform mode, and in adaptive mode the bucket the enclosing version's
-    // composes to through the placement (see `nested_bucket`).
-    let placement_versions: Vec<(usize, i32)> = layout
+    // Which version of its prototype each placement draws: the shared one
+    // (`None`), or — in adaptive mode, inside an unshared prototype, for a
+    // target this instancer places once — one built for that placement.
+    let counts = target_counts(&layout);
+    let adaptive = caches.meshes.subdiv.adaptive.is_some();
+    let placement_versions: Vec<(usize, Option<usize>)> = layout
         .placements
         .iter()
-        .map(|&(k, xf)| {
-            let q = nested_bucket(
-                stage,
-                &layout.targets[k],
-                caches,
-                depth,
-                bucket,
-                &(local * xf),
-            );
-            (k, q)
+        .enumerate()
+        .map(|(i, &(k, _))| {
+            let unshared = adaptive && counts[k] == 1 && matches!(place, ProtoPlace::Unshared(_));
+            (k, unshared.then_some(i))
         })
         .collect();
-    // Every prototype in uniform mode, as before buckets existed (so an
+    // Every prototype's shared version in uniform mode, as before (so an
     // unplaced prototype is still built and still reported), and only the
-    // placed versions in adaptive mode. In (prototype, bucket) order, so the
+    // placed versions in adaptive mode. In (prototype, version) order, so the
     // build order and the slot layout below are independent of placement
     // order.
-    let versions: BTreeSet<(usize, i32)> = if caches.meshes.subdiv.adaptive.is_some() {
+    let versions: BTreeSet<(usize, Option<usize>)> = if adaptive {
         placement_versions.iter().copied().collect()
     } else {
-        (0..layout.targets.len()).map(|k| (k, 0)).collect()
+        (0..layout.targets.len()).map(|k| (k, None)).collect()
     };
-    let groups: BTreeMap<(usize, i32), Option<ProtoPart>> = versions
+    let groups: BTreeMap<(usize, Option<usize>), Option<ProtoPart>> = versions
         .into_iter()
-        .map(|(k, q)| {
-            (
-                (k, q),
-                prototype_group(stage, &layout.targets[k], caches, depth, q),
-            )
+        .map(|(k, placed)| {
+            let target = &layout.targets[k];
+            let group = match (placed, place) {
+                (Some(i), ProtoPlace::Unshared(world)) => {
+                    let inner = world * local * layout.placements[i].1;
+                    unshared_group(stage, target, caches, depth, inner)
+                }
+                _ => prototype_group(stage, target, caches, depth),
+            };
+            ((k, placed), group)
         })
         .collect();
 
     // The placements that draw something: a prototype with no geometry, or a
     // zero-scale placement (the "hide this instance" idiom), draws nothing.
-    let drawn: Vec<((usize, i32), GMat4)> = layout
+    let drawn: Vec<((usize, Option<usize>), GMat4)> = layout
         .placements
         .iter()
         .zip(&placement_versions)
@@ -467,8 +485,8 @@ fn nested_instancer_parts(
     // Slots only for the versions something actually draws — every slot is
     // reserved again at each placement of this part, so a prototype placed
     // only by hidden entries would cost ids no hit can reach — in (prototype,
-    // bucket) order so the layout is independent of placement order.
-    let mut first: BTreeMap<(usize, i32), u32> = BTreeMap::new();
+    // version) order so the layout is independent of placement order.
+    let mut first: BTreeMap<(usize, Option<usize>), u32> = BTreeMap::new();
     for &(version, _) in &drawn {
         first.insert(version, 0);
     }
@@ -571,16 +589,27 @@ fn prototype_group(
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
     depth: usize,
-    bucket: i32,
 ) -> Option<ProtoPart> {
-    let key = (caches.epoch, proto_path.to_string(), bucket);
+    let key = (caches.epoch, proto_path.to_string());
     if let Some(group) = caches.groups.get(&key) {
         return group.clone();
     }
-    let parts = prototype_parts(stage, proto_path, caches, depth, bucket);
+    let parts = prototype_parts(stage, proto_path, caches, depth);
     let group = group_parts(&parts);
     caches.groups.insert(key, group.clone());
     group
+}
+
+/// A prototype as one part, built for its one placement (`world` carries its
+/// root frame to world) and not cached: no other placement can use it.
+fn unshared_group(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+    world: GMat4,
+) -> Option<ProtoPart> {
+    group_parts(&unshared_parts(stage, proto_path, caches, depth, world))
 }
 
 /// The parts a top-level placement of `proto_path` attaches: the prototype
@@ -590,17 +619,18 @@ fn placed_parts(
     stage: &Stage,
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
-    bucket: i32,
+    place: ProtoPlace,
 ) -> Arc<Vec<ProtoPart>> {
-    let parts = prototype_parts(stage, proto_path, caches, 0, bucket);
+    let parts = match place {
+        ProtoPlace::Shared => prototype_parts(stage, proto_path, caches, 0),
+        ProtoPlace::Unshared(world) => {
+            Arc::new(unshared_parts(stage, proto_path, caches, 0, world))
+        }
+    };
     if parts.len() < TOP_LEVEL_GROUP_MIN_PARTS {
         return parts;
     }
-    Arc::new(
-        prototype_group(stage, proto_path, caches, 0, bucket)
-            .into_iter()
-            .collect(),
-    )
+    Arc::new(group_parts(&parts).into_iter().collect())
 }
 
 /// Parts from which a top-level placement is grouped into one instance.
@@ -630,8 +660,16 @@ pub(super) fn emit_native_instance(
     world_xf: GMat4,
     caches: &mut ImportCaches<'_>,
 ) {
-    let bucket = placement_bucket(stage, proto_path, caches, &world_xf);
-    let parts = placed_parts(stage, proto_path, caches, bucket);
+    // Adaptive subdivision refines a prototype by its size on screen only when
+    // this is its one placement in its top-level subtree.
+    let place = if caches.meshes.subdiv.adaptive.is_some()
+        && caches.placement_count(prim.path(), proto_path) == 1
+    {
+        ProtoPlace::Unshared(world_xf)
+    } else {
+        ProtoPlace::Shared
+    };
+    let parts = placed_parts(stage, proto_path, caches, place);
     let first = world.count();
     attach_proto_parts(world, &parts, world_xf, "native instance");
     debug!(
@@ -838,9 +876,8 @@ fn prototype_parts(
     proto_path: &sdf::Path,
     caches: &mut ImportCaches<'_>,
     depth: usize,
-    bucket: i32,
 ) -> Arc<Vec<ProtoPart>> {
-    let key = (caches.epoch, proto_path.to_string(), bucket);
+    let key = (caches.epoch, proto_path.to_string());
     if let Some(parts) = caches.protos.get(&key) {
         debug!(
             "Prototype {} (epoch {}): reusing {} cached part(s)",
@@ -850,29 +887,68 @@ fn prototype_parts(
         );
         return parts.clone();
     }
-    if caches.meshes.subdiv.adaptive.is_some() {
-        caches.prototype_versions += 1;
-        let survey = caches.surveys.get(&(key.0, key.1.clone()));
-        if survey.is_some_and(|s| s.range.is_some()) {
-            caches.rate_dependent_versions += 1;
-        }
-    }
+    let parts = Arc::new(build_parts(
+        stage,
+        proto_path,
+        caches,
+        depth,
+        ProtoPlace::Shared,
+    ));
+    caches.protos.insert(key, parts.clone());
+    parts
+}
+
+/// A prototype's parts built for its one placement, uncached.
+fn unshared_parts(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+    world: GMat4,
+) -> Vec<ProtoPart> {
+    build_parts(
+        stage,
+        proto_path,
+        caches,
+        depth,
+        ProtoPlace::Unshared(world),
+    )
+}
+
+fn build_parts(
+    stage: &Stage,
+    proto_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+    depth: usize,
+    place: ProtoPlace,
+) -> Vec<ProtoPart> {
     let started = Instant::now();
     let root = prim_at(stage, proto_path.clone());
-    let parts = Arc::new(collect_proto_parts(stage, &root, caches, depth, bucket));
+    let parts = collect_proto_parts(stage, &root, caches, depth, place);
     if parts.is_empty() {
-        warn!("Prototype {} contributed no geometry", key.1);
+        warn!("Prototype {proto_path} contributed no geometry");
     } else {
         debug!(
-            "Prototype {} (epoch {}, nesting depth {depth}): built {} part(s) in {:?}",
-            key.1,
-            key.0,
+            "Prototype {proto_path} (epoch {}, nesting depth {depth}, {}): built {} part(s) in {:?}",
+            caches.epoch,
+            match place {
+                ProtoPlace::Shared => "shared",
+                ProtoPlace::Unshared(_) => "placed once",
+            },
             parts.len(),
             started.elapsed()
         );
     }
-    caches.protos.insert(key, parts.clone());
     parts
+}
+
+/// How many times an instancer places each of its targets.
+fn target_counts(layout: &InstancerLayout) -> Vec<usize> {
+    let mut counts = vec![0usize; layout.targets.len()];
+    for &(k, _) in &layout.placements {
+        counts[k] += 1;
+    }
+    counts
 }
 
 /// Imports a `UsdGeomPointInstancer`: every entry of the per-instance
@@ -891,34 +967,43 @@ pub(super) fn emit_point_instancer(
     let Some(layout) = read_instancer(prim, instancer) else {
         return;
     };
-    // The version of its prototype each placement draws, grouped before any
-    // is built: one per prototype in uniform mode, one per rate bucket a
-    // placement falls in in adaptive mode.
-    let placement_versions: Vec<(usize, i32)> = layout
+    // The version of its prototype each placement draws: the shared one, or —
+    // in adaptive mode, for a target this instancer places once — one built
+    // for that placement.
+    let counts = target_counts(&layout);
+    let adaptive = caches.meshes.subdiv.adaptive.is_some();
+    let placement_versions: Vec<(usize, Option<usize>)> = layout
         .placements
         .iter()
-        .map(|&(k, xf)| {
-            let q = placement_bucket(stage, &layout.targets[k], caches, &(world_xf * xf));
-            (k, q)
-        })
+        .enumerate()
+        .map(|(i, &(k, _))| (k, (adaptive && counts[k] == 1).then_some(i)))
         .collect();
     // As in `nested_instancer_parts`: every prototype in uniform mode, the
-    // placed versions in adaptive mode, in (prototype, bucket) order.
-    let versions: BTreeSet<(usize, i32)> = if caches.meshes.subdiv.adaptive.is_some() {
+    // placed versions in adaptive mode, in (prototype, version) order.
+    let versions: BTreeSet<(usize, Option<usize>)> = if adaptive {
         placement_versions.iter().copied().collect()
     } else {
-        (0..layout.targets.len()).map(|k| (k, 0)).collect()
+        (0..layout.targets.len()).map(|k| (k, None)).collect()
     };
-    let proto_parts: BTreeMap<(usize, i32), Arc<Vec<ProtoPart>>> = versions
+    let proto_parts: BTreeMap<(usize, Option<usize>), Arc<Vec<ProtoPart>>> = versions
         .into_iter()
-        .map(|(k, q)| ((k, q), placed_parts(stage, &layout.targets[k], caches, q)))
+        .map(|(k, placed)| {
+            let place = match placed {
+                Some(i) => ProtoPlace::Unshared(world_xf * layout.placements[i].1),
+                None => ProtoPlace::Shared,
+            };
+            (
+                (k, placed),
+                placed_parts(stage, &layout.targets[k], caches, place),
+            )
+        })
         .collect();
 
     // A dense scatter can place millions of instances in this one call;
     // reserving the exact total up front avoids both the doubling-copy
     // cost and the over-allocation of growing the geometry table
     // incrementally (see `WorldBuilder::reserve`).
-    let part_counts: BTreeMap<(usize, i32), usize> = proto_parts
+    let part_counts: BTreeMap<(usize, Option<usize>), usize> = proto_parts
         .iter()
         .map(|(&version, parts)| (version, parts.iter().map(|p| p.slots.len()).sum()))
         .collect();
@@ -949,139 +1034,6 @@ pub(super) fn emit_point_instancer(
             String::new()
         }
     );
-}
-
-/// What adaptive subdivision has to know of a prototype before building a
-/// version of it, from one walk of its cages ([`prototype_survey`]).
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct ProtoSurvey {
-    /// The box around its subdivision meshes' cages, nested scatters included,
-    /// in the prototype's frame. A refined surface stays within its cage's
-    /// hull, so this bounds every version, and it does not depend on which
-    /// version is built first.
-    bounds: Option<Aabb>,
-    /// The rate buckets over which any of its levels changes. `None` when it
-    /// has no subdivision mesh: then no level depends on the rate, and every
-    /// placement shares one version.
-    pub(super) range: Option<QRange>,
-}
-
-impl ProtoSurvey {
-    fn include(&mut self, bounds: Aabb, range: QRange) {
-        self.bounds = Some(self.bounds.map_or(bounds, |b| b.union(bounds)));
-        self.range = Some(self.range.map_or(range, |r| r.union(range)));
-    }
-}
-
-/// Surveys a prototype for adaptive subdivision, once per stage epoch: the
-/// same walk as [`collect_proto_parts`], reading only the cages of the meshes
-/// it would refine. Only called in adaptive mode.
-fn prototype_survey(
-    stage: &Stage,
-    proto_path: &sdf::Path,
-    caches: &mut ImportCaches<'_>,
-    depth: usize,
-) -> ProtoSurvey {
-    let key = (caches.epoch, proto_path.to_string());
-    if let Some(&survey) = caches.surveys.get(&key) {
-        return survey;
-    }
-    let Some(rate) = caches.meshes.subdiv.adaptive else {
-        return ProtoSurvey::default();
-    };
-    let mut survey = ProtoSurvey::default();
-    if depth <= MAX_INSTANCE_NESTING {
-        let root = prim_at(stage, proto_path.clone());
-        let mut stack: Vec<(Prim, GMat4)> = vec![(root.clone(), GMat4::IDENTITY)];
-        while let Some((prim, parent_local)) = stack.pop() {
-            if prototype_prunes(&prim, &root, false) {
-                continue;
-            }
-            let this_local = part_local(stage, &prim, &root, parent_local);
-            if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-                if caches.meshes.subdiv.refines(&mesh)
-                    && let Some((points, counts, indices)) = mesh_arrays(&mesh)
-                    && let Some(cage) = Aabb::of_points(&points)
-                {
-                    let edge = mean_edge_length(&points, &counts, &indices);
-                    let range = rate.level_range(edge, stretch(&Mat3::from_mat4(this_local)));
-                    survey.include(cage.transformed(&this_local), range);
-                }
-            } else if let Ok(Some(instancer)) = PointInstancer::get(stage, prim.path().clone()) {
-                if let Some(layout) = read_instancer(&prim, &instancer) {
-                    let inner: Vec<ProtoSurvey> = layout
-                        .targets
-                        .iter()
-                        .map(|t| prototype_survey(stage, t, caches, depth + 1))
-                        .collect();
-                    for &(k, xf) in &layout.placements {
-                        let (Some(bounds), Some(range)) = (inner[k].bounds, inner[k].range) else {
-                            continue;
-                        };
-                        let placement = this_local * xf;
-                        let delta = ScreenRate::bucket(stretch(&Mat3::from_mat4(placement)));
-                        survey.include(bounds.transformed(&placement), range.shifted_down(delta));
-                    }
-                }
-                continue;
-            }
-            if let Ok(children) = prim.children() {
-                for child in children {
-                    stack.push((child, this_local));
-                }
-            }
-        }
-    }
-    caches.surveys.insert(key, survey);
-    survey
-}
-
-/// The rate bucket a top-level placement of `proto_path` at `world_xf` is built
-/// at: 0 in uniform mode and for a prototype no level of which depends on the
-/// rate, else its pixels per unit at the nearest point of its cage bounds,
-/// rounded up to a power of two and clamped to the prototype's range.
-fn placement_bucket(
-    stage: &Stage,
-    proto_path: &sdf::Path,
-    caches: &mut ImportCaches<'_>,
-    world_xf: &GMat4,
-) -> i32 {
-    let Some(rate) = caches.meshes.subdiv.adaptive else {
-        return 0;
-    };
-    let survey = prototype_survey(stage, proto_path, caches, 0);
-    match (survey.bounds, survey.range) {
-        (Some(bounds), Some(range)) => {
-            range.canonical(ScreenRate::bucket(rate.sigma(world_xf, &bounds)))
-        }
-        _ => 0,
-    }
-}
-
-/// The rate bucket a placement *inside* a prototype version is built at: the
-/// enclosing version's bucket composed with the placement's stretch, so the
-/// distance is the outer placement's — the nearest point of its bounds is no
-/// farther than any part inside it. Since the outer bucket is an integer,
-/// `ceil(log2(2^q · s)) = q + ceil(log2 s)` exactly, which is what
-/// [`prototype_survey`] shifts the inner range by.
-fn nested_bucket(
-    stage: &Stage,
-    proto_path: &sdf::Path,
-    caches: &mut ImportCaches<'_>,
-    depth: usize,
-    outer: i32,
-    placement: &GMat4,
-) -> i32 {
-    if caches.meshes.subdiv.adaptive.is_none() {
-        return 0;
-    }
-    match prototype_survey(stage, proto_path, caches, depth).range {
-        Some(range) => {
-            let delta = ScreenRate::bucket(stretch(&Mat3::from_mat4(*placement)));
-            range.canonical(outer.saturating_add(delta))
-        }
-        None => 0,
-    }
 }
 
 /// A `point3f[]` / `float3[]` attribute as a plain vector.

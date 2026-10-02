@@ -145,6 +145,14 @@ pub struct Config {
     /// `CRUST_SUBDIV`: refine subdivision cages (`false`: render every cage
     /// unrefined).
     pub subdiv: bool,
+    /// `CRUST_ADAPTIVE_PER_FACE`: in adaptive subdivision, tessellate each
+    /// mesh per face at its edges' own rates (`false`: refine each mesh to one
+    /// level, the per-mesh adaptive behaviour this replaced).
+    pub adaptive_per_face: bool,
+    /// `CRUST_ADAPTIVE_FRUSTUM`: in adaptive subdivision, leave geometry wholly
+    /// outside the render camera's view unrefined (`false`: refine by distance
+    /// alone, in view or not).
+    pub adaptive_frustum: bool,
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
     /// (`gathered` | `indexed` | `auto`; bit-identical either way).
     pub tri_packets: TriPackets,
@@ -213,6 +221,8 @@ impl Default for Config {
             stream_import: true,
             mesh_bake: true,
             subdiv: true,
+            adaptive_per_face: true,
+            adaptive_frustum: true,
             tri_packets: TriPackets::Auto,
             bvh_packet_sah: true,
             mtlx_opt: true,
@@ -250,6 +260,8 @@ impl Config {
             stream_import: flag("CRUST_STREAM_IMPORT", d.stream_import),
             mesh_bake: flag("CRUST_MESH_BAKE", d.mesh_bake),
             subdiv: flag("CRUST_SUBDIV", d.subdiv),
+            adaptive_per_face: flag("CRUST_ADAPTIVE_PER_FACE", d.adaptive_per_face),
+            adaptive_frustum: flag("CRUST_ADAPTIVE_FRUSTUM", d.adaptive_frustum),
             tri_packets: env_parse(
                 &lookup,
                 "CRUST_TRI_PACKETS",
@@ -429,6 +441,13 @@ mod tests {
         }
         // Unreadable is the default, whichever way the default points.
         assert!(with(&[("CRUST_SUBDIV", "maybe")]).subdiv);
+        assert!(
+            with(&[]).adaptive_per_face,
+            "per-face is the adaptive default"
+        );
+        assert!(!with(&[("CRUST_ADAPTIVE_PER_FACE", "0")]).adaptive_per_face);
+        assert!(with(&[]).adaptive_frustum);
+        assert!(!with(&[("CRUST_ADAPTIVE_FRUSTUM", "0")]).adaptive_frustum);
         assert!(!with(&[("CRUST_PTEX_STREAM", "")]).ptex_stream);
     }
 

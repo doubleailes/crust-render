@@ -218,6 +218,7 @@ fn quad_face_map() -> FaceMap {
         faces: vec![0, 0],
         slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
         sub: None,
+        corners: None,
         density: Vec::new(),
     }
 }
@@ -243,6 +244,7 @@ fn face_map_triangle_slice_is_the_identity_and_ngons_are_unmappable() {
         faces: vec![3, 4],
         slices: vec![FanSlice::Triangle, FanSlice::Unmappable],
         sub: None,
+        corners: None,
         density: Vec::new(),
     };
     let (f, u, v) = m.resolve(0, 0.2, 0.3, false).unwrap();
@@ -279,6 +281,7 @@ fn face_map_sub_face_corners_interpolate() {
         faces: vec![7],
         slices: vec![FanSlice::QuadLower],
         sub: Some(vec![cell]),
+        corners: None,
         density: Vec::new(),
     };
     let (f, u, v) = m.resolve(0, 0.0, 0.0, false).unwrap();
@@ -296,6 +299,7 @@ fn face_map_sub_face_corners_interpolate() {
         faces: vec![7],
         slices: vec![FanSlice::Unmappable],
         sub: Some(vec![cell]),
+        corners: None,
         density: Vec::new(),
     };
     assert!(n.resolve(0, 0.2, 0.2, false).is_none());
@@ -1140,6 +1144,7 @@ fn face_density_uses_the_half_unit_square_every_fan_slice_covers() {
         faces: vec![0, 1],
         slices: vec![FanSlice::Triangle, FanSlice::Triangle],
         sub: None,
+        corners: None,
         density: Vec::new(),
     };
     tri.build_density(&arrays(&quad_verts()), &quad_tris());
@@ -1160,6 +1165,7 @@ fn face_density_reads_sub_face_uvs_on_a_subdivided_mesh() {
         faces: vec![0, 0],
         slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
         sub: Some(vec![cell, cell]),
+        corners: None,
         density: Vec::new(),
     };
     m.build_density(&arrays(&quad_verts()), &quad_tris());
@@ -1174,6 +1180,7 @@ fn face_density_is_zero_for_an_unmappable_slice() {
         faces: vec![0, 0],
         slices: vec![FanSlice::Unmappable, FanSlice::QuadUpper],
         sub: None,
+        corners: None,
         density: Vec::new(),
     };
     m.build_density(&arrays(&quad_verts()), &quad_tris());

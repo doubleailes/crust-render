@@ -72,12 +72,12 @@ mod time;
 mod volume;
 mod xform;
 
-use adaptive::ScreenRate;
+use adaptive::{Frustum, ScreenRate};
 use attrs::{
     custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
 };
 use camera::{build_camera, screen_projection};
-use instancing::{ProtoPart, ProtoSurvey, emit_native_instance, emit_point_instancer};
+use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
 use light_links::LightLinks;
 use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
@@ -145,23 +145,60 @@ fn stream_roots(stage: &Stage) -> Vec<sdf::Path> {
         debug!("Streaming import disabled by CRUST_STREAM_IMPORT=0");
         return Vec::new();
     }
-    let pseudo_root = prim_at(stage, sdf::Path::abs_root());
-    let Ok(top) = pseudo_root.children() else {
-        return Vec::new();
-    };
-
-    let chunks: Vec<sdf::Path> = match top.as_slice() {
-        [only] => match only.children() {
-            Ok(children) => children.iter().map(|c| c.path().clone()).collect(),
-            Err(_) => return Vec::new(),
-        },
-        many => many.iter().map(|p| p.path().clone()).collect(),
-    };
-
+    let chunks = subtree_roots(stage);
     if chunks.len() < MIN_STREAM_CHUNKS {
         return Vec::new();
     }
     chunks
+}
+
+/// The stage's top-level subtrees: the children of its one root prim, or its
+/// root prims when it has several. The unit [`stream_roots`] streams, and the
+/// scope adaptive subdivision counts native placements in — in every import
+/// mode, so that streaming cannot change which prototypes are shared.
+fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
+    let pseudo_root = prim_at(stage, sdf::Path::abs_root());
+    let Ok(top) = pseudo_root.children() else {
+        return Vec::new();
+    };
+    match top.as_slice() {
+        [only] => match only.children() {
+            Ok(children) => children.iter().map(|c| c.path().clone()).collect(),
+            Err(_) => Vec::new(),
+        },
+        many => many.iter().map(|p| p.path().clone()).collect(),
+    }
+}
+
+/// Counts the native placements of every prototype on `stage`, per top-level
+/// subtree, into `caches.placements`: the same walk and pruning as
+/// [`traverse_into`] (abstract, inactive, non-render purpose, invisible), not
+/// descending into an instance or a `PointInstancer`, whose contents the
+/// traversal does not reach directly either.
+fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
+    let mut stack = vec![prim_at(stage, sdf::Path::abs_root())];
+    while let Some(prim) = stack.pop() {
+        if prim.is_abstract().unwrap_or(false)
+            || !prim.is_active().unwrap_or(true)
+            || non_render_purpose(&prim).is_some()
+            || is_invisible(&prim)
+        {
+            continue;
+        }
+        if prim.is_instance().unwrap_or(false)
+            && let Ok(Some(proto)) = prim.prototype()
+        {
+            let key = (caches.subtree_of(prim.path()), proto.to_string());
+            *caches.placements.entry(key).or_default() += 1;
+            continue;
+        }
+        if matches!(PointInstancer::get(stage, prim.path().clone()), Ok(Some(_))) {
+            continue;
+        }
+        if let Ok(children) = prim.children() {
+            stack.extend(children);
+        }
+    }
 }
 
 /// Everything a traversal accumulates, kept separate from the stage that
@@ -562,6 +599,14 @@ pub(crate) fn load_scene(
         settings = settings.with_frame(seed);
     }
     let chunks = stream_roots(&index);
+    let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
+        subtree_roots(&index)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    } else {
+        Default::default()
+    };
     // Kept, not dropped: a light's link collections are read on it (see
     // `light_links`), because a streamed chunk's population mask can leave
     // out the prims a collection refers to. It stays cheap — openusd composes
@@ -581,7 +626,10 @@ pub(crate) fn load_scene(
         // with identical local geometry + material share one copy of that
         // geometry — placed by an instance when it is placed more than once,
         // baked flat into the parent BVH when it is placed exactly once.
-        caches: ImportCaches::new(assets, path, subdiv),
+        caches: ImportCaches {
+            subtrees,
+            ..ImportCaches::new(assets, path, subdiv)
+        },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
@@ -598,6 +646,9 @@ pub(crate) fn load_scene(
              CRUST_STREAM_IMPORT=0)"
         );
         let stage = open_stage(path, path_str, None)?;
+        if ctx.caches.meshes.subdiv.adaptive.is_some() {
+            count_placements(&stage, &mut ctx.caches);
+        }
         traverse_into(
             &stage,
             prim_at(&stage, sdf::Path::abs_root()),
@@ -614,6 +665,9 @@ pub(crate) fn load_scene(
             let chunk_start = Instant::now();
             debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
             let stage = open_stage(path, path_str, Some(chunk.clone()))?;
+            if ctx.caches.meshes.subdiv.adaptive.is_some() {
+                count_placements(&stage, &mut ctx.caches);
+            }
             // Traverse from the root, not from `chunk`: a mask keeps the
             // masked path's *ancestors* populated, so starting at the
             // root picks up their transforms exactly as a full traversal
@@ -706,6 +760,13 @@ pub(crate) fn load_scene(
         ctx.lights.hide_infinite_from_camera();
     }
 
+    if ctx.caches.meshes.subdiv.adaptive.is_some() {
+        let [interior, stitched] = ctx.caches.meshes.subdiv.quality;
+        debug!(
+            "Per-face triangle shapes (4√3·area / Σ edge², bins ≥0.9 · ≥0.5 · ≥0.1 · ≥0.01 · \
+             <0.01): interior {interior:?}, stitched {stitched:?}"
+        );
+    }
     if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
         // The two reads of one camera must agree, or every level was chosen
         // for a viewpoint the render does not use.
@@ -718,8 +779,11 @@ pub(crate) fn load_scene(
         stats.subdivision = SubdivisionCounters {
             adaptive: Some((rate.target, rate.max)),
             levels: ctx.caches.meshes.subdiv.levels.clone(),
-            prototype_versions: ctx.caches.prototype_versions,
-            rate_dependent_versions: ctx.caches.rate_dependent_versions,
+            shared_meshes: ctx.caches.meshes.subdiv.shared_meshes,
+            shared_level: ctx.caches.meshes.subdiv.level,
+            per_face_meshes: ctx.caches.meshes.subdiv.per_face_meshes,
+            per_face_fallbacks: ctx.caches.meshes.subdiv.per_face_fallbacks,
+            rate_bins: ctx.caches.meshes.subdiv.rate_bins.clone(),
         };
     }
 
@@ -818,7 +882,7 @@ fn subdiv_policy(
             p
         }
     };
-    let Some((eye, f_px)) = projection else {
+    let Some(projection) = projection else {
         warn!(
             "Adaptive subdivision ({target} px): {camera_path} is not a camera on this stage. \
              Using the uniform level {subdiv_level}"
@@ -830,15 +894,29 @@ fn subdiv_policy(
         render_settings_subdiv_level(index),
     );
     info!(
-        "Adaptive subdivision: cage edges refined to at most {target} px through {camera_path}, \
-         up to level {max}"
+        "Adaptive subdivision: unshared cage edges refined to at most {target} px through \
+         {camera_path}, up to level {max}; shared prototypes at level {subdiv_level}"
     );
-    Ok(SubdivPolicy::adaptive(ScreenRate {
-        eye,
-        f_px,
-        target,
-        max,
-    }))
+    // Shared prototypes take the uniform level: the level setting when one is
+    // given (it is also the ceiling above), else 0.
+    Ok(SubdivPolicy::adaptive(
+        ScreenRate {
+            eye: projection.eye,
+            f_px: projection.f_px,
+            target,
+            max,
+            frustum: crate::config().adaptive_frustum.then(|| {
+                Frustum::new(
+                    projection.eye,
+                    projection.forward,
+                    projection.up,
+                    projection.tan_v,
+                    projection.tan_h,
+                )
+            }),
+        },
+        subdiv_level,
+    ))
 }
 
 // -----------------------------------------------------------------------
@@ -857,23 +935,21 @@ struct ImportCaches<'a> {
     /// until its representation is decided (see [`flush_meshes`]), then its
     /// committed kernel scene if it needed one.
     meshes: MeshArena,
-    /// `(epoch, prototype path, rate bucket)` → its parts, for both
-    /// instancing mechanisms. See [`ImportCaches::epoch`] for the epoch. The
-    /// bucket is 0 in uniform subdivision; in adaptive mode it is the version
-    /// of the prototype refined for one range of on-screen sizes (see
-    /// `instancing::placement_bucket`).
-    protos: HashMap<(u32, String, i32), Arc<Vec<ProtoPart>>>,
+    /// `(epoch, prototype path)` → its shared parts, for both instancing
+    /// mechanisms. See [`ImportCaches::epoch`] for the epoch. A prototype placed
+    /// once in adaptive mode is built for its placement and not cached here.
+    protos: HashMap<(u32, String), Arc<Vec<ProtoPart>>>,
     /// The same prototypes as one [`ProtoPart`] each (see
     /// `instancing::group_parts`), `None` for one with no geometry. Same keys
     /// as `protos`.
-    groups: HashMap<(u32, String, i32), Option<ProtoPart>>,
-    /// `(epoch, prototype path)` → its cage bounds and level range, for
-    /// adaptive subdivision. Empty in uniform mode.
-    surveys: HashMap<(u32, String), ProtoSurvey>,
-    /// Prototype versions built in adaptive mode, and how many of them belong
-    /// to a prototype whose levels depend on the rate.
-    prototype_versions: u64,
-    rate_dependent_versions: u64,
+    groups: HashMap<(u32, String), Option<ProtoPart>>,
+    /// Adaptive mode only: native placements per `(top-level subtree,
+    /// prototype path)`, counted before the subtree is walked
+    /// ([`count_placements`]). A prototype placed once in its subtree is
+    /// unshared, and refined by its size on screen.
+    placements: HashMap<(String, String), u32>,
+    /// The top-level subtrees placements are counted in ([`subtree_roots`]).
+    subtrees: std::collections::HashSet<String>,
     /// Which stage the entries above came from.
     ///
     /// Prototype paths (`/__Prototype_N`) are numbered per composition, so
@@ -909,6 +985,28 @@ struct ImportCaches<'a> {
     light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
 }
 
+impl ImportCaches<'_> {
+    /// The top-level subtree `path` lies in, as [`subtree_roots`] partitions the
+    /// stage; empty above every subtree.
+    fn subtree_of(&self, path: &sdf::Path) -> String {
+        let mut cur = Some(path.clone());
+        while let Some(p) = cur {
+            let key = p.to_string();
+            if self.subtrees.contains(&key) {
+                return key;
+            }
+            cur = p.parent();
+        }
+        String::new()
+    }
+
+    /// How many native placements `proto_path` has in the subtree `prim` lies in.
+    pub(super) fn placement_count(&self, prim: &sdf::Path, proto_path: &sdf::Path) -> u32 {
+        let key = (self.subtree_of(prim), proto_path.to_string());
+        self.placements.get(&key).copied().unwrap_or(0)
+    }
+}
+
 impl<'a> ImportCaches<'a> {
     fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path, subdiv: SubdivPolicy) -> Self {
         ImportCaches {
@@ -916,9 +1014,8 @@ impl<'a> ImportCaches<'a> {
             meshes: MeshArena::new(subdiv),
             protos: HashMap::new(),
             groups: HashMap::new(),
-            surveys: HashMap::new(),
-            prototype_versions: 0,
-            rate_dependent_versions: 0,
+            placements: HashMap::new(),
+            subtrees: std::collections::HashSet::new(),
             epoch: 0,
             assets,
             stage_path,

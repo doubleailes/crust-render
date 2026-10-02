@@ -1,20 +1,22 @@
 #usda 1.0
 (
-    doc = """Adaptive subdivision: one Catmull-Clark cube cage, placed five times by a
-    PointInstancer along a row that recedes from the camera.
+    doc = """Adaptive subdivision: one Catmull-Clark cube cage, referenced by five meshes
+    along a row that recedes from the camera.
 
     crust:subdivisionEdgeLength on the RenderSettings prim (8 px here) turns on
     adaptive subdivision: each placement is refined only until its mean cage
-    edge, at the nearest point of its bounds to the render camera, projects to
-    at most that many pixels. The level setting (crust:subdivisionLevel or
-    --subdiv-level) becomes the ceiling, 3 by default. From near to far the
-    five placements are refined to levels 3, 3, 2, 1 and 0: the far cube keeps
-    its smooth cage, which covers a few pixels.
+    edge, at its own nearest point to the render camera, projects to at most that
+    many pixels: each cage face is tessellated at the rate of its edges. The level
+    setting (crust:subdivisionLevel or --subdiv-level) becomes the ceiling, 3 by
+    default (a rate of 8 per edge). From near to far the five cubes are split 8,
+    8, 4, 2 and 1 times per edge: the far cube is its cage's six faces on the
+    limit surface, a few pixels wide. Only unshared geometry is adaptive: a
+    prototype placed more than once takes the uniform level.
 
     `--stats` reports the choice:
       adaptive subdivision         8 px, at most level 3
-        subdivision levels         L0 1 · L1 1 · L2 1 · L3 2
-        prototype versions         5 (rate-dependent: 5)
+        per-face meshes            5 (fallback: 0)
+        edge rates                 1: 12 · 2: 12 · 3-4: 12 · 5-8: 24
 
     --subdiv-edge-length overrides the target (2 refines everything visible to
     the ceiling); without a target, the uniform level applies to all five."""
@@ -55,32 +57,54 @@ def Xform "World"
         }
     }
 
-    def PointInstancer "Row"
+    # One Catmull-Clark cube cage, referenced by five meshes. A reference composes a
+    # direct mesh, which adaptive subdivision tessellates for its own distance;
+    # a PointInstancer or instanceable placement would be shared and take the
+    # uniform level instead. Distances 8, 25, 60, 150 and 400 down the view,
+    # fanned from -6 to +6 degrees so no cube hides another.
+    class Mesh "Cage" (prepend apiSchemas = ["MaterialBindingAPI"])
     {
-        rel prototypes = [</World/Row/Protos/Cube>]
-        # Distances 8, 25, 60, 150 and 400 down the view, fanned from -6° to
-        # +6° so no cube hides another.
-        int[] protoIndices = [0, 0, 0, 0, 0]
-        point3f[] positions = [(-0.84, 0, -8), (-1.31, 0, -25), (0, 0, -60),
-                               (7.88, 0, -150), (42.04, 0, -400)]
+        uniform token subdivisionScheme = "catmullClark"
+        point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+                            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/clay>
+    }
 
-        def Scope "Protos"
-        {
-            def Mesh "Cube" (prepend apiSchemas = ["MaterialBindingAPI"])
-            {
-                uniform token subdivisionScheme = "catmullClark"
-                point3f[] points = [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
-                                    (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
-                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
-                int[] faceVertexIndices = [0, 1, 2, 3,
-                                           5, 4, 7, 6,
-                                           4, 0, 3, 7,
-                                           1, 5, 6, 2,
-                                           3, 2, 6, 7,
-                                           4, 5, 1, 0]
-                rel material:binding = </World/Materials/clay>
-            }
-        }
+    def Mesh "Cube1" (prepend references = </World/Cage>)
+    {
+        double3 xformOp:translate = (-0.84, 0, -8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Cube2" (prepend references = </World/Cage>)
+    {
+        double3 xformOp:translate = (-1.31, 0, -25)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Cube3" (prepend references = </World/Cage>)
+    {
+        double3 xformOp:translate = (0, 0, -60)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Cube4" (prepend references = </World/Cage>)
+    {
+        double3 xformOp:translate = (7.88, 0, -150)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Cube5" (prepend references = </World/Cage>)
+    {
+        double3 xformOp:translate = (42.04, 0, -400)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
     def Mesh "Floor"

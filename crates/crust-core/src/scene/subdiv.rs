@@ -606,6 +606,666 @@ fn ptex_fvar_channel(counts: &[usize]) -> (Vec<[f32; 2]>, Vec<u32>) {
     (values, indices)
 }
 
+// ---------------------------------------------------------------------------
+// Per-face adaptive tessellation
+// ---------------------------------------------------------------------------
+
+/// Feature-adaptive isolation depth of per-face tessellation's patch table.
+///
+/// Shallow on purpose. Under Catmull-Clark an all-triangle cage is irregular
+/// everywhere (every split triangle's centre is a valence-3 vertex), so
+/// isolation at depth `d` refines every face `d` times: at 3 the Moana ocean's
+/// 684 416-triangle cage cost a 19.9 GiB transient. Gregory patches cover what
+/// isolation leaves irregular. Measured on the all-extraordinary cube (edges of
+/// length 2): exact at sampling depths up to the isolation depth, and within
+/// 0.0185 of the uniform limit (0.9% of an edge) at a rate of 4, next to an
+/// extraordinary vertex only; regular faces are exact B-spline patches at any
+/// depth.
+const ADAPTIVE_ISOLATION: usize = 1;
+
+/// Per triangle of a per-face tessellation: the cage face Ptex addresses and
+/// the triangle's corners in that face's unit square. `None` for a triangle of
+/// an `n`-gon, which Ptex does not address here (as for uniform refinement).
+pub(crate) struct TessellatedFaces {
+    pub base_face: Vec<Option<u32>>,
+    pub corner_uvs: Vec<[[f32; 2]; 3]>,
+}
+
+/// What [`tessellate_adaptive`] needs to size one segment of the cage: the
+/// points that span it — for a cage edge its two cage vertices then their two
+/// limit points, for a spoke of an `n`-gon its two limit end points — and it
+/// answers the segment's projected length over the target (`ℓ · σ / t`).
+pub(crate) type SegmentSize<'a> = dyn Fn(&[[f32; 3]]) -> f32 + 'a;
+
+/// A limit-surface tessellation, in [`SubdividedMesh`]'s shapes (all
+/// triangles), with Ptex corners as [`TessellatedFaces`].
+pub(crate) struct TessellatedMesh {
+    pub points: Vec<Vec3f>,
+    pub indices: Vec<i32>,
+    pub normals: Vec<[f32; 3]>,
+    pub faces: Option<TessellatedFaces>,
+    /// A `vertex` chart evaluated at every vertex.
+    pub uvs: Option<Vec<[f32; 2]>>,
+    /// A `faceVarying` chart evaluated per Ptex face, so each side of a seam
+    /// keeps its own values: `values`, and per triangle corner (parallel to
+    /// `indices`) an index into them.
+    pub face_varying_uvs: Option<(Vec<[f32; 2]>, Vec<i32>)>,
+    /// The smallest and largest edge rate used, for the debug line.
+    pub rate_range: (u32, u32),
+    /// Cage edges and spokes by rate, binned by `ceil(log2(rate))`: 1, 2,
+    /// 3–4, 5–8, …
+    pub rate_bins: Vec<u64>,
+    /// Ptex faces tessellated.
+    pub ptex_faces: usize,
+    /// The shape of the selected faces' triangles: [`TriangleQuality`] bins
+    /// for the interior grids' and for the stitched rings'.
+    pub quality: [[u64; QUALITY_BINS]; 2],
+}
+
+/// Bins of [`triangle_quality`]: `[0.9, 1]`, `[0.5, 0.9)`, `[0.1, 0.5)`,
+/// `[0.01, 0.1)`, `[0, 0.01)`.
+pub(crate) const QUALITY_BINS: usize = 5;
+
+/// A triangle's shape, `4√3 · area / Σ edge²`: 1 for an equilateral
+/// triangle, toward 0 for a sliver.
+pub(crate) fn triangle_quality(a: Vec3A, b: Vec3A, c: Vec3A) -> f32 {
+    let area2 = (b - a).cross(c - a).length(); // twice the area
+    let sum = (b - a).length_squared() + (c - b).length_squared() + (a - c).length_squared();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    (2.0 * 3f32.sqrt() * area2 / sum).clamp(0.0, 1.0)
+}
+
+/// The [`QUALITY_BINS`] bin of a quality.
+pub(crate) fn quality_bin(q: f32) -> usize {
+    match q {
+        q if q >= 0.9 => 0,
+        q if q >= 0.5 => 1,
+        q if q >= 0.1 => 2,
+        q if q >= 0.01 => 3,
+        _ => 4,
+    }
+}
+
+/// A point on an unrefined face's boundary: its vertex, its Ptex coordinate and its
+/// face-varying chart value.
+type RingPoint = (u32, [f32; 2], [f32; 2]);
+
+/// Who owns a vertex of the tessellation, so the faces that meet there share it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum VertexKey {
+    Cage(u32),
+    /// Point `i` of cage edge `edge`, counted from its lower vertex.
+    Edge(u32, u32),
+    /// The centre of `n`-gon `face`.
+    Centre(u32),
+    /// Point `i` of spoke `k` of `n`-gon `face`, counted from the edge midpoint.
+    Spoke(u32, u32, u32),
+}
+
+/// Tessellates a Catmull-Clark or bilinear cage per Ptex face.
+///
+/// Every cage edge is rated from its two cage vertices (`segment_size`, then
+/// [`tessellate::edge_rate`] under `max_level`). A face with an edge rated above
+/// 1 is *selected*: only selected faces get limit patches
+/// (`refine_adaptive_selected`, `create_with_options_selected`), and each of
+/// their Ptex quads is gridded and stitched to its edges
+/// ([`tessellate::tessellate_quad`]) on the limit surface. Every other face
+/// renders its cage, smooth-shaded, as level 0 does — what MoonRay does with a
+/// face whose tessellation factor is 0 — so the cost grows with the refined
+/// area, not the cage. A cage vertex a selected face touches takes that face's
+/// limit point, and every corner and edge point is evaluated once and shared,
+/// so a selected and an unselected face meet without a crack.
+///
+/// `req.level` is ignored. A `vertex` chart is evaluated with the positions'
+/// basis; a `faceVarying` one with the patch table's face-varying patches,
+/// under its `faceVaryingLinearInterpolation` (linear across an unselected
+/// face).
+pub(crate) fn tessellate_adaptive(
+    points: &[Vec3f],
+    counts: &[i32],
+    indices: &[i32],
+    req: &SubdivRequest,
+    max_level: u32,
+    segment_size: &SegmentSize<'_>,
+) -> Result<TessellatedMesh, SubdivError> {
+    use super::tessellate::{PointKey, edge_rate, tessellate_quad};
+    use opensubdiv_rs::far::{AdaptiveOptions, PatchMap, PatchTableFactory, PatchTableOptions};
+    use std::collections::HashMap;
+
+    debug_assert!(
+        req.scheme != SubdivScheme::Loop,
+        "Loop is the caller's to route"
+    );
+    let (counts_us, indices_u32) = validate_cage(points.len(), counts, indices)?;
+    let (crease_pairs, crease_weights) = expand_crease_runs(
+        req.crease_indices,
+        req.crease_lengths,
+        req.crease_sharpnesses,
+    )?;
+    let corners = validate_corners(req.corner_indices, req.corner_sharpnesses)?;
+    let scheme = match req.scheme {
+        SubdivScheme::Bilinear => sdc::SchemeType::Bilinear,
+        _ => sdc::SchemeType::Catmark,
+    };
+    let chart = req.uvs.filter(|c| c.face_varying);
+    let vertex_chart = req.uvs.filter(|c| !c.face_varying);
+
+    // Faces, and the cage edges.
+    let n_faces = counts_us.len();
+    let mut starts = Vec::with_capacity(n_faces);
+    let mut at = 0usize;
+    for &n in &counts_us {
+        starts.push(at);
+        at += n;
+    }
+    let face_verts = |f: usize| &indices_u32[starts[f]..starts[f] + counts_us[f]];
+    let mut edge_ids: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut face_edges: Vec<u32> = Vec::with_capacity(indices_u32.len());
+    for f in 0..n_faces {
+        let fv = face_verts(f);
+        for k in 0..fv.len() {
+            let (a, b) = (fv[k], fv[(k + 1) % fv.len()]);
+            let key = (a.min(b), a.max(b));
+            let id = *edge_ids.entry(key).or_insert_with(|| {
+                edges.push(key);
+                (edges.len() - 1) as u32
+            });
+            face_edges.push(id);
+        }
+    }
+    let edges_of = |f: usize| &face_edges[starts[f]..starts[f] + counts_us[f]];
+
+    // Rates from the cage, then the selection: faces with a finer edge.
+    let base_rates: Vec<u32> = edges
+        .iter()
+        .map(|&(a, b)| {
+            let (pa, pb) = (base_point(points, a), base_point(points, b));
+            edge_rate(segment_size(&[pa, pb]), max_level, false)
+        })
+        .collect();
+    let selected: Vec<bool> = (0..n_faces)
+        .map(|f| edges_of(f).iter().any(|&e| base_rates[e as usize] > 1))
+        .collect();
+    // A selected `n`-gon's Ptex quads split its edges at their midpoints, so
+    // those edges take an even rate — on both sides.
+    let mut edge_rates = base_rates.clone();
+    for f in (0..n_faces).filter(|&f| selected[f] && counts_us[f] != 4) {
+        for &e in edges_of(f) {
+            let r = &mut edge_rates[e as usize];
+            *r = (*r).max(2).next_multiple_of(2);
+        }
+    }
+    let rate_of = |a: u32, b: u32| {
+        let id = edge_ids[&(a.min(b), a.max(b))];
+        (id, edge_rates[id as usize])
+    };
+    let canonical = |a: u32, b: u32, i: u32, n: u32| if a < b { i } else { n - i };
+
+    let mut rate_bins: Vec<u64> = Vec::new();
+    let mut bin = |r: u32| {
+        let b = (32 - (r.max(1) - 1).leading_zeros()) as usize;
+        if rate_bins.len() <= b {
+            rate_bins.resize(b + 1, 0);
+        }
+        rate_bins[b] += 1;
+    };
+    for &r in &edge_rates {
+        bin(r);
+    }
+    let selected_faces: Vec<u32> = (0..n_faces as u32)
+        .filter(|&f| selected[f as usize])
+        .collect();
+    let ptex_faces: usize = counts_us.iter().map(|&n| if n == 4 { 1 } else { n }).sum();
+
+    let mut vertex_of: HashMap<VertexKey, u32> = HashMap::new();
+    let mut out_points: Vec<Vec3f> = Vec::new();
+    let mut out_normals: Vec<[f32; 3]> = Vec::new();
+    let mut out_uvs: Vec<[f32; 2]> = Vec::new();
+    let mut out_indices: Vec<i32> = Vec::new();
+    let mut base_face: Vec<Option<u32>> = Vec::new();
+    let mut corner_uvs: Vec<[[f32; 2]; 3]> = Vec::new();
+    let mut fv_values: Vec<[f32; 2]> = Vec::new();
+    let mut fv_indices: Vec<i32> = Vec::new();
+    let (mut min_rate, mut max_rate) = (u32::MAX, 0u32);
+    let mut quality = [[0u64; QUALITY_BINS]; 2];
+
+    // --- Selected faces, on the limit surface -----------------------------
+    if !selected_faces.is_empty() {
+        let options = sdc::Options::default()
+            .with_vtx_boundary_interpolation(req.boundary)
+            .with_fvar_linear_interpolation(
+                chart.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
+            );
+        let chart_indices: Vec<u32> = match chart {
+            Some(c) => (0..indices.len())
+                .map(|fv| c.value_index(fv) as u32)
+                .collect(),
+            None => Vec::new(),
+        };
+        let channels: Vec<FVarChannelDescriptor> = chart
+            .map(|c| FVarChannelDescriptor::new(c.values.len(), &chart_indices))
+            .into_iter()
+            .collect();
+        let mut descriptor = TopologyDescriptor::new(points.len(), &counts_us, &indices_u32)
+            .with_creases(&crease_pairs, &crease_weights)
+            .with_corners(&corners.0, &corners.1);
+        if !channels.is_empty() {
+            descriptor = descriptor.with_fvar_channels(&channels);
+        }
+        let mut refiner = TopologyRefinerFactory::create(descriptor, scheme, options)
+            .map_err(SubdivError::Refine)?;
+        // A face regular in the vertex topology can be irregular in the
+        // chart's: isolate it too rather than capping it a level up.
+        let mut adaptive =
+            AdaptiveOptions::new(ADAPTIVE_ISOLATION).with_consider_fvar_channels(chart.is_some());
+        adaptive.use_single_crease_patch = true;
+        refiner.refine_adaptive_selected(adaptive, &selected_faces);
+        // Smooth face-varying patches that follow the chart's own topology
+        // and rule, not OpenSubdiv's legacy linear ones.
+        let table_options = PatchTableOptions::new()
+            .with_fvar_tables(chart.is_some())
+            .with_fvar_legacy_linear_patches(false);
+        let table = PatchTableFactory::create_with_options_selected(
+            &refiner,
+            &table_options,
+            &selected_faces,
+        )
+        .map_err(SubdivError::Refine)?;
+        let map = PatchMap::new(&table);
+        let ptex_of = table.ptex_indices();
+
+        // Control values: every level's vertices, base first.
+        let primvar = PrimvarRefiner::new(&refiner);
+        let base: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let mut control = base.clone();
+        let mut level_vals = base;
+        for l in 1..=refiner.max_level() {
+            let mut refined = vec![[0.0f32; 3]; refiner.level(l).num_vertices()];
+            primvar.interpolate(l, &level_vals, &mut refined);
+            control.extend_from_slice(&refined);
+            level_vals = refined;
+        }
+        let fvar_values: Option<Vec<[f32; 2]>> = chart.map(|c| {
+            let mut values = c.values.to_vec();
+            for level in primvar.interpolate_face_varying_all(0, c.values) {
+                values.extend_from_slice(&level);
+            }
+            values
+        });
+        let uv_control: Option<Vec<[f32; 2]>> = vertex_chart.map(|c| {
+            let mut control: Vec<[f32; 2]> = (0..points.len())
+                .map(|v| c.values[c.value_index(v)])
+                .collect();
+            let mut level_vals = control.clone();
+            for l in 1..=refiner.max_level() {
+                let mut refined = vec![[0.0f32; 2]; refiner.level(l).num_vertices()];
+                primvar.interpolate(l, &level_vals, &mut refined);
+                control.extend_from_slice(&refined);
+                level_vals = refined;
+            }
+            control
+        });
+        let eval = |ptex: usize, u: f32, v: f32| -> Option<([f32; 3], [f32; 3])> {
+            let patch = map.find_patch(ptex, u, v)?;
+            let (p, du, dv) = table.evaluate(patch, u, v, &control);
+            let n = Vec3A::from(du).cross(Vec3A::from(dv));
+            let n = if n.length_squared() > 1e-24 {
+                n.normalize()
+            } else {
+                // A degenerate parameterization (a pole): the normal a hair inside.
+                let (u2, v2) = (u + (0.5 - u) * 1e-3, v + (0.5 - v) * 1e-3);
+                let patch = map.find_patch(ptex, u2, v2)?;
+                let (_, du, dv) = table.evaluate(patch, u2, v2, &control);
+                Vec3A::from(du).cross(Vec3A::from(dv)).normalize_or_zero()
+            };
+            Some((p, n.to_array()))
+        };
+        let eval_fvar = |ptex: usize, u: f32, v: f32| -> Option<[f32; 2]> {
+            let values = fvar_values.as_ref()?;
+            let patch = map.find_patch(ptex, u, v)?;
+            Some(table.evaluate_face_varying(patch, u, v, values, 0).0)
+        };
+        let eval_uv = |ptex: usize, u: f32, v: f32| -> Option<[f32; 2]> {
+            let control = uv_control.as_ref()?;
+            let patch = map.find_patch(ptex, u, v)?;
+            Some(table.evaluate(patch, u, v, control).0)
+        };
+        let mut emit = |key: Option<VertexKey>,
+                        ptex: usize,
+                        uv: [f32; 2],
+                        out_points: &mut Vec<Vec3f>,
+                        out_normals: &mut Vec<[f32; 3]>,
+                        out_uvs: &mut Vec<[f32; 2]>|
+         -> Result<u32, SubdivError> {
+            if let Some(key) = key
+                && let Some(&v) = vertex_of.get(&key)
+            {
+                return Ok(v);
+            }
+            let (p, n) = eval(ptex, uv[0], uv[1]).ok_or_else(|| {
+                SubdivError::BadTopology(format!("no limit patch under Ptex face {ptex} at {uv:?}"))
+            })?;
+            let v = out_points.len() as u32;
+            out_points.push(Vec3f {
+                x: p[0],
+                y: p[1],
+                z: p[2],
+            });
+            out_normals.push(n);
+            if uv_control.is_some() {
+                out_uvs.push(eval_uv(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]));
+            }
+            if let Some(key) = key {
+                vertex_of.insert(key, v);
+            }
+            Ok(v)
+        };
+
+        for &f in &selected_faces {
+            let f = f as usize;
+            let fv = face_verts(f);
+            let first = ptex_of.face_id(f) as usize;
+            let n = fv.len();
+            let quads: usize = if n == 4 { 1 } else { n };
+            // Spoke rates of an `n`-gon: from the limit midpoint of edge k to
+            // the limit centre.
+            let spoke_rates: Vec<u32> = if n == 4 {
+                Vec::new()
+            } else {
+                let centre = eval(first, 1.0, 1.0).map(|e| e.0);
+                (0..n)
+                    .map(|k| {
+                        let mid = eval(first + k, 1.0, 0.0).map(|e| e.0);
+                        match (mid, centre) {
+                            (Some(m), Some(c)) => {
+                                edge_rate(segment_size(&[m, c]), max_level, false)
+                            }
+                            _ => 1,
+                        }
+                    })
+                    .collect()
+            };
+            for &r in &spoke_rates {
+                bin(r);
+            }
+            for k in 0..quads {
+                let ptex = first + k;
+                let mut rates = [0u32; 4];
+                let mut edge_key: [Box<dyn Fn(u32) -> VertexKey>; 4] = std::array::from_fn(|_| {
+                    Box::new(|_| VertexKey::Cage(0)) as Box<dyn Fn(u32) -> VertexKey>
+                });
+                let corner_key: [VertexKey; 4] = if n == 4 {
+                    for e in 0..4 {
+                        let (a, b) = (fv[e], fv[(e + 1) % 4]);
+                        let (id, r) = rate_of(a, b);
+                        rates[e] = r;
+                        edge_key[e] = Box::new(move |i| VertexKey::Edge(id, canonical(a, b, i, r)));
+                    }
+                    [0, 1, 2, 3].map(|c| VertexKey::Cage(fv[c]))
+                } else {
+                    let (vk, vnext, vprev) = (fv[k], fv[(k + 1) % n], fv[(k + n - 1) % n]);
+                    let (e_next, r_next) = rate_of(vk, vnext);
+                    let (e_prev, r_prev) = rate_of(vprev, vk);
+                    let (s_k, s_prev) = (spoke_rates[k], spoke_rates[(k + n - 1) % n]);
+                    let (fi, ki, kp) = (f as u32, k as u32, ((k + n - 1) % n) as u32);
+                    rates = [r_next / 2, s_k, s_prev, r_prev / 2];
+                    edge_key[0] =
+                        Box::new(move |i| VertexKey::Edge(e_next, canonical(vk, vnext, i, r_next)));
+                    edge_key[1] = Box::new(move |i| VertexKey::Spoke(fi, ki, i));
+                    edge_key[2] = Box::new(move |i| VertexKey::Spoke(fi, kp, s_prev - i));
+                    // From the midpoint toward vk: `half − i` segments from vk.
+                    let half = r_prev / 2;
+                    edge_key[3] = Box::new(move |i| {
+                        let from_vk = half - i;
+                        VertexKey::Edge(e_prev, canonical(vk, vprev, from_vk, r_prev))
+                    });
+                    [
+                        VertexKey::Cage(vk),
+                        VertexKey::Edge(e_next, r_next / 2),
+                        VertexKey::Centre(fi),
+                        VertexKey::Edge(e_prev, r_prev / 2),
+                    ]
+                };
+                for &r in &rates {
+                    min_rate = min_rate.min(r);
+                    max_rate = max_rate.max(r);
+                }
+                let t = tessellate_quad(rates);
+                let mut local = Vec::with_capacity(t.points.len());
+                for (uv, key) in t.points.iter().zip(&t.keys) {
+                    let key = match *key {
+                        PointKey::Corner(c) => Some(corner_key[c as usize]),
+                        PointKey::Edge { edge, i } => Some(edge_key[edge as usize](i)),
+                        PointKey::Interior => None,
+                    };
+                    local.push(emit(
+                        key,
+                        ptex,
+                        *uv,
+                        &mut out_points,
+                        &mut out_normals,
+                        &mut out_uvs,
+                    )?);
+                }
+                // The chart once per point of this Ptex face: a seam vertex
+                // shared with a face on the chart's other side takes this
+                // side's value.
+                let fv_first = fv_values.len() as i32;
+                if fvar_values.is_some() {
+                    for uv in &t.points {
+                        fv_values.push(eval_fvar(ptex, uv[0], uv[1]).unwrap_or([0.0, 0.0]));
+                    }
+                }
+                for (k, tri) in t.tris.iter().enumerate() {
+                    let [a, b, c] = tri.map(|c| {
+                        let p = out_points[local[c as usize] as usize];
+                        Vec3A::new(p.x, p.y, p.z)
+                    });
+                    quality[usize::from(k >= t.stitched_from)]
+                        [quality_bin(triangle_quality(a, b, c))] += 1;
+                    for &c in tri {
+                        out_indices.push(local[c as usize] as i32);
+                        if fvar_values.is_some() {
+                            fv_indices.push(fv_first + c as i32);
+                        }
+                    }
+                    base_face.push((n == 4).then_some(f as u32));
+                    corner_uvs.push(tri.map(|c| t.points[c as usize]));
+                }
+            }
+        }
+    }
+
+    // --- Unselected faces: the smooth cage --------------------------------
+    if selected_faces.len() < n_faces {
+        let cage_normals = smooth_cage_normals(points, counts, indices)
+            .ok_or_else(|| SubdivError::BadTopology("cage normals".into()))?;
+        let corner_param = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for f in (0..n_faces).filter(|&f| !selected[f]) {
+            let fv = face_verts(f);
+            let n = fv.len();
+            // The face's boundary, corner by corner and along each edge's
+            // points, with its Ptex coordinate (quads) and chart value.
+            let mut ring: Vec<RingPoint> = Vec::new();
+            let chart_at = |k: usize| -> [f32; 2] {
+                chart.map_or([0.0, 0.0], |c| c.values[c.value_index(starts[f] + k)])
+            };
+            for k in 0..n {
+                let (a, b) = (fv[k], fv[(k + 1) % n]);
+                let v = match vertex_of.get(&VertexKey::Cage(a)) {
+                    Some(&v) => v,
+                    None => {
+                        let v = out_points.len() as u32;
+                        out_points.push(points[a as usize]);
+                        out_normals.push(cage_normals[a as usize]);
+                        if let Some(c) = vertex_chart {
+                            out_uvs.push(c.values[c.value_index(a as usize)]);
+                        }
+                        vertex_of.insert(VertexKey::Cage(a), v);
+                        v
+                    }
+                };
+                let (pa, pb) = if n == 4 {
+                    (corner_param[k], corner_param[(k + 1) % 4])
+                } else {
+                    ([0.0, 0.0], [0.0, 0.0])
+                };
+                let (ca, cb) = (chart_at(k), chart_at((k + 1) % n));
+                ring.push((v, pa, ca));
+                // An edge point here was placed by a selected neighbour (a
+                // midpoint its `n`-gon forced): use it, or the faces would
+                // meet at a T-junction.
+                let (id, r) = rate_of(a, b);
+                for i in 1..r {
+                    let s = i as f32 / r as f32;
+                    let key = VertexKey::Edge(id, canonical(a, b, i, r));
+                    let v = match vertex_of.get(&key) {
+                        Some(&v) => v,
+                        None => {
+                            // Not reached: an edge above rate 1 has a selected
+                            // face. Placed on the cage edge all the same.
+                            let (p, q) = (points[a as usize], points[b as usize]);
+                            let v = out_points.len() as u32;
+                            out_points.push(Vec3f {
+                                x: p.x + (q.x - p.x) * s,
+                                y: p.y + (q.y - p.y) * s,
+                                z: p.z + (q.z - p.z) * s,
+                            });
+                            let (na, nb) = (cage_normals[a as usize], cage_normals[b as usize]);
+                            out_normals.push(
+                                Vec3A::from(na)
+                                    .lerp(Vec3A::from(nb), s)
+                                    .normalize_or_zero()
+                                    .to_array(),
+                            );
+                            if let Some(c) = vertex_chart {
+                                let (ua, ub) = (
+                                    c.values[c.value_index(a as usize)],
+                                    c.values[c.value_index(b as usize)],
+                                );
+                                out_uvs.push([
+                                    ua[0] + (ub[0] - ua[0]) * s,
+                                    ua[1] + (ub[1] - ua[1]) * s,
+                                ]);
+                            }
+                            vertex_of.insert(key, v);
+                            v
+                        }
+                    };
+                    let lerp2 = |x: [f32; 2], y: [f32; 2]| {
+                        [x[0] + (y[0] - x[0]) * s, x[1] + (y[1] - x[1]) * s]
+                    };
+                    ring.push((v, lerp2(pa, pb), lerp2(ca, cb)));
+                }
+            }
+            min_rate = min_rate.min(1);
+            max_rate = max_rate.max(1);
+            let mut push_tri = |tri: [&RingPoint; 3],
+                                out_indices: &mut Vec<i32>,
+                                fv_values: &mut Vec<[f32; 2]>,
+                                fv_indices: &mut Vec<i32>| {
+                for c in tri {
+                    out_indices.push(c.0 as i32);
+                    if chart.is_some() {
+                        fv_indices.push(fv_values.len() as i32);
+                        fv_values.push(c.2);
+                    }
+                }
+                base_face.push((n == 4).then_some(f as u32));
+                corner_uvs.push(tri.map(|c| c.1));
+            };
+            if ring.len() == n {
+                // The cage polygon, fanned from its first corner as the
+                // importer triangulates.
+                for k in 1..n - 1 {
+                    push_tri(
+                        [&ring[0], &ring[k], &ring[k + 1]],
+                        &mut out_indices,
+                        &mut fv_values,
+                        &mut fv_indices,
+                    );
+                }
+            } else {
+                // Edge points on the boundary: fan from the cage centroid.
+                let m = ring.len() as f32;
+                let centre_p = fv.iter().fold(Vec3A::ZERO, |acc, &v| {
+                    let p = points[v as usize];
+                    acc + Vec3A::new(p.x, p.y, p.z)
+                }) / n as f32;
+                let centre_n = fv
+                    .iter()
+                    .fold(Vec3A::ZERO, |acc, &v| {
+                        acc + Vec3A::from(cage_normals[v as usize])
+                    })
+                    .normalize_or_zero();
+                let c = out_points.len() as u32;
+                out_points.push(Vec3f {
+                    x: centre_p.x,
+                    y: centre_p.y,
+                    z: centre_p.z,
+                });
+                out_normals.push(centre_n.to_array());
+                if let Some(ch) = vertex_chart {
+                    let mut uv = [0.0f32, 0.0];
+                    for &v in fv {
+                        let x = ch.values[ch.value_index(v as usize)];
+                        uv[0] += x[0] / n as f32;
+                        uv[1] += x[1] / n as f32;
+                    }
+                    out_uvs.push(uv);
+                }
+                let avg = |pick: fn(&RingPoint) -> [f32; 2]| {
+                    let mut a = [0.0f32, 0.0];
+                    for r in &ring {
+                        let x = pick(r);
+                        a[0] += x[0] / m;
+                        a[1] += x[1] / m;
+                    }
+                    a
+                };
+                let centre = (
+                    c,
+                    if n == 4 { [0.5, 0.5] } else { [0.0, 0.0] },
+                    avg(|r| r.2),
+                );
+                for k in 0..ring.len() {
+                    let next = &ring[(k + 1) % ring.len()];
+                    push_tri(
+                        [&centre, &ring[k], next],
+                        &mut out_indices,
+                        &mut fv_values,
+                        &mut fv_indices,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(TessellatedMesh {
+        points: out_points,
+        indices: out_indices,
+        normals: out_normals,
+        faces: req.want_face_uvs.then_some(TessellatedFaces {
+            base_face,
+            corner_uvs,
+        }),
+        uvs: vertex_chart.is_some().then_some(out_uvs),
+        face_varying_uvs: chart.is_some().then_some((fv_values, fv_indices)),
+        rate_range: (min_rate.min(max_rate), max_rate),
+        rate_bins,
+        ptex_faces,
+        quality,
+    })
+}
+
+fn base_point(points: &[Vec3f], v: u32) -> [f32; 3] {
+    let p = points[v as usize];
+    [p.x, p.y, p.z]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +1307,334 @@ mod tests {
             corner_sharpnesses: &[],
             want_face_uvs: false,
             uvs: None,
+        }
+    }
+
+    // --- Per-face adaptive tessellation -----------------------------------
+
+    /// Every undirected edge of a closed tessellation, used once each way.
+    fn assert_closed_and_consistent(indices: &[i32], what: &str) {
+        let mut directed = std::collections::HashMap::<(i32, i32), u32>::new();
+        for t in indices.chunks(3) {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *directed.entry((a, b)).or_default() += 1;
+            }
+        }
+        for (&(a, b), &n) in &directed {
+            assert_eq!(n, 1, "{what}: edge {a}->{b} used {n} times");
+            assert!(
+                directed.contains_key(&(b, a)),
+                "{what}: edge {a}->{b} has no twin: a crack or a winding flip"
+            );
+        }
+    }
+
+    /// A segment-size closure giving every segment `rate` segments, whatever
+    /// its length (`rate − 0.5` rounds up to `rate`).
+    fn constant(rate: u32) -> impl Fn(&[[f32; 3]]) -> f32 {
+        move |_| rate as f32 - 0.5
+    }
+
+    /// Rates that vary across the mesh, from each segment's first point: 1 to
+    /// 7 segments, so neighbouring faces disagree on their other edges.
+    fn mixed(p: &[[f32; 3]]) -> f32 {
+        let h = (p[0][0] * 3.1 + p[0][1] * 1.7 + p[0][2] * 2.3).abs();
+        (h * 10.0) % 7.0 + 0.5
+    }
+
+    /// A pentagonal prism: two pentagons and five quads, closed.
+    fn prism() -> (Vec<Vec3f>, Vec<i32>, Vec<i32>) {
+        let mut points = Vec::new();
+        for z in [-1.0f32, 1.0] {
+            for k in 0..5 {
+                let a = k as f32 * std::f32::consts::TAU / 5.0;
+                points.push(Vec3f::from([a.cos(), a.sin(), z]));
+            }
+        }
+        let mut counts = vec![5, 5];
+        let mut indices = vec![4, 3, 2, 1, 0, 5, 6, 7, 8, 9];
+        for k in 0..5 {
+            let k1 = (k + 1) % 5;
+            counts.push(4);
+            indices.extend_from_slice(&[k, k1, 5 + k1, 5 + k]);
+        }
+        (points, counts, indices)
+    }
+
+    #[test]
+    fn a_closed_cage_tessellates_closed_at_mixed_rates() {
+        for (name, (points, counts, indices)) in [("cube", cube()), ("prism", prism())] {
+            for max in [1u32, 2, 3] {
+                let t = tessellate_adaptive(&points, &counts, &indices, &request(0), max, &mixed)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_closed_and_consistent(&t.indices, &format!("{name} at max {max}"));
+                if max == 3 {
+                    assert!(t.rate_range.0 < t.rate_range.1, "{name}: rates should vary");
+                }
+            }
+            let t = tessellate_adaptive(&points, &counts, &indices, &request(0), 3, &constant(1))
+                .unwrap();
+            assert_closed_and_consistent(&t.indices, &format!("{name} at rate 1"));
+        }
+    }
+
+    /// A face whose every edge is split once is not refined at all: it renders
+    /// its cage, smooth-shaded, as level 0 does — and no patch is built for it.
+    #[test]
+    fn rate_one_faces_render_their_smooth_cage() {
+        let (points, counts, indices) = cube();
+        let t =
+            tessellate_adaptive(&points, &counts, &indices, &request(0), 3, &constant(1)).unwrap();
+        assert_eq!(t.points.len(), 8, "one vertex per cage corner");
+        assert_eq!(t.indices.len(), 6 * 2 * 3);
+        // The cage's own positions and level 0's smooth normals, in whatever
+        // order the faces emitted them.
+        let smooth = smooth_cage_normals(&points, &counts, &indices).unwrap();
+        for (p, n) in t.points.iter().zip(&t.normals) {
+            let k = points.iter().position(|q| q == p).expect("a cage position");
+            assert_eq!(*n, smooth[k], "the smooth cage normal at {p:?}");
+        }
+    }
+
+    /// The limit points of uniform level `level`, as a list.
+    fn uniform_points(
+        points: &[Vec3f],
+        counts: &[i32],
+        indices: &[i32],
+        level: u32,
+    ) -> Vec<[f32; 3]> {
+        let m = subdivide(points, counts, indices, &request(level)).unwrap();
+        m.points.iter().map(|p| [p.x, p.y, p.z]).collect()
+    }
+
+    /// For each point, the distance to the nearest of `to`.
+    fn worst_distance(from: &[Vec3f], to: &[[f32; 3]]) -> f32 {
+        from.iter()
+            .map(|p| {
+                to.iter()
+                    .map(|q| Vec3A::new(p.x - q[0], p.y - q[1], p.z - q[2]).length())
+                    .fold(f32::MAX, f32::min)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// Where a refined face meets a face left at its cage, the surface stays
+    /// closed: the shared corners take the refined face's limit points, and an
+    /// edge point a refined `n`-gon forced is used by its unrefined neighbour.
+    #[test]
+    fn refined_and_cage_faces_meet_closed() {
+        // Only edges touching the +X side are rated above 1.
+        let near_x = |p: &[[f32; 3]]| {
+            if p[0][0] > 0.5 && p[1][0] > 0.5 {
+                5.5
+            } else {
+                0.5
+            }
+        };
+        for (name, (points, counts, indices)) in [("cube", cube()), ("prism", prism())] {
+            let t = tessellate_adaptive(&points, &counts, &indices, &request(0), 3, &near_x)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_closed_and_consistent(&t.indices, &format!("{name}, partly refined"));
+            assert!(t.rate_range.1 > 1, "{name}: some face is refined");
+            let all = tessellate_adaptive(&points, &counts, &indices, &request(0), 3, &constant(6))
+                .unwrap();
+            assert!(
+                t.indices.len() < all.indices.len(),
+                "{name}: the faces left at their cage cost fewer triangles"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uniform_rate_is_uniform_refinement_on_regular_faces() {
+        // A 6×6 grid of quads with a bump: interior faces are regular.
+        let g = 6;
+        let mut points = Vec::new();
+        for j in 0..=g {
+            for i in 0..=g {
+                let (x, y) = (i as f32, j as f32);
+                points.push(Vec3f::from([
+                    x,
+                    y,
+                    ((x * 0.9).sin() * (y * 0.7).cos()) * 0.5,
+                ]));
+            }
+        }
+        let mut counts = Vec::new();
+        let mut indices = Vec::new();
+        for j in 0..g {
+            for i in 0..g {
+                let a = j * (g + 1) + i;
+                counts.push(4);
+                indices.extend_from_slice(&[a, a + 1, a + g + 2, a + g + 1]);
+            }
+        }
+        for level in [1u32, 2, 3] {
+            let t = tessellate_adaptive(
+                &points,
+                &counts,
+                &indices,
+                &request(0),
+                level,
+                &constant(1 << level),
+            )
+            .unwrap();
+            let uniform = uniform_points(&points, &counts, &indices, level);
+            assert_eq!(t.points.len(), uniform.len(), "level {level}: vertex count");
+            let d = worst_distance(&t.points, &uniform);
+            assert!(
+                d < 1e-4,
+                "level {level}: a vertex is {d} from the uniform limit"
+            );
+        }
+    }
+
+    #[test]
+    fn near_extraordinary_vertices_the_patches_approximate_the_limit() {
+        // (The bound below and ADAPTIVE_ISOLATION's doc are the measurement.)
+        let (points, counts, indices) = cube();
+        for level in [1u32, 2, 3] {
+            let t = tessellate_adaptive(
+                &points,
+                &counts,
+                &indices,
+                &request(0),
+                level,
+                &constant(1 << level),
+            )
+            .unwrap();
+            let uniform = uniform_points(&points, &counts, &indices, level);
+            assert_eq!(t.points.len(), uniform.len());
+            let d = worst_distance(&t.points, &uniform);
+            // Measured and pinned: the cube is all extraordinary corners, the
+            // Gregory patches' worst case. Down to the isolation depth the
+            // samples are refined vertices, exact limit points; below it the
+            // Gregory patches approximate the limit (see ADAPTIVE_ISOLATION).
+            let bound = if level as usize <= ADAPTIVE_ISOLATION {
+                1e-6
+            } else {
+                0.03
+            };
+            assert!(d < bound, "level {level}: {d}");
+        }
+    }
+
+    #[test]
+    fn ptex_corners_land_on_their_vertices() {
+        let (points, counts, indices) = cube();
+        let req = SubdivRequest {
+            want_face_uvs: true,
+            ..request(0)
+        };
+        let t = tessellate_adaptive(&points, &counts, &indices, &req, 3, &mixed).unwrap();
+        let faces = t.faces.as_ref().expect("face table");
+        assert_eq!(faces.base_face.len() * 3, t.indices.len());
+        // Re-evaluate each corner through the patch table of its own face: it
+        // must be the vertex the triangle indexes.
+        let (counts_us, indices_u32) = validate_cage(points.len(), &counts, &indices).unwrap();
+        let descriptor = TopologyDescriptor::new(points.len(), &counts_us, &indices_u32);
+        let mut refiner = TopologyRefinerFactory::create(
+            descriptor,
+            sdc::SchemeType::Catmark,
+            sdc::Options::default()
+                .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::EdgeAndCorner),
+        )
+        .unwrap();
+        let mut adaptive = opensubdiv_rs::far::AdaptiveOptions::new(ADAPTIVE_ISOLATION);
+        adaptive.use_single_crease_patch = true;
+        refiner.refine_adaptive(adaptive);
+        let table = opensubdiv_rs::far::PatchTableFactory::create(&refiner).unwrap();
+        let map = opensubdiv_rs::far::PatchMap::new(&table);
+        let primvar = PrimvarRefiner::new(&refiner);
+        let mut control: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let mut vals = control.clone();
+        for l in 1..=refiner.max_level() {
+            let mut r = vec![[0.0f32; 3]; refiner.level(l).num_vertices()];
+            primvar.interpolate(l, &vals, &mut r);
+            control.extend_from_slice(&r);
+            vals = r;
+        }
+        let mut worst = 0.0f32;
+        for (tri, (face, corners)) in t
+            .indices
+            .chunks(3)
+            .zip(faces.base_face.iter().zip(&faces.corner_uvs))
+        {
+            let face = face.expect("every cube face is a quad") as usize;
+            let ptex = table.ptex_indices().face_id(face) as usize;
+            for (&v, uv) in tri.iter().zip(corners) {
+                let patch = map.find_patch(ptex, uv[0], uv[1]).unwrap();
+                let (p, _, _) = table.evaluate(patch, uv[0], uv[1], &control);
+                let q = t.points[v as usize];
+                worst = worst.max(Vec3A::new(p[0] - q.x, p[1] - q.y, p[2] - q.z).length());
+            }
+        }
+        assert!(worst < 1e-5, "a Ptex corner is {worst} off its vertex");
+    }
+
+    /// A face-varying chart giving every cube face its own unit square (every
+    /// edge a seam): each triangle corner's UV is its own Ptex coordinate,
+    /// whichever face shares the vertex — at mixed rates, where a shared seam
+    /// vertex would otherwise take the other side's value.
+    #[test]
+    fn a_seamed_face_varying_chart_keeps_each_side() {
+        let (points, counts, indices) = cube();
+        let square = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let values: Vec<[f32; 2]> = (0..6).flat_map(|_| square).collect();
+        let chart_indices: Vec<i32> = (0..24).collect();
+        for linear in [
+            sdc::FVarLinearInterpolation::All,
+            sdc::FVarLinearInterpolation::Boundaries,
+        ] {
+            let req = SubdivRequest {
+                want_face_uvs: true,
+                uvs: Some(UvChannel {
+                    values: &values,
+                    indices: Some(&chart_indices),
+                    face_varying: true,
+                    linear,
+                }),
+                ..request(0)
+            };
+            let t = tessellate_adaptive(&points, &counts, &indices, &req, 3, &mixed).unwrap();
+            let (fv, corners) = t.face_varying_uvs.as_ref().expect("a face-varying chart");
+            let ptex = t.faces.as_ref().unwrap();
+            assert_eq!(corners.len(), t.indices.len());
+            let mut worst = 0.0f32;
+            for (k, &c) in corners.iter().enumerate() {
+                let want = ptex.corner_uvs[k / 3][k % 3];
+                let got = fv[c as usize];
+                worst = worst.max((got[0] - want[0]).abs().max((got[1] - want[1]).abs()));
+            }
+            // The chart is affine on each face, so even a smooth rule
+            // reproduces it.
+            assert!(
+                worst < 1e-5,
+                "{linear:?}: a corner's UV is {worst} off its Ptex coordinate"
+            );
+        }
+    }
+
+    #[test]
+    fn triangle_quality_is_one_for_equilateral_and_falls_for_slivers() {
+        let (a, b) = (Vec3A::ZERO, Vec3A::X);
+        let apex = Vec3A::new(0.5, 3f32.sqrt() / 2.0, 0.0);
+        assert!((triangle_quality(a, b, apex) - 1.0).abs() < 1e-5);
+        assert!(triangle_quality(a, b, Vec3A::new(0.5, 0.01, 0.0)) < 0.05);
+        assert_eq!(triangle_quality(a, a, a), 0.0);
+        assert_eq!(quality_bin(1.0), 0);
+        assert_eq!(quality_bin(0.005), 4);
+    }
+
+    #[test]
+    fn normals_point_out_of_a_closed_surface() {
+        for (name, (points, counts, indices)) in [("cube", cube()), ("prism", prism())] {
+            let t =
+                tessellate_adaptive(&points, &counts, &indices, &request(0), 2, &mixed).unwrap();
+            for (p, n) in t.points.iter().zip(&t.normals) {
+                let out = Vec3A::new(p.x, p.y, p.z).dot(Vec3A::from(*n));
+                assert!(out > 0.0, "{name}: normal {n:?} at {p:?} points inward");
+            }
         }
     }
 

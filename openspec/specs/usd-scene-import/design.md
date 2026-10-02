@@ -204,42 +204,79 @@ Schema mapping:
     - **Direct meshes** are levelled in `mesh_source` from the prim's world transform
       and cage box (`MeshPlace::World`); `MeshKey` hashes the refined arrays, so equal
       levels still share and unequal ones cannot collide.
-    - **Prototypes are cached per rate bucket**, `q = ceil(log2(s · f_px / d))`; the
-      caches are keyed `(epoch, path, q)`, and a mesh inside is levelled at `2^q`
-      times its prototype-relative stretch (`MeshPlace::Prototype`), never less than
-      the placement's exact rate asks. `prototype_survey` walks a prototype's cages
-      once per epoch for two things the build needs first: their **box**, which
-      bounds every version (a refined surface stays in its cage's hull) and does not
-      depend on which placement is met first — a box from the first build would; and
-      the **bucket range** where any level changes (`ScreenRate::level_range`, one
-      bucket of margin each side). Buckets clamp into it (`QRange::canonical`), and a
-      prototype with no subdivision mesh has no range, so all its placements share
-      one version. PointInstancer placements are bucketed before any version is
-      built; native instances bucket on their own. A **nested scatter** composes its
-      placement's stretch into the enclosing bucket: `ceil(log2(2^q · s)) = q + ceil(log2 s)`
-      exactly, which is also how the survey shifts an inner range. In uniform mode
-      every bucket is 0 and every prototype is still built for every target, so the
-      output and the logs are unchanged (all 30 goldens bit-identical).
-    - **Reported** by `--stats` (`adaptive subdivision`, `subdivision levels` per mesh
-      read, `prototype versions`), one INFO line, and a DEBUG line per refined mesh.
-    - **Measured** (2026-10-01, Ptex streamed, under a 56 GiB guard):
+    - **Only unshared geometry is adaptive** (`per-face-adaptive-tessellation`):
+      a direct mesh prim, a native instance whose prototype has no other placement in
+      its top-level subtree, and a `PointInstancer` prototype placed once are rated
+      through their world transform (`MeshPlace::World`, `ProtoPlace::Unshared`);
+      every other prototype is *shared* and refined to the uniform level (the level
+      setting when given, else 0), whatever its distance (`MeshPlace::Shared`). This is
+      MoonRay's rule (`GeometryManager.cc` sets the adaptive error of shared
+      primitives to 0); Cycles likewise dices only single-user meshes in world space.
+      Placements are counted per top-level subtree in every import mode
+      (`count_placements`, `subtree_roots`) because prototype paths are renumbered per
+      streamed stage — a whole-stage count would let streaming change the result.
+      - **Trap: what was replaced.** `adaptive-subdivision` built one prototype version
+        per rate bucket at the placement's distance. Every island element is
+        `instanceable` with its geometry under a payload, so its kilometre-wide terrain
+        arrived as prototypes placed once and was refined whole: killed past 56 GiB
+        at 2 px. The buckets, the prototype survey and the `prototype versions` stat
+        are gone; the shared caches are keyed `(epoch, path)` again.
+    - **Per-face tessellation** (`scene/tessellate.rs`, `subdiv::tessellate_adaptive`,
+      `CRUST_ADAPTIVE_PER_FACE`, default on): an unshared Catmull-Clark or bilinear mesh
+      is cut per Ptex face, every cage edge into `clamp(ceil(ℓ · σ / t), 1, 2^max)`
+      segments from its own cage chord and distance, decided once per edge so the two
+      faces sharing it agree; interiors are gridded and stitched to their edges by the
+      shorter diagonal; corners and edge points are evaluated once on the limit
+      surface (patch table, `du × dv` normals) and shared. A face whose edges are all
+      rated 1 is not refined: it renders its smooth cage, as level 0 does and as
+      MoonRay does with a factor-0 face, and only faces with a finer edge are refined
+      and patched (`refine_adaptive_selected`, `create_with_options_selected`,
+      opensubdiv-rs 0.5.0). Ptex triangles carry explicit corners (`FaceMap::corners`);
+      a face-varying chart is evaluated with face-varying patches, per triangle corner
+      in its own Ptex face so seams keep each side. A `loop` mesh keeps the per-mesh
+      level. Geometry wholly out of the camera's view is split once
+      (`adaptive::Frustum`, `CRUST_ADAPTIVE_FRUSTUM`). Isolation depth 1
+      (`subdiv::ADAPTIVE_ISOLATION`): exact down to it, Gregory patches below.
+      - **Trap: an all-triangle cage is irregular everywhere.** Every split triangle's
+        centre is a valence-3 vertex, so isolating to depth `d` refines every face `d`
+        times: at depth 3 the island ocean's 684 416-triangle cage cost a 19.9 GiB
+        transient (5.8 GiB at 1), and its patches were Gregory caps at 2.7 KB each
+        until opensubdiv-rs 0.4.0 (1.0 KB).
+      - **Trap: four side planes do not bound a view pyramid.** They all meet at the
+        eye, so a box behind the camera passes each with a different corner; the
+        frustum also tests the eye plane facing forward.
+      - **Trap: the even rule cascades.** An `n`-gon's Ptex quads need its edges split
+        at the midpoint; rounding every `n`-gon's edges up to even selects every face
+        of an all-triangle cage. Only *selected* `n`-gons force it, and an unselected
+        neighbour that gets such a midpoint is fanned from its centroid.
+      - **Trap: guard the renderer, not its shell.** A memory guard that `pgrep`s the
+        command line matched the wrapping shell, never fired, and let the kernel's
+        OOM killer end a run silently; guard the PID the shell started (`$!`).
+    - **Reported** by `--stats` (`adaptive subdivision`, `subdivision levels` per
+      per-mesh read, `shared meshes N at level L`, `per-face meshes N (fallback: M)`,
+      `edge rates`), one INFO line, a DEBUG line per refined mesh, and one DEBUG line
+      of triangle shapes (`4√3·area / Σ edge²`, interior against stitched).
+    - **Measured** (Ptex streamed, under a 56 GiB guard):
 
       | | triangles | kernel | peak | Traverse prims |
       |---|---|---|---|---|
       | island, uniform L0 | 60.9 M | 13.52 GiB | 23.79 GiB | 2:37 |
-      | island, adaptive 2 px, max 3 / 4 px, max 3 / 2 px, max 2 | — | — | killed > 56 GiB | — |
-      | island, adaptive 2 px, max 1 | 187.2 M | 27.75 GiB | 38.47 GiB | 6:01 |
       | island, uniform L1 | 274.7 M | 36.59 GiB | 51.07 GiB | 6:41 |
+      | island, per-mesh 2 px (max 3, 2) | — | — | killed > 56 GiB | — |
+      | island, per-mesh 2 px, max 1 | 187.2 M | 27.75 GiB | 38.47 GiB | 6:01 |
+      | **island, per-face 2 px, max 3** | **63.6 M** | **13.83 GiB** | **24.70 GiB** | **3:25** |
       | ALab 1004, uniform L1 | 81.8 M | 10.47 GiB | 36.86 GiB | 4:04 |
-      | ALab 1004, adaptive 2 px, max 3 | 74.2 M | 9.28 GiB | 35.67 GiB | 3:26 |
+      | ALab 1004, per-mesh 2 px, max 3 | 74.2 M | 9.28 GiB | 35.67 GiB | 3:26 |
+      | **ALab 1004, per-face 2 px, max 3** | **22.8 M** | **3.97 GiB** | **29.46 GiB** | **2:58** |
 
-      ALab is the case the design was for: L0 4 678 · L1 444 · L2 272 · L3 240 mesh
-      reads, more detail near the camera than uniform L1 gives anywhere, for less
-      memory. The island is the case it is not: its terrain and beach meshes are
-      kilometres wide and pass close to `shotCam`, and a per-mesh level refines all
-      of each — at max 1 only 5 285 of 188 959 reads refine, yet they hold most of
-      the extra triangles. Render it with `--subdiv-level 1` as the ceiling. At
-      640×360 / 4 spp the capped island is indistinguishable from L0 by eye.
+      The island: 32 589 per-face meshes (edge rates 1: 48.7 M · 2: 89 k · 3–4: 59 k ·
+      5–8: 63 k), 86 682 shared meshes at level 0, within 1 GiB of uniform L0's peak.
+      ALab: 5 242 per-face meshes, 381 shared, under uniform L1's memory with more
+      detail near the camera than L1 gives anywhere.
+      Render speed is unchanged: at `--subdiv-level 1` (where both fit), interleaved,
+      per-face Render 3.631 / 3.736 s (min / mean) against per-mesh 3.752 / 3.789 s.
+      Stitched triangles are shaped like the interior grids' (1.2% below a quality of
+      0.1 against 0.8%), so the BVH sees no sliver population.
   - The per-prim `crust:subdivisionLevel` this replaced is read only to warn — once per
     load (`SubdivPolicy::legacy_warned`), since a per-prim warning would scale with
     the scene.
@@ -602,18 +639,22 @@ of the camera seeing the HDRI instead of the backdrop.
 
 ## Known gaps: adaptive subdivision
 
-- **One level per mesh.** A large mesh near the camera is refined everywhere, its far
-  end included: this is what keeps the Moana island to a ceiling of 1. Per-face
-  (feature-adaptive) refinement with crack-free transitions inside a mesh is the fix,
-  and is not implemented.
-- **No frustum term.** Off-screen geometry is levelled by distance alone, on purpose
-  (it still reflects and shadows), so a mesh behind the camera costs as much as one in
-  front.
+- **Shared geometry never gains detail.** A prototype placed more than once in its
+  subtree takes the uniform level whatever its distance; `--subdiv-level` raises all of
+  them (MoonRay's `mesh_resolution` trade).
+- **Unrefined faces render their cage.** Far and out-of-view faces sit on their cage,
+  not the limit surface, and a face between a refined and an unrefined neighbour mixes
+  limit and cage corners; its chart is interpolated linearly.
+- **Out-of-view geometry is coarse in reflections and shadows.** The frustum cuts it to
+  its cage; `CRUST_ADAPTIVE_FRUSTUM=0` rates by distance alone.
+- **No Loop tessellation.** A `loop` mesh keeps the per-mesh level.
+- **Gregory patches below the isolation depth** approximate the limit next to
+  extraordinary vertices (within 0.9% of an edge on the worst-case cube).
 - **Cracks between meshes.** Two separate meshes meeting at a boundary can be refined
-  to different levels, exactly as two separately refined meshes always could.
-- **Level popping across frames.** Each frame imports at its own camera, so in a
-  sequence a mesh can change level between frames.
-- **The level ignores motion.** It is chosen at the camera's and the placement's
+  differently, exactly as two separately refined meshes always could.
+- **Level popping across frames.** Each frame imports at its own camera; there is no
+  dicing reference camera.
+- **The rate ignores motion.** It is chosen at the camera's and the placement's
   shutter-open transforms.
 
 ## Known gaps: openusd bugs and workarounds

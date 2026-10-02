@@ -444,6 +444,39 @@ default ceiling of 3 it holds 74.2 M triangles against uniform level 1's 81.8 M,
 against 10.47 GiB of kernel and peaks at 35.67 against 36.86 GiB, while 240 meshes near
 the camera get level 3.
 
+### Per-face tessellation
+
+Measured 2026-10-02 for `per-face-adaptive-tessellation` on opensubdiv-rs 0.5.0, same
+setup. Each cage edge of *unshared* geometry is cut by its own size on screen; prototypes
+placed more than once stay at the uniform level; faces whose edges all need one segment,
+and faces out of view, keep their cage; patches are built only for the refined faces.
+
+| `--subdiv-edge-length 2` | triangles | kernel | peak RSS | Traverse prims |
+|---|---|---|---|---|
+| per-mesh, ceiling 3 or 2 | | | killed > 56 GiB | |
+| per-mesh, ceiling 1 | 187.2 M | 27.75 GiB | 38.47 GiB | 6:01 |
+| **per-face, ceiling 3 (default)** | **63.6 M** | **13.83 GiB** | **24.70 GiB** | **3:25** |
+
+- **Within 1 GiB of uniform level 0's peak**, with 32 589 meshes cut per face (edges at
+  rate 1: 48.7 M · 2: 89 k · 3–4: 59 k · 5–8: 63 k) and 86 682 shared vegetation meshes
+  at level 0.
+- **What it took**, each found by the run before: shared prototypes at the uniform level
+  (the terrain elements are `instanceable` but placed once, so they count as unshared);
+  isolation depth 1 (the ocean is an all-triangle cage, irregular everywhere: 19.9 GiB
+  at depth 3); a frustum term (`ocean_geo1` 31.2 M → 4.1 M triangles); compact patch
+  storage and face-varying patches (opensubdiv-rs 0.4.0); and patches for refined faces
+  only (0.5.0) — `ocean_geo`, about 14.9 M triangles, would otherwise need about 45 M
+  Gregory patches.
+- **Speed**, both at `--subdiv-edge-length 2 --subdiv-level 1 -s 16`, alternating, two
+  runs each: per-face Render 3.631 / 3.736 s (min / mean) against per-mesh 3.752 /
+  3.789 s, within noise; Traverse 4:27 against 5:20; peak 30.9 against 39.0 GiB.
+- **Triangle shapes** of the 3.02 M refined triangles (`4√3·area / Σ edge²`): stitched
+  rings 19% ≥ 0.9, 69% ≥ 0.5, 10.3% ≥ 0.1, 1.2% ≥ 0.01, 6 below; the interior grids
+  21%, 71%, 7.3%, 0.8%, none below. Stitching costs little shape.
+- **ALab** at the same settings: 22.8 M triangles, 3.97 GiB of kernel, 29.46 GiB peak,
+  Traverse 2:58 — under uniform level 1's 81.8 M / 10.47 / 36.86, with all 5 242 unshared
+  meshes cut per face (their face-varying charts evaluated on the patches).
+
 ## Tooling added for this
 
 - `traversal-stats` now also counts descents per top-level instance
