@@ -242,6 +242,28 @@ pub trait Material: Send + Sync {
         1.0
     }
 
+    /// Whether this material is a **medium boundary**: a volume-only
+    /// material (a USD `Material` whose only terminal is `volume`, a MaterialX
+    /// `volumematerial`) that scatters nothing at its surface. A path crosses
+    /// it untouched — no vertex, no depth — entering
+    /// [`Material::boundary_medium`] through a front face and leaving it
+    /// through a back one, and a shadow ray crosses it the same way, paying
+    /// the interior's transmittance. Known when the material is built; the
+    /// world counts these at commit ([`crate::World::has_medium_boundaries`]).
+    ///
+    /// Typhoon's `IsVolumeOnlyBoundary`. A boundary is never shaded: nothing
+    /// asks it to scatter, evaluate or emit.
+    fn is_medium_boundary(&self) -> bool {
+        false
+    }
+
+    /// The medium inside a medium boundary at a hit, `None` for vacuum.
+    /// Only asked when [`Material::is_medium_boundary`] says so.
+    fn boundary_medium(&self, r_in: &Ray, rec: &HitRecord) -> Option<crate::medium::Medium> {
+        let _ = (r_in, rec);
+        None
+    }
+
     /// Returns the emitted color of the material.
     ///
     /// This method is used for materials that emit light, such as light sources.

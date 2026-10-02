@@ -29,7 +29,7 @@
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
-use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure};
+use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure, volume_medium};
 use crate::material::{Material, Resolution, ScatterSample};
 use crate::ray::Ray;
 use crust_mtlx::{Closures, Host, Program, ShadeCtx, Val};
@@ -60,6 +60,9 @@ pub struct MtlxMaterial {
     closures: Closures,
     /// The program for the surface's opacity alone, when it has one.
     presence: Option<Presence>,
+    /// A volume terminal with no surface: a medium boundary
+    /// ([`Material::is_medium_boundary`]).
+    volume_only: bool,
     /// Name of the material node, for diagnostics.
     pub name: String,
     /// The working colour space's luminance weights, which lobe selection
@@ -318,6 +321,19 @@ impl Material for MtlxMaterial {
             })
     }
 
+    fn is_medium_boundary(&self) -> bool {
+        self.volume_only
+    }
+
+    /// The volume terminal's medium at the hit: the whole program runs, but a
+    /// volume-only material's program is its volume network and nothing else.
+    fn boundary_medium(&self, r_in: &Ray, rec: &HitRecord) -> Option<crate::medium::Medium> {
+        if !self.volume_only {
+            return None;
+        }
+        self.with_slots(r_in, rec, |s| volume_medium(&self.closures, s))
+    }
+
     /// The surface's opacity, from its own slice of the program, clamped to
     /// [0, 1]; a non-finite value is opaque.
     fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {
@@ -463,7 +479,13 @@ pub fn load_in(
     host: &Host<'_>,
     luma: utils::Luma,
 ) -> Result<Loaded, MtlxError> {
-    let mut c = crust_mtlx::compile(path, material_node, host)?;
+    from_compiled(crust_mtlx::compile(path, material_node, host)?, luma)
+}
+
+/// Builds a material from an already-compiled MaterialX graph — a `.mtlx`'s
+/// ([`load_in`]) or a `UsdShade` network's, translated by the importer —
+/// selecting lobes by `luma` as [`load_in`] does.
+pub fn from_compiled(mut c: crust_mtlx::Compiled, luma: utils::Luma) -> Result<Loaded, MtlxError> {
     let leaves = c.closures.leaf_count();
     if leaves > MAX_LEAVES {
         return Err(MtlxError::Unsupported(format!(
@@ -526,6 +548,7 @@ pub fn load_in(
         program: c.program,
         closures: c.closures,
         presence,
+        volume_only: c.volume_only,
         name: c.root_name,
         luma,
     };

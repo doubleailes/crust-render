@@ -2,7 +2,7 @@
 title = "Volumes"
 description = "Homogeneous, procedural smoke and voxel-grid volumes with crust:volume:* attributes."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-02T08:00:00+00:00
 draft = false
 weight = 60
 sort_by = "weight"
@@ -39,8 +39,9 @@ def Cube "Fog"
 }
 ```
 
-Crust Render doesn't read `UsdVolVolume` or OpenVDB files. Volumes are only the three
-types on this page.
+Crust Render doesn't read `UsdVolVolume` or OpenVDB files. Volume regions are the three
+types on this page. A medium can also fill any closed mesh through its material's `volume`
+terminal: see [Volume materials](@/docs/usd/materials.md#volume-materials).
 
 ## crust:volume:type
 

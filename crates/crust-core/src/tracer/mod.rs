@@ -831,10 +831,21 @@ impl Renderer {
         if AOV && let Some(planes) = work.aov.as_mut() {
             planes.pixel = p;
         }
-        if profiling {
-            self.advance_pixel::<true, AOV>(i, j, cfg, filter, gctx, work, scratch, st, target);
-        } else {
-            self.advance_pixel::<false, AOV>(i, j, cfg, filter, gctx, work, scratch, st, target);
+        // Monomorphised on medium boundaries too (`trace_path`'s `MEDIA`): a
+        // world without one runs an integrator with none of their branches.
+        match (profiling, self.world.has_medium_boundaries()) {
+            (true, false) => self.advance_pixel::<true, AOV, false>(
+                i, j, cfg, filter, gctx, work, scratch, st, target,
+            ),
+            (false, false) => self.advance_pixel::<false, AOV, false>(
+                i, j, cfg, filter, gctx, work, scratch, st, target,
+            ),
+            (true, true) => self.advance_pixel::<true, AOV, true>(
+                i, j, cfg, filter, gctx, work, scratch, st, target,
+            ),
+            (false, true) => self.advance_pixel::<false, AOV, true>(
+                i, j, cfg, filter, gctx, work, scratch, st, target,
+            ),
         }
     }
 
@@ -847,7 +858,7 @@ impl Renderer {
     /// planes (at the pixel `advance_dispatch` set), with the sample's own
     /// film offset and weight.
     #[allow(clippy::too_many_arguments)]
-    fn advance_pixel<const PROFILE: bool, const AOV: bool>(
+    fn advance_pixel<const PROFILE: bool, const AOV: bool, const MEDIA: bool>(
         &self,
         i: usize,
         j: usize,
@@ -938,7 +949,7 @@ impl Renderer {
             }
             drop(primary);
             unit.rays.camera_rays += 1;
-            let color = trace_path::<PROFILE, AOV>(
+            let color = trace_path::<PROFILE, AOV, MEDIA>(
                 &r,
                 &path_cx,
                 root,

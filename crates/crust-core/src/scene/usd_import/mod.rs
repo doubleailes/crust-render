@@ -23,6 +23,7 @@
 //! | [`light_links`] | `collection:lightLink`: lights that illuminate nothing      |
 //! | [`materials`]  | binding resolution, the material cache, shader dispatch      |
 //! | [`preview`]    | `UsdPreviewSurface` + `UsdUVTexture` networks                |
+//! | [`mtlx_network`] | inline MaterialX (`ND_*`) networks → crust-mtlx documents  |
 //! | [`volume`]     | `crust:volume:*` regions                                     |
 //! | [`listing`]    | what a stage holds, without importing it (`crust ls`)        |
 //!
@@ -68,6 +69,7 @@ mod lights;
 mod listing;
 mod materials;
 mod mesh;
+mod mtlx_network;
 mod preview;
 mod products;
 mod settings;

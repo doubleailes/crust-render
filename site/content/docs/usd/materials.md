@@ -2,7 +2,7 @@
 title = "Materials and textures"
 description = "The crust:openpbr shader and its inputs, and the other material types Crust Render reads."
 date = 2026-10-01T08:00:00+00:00
-updated = 2026-10-01T08:00:00+00:00
+updated = 2026-10-02T08:00:00+00:00
 draft = false
 weight = 50
 sort_by = "weight"
@@ -25,6 +25,7 @@ Crust Render picks the material's surface shader by its `info:id`:
 | `info:id = "UsdPreviewSurface"` | mapped onto OpenPBR, with `UsdUVTexture` and Ptex texture inputs |
 | `info:id = "PxrDisneyBsdf"` | mapped onto OpenPBR (as authored by the Moana Island) |
 | a reference into a `.mtlx` file | read as a MaterialX graph: standalone BSDF nodes, `open_pbr_surface`, `standard_surface`, `gltf_pbr`, image and UDIM textures, normal maps, [hair](#hair) |
+| `info:id = "ND_…"` (a MaterialX nodedef) | an inline MaterialX network, read exactly as the same graph in a `.mtlx`. [See below](#materialx-networks-in-usd). |
 
 A material Crust Render can't read logs a warning and renders as grey diffuse. Look for
 these warnings when a surface comes out grey.
@@ -39,6 +40,99 @@ def Material "Ceramic" (
 {
 }
 ```
+
+## MaterialX networks in USD
+
+A MaterialX material can also be authored inline, as `Shader` prims whose `info:id` names
+a MaterialX nodedef, wired to the material's `outputs:mtlx:surface` terminal. This is how
+`usdMtlx` brings a `.mtlx` into a stage, how DCCs export MaterialX, and how NVIDIA's
+Typhoon renderer receives materials.
+
+```usda
+def Material "Copper"
+{
+    token outputs:mtlx:surface.connect = </World/Looks/Copper/Surface.outputs:out>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:base_metalness = 1
+        color3f inputs:base_color = (0.95, 0.64, 0.54)
+        token outputs:out
+    }
+}
+```
+
+The node's type comes from the nodedef name (`ND_mix_vdf` is a `mix` of VDFs,
+`ND_dielectric_bsdf` a `dielectric_bsdf`). Inputs are read as values, or followed through
+connections, including through `NodeGraph` outputs and `Material` interface inputs.
+`asset` inputs resolve against the layer that authored them.
+
+A universal `outputs:surface` with a decodable shader, such as a `UsdPreviewSurface`, is
+still used first. The `mtlx` terminal is read when the material has nothing else Crust
+Render can decode, so a stage that rendered through its preview surface renders the same.
+
+## Volume materials
+
+A material's `volume` terminal (`outputs:mtlx:volume`, or `outputs:volume`) describes the
+medium **inside** the geometry the material is bound to. It is an `ND_volume` shader whose
+`vdf` input is a VDF network:
+
+| node | medium |
+|------|--------|
+| `ND_anisotropic_vdf` | `absorption` and `scattering` coefficients (per unit length), Henyey–Greenstein `anisotropy` |
+| `ND_absorption_vdf` | `absorption` alone |
+| `ND_mix_vdf`, `ND_add_vdf`, `ND_multiply_vdfC` / `vdfF` | combinations: coefficients combine linearly, the anisotropy is weighted by how much each side scatters |
+| `ND_mix_volumeshader` | a mix of two `ND_volume` shaders |
+
+There are two cases:
+
+- **A volume with no surface** makes the object a **medium boundary**. Its surface is
+  invisible. Rays cross it without scattering, and travel through the medium inside. The
+  medium is lit through the boundary, scatters light, and casts shadows. Objects inside it
+  are seen and lit through it. This is how to make fog, smoke or murky water in a shape.
+- **A volume with a MaterialX surface** is the interior of that surface. A ray that
+  refracts into a thick (not thin-walled) transmissive surface travels through it. It
+  replaces the medium the surface's own `transmission_*` inputs would describe.
+
+```usda
+def Material "Fog"
+{
+    token outputs:mtlx:volume.connect = </World/Looks/Fog/Volume.outputs:out>
+
+    def Shader "Volume"
+    {
+        uniform token info:id = "ND_volume"
+        token inputs:vdf.connect = </World/Looks/Fog/Vdf.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "Vdf"
+    {
+        uniform token info:id = "ND_anisotropic_vdf"
+        vector3f inputs:absorption = (0.02, 0.02, 0.02)
+        vector3f inputs:scattering = (0.9, 0.9, 0.9)
+        float inputs:anisotropy = 0.5
+        token outputs:out
+    }
+}
+```
+
+A `.mtlx` document can do the same with a `volumematerial` node.
+
+Rules for the geometry of a medium boundary:
+
+- It must be **closed**, with normals facing **out**. Rays enter through its front faces.
+- The medium is **homogeneous**: one set of coefficients per object. For smoke and noise,
+  use a [volume region](@/docs/usd/volumes.md).
+- One medium at a time: inside a medium boundary, other boundaries and glass don't change
+  the medium.
+- A camera that starts inside a medium boundary doesn't see the medium until its rays leave
+  and enter it again.
+- A volume's `edf` (volume emission) is ignored, with a warning.
+
+`samples/materialx_volume.usda` shows a fog cube with a ball inside it, a glass sphere with
+a volume interior, and an inline OpenPBR surface.
 
 ## The crust:openpbr shader
 

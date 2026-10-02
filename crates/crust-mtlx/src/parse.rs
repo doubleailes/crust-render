@@ -212,6 +212,24 @@ impl Doc {
         Ok(doc)
     }
 
+    /// A document from nodes built elsewhere — a `UsdShade` network
+    /// translated node for node — indexed exactly as a parsed one is, the
+    /// first of two equal names winning. Every connection is by node name:
+    /// such a document has no nodegraphs to forward through.
+    pub fn from_nodes(nodes: Vec<Node>) -> Doc {
+        let mut doc = Doc {
+            nodes: Vec::with_capacity(nodes.len()),
+            colorspace: None,
+            graph_colorspaces: HashMap::new(),
+            index: HashMap::new(),
+            graph_outputs: HashMap::new(),
+        };
+        for n in nodes {
+            doc.push(n);
+        }
+        doc
+    }
+
     fn push(&mut self, node: Node) {
         let key = (node.graph.clone().unwrap_or_default(), node.name.clone());
         // First declaration wins. MaterialX requires names unique within a

@@ -519,14 +519,7 @@ impl ResolvedClosure {
         }
         self.select_total = self.leaves[..self.len].iter().map(|l| l.select).sum();
         if self.transmits && !thin_walled {
-            self.medium = closures.volume.and_then(|v| {
-                let m = Medium {
-                    sigma_a: sanitize(slots[v.absorption as usize].rgb()),
-                    sigma_s: sanitize(slots[v.scattering as usize].rgb()),
-                    g: slots[v.anisotropy as usize].x().clamp(-0.999, 0.999),
-                };
-                (m.sigma_t_max() > 1e-6).then_some(m)
-            });
+            self.medium = volume_medium(closures, slots);
         }
     }
 
@@ -1092,6 +1085,26 @@ impl Choice {
 }
 
 /// Finite and non-negative, per channel.
+/// The interior medium `closures.volume` describes at the evaluated `slots`:
+/// coefficients sanitised to finite and non-negative, anisotropy clamped
+/// inside (−1, 1), and `None` for vacuum. The one mapping, for a thick
+/// surface's interior and a volume-only boundary alike.
+pub(crate) fn volume_medium(closures: &Closures, slots: &[Val]) -> Option<Medium> {
+    closures.volume.and_then(|v| {
+        let g = slots[v.anisotropy as usize].x();
+        let m = Medium {
+            sigma_a: sanitize(slots[v.absorption as usize].rgb()),
+            sigma_s: sanitize(slots[v.scattering as usize].rgb()),
+            g: if g.is_finite() {
+                g.clamp(-0.999, 0.999)
+            } else {
+                0.0
+            },
+        };
+        (m.sigma_t_max() > 1e-6).then_some(m)
+    })
+}
+
 fn sanitize(v: Vec3A) -> Vec3A {
     let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
     Vec3A::new(f(v.x), f(v.y), f(v.z))

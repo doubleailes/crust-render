@@ -50,7 +50,10 @@ feature-by-feature comparison against Embree's intersection kernels, and
   nodegraphs), evaluated as a closure tree with MaterialX's own layering,
   textured through UV/**UDIM** image sets and tangent-space normal maps, plus
   `uniform_edf` emission an image can drive (the one input that uses an HDR
-  texture's range, since an albedo above 1 creates energy and is clamped)
+  texture's range, since an albedo above 1 creates energy and is clamped) —
+  from a referenced `.mtlx` or authored inline in USD (`ND_*` shaders), with
+  **volume materials**: a material's `volume` terminal is the medium inside the
+  mesh it is bound to, as in NVIDIA's Typhoon
 - 🧠 **Importance Sampling**
   - Supports BRDF- and light-based sampling
 - 🧭 **Path Guiding** (opt-in)
@@ -218,6 +221,17 @@ The shipped DPEL documents address UDIM sets as `Albedo.<UDIM>.png` — a bare
 reader tolerates it; crust escapes the token before parsing, since rejecting
 the document would mean no material at all rather than a wrong path.
 
+MaterialX authored **inline** — `Shader` prims whose `info:id` is a MaterialX
+nodedef (`ND_open_pbr_surface_surfaceshader`, `ND_anisotropic_vdf`, …), the way
+`usdMtlx`, DCC exporters and NVIDIA's Typhoon carry it — is translated node for
+node into the same document and compiled the same way. A material's **`volume`
+terminal** (`ND_volume` over a VDF network) is, as in Typhoon, the medium
+*inside* the geometry it is bound to: under a thick transmissive MaterialX
+surface it is the glass's interior; with no surface at all the mesh becomes a
+transparent **medium boundary** — fog, smoke or murky water of any closed shape,
+crossed without scattering, lit through its boundary by NEE with MIS, casting
+shadows (`samples/materialx_volume.usda`).
+
 Samples: `samples/materialx_basic.usda` is a self-contained fixture (20 KiB
 of textures, what the tests run against), `materialx_surfaces.usda` puts one
 sphere per surface node side by side; `materialx_teapot.usda`,
@@ -257,7 +271,9 @@ or `grid` (inline voxel data) density field and its own σₛ/σₐ/anisotropy/
 emission. Scatter vertices inside a region get NEE with MIS against the
 phase function, and shadow rays attenuate through volumes via ratio/Beer-
 Lambert transmittance. See `samples/fog.usda` (homogeneous god rays) and
-`samples/smoke.usda` (noise plume + emissive ember + explicit grid).
+`samples/smoke.usda` (noise plume + emissive ember + explicit grid). A
+homogeneous medium inside any closed mesh is a volume *material* instead (see
+MaterialX above).
 
 ### 🎥 Camera & render settings
 
@@ -480,7 +496,9 @@ Documented gaps rather than silent ones — see the "Known gaps" sections of eac
 - **Motion blur is transform-only.** Linear matrix lerp per instance; no deformation
   (per-vertex) blur and no quaternion-correct rotation blur.
 - **No OpenVDB / `UsdVolVolume` import.** Volumes are homogeneous, procedural noise, or
-  an inline voxel grid authored directly in USD.
+  an inline voxel grid authored directly in USD, or a homogeneous medium inside a closed
+  mesh through its material's `volume` terminal. Medium boundaries hold one medium at a
+  time (Typhoon's model): no nesting, and a camera that starts inside one does not see it.
 - **Texture filtering is isotropic.** Minification is filtered — ray cones give each hit
   a footprint, and both the UV and Ptex paths read trilinear mip pyramids from it — but
   the filter has no direction, so a chart stretched in one axis over-blurs at grazing
