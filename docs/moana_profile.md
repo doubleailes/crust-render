@@ -290,6 +290,25 @@ What is left is not the sky rig. Candidates, none measured yet:
   0.05; `island.usda` keeps them at 1.
 - The per-channel clip tone map, against the reference's grade.
 
+**Found 2026-10-02: the sun was shadowing itself.** The sun is `sun_quad_llc`, a
+20000 × 20000 `RectLight` about 2.9·10⁵ units out, and it was imported correctly.
+Its shadow rays, though, stopped at `distance − 0.001`. At that distance an `f32`
+ulp is about 0.03, so the bound rounded back to `distance`. The ray then reached
+the light's own surface, which is in the shadow mask, and was blocked by it most of
+the time. With only the island's light rig over a grey ground, the sun's direct
+light came out speckled and at about 30% of its value. That explains much of the
+"cooler than RenderMan" gap: the warm key light and its hard shadows were mostly
+missing.
+- **The fix:** `shadow_t_max` in `tracer/path.rs` stops every shadow ray short by
+  the larger of 0.001 and 1e-5 × `distance`. Nearer than 100 units the bound is
+  unchanged, and every checked-in sample and both Kitchen_set variants stay
+  bit-identical.
+- **Pinned by:** `a_far_rect_light_does_not_shadow_itself` in
+  `crust-core/tests/usd_inline.rs`. Before the fix it measured 0.000201 against
+  0.000678 for the scaled-down twin.
+- **Stale numbers:** the island colours in the table above predate the fix and need
+  re-measuring.
+
 Same wall time as before (about 5:10 to 5:20) and the same peak RSS (51.5 GiB).
 
 ## Memory: instances and curve spans inline
