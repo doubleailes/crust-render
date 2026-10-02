@@ -169,20 +169,26 @@ subdivision may choose instead.
 `--subdiv-edge-length <PX>`
 
 Turns on adaptive subdivision: each subdivision mesh is refined only as far as its size
-on screen asks. A mesh is refined until its average control-cage edge, seen from the
-render camera at the mesh's nearest point, is at most `PX` pixels long. Overrides
+on screen asks. Each control-cage edge is cut into as many segments as it takes for each
+to be at most `PX` pixels long, seen from the render camera at the edge's own distance,
+so one mesh can be fine near the camera and coarse far away. Overrides
 [`crust:subdivisionEdgeLength`](@/docs/usd/render-settings.md#crust-subdivisionedgelength).
 
-- **The ceiling:** [`--subdiv-level`](#subdiv-level) (or `crust:subdivisionLevel`) is the
-  highest level a mesh can get. Without either, it is 3.
-- **Instances:** each placement of an instanced mesh gets the level its own distance asks
-  for, so near copies are refined and far ones are not. Placements that need the same
-  level still share one copy of the geometry.
+- **The ceiling:** [`--subdiv-level`](#subdiv-level) (or `crust:subdivisionLevel`) caps
+  it: at most 2^level segments per edge, the density of that uniform level. Without
+  either, the ceiling is 3.
+- **Instances:** only geometry used once is adaptive. A mesh placed directly, or a
+  prototype with a single placement, is refined by its size on screen. A prototype placed
+  several times is refined to the uniform level (`--subdiv-level`, else 0), so a forest
+  costs no more than in a uniform render.
 - **The camera:** it must be named before the scene is read, by [`--camera`](#camera) or
   the stage's `RenderSettings.camera`. Without one, a warning is logged and every mesh
   uses the uniform level.
-- **Off-screen meshes:** a mesh behind the camera is refined by its distance like any
-  other, so its reflections and shadows keep their detail.
+- **Off-screen geometry** is not refined: faces outside the camera's view keep their
+  control cage, which reflections and shadows see. Set `CRUST_ADAPTIVE_FRUSTUM=0` to
+  refine them by distance too.
+- **Faces that need no refinement** render their control cage with smooth normals, as at
+  level 0.
 
 The value must be a positive number. `--stats` reports how many meshes got each level.
 

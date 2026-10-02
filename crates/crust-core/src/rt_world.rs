@@ -204,6 +204,11 @@ pub struct FaceMap {
     /// `None` for unsubdivided meshes, whose triangles resolve through
     /// `slices` alone.
     pub sub: Option<Vec<SubFace>>,
+    /// Each triangle's three corners in its Ptex face, index-parallel with
+    /// `faces`. Per-face tessellated meshes only: their stitched grids are not
+    /// dyadic cells, so neither `slices` nor `sub` can express them. Checked
+    /// before `sub`.
+    pub corners: Option<Vec<[[f32; 2]; 3]>>,
     /// Face-space units per unit of local space, per triangle — see
     /// [`triangle_density`]. Empty when [`FaceMap::build_density`] was never
     /// called, which every consumer reads as "point-sample".
@@ -228,6 +233,18 @@ impl FaceMap {
         let i = prim_id as usize;
         let (&face, &slice) = (self.faces.get(i)?, self.slices.get(i)?);
         let (u, v) = if swapped { (v, u) } else { (u, v) };
+        if let Some(corners) = &self.corners {
+            if slice == FanSlice::Unmappable {
+                return None;
+            }
+            let [a, b, c] = *corners.get(i)?;
+            let w = 1.0 - u - v;
+            return Some((
+                face,
+                (w * a[0] + u * b[0] + v * c[0]).clamp(0.0, 1.0),
+                (w * a[1] + u * b[1] + v * c[1]).clamp(0.0, 1.0),
+            ));
+        }
         if let Some(sub) = &self.sub {
             // Corner coordinates come out in the triangle's *original*
             // vertex order, so the swap above already restored the
@@ -278,6 +295,11 @@ impl FaceMap {
         for (t, tri) in tris.iter().enumerate() {
             let param = match (&self.sub, self.slices.get(t)) {
                 (_, Some(FanSlice::Unmappable)) | (_, None) => 0.0,
+                _ if self.corners.is_some() => self
+                    .corners
+                    .as_ref()
+                    .and_then(|c| c.get(t))
+                    .map_or(0.0, uv_area),
                 (Some(sub), Some(&slice)) => sub
                     .get(t)
                     .and_then(|f| f.triangle_corners(slice))
@@ -921,6 +943,7 @@ mod tests {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
             sub: None,
+            corners: None,
             density: Vec::new(),
         }
     }
@@ -977,6 +1000,7 @@ mod tests {
             faces: vec![3],
             slices: vec![FanSlice::Unmappable],
             sub: None,
+            corners: None,
             density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);
@@ -998,6 +1022,7 @@ mod tests {
             faces: vec![7, 7],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
             sub: Some(vec![cell, cell]),
+            corners: None,
             density: Vec::new(),
         }
     }
@@ -1071,6 +1096,7 @@ mod tests {
             faces: vec![u32::MAX],
             slices: vec![FanSlice::Unmappable],
             sub: Some(vec![SubFace::default()]),
+            corners: None,
             density: Vec::new(),
         };
         assert_eq!(m.resolve(0, 0.25, 0.25, false), None);

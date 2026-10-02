@@ -68,6 +68,8 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_STREAM_IMPORT`](#crust-stream-import) | on | USD import |
 | [`CRUST_MESH_BAKE`](#crust-mesh-bake) | on | USD import |
 | [`CRUST_SUBDIV`](#crust-subdiv) | on | USD import |
+| [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
+| [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
 | [`CRUST_BVH_PACKET_SAH`](#crust-bvh-packet-sah) | on | ray tracing |
 | [`CRUST_TRI_PACKETS`](#crust-tri-packets) | `auto` | ray tracing |
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
@@ -119,6 +121,23 @@ Boolean, default **on**.
 
 This isn't the same as `--subdiv-level 0`, which still shades the cage with smooth
 normals. Use `CRUST_SUBDIV=0` to tell whether an artifact comes from subdivision.
+
+### CRUST_ADAPTIVE_PER_FACE
+
+Boolean, default **on**. Only with
+[`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length).
+
+`0` refines each mesh to one level, chosen for its nearest point to the camera, instead
+of cutting each face by its own size on screen. A large mesh close to the camera is then
+refined everywhere, its far end included. Use it to compare the two.
+
+### CRUST_ADAPTIVE_FRUSTUM
+
+Boolean, default **on**. Only with
+[`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length).
+
+`0` refines geometry outside the camera's view by its distance like the rest, so its
+reflections and shadows keep their detail, at the cost of memory.
 
 ## Ray tracing
 

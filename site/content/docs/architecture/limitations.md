@@ -40,12 +40,11 @@ render.
   acceleration structure is built, its peak memory can be well above what the finished
   render needs, especially with subdivision. Lowering
   [`--subdiv-level`](@/docs/reference/command-line.md#subdiv-level) is the first remedy.
-- **Adaptive subdivision picks one level per mesh.**
-  [`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length) refines
-  each mesh for its nearest point to the camera, so a large terrain mesh passing close
-  to the camera is refined everywhere, its far end included. On such a scene, cap it with
-  `--subdiv-level 1` or `2`. There is no per-face refinement and no frustum culling of
-  the level.
+- **Adaptive subdivision refines only geometry used once.**
+  [`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length) leaves
+  a prototype placed several times at the uniform level, whatever its distance, and
+  leaves faces outside the camera's view at their control cage, which reflections and
+  shadows then see. Loop subdivision meshes are refined to one level per mesh.
 
 ## Materials and textures
 

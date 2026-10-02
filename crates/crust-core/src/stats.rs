@@ -369,11 +369,18 @@ pub struct SubdivisionCounters {
     /// level): a direct prim once per placement, a prototype's mesh once per
     /// version of the prototype.
     pub levels: Vec<u64>,
-    /// Prototype versions built, one per prototype and rate bucket that was
-    /// placed, and how many of those belong to prototypes whose levels depend
-    /// on the rate (the others share one version across every placement).
-    pub prototype_versions: u64,
-    pub rate_dependent_versions: u64,
+    /// Meshes of shared prototypes (placed more than once in their top-level
+    /// subtree), all refined to `shared_level` whatever their distance.
+    pub shared_meshes: u64,
+    pub shared_level: u32,
+    /// Subdivision meshes tessellated per face, and adaptive meshes that took
+    /// the per-mesh level instead (a `loop` mesh, a face-varying chart, or
+    /// `CRUST_ADAPTIVE_PER_FACE=0`).
+    pub per_face_meshes: u64,
+    pub per_face_fallbacks: u64,
+    /// Cage edges and spokes of per-face meshes by segment count, binned by
+    /// `ceil(log2(rate))` (index 0: rate 1, 1: 2, 2: 3–4, 3: 5–8, …).
+    pub rate_bins: Vec<u64>,
 }
 
 /// What Ptex cost over a render, under whichever backend ran.
@@ -788,13 +795,41 @@ impl fmt::Display for RenderStats {
                     levels.join(" · ")
                 }
             )?;
-            writeln!(
-                f,
-                "    {:<26} {} (rate-dependent: {})",
-                "prototype versions",
-                thousands(sub.prototype_versions as usize),
-                thousands(sub.rate_dependent_versions as usize)
-            )?;
+            if sub.shared_meshes > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {} at level {}",
+                    "shared meshes",
+                    thousands(sub.shared_meshes as usize),
+                    sub.shared_level
+                )?;
+            }
+            if sub.per_face_meshes + sub.per_face_fallbacks > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {} (fallback: {})",
+                    "per-face meshes",
+                    thousands(sub.per_face_meshes as usize),
+                    thousands(sub.per_face_fallbacks as usize)
+                )?;
+            }
+            let bins: Vec<String> = sub
+                .rate_bins
+                .iter()
+                .enumerate()
+                .filter(|&(_, &n)| n > 0)
+                .map(|(b, &n)| {
+                    let label = match b {
+                        0 => "1".to_string(),
+                        1 => "2".to_string(),
+                        _ => format!("{}-{}", (1u64 << (b - 1)) + 1, 1u64 << b),
+                    };
+                    format!("{label}: {}", thousands(n as usize))
+                })
+                .collect();
+            if !bins.is_empty() {
+                writeln!(f, "    {:<26} {}", "edge rates", bins.join(" · "))?;
+            }
         }
         if s.volumes > 0 {
             writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;

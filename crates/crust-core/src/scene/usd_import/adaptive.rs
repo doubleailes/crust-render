@@ -4,7 +4,7 @@
 //! Every quantity here errs toward *more* detail: the stretch of a transform is
 //! its exact spectral norm (the largest factor it can lengthen an edge by), the
 //! distance is to the nearest point of the placement's bounds, and levels and
-//! buckets round up. See "Adaptive level" in
+//! edge rates round up. See "Adaptive level" in
 //! `openspec/specs/usd-scene-import/design.md`.
 
 use glam::{DMat3, Mat3, Mat4 as GMat4, Vec3};
@@ -12,11 +12,6 @@ use openusd::gf::Vec3f;
 
 /// Below this a distance, a stretch or an edge length is treated as zero.
 const EPS: f32 = 1e-6;
-
-/// The bucket of a placement whose bounds contain the camera: every mesh in it
-/// is refined to the maximum level. Canonicalising clamps it to the top of a
-/// prototype's range, so it never reaches [`ScreenRate::bucket_scale`].
-pub(super) const Q_INSIDE: i32 = i32::MAX;
 
 /// The render camera's projection, the target and the ceiling: everything the
 /// level of a placement depends on besides the placement itself.
@@ -30,6 +25,53 @@ pub(super) struct ScreenRate {
     pub(super) target: f32,
     /// The ceiling on the level.
     pub(super) max: u32,
+    /// The view pyramid: geometry wholly outside it is not refined.
+    /// `None` under `CRUST_ADAPTIVE_FRUSTUM=0`.
+    pub(super) frustum: Option<Frustum>,
+}
+
+/// The render camera's view pyramid, as planes through the eye with inward
+/// normals: the four sides, and the eye plane facing forward. The sides alone
+/// are not enough for a box test — they all meet at the eye, so a box behind
+/// it can pass each side with a different corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Frustum {
+    eye: Vec3,
+    normals: [Vec3; 5],
+}
+
+impl Frustum {
+    /// The pyramid of a camera at `eye` looking along `forward` with `up`,
+    /// whose half fields of view have tangents `tan_v` and `tan_h`.
+    pub(super) fn new(eye: Vec3, forward: Vec3, up: Vec3, tan_v: f32, tan_h: f32) -> Frustum {
+        let right = forward.cross(up).normalize();
+        let up = right.cross(forward).normalize();
+        // Inside is `|d·right| ≤ tan_h · d·forward` and the same with `up`.
+        Frustum {
+            eye,
+            normals: [
+                tan_h * forward - right,
+                tan_h * forward + right,
+                tan_v * forward - up,
+                tan_v * forward + up,
+                forward,
+            ],
+        }
+    }
+
+    /// Whether `b` can overlap the pyramid. Conservative: a box that crosses a
+    /// plane's corner region may be reported in view, never the reverse.
+    pub(super) fn overlaps(&self, b: &Aabb) -> bool {
+        self.normals.iter().all(|n| {
+            // The box corner furthest along the inward normal.
+            let p = Vec3::new(
+                if n.x >= 0.0 { b.max.x } else { b.min.x },
+                if n.y >= 0.0 { b.max.y } else { b.min.y },
+                if n.z >= 0.0 { b.max.z } else { b.min.z },
+            );
+            n.dot(p - self.eye) >= 0.0
+        })
+    }
 }
 
 impl ScreenRate {
@@ -37,7 +79,11 @@ impl ScreenRate {
     /// the camera. Infinite when the camera is inside `bounds` (in the
     /// placement's local frame, carried to world by `xf`).
     pub(super) fn sigma(&self, xf: &GMat4, bounds: &Aabb) -> f32 {
-        let d = bounds.transformed(xf).distance_to(self.eye);
+        let world = bounds.transformed(xf);
+        if self.frustum.is_some_and(|f| !f.overlaps(&world)) {
+            return 0.0;
+        }
+        let d = world.distance_to(self.eye);
         if d < EPS {
             return f32::INFINITY;
         }
@@ -63,78 +109,52 @@ impl ScreenRate {
         (ratio.log2().ceil() as u32).min(self.max)
     }
 
-    /// The rate bucket of a prototype placement: `ceil(log2(sigma))`, so the
-    /// version built for it (at `2^q` pixels per unit) never has less detail
-    /// than the placement's exact rate asks for.
-    pub(super) fn bucket(sigma: f32) -> i32 {
-        if sigma == f32::INFINITY {
-            return Q_INSIDE;
+    /// A cage segment's projected length over the target, for per-face
+    /// tessellation of a direct mesh at `xf`: its chord (the first two of
+    /// `points`, local units) stretched by `xf`, seen at the nearest point of
+    /// the box around all of `points` carried to world. Infinite when the
+    /// camera is inside that box.
+    pub(super) fn segment_at(&self, xf: &GMat4, points: &[[f32; 3]]) -> f32 {
+        let Some(bounds) = Aabb::of_arrays(points) else {
+            return 0.0;
+        };
+        // A segment wholly out of view is split once. Its box is padded by its
+        // own diagonal first, as MoonRay pads a face's, so the limit curve —
+        // which strays off its chord — is not culled on the frustum's edge.
+        if let Some(f) = self.frustum {
+            let world = bounds.transformed(xf);
+            let pad = Vec3::splat((world.max - world.min).length());
+            let padded = Aabb {
+                min: world.min - pad,
+                max: world.max + pad,
+            };
+            if !f.overlaps(&padded) {
+                return 0.0;
+            }
         }
-        if sigma.is_nan() || sigma <= 0.0 {
-            return i32::MIN;
-        }
-        sigma.log2().ceil() as i32
+        self.segment_with_sigma(self.sigma_unculled(xf, &bounds), points)
     }
 
-    /// Pixels per unit of a bucket. Only ever called on a canonical bucket,
-    /// which is finite.
-    pub(super) fn bucket_scale(q: i32) -> f32 {
-        (q as f32).exp2()
-    }
-
-    /// The buckets over which the level of a mesh whose mean edge is `edge`
-    /// local units, under a prototype-relative stretch of `stretch`, can
-    /// change. Outside it the level is 0 (below) or `max` (above), so every
-    /// bucket there builds the same mesh.
-    ///
-    /// Widened by one bucket each side: the level is computed from a product
-    /// and the range from a sum of logarithms, and the two may round apart
-    /// at an exact power of two.
-    pub(super) fn level_range(&self, edge: f32, stretch: f32) -> QRange {
-        let k = edge * stretch;
-        if k.is_nan() || k <= 0.0 || !k.is_finite() {
-            // Degenerate: no level ever leaves 0. A one-bucket range.
-            return QRange { lo: 0, hi: 0 };
+    /// [`ScreenRate::sigma`] without the frustum test, for a caller that has
+    /// made its own.
+    fn sigma_unculled(&self, xf: &GMat4, bounds: &Aabb) -> f32 {
+        let d = bounds.transformed(xf).distance_to(self.eye);
+        if d < EPS {
+            return f32::INFINITY;
         }
-        // Level 0 for every q with k·2^q ≤ target, level max for every q with
-        // k·2^q / target > 2^(max − 1).
-        let below = (self.target / k).log2();
-        let lo = below.floor() as i32 - 1;
-        let hi = (below + self.max as f32 - 1.0).floor() as i32 + 2;
-        QRange { lo, hi }
-    }
-}
-
-/// A span of rate buckets, inclusive. See [`ScreenRate::level_range`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct QRange {
-    pub(super) lo: i32,
-    pub(super) hi: i32,
-}
-
-impl QRange {
-    /// The smallest range covering both.
-    pub(super) fn union(self, other: QRange) -> QRange {
-        QRange {
-            lo: self.lo.min(other.lo),
-            hi: self.hi.max(other.hi),
-        }
+        stretch(&Mat3::from_mat4(*xf)) * self.f_px / d
     }
 
-    /// The range as seen `delta` buckets further out: what an inner
-    /// prototype's range is in its parent's buckets, when the parent places it
-    /// with a stretch of `2^delta`.
-    pub(super) fn shifted_down(self, delta: i32) -> QRange {
-        QRange {
-            lo: self.lo.saturating_sub(delta),
-            hi: self.hi.saturating_sub(delta),
-        }
-    }
-
-    /// The bucket a placement in `q` is built at: `q` itself inside the range,
-    /// else the nearest end, which builds the same meshes.
-    pub(super) fn canonical(self, q: i32) -> i32 {
-        q.clamp(self.lo, self.hi)
+    /// A cage segment's projected length over the target at `sigma` pixels
+    /// per local unit: inside a prototype version, `2^q` times the part's
+    /// stretch.
+    pub(super) fn segment_with_sigma(&self, sigma: f32, points: &[[f32; 3]]) -> f32 {
+        let chord = match points {
+            [a, b, ..] => Vec3::from_array(*a).distance(Vec3::from_array(*b)),
+            _ => 0.0,
+        };
+        let r = chord * sigma / self.target;
+        if r.is_nan() { 0.0 } else { r }
     }
 }
 
@@ -162,11 +182,20 @@ impl Aabb {
         ))
     }
 
-    pub(super) fn union(self, other: Aabb) -> Aabb {
-        Aabb {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
+    /// The box around `points`, `None` when there are none.
+    pub(super) fn of_arrays(points: &[[f32; 3]]) -> Option<Aabb> {
+        let mut it = points.iter().map(|&p| Vec3::from_array(p));
+        let first = it.next()?;
+        Some(it.fold(
+            Aabb {
+                min: first,
+                max: first,
+            },
+            |b, p| Aabb {
+                min: b.min.min(p),
+                max: b.max.max(p),
+            },
+        ))
     }
 
     /// The box around this one's eight corners carried by `xf`.
@@ -279,7 +308,64 @@ mod tests {
             f_px: 1000.0,
             target: 2.0,
             max: 3,
+            frustum: None,
         }
+    }
+
+    /// A camera at the origin looking down −Z, ±45° both ways.
+    fn frustum() -> Frustum {
+        Frustum::new(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y, 1.0, 1.0)
+    }
+
+    fn unit_box_at(c: Vec3) -> Aabb {
+        Aabb {
+            min: c - 0.5,
+            max: c + 0.5,
+        }
+    }
+
+    #[test]
+    fn the_frustum_keeps_what_is_in_view() {
+        let f = frustum();
+        assert!(
+            f.overlaps(&unit_box_at(Vec3::new(0.0, 0.0, -10.0))),
+            "dead ahead"
+        );
+        assert!(
+            f.overlaps(&unit_box_at(Vec3::new(9.8, 0.0, -10.0))),
+            "at the edge"
+        );
+        assert!(
+            !f.overlaps(&unit_box_at(Vec3::new(20.0, 0.0, -10.0))),
+            "beside"
+        );
+        assert!(
+            !f.overlaps(&unit_box_at(Vec3::new(0.0, -20.0, -10.0))),
+            "below"
+        );
+        assert!(
+            !f.overlaps(&unit_box_at(Vec3::new(0.0, 0.0, 10.0))),
+            "behind"
+        );
+        assert!(f.overlaps(&unit_box_at(Vec3::ZERO)), "around the camera");
+    }
+
+    #[test]
+    fn out_of_view_geometry_is_not_refined() {
+        let r = ScreenRate {
+            frustum: Some(frustum()),
+            ..rate()
+        };
+        let behind = GMat4::from_translation(Vec3::new(0.0, 0.0, 3.0));
+        let ahead = GMat4::from_translation(Vec3::new(0.0, 0.0, -3.0));
+        let b = unit_box_at(Vec3::ZERO);
+        assert_eq!(r.level(0.25, r.sigma(&behind, &b)), 0);
+        assert!(r.level(0.25, r.sigma(&ahead, &b)) > 0);
+        let seg = [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0]];
+        assert_eq!(r.segment_at(&behind, &seg), 0.0);
+        assert!(r.segment_at(&ahead, &seg) > 1.0);
+        // Without the frustum the one behind is as fine as the one ahead.
+        assert!(rate().segment_at(&behind, &seg) > 1.0);
     }
 
     /// A unit cube centred `z` units in front of the camera.
@@ -337,7 +423,6 @@ mod tests {
         let sigma = r.sigma(&xf, &b);
         assert_eq!(sigma, f32::INFINITY);
         assert_eq!(r.level(1e-6, sigma), r.max);
-        assert_eq!(ScreenRate::bucket(sigma), Q_INSIDE);
     }
 
     #[test]
@@ -349,35 +434,6 @@ mod tests {
         assert_eq!(r.level(8.0, 1.0), 2);
         assert_eq!(r.level(1e30, 1.0), r.max, "clamped above");
         assert_eq!(r.level(f32::NAN, 1.0), 0);
-    }
-
-    #[test]
-    fn a_bucket_never_has_less_detail_than_its_rate() {
-        let r = rate();
-        for sigma in [0.3f32, 1.0, 1.5, 7.9, 64.0, 1000.0] {
-            let q = ScreenRate::bucket(sigma);
-            assert!(ScreenRate::bucket_scale(q) >= sigma);
-            for edge in [0.001, 0.01, 0.1, 1.0] {
-                assert!(r.level(edge, ScreenRate::bucket_scale(q)) >= r.level(edge, sigma));
-            }
-        }
-    }
-
-    #[test]
-    fn levels_are_constant_outside_their_range() {
-        let r = rate();
-        for (edge, s) in [(0.01, 1.0), (0.3, 2.0), (5.0, 0.5), (1e-4, 30.0)] {
-            let range = r.level_range(edge, s);
-            let at = |q: i32| r.level(edge, ScreenRate::bucket_scale(q) * s);
-            for q in range.lo - 20..range.lo {
-                assert_eq!(at(q), 0, "below the range at q = {q}");
-            }
-            for q in range.hi + 1..range.hi + 20 {
-                assert_eq!(at(q), r.max, "above the range at q = {q}");
-            }
-            assert_eq!(at(range.canonical(range.lo - 5)), at(range.lo - 5));
-            assert_eq!(at(range.canonical(range.hi + 5)), at(range.hi + 5));
-        }
     }
 
     #[test]

@@ -155,8 +155,8 @@ pub(super) struct MeshArena {
 /// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
 pub(super) struct SubdivPolicy {
     /// The one refinement level, resolved by
-    /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level). Unused
-    /// in adaptive mode.
+    /// [`resolve_subdiv_level`](super::attrs::resolve_subdiv_level). In
+    /// adaptive mode, the level of shared prototypes.
     pub(super) level: u32,
     /// Adaptive mode: each mesh's level comes from its size on screen
     /// ([`ScreenRate`]) instead of [`SubdivPolicy::level`]. `None` is uniform.
@@ -164,6 +164,20 @@ pub(super) struct SubdivPolicy {
     /// Subdivision meshes read, by the level each was refined to: a direct
     /// prim once per placement, a prototype's mesh once per version built.
     pub(super) levels: Vec<u64>,
+    /// Meshes tessellated per face, and adaptive meshes that took the
+    /// per-mesh level instead (a `loop` mesh, a face-varying chart, or
+    /// `CRUST_ADAPTIVE_PER_FACE=0`).
+    pub(super) per_face_meshes: u64,
+    pub(super) per_face_fallbacks: u64,
+    /// Meshes of shared prototypes, refined to [`SubdivPolicy::level`] in
+    /// adaptive mode.
+    pub(super) shared_meshes: u64,
+    /// Cage edges and spokes of per-face meshes by rate, binned by
+    /// `ceil(log2(rate))`.
+    pub(super) rate_bins: Vec<u64>,
+    /// Shapes of the per-face meshes' refined triangles (interior grids,
+    /// stitched rings), for the end-of-import DEBUG line.
+    pub(super) quality: [[u64; subdiv::QUALITY_BINS]; 2],
     /// `false` under `CRUST_SUBDIV=0`: every mesh renders its faceted cage,
     /// exactly as before subdivision surfaces were read at all — so, unlike
     /// level 0, not even smooth cage normals. The honest "off" side of the A/B.
@@ -180,23 +194,23 @@ impl SubdivPolicy {
             level,
             adaptive: None,
             levels: Vec::new(),
+            per_face_meshes: 0,
+            per_face_fallbacks: 0,
+            shared_meshes: 0,
+            rate_bins: Vec::new(),
+            quality: [[0; subdiv::QUALITY_BINS]; 2],
             enabled: crate::config().subdiv,
             legacy_warned: false,
         }
     }
 
-    /// Adaptive subdivision under `rate`.
-    pub(super) fn adaptive(rate: ScreenRate) -> Self {
+    /// Adaptive subdivision under `rate`, shared prototypes refined to
+    /// `shared_level`.
+    pub(super) fn adaptive(rate: ScreenRate, shared_level: u32) -> Self {
         SubdivPolicy {
             adaptive: Some(rate),
-            ..SubdivPolicy::new(rate.max)
+            ..SubdivPolicy::new(shared_level)
         }
-    }
-
-    /// Whether `mesh` is refined at all: subdivision is on and its scheme is
-    /// not `none` (unauthored reads the schema fallback, `catmullClark`).
-    pub(super) fn refines(&self, mesh: &UsdMesh) -> bool {
-        self.enabled && subdivision_scheme(mesh) != SubdivisionScheme::None
     }
 
     /// The level a subdivision mesh with this cage is refined to, read for
@@ -209,23 +223,20 @@ impl SubdivPolicy {
         indices: &[i32],
         place: MeshPlace<'_>,
     ) -> u32 {
-        let level = match self.adaptive {
-            None => self.level,
-            Some(rate) => {
+        let level = match (self.adaptive, place) {
+            (None, _) => self.level,
+            (Some(_), MeshPlace::Shared) => {
+                self.shared_meshes += 1;
+                self.level
+            }
+            (Some(rate), MeshPlace::World(xf)) => {
                 let edge = adaptive::mean_edge_length(points, counts, indices);
-                let (sigma, distance) = match place {
-                    MeshPlace::World(xf) => match Aabb::of_points(points) {
-                        Some(bounds) => (
-                            rate.sigma(xf, &bounds),
-                            Some(bounds.transformed(xf).distance_to(rate.eye)),
-                        ),
-                        None => (0.0, None),
-                    },
-                    MeshPlace::Prototype { bucket, local } => (
-                        ScreenRate::bucket_scale(bucket)
-                            * adaptive::stretch(&glam::Mat3::from_mat4(*local)),
-                        None,
+                let (sigma, distance) = match Aabb::of_points(points) {
+                    Some(bounds) => (
+                        rate.sigma(xf, &bounds),
+                        Some(bounds.transformed(xf).distance_to(rate.eye)),
                     ),
+                    None => (0.0, None),
                 };
                 let level = rate.level(edge, sigma);
                 debug!(
@@ -248,15 +259,15 @@ impl SubdivPolicy {
     }
 }
 
-/// Where [`mesh_source`] reads a mesh for, which in adaptive mode decides its
-/// level.
+/// Where [`mesh_source`] reads a mesh for, which in adaptive mode decides how
+/// it is refined.
 #[derive(Clone, Copy)]
 pub(super) enum MeshPlace<'a> {
-    /// A direct prim, at its world transform.
+    /// Unshared geometry — a direct prim, or a part of a prototype placed once
+    /// — at its world transform: refined by its size on screen.
     World(&'a GMat4),
-    /// A part of a prototype version built at rate bucket `bucket`, at `local`
-    /// in the prototype's frame.
-    Prototype { bucket: i32, local: &'a GMat4 },
+    /// A part of a shared prototype: refined to the uniform level.
+    Shared,
 }
 
 /// A mesh's `subdivisionScheme`, unauthored (or blocked) reading the schema
@@ -324,7 +335,7 @@ impl MeshArena {
         // A subdivided face table numbers *refined* faces; rewrite it to the
         // base-cage ids Ptex actually indexes before anything caches it.
         let faces = match (&src.subdiv_faces, faces) {
-            (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
+            (Some(sub), Some(map)) => Some(remap_refined_faces(map, sub)),
             (_, faces) => faces,
         };
         check_face_count(prim, src.base_face_count, material.as_ref());
@@ -515,7 +526,7 @@ pub(super) fn emit_mesh(
                     .is_some()
                     .then(|| subdiv::smooth_normals(&verts, &src.counts, &src.indices));
                 let faces = match (&src.subdiv_faces, faces) {
-                    (Some(sub), Some(map)) => Some(remap_subdivided_faces(map, sub)),
+                    (Some(sub), Some(map)) => Some(remap_refined_faces(map, sub)),
                     (_, faces) => faces,
                 };
                 // Already world-space here, so the density is too and the
@@ -875,7 +886,7 @@ pub(super) struct MeshSource {
     pub(super) normals: Option<Vec<[f32; 3]>>,
     /// Refined-face → base-cage-face mapping, `Some` iff subdivided and the
     /// material wants a face table.
-    pub(super) subdiv_faces: Option<subdiv::SubdivFaces>,
+    pub(super) subdiv_faces: Option<RefinedFaces>,
     /// The *authored* cage's face count — what Ptex face ids index, whether
     /// or not the mesh was refined.
     pub(super) base_face_count: usize,
@@ -884,6 +895,14 @@ pub(super) struct MeshSource {
     /// cage's UVs on refined triangles would stretch every texture across the
     /// patch it came from.
     pub(super) uvs: Option<UvSource>,
+}
+
+/// How a refined mesh's triangles map back to the cage faces Ptex addresses.
+pub(super) enum RefinedFaces {
+    /// Uniform (or per-mesh adaptive) refinement: dyadic cells of cage faces.
+    Uniform(subdiv::SubdivFaces),
+    /// Per-face tessellation: explicit corners per triangle.
+    PerFace(subdiv::TessellatedFaces),
 }
 
 /// Reads a mesh prim's arrays and refines them when the mesh is a
@@ -937,7 +956,21 @@ pub(super) fn mesh_source(
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
         return Some(cage(points, counts, indices, uvs));
     }
-    let level = policy.level_for(prim, &points, &counts, &indices, place);
+    // Adaptive mode tessellates unshared meshes per face, but for a `loop`
+    // cage, which keeps the per-mesh level: the tessellator cuts quad Ptex
+    // faces only.
+    let per_face = policy.adaptive.is_some()
+        && matches!(place, MeshPlace::World(_))
+        && crate::config().adaptive_per_face
+        && usd_scheme != SubdivisionScheme::Loop;
+    if policy.adaptive.is_some() && matches!(place, MeshPlace::World(_)) && !per_face {
+        policy.per_face_fallbacks += 1;
+    }
+    let level = if per_face {
+        policy.adaptive.map_or(0, |r| r.max)
+    } else {
+        policy.level_for(prim, &points, &counts, &indices, place)
+    };
     // Loop refinement builds no face table (Ptex addresses quad sub-faces),
     // so a Ptex lookup on its triangles would read refined face ordinals as
     // cage face ids — a plausible, wrong texture. Keep the cage instead.
@@ -950,7 +983,7 @@ pub(super) fn mesh_source(
             prim.path()
         );
     }
-    if level == 0 || loop_ptex {
+    if !per_face && (level == 0 || loop_ptex) {
         let normals = subdiv::smooth_cage_normals(&points, &counts, &indices);
         return Some(MeshSource {
             normals,
@@ -1046,6 +1079,65 @@ pub(super) fn mesh_source(
         want_face_uvs: want_faces,
         uvs: chart,
     };
+    if per_face
+        && let Some(rate) = policy.adaptive
+        && let MeshPlace::World(xf) = place
+    {
+        let segment = |pts: &[[f32; 3]]| rate.segment_at(xf, pts);
+        match subdiv::tessellate_adaptive(&points, &counts, &indices, &req, rate.max, &segment) {
+            Ok(t) => {
+                policy.per_face_meshes += 1;
+                for (into, from) in policy.quality.iter_mut().zip(&t.quality) {
+                    for (i, f) in into.iter_mut().zip(from) {
+                        *i += f;
+                    }
+                }
+                for (b, &n) in t.rate_bins.iter().enumerate() {
+                    if policy.rate_bins.len() <= b {
+                        policy.rate_bins.resize(b + 1, 0);
+                    }
+                    policy.rate_bins[b] += n;
+                }
+                debug!(
+                    "Mesh at {}: tessellated per face ({} Ptex faces -> {} triangles, edge rates {}..={})",
+                    prim.path(),
+                    t.ptex_faces,
+                    t.indices.len() / 3,
+                    t.rate_range.0,
+                    t.rate_range.1
+                );
+                let n_tris = t.indices.len() / 3;
+                return Some(MeshSource {
+                    points: t.points,
+                    counts: vec![3; n_tris],
+                    indices: t.indices,
+                    normals: Some(t.normals),
+                    subdiv_faces: t.faces.map(RefinedFaces::PerFace),
+                    base_face_count,
+                    uvs: match (t.uvs, t.face_varying_uvs) {
+                        (Some(values), _) => Some(UvSource {
+                            values,
+                            indices: None,
+                            face_varying: false,
+                        }),
+                        (None, Some((values, corners))) => Some(UvSource {
+                            values,
+                            indices: Some(corners),
+                            face_varying: true,
+                        }),
+                        (None, None) => None,
+                    },
+                });
+            }
+            Err(e) => {
+                warn!(
+                    "Mesh at {}: per-face tessellation failed ({e}) — rendering the base cage",
+                    prim.path()
+                );
+                return Some(cage(points, counts, indices, uvs));
+            }
+        }
+    }
     match subdiv::subdivide(&points, &counts, &indices, &req) {
         Ok(refined) => {
             debug!(
@@ -1059,7 +1151,7 @@ pub(super) fn mesh_source(
                 counts: refined.counts,
                 indices: refined.indices,
                 normals: Some(refined.normals),
-                subdiv_faces: refined.faces,
+                subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
                 base_face_count,
                 uvs: refined.uvs.map(|uv| UvSource {
                     values: uv.values,
@@ -1101,6 +1193,48 @@ fn face_varying_linear(mesh: &UsdMesh) -> opensubdiv_rs::sdc::FVarLinearInterpol
     }
 }
 
+/// [`remap_subdivided_faces`] or [`remap_tessellated_faces`], by how the mesh
+/// was refined.
+fn remap_refined_faces(map: FaceMap, faces: &RefinedFaces) -> FaceMap {
+    match faces {
+        RefinedFaces::Uniform(sub) => remap_subdivided_faces(map, sub),
+        RefinedFaces::PerFace(per_face) => remap_tessellated_faces(map, per_face),
+    }
+}
+
+/// Rewrites a [`FaceMap`] built by triangulating a per-face tessellation —
+/// all triangles, so `faces` numbers them — into cage face ids plus each
+/// triangle's explicit corners. A triangle of an `n`-gon is unmappable, as
+/// under uniform refinement.
+fn remap_tessellated_faces(map: FaceMap, t: &subdiv::TessellatedFaces) -> FaceMap {
+    let n = map.faces.len();
+    let mut faces = Vec::with_capacity(n);
+    let mut slices = Vec::with_capacity(n);
+    let mut corners = Vec::with_capacity(n);
+    for &tri in &map.faces {
+        let tri = tri as usize;
+        match t.base_face.get(tri).copied().flatten() {
+            Some(base) => {
+                faces.push(base);
+                slices.push(FanSlice::Triangle);
+                corners.push(t.corner_uvs[tri]);
+            }
+            None => {
+                faces.push(u32::MAX);
+                slices.push(FanSlice::Unmappable);
+                corners.push([[0.0; 2]; 3]);
+            }
+        }
+    }
+    FaceMap {
+        faces,
+        slices,
+        sub: None,
+        corners: Some(corners),
+        density: Vec::new(),
+    }
+}
+
 /// Rewrites a [`FaceMap`] built by triangulating *refined* quads — whose
 /// `faces` therefore number refined faces — into base-cage face ids plus
 /// explicit sub-face UVs. The fan of a refined quad is `k=1 -> (v0,v1,v2)`
@@ -1136,6 +1270,7 @@ fn remap_subdivided_faces(map: FaceMap, sub: &subdiv::SubdivFaces) -> FaceMap {
         faces,
         slices,
         sub: Some(subs),
+        corners: None,
         density: Vec::new(),
     }
 }
@@ -1264,6 +1399,7 @@ fn triangulate(
         faces,
         slices,
         sub: None,
+        corners: None,
         density: Vec::new(),
     });
     // The densities are left empty: they want the mesh's *local* vertices,
@@ -1460,6 +1596,82 @@ mod bake_tests {
 mod face_table_tests {
     use super::*;
 
+    /// Per-face tessellation's face table end to end: a cube tessellated at
+    /// mixed rates, triangulated and remapped. Every triangle resolves into
+    /// the cage face it was cut from, its corners to their own Ptex
+    /// coordinates, and two triangles sharing an edge inside a face resolve
+    /// its midpoint to the same place — the texture is continuous across the
+    /// tessellation.
+    #[test]
+    fn tessellated_face_table_resolves_to_patch_coordinates() {
+        let points: Vec<Vec3f> = [
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+        ]
+        .map(Vec3f::from)
+        .to_vec();
+        let counts = [4; 6];
+        let indices = [
+            0, 1, 2, 3, 5, 4, 7, 6, 4, 0, 3, 7, 1, 5, 6, 2, 3, 2, 6, 7, 4, 5, 1, 0,
+        ];
+        let req = subdiv::SubdivRequest {
+            scheme: subdiv::SubdivScheme::CatmullClark,
+            level: 0,
+            boundary: opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeAndCorner,
+            crease_indices: &[],
+            crease_lengths: &[],
+            crease_sharpnesses: &[],
+            corner_indices: &[],
+            corner_sharpnesses: &[],
+            want_face_uvs: true,
+            uvs: None,
+        };
+        // Rates 1 to 6, varying by edge.
+        let segment =
+            |p: &[[f32; 3]]| ((p[0][0] + 2.0 * p[1][1] + 3.0 * p[0][2]).abs() * 2.1) % 6.0;
+        let t = subdiv::tessellate_adaptive(&points, &counts, &indices, &req, 3, &segment).unwrap();
+        let per_face = t.faces.as_ref().unwrap();
+        let tri_counts = vec![3; t.indices.len() / 3];
+        let (tris, map, _) =
+            triangulate(&tri_counts, &t.indices, t.points.len(), true, None).unwrap();
+        let map = remap_tessellated_faces(map.unwrap(), per_face);
+        assert_eq!(map.faces.len(), tris.len());
+        // Corners: barycentric (0,0), (1,0), (0,1) are the triangle's own
+        // corners, in its original order.
+        let mut by_edge: std::collections::HashMap<(u32, u32), (u32, [f32; 2])> =
+            std::collections::HashMap::new();
+        for (i, tri) in tris.iter().enumerate() {
+            let want = per_face.corner_uvs[i];
+            let face = per_face.base_face[i].expect("cube faces are quads");
+            for (k, (bu, bv)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)].into_iter().enumerate() {
+                let (f, u, v) = map.resolve(i as u32, bu, bv, false).unwrap();
+                assert_eq!(f, face);
+                assert!((u - want[k][0]).abs() < 1e-6 && (v - want[k][1]).abs() < 1e-6);
+            }
+            // Each edge's midpoint, as this triangle resolves it.
+            for (a, b, bary) in [(0, 1, (0.5, 0.0)), (1, 2, (0.5, 0.5)), (2, 0, (0.0, 0.5))] {
+                let (f, u, v) = map.resolve(i as u32, bary.0, bary.1, false).unwrap();
+                let key = (tri[a].min(tri[b]), tri[a].max(tri[b]));
+                if let Some(&(f2, uv2)) = by_edge.get(&key) {
+                    if f2 == f {
+                        assert!(
+                            (uv2[0] - u).abs() < 1e-6 && (uv2[1] - v).abs() < 1e-6,
+                            "an edge inside face {f} resolves to two places"
+                        );
+                    }
+                } else {
+                    by_edge.insert(key, (f, [u, v]));
+                }
+            }
+        }
+    }
+
     /// The remap end to end: subdivide one textured quad, triangulate the
     /// refinement, remap — every triangle must resolve into the *base* face,
     /// and the refined corners must land on their sub-rectangle of it.
@@ -1554,6 +1766,7 @@ mod face_table_tests {
             faces: vec![0, 1],
             slices: vec![FanSlice::QuadLower, FanSlice::QuadUpper],
             sub: None,
+            corners: None,
             density: Vec::new(),
         };
         let sub = subdiv::SubdivFaces {

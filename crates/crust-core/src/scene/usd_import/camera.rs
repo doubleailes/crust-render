@@ -81,13 +81,39 @@ pub(super) fn screen_projection(
     stage: &Stage,
     prim: &Prim,
     settings: &RenderSettings,
-) -> Option<(Vec3, f32)> {
+) -> Option<ScreenProjection> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let eye = local_to_world(stage, prim).transform_point3(Vec3::ZERO);
+    let world = local_to_world(stage, prim);
+    let eye = world.transform_point3(Vec3::ZERO);
     let (focal_length, vert_aperture) = lens(&cam, settings);
-    let (_, h) = settings.get_dimensions();
+    let (w, h) = settings.get_dimensions();
     let f_px = h as f32 * focal_length / vert_aperture;
-    (f_px.is_finite() && f_px > 0.0).then_some((eye, f_px))
+    // The view pyramid, as `build_camera` builds it: the vertical field of
+    // view from the lens, the horizontal one from the image's aspect ratio.
+    let tan_v = vert_aperture / (2.0 * focal_length);
+    let forward = world.transform_vector3(Vec3::NEG_Z).normalize();
+    let up = world.transform_vector3(Vec3::Y).normalize();
+    (f_px.is_finite() && f_px > 0.0).then_some(ScreenProjection {
+        eye,
+        f_px,
+        forward,
+        up,
+        tan_v,
+        tan_h: tan_v * w as f32 / h as f32,
+    })
+}
+
+/// The render camera as adaptive subdivision needs it, read before traversal.
+pub(super) struct ScreenProjection {
+    pub(super) eye: Vec3,
+    /// Pixels per world unit at unit distance.
+    pub(super) f_px: f32,
+    /// The view direction and the image's up, in world space.
+    pub(super) forward: Vec3,
+    pub(super) up: Vec3,
+    /// Tangents of the half fields of view, vertical and horizontal.
+    pub(super) tan_v: f32,
+    pub(super) tan_h: f32,
 }
 
 /// Composed local-to-world by walking the prim path upwards. Slower than

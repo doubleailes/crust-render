@@ -256,14 +256,15 @@ highest level adaptive subdivision may choose.
 `float`, in pixels, unset by default. CLI:
 [`--subdiv-edge-length`](@/docs/reference/command-line.md#subdiv-edge-length).
 
-Turns on adaptive subdivision. Each subdivision mesh is refined only until its average
-control-cage edge, seen from the render camera at the mesh's nearest point, is at most
-this many pixels long. So a mesh filling the frame is refined and a distant one keeps its
-cage.
+Turns on adaptive subdivision. Each control-cage edge is cut until its segments are at
+most this many pixels long, seen from the render camera at the edge's own distance. So
+the near part of a mesh is refined and its far part keeps its cage.
 
-- [`crust:subdivisionLevel`](#crust-subdivisionlevel) becomes the highest level a mesh
-  can get, 3 when it is unauthored.
-- Each placement of an instanced mesh is refined for its own distance.
+- [`crust:subdivisionLevel`](#crust-subdivisionlevel) becomes the ceiling (2^level
+  segments per edge), 3 when it is unauthored.
+- Only geometry used once is adaptive. A prototype placed several times is refined to
+  `crust:subdivisionLevel` (else 0) everywhere.
+- Faces outside the camera's view are not refined.
 - The camera must be named by `rel camera` on this prim or by `--camera`. Otherwise a
   warning is logged and the uniform level applies.
 - A value that is not a positive number is ignored with a warning.
