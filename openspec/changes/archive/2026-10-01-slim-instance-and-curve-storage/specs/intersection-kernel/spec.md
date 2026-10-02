@@ -3,11 +3,12 @@
 ### Requirement: Instances and cubic curve spans are stored inline
 
 After `commit()`, the kernel SHALL store instances and cubic curve spans in arrays of
-their own kind, inline, with no per-primitive heap allocation and no generic
-per-primitive slot pointing at them.
+their own kind, inline, with no generic per-primitive slot pointing at them and no
+per-primitive heap allocation except a moving instance's motion record.
 
 - A static instance SHALL hold one cached transform, world-to-local.
-- A moving instance SHALL additionally hold its two endpoint local-to-world transforms.
+- A moving instance SHALL additionally hold its two endpoint local-to-world transforms,
+  in one heap-allocated motion record, so static instances do not pay for them.
 - The kernel's memory report (`--stats` "kernel memory") SHALL list instances and
   cubic curve spans as their own lines.
 
