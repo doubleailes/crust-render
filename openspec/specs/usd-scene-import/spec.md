@@ -130,8 +130,21 @@ geometry without a resolvable bound material falls back to a default grey `OpenP
 The importer SHALL map every `UsdLux` light it reads — `SphereLight`,
 `RectLight`, `DiskLight`, `CylinderLight`, `DistantLight` and `DomeLight` — onto
 the lights defined by the `lighting` capability, with UsdLux units, `normalize`,
-colour temperature and `ShapingAPI` honoured as that capability states.
-`PortalLight`, mesh lights, light filters and light linking SHALL NOT be read.
+colour temperature, `ShapingAPI`, camera visibility (`crust:light:cameraVisible`,
+`primvars:ri:attributes:visibility:camera`) and `collection:lightLink` /
+`collection:shadowLink` honoured as that capability states. `PortalLight`, mesh
+lights and light filters SHALL NOT be read.
+
+The importer SHALL read the render setting `domeLightCameraVisibility` (and
+`crust:domeLightCameraVisibility`) off the stage's `RenderSettings` prim, as the
+`lighting` capability's "Infinite lights" requirement states.
+
+A light whose `collection:lightLink` has no member among the receivers the import
+traversed (see "Light collection membership") illuminates nothing, as the
+`lighting` capability's "Lights linked to nothing" requirement states. The test
+SHALL be made after the whole stage is traversed, so it does not depend on the
+order in which lights and receivers are traversed or on how the import is
+streamed.
 
 #### Scenario: Area light
 
@@ -144,6 +157,20 @@ colour temperature and `ShapingAPI` honoured as that capability states.
 
 - **WHEN** a `UsdLuxDistantLight` or `UsdLuxDomeLight` prim is traversed
 - **THEN** it becomes a light-list entry with no scene geometry
+
+#### Scenario: The Moana backdrop
+
+- **WHEN** `island.usda` is imported, where `sky_dome_cam_llc` authors
+  `collection:lightLink:excludes = </island>` and every geometry lies under
+  `/island`
+- **THEN** `sky_dome_cam_llc` illuminates nothing, and `sky_dome_env_llc`, whose
+  excludes name only the other light, illuminates everything
+
+#### Scenario: A light traversed before what it excludes
+
+- **WHEN** a streamed stage's backdrop dome is traversed in an earlier chunk than
+  the geometry its `excludes` cover
+- **THEN** it still illuminates nothing, as it does with streaming disabled
 
 ### Requirement: Volume region import
 
@@ -550,3 +577,59 @@ values. `--camera` SHALL still take precedence.
 
 - **WHEN** a RenderVar authors `sourceType = "intrinsic"`
 - **THEN** a warning names the var and it is skipped
+
+### Requirement: Imported opacity inputs are cutouts
+
+`crust:openpbr`'s `geometryOpacity` and `PxrDisneyBsdf`'s `alpha` SHALL be
+the material's opacity, a cutout the integrator honours (see the rendering
+capability). A `UsdPreviewSurface` whose `opacityThreshold` is above 0 SHALL be
+a cutout mask: a point is present where `opacity ≥ opacityThreshold` and absent
+otherwise, from a constant or a texture-driven `opacity` alike, and SHALL NOT
+refract. Under an `opacityThreshold` of 0 (the default) `opacity` below 1
+SHALL remain translucency (transmission at `ior`), not a cutout.
+
+#### Scenario: A constant preview cutout
+
+- **WHEN** a `UsdPreviewSurface` authors `opacity = 0` and `opacityThreshold = 0.5`
+- **THEN** its material is a cutout of opacity 0, and its BSDF transmits nothing
+
+#### Scenario: A textured preview mask
+
+- **WHEN** a `UsdPreviewSurface` under `opacityThreshold = 0.5` reads `opacity`
+  from a texture whose value at a hit is 0.2, and at another 0.8
+- **THEN** the first hit has opacity 0 and the second opacity 1
+
+#### Scenario: Translucency is no cutout
+
+- **WHEN** a `UsdPreviewSurface` authors `opacity = 0` with no threshold
+- **THEN** its material has no cutout and refracts at `ior`
+
+### Requirement: Light collection membership
+
+For every UsdLux light it reads, the importer SHALL resolve `collection:lightLink`
+and `collection:shadowLink` with `UsdCollectionAPI` semantics. A geometry prim is a
+member when the nearest of its own path and its ancestors named in `includes` or
+`excludes` is an include, or, when none is named, when `includeRoot` is true (the
+UsdLux fallback). `expansionRule = explicitOnly` SHALL match only the named paths.
+`expandPrims` (the default) and `expandPrimsAndProperties` SHALL match the named
+paths' descendants. Included collections SHALL be resolved recursively, and a
+cycle SHALL be refused with a warning. Membership SHALL be judged on the prim that
+owns the emitted geometry. For native instances and PointInstancer instances, that
+is the instance prim, and targets inside a prototype SHALL warn once per collection.
+
+#### Scenario: The nearest path decides
+
+- **WHEN** a collection includes `/World` and excludes `/World/Set`, and
+  `/World/Set/Chair` is traversed
+- **THEN** `/World/Set/Chair` is not a member
+
+#### Scenario: Default collection
+
+- **WHEN** a light authors no `collection:lightLink` properties
+- **THEN** every geometry is a member and no link data is built
+
+#### Scenario: Explicit only
+
+- **WHEN** a collection sets `expansionRule = "explicitOnly"` and includes
+  `/World/Hero`
+- **THEN** `/World/Hero/Body` is not a member
