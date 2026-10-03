@@ -134,7 +134,7 @@ fn invert3(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 /// `π·sin²θmax` is the cosine-weighted solid angle of the source cone, so a
 /// normalised distant light delivers exactly `intensity` lux to a surface
 /// facing it — the property the spec picks the formula for.
-pub fn distant_size_factor(angle_deg: f32) -> f32 {
+pub(crate) fn distant_size_factor(angle_deg: f32) -> f32 {
     let theta = (0.5 * (angle_deg as f64).to_radians()).clamp(0.0, std::f64::consts::PI);
     if theta == 0.0 {
         return 1.0;
@@ -155,7 +155,7 @@ pub fn distant_size_factor(angle_deg: f32) -> f32 {
 /// `L · π·sin²θmax`, capped at the facing hemisphere (`L · π`). In f64 for
 /// the reason [`distant_size_factor`] is. A zero angle is a delta light and
 /// has no such conversion; the caller treats its intensity as illuminance.
-pub fn distant_illuminance(luminance: f32, angle_deg: f32) -> f32 {
+pub(crate) fn distant_illuminance(luminance: f32, angle_deg: f32) -> f32 {
     let theta = (0.5 * (angle_deg as f64).to_radians()).clamp(0.0, 0.5 * std::f64::consts::PI);
     (luminance as f64 * std::f64::consts::PI * theta.sin().powi(2)) as f32
 }

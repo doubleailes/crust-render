@@ -334,12 +334,17 @@ impl LightList {
     /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
     /// rounds differently when `n` is not a power of two — so the default
     /// renders bit-identically to the renderer before selection was a choice.
+    ///
+    /// Floored at `1e-6`, here rather than at each caller so no MIS half can
+    /// forget it: NEE divides by this density, and both MIS weights compare
+    /// it against the bounce density.
     pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32) -> PdfSolidAngle {
         PdfSolidAngle::from_measure(if self.pmf.is_empty() {
             light_pdf.get() / self.lights.len() as f32
         } else {
             light_pdf.get() * pmf
         })
+        .max(1e-6)
     }
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it
@@ -385,7 +390,11 @@ impl LightList {
     }
 
     /// [`LightList::pick_at`] as an index into [`LightList::lights`].
-    #[inline]
+    ///
+    /// `inline(always)`: it runs at every NEE vertex, and plain `#[inline]`
+    /// left the decision to LLVM, which took it out of line once the
+    /// integrator's helpers moved (+0.5% instructions on cornellbox).
+    #[inline(always)]
     pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
         match self.cache.as_ref().and_then(|c| c.lookup(p)) {
             Some((pmf, cdf)) => {

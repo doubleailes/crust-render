@@ -14,7 +14,7 @@ use crate::volume::Volumes;
 use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
-pub(crate) use path::{cutout_through, shadow_t_max};
+pub(crate) use path::{shadow_t_max, surface_visibility};
 mod settings;
 
 use path::{K_CAMERA, K_TIME, trace_path};
@@ -33,6 +33,16 @@ pub(crate) use path::PathScratch;
 /// given. Presentation (progress bars,
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
+
+/// The extra sampler domain that tells pixel `(i, j)`'s 256×256 tile apart
+/// from the others: OpenQMC decorrelates pixels only within one such tile,
+/// so images wider or taller than 256 take one more domain per tile to stay
+/// fully decorrelated (the frame seed alone is constant within a render).
+/// Tile 0 — every pixel of an image up to 256 across — is 0.
+#[inline]
+pub(crate) fn pixel_tile(i: usize, j: usize) -> i32 {
+    (i >> 8) as i32 + ((j >> 8) as i32) * 4096
+}
 
 /// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
@@ -518,6 +528,20 @@ impl Renderer {
             }
         };
         let scratch = || PathScratch::new(self.settings.max_depth as usize);
+        // The integrator is monomorphised on the profiler switch; this picks
+        // the instance once per pixel step, for both sweeps below.
+        let advance = |i: usize,
+                       j: usize,
+                       work: &mut UnitWork,
+                       scratch: &mut PathScratch,
+                       st: &mut PixelState,
+                       target: u32| {
+            if profiling {
+                self.advance_pixel::<true>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+            } else {
+                self.advance_pixel::<false>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+            }
+        };
 
         // First sweep: every pixel to the first check point (or to the
         // budget). The path scratch is held per rayon worker rather than
@@ -526,15 +550,7 @@ impl Renderer {
             .par_iter_mut()
             .for_each_init(scratch, |scratch, unit| {
                 unit.for_each_pixel(|i, j, work, st| {
-                    if profiling {
-                        self.advance_pixel::<true>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    } else {
-                        self.advance_pixel::<false>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    }
+                    advance(i, j, work, scratch, st, sweep_to);
                     st.finish_round(cfg.spp, threshold);
                 });
                 // Once per unit, and a no-op unless `--profile` is on.
@@ -577,15 +593,7 @@ impl Renderer {
                                 return;
                             }
                         }
-                        if profiling {
-                            self.advance_pixel::<true>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        } else {
-                            self.advance_pixel::<false>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        }
+                        advance(i, j, work, scratch, st, target);
                         st.finish_round(cfg.spp, threshold);
                     });
                     profile::flush();
@@ -718,10 +726,7 @@ impl Renderer {
     ) {
         let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
 
-        // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
-        // with an extra domain so images wider/taller than 256 stay fully
-        // decorrelated (the frame seed alone is constant within one render).
-        let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
+        let tile = pixel_tile(i, j);
 
         // Is the shutter coordinate worth sampling at all? `ray.time` is read
         // by exactly one thing — a moving instance interpolating its

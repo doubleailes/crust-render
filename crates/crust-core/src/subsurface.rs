@@ -36,14 +36,14 @@
 
 use glam::Vec3A;
 use std::f32::consts::{FRAC_1_PI, PI};
-use utils::cosine_hemisphere;
+use utils::{cosine_hemisphere, exp3};
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::brdf::tangent_frame;
 use crate::material::{Material, ScatterSample};
 use crate::medium::{hg_phase, sample_henyey_greenstein};
-use crate::ray::{MASK_ALL, Ray};
+use crate::ray::{MASK_ALL, Ray, TRACE_T_MIN};
 use crate::rt_world::World;
 
 /// Walk steps before a walk is given up as absorbed (Typhoon, Cycles).
@@ -227,19 +227,6 @@ pub fn backward_dwivedi_fraction(opposite: f32, from_entry: f32, nu: f32) -> f32
     let d = from_entry.clamp(0.0, opposite);
     1.0 / (1.0 + ((opposite - 2.0 * d) / nu).exp())
 }
-
-fn exp3(v: Vec3A) -> Vec3A {
-    Vec3A::new(v.x.exp(), v.y.exp(), v.z.exp())
-}
-
-/// The interval every other `World::intersect` in the renderer asks for.
-///
-/// The walk asks for the same one and moves the ray's origin instead of its
-/// bounds. With every caller passing `(0.001, ∞)`, LLVM propagates both
-/// constants into the kernel; one caller passing variables was enough to
-/// lose that, and cornellbox — which never walks — ran 0.3% more
-/// instructions in the triangle test.
-const TRACE_T_MIN: f32 = 0.001;
 
 /// Closest hit on `owner` from `pos` along the unit `dir` within
 /// `(t_min, t_max)`, stepping past every other geometry. The record's `t`

@@ -17,6 +17,7 @@ use crate::medium::hg_phase;
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Mat4, Vec3, Vec3A};
 use openqmc::pcg::Rng;
+use utils::exp3;
 
 /// Spatial density in local box coordinates, normalized to `[0, 1]^3`.
 /// Values are dimensionless multipliers on the region's coefficients.
@@ -399,6 +400,15 @@ pub struct Volumes {
     regions: Vec<VolumeRegion>,
 }
 
+/// The span the delta-tracking walks cover: from the earliest start to the
+/// latest end of [`Volumes`]' active intervals (`(region, start, end)`).
+#[inline]
+fn union_span(spans: &[(usize, f32, f32)]) -> (f32, f32) {
+    let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
+    let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+    (start, end)
+}
+
 impl Volumes {
     pub fn new(regions: Vec<VolumeRegion>) -> Self {
         Self { regions }
@@ -455,8 +465,7 @@ impl Volumes {
                 emitted: Vec3A::ZERO,
             };
         }
-        let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-        let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+        let (start, end) = union_span(&spans);
 
         let mut t = start;
         let mut w = Vec3A::ONE;
@@ -543,13 +552,12 @@ impl Volumes {
             let mut tr = Vec3A::ONE;
             for &(i, a, b) in &spans {
                 let e = self.regions[i].sigma_t_at_density(1.0) * (b - a);
-                tr *= Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp());
+                tr *= exp3(-e);
             }
             return tr;
         }
 
-        let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-        let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+        let (start, end) = union_span(&spans);
         let mut t = start;
         let mut w = Vec3A::ONE;
         loop {

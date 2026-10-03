@@ -36,7 +36,7 @@ mod scene;
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
-pub mod subsurface;
+mod subsurface;
 mod texture;
 mod tracer;
 mod volume;
@@ -57,16 +57,6 @@ pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{Config, PtexMipSpace, TriPackets, config};
-
-/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
-/// `CRUST_BVH_PACKET_SAH` switches, read once.
-pub fn commit_options() -> crust_rt::CommitOptions {
-    let c = config();
-    crust_rt::CommitOptions {
-        layout: c.tri_packets.into(),
-        packet_sah: c.bvh_packet_sah,
-    }
-}
 pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
@@ -78,11 +68,13 @@ pub use light::{
     LightLinks, LightList, LightSample, LightSelection, LightShape, RectShape, SolidAngleSampler,
     SolidAngleSampling, SphereShape, UnitShape, projected_cone_solid_angle,
 };
-pub use lux::{
-    IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb, distant_illuminance,
-    distant_size_factor,
+// `IesShaping` stays public only because it is the type of the public
+// `Shaping::ies` field; nothing outside the importer builds one.
+pub use lux::{IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb};
+pub use material::{
+    Emissive, InteriorCache, Material, MtlxMaterial, OpenPBR, PreviewSurface, Resolution,
+    ResolvedOpenPBR, ScatterSample, ShadingPoint, closure, preview_surface,
 };
-pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask};
@@ -100,3 +92,13 @@ pub use tracer::{
 };
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};
+
+/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
+/// `CRUST_BVH_PACKET_SAH` switches, read once.
+pub(crate) fn commit_options() -> crust_rt::CommitOptions {
+    let c = config();
+    crust_rt::CommitOptions {
+        layout: c.tri_packets.into(),
+        packet_sah: c.bvh_packet_sah,
+    }
+}

@@ -132,7 +132,7 @@ consumed as ordinary dependencies:
      through is no vertex — no depth, no emission, no MIS record — and the previous
      vertex's record meets whatever the segment does reach, so bounce-hit emission
      behind a cutout keeps its weight. The shadow side is its twin
-     (`cutout_through`, under `cutout_shadow`): `Π(1 − opacity)` over every crossing,
+     (`cutout_through`, under `surface_visibility`): `Π(1 − opacity)` over every crossing,
      deterministic, and 0 at the first opaque hit. The two estimate the same
      visibility, which is what keeps NEE and the bounce side describing one integrand
      (`every_sampling_strategy_agrees_through_a_cutout`, in
@@ -143,7 +143,7 @@ consumed as ordinary dependencies:
      (`cutout_opacity_ignores_the_ray_footprint`). And both follow at most 256
      crossings and treat the hit past them as present, so a stack exactly that deep is
      clear to both (`a_cutout_stack_at_the_crossing_limit_is_clear_on_both_sides`).
-     The learned light cache's training shadow rays go through `cutout_through` too. Both are `#[cold]` and out of line, and
+     The learned light cache's training shadow rays go through the same `surface_visibility`. Both walks are `#[cold]` and out of line, and
      gated on `World::has_cutouts` (any material's `has_cutout`, fixed at commit): a
      world without one takes exactly the old code, bit for bit. With one, a shadow ray
      still asks the any-hit query first and walks hit by hit only when it is blocked,
@@ -443,3 +443,27 @@ randomness use `openqmc::pcg::Rng`.
   interiors (subsurface) render brighter than before, correctly. And bounce-hit emission
   (`next_emit`) is now attenuated by the arriving segment (tinted glass / smoke in front
   of an emitter used to pass emission through undimmed).
+
+## History: the iterative integrator and its estimator
+
+- **Recursion to two passes.** `trace_path` replaced a recursive integrator that
+  intersected every segment twice: once from the previous vertex to find emission
+  (`add_emission` traced the ray itself) and once as the next vertex. The forward walk
+  intersects each segment once and the backward gather folds the `VertexRec`s into the
+  same estimate. The recursion's rule at an exhausted depth was kept: the last bounce
+  still collects (MIS-weighted) emission from the surface it hits, but never anything
+  from lights at infinity.
+- **The double cosine.** `Material::eval` and `ScatterSample::value` return
+  `brdf · |cos|`, and the integrator used to multiply by the cosine again on both the
+  bounce and the NEE side, so every bounce integrated `brdf · cos²` — a Lambertian
+  surface reflected 2/3 of its albedo (0.64 × L in the furnace scene). Both strategies
+  applied the same extra factor, so every `--strategy` agreed on the dimmed answer and
+  no MIS test caught it; the white-furnace test
+  (`a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance`,
+  `crust-core/tests/render_smoke.rs`) did. Guiding training samples carry one cosine
+  for the same reason.
+- **NEE test order.** Surface NEE tests radiance, then the BSDF (`eval`), then the
+  shadow ray. Before `ShadingPoint` ran a material's pattern network once per vertex,
+  a textured `eval` went after the shadow ray, so an occluded light never paid for the
+  network; with the network already run, `eval` is the cheaper test. Either order is
+  bit-identical.

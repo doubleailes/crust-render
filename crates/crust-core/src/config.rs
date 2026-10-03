@@ -2,12 +2,9 @@
 //!
 //! Each switch exists to A/B an optimization against the behaviour it
 //! replaced (`docs/architecture.md` § Environment switches, whose table is
-//! this struct's field list). They used to be read where they were used, and
-//! parsed six different ways: some were cached, others re-read per prim or per
-//! texture open, a bad budget warned once per call site, and a bad
-//! `CRUST_TEX_MAX` not at all. Now there is one boolean grammar
-//! ([`env_flag`]), one number grammar ([`env_parse`]), and one warning per
-//! bad value per process.
+//! this struct's field list). This module is the only place the environment
+//! is read: one boolean grammar ([`env_flag`]), one number grammar
+//! ([`env_parse`]), and one warning per bad value per process.
 //!
 //! The process-wide value is [`config()`], read from the environment on first
 //! use. Code that wants a different setting — a test comparing both sides of

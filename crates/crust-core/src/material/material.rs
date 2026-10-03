@@ -35,7 +35,7 @@ pub struct ScatterSample {
     pub spread: f32,
     /// Set when the material selected a subsurface leaf: the direction is
     /// not a bounce but the entry into a random walk
-    /// ([`crate::subsurface`]), which the tracer runs before the path
+    /// (crust-core's `subsurface` module), which the tracer runs before the path
     /// resumes at the walk's exit. Such a sample is `delta` — no continuous
     /// density can produce it — and its `value` is the leaf's weight over its
     /// selection probability. The value is the leaf's index, which

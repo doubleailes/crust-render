@@ -31,7 +31,7 @@ pub mod mx;
 use glam::Vec3A;
 use std::cell::RefCell;
 use std::f32::consts::FRAC_1_PI;
-use utils::cosine_hemisphere;
+use utils::{cosine_hemisphere, luminance};
 
 use crate::PathSampler;
 use crate::hittable::HitRecord;
@@ -58,6 +58,11 @@ pub const MAX_LEAVES: usize = 8;
 /// helpers need a finite distribution, and a mirror this sharp is already
 /// indistinguishable from a delta at any pixel footprint.
 const MIN_ALPHA: f32 = 1e-4;
+
+/// The floor on a leaf's lobe-selection weight (its estimated albedo before
+/// the layer weights): a lobe estimated near black keeps a small chance of
+/// being picked, so a sample can still reach it wherever it does reflect.
+const MIN_SELECT: f32 = 0.02;
 
 /// A leaf's shading frame: its own normal and tangent.
 #[derive(Clone, Copy, Debug)]
@@ -135,7 +140,7 @@ pub enum Lobe {
     },
     /// `subsurface_bsdf`: no value toward any direction (as in Typhoon, the
     /// leaf does no NEE); selecting it enters a random walk
-    /// ([`crate::subsurface`]) through the interface above it.
+    /// (the tracer's `subsurface` module) through the interface above it.
     Subsurface {
         color: Vec3A,
         radius: Vec3A,
@@ -666,10 +671,6 @@ impl ResolvedClosure {
     }
 }
 
-fn luminance(c: Vec3A) -> f32 {
-    utils::luminance(c)
-}
-
 /// Finite and non-negative, per channel.
 fn sanitize(v: Vec3A) -> Vec3A {
     let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
@@ -737,7 +738,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     color,
                     roughness: r,
                 },
-                luminance(albedo).max(0.02),
+                luminance(albedo).max(MIN_SELECT),
                 None,
             )
         }
@@ -777,13 +778,13 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     roughness: 0.0,
                 }
             };
-            (lobe, luminance(color).max(0.02), None)
+            (lobe, luminance(color).max(MIN_SELECT), None)
         }
         Bsdf::Translucent { color } => {
             let color = rgb(*color);
             (
                 Lobe::Translucent { color },
-                luminance(color).max(0.02),
+                luminance(color).max(MIN_SELECT),
                 None,
             )
         }
@@ -798,7 +799,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     color,
                     roughness: r,
                 },
-                (luminance(color) * e).max(0.02),
+                (luminance(color) * e).max(MIN_SELECT),
                 Some(Vec3A::splat(e)),
             )
         }
@@ -851,7 +852,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     eta,
                     thin_walled: w.thin_walled,
                 },
-                select.max(0.02),
+                select.max(MIN_SELECT),
                 Some(e_r),
             )
         }
@@ -882,7 +883,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     eta: 1.0,
                     thin_walled: false,
                 },
-                luminance(e).max(0.02),
+                luminance(e).max(MIN_SELECT),
                 // MaterialX: a conductor is opaque.
                 None,
             )
@@ -922,7 +923,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     eta: if w.rec.front_face { eta } else { 1.0 / eta },
                     thin_walled: w.thin_walled,
                 },
-                e_avg.max(0.02),
+                e_avg.max(MIN_SELECT),
                 Some(Vec3A::splat(e_avg)),
             )
         }

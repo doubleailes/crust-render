@@ -39,7 +39,7 @@
 use crate::camera::Camera;
 use crate::light::{Light, LightList};
 use crate::material::ShadingPoint;
-use crate::ray::{MASK_INDIRECT, Ray};
+use crate::ray::{MASK_INDIRECT, Ray, TRACE_T_MIN};
 use crate::rt_world::World;
 use crate::{PathSampler, Vec3A};
 use rayon::prelude::*;
@@ -177,13 +177,13 @@ pub(crate) fn train(
         .map(|j| {
             let mut out = Vec::new();
             for i in 0..gw {
-                // OpenQMC decorrelates coordinates within a 256x256 tile only, so
-                // grids past 256 take a tile domain, as `render_pixel` does. It is
-                // skipped for tile 0, which leaves every grid up to 256 — every
-                // render up to 1024 pixels across, the ones measured in
-                // `docs/light_sampling.md` §3.12 — drawing exactly what it did.
+                // Grids past 256 take a tile domain, as `render_pixel` does
+                // (`pixel_tile`). It is skipped for tile 0, which leaves every
+                // grid up to 256 — every render up to 1024 pixels across, the
+                // ones measured in `docs/light_sampling.md` §3.12 — drawing
+                // exactly what it did.
                 let base = PathSampler::new(i as i32, j as i32, frame as i32, 0);
-                let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
+                let tile = crate::tracer::pixel_tile(i, j);
                 let base = if tile == 0 {
                     base
                 } else {
@@ -198,7 +198,7 @@ pub(crate) fn train(
                 }
                 let mut ray = camera.get_ray(u, v, [cam[2], cam[3]], 0.0);
                 for depth in 0..=TRAIN_BOUNCES {
-                    let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) else {
+                    let Some(hit) = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY) else {
                         break;
                     };
                     let vertex = root.new_domain(1 + depth as i32);
@@ -242,22 +242,14 @@ pub(crate) fn train(
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.
-                                let t_max = crate::tracer::shadow_t_max(ls.distance);
-                                let mut through = 1.0;
-                                if world.occluded(&shadow, 0.001, t_max) {
-                                    through = if world.has_cutouts() {
-                                        crate::tracer::cutout_through(
-                                            world,
-                                            &shadow,
-                                            t_max,
-                                            &mut crate::stats::RayStats::default(),
-                                        )
-                                    } else {
-                                        0.0
-                                    };
-                                    if through == 0.0 {
-                                        continue;
-                                    }
+                                let through = crate::tracer::surface_visibility(
+                                    world,
+                                    &shadow,
+                                    crate::tracer::shadow_t_max(ls.distance),
+                                    &mut crate::stats::RayStats::default(),
+                                );
+                                if through == 0.0 {
+                                    continue;
                                 }
                                 let e = through * utils::luminance(c) / ls.pdf.get();
                                 if e.is_finite() {

@@ -689,6 +689,11 @@ pub(crate) fn breakdown(kinds: impl Iterator<Item = &'static str>) -> Vec<(&'sta
     out
 }
 
+/// [`thousands`] for a `u64` counter: how the report prints every count.
+fn count(n: u64) -> String {
+    thousands(n as usize)
+}
+
 pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -926,7 +931,6 @@ impl fmt::Display for RenderStats {
         // -- Ray statistics -------------------------------------------
         let r = &self.rays;
         if !r.is_empty() {
-            let count = |n: u64| thousands(n as usize);
             let share = |n: u64, of: u64| 100.0 * n as f64 / of.max(1) as f64;
             writeln!(f, "{rule}")?;
             writeln!(f, "Ray Statistics")?;
@@ -1097,7 +1101,6 @@ impl fmt::Display for RenderStats {
         // -- Textures --------------------------------------------------
         let t = &self.textures;
         if !t.is_empty() {
-            let count = |n: u64| thousands(n as usize);
             writeln!(f, "{rule}")?;
             writeln!(f, "Textures")?;
             writeln!(f, "{rule}")?;
@@ -1114,7 +1117,6 @@ impl fmt::Display for RenderStats {
             }
         }
         if t.lookups() > 0 {
-            let count = |n: u64| thousands(n as usize);
             let share = |n: u64| 100.0 * n as f64 / t.lookups().max(1) as f64;
             writeln!(f, "  {:<28} {}", "streamed files", count(t.files))?;
             // Guerilla's texture memory triple. `total` is what preloading
@@ -1215,12 +1217,6 @@ impl fmt::Display for RenderStats {
             writeln!(f, "{rule}")?;
             // The line the whole block exists for. An island run's peak RSS
             // cannot be read without knowing which backend produced it.
-            // A mixed report is the normal case on a production stage, not a
-            // warning — the island streams 39 of 3 618 and preloads the rest
-            // by design. So "declined" and "failed" are named separately:
-            // the first says the admission rule worked, the second says a
-            // file is broken, and calling both a fallback (as this line once
-            // did) reads as 3 579 errors.
             let backend = if p.streamed == 0
                 && p.below_threshold == 0
                 && p.budget_full == 0
@@ -1234,10 +1230,10 @@ impl fmt::Display for RenderStats {
             } else {
                 // A mixed report is the normal case on a production stage, not
                 // a warning — the island streams 39 of 3 618 and preloads the
-                // rest by design. So the two reasons are named separately: one
-                // says the admission rule worked, the other says a file is
-                // broken. Calling both a fallback, as this line once did, read
-                // as 3 579 errors.
+                // rest by design. So every reason is named on its own: the
+                // policy ones (size threshold, budget, mip space) say the
+                // admission rule worked, and only a failed open — shouted —
+                // says a file is broken.
                 let mut parts = Vec::new();
                 if p.streamed > 0 {
                     parts.push(format!("{} streamed", thousands(p.streamed as usize)));

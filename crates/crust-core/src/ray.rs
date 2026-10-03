@@ -3,6 +3,18 @@ use glam::Vec3A;
 
 pub use crust_rt::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
 
+/// The ray epsilon: the `t_min` of every `World::intersect` / `occluded`
+/// query and every volume-region walk in the renderer, and the step a
+/// segment stops short of a hit it restarts past or a light it is aimed at.
+///
+/// A constant on purpose. With every closest-hit caller passing
+/// `(TRACE_T_MIN, ∞)`, LLVM propagates both bounds into the kernel; one
+/// caller passing variables was enough to lose that, and cornellbox ran 0.3%
+/// more instructions in the triangle test. Code that needs another interval
+/// (the subsurface walk, a segment restarted past a cutout) moves the ray's
+/// origin instead of its bounds.
+pub(crate) const TRACE_T_MIN: f32 = 0.001;
+
 /// The ray's texture-filtering footprint, as a cone about its axis.
 ///
 /// This is the renderer's answer to "how much texture does this ray cover",
