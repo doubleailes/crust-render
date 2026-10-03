@@ -153,20 +153,20 @@ authored value.
 
 The renderer SHALL offer two Rayon-parallel execution strategies that produce a
 **bit-identical** image buffer, guided renders included: a scanline strategy
-(`render`) parallel over pixels within each row, and a tiled strategy
-(`render_with_tiles`) parallel over 16×16 buckets. The choice is the caller's —
+(`RenderOrder::Scanlines`, also what `render()` uses) parallel over pixels within
+each row, and a tiled strategy (`RenderOrder::Tiles`) parallel over 16×16 buckets. The choice is the caller's —
 the `Renderer` API favours neither — and the CLI defaults to tiles (see the cli
 spec). Progress callbacks SHALL be delivered one at a time, with the completed
 count increasing by one per report, under either strategy.
 
 #### Scenario: Scanline rendering
 
-- **WHEN** `render()` is called (CLI `--scanline`)
+- **WHEN** `render()` or `render_with(RenderOrder::Scanlines, …)` is called (CLI `--scanline`)
 - **THEN** it fills the buffer, parallelising pixels within each scanline
 
 #### Scenario: Bucket rendering
 
-- **WHEN** `render_with_tiles()` is called (the CLI default)
+- **WHEN** `render_with(RenderOrder::Tiles, …)` is called (the CLI default)
 - **THEN** it divides the image into 16×16 tiles rendered in parallel and
   reassembles them into the same buffer
 

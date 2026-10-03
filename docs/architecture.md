@@ -77,7 +77,7 @@ crust-render::main
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
  ├─ Renderer::new(scene)                     light selection table, optional learned light cache
- ├─ Renderer::render_with_stats(tiled, progress)
+ ├─ Renderer::render_with(order, progress)
  │   └─ per tile → per pixel → per sample: render_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples

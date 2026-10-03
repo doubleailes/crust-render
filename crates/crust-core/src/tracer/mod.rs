@@ -34,6 +34,17 @@ pub(crate) use path::PathScratch;
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
+/// The order a render hands out its work units. Scheduling only: both give
+/// bit-identical images (CLAUDE.md's tiles ↔ scanlines pair), so the choice
+/// is about progress granularity and cache locality, never about the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderOrder {
+    /// 16×16 tiles, in parallel — the CLI's default.
+    Tiles,
+    /// Image rows, in parallel, each written into the image in place.
+    Scanlines,
+}
+
 /// The extra sampler domain that tells pixel `(i, j)`'s 256×256 tile apart
 /// from the others: OpenQMC decorrelates pixels only within one such tile,
 /// so images wider or taller than 256 take one more domain per tile to stay
@@ -184,30 +195,26 @@ impl Renderer {
         self
     }
 
+    /// Renders by scanlines with no progress reporting, discarding the
+    /// integrator's counters: [`Renderer::render_with`] at its simplest.
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None).0
+        self.render_with(RenderOrder::Scanlines, None).0
     }
 
-    pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None).0
-    }
-
-    /// Renders with a progress callback — see [`ProgressCallback`]. With
-    /// guiding enabled, only the final pass reports (training passes are
-    /// silent, as before).
-    pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
-        self.render_impl(tiled, Some(progress)).0
-    }
-
-    /// As [`Renderer::render_with_progress`], also returning what the
-    /// integrator did — see [`RayStats`]. Counting is unconditional and
-    /// costs an increment per ray, so this is the same render either way;
-    /// the other entry points simply discard the numbers.
+    /// Renders in `order`, reporting to `progress` when given (see
+    /// [`ProgressCallback`]; with guiding enabled only the final pass
+    /// reports), and returns the image with what the integrator did — see
+    /// [`RayStats`]. Counting is unconditional and costs an increment per
+    /// ray, so the render is the same whether or not a caller reads them.
     ///
     /// With guiding enabled the counters cover **every** pass, training
     /// included, since all of them spend time.
-    pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
-        self.render_impl(tiled, Some(progress))
+    pub fn render_with(
+        &self,
+        order: RenderOrder,
+        progress: Option<ProgressCallback>,
+    ) -> (Buffer, RayStats) {
+        self.render_impl(order == RenderOrder::Tiles, progress)
     }
 
     fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {

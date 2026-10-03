@@ -12,7 +12,7 @@ mod traversal_report;
 
 use clap::Parser;
 use crust_assets::FileAssets;
-use crust_core::{RenderSettings, Renderer, Scene, get_settings, simple_scene};
+use crust_core::{RenderOrder, RenderSettings, Renderer, Scene, get_settings, simple_scene};
 use exr::prelude::write_rgb_file;
 use indicatif::ProgressBar;
 use std::path::Path;
@@ -110,7 +110,12 @@ fn main() -> ExitCode {
         }
         progress_bar.set_position(done);
     };
-    let (buffer, ray_stats) = renderer.render_with_stats(!cli.scanline, &progress);
+    let order = if cli.scanline {
+        RenderOrder::Scanlines
+    } else {
+        RenderOrder::Tiles
+    };
+    let (buffer, ray_stats) = renderer.render_with(order, Some(&progress));
     bar.finish();
     let duration: Duration = start.elapsed();
     stats.record("Render", 0, duration);

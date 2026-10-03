@@ -66,7 +66,7 @@ fn guided_render_with_tiles_smoke() {
     let scene = Scene::from_usd(&sample_scene()).expect("load cornellbox_guided.usda");
     let settings = RenderSettings::new(8, 6, 64, 64, 4, 0.05, 0).with_guiding(true, 3, 0.5);
     let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
-    let buf = renderer.render_with_tiles();
+    let buf = renderer.render_with(crust_core::RenderOrder::Tiles, None).0;
     // The closed box is lit: the image cannot be black.
     let mut total = 0.0f64;
     for y in 0..64 {
@@ -91,7 +91,7 @@ fn guided_tiles_and_rows_are_bit_identical() {
         let settings = RenderSettings::new(8, 6, w, h, 4, 0.05, 0).with_guiding(true, 3, 0.5);
         let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
         if tiled {
-            renderer.render_with_tiles()
+            renderer.render_with(crust_core::RenderOrder::Tiles, None).0
         } else {
             renderer.render()
         }

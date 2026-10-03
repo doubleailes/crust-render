@@ -158,7 +158,7 @@ fn rows_and_tiles_render_the_same_image() {
     let (w, h) = (20, 12);
     let r = emissive_ball_scene(1.0, w, h, 16);
     let rows = r.render();
-    let tiles = r.render_with_tiles();
+    let tiles = r.render_with(crust_core::RenderOrder::Tiles, None).0;
     assert!(
         buffers_equal(&rows, &tiles, w, h),
         "tile and row paths diverged"
@@ -236,7 +236,12 @@ fn progress_callback_reaches_the_total() {
             total.store(all, Ordering::SeqCst);
             calls.fetch_add(1, Ordering::SeqCst);
         };
-        let buf = r.render_with_progress(tiled, &cb);
+        let order = if tiled {
+            crust_core::RenderOrder::Tiles
+        } else {
+            crust_core::RenderOrder::Scanlines
+        };
+        let buf = r.render_with(order, Some(&cb)).0;
         assert!(buffer_sum(&buf, w, h) > 0.0);
         let t = total.load(Ordering::SeqCst);
         assert!(t > 0, "tiled={tiled}");
@@ -265,7 +270,7 @@ fn progress_callback_reaches_the_total() {
 fn ray_stats_count_every_camera_ray() {
     let (w, h, spp) = (6, 5, 3);
     let r = emissive_ball_scene(1.0, w, h, spp);
-    let (buf, stats) = r.render_with_stats(false, &|_, _| {});
+    let (buf, stats) = r.render_with(crust_core::RenderOrder::Scanlines, None);
     assert!(buffer_sum(&buf, w, h) > 0.0);
     assert_eq!(stats.camera_rays, (w * h) as u64 * spp as u64);
     assert!(stats.closest_hit >= stats.camera_rays);
@@ -308,7 +313,7 @@ fn adaptive_sampling_takes_fewer_camera_rays_on_a_flat_image() {
     // stops at the first check past the minimum.
     let settings = RenderSettings::new(64, 2, w, h, 4, 0.01, 0);
     let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
-    let (buf, stats) = r.render_with_stats(false, &|_, _| {});
+    let (buf, stats) = r.render_with(crust_core::RenderOrder::Scanlines, None);
     assert!(
         stats.camera_rays < (w * h * 64) as u64,
         "early stop never fired: {}",
@@ -828,7 +833,7 @@ fn adaptive_sampling_never_stops_a_pixel_that_has_seen_no_light() {
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
     let settings = RenderSettings::new(spp, 2, w, h, 4, 0.01, 0);
     let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
-    let (buf, stats) = r.render_with_stats(false, &|_, _| {});
+    let (buf, stats) = r.render_with(crust_core::RenderOrder::Scanlines, None);
     assert_eq!(buffer_sum(&buf, w, h), 0.0, "an empty world is black");
     assert_eq!(stats.early_stopped, 0, "{stats:?}");
     assert_eq!((stats.spp_min, stats.spp_max), (spp, spp), "{stats:?}");
@@ -841,7 +846,7 @@ fn adaptive_sampling_never_stops_a_pixel_that_has_seen_no_light() {
 fn adaptive_minimum_is_floored_at_sqrt_spp() {
     let (w, h) = (4, 4);
     let r = flat_adaptive_scene(1.0, w, h, 1024, 8, -1.0);
-    let (_, stats) = r.render_with_stats(false, &|_, _| {});
+    let (_, stats) = r.render_with(crust_core::RenderOrder::Scanlines, None);
     assert_eq!(stats.early_stopped, (w * h) as u64, "{stats:?}");
     assert!(stats.spp_min >= 32, "{stats:?}");
     assert!(stats.spp_max < 1024, "{stats:?}");
@@ -878,8 +883,10 @@ fn one_noisy_pixel_scene(w: usize, h: usize, spp: u32, t: f32) -> Renderer {
 #[test]
 fn a_less_converged_cross_neighbour_holds_a_pixel() {
     let (w, h, spp) = (7, 7, 1024);
-    let (buf, on) = one_noisy_pixel_scene(w, h, spp, 1.0).render_with_stats(false, &|_, _| {});
-    let (_, off) = one_noisy_pixel_scene(w, h, spp, -1.0).render_with_stats(false, &|_, _| {});
+    let (buf, on) =
+        one_noisy_pixel_scene(w, h, spp, 1.0).render_with(crust_core::RenderOrder::Scanlines, None);
+    let (_, off) = one_noisy_pixel_scene(w, h, spp, -1.0)
+        .render_with(crust_core::RenderOrder::Scanlines, None);
     let centre = buf.get_pixel(3, 3);
     assert!(
         centre.x > 1.5,
@@ -912,8 +919,8 @@ fn a_less_converged_cross_neighbour_holds_a_pixel() {
 fn tiles_and_scanlines_agree_under_the_neighbour_comparison() {
     let (w, h, spp) = (20, 18, 256);
     let rows = one_noisy_pixel_scene(w, h, spp, 1.0);
-    let (a, sa) = rows.render_with_stats(false, &|_, _| {});
-    let (b, sb) = rows.render_with_stats(true, &|_, _| {});
+    let (a, sa) = rows.render_with(crust_core::RenderOrder::Scanlines, None);
+    let (b, sb) = rows.render_with(crust_core::RenderOrder::Tiles, None);
     assert!(buffers_equal(&a, &b, w, h));
     assert_eq!(sa, sb);
     assert!(sa.neighbour_held > 0, "{sa:?}");
