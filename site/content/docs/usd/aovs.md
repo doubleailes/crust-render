@@ -380,7 +380,9 @@ crust renders in one colour space.
 
 Each of these is refused with a warning when authored, never ignored silently:
 
-- identity AOVs (`primId`, `instanceId`, `elementId`) and Cryptomatte;
+- identity AOVs (`primId`, `instanceId`, `elementId`) and ID mattes. ID mattes are
+  planned as [OpenEXRId](https://github.com/MercenariesEngineering/openexrid) deep EXRs,
+  not Cryptomatte, once crust can write deep EXRs;
 - `sourceType = "primvar"`;
 - the geometric normal `Ng`;
 - deep output (`productType = "deepRaster"`);

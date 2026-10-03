@@ -321,7 +321,7 @@ are aliases, matched case-sensitively, as Arnold and RenderMan do.
 | `primId` | `id`, `ID`, `Object Index` | int | closest | Phase 3. Stable per-prim integer: hash of the prim path (D14). Clear `-1` (written as u32 `0xFFFFFFFF`). |
 | `instanceId` | `id2` | int | closest | Phase 3. Instance index within its instancer, else `-1`. |
 | `elementId` | `faceindex` | int | closest | Phase 3. *Authored* face index (pre-triangulation), else `-1`. |
-| `crypto_object` / `crypto_material` / `crypto_asset` | `CryptoObject`, `CryptoMaterial`, `CryptoAsset` | (layers) | rank-weighted | Phase 3. Cryptomatte v1.2 (D14). |
+| ID mattes | — | (deep) | coverage-weighted | Phase 3, on hold: OpenEXRId deep EXRs, not Cryptomatte (D14). The Cryptomatte names (`crypto_object` …) stay refused. |
 
 \* `diffuse_albedo` is Arnold's diffuse-only albedo, so it is an alias only
 for an OpenPBR surface whose albedo is entirely diffuse. Phase 2 decides
@@ -658,7 +658,7 @@ question.
 The user writes `C.*<L.'key'>`. Automatic per-tag splitting (Karma's
 `C_key`) is not done; the user asks for each group with its own var.
 
-### D14. Identity and Cryptomatte (Phase 3)
+### D14. Identity and ID mattes (Phase 3) — ID mattes on hold
 
 **A prim-path table.** Import keeps a compact `geom_id → interned prim path`
 table for every geometry prim, not only for emitters.
@@ -679,28 +679,26 @@ an int.
 - **Rejected: Hydra's dense index.** Compositors key mattes across frames, so
   stability matters more than density.
 
-**Cryptomatte** follows the Psyop v1.2 spec exactly:
+**ID mattes: OpenEXRId, not Cryptomatte.** The project chose
+[OpenEXRId](https://github.com/MercenariesEngineering/openexrid) over
+Cryptomatte v1.2 for ID mattes. OpenEXRId stores mattes as a *deep* EXR:
+each pixel holds its own list of samples, each with an object id and its
+coverage, and the names the ids stand for travel in the file.
 
-- **Hash.** `MurmurHash3_x86_32`, seed 0, over UTF-8. The result is converted
-  to float32 bits, with the exponent fixed if it would be 0 or 255.
-  Spec test vector: `"torus"` → 4053562365 → −1.54943624832e+30.
-- **Layers.** `<name>00`, `<name>01`, … holding (id, coverage) pairs in
-  `.r/.g/.b/.a`. The default is 6 ranks (3 layers);
-  `driver:parameters:aov:cryptomatterank` overrides it.
-- **Header metadata.** `cryptomatte/<key>/{name, hash, conversion, manifest}`.
-  The manifest is in the header, with no sidecar.
-- **Coverage.** Uses the beauty's filter weights, as the spec requires ("same
-  kernel as beauty"), summed per ID and normalised by the pixel's weight sum.
-  Cutout pass-through contributes to the surfaces behind it, weighted by
-  opacity.
-- **Names:**
-  - `crypto_object`: prim path;
-  - `crypto_material`: bound material path;
-  - `crypto_asset`: the nearest ancestor with `kind = component` or
-    `assembly`, else the top-level prim.
-- **Memory.** Accumulation needs a small per-pixel map from ID to weight.
-  A unit keeps a fixed small array per pixel (rank × 2, plus spill), so this
-  is never a full-frame hashmap.
+- **On hold.** The `exr` crate (1.74) reads and writes flat images only; its
+  README lists deep data as not yet supported. Nothing else here is blocked.
+- **Unblocking it** means one of: deep scanline writing landing in `exr`
+  (upstream contribution), or a deep scanline writer in-tree in safe Rust
+  (the OpenEXR deep format is documented). A C++/FFI writer would be
+  `unsafe`, which is a project decision.
+- **What carries over** from this record: the prim-path table and the
+  stable per-path `primId` above, which name the ids; coverage weighted by
+  the beauty's pixel filter, as for every filtered AOV; cutout pass-through
+  contributing to the surfaces behind it. The exact channel and metadata
+  layout is OpenEXRId's, to be taken from its specification when the work
+  resumes — not designed here.
+- **Superseded:** the Cryptomatte plan (MurmurHash3 names, ranked
+  `<name>NN.rgba` layers, header manifests) is dropped, not deferred.
 
 **`primvar` sources.** Primvars named by `sourceType = "primvar"` vars are
 added to a "keep" set before the meshes load. `import_render_settings` already
@@ -728,18 +726,17 @@ like `st`, and evaluated at the first hit.
   - **Scalars:** a single channel named after the layer (`Z`, `depth`,
     `sampleCount`). A var named `Z` therefore gives the conventional `Z`
     channel.
-  - **Cryptomatte:** `<name>NN.r/.g/.b/.a`, lower-case as the spec requires.
 - **Precision:**
   - `half*`/`color3h` → HALF;
   - `float*`/`color3f` → FLOAT;
   - `int` → UINT, with `-1` written as its two's-complement bit pattern.
 
-  Data AOVs default to FLOAT; Cryptomatte must be FLOAT.
+  Data AOVs default to FLOAT. (ID mattes are deep, OpenEXRId's own layout:
+  D14.)
 - **Header:**
   - `software` = `crust-render <version>`;
   - `colorInteropID` = `lin_rec709_scene`, crust's rendering space
     (`docs/color_management.md`), applying to the colour channels;
-  - Cryptomatte keys;
   - `driver:parameters:OpenEXR:*` / `driver:parameters:artist|comment` text
     attributes copied through.
 
