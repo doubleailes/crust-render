@@ -812,7 +812,10 @@ pub(crate) fn load_scene(
     }
     if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
         // The two reads of one camera must agree, or every level was chosen
-        // for a viewpoint the render does not use.
+        // for a viewpoint the render does not use. Both go through
+        // `camera::camera_frame`, but `screen_projection` may have read the
+        // camera on the index stage or a stage masked to it, and the render
+        // camera comes from the traversal's stage.
         debug_assert!(
             (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
             "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
