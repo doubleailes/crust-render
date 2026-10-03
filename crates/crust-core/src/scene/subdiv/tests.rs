@@ -329,7 +329,8 @@ fn a_seamed_face_varying_chart_keeps_each_side() {
             ..request(0)
         };
         let t = tessellate_adaptive(&points, &counts, &indices, &req, 3, &mixed).unwrap();
-        let (fv, corners) = t.face_varying_uvs.as_ref().expect("a face-varying chart");
+        let uvs = t.uvs.as_ref().expect("a face-varying chart");
+        let (fv, corners) = (&uvs.values, uvs.indices.as_ref().unwrap());
         let ptex = t.faces.as_ref().unwrap();
         assert_eq!(corners.len(), t.indices.len());
         let mut worst = 0.0f32;
@@ -408,7 +409,8 @@ fn a_smooth_chart_is_continuous_where_refined_and_cage_faces_meet() {
             ..request(0)
         };
         let t = tessellate_adaptive(&points, &counts, &indices, &req, 3, &near_x).unwrap();
-        let (fv, corners) = t.face_varying_uvs.as_ref().unwrap();
+        let uvs = t.uvs.as_ref().unwrap();
+        let (fv, corners) = (&uvs.values, uvs.indices.as_ref().unwrap());
         let mut at: std::collections::HashMap<i32, [f32; 2]> = Default::default();
         let mut worst = 0.0f32;
         for (&v, &c) in t.indices.iter().zip(corners) {
@@ -691,7 +693,7 @@ fn flat_quad() -> (Vec<Vec3f>, Vec<i32>, Vec<i32>) {
 const UNIT_SQUARE: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
 /// The refined chart's value at refined face-vertex `fv`.
-fn uv_at(uvs: &RefinedUvs, fv: usize, point: usize) -> [f32; 2] {
+fn uv_at(uvs: &UvSource, fv: usize, point: usize) -> [f32; 2] {
     match &uvs.indices {
         Some(idx) => uvs.values[idx[fv] as usize],
         None => uvs.values[point],

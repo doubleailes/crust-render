@@ -6,7 +6,7 @@ use openusd::gf::Vec3f;
 
 use super::normals::smooth_normals;
 use super::topology::prepare_cage;
-use super::{RefinedUvs, SubdivError, SubdivFaces, SubdivRequest, SubdivScheme, SubdividedMesh};
+use super::{SubdivError, SubdivFaces, SubdivRequest, SubdivScheme, SubdividedMesh, UvSource};
 
 /// Uniformly refines the cage to `req.level` and snaps the result to the
 /// limit surface. See the module docs for the shape of the answer.
@@ -151,7 +151,7 @@ pub(crate) fn subdivide(
             for f in 0..n_faces {
                 fv_indices.extend(last.face_fvar_values(f, ch).iter().map(|&v| v as i32));
             }
-            RefinedUvs {
+            UvSource {
                 values: limit_uvs,
                 indices: Some(fv_indices),
                 face_varying: true,
@@ -170,7 +170,7 @@ pub(crate) fn subdivide(
             }
             let mut limit_uvs = vec![[0.0f32; 2]; values.len()];
             primvar.limit(&values, &mut limit_uvs);
-            RefinedUvs {
+            UvSource {
                 values: limit_uvs,
                 indices: None,
                 face_varying: false,

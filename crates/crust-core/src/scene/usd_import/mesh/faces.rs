@@ -6,9 +6,9 @@ use tracing::warn;
 
 use crate::material::Material;
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap};
-use crate::scene::subdiv;
+use crate::scene::subdiv::{self, UvSource};
 
-use super::source::{RefinedFaces, UvSource};
+use super::source::RefinedFaces;
 
 /// [`remap_subdivided_faces`] or [`remap_tessellated_faces`], by how the mesh
 /// was refined.

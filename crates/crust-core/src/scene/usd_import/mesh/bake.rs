@@ -39,13 +39,10 @@ pub(in crate::scene::usd_import) fn emit_mesh(
     pending: &mut Vec<MeshPlacement>,
 ) {
     let want_faces = material.face_texture().is_some();
-    let want_uvs = material.uses_uv();
     let Some(src) = mesh_source(
         prim,
         mesh,
-        want_faces,
-        want_uvs,
-        material.uv_primvar(),
+        material.as_ref(),
         &mut meshes.subdiv,
         MeshPlace::World(&world_xf),
     ) else {

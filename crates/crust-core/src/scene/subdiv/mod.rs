@@ -82,7 +82,8 @@ pub(crate) struct SubdivRequest<'a> {
     pub uvs: Option<UvChannel<'a>>,
 }
 
-/// An authored texture-coordinate primvar, as the importer read it. The
+/// An authored texture-coordinate primvar, borrowed from the importer's
+/// [`UvSource`] with the rule that refines it. The
 /// caller checks it with [`UvChannel::is_well_formed`] first — a refiner
 /// cannot skip a bad value the way a triangle lookup can.
 #[derive(Clone, Copy)]
@@ -124,12 +125,51 @@ impl UvChannel<'_> {
     }
 }
 
-/// The refined chart, in the shape the importer's `UvSource` holds.
-pub(crate) struct RefinedUvs {
+/// A texture chart: the `st` primvar as the importer read it, before
+/// triangulation resolves it, and the refined chart [`subdivide`] and
+/// [`tessellate_adaptive`] hand back in its place.
+///
+/// USD stores texture coordinates as a value array plus an optional index
+/// array, interpolated either per **point** (`vertex`/`varying`) or per
+/// **face-vertex** (`faceVarying`). The distinction is not cosmetic: a vertex
+/// on a UV seam has one position but two texture coordinates, which only the
+/// faceVarying form can express — and it is the form both DPEL assets use.
+pub(crate) struct UvSource {
     pub values: Vec<[f32; 2]>,
-    /// Per refined face-vertex, into `values` — `Some` iff `face_varying`.
+    /// `primvars:st:indices`, when authored; for a refined chart, per refined
+    /// face-vertex — `Some` iff `face_varying`. Indexes `values`.
     pub indices: Option<Vec<i32>>,
+    /// True for `faceVarying`: the lookup index is the running face-vertex
+    /// offset rather than the point index.
     pub face_varying: bool,
+}
+
+impl UvSource {
+    /// The index into `values` of the coordinate at face-vertex `fv`, whose
+    /// point index is `point`; `None` when the source does not resolve it
+    /// (a negative or out-of-range entry), which reads as `(0, 0)`.
+    pub(crate) fn index_at(&self, fv: usize, point: usize) -> Option<u32> {
+        let i = if self.face_varying { fv } else { point };
+        let i = match &self.indices {
+            Some(idx) => match idx.get(i) {
+                Some(&v) if v >= 0 => v as usize,
+                _ => return None,
+            },
+            None => i,
+        };
+        (i < self.values.len()).then_some(i as u32)
+    }
+
+    /// The chart as a refinement request carries it, refined under `linear`
+    /// (the mesh's `faceVaryingLinearInterpolation`).
+    pub(crate) fn channel(&self, linear: sdc::FVarLinearInterpolation) -> UvChannel<'_> {
+        UvChannel {
+            values: &self.values,
+            indices: self.indices.as_deref(),
+            face_varying: self.face_varying,
+            linear,
+        }
+    }
 }
 
 /// Per refined face: the base-cage face it descends from and its corner UVs
@@ -156,7 +196,7 @@ pub(crate) struct SubdividedMesh {
     /// `Some` iff the request asked for face UVs.
     pub faces: Option<SubdivFaces>,
     /// `Some` iff the request carried a texture chart.
-    pub uvs: Option<RefinedUvs>,
+    pub uvs: Option<UvSource>,
 }
 
 #[derive(Debug)]
@@ -206,12 +246,11 @@ pub(crate) struct TessellatedMesh {
     pub indices: Vec<i32>,
     pub normals: Vec<[f32; 3]>,
     pub faces: Option<TessellatedFaces>,
-    /// A `vertex` chart evaluated at every vertex.
-    pub uvs: Option<Vec<[f32; 2]>>,
-    /// A `faceVarying` chart evaluated per Ptex face, so each side of a seam
-    /// keeps its own values: `values`, and per triangle corner (parallel to
-    /// `indices`) an index into them.
-    pub face_varying_uvs: Option<(Vec<[f32; 2]>, Vec<i32>)>,
+    /// The chart, `Some` iff the request carried one: a `vertex` chart
+    /// evaluated at every vertex, or a `faceVarying` one evaluated per Ptex
+    /// face, so each side of a seam keeps its own values — `values`, and per
+    /// triangle corner (parallel to `indices`) an index into them.
+    pub uvs: Option<UvSource>,
     /// The smallest and largest edge rate used, for the debug line.
     pub rate_range: (u32, u32),
     /// Cage edges and spokes by rate, binned by `ceil(log2(rate))`: 1, 2,

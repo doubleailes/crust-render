@@ -195,9 +195,7 @@ pub(super) fn collect_proto_parts(
             if let Some(src) = mesh_source(
                 &prim,
                 &mesh,
-                material.face_texture().is_some(),
-                material.uses_uv(),
-                material.uv_primvar(),
+                material.as_ref(),
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()

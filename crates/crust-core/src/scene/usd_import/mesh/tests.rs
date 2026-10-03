@@ -452,10 +452,12 @@ mod face_table_tests {
 }
 
 mod subdiv_policy_tests {
-    use glam::Mat4 as GMat4;
+    use glam::{Mat4 as GMat4, Vec3A};
     use openusd::sdf;
     use openusd::usd::Stage;
     use openusd_schemas::geom::Mesh as UsdMesh;
+
+    use crate::material::OpenPBR;
 
     use super::super::source::{MeshPlace, SubdivPolicy, mesh_source};
 
@@ -498,9 +500,7 @@ mod subdiv_policy_tests {
             let src = mesh_source(
                 &prim,
                 &mesh,
-                false,
-                false,
-                None,
+                &OpenPBR::diffuse(Vec3A::splat(0.5)),
                 &mut policy,
                 MeshPlace::World(&GMat4::IDENTITY),
             )

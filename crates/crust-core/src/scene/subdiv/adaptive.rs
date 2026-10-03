@@ -16,7 +16,7 @@ use super::normals::smooth_cage_normals;
 use super::topology::{Cage, prepare_cage};
 use super::{
     QUALITY_BINS, SegmentSize, SubdivError, SubdivRequest, SubdivScheme, TessellatedFaces,
-    TessellatedMesh, UvChannel,
+    TessellatedMesh, UvChannel, UvSource,
 };
 
 /// Feature-adaptive isolation depth of per-face tessellation's patch table.
@@ -378,8 +378,21 @@ impl TessBuilder {
                 base_face: self.base_face,
                 corner_uvs: self.corner_uvs,
             }),
-            uvs: vertex_chart.then_some(self.uvs),
-            face_varying_uvs: chart.then_some((self.fv_values, self.fv_indices)),
+            uvs: if vertex_chart {
+                Some(UvSource {
+                    values: self.uvs,
+                    indices: None,
+                    face_varying: false,
+                })
+            } else if chart {
+                Some(UvSource {
+                    values: self.fv_values,
+                    indices: Some(self.fv_indices),
+                    face_varying: true,
+                })
+            } else {
+                None
+            },
             rate_range: (self.min_rate.min(self.max_rate), self.max_rate),
             rate_bins: self.rate_bins,
             ptex_faces,

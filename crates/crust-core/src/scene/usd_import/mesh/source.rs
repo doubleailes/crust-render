@@ -12,7 +12,8 @@ use openusd_schemas::geom::{
 };
 use tracing::{debug, warn};
 
-use crate::scene::subdiv;
+use crate::material::Material;
+use crate::scene::subdiv::{self, UvSource};
 
 use super::super::adaptive::{self, Aabb, ScreenRate};
 use super::super::attrs::{custom_i32, decode_f32s, decode_i32s, decode_vec3fs, value_at};
@@ -155,39 +156,6 @@ pub(super) fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i
     Some((points, counts, indices))
 }
 
-/// The `st` primvar as authored, before triangulation resolves it.
-///
-/// USD stores texture coordinates as a value array plus an optional index
-/// array, interpolated either per **point** (`vertex`/`varying`) or per
-/// **face-vertex** (`faceVarying`). The distinction is not cosmetic: a vertex
-/// on a UV seam has one position but two texture coordinates, which only the
-/// faceVarying form can express — and it is the form both DPEL assets use.
-pub(super) struct UvSource {
-    pub(super) values: Vec<[f32; 2]>,
-    /// `primvars:st:indices`, when authored. Indexes `values`.
-    pub(super) indices: Option<Vec<i32>>,
-    /// True for `faceVarying`: the lookup index is the running face-vertex
-    /// offset rather than the point index.
-    pub(super) face_varying: bool,
-}
-
-impl UvSource {
-    /// The index into `values` of the coordinate at face-vertex `fv`, whose
-    /// point index is `point`; `None` when the source does not resolve it
-    /// (a negative or out-of-range entry), which reads as `(0, 0)`.
-    pub(super) fn index_at(&self, fv: usize, point: usize) -> Option<u32> {
-        let i = if self.face_varying { fv } else { point };
-        let i = match &self.indices {
-            Some(idx) => match idx.get(i) {
-                Some(&v) if v >= 0 => v as usize,
-                _ => return None,
-            },
-            None => i,
-        };
-        (i < self.values.len()).then_some(i as u32)
-    }
-}
-
 /// Reads a mesh's texture-coordinate primvar.
 ///
 /// `st` is USD's conventional name and what `UsdPreviewSurface` and MaterialX
@@ -281,20 +249,26 @@ pub(super) enum RefinedFaces {
 /// its size on screen asks for when read for `place`; at level 0 it renders its
 /// cage with smooth normals rather than faceted.
 ///
+/// The bound `material` decides what else is read: a face table when it
+/// samples a per-face texture, and the chart ([`mesh_uvs`]) when it reads
+/// texture coordinates.
+///
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
 pub(in crate::scene::usd_import) fn mesh_source(
     prim: &Prim,
     mesh: &UsdMesh,
-    want_faces: bool,
-    want_uvs: bool,
-    uv_primvar: Option<&str>,
+    material: &dyn Material,
     policy: &mut SubdivPolicy,
     place: MeshPlace<'_>,
 ) -> Option<MeshSource> {
+    let want_faces = material.face_texture().is_some();
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
-    let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
+    let uvs = material
+        .uses_uv()
+        .then(|| mesh_uvs(prim, material.uv_primvar()))
+        .flatten();
     let cage = |points, counts, indices, uvs| MeshSource {
         points,
         counts,
@@ -400,12 +374,7 @@ pub(in crate::scene::usd_import) fn mesh_source(
     // surface then renders on the material's constant inputs, as every
     // subdivided mesh did before charts were refined.
     let chart = uvs.as_ref().and_then(|uv| {
-        let channel = subdiv::UvChannel {
-            values: &uv.values,
-            indices: uv.indices.as_deref(),
-            face_varying: uv.face_varying,
-            linear: face_varying_linear(mesh),
-        };
+        let channel = uv.channel(face_varying_linear(mesh));
         let n_entries = if uv.face_varying {
             indices.len()
         } else {
@@ -470,19 +439,7 @@ pub(in crate::scene::usd_import) fn mesh_source(
                     normals: Some(t.normals),
                     subdiv_faces: t.faces.map(RefinedFaces::PerFace),
                     base_face_count,
-                    uvs: match (t.uvs, t.face_varying_uvs) {
-                        (Some(values), _) => Some(UvSource {
-                            values,
-                            indices: None,
-                            face_varying: false,
-                        }),
-                        (None, Some((values, corners))) => Some(UvSource {
-                            values,
-                            indices: Some(corners),
-                            face_varying: true,
-                        }),
-                        (None, None) => None,
-                    },
+                    uvs: t.uvs,
                 });
             }
             Err(e) => {
@@ -509,11 +466,7 @@ pub(in crate::scene::usd_import) fn mesh_source(
                 normals: Some(refined.normals),
                 subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
                 base_face_count,
-                uvs: refined.uvs.map(|uv| UvSource {
-                    values: uv.values,
-                    indices: uv.indices,
-                    face_varying: uv.face_varying,
-                }),
+                uvs: refined.uvs,
             })
         }
         Err(e) => {
