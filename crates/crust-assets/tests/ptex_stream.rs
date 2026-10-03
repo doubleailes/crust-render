@@ -222,9 +222,10 @@ fn bilinear_taps_cross_tile_boundaries() {
 /// is wrong, and a wrong key is how one texture ends up answering for
 /// another. What the rate measures is whether the key identifies a tile.
 ///
-/// The corner half is why `MICRO_SLOTS` is 4 and not the two `tiled::cache`
-/// keeps. A lookup sitting exactly where four tiles meet — both the u and the
-/// v tap straddling a seam — needs four distinct tiles for its four taps, and
+/// The corner half is why `MICRO_SLOTS` is 4 rather than two (the `.tx`
+/// microcache's original slot count; it is now 16 sets of 4 ways). A lookup
+/// sitting exactly where four tiles meet — both the u and the v tap
+/// straddling a seam — needs four distinct tiles for its four taps, and
 /// with two slots each tap evicts one the same lookup is about to ask for:
 /// this case measured **0.000** of 1 600 fetches, a total thrash, against
 /// 0.999 for a tap inside a tile. A `.ptx` grids *per face* rather than once

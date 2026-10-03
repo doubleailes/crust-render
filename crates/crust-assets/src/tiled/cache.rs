@@ -122,9 +122,6 @@ fn thread_stripe() -> usize {
     })
 }
 
-/// Default cache budget, matching OIIO's own 1 GB.
-pub const DEFAULT_BUDGET_BYTES: u64 = crust_core::config::DEFAULT_CACHE_MB as u64 * 1024 * 1024;
-
 /// Which tile, of which level, of which file.
 ///
 /// The file is an interned index, not a path: a key is compared and hashed on
@@ -431,17 +428,6 @@ impl TileCache {
             sweeping: Mutex::new(0),
             stats: CacheStats::default(),
         }
-    }
-
-    /// The budget from `CRUST_TEX_CACHE_MB` as parsed into
-    /// [`crust_core::config()`], or [`DEFAULT_BUDGET_BYTES`].
-    pub fn budget_from_env() -> u64 {
-        Self::budget_of(crust_core::config())
-    }
-
-    /// The tile cache budget `config` asks for, in bytes.
-    pub fn budget_of(config: &crust_core::Config) -> u64 {
-        config.tex_cache_mb.get() * 1024 * 1024
     }
 
     pub fn budget(&self) -> u64 {

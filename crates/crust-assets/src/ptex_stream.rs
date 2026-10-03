@@ -39,26 +39,6 @@ use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Default cache budget, in MiB.
-///
-/// 1024, matching `CRUST_TEX_CACHE_MB` and so OIIO's own default. Upstream's
-/// [`ptex::DEFAULT_CACHE_BUDGET`] is 64 MiB, which is a library's answer for a
-/// caller that has not thought about it; a renderer has, and a path tracer
-/// asks for texels from every worker in an order nothing can predict, so the
-/// working set is the frame rather than a locality window.
-pub const DEFAULT_CACHE_MB: usize = crust_core::config::DEFAULT_CACHE_MB;
-
-/// `CRUST_PTEX_CACHE_MB` as parsed into [`crust_core::config()`], as a byte
-/// count.
-pub fn cache_budget_from_env() -> usize {
-    budget_bytes(crust_core::config())
-}
-
-/// [`cache_budget_from_env`] for a given configuration.
-pub fn budget_bytes(config: &crust_core::Config) -> usize {
-    config.ptex_cache_mb.get() * 1024 * 1024
-}
-
 /// Is the streaming backend on? `CRUST_PTEX_STREAM=1` turns it on.
 pub fn stream_enabled() -> bool {
     crust_core::config().ptex_stream
@@ -94,12 +74,6 @@ pub fn stream_enabled() -> bool {
 /// `CRUST_PTEX_STREAM_MIN_MB` overrides it; `0` admits everything, which is
 /// what reproduces the even-split behaviour for comparison.
 pub const DEFAULT_STREAM_MIN_MB: usize = crust_core::config::DEFAULT_PTEX_STREAM_MIN_MB;
-
-/// `CRUST_PTEX_STREAM_MIN_MB` as parsed into [`crust_core::config()`], as a
-/// byte count. See [`DEFAULT_STREAM_MIN_MB`].
-pub fn stream_min_bytes_from_env() -> usize {
-    crust_core::config().ptex_stream_min_mb * 1024 * 1024
-}
 
 /// Which mip chain a streamed texture is allowed to read — the reasoning is
 /// on [`crust_core::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
@@ -177,11 +151,14 @@ struct TileId {
 /// here is the reader's single `Mutex` rather than one of 64 shards, so it
 /// matters more, not less.
 ///
-/// **Four rather than that cache's two, and the difference is not a guess.**
-/// A `.tx` is one grid over the whole texture, so a tap straddling a seam is
-/// rare. A `.ptx` is a grid *per face*, and the faces that get tiled at all
-/// are the large ones a streamed render spends its time in — so taps land on
-/// seams routinely, and a lookup sitting on a **four-tile corner**, where the
+/// **A single set of four, and the four is not a guess.** The `.tx`
+/// microcache is 16 sets of 4 ways, hashed by file so the several textures of
+/// one material keep out of each other's way; this one is one set shared by
+/// every texture, the texture id in the key. Its four is set by seams. A `.tx`
+/// is one grid over the whole texture, so a tap straddling a seam is rare. A
+/// `.ptx` is a grid *per face*, and the faces that get tiled at all are the
+/// large ones a streamed render spends its time in — so taps land on seams
+/// routinely, and a lookup sitting on a **four-tile corner**, where the
 /// u and the v tap both straddle, needs four distinct tiles for its four
 /// taps. With two slots each tap evicts one the same lookup is about to want:
 /// measured on the tiled fixture, that case hit **0.000** of 1 600 fetches
@@ -376,7 +353,7 @@ impl PtexStream {
 
     /// [`PtexStream::open`] with the budget and caps of `config`.
     pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, AssetError> {
-        let total = budget_bytes(config);
+        let total = crate::budget::ptex_cache_bytes(config);
         PtexStream::open_with(
             path,
             total,
@@ -827,13 +804,5 @@ mod tests {
                 .powf(2.2);
             assert_eq!(table.to_bits(), scalar.to_bits(), "entry {i}");
         }
-    }
-
-    #[test]
-    fn a_budget_is_read_from_the_environment_and_a_bad_one_falls_back() {
-        // No env mutation: `cache_budget_from_env` is the wrapper, and the
-        // policy it wraps is what matters. Kept as a compile-time check that
-        // the default is stated in one place and in MiB.
-        assert_eq!(DEFAULT_CACHE_MB * 1024 * 1024, 1024 * 1024 * 1024);
     }
 }
