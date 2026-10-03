@@ -451,12 +451,12 @@ fn normal_map(encoded: Val, scale: Val, ctx: &ShadeCtx) -> Vec3A {
 /// Rotates a **decoded** tangent-space normal (`z` along `normal`) into world
 /// space, against `tangent` re-orthogonalised to `normal`.
 ///
-/// The half of [`normal_map`] that knows nothing about MaterialX's `[0,1]`
+/// The half of `normal_map` that knows nothing about MaterialX's `[0,1]`
 /// encoding, public so a host with its own decode — UsdPreviewSurface's
 /// `normal` input arrives already in `[-1,1]`, its UsdUVTexture's
 /// `scale`/`bias` having done the decode — rotates it identically. Returns
 /// `normal` unchanged when `tangent` is zero (no chart frame) or parallel to
-/// it, for the reason [`normal_map`] gives.
+/// it, for the reason `normal_map` gives.
 pub fn perturb_normal(local: Vec3A, normal: Vec3A, tangent: Vec3A) -> Vec3A {
     if tangent.length_squared() < 1e-20 {
         return normal;

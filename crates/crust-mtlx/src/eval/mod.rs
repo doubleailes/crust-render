@@ -124,8 +124,8 @@ impl Program {
     ///
     /// - **Constant folding.** An op whose operands are all constant, and
     ///   which reads neither the shading point nor a texture, is evaluated
-    ///   here — by [`apply`], the function the interpreter runs, so the value
-    ///   is the one every hit would have computed, bit for bit.
+    ///   here — by the interpreter's own step ([`Program::apply_op`]), so the
+    ///   value is the one every hit would have computed, bit for bit.
     /// - **Constant hoisting and deduplication.** Constants move into
     ///   [`Program::consts`], copied in with one `memcpy` per evaluation
     ///   instead of one dispatched instruction each, and bitwise-equal ones

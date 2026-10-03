@@ -52,7 +52,7 @@ pub enum Op {
         offset: [f32; 2],
         arity: u8,
         /// Where to look up relative to the shading point, in footprint
-        /// widths (see [`shifted_uv`]). Zero everywhere except the copies of
+        /// widths (see `shifted_uv`). Zero everywhere except the copies of
         /// a subgraph `heighttonormal` differentiates.
         shift: [f32; 2],
         /// The slot holding an authored `texcoord` connection, when the

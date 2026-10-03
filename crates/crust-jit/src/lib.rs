@@ -17,7 +17,7 @@
 //!   `exp`, `pow`, the trigonometric ops, `min`/`max` (Rust's `minnum`
 //!   semantics are not Cranelift's `fmin`), `normalize`, `normalmap`,
 //!   `artistic_ior`, the dot products — and any op whose operand width is only
-//!   known at run time. The generated code calls [`host_apply`], which runs
+//!   known at run time. The generated code calls `host_apply`, which runs
 //!   crust-mtlx's own interpreter step ([`Program::apply_op`]) on that one op
 //!   over the slots computed so far. Those ops are therefore exact by
 //!   construction; they only stop paying for dispatch between them.
