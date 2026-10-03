@@ -84,6 +84,22 @@ consumed as ordinary dependencies:
    bounce and records a `VertexRec` per vertex, then a backward gather that folds the
    records into the radiance estimate and emits guiding training samples (which need
    the radiance from the rest of the path — the reason for the backward pass). Features:
+   - **Shape.** What every level reads and none changes (world, lights, volumes, depth,
+     strategy, indirect clamp, guiding) travels as one borrowed `PathContext`; the
+     walk's state between vertices is a `Walk`, and each vertex runs named phases in a
+     fixed order — trace the segment, `free_flight` / `volume_event`, then
+     `scatter_in_volume`, `scatter_in_medium`, `escaped` or `surface_vertex` →
+     `bounce` — with `gather` as the backward pass. Every phase is `inline(always)`,
+     so it is still one loop to LLVM, and two shapes were measured and avoided
+     (callgrind, cornellbox, 2 spp): a `Walk` that *owned* its `Ray` stayed in memory
+     whole, since the ray's address escapes into the kernel at every vertex (+0.05%,
+     fog +0.07%; the ray is borrowed from `trace_path` instead), and returning the
+     segment's hit from a method copied it out at every vertex (+0.6%; it is built
+     in the loop).
+     What is left is +0.23% on cornellbox, +0.1% on fog, +0.15% on
+     materialx_subsurface and +0.4% on veach_mis against the single-function loop —
+     register allocation (the previous vertex's tag, for one, is now reloaded from the
+     stack at every surface vertex).
    - **MIS** combining direct light sampling and BRDF sampling. The heuristic is
      selectable via `SamplingStrategy` (`crust:samplingStrategy` attr / `--strategy`
      flag): `power` (β=2 power heuristic — the default and historical behavior),

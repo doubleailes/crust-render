@@ -124,6 +124,7 @@ fn phase_scattered(ray: &Ray, p: Vec3A, dir: Vec3A) -> Ray {
 /// lists. `trace_path` and the per-vertex helpers it calls are inlined, so
 /// LLVM sees through the reference to the fields, as it did to `&self.world`
 /// and `self.settings` before the struct existed.
+#[derive(Clone, Copy)]
 pub(super) struct PathContext<'a> {
     pub(super) world: &'a World,
     pub(super) lights: &'a LightList,
@@ -755,10 +756,9 @@ struct VolumeReceiver<'p> {
     time: f32,
 }
 
-/// A surface vertex, as [`surface_nee`] lights it.
+/// A surface vertex, as [`surface_nee`] lights it and [`Walk::bounce`]
+/// leaves it.
 struct SurfaceReceiver<'s> {
-    /// The ray that arrived here.
-    ray: &'s Ray,
     rec: &'s HitRecord,
     sp: &'s ShadingPoint<'s>,
     /// The receiver's light-link class.
@@ -766,6 +766,9 @@ struct SurfaceReceiver<'s> {
     /// The guiding field when it steers this vertex's bounce (secondary
     /// vertices only): NEE's competing density is then the guide mixture.
     guiding: Option<&'s GuidingContext<'s>>,
+    /// The arriving cone's perpendicular cross-section here, which the
+    /// bounce's cone starts from.
+    cone_width: f32,
 }
 
 /// Direct lighting at a volume-region scatter point. The exact mirror of
@@ -840,16 +843,17 @@ fn volume_nee<const PROFILE: bool>(
 #[inline(always)]
 fn surface_nee<const PROFILE: bool>(
     ctx: &PathContext,
+    ray: &Ray,
     at: &SurfaceReceiver,
     v: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
     let &SurfaceReceiver {
-        ray,
         rec,
         sp,
         class: class_here,
         guiding: guiding_here,
+        ..
     } = at;
     let (lights, strategy) = (ctx.lights, ctx.strategy);
     // The light strategy is "pick one light with the light list's
@@ -946,6 +950,15 @@ fn surface_nee<const PROFILE: bool>(
 /// training samples, which need the radiance arriving from the rest of the
 /// path and therefore cannot be computed forward.
 ///
+/// Each vertex runs the same phases in the same order: trace the arriving
+/// segment, let the carried medium and the volume
+/// regions compete for it ([`free_flight`], [`volume_event`]), and then
+/// whichever event won — a volume-region scatter
+/// ([`Walk::scatter_in_volume`]), a carried-medium scatter
+/// ([`Walk::scatter_in_medium`]), an escape ([`Walk::escaped`]) or a surface
+/// ([`Walk::surface_vertex`], whose continuation is [`Walk::bounce`]). The
+/// phases are `inline(always)`, so this is still one loop to LLVM.
+///
 /// Forced inline into `render_pixel` (and the `ray_color` wrapper tests call).
 /// LLVM inlined it on its
 /// own until the cutout branches tipped it over the threshold, and out of
@@ -960,131 +973,55 @@ pub(super) fn trace_path<const PROFILE: bool>(
     scratch: &mut PathScratch,
     stats: &mut RayStats,
 ) -> Vec3A {
-    let PathContext {
-        world,
-        lights,
-        volumes,
-        depth,
-        strategy,
-        indirect_clamp,
-        guiding,
-    } = *ctx;
-    let training = guiding.is_some_and(|g| g.training);
+    // A copy the walk's phases borrow: its fields are then this function's
+    // own locals to LLVM, which keeps them in registers across the calls the
+    // loop makes rather than reloading them through the caller's (0.05% of
+    // cornellbox's instructions).
+    let ctx = &PathContext { ..*ctx };
     // The bounce subtree; each vertex derives its own domain off this by depth.
     let path = sampler.new_domain(K_PATH);
-    // Borrowed, not allocated — see `PathScratch`. Capacity carries over from
-    // the previous sample, so after the first walk this is free.
-    let records = &mut scratch.records;
-    records.clear();
     let mut ray = r.clone();
-    let mut remaining = depth;
-    // Set after surface bounces and volume-region phase scatters; `None`
-    // at the primary vertex and after carried-medium (subsurface)
-    // scatters, where the next vertex's emission counts fully.
-    let mut prev: Option<PrevVertex> = None;
-    // Running throughput. Only drives the roulette survival probability —
-    // the estimate itself is rebuilt by the backward gather.
-    let mut beta = Vec3A::ONE;
+    let mut walk = Walk::start(ctx, &mut ray, scratch);
     // Radiance entering the path from beyond the last vertex.
     let mut terminal = Vec3A::ZERO;
-    // Set when the last vertex entered a random walk: the next vertex is
-    // its exit, shaded without tracing the segment that reaches it (the walk
-    // already did, inside the object). A flag beside a slot rather than an
-    // `Option<WalkExit>`: taking a 150-byte option at every vertex cost
-    // cornellbox, which never walks, 1% of its instructions.
-    let mut sss_pending = false;
-    let sss_exit = &mut scratch.sss_exit;
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
         // has been pushed for it yet). Every per-event draw hangs off `v`.
-        let v = path.new_domain(records.len() as i32);
+        let v = path.new_domain(walk.records.len() as i32);
 
-        if remaining <= 0 {
-            stats.ended_depth += 1;
-            // Depth exhausted: no further vertex, but the last bounce still
-            // collects the emission of the surface it hits, MIS-weighted and
-            // attenuated through any media the final segment crosses. A ray
-            // escaping here collects nothing from lights at infinity.
-            if let Some(p) = &prev {
-                stats.closest_hit += 1;
-                let mut hit = {
-                    let _p = profile::scope_if::<PROFILE>(Section::Trace);
-                    world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
-                };
-                if world.has_cutouts() {
-                    pass_cutouts(world, &ray, &mut hit, v, stats);
-                }
-                if let Some(hit) = hit {
-                    let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
-                    let mut emitted = hit.mat.emitted_at(&ray, &hit.rec, cos_o);
-                    if emitted.length_squared() > 0.0 {
-                        if let Some(m) = ray.medium() {
-                            emitted *= m.transmittance(hit.rec.t);
-                        }
-                        if !volumes.is_empty() {
-                            let mut rng = v.new_domain(K_VOLUME).rng();
-                            emitted *=
-                                volumes.transmittance(&ray, TRACE_T_MIN, hit.rec.t, &mut rng);
-                        }
-                        let last = records.last_mut().expect("prev implies a record");
-                        last.next_emit = emitted;
-                        last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
-                    }
-                }
-            }
+        if walk.remaining <= 0 {
+            walk.end_at_depth::<PROFILE>(ctx, v, stats);
             break;
         }
 
-        let exiting = sss_pending;
+        // === The arriving segment ===
+        // The hit it ends at, if any: the closest past every cutout it
+        // passes — or, when the last vertex entered a random walk, the
+        // walk's exit, which needs no segment traced at all. Built here
+        // rather than returned by a `Walk` method: returned, the hit was
+        // copied out at every vertex (+0.6% of cornellbox's instructions).
+        let exiting = walk.sss_pending;
         let mut hit_opt = if exiting {
-            sss_pending = false;
-            sss_exit.hit()
+            walk.sss_pending = false;
+            walk.sss_exit.hit()
         } else {
             stats.closest_hit += 1;
             let _p = profile::scope_if::<PROFILE>(Section::Trace);
-            world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
+            ctx.world.intersect(walk.ray, TRACE_T_MIN, f32::INFINITY)
         };
         // Patched in place, on the cold side only: an `if` that yields the
         // hit from either arm copies all of it at every vertex (+0.8% of
         // cornellbox's instructions, which has no cutout).
-        if world.has_cutouts() && !exiting {
-            pass_cutouts(world, &ray, &mut hit_opt, v, stats);
+        if ctx.world.has_cutouts() && !exiting {
+            pass_cutouts(ctx.world, walk.ray, &mut hit_opt, v, stats);
         }
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
+        let t_med = free_flight(walk.ray, v);
+        let event = volume_event::<PROFILE>(ctx, walk.ray, t_surf.min(t_med), exiting, v);
 
-        // Free-flight candidate in the carried homogeneous medium
-        // (subsurface / participating glass interiors) — analog sampling
-        // at the extinction majorant. Incidental (unbounded across bounces),
-        // so it uses the PRNG side rather than a stratified dimension.
-        let t_med = match ray.medium() {
-            Some(m) if m.is_scattering() => {
-                let sigma_t_max = m.sigma_t_max().max(1e-4);
-                -(v.new_domain(K_MEDIUM).draw_rnd_f32::<1>()[0].ln()) / sigma_t_max
-            }
-            _ => f32::INFINITY,
-        };
-
-        // Volume-region interaction, clipped to whatever event would
-        // otherwise end the segment. Because the walk is bounded by
-        // `t_lim`, a real collision is the nearest event by construction —
-        // the competition between the carried medium, the surface and the
-        // regions is exact (superposed processes), and the `Passthrough`
-        // weight is precisely the region transmittance up to the winner.
-        let t_lim = t_surf.min(t_med);
-        // A walk's exit has no arriving segment outside the object.
-        let event = if volumes.is_empty() || exiting {
-            VolumeEvent::Passthrough {
-                transmittance: Vec3A::ONE,
-                emitted: Vec3A::ZERO,
-            }
-        } else {
-            let _p = profile::scope_if::<PROFILE>(Section::Volume);
-            let mut rng = v.new_domain(K_VOLUME).rng();
-            volumes.sample_interaction(&ray, TRACE_T_MIN, t_lim, &mut rng)
-        };
-
-        let (vol_tr, vol_emit) = match event {
+        // === Volume-region and carried-medium scatter vertices ===
+        let segment = match event {
             VolumeEvent::Scatter {
                 p,
                 weight,
@@ -1093,124 +1030,313 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 class,
                 ..
             } => {
-                stats.volume_scatters += 1;
-                // === Volume-region scatter vertex ===
-                let wi = ray.direction().normalize();
-                let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
-                let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
-                let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
                 let receiver = VolumeReceiver {
                     p,
-                    wi,
+                    wi: walk.ray.direction().normalize(),
                     phase: &phase,
                     class,
-                    time: ray.time(),
+                    time: walk.ray.time(),
                 };
-                let nee = volume_nee::<PROFILE>(ctx, &receiver, v, stats);
-
-                // The walk weight goes into `atten` (it multiplies NEE and
-                // everything beyond); the continuation factor is ONE
-                // because the HG value and pdf cancel exactly. Volume
-                // vertices are not trained on — the field guides surface
-                // bounces only.
-                let mut vrec = VertexRec {
-                    atten: weight,
-                    segment_emit: emitted,
-                    emit_here: Vec3A::ZERO,
-                    nee,
-                    factor: Vec3A::ONE,
-                    next_emit: Vec3A::ZERO,
-                    next_emit_weight: 1.0,
-                    train: None,
-                };
-                beta *= weight;
-                if !roulette(&mut beta, &mut vrec.factor, records.len(), v, stats) {
-                    stats.vertices += 1;
-                    records.push(vrec);
-                    break;
+                if walk.scatter_in_volume::<PROFILE>(ctx, &receiver, weight, emitted, v, stats) {
+                    continue;
                 }
-                prev = Some(PrevVertex::Phase {
-                    pos: p,
-                    pdf: PdfSolidAngle::from_measure(phase_pdf),
-                    class,
-                });
-                stats.vertices += 1;
-                records.push(vrec);
-                ray = phase_scattered(&ray, p, dir);
-                remaining -= 1;
-                continue;
+                break;
             }
             VolumeEvent::Passthrough {
                 transmittance,
                 emitted,
-            } => (transmittance, emitted),
+            } => Segment {
+                transmittance,
+                emitted,
+            },
         };
-
         if t_med < t_surf {
-            // === Carried-medium scatter vertex (subsurface interiors) ===
-            stats.medium_scatters += 1;
-            let medium = *ray.medium().expect("t_med implies a medium");
-            let sigma_bar = medium.sigma_t_max().max(1e-4);
-            let pos = ray.at(t_med);
-            let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
-            let dir = sample_henyey_greenstein(
-                ray.direction().normalize(),
-                medium.g,
-                phase_uv[0],
-                phase_uv[1],
-            );
-            // Weighted analog estimator: sampling was at rate σ̄ (the
-            // max-channel extinction), so the event pays σₛ/σ̄ with the
-            // chromatic correction e^{(σ̄−σₜ)·t} per channel. For a gray
-            // medium this is exactly the single-scattering albedo — the
-            // old code's `factor = albedo` with an extra Beer-Lambert on
-            // top double-counted extinction.
-            let factor =
-                medium.sigma_s / sigma_bar * chromatic_correction(&medium, sigma_bar, t_med);
-            // Subsurface vertices run no NEE (their shadow rays are
-            // blocked by the enclosing surface), so `prev = None` keeps
-            // the next hit's emission at full weight — the pairing that
-            // avoids double counting.
-            let mut vrec = VertexRec {
-                atten: vol_tr,
-                segment_emit: vol_emit,
-                emit_here: Vec3A::ZERO,
-                nee: Vec3A::ZERO,
-                factor,
-                next_emit: Vec3A::ZERO,
-                next_emit_weight: 1.0,
-                train: None,
-            };
-            beta *= vol_tr * factor;
-            if !roulette(&mut beta, &mut vrec.factor, records.len(), v, stats) {
-                stats.vertices += 1;
-                records.push(vrec);
-                break;
+            if walk.scatter_in_medium(t_med, &segment, v, stats) {
+                continue;
             }
-            stats.vertices += 1;
-            records.push(vrec);
-            // Still inside `medium`: the ray it scattered in carries it.
-            ray = phase_scattered(&ray, pos, dir);
-            remaining -= 1;
-            prev = None;
-            continue;
+            break;
         }
 
+        // === Escape, or a surface vertex ===
         let Some(hit) = hit_opt else {
             stats.ended_escaped += 1;
-            // === Background ===
-            // A ray leaving the scene is how lights at infinity are found
-            // by chance, so it is a bounce-side MIS event just like hitting
-            // an emissive surface.
-            let unit_direction = Vec3A::normalize(ray.direction());
-            let background = escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy);
-            // Segment emission is already weighted; the background pays the
-            // volume transmittance of the final segment.
-            terminal = vol_emit + vol_tr * background;
+            terminal = walk.escaped(ctx, &segment);
             break;
         };
+        if !walk.surface_vertex::<PROFILE>(ctx, &hit, &segment, v, stats) {
+            break;
+        }
+    }
+
+    gather::<PROFILE>(walk.records, terminal, ctx.indirect_clamp, train_out)
+}
+
+/// What the segment arriving at a vertex did on its way there, besides any
+/// carried medium: the volume regions' transmittance (the tracking weight up
+/// to the vertex) and their emission along it, already weighted by that walk.
+struct Segment {
+    transmittance: Vec3A,
+    emitted: Vec3A,
+}
+
+/// The forward walk's state between vertices: the ray the next vertex
+/// arrives along, what the last vertex left for it, and where the records
+/// go. A local of [`trace_path`] whose methods are all `inline(always)`, so
+/// its fields stay the loop's own variables to LLVM.
+struct Walk<'a, 's> {
+    /// The ray the next vertex arrives along. Borrowed from `trace_path`
+    /// rather than owned: its address escapes into the intersection kernel
+    /// at every vertex, and LLVM keeps a struct whose field's address
+    /// escapes in memory whole — owned here, the other fields were stored
+    /// and reloaded at every vertex (+0.05% of cornellbox's instructions,
+    /// +0.07% of fog's).
+    ray: &'s mut Ray,
+    /// Path depth left to spend.
+    remaining: i32,
+    /// Set after surface bounces and volume-region phase scatters; `None`
+    /// at the primary vertex and after carried-medium (subsurface)
+    /// scatters, where the next vertex's emission counts fully.
+    prev: Option<PrevVertex<'a>>,
+    /// Running throughput. Only drives the roulette survival probability —
+    /// the estimate itself is rebuilt by the backward gather.
+    beta: Vec3A,
+    /// Set when the last vertex entered a random walk: the next vertex is
+    /// its exit, shaded without tracing the segment that reaches it (the walk
+    /// already did, inside the object). A flag beside a slot rather than an
+    /// `Option<WalkExit>`: taking a 150-byte option at every vertex cost
+    /// cornellbox, which never walks, 1% of its instructions.
+    sss_pending: bool,
+    /// Record guiding training samples (a training pass)?
+    training: bool,
+    /// One per vertex, read by the backward gather. Borrowed, not allocated —
+    /// see [`PathScratch`].
+    records: &'s mut Vec<VertexRec>,
+    sss_exit: &'s mut PendingExit,
+}
+
+impl<'a, 's> Walk<'a, 's> {
+    /// A walk about to trace the camera ray `ray`.
+    #[inline(always)]
+    fn start(ctx: &PathContext, ray: &'s mut Ray, scratch: &'s mut PathScratch) -> Self {
+        // Capacity carries over from the previous sample, so after the first
+        // walk this is free.
+        scratch.records.clear();
+        Walk {
+            ray,
+            remaining: ctx.depth,
+            prev: None,
+            beta: Vec3A::ONE,
+            sss_pending: false,
+            training: ctx.guiding.is_some_and(|g| g.training),
+            records: &mut scratch.records,
+            sss_exit: &mut scratch.sss_exit,
+        }
+    }
+
+    /// Ends this vertex with `vrec`: the path holds one more vertex.
+    #[inline(always)]
+    fn record(&mut self, vrec: VertexRec, stats: &mut RayStats) {
+        stats.vertices += 1;
+        self.records.push(vrec);
+    }
+
+    /// Depth exhausted: no further vertex, but the last bounce still
+    /// collects the emission of the surface it hits, MIS-weighted and
+    /// attenuated through any media the final segment crosses. A ray
+    /// escaping here collects nothing from lights at infinity.
+    #[inline(always)]
+    fn end_at_depth<const PROFILE: bool>(
+        &mut self,
+        ctx: &PathContext,
+        v: PathSampler,
+        stats: &mut RayStats,
+    ) {
+        stats.ended_depth += 1;
+        let Some(p) = &self.prev else {
+            return;
+        };
+        let (world, ray) = (ctx.world, &*self.ray);
+        stats.closest_hit += 1;
+        let mut hit = {
+            let _p = profile::scope_if::<PROFILE>(Section::Trace);
+            world.intersect(ray, TRACE_T_MIN, f32::INFINITY)
+        };
+        if world.has_cutouts() {
+            pass_cutouts(world, ray, &mut hit, v, stats);
+        }
+        if let Some(hit) = hit {
+            let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
+            let mut emitted = hit.mat.emitted_at(ray, &hit.rec, cos_o);
+            if emitted.length_squared() > 0.0 {
+                if let Some(m) = ray.medium() {
+                    emitted *= m.transmittance(hit.rec.t);
+                }
+                if !ctx.volumes.is_empty() {
+                    let mut rng = v.new_domain(K_VOLUME).rng();
+                    emitted *= ctx
+                        .volumes
+                        .transmittance(ray, TRACE_T_MIN, hit.rec.t, &mut rng);
+                }
+                let last = self.records.last_mut().expect("prev implies a record");
+                last.next_emit = emitted;
+                last.next_emit_weight = bounce_emission_weight(p, ctx.lights, &hit, ctx.strategy);
+            }
+        }
+    }
+
+    /// A volume-region scatter vertex at `at`, reached with the tracking
+    /// walk's `weight` and its `emitted` light: NEE through the phase
+    /// function, then a phase-sampled continuation. `false` when roulette
+    /// ends the path here.
+    #[inline(always)]
+    fn scatter_in_volume<const PROFILE: bool>(
+        &mut self,
+        ctx: &PathContext,
+        at: &VolumeReceiver,
+        weight: Vec3A,
+        emitted: Vec3A,
+        v: PathSampler,
+        stats: &mut RayStats,
+    ) -> bool {
+        stats.volume_scatters += 1;
+        let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
+        let dir = at.phase.sample(at.wi, ps[0], [ps[1], ps[2]]);
+        let phase_pdf = at.phase.pdf(at.wi.dot(dir)).max(1e-6);
+        let nee = volume_nee::<PROFILE>(ctx, at, v, stats);
+
+        // The walk weight goes into `atten` (it multiplies NEE and
+        // everything beyond); the continuation factor is ONE
+        // because the HG value and pdf cancel exactly. Volume
+        // vertices are not trained on — the field guides surface
+        // bounces only.
+        let mut vrec = VertexRec {
+            atten: weight,
+            segment_emit: emitted,
+            emit_here: Vec3A::ZERO,
+            nee,
+            factor: Vec3A::ONE,
+            next_emit: Vec3A::ZERO,
+            next_emit_weight: 1.0,
+            train: None,
+        };
+        self.beta *= weight;
+        if !roulette(
+            &mut self.beta,
+            &mut vrec.factor,
+            self.records.len(),
+            v,
+            stats,
+        ) {
+            self.record(vrec, stats);
+            return false;
+        }
+        self.prev = Some(PrevVertex::Phase {
+            pos: at.p,
+            pdf: PdfSolidAngle::from_measure(phase_pdf),
+            class: at.class,
+        });
+        self.record(vrec, stats);
+        *self.ray = phase_scattered(self.ray, at.p, dir);
+        self.remaining -= 1;
+        true
+    }
+
+    /// A carried-medium scatter vertex (subsurface interiors) at `t_med`
+    /// along the segment. `false` when roulette ends the path here.
+    #[inline(always)]
+    fn scatter_in_medium(
+        &mut self,
+        t_med: f32,
+        segment: &Segment,
+        v: PathSampler,
+        stats: &mut RayStats,
+    ) -> bool {
+        stats.medium_scatters += 1;
+        let ray = &*self.ray;
+        let medium = *ray.medium().expect("t_med implies a medium");
+        let sigma_bar = medium.sigma_t_max().max(1e-4);
+        let pos = ray.at(t_med);
+        let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
+        let dir = sample_henyey_greenstein(
+            ray.direction().normalize(),
+            medium.g,
+            phase_uv[0],
+            phase_uv[1],
+        );
+        // Weighted analog estimator: sampling was at rate σ̄ (the
+        // max-channel extinction), so the event pays σₛ/σ̄ with the
+        // chromatic correction e^{(σ̄−σₜ)·t} per channel. For a gray
+        // medium this is exactly the single-scattering albedo — the
+        // old code's `factor = albedo` with an extra Beer-Lambert on
+        // top double-counted extinction.
+        let factor = medium.sigma_s / sigma_bar * chromatic_correction(&medium, sigma_bar, t_med);
+        // Subsurface vertices run no NEE (their shadow rays are
+        // blocked by the enclosing surface), so `prev = None` keeps
+        // the next hit's emission at full weight — the pairing that
+        // avoids double counting.
+        let mut vrec = VertexRec {
+            atten: segment.transmittance,
+            segment_emit: segment.emitted,
+            emit_here: Vec3A::ZERO,
+            nee: Vec3A::ZERO,
+            factor,
+            next_emit: Vec3A::ZERO,
+            next_emit_weight: 1.0,
+            train: None,
+        };
+        self.beta *= segment.transmittance * factor;
+        if !roulette(
+            &mut self.beta,
+            &mut vrec.factor,
+            self.records.len(),
+            v,
+            stats,
+        ) {
+            self.record(vrec, stats);
+            return false;
+        }
+        self.record(vrec, stats);
+        // Still inside `medium`: the ray it scattered in carries it.
+        *self.ray = phase_scattered(self.ray, pos, dir);
+        self.remaining -= 1;
+        self.prev = None;
+        true
+    }
+
+    /// The radiance a ray leaving the scene brings back: whatever lights at
+    /// infinity it finds, through the final segment.
+    #[inline(always)]
+    fn escaped(&self, ctx: &PathContext, segment: &Segment) -> Vec3A {
+        // A ray leaving the scene is how lights at infinity are found
+        // by chance, so it is a bounce-side MIS event just like hitting
+        // an emissive surface.
+        let unit_direction = Vec3A::normalize(self.ray.direction());
+        let background = escaped_emission(
+            &self.prev,
+            ctx.lights,
+            unit_direction,
+            self.ray.mask(),
+            ctx.strategy,
+        );
+        // Segment emission is already weighted; the background pays the
+        // volume transmittance of the final segment.
+        segment.emitted + segment.transmittance * background
+    }
+
+    /// A surface vertex at `hit`: the arriving segment's attenuation, the
+    /// emission found here, NEE, and then the [`bounce`](Self::bounce) that
+    /// continues the path. `false` when the path ends here.
+    #[inline(always)]
+    fn surface_vertex<const PROFILE: bool>(
+        &mut self,
+        ctx: &PathContext,
+        hit: &WorldHit<'a>,
+        segment: &Segment,
+        v: PathSampler,
+        stats: &mut RayStats,
+    ) -> bool {
+        let ray = &*self.ray;
         let rec: HitRecord = hit.rec;
-        let mat = hit.mat;
         // The cone's perpendicular cross-section where it met this surface.
         // `World::intersect` has already derived the shader-facing texture
         // widths from the same quantity; this is the bounce side of it, kept
@@ -1231,7 +1357,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
             Some(m) => m.transmittance(rec.t),
             None => Vec3A::ONE,
         };
-        let atten = vol_tr * med_arrival;
+        let atten = segment.transmittance * med_arrival;
 
         // Emission accounting: a vertex reached by a bounce hands its
         // emission to the previous vertex's record, MIS-weighted —
@@ -1242,23 +1368,24 @@ pub(super) fn trace_path<const PROFILE: bool>(
         let cos_o = ray.direction().normalize().dot(rec.normal).abs();
         // The receiver's light-link class, for NEE here and for whatever the
         // bounce leaving this vertex collects.
-        let class_here = world.light_class(hit.geom_id);
+        let class_here = ctx.world.light_class(hit.geom_id);
         // The material's per-hit work (pattern network, textures), done once
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
         // scatters, so this is never wasted work.
         let sp = {
             let _p = profile::scope_if::<PROFILE>(Section::EvalBsdfs);
-            ShadingPoint::new(mat, &ray, &rec, cos_o)
+            ShadingPoint::new(hit.mat, ray, &rec, cos_o)
         };
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
-        match &prev {
+        match &self.prev {
             Some(p) => {
                 if emitted.length_squared() > 0.0 {
-                    let last = records.last_mut().expect("prev implies a record");
+                    let last = self.records.last_mut().expect("prev implies a record");
                     last.next_emit = atten * emitted;
-                    last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
+                    last.next_emit_weight =
+                        bounce_emission_weight(p, ctx.lights, hit, ctx.strategy);
                 }
             }
             None => emit_here = emitted,
@@ -1267,21 +1394,25 @@ pub(super) fn trace_path<const PROFILE: bool>(
         // Guide secondary bounces only: primary vertices vary per pixel far
         // below the guiding field's spatial resolution, so guiding them adds
         // parallax-mismatch variance instead of removing any.
-        let guiding_here = if prev.is_some() { guiding } else { None };
+        let guiding_here = if self.prev.is_some() {
+            ctx.guiding
+        } else {
+            None
+        };
 
         // === 1. Direct Lighting via Light Sampling ===
         let receiver = SurfaceReceiver {
-            ray: &ray,
             rec: &rec,
             sp: &sp,
             class: class_here,
             guiding: guiding_here,
+            cone_width: cone_width_here,
         };
-        let nee = surface_nee::<PROFILE>(ctx, &receiver, v, stats);
+        let nee = surface_nee::<PROFILE>(ctx, self.ray, &receiver, v, stats);
 
-        let mut vrec = VertexRec {
+        let vrec = VertexRec {
             atten,
-            segment_emit: vol_emit,
+            segment_emit: segment.emitted,
             emit_here,
             nee,
             factor: Vec3A::ZERO,
@@ -1289,11 +1420,29 @@ pub(super) fn trace_path<const PROFILE: bool>(
             next_emit_weight: 1.0,
             train: None,
         };
+        self.bounce::<PROFILE>(ctx, hit, &receiver, vrec, v, stats)
+    }
 
+    /// The continuation of the surface vertex `at` (on `hit`, whose record so
+    /// far is `vrec`): sample the bounce — walking the interior first when a
+    /// subsurface lobe was picked — record the vertex and, unless the sample
+    /// is absorbed or roulette kills it, aim the walk along it. `false` when
+    /// the path ends here.
+    #[inline(always)]
+    fn bounce<const PROFILE: bool>(
+        &mut self,
+        ctx: &PathContext,
+        hit: &WorldHit<'a>,
+        at: &SurfaceReceiver,
+        mut vrec: VertexRec,
+        v: PathSampler,
+        stats: &mut RayStats,
+    ) -> bool {
+        let rec = at.rec;
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction(&ray, &rec, &sp, guiding_here, v)
+            sample_bounce_direction(self.ray, rec, at.sp, at.guiding, v)
         };
         // A subsurface leaf was selected: walk the interior now. The walk is
         // part of this surface event — the entry's record carries its weight
@@ -1306,8 +1455,17 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // away when profiling is off (cornellbox: +0.0002% instructions),
             // and `--stats` keeps its integer counters (`sss_*`) either way.
             let _p = profile::scope_if::<PROFILE>(Section::Subsurface);
-            bounce = walk_subsurface(world, &hit, &ray, &sp, sample, v, sss_exit, stats);
-            sss_pending = bounce.is_some();
+            bounce = walk_subsurface(
+                ctx.world,
+                hit,
+                self.ray,
+                at.sp,
+                sample,
+                v,
+                self.sss_exit,
+                stats,
+            );
+            self.sss_pending = bounce.is_some();
         }
         if bounce.is_none() {
             stats.ended_absorbed += 1;
@@ -1324,12 +1482,12 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // Russian roulette on the continuation: survive with probability
             // tracking the throughput, dividing it out on survival. Applies
             // to the whole continuation (bounce-hit emission included).
-            beta *= atten * factor;
-            if roulette(&mut beta, &mut factor, records.len(), v, stats) {
+            self.beta *= vrec.atten * factor;
+            if roulette(&mut self.beta, &mut factor, self.records.len(), v, stats) {
                 // Training samples cover continuous surface bounces only —
                 // the guide can never produce a delta direction. The
                 // radiance is filled in by the backward gather.
-                if training && !sample.delta {
+                if self.training && !sample.delta {
                     vrec.train = Some(TrainRec {
                         pos: rec.p,
                         dir,
@@ -1337,36 +1495,36 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     });
                 }
                 vrec.factor = factor;
-                if sss_pending {
-                    let exit = &*sss_exit;
+                let cone_width_here = at.cone_width;
+                if self.sss_pending {
                     // The exit vertex sees the walk arrive from outside,
                     // along its last direction; what it emits there leaves
                     // the object, so nothing is owed to this record.
-                    stats.vertices += 1;
-                    records.push(vrec);
-                    prev = None;
-                    ray = Ray::new(exit.rec.p, -exit.dir)
-                        .with_time(ray.time())
+                    self.record(vrec, stats);
+                    self.prev = None;
+                    let exit = &*self.sss_exit;
+                    *self.ray = Ray::new(exit.rec.p, -exit.dir)
+                        .with_time(self.ray.time())
                         .with_mask(crate::ray::MASK_INDIRECT)
                         .with_cone(
-                            ray.cone()
+                            self.ray
+                                .cone()
                                 .scattered(cone_width_here, crate::RayCone::MAX_SPREAD),
                         );
-                    continue;
+                    return true;
                 }
-                prev = Some(PrevVertex::Surface(PrevBounce {
+                self.prev = Some(PrevVertex::Surface(PrevBounce {
                     pos: rec.p,
                     // A BSDF (or guide-mixture) pdf, in solid angle.
                     pdf: PdfSolidAngle::from_measure(sample.pdf),
                     delta: sample.delta,
-                    class: class_here,
+                    class: at.class,
                     #[cfg(debug_assertions)]
-                    check: (ray.clone(), rec, mat, dir),
+                    check: (self.ray.clone(), *rec, hit.mat, dir),
                     #[cfg(not(debug_assertions))]
                     _mat: std::marker::PhantomData,
                 }));
-                stats.vertices += 1;
-                records.push(vrec);
+                self.record(vrec, stats);
                 // Materials build the scattered ray without path context;
                 // stamp the path's shutter time, the indirect category, and
                 // the texture-filtering cone this bounce leaves behind. The
@@ -1374,28 +1532,79 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 // perpendicular cross-section, *not* the grazing-stretched
                 // footprint `World::intersect` handed the shader — and picks
                 // up the sampled lobe's own angular width.
-                ray = sample
+                *self.ray = sample
                     .ray
-                    .with_time(ray.time())
+                    .with_time(self.ray.time())
                     .with_mask(crate::ray::MASK_INDIRECT)
-                    .with_cone(ray.cone().scattered(cone_width_here, sample.spread));
-                remaining -= 1;
-                continue;
+                    .with_cone(self.ray.cone().scattered(cone_width_here, sample.spread));
+                self.remaining -= 1;
+                return true;
             }
         }
 
         // Absorbed or roulette-killed: this vertex's own gathers stand
         // (factor stays zero), the path ends here.
-        stats.vertices += 1;
-        records.push(vrec);
-        break;
+        self.record(vrec, stats);
+        false
     }
+}
 
-    // Backward gather: fold the records into the estimate, deepest vertex
-    // first, emitting guiding training samples along the way. `radiance` is
-    // what each vertex receives from its continuation (the next vertex's
-    // emission left out — its MIS-weighted share enters separately through
-    // `next_emit`).
+/// Free-flight candidate in the carried homogeneous medium (subsurface /
+/// participating glass interiors) — analog sampling at the extinction
+/// majorant; infinite outside a scattering medium. Incidental (unbounded
+/// across bounces), so it uses the PRNG side rather than a stratified
+/// dimension.
+#[inline(always)]
+fn free_flight(ray: &Ray, v: PathSampler) -> f32 {
+    match ray.medium() {
+        Some(m) if m.is_scattering() => {
+            let sigma_t_max = m.sigma_t_max().max(1e-4);
+            -(v.new_domain(K_MEDIUM).draw_rnd_f32::<1>()[0].ln()) / sigma_t_max
+        }
+        _ => f32::INFINITY,
+    }
+}
+
+/// Volume-region interaction along `ray`, clipped at `t_lim` — whatever
+/// event would otherwise end the segment. Because the walk is bounded by
+/// `t_lim`, a real collision is the nearest event by construction — the
+/// competition between the carried medium, the surface and the regions is
+/// exact (superposed processes), and the `Passthrough` weight is precisely
+/// the region transmittance up to the winner.
+#[inline(always)]
+fn volume_event<const PROFILE: bool>(
+    ctx: &PathContext,
+    ray: &Ray,
+    t_lim: f32,
+    exiting: bool,
+    v: PathSampler,
+) -> VolumeEvent {
+    // A walk's exit has no arriving segment outside the object.
+    if ctx.volumes.is_empty() || exiting {
+        VolumeEvent::Passthrough {
+            transmittance: Vec3A::ONE,
+            emitted: Vec3A::ZERO,
+        }
+    } else {
+        let _p = profile::scope_if::<PROFILE>(Section::Volume);
+        let mut rng = v.new_domain(K_VOLUME).rng();
+        ctx.volumes
+            .sample_interaction(ray, TRACE_T_MIN, t_lim, &mut rng)
+    }
+}
+
+/// Backward gather: fold the records into the estimate, deepest vertex
+/// first, emitting guiding training samples along the way. `radiance` is
+/// what each vertex receives from its continuation (the next vertex's
+/// emission left out — its MIS-weighted share enters separately through
+/// `next_emit`); `terminal` is what enters the path beyond its last vertex.
+#[inline(always)]
+fn gather<const PROFILE: bool>(
+    records: &[VertexRec],
+    terminal: Vec3A,
+    indirect_clamp: Option<f32>,
+    train_out: &mut Vec<SampleData>,
+) -> Vec3A {
     let _gather = profile::scope_if::<PROFILE>(Section::Contributions);
     let mut radiance = terminal;
     for (index, vrec) in records.iter().enumerate().rev() {
