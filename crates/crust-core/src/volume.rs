@@ -316,6 +316,79 @@ impl VolumeRegion {
     }
 }
 
+/// A short list held inline up to `N` entries and spilled to the heap past
+/// that. The volume integrator builds two per ray segment — the regions the
+/// segment crosses, and the phase lobes at a collision — and they almost
+/// always hold one or two entries; as `Vec`s, allocating and freeing them
+/// cost about 5% of `samples/fog.usda`'s render instructions. Entries keep
+/// their push order, so every sum over one is the same as over the `Vec`.
+#[derive(Debug, Clone)]
+struct InlineList<T: Copy + Default, const N: usize> {
+    inline: [T; N],
+    len: usize,
+    spill: Vec<T>,
+}
+
+impl<T: Copy + Default, const N: usize> InlineList<T, N> {
+    fn new() -> Self {
+        Self {
+            inline: [T::default(); N],
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, item: T) {
+        if self.spill.is_empty() && self.len < N {
+            self.inline[self.len] = item;
+            self.len += 1;
+        } else {
+            if self.spill.is_empty() {
+                self.spill.extend_from_slice(&self.inline);
+            }
+            self.spill.push(item);
+        }
+    }
+}
+
+impl<T: Copy + Default, const N: usize> std::ops::Deref for InlineList<T, N> {
+    type Target = [T];
+
+    #[inline]
+    fn deref(&self) -> &[T] {
+        if self.spill.is_empty() {
+            &self.inline[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+}
+
+impl<T: Copy + Default, const N: usize> std::ops::DerefMut for InlineList<T, N> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [T] {
+        if self.spill.is_empty() {
+            &mut self.inline[..self.len]
+        } else {
+            &mut self.spill
+        }
+    }
+}
+
+impl<'a, T: Copy + Default, const N: usize> IntoIterator for &'a InlineList<T, N> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The regions a ray segment crosses: `(region index, t entry, t exit)`.
+type ActiveSpans = InlineList<(usize, f32, f32), 4>;
+
 /// The phase function at a scatter point — a σₛ-weighted mixture of the
 /// HG lobes of every region overlapping that point. One entry in the
 /// common single-region case. Sampling picks a lobe by weight and samples
@@ -324,14 +397,14 @@ impl VolumeRegion {
 #[derive(Debug, Clone)]
 pub struct PhaseMix {
     /// `(weight, g)` pairs; weights sum to 1.
-    lobes: Vec<(f32, f32)>,
+    lobes: InlineList<(f32, f32), 4>,
 }
 
 impl PhaseMix {
     pub fn single(g: f32) -> Self {
-        Self {
-            lobes: vec![(1.0, g)],
-        }
+        let mut lobes = InlineList::new();
+        lobes.push((1.0, g));
+        Self { lobes }
     }
 
     /// Sample an outgoing direction given the incoming propagation
@@ -426,8 +499,8 @@ impl Volumes {
     /// majorant of the intersected regions. Summing majorants over the
     /// union span majorizes the summed extinction everywhere on it
     /// (superposed extinction of overlapping media is exact).
-    fn active_intervals(&self, ray: &Ray, t_eps: f32, t_max: f32) -> (Vec<(usize, f32, f32)>, f32) {
-        let mut spans = Vec::new();
+    fn active_intervals(&self, ray: &Ray, t_eps: f32, t_max: f32) -> (ActiveSpans, f32) {
+        let mut spans = ActiveSpans::new();
         let mut majorant = 0.0f32;
         for (i, region) in self.regions.iter().enumerate() {
             if region.majorant_sigma_t <= 0.0 || !ray.mask().sees(region.mask) {
@@ -483,7 +556,7 @@ impl Volumes {
             // Pointwise coefficients summed over regions covering `p`.
             let mut sigma_s_x = Vec3A::ZERO;
             let mut sigma_t_x = Vec3A::ZERO;
-            let mut lobes: Vec<(f32, f32)> = Vec::new();
+            let mut lobes = InlineList::new();
             let mut class: Option<u16> = None;
             for &(i, a, b) in &spans {
                 if t < a || t > b {
@@ -511,7 +584,7 @@ impl Volumes {
             let p_scatter = (sigma_s_x.max_element() / majorant).clamp(0.0, 1.0);
             if rng.next_f32() < p_scatter {
                 let total: f32 = lobes.iter().map(|l| l.0).sum();
-                for l in &mut lobes {
+                for l in lobes.iter_mut() {
                     l.0 /= total;
                 }
                 return VolumeEvent::Scatter {
@@ -585,6 +658,24 @@ impl Volumes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_list_keeps_push_order_across_the_spill() {
+        // Five overlapping regions are rare but legal; the list must read
+        // back exactly what a Vec would, before and after it spills.
+        let mut list: InlineList<(usize, f32, f32), 4> = InlineList::new();
+        let mut reference = Vec::new();
+        for k in 0..7 {
+            let item = (k, k as f32, 2.0 * k as f32);
+            list.push(item);
+            reference.push(item);
+            assert_eq!(&*list, &reference[..]);
+        }
+        for item in list.iter_mut() {
+            item.1 += 1.0;
+        }
+        assert_eq!(list[6], (6, 7.0, 12.0));
+    }
     use openqmc::pcg::Rng;
 
     fn unit_region(sigma_s: Vec3A, sigma_a: Vec3A, g: f32, field: DensityField) -> VolumeRegion {
