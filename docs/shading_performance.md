@@ -12,7 +12,7 @@ step, and the call counts below were confirmed by them.
 Two materials evaluate a pattern network at every hit:
 
 - **`MtlxMaterial`** (`material/materialx.rs`). It runs the compiled
-  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then collapses the document's
+  MaterialX `Program` (`crust-mtlx/src/eval/`), then collapses the document's
   closure tree into a `ResolvedClosure` that answers the query (at the time of
   this plan it pooled the lobes onto an `OpenPBR` instead; the closure tree's
   cost is recorded in `openspec/specs/materials/design.md` § MaterialX). The `Program` is already a linear, slot-indexed instruction list with a

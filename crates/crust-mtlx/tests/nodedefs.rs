@@ -5,8 +5,7 @@
 //! update not carried over — would make every document that leaves an input
 //! unauthored shade with the wrong value, and render plausibly.
 
-use crust_mtlx::surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
-use crust_mtlx::value::parse_literal;
+use crust_mtlx::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE, parse_literal};
 use std::path::Path;
 
 /// `(name, type, value)` of every input of `nodedef` in `file`, with an

@@ -191,9 +191,9 @@
   query then fails and the surface falls back to grey — which is what the two
   DPEL assets (MaterialX Teapot, MaterialX Lion) did on import. The reader is
   the standalone `crust-mtlx` crate — `parse.rs` (XML → a flat,
-  name-addressable graph), `value.rs` (the one runtime value), `eval.rs` (the
+  name-addressable graph), `value.rs` (the one runtime value), `eval/` (the
   graph compiled to a slot-indexed program), `bsdf.rs` (the closure tree),
-  `surface.rs` (the three surface-shader nodes expanded into closure trees) —
+  `surface/` (the three surface-shader nodes expanded into closure trees) —
   and crust-core evaluates what it describes: `closure/` collapses the tree at
   a vertex and shades its leaves, `materialx.rs` is the `Material` and the
   importer-facing `load()`.
@@ -399,7 +399,7 @@
   - **Surface shaders are their nodegraphs, node for node.** `open_pbr_surface`
     (1.1), `standard_surface` (1.0.1) and `gltf_pbr` (2.0.1) are MaterialX
     nodedefs implemented as nodegraphs over standalone BSDFs, and a document
-    never carries the implementation. `surface.rs` reproduces each graph — the
+    never carries the implementation. `surface/` reproduces each graph — the
     same leaves, the same `layer` / `mix` / `multiply` in the same order, the same
     derived parameters emitted as program ops so they fold, optimise and JIT —
     commented with the nodegraph node names so it can be checked against the
@@ -740,7 +740,7 @@
   `normal`, `position` and `viewdirection` (the shading globals) are not in it,
   nor are `hsvadjust`, `colorcorrect` and `heighttonormal` (not yet in the
   script's `CATEGORIES`), nor anything the closure and surface builders
-  (`bsdf.rs`, `surface.rs`) emit, which the pattern ops they lower to are
+  (`bsdf.rs`, `surface/`) emit, which the pattern ops they lower to are
   checked through. `integer`, `boolean` and matrix signatures are not generated
   because crust has no such values.
 - **Stdlib nodegraphs lowered by hand.** `colorcorrect` (`color3`) is compiled to

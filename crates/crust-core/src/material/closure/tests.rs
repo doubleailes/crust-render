@@ -24,7 +24,7 @@ fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let mut out = Closures::default();
     flatten(&mut c, &node, &mut out);
     let mut slots = Vec::new();
-    c.program.eval(
+    c.program().eval(
         &ShadeCtx {
             uv: (0.5, 0.5),
             normal: Vec3A::Z,

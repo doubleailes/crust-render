@@ -37,7 +37,7 @@ fn run_with(doc: &str, name: &str, ctx: &ShadeCtx, loader: crust_mtlx::TextureLo
     let mut c = Compiler::new(&d, loader);
     let slot = c.compile_named("", name, None);
     let mut slots = Vec::new();
-    c.program.eval(ctx, &mut slots);
+    c.program().eval(ctx, &mut slots);
     slots[slot as usize]
 }
 
@@ -80,7 +80,7 @@ fn closures_of(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let mut out = Closures::default();
     flatten(&mut c, &root, &mut out);
     let mut slots = Vec::new();
-    c.program.eval(&ctx(), &mut slots);
+    c.program().eval(&ctx(), &mut slots);
     (out, slots)
 }
 
@@ -170,7 +170,7 @@ fn unsupported_of(doc: &str, root: &str) -> Vec<String> {
     let root = d.find("", root).expect("root node").clone();
     let mut out = Closures::default();
     flatten(&mut c, &root, &mut out);
-    c.unsupported.iter().cloned().collect()
+    c.unsupported().iter().cloned().collect()
 }
 
 fn sample_mtlx() -> PathBuf {
@@ -247,7 +247,7 @@ fn val_from_vec3a() {
 
 #[test]
 fn parse_literal_handles_edge_cases() {
-    use crust_mtlx::value::{arity_of, parse_literal};
+    use crust_mtlx::{arity_of, parse_literal};
     assert!(parse_literal("", "float").is_none());
     assert!(parse_literal("abc", "float").is_none());
     assert!(parse_literal("1, x", "vector2").is_none());
@@ -856,14 +856,14 @@ fn shared_upstream_nodes_are_compiled_once() {
     let mut c = Compiler::new(&d, &decline);
     let slot = c.compile_named("", "a", None);
     let consts = c
-        .program
+        .program()
         .ops
         .iter()
         .filter(|op| matches!(op, Op::Const(_)))
         .count();
     assert_eq!(consts, 1, "the shared constant is memoised");
     let mut slots = Vec::new();
-    c.program.eval(&ctx(), &mut slots);
+    c.program().eval(&ctx(), &mut slots);
     assert!(approx(slots[slot as usize].x(), 4.0));
 }
 
@@ -881,10 +881,10 @@ fn unsupported_categories_degrade_to_a_constant_and_are_recorded() {
     .unwrap();
     let mut c = Compiler::new(&d, &decline);
     let slot = c.compile_named("", "a", None);
-    assert!(c.unsupported.contains("frobnicate"));
-    assert_eq!(c.unsupported.len(), 1);
+    assert!(c.unsupported().contains("frobnicate"));
+    assert_eq!(c.unsupported().len(), 1);
     let mut slots = Vec::new();
-    c.program.eval(&ctx(), &mut slots);
+    c.program().eval(&ctx(), &mut slots);
     assert!(slots[slot as usize].x().is_finite());
 }
 
@@ -997,7 +997,7 @@ fn a_loaded_image_is_sampled_and_counted() {
     let mut c = Compiler::new(&d, &loader);
     c.compile_named("", "n", None);
     let textured = c
-        .program
+        .program()
         .ops
         .iter()
         .filter(|op| matches!(op, Op::Texture { tex: Some(_), .. }))
