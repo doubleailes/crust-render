@@ -31,6 +31,7 @@
 //! that matters.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -245,14 +246,11 @@ struct ImportCtx<'a> {
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
     settings: RenderSettings,
-    /// The stage file, for resolving asset paths against its directory.
-    stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
     /// resolved (a chunk's mask may exclude what they name). Dropped as soon
     /// as the links are resolved, before the top-level BVH commit that is
     /// the import's memory peak.
     index: Option<Stage>,
-    assets: &'a dyn AssetLoader,
 }
 
 /// Walks `root` and its subtree, emitting geometry, lights and volumes
@@ -395,15 +393,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
             emit_distant_light(&mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(
-                &mut ctx.lights,
-                &prim,
-                &light,
-                this_world,
-                ctx.stage_path,
-                ctx.assets,
-                &mut ctx.caches.asset_time,
-            );
+            emit_dome_light(&mut ctx.lights, &prim, &light, this_world, &mut ctx.caches);
         }
         ctx.links.saw(
             prim.path(),
@@ -688,9 +678,7 @@ pub(crate) fn load_scene(
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
-        stage_path: path,
         index: Some(index),
-        assets,
     };
 
     let traverse_start = Instant::now();
@@ -1038,6 +1026,10 @@ struct ImportCaches<'a> {
     ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
     /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
     light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
+    /// Resolved path → a `DomeLight`'s decoded environment map. A stage rarely
+    /// has two domes on one file, but a decode is the most expensive load
+    /// there is, so it is never done twice.
+    environments: HashMap<std::path::PathBuf, Option<Arc<crate::EnvironmentMap>>>,
 }
 
 impl ImportCaches<'_> {
@@ -1060,6 +1052,31 @@ impl ImportCaches<'_> {
         let key = (self.subtree_of(prim), proto_path.to_string());
         self.placements.get(&key).copied().unwrap_or(0)
     }
+
+    /// One host decode through `assets`, memoized in the map `cache` selects:
+    /// keyed by `key` (a resolved path, plus whatever else changes the
+    /// decode), and remembering a failure too, so a file that would not load
+    /// is not retried per material or light. The decode's time is billed to
+    /// [`asset_time`](Self::asset_time). `report` runs after each actual
+    /// decode — never on a cache hit — with what it returned, which is where
+    /// a load's log line belongs.
+    fn load_cached<K: Eq + Hash, V: Clone>(
+        &mut self,
+        cache: fn(&mut Self) -> &mut HashMap<K, Option<V>>,
+        key: K,
+        load: impl FnOnce(&dyn AssetLoader, &K) -> Option<V>,
+        report: impl FnOnce(&K, Option<&V>),
+    ) -> Option<V> {
+        if let Some(hit) = cache(self).get(&key) {
+            return hit.clone();
+        }
+        let started = Instant::now();
+        let loaded = load(self.assets, &key);
+        self.asset_time += started.elapsed();
+        report(&key, loaded.as_ref());
+        cache(self).insert(key, loaded.clone());
+        loaded
+    }
 }
 
 impl<'a> ImportCaches<'a> {
@@ -1077,6 +1094,7 @@ impl<'a> ImportCaches<'a> {
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
             light_textures: HashMap::new(),
+            environments: HashMap::new(),
         }
     }
 }

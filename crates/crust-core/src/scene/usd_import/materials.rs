@@ -527,22 +527,19 @@ pub(super) fn load_uv_texture(
     space: crate::ColorSpace,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn crate::Texture2D>> {
-    let key = (path.to_string_lossy().into_owned(), space);
-    if let Some(hit) = caches.materials.textures.get(&key) {
-        return hit.clone();
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_texture(path, space);
-    let elapsed = started.elapsed();
-    caches.asset_time += elapsed;
-    if loaded.is_none() {
-        debug!(
-            "Texture {} ({space:?}) not loadable by the host",
-            path.display()
-        );
-    }
-    caches.materials.textures.insert(key, loaded.clone());
-    loaded
+    caches.load_cached(
+        |c| &mut c.materials.textures,
+        (path.to_string_lossy().into_owned(), space),
+        |assets, _| assets.load_texture(path, space),
+        |_, loaded| {
+            if loaded.is_none() {
+                debug!(
+                    "Texture {} ({space:?}) not loadable by the host",
+                    path.display()
+                );
+            }
+        },
+    )
 }
 
 /// The per-face colour texture a material binds, if any.
@@ -565,15 +562,14 @@ pub(super) fn material_ptex(
     // texture is opened once however many materials or chunks reference it.
     // Negative results are cached too: a 600 MB file that failed to open
     // should not be retried per material.
-    let key = path.to_string_lossy().into_owned();
-    if let Some(hit) = caches.materials.ptex.get(&key) {
-        return hit.clone().map(crate::PtexRef);
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_ptex(&path);
-    caches.asset_time += started.elapsed();
-    caches.materials.ptex.insert(key, loaded.clone());
-    loaded.map(crate::PtexRef)
+    caches
+        .load_cached(
+            |c| &mut c.materials.ptex,
+            path.to_string_lossy().into_owned(),
+            |assets, _| assets.load_ptex(&path),
+            |_, _| {},
+        )
+        .map(crate::PtexRef)
 }
 
 /// An `asset`-valued attribute as a filesystem path.
@@ -583,6 +579,17 @@ pub(super) fn material_ptex(
 /// production stage's `../../../textures/foo.ptx` work at all, since the layer
 /// authoring it is nested several directories below the root. The authored
 /// string is only a fallback, anchored against the root layer.
+///
+/// The rule for single-file assets: a light's IES profile and `RectLight`
+/// texture, the `DomeLight` texture and a material's Ptex `inputs:surfaceMap`.
+/// openusd reports `resolved_path` whenever such a file exists, so the
+/// root-layer fallback only decides where a path openusd could not find is
+/// looked for. UsdUVTexture files take [`attribute_asset_path`] instead,
+/// which differs exactly there: it anchors an unresolved relative path
+/// against the authoring layer, because a `<UDIM>` path names a set of files
+/// and never resolves. Routing these sites through it would move the lookup
+/// for a missing or string-typed path from the root layer's directory to the
+/// authoring layer's.
 pub(super) fn asset_value_path(
     value: &sdf::Value,
     stage_path: &Path,
@@ -624,6 +631,9 @@ pub(super) fn asset_value_path(
 /// `@../../texture/…<UDIM>.exr@`, and 1 718 texture sets failed to load. The
 /// strongest spec in the attribute's property stack is the layer whose opinion
 /// supplies the value, which is exactly what USD anchors against.
+///
+/// The rule for UsdUVTexture `inputs:file` only (`preview.rs`); every other
+/// asset goes through [`asset_value_path`], whose doc says why they differ.
 pub(super) fn attribute_asset_path(
     attr: &openusd::usd::Attribute,
     stage_path: &Path,
