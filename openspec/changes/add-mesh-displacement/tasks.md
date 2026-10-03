@@ -59,7 +59,7 @@
 ## 6. MaterialX displacement
 
 - [x] 6.1 In `crust-mtlx`, follow `surfacematerial.displacementshader` to a `displacement` node. Expose its `float` input and `scale` as roots of `Compiled`. Refuse a `vector3` input with an error the loader reports once. Verify with a `crust-mtlx/tests/graph.rs` case for each.
-- [x] 6.2 In `material/materialx.rs`, build the one-root displacement program with `Program::optimize`, JIT-compiled under `jit`, and evaluated from a vertex `ShadeCtx`: owner `uv` and `uv_width`, local `position` and `normal`, zero `tangent`, `view = normal`. Verify the interpreter ↔ JIT bit-identity test over the new root.
+- [x] 6.2 In `material/materialx.rs`, build the one-root displacement program with `Program::optimize`, JIT-compiled under `jit`, and evaluated from a vertex `ShadeCtx`: owner `uv` and `uv_width`, local `position` and `normal`, zero `tangent`, `view = −normal` (a head-on viewer; `view` points toward the surface). Verify the interpreter ↔ JIT bit-identity test over the new root.
 - [x] 6.3 Add a MaterialX displacement to `samples/displacement.usda` (a small `.mtlx` beside it) that uses the same map and scale as the preview-surface object. Verify with a test that the two meshes' displaced vertices match.
 - [x] 6.4 Document the displacement node, its object-space semantics and the view-dependent caveat in the materials design record and in `site/content/docs/usd/materials.md`. Verify with `zola build`.
 

@@ -460,7 +460,9 @@ same point.
   counts placements per key, is unchanged. Displacing at the end of `mesh_source` instead
   would run per prim, before deduplication.
 - **One sample per unique vertex, from its owner corner**, the first face corner that
-  references it in face order. Positions are shared and each moves once, so the displaced
+  references it in face order and carries every chart the displacement reads (falling
+  back to the first corner when none does, e.g. a vertex only an unmapped `n`-gon
+  reaches). Positions are shared and each moves once, so the displaced
   mesh has the undisplaced mesh's connectivity: watertight wherever that was, across UV
   seams and Ptex face boundaries (`a_uv_seam_stays_closed`,
   `a_ptex_face_boundary_stays_closed`, `a_per_face_mesh_at_mixed_rates_stays_closed`).
@@ -484,14 +486,17 @@ same point.
 - **Normals are recomputed** from the displaced triangles (`smooth_normals`). A faceted
   source stays faceted. Limit-normal precision is lost on displaced per-face meshes only.
 - **`none` meshes are diced bilinearly** when displaced, so a ground authored as one quad
-  can show its map. Under `CRUST_SUBDIV=0` or `CRUST_DISPLACE=0` they stay faceted cages.
+  can show its map. Under `CRUST_SUBDIV=0` or `CRUST_DISPLACE=0` they stay faceted cages,
+  and so does one whose displacement reads Ptex while it has a non-quad face (see Known
+  gaps).
 - **Deterministic and parallel.** The pass reads no USD, so it fans out over vertices in
   fixed rayon chunks without touching the import's thread-local time. Every vertex is
   independent, so the output is bit-identical at any thread count
   (`the_result_does_not_depend_on_the_thread_count`).
-- **Adaptive dicing and the bound.** The per-mesh frustum and nearest-point tests and
-  `segment_culled`'s per-segment frustum test grow the **local** box by the bound before
-  it is carried to world (`Cull::Pad`). A displaced point lies within that box exactly,
+- **Adaptive dicing and the bound.** The per-mesh and per-segment frustum tests and
+  nearest-point distances grow the **local** box by the bound before it is carried to
+  world (`Cull::Pad`), so geometry displacement can bring closer is diced for the nearer
+  distance. A displaced point lies within that box exactly,
   whatever the placement's scale, so no `max_axis_scale` factor is needed. The bound is
   `|c|` for a constant, else the mesh prim's `crust:displacementBound`, else its
   `primvars:displacementbound:sphere` (RenderMan's, which the island authors), else the
@@ -507,26 +512,26 @@ same point.
   skipped, only when a mesh was displaced. A non-constant displacement at cage
   resolution warns once per load.
 
-- **Measured** (2026-10-03, `--stats`, one sequential run per side, so timings are
-  indicative and the deterministic counts are what matter):
-  - `samples/displacement.usda` (level 6): 3 meshes, 33 028 vertices displaced in about
-    10 ms, 65 536 triangles against 49 156 with `CRUST_DISPLACE=0` (the two one-quad
-    grounds dice to 8 192 each), "Traverse prims" ~37 ms against ~21 ms, peak RSS
-    37.4 against 33.5 MiB.
-  - ALab (`entry.usda`, `-s 1`, no displacement authored), against the binary before
-    this change: identical geometry (13 302 geometries, 21 166 922 triangles), no
-    displacement lines, peak 25.07 against 25.14 GiB, Traverse 2:09 against 2:13.
+- **Measured** (2026-10-03, `--stats`). These are the deterministic figures — counts,
+  kernel memory, peak RSS — from one run per side. No timing comparison is claimed: the
+  runs were sequential, not interleaved with `bench_ab.sh`, and this change does not
+  touch per-triangle render cost. The displacement pass's own time is its `--stats`
+  counter, measured inside the import.
+  - `samples/displacement.usda` (level 6): 3 meshes and 33 028 vertices displaced (pass
+    ~10 ms); 65 536 triangles against 49 156 with `CRUST_DISPLACE=0` (the two one-quad
+    grounds dice to 8 192 each); peak RSS 37.4 against 33.5 MiB.
+  - ALab (`entry.usda`, `-s 1`, no displacement authored), against the binary before this
+    change: identical geometry (13 302 geometries, 21 166 922 triangles), no displacement
+    lines, peak RSS 25.07 against 25.14 GiB.
   - The Moana island at `--subdiv-edge-length 2` (ceiling 3), `shotCam`, Ptex streamed,
     `-s 4`, under a 56 GiB guard, `CRUST_DISPLACE` on against off on the same binary:
-    47 meshes and 574 924 vertices displaced in 0.21 s, max `|offset|` 6.25 (the
-    largest `dispScale`), 4 at cage resolution, none frustum-skipped (every displaced
-    mesh authors `primvars:displacementbound:sphere`); 63 602 769 against 63 600 590
-    triangles (bound padding brings a few more edges into view); 3 632 against 3 618
-    Ptex textures (the 14 displacement maps: 12 `displacementMap`s and isDunesA's two
-    blended ones); peak RSS 24.70 against 24.55 GiB; Traverse 3:22.0 against 3:13.1,
-    Load assets 24.4 against 22.6 s. (Before isDunesA's `PxrBlend` was read: 46 meshes,
-    548 397 vertices, 24.63 GiB.) Well inside the
-    guard, which the per-face tessellation's own 24.70 GiB had left room for.
+    47 meshes and 575 256 vertices displaced (pass ~0.2 s), max `|offset|` 6.25 (the
+    largest `dispScale`), 4 at cage resolution, none frustum-skipped (every displaced mesh
+    authors `primvars:displacementbound:sphere`); 63 603 431 against 63 600 590
+    triangles (the bound padding brings a few more edges into view and nearer); kernel
+    memory 13.83 GiB either way; 3 632 against 3 618 Ptex textures (the 14 displacement
+    maps: 12 `displacementMap`s and isDunesA's two blended ones); peak RSS 24.66 against
+    24.55 GiB — well inside the guard.
 
 ## Known gaps: displacement
 
@@ -540,6 +545,12 @@ same point.
 - **A seam step.** Where a map is discontinuous across a UV seam, the one ring of triangles
   at the seam stretches between the two sides' values (one owner per vertex). This is
   inherent to the authoring.
+- **Ptex displacement on refined non-quad faces.** Refinement splits a triangle or an
+  `n`-gon into quads no Ptex face addresses here (the same gap Ptex colour has). A
+  displaced `none` mesh with such a face therefore stays on its cage when its
+  displacement reads Ptex (one warning per load). On an authored subdivision surface the
+  children's own vertices read no map and stay undisplaced. Vertices they share with a
+  Ptex quad take the quad's value, since the owner is the first *charted* corner.
 - **No vector displacement** (MaterialX `vector3`, `PxrDisplace.dispVector` /
   `modelDispVector`): warned about and ignored.
 - **RenderMan networks beyond `PxrPtexture`, or a `PxrBlend` multiply of two, `→
@@ -549,8 +560,8 @@ same point.
   bump colour with it too), not from RenderMan's documentation.
 - **No bump from sub-dicing detail**, no lazy or per-ray dicing, no displacement of
   `UsdGeomSphere`, and no displacement beyond the per-mesh level on Loop meshes.
-- **MaterialX view-dependent nodes** have no meaningful value at a vertex (`view` is the
-  normal).
+- **MaterialX view-dependent nodes** have no meaningful value at a vertex (they see a
+  head-on viewer, `view = −normal`).
 
 ## Volumes, frame, camera and render settings
 

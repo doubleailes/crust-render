@@ -51,6 +51,12 @@ pub(crate) type PtexAt<'a> = &'a dyn Fn(usize, usize) -> Option<(u32, [f32; 2])>
 /// square, or `None` where the face is not Ptex-addressable. Either is `None`
 /// when the displacement does not read that chart.
 ///
+/// The owner is the first corner that carries every requested chart; a
+/// vertex only uncharted corners reach takes its first corner. So a vertex
+/// shared between a Ptex quad and an n-gon Ptex cannot address reads the
+/// quad whatever the face order, rather than an offset of zero that would
+/// dip the quad's border.
+///
 /// Sequential and in face order, so the owner of a vertex is a property of
 /// the authored mesh — never of thread count or import order.
 pub(crate) fn owner_charts(
@@ -61,6 +67,8 @@ pub(crate) fn owner_charts(
     ptex: Option<PtexAt<'_>>,
 ) -> Vec<VertexChart> {
     let mut charts = vec![VertexChart::default(); n_points];
+    // Whether a vertex's owner already carries every requested chart.
+    let mut complete = vec![false; n_points];
     let mut off = 0usize;
     for (face, &fc) in counts.iter().enumerate() {
         let fc = fc.max(0) as usize;
@@ -72,7 +80,7 @@ pub(crate) fn owner_charts(
             let Ok(p) = usize::try_from(indices[off + k]) else {
                 continue;
             };
-            if p >= n_points || charts[p].owned {
+            if p >= n_points || complete[p] {
                 continue;
             }
             let (prev, next) = ((k + fc - 1) % fc, (k + 1) % fc);
@@ -99,7 +107,11 @@ pub(crate) fn owner_charts(
                     c.ptex_width = spacing(here, same(prev), same(next));
                 }
             }
-            charts[p] = c;
+            let full = (uv.is_none() || c.uv.is_some()) && (ptex.is_none() || c.ptex.is_some());
+            if full || !charts[p].owned {
+                charts[p] = c;
+                complete[p] = full;
+            }
         }
         off += fc;
     }
@@ -382,6 +394,33 @@ mod tests {
         // 2, at (1, 1) of face 0.
         assert_eq!(charts[4].ptex, Some((0, [1.0, 1.0])));
         assert_eq!(charts[4].ptex_width, 1.0);
+    }
+
+    /// A vertex shared with a face that has no Ptex chart (an n-gon) takes
+    /// its chart from the quad, even when the n-gon comes first.
+    #[test]
+    fn the_owner_is_the_first_charted_corner() {
+        // A pentagon (face 0) and a quad (face 1) sharing points 1 and 2.
+        let counts = [5, 4];
+        let idx = [0, 1, 2, 3, 4, 1, 5, 6, 2];
+        const Q: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let ptex = |f: usize, k: usize| (f == 1).then(|| (1, Q[k]));
+        let charts = owner_charts(&counts, &idx, 7, None, Some(&ptex));
+        assert_eq!(charts[1].ptex, Some((1, [0.0, 0.0])));
+        assert_eq!(charts[2].ptex, Some((1, [0.0, 1.0])));
+        // Points only the pentagon reaches stay owned, uncharted.
+        assert!(charts[0].owned && charts[0].ptex.is_none());
+    }
+
+    /// A malformed face is skipped, not a panic.
+    #[test]
+    fn malformed_faces_are_skipped() {
+        let (p, _, _) = cube();
+        let counts = [0, 4, 2, -3, 4];
+        let idx = [0, 3, 2, 1, 7, 9, 4, 5, 6, 7];
+        let charts = owner_charts(&counts, &idx, p.len(), None, None);
+        let out = displace(&p, &counts, &idx, None, &charts, &constant(0.1));
+        assert_eq!(out.points.len(), p.len());
     }
 
     #[test]

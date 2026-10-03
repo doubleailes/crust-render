@@ -88,8 +88,9 @@ struct Presence {
 /// It runs at vertices, not hits, so the context is built from the vertex:
 /// the owner corner's `uv` and footprint, the **local-space** position and
 /// normal (MaterialX displacement is in object space), no tangent, and a
-/// view straight down the normal — a view-dependent graph has no meaningful
-/// value here.
+/// head-on viewer looking down the normal (`view = −normal`, `view` being
+/// the direction *toward* the surface) — a view-dependent graph has no
+/// meaningful value here.
 pub struct MtlxDisplacement {
     program: Program,
     #[cfg(feature = "jit")]
@@ -103,7 +104,7 @@ impl MtlxDisplacement {
             uv: ctx.uv.map_or((0.0, 0.0), |[u, v]| (u, v)),
             normal: ctx.normal,
             tangent: Vec3A::ZERO,
-            view: ctx.normal,
+            view: -ctx.normal,
             position: ctx.position,
             uv_width: ctx.uv_width,
         };

@@ -198,6 +198,9 @@ pub(super) struct SubdivPolicy {
     /// about: once per load, since a per-prim warning would scale with the
     /// scene.
     legacy_warned: bool,
+    /// Whether a Ptex-displaced `none` mesh kept on its cage has been warned
+    /// about, once per load for the same reason.
+    ptex_cage_warned: bool,
 }
 
 impl SubdivPolicy {
@@ -214,6 +217,7 @@ impl SubdivPolicy {
             quality: [[0; subdiv::QUALITY_BINS]; 2],
             enabled: crate::config().subdiv,
             legacy_warned: false,
+            ptex_cage_warned: false,
         }
     }
 
@@ -351,12 +355,14 @@ impl MeshArena {
             None => (verts, src.normals),
         };
         let want_faces = material.face_texture().is_some();
+        // A chart read only for the displacement has been consumed by now:
+        // the per-triangle table is built only when the surface reads it.
         let (tris, faces, uvs) = triangulate(
             &src.counts,
             &src.indices,
             verts.len(),
             want_faces,
-            src.uvs.as_ref(),
+            src.uvs.as_ref().filter(|_| material.uses_uv()),
         )
         .or_else(|| {
             debug!("Mesh at {} produced no triangles", prim.path());
@@ -606,7 +612,7 @@ pub(super) fn emit_mesh(
             &src.indices,
             verts.len(),
             want_faces,
-            src.uvs.as_ref(),
+            src.uvs.as_ref().filter(|_| want_uvs),
         ) {
             Some((tris, faces, uvs)) => {
                 // A singular transform has no inverse-transpose to push the
@@ -1027,6 +1033,7 @@ pub(super) fn mesh_source(
     // A displacement reads its own chart, whether or not the surface does.
     let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
     let want_uvs = want_uvs || displacement.is_some_and(Displacement::needs_uv);
+    let uv_primvar = uv_primvar.or_else(|| displacement.and_then(|d| d.uv_primvar.as_deref()));
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
     let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
@@ -1056,8 +1063,28 @@ pub(super) fn mesh_source(
     // A displaced `none` mesh is diced bilinearly, so the displacement has
     // vertices to move: its faces keep their flat shape until displaced.
     // Under `CRUST_SUBDIV=0` it stays the faceted cage, as everything does.
-    if usd_scheme == SubdivisionScheme::None && displacement.is_some() && policy.enabled {
-        usd_scheme = SubdivisionScheme::Bilinear;
+    //
+    // Except when its displacement reads Ptex and it has a face that is not a
+    // quad: refinement splits a triangle or an n-gon into quads no Ptex face
+    // addresses here, so those children would read no map at all. Its cage
+    // keeps every triangle addressable, so it stays the cage.
+    if let Some(d) = displacement
+        && usd_scheme == SubdivisionScheme::None
+        && policy.enabled
+    {
+        if d.needs_ptex() && counts.iter().any(|&c| c != 4) {
+            if !policy.ptex_cage_warned {
+                policy.ptex_cage_warned = true;
+                warn!(
+                    "Mesh at {} (and possibly others): subdivisionScheme = none with a Ptex \
+                     displacement and non-quad faces is displaced at its cage — refining it \
+                     would leave the children of its triangles with no Ptex face",
+                    prim.path()
+                );
+            }
+        } else {
+            usd_scheme = SubdivisionScheme::Bilinear;
+        }
     }
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
         return Some(cage(points, counts, indices, uvs));
@@ -2493,5 +2520,65 @@ def Mesh "G"
         let geom = arena.slots[slot as usize].local.as_ref().unwrap();
         let highest = geom.verts.iter().map(|v| v[1].abs()).fold(0.0f32, f32::max);
         assert_eq!(highest, arena.displaced.max_offset, "unclamped");
+    }
+
+    /// A `none` triangle mesh with a Ptex displacement stays on its cage, so
+    /// every vertex keeps a Ptex face (the triangle convention) and moves.
+    #[test]
+    fn a_ptex_displaced_none_triangle_mesh_keeps_its_cage() {
+        let dir = std::env::temp_dir().join("crust_mesh_displacement_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("none_triangles.usda");
+        std::fs::write(
+            &path,
+            r#"#usda 1.0
+def Mesh "T"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [3, 3]
+    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+    point3f[] points = [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)]
+}
+"#,
+        )
+        .unwrap();
+        let stage = Stage::builder().open(path.to_str().unwrap()).unwrap();
+        let p = sdf::path("/T").unwrap();
+        let prim = super::super::prim_at(&stage, p.clone());
+        let mesh = UsdMesh::get(&stage, p).unwrap().unwrap();
+        let d = ptex_displacement();
+        let mut arena = MeshArena::new(SubdivPolicy::new(2));
+        let src = mesh_source(
+            &prim,
+            &mesh,
+            false,
+            false,
+            None,
+            Some(&d),
+            &mut arena.subdiv,
+            MeshPlace::World(&GMat4::IDENTITY),
+        )
+        .unwrap();
+        assert!(!src.refined, "kept on its cage");
+        assert!(arena.subdiv.ptex_cage_warned);
+        let charts = owner_charts(&src, src.points.len(), &d);
+        assert!(
+            charts.iter().all(|c| c.ptex.is_some()),
+            "every vertex has a face"
+        );
+        // The same mesh with a UV displacement is diced bilinearly as usual.
+        let uv = uv_displacement();
+        let src = mesh_source(
+            &prim,
+            &mesh,
+            false,
+            false,
+            None,
+            Some(&uv),
+            &mut arena.subdiv,
+            MeshPlace::World(&GMat4::IDENTITY),
+        )
+        .unwrap();
+        assert!(src.refined);
     }
 }

@@ -28,7 +28,7 @@ use super::{ImportCaches, prim_at};
 /// which is what lets `MeshKey` recognize shared mesh geometry.
 #[derive(Default)]
 pub(super) struct MaterialCache {
-    pub(super) by_path: HashMap<(u32, String), BoundMaterial>,
+    pub(super) by_path: HashMap<(u32, String), CachedMaterial>,
     pub(super) default: Option<Arc<dyn Material>>,
     /// Resolved `.ptx` path -> the opened texture, or `None` if it could not
     /// be opened. Keyed by filesystem path, so it needs no epoch scoping.
@@ -43,8 +43,8 @@ pub(super) struct MaterialCache {
     /// [`MaterialCache::key`]. Kept in step with [`ImportCaches::epoch`].
     pub(super) epoch: u32,
     /// The displacement of the `.mtlx` material the last resolution loaded,
-    /// handed from [`load_mtlx_material`] to [`resolve_bound`], which takes it
-    /// straight after: the document is compiled once, for both.
+    /// handed from [`load_mtlx_material`] to [`cached_material`], which keeps
+    /// it with the material: the document is compiled once, for both.
     mtlx_displacement: Option<Arc<crate::materialx::MtlxDisplacement>>,
 }
 
@@ -80,8 +80,9 @@ impl MaterialCache {
 
 /// A prim's resolved material and the displacement it defines, if any.
 ///
-/// Resolved together and cached together, per `(epoch, path)`: displacement
-/// is a property of the material, but it is consumed once at import rather
+/// Cached together per `(epoch, path)` ([`CachedMaterial`]), the displacement
+/// resolved the first time a mesh asks: displacement is a property of the
+/// material, but it is consumed once at import rather
 /// than per hit, so it lives beside the [`Material`] instead of inside it.
 /// `displacement` is always `None` under `CRUST_DISPLACE=0`, and every
 /// downstream step keys off its presence — so the off side is the code path
@@ -90,6 +91,20 @@ impl MaterialCache {
 pub(super) struct BoundMaterial {
     pub(super) material: Arc<dyn Material>,
     pub(super) displacement: Option<Arc<Displacement>>,
+}
+
+/// One cached material, its displacement resolved on first demand.
+///
+/// Lazily, because only a mesh consumes a displacement: a material bound
+/// only to spheres or curves never opens its displacement maps. A `.mtlx`
+/// material's displacement program is compiled with the document, so it is
+/// kept here until then.
+pub(super) struct CachedMaterial {
+    material: Arc<dyn Material>,
+    mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
+    /// `None` until a mesh asked; then the answer, which may be no
+    /// displacement.
+    displacement: Option<Option<Arc<Displacement>>>,
 }
 
 /// The binding purpose a final render resolves: USD's `full`, falling back to
@@ -131,14 +146,17 @@ fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
     None
 }
 
-/// The material bound to `prim` — [`resolve_bound`] for a prim that cannot
-/// be displaced (spheres, curves).
+/// The material bound to `prim`, for a prim that cannot be displaced
+/// (spheres, curves): its displacement is not resolved.
 pub(super) fn resolve_material(
     stage: &Stage,
     prim: &Prim,
     caches: &mut ImportCaches<'_>,
 ) -> Arc<dyn Material> {
-    resolve_bound(stage, prim, caches).material
+    match cached_material(stage, prim, caches) {
+        Some((key, _)) => caches.materials.by_path[&key].material.clone(),
+        None => caches.materials.default_material(),
+    }
 }
 
 /// The material bound to `prim`, with its displacement.
@@ -147,22 +165,55 @@ pub(super) fn resolve_bound(
     prim: &Prim,
     caches: &mut ImportCaches<'_>,
 ) -> BoundMaterial {
-    let mat_path = bound_material(stage, prim);
-
-    let Some(mat_path) = mat_path else {
-        debug!(
-            "{} has no material binding — using default grey OpenPBR",
-            prim.path()
-        );
+    let Some((key, mat_path)) = cached_material(stage, prim, caches) else {
         return BoundMaterial {
             material: caches.materials.default_material(),
             displacement: None,
         };
     };
+    let entry = &caches.materials.by_path[&key];
+    let material = entry.material.clone();
+    if let Some(displacement) = &entry.displacement {
+        return BoundMaterial {
+            material,
+            displacement: displacement.clone(),
+        };
+    }
+    let mtlx = entry.mtlx.clone();
+    let displacement = if crate::config().displace {
+        resolve_displacement(stage, &mat_path, mtlx, caches).map(Arc::new)
+    } else {
+        None
+    };
+    if let Some(d) = &displacement {
+        debug!("Material {mat_path}: {d:?}");
+    }
+    if let Some(entry) = caches.materials.by_path.get_mut(&key) {
+        entry.displacement = Some(displacement.clone());
+    }
+    BoundMaterial {
+        material,
+        displacement,
+    }
+}
 
+/// Resolves and caches the material bound to `prim`, returning its cache key
+/// and path; `None` for an unbound prim, which takes the default.
+fn cached_material(
+    stage: &Stage,
+    prim: &Prim,
+    caches: &mut ImportCaches<'_>,
+) -> Option<((u32, String), sdf::Path)> {
+    let Some(mat_path) = bound_material(stage, prim) else {
+        debug!(
+            "{} has no material binding — using default grey OpenPBR",
+            prim.path()
+        );
+        return None;
+    };
     let key = caches.materials.key(mat_path.as_str());
-    if let Some(hit) = caches.materials.by_path.get(&key) {
-        return hit.clone();
+    if caches.materials.by_path.contains_key(&key) {
+        return Some((key, mat_path));
     }
     // Per *distinct* material, not per binding: a stage binding one material
     // to 10 000 prims logs this once. The key carries the cache epoch, which
@@ -172,20 +223,15 @@ pub(super) fn resolve_bound(
     caches.materials.mtlx_displacement = None;
     let material = resolve_material_uncached(stage, &mat_path, caches);
     let mtlx = caches.materials.mtlx_displacement.take();
-    let displacement = if crate::config().displace {
-        resolve_displacement(stage, &mat_path, mtlx, caches).map(Arc::new)
-    } else {
-        None
-    };
-    if let Some(d) = &displacement {
-        debug!("Material {mat_path}: {d:?}");
-    }
-    let resolved = BoundMaterial {
-        material,
-        displacement,
-    };
-    caches.materials.by_path.insert(key, resolved.clone());
-    resolved
+    caches.materials.by_path.insert(
+        key.clone(),
+        CachedMaterial {
+            material,
+            mtlx,
+            displacement: None,
+        },
+    );
+    Some((key, mat_path))
 }
 
 /// The scalar displacement a material defines, read from whichever of the
@@ -216,11 +262,13 @@ fn resolve_displacement(
 /// The material's child `Shader` with this `info:id`, if any.
 fn child_shader(stage: &Stage, mat_path: &sdf::Path, id: &str) -> Option<Shader> {
     let children = prim_at(stage, mat_path.clone()).children().ok()?;
+    // A token or a string, as `has_shader_id` accepts.
     let child = children.iter().find(|c| {
-        matches!(
-            c.attribute("info:id").get_at::<sdf::Value>(eval_time()),
-            Ok(Some(sdf::Value::Token(t))) if t.as_str() == id
-        )
+        match c.attribute("info:id").get_at::<sdf::Value>(eval_time()) {
+            Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
+            Ok(Some(sdf::Value::String(t))) => t == id,
+            _ => false,
+        }
     })?;
     Shader::get(stage, child.path().clone()).ok().flatten()
 }

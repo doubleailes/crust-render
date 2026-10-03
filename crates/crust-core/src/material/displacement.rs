@@ -158,6 +158,10 @@ pub struct Displacement {
     /// the frustum test off for the mesh, so displaced geometry pushed into
     /// view is never under-diced.
     pub bound: Option<f32>,
+    /// The texture-coordinate primvar the displacement's texture names, for a
+    /// mesh whose surface reads no chart of its own. One chart per mesh: when
+    /// the surface names one, it wins.
+    pub uv_primvar: Option<String>,
 }
 
 impl std::fmt::Debug for Displacement {
@@ -182,7 +186,17 @@ impl Displacement {
             DisplacementValue::Constant(c) => Some(c.abs()),
             _ => None,
         };
-        Displacement { value, bound }
+        Displacement {
+            value,
+            bound,
+            uv_primvar: None,
+        }
+    }
+
+    /// With the primvar its texture reads.
+    pub fn with_uv_primvar(mut self, primvar: Option<String>) -> Self {
+        self.uv_primvar = primvar;
+        self
     }
 
     /// With an authored `crust:displacementBound`. A constant keeps its exact

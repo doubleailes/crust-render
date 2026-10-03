@@ -205,6 +205,7 @@ impl Texture2D for Ramp {
 #[derive(Default)]
 struct RampAssets {
     requested: Mutex<Vec<(PathBuf, ColorSpace)>>,
+    ptex_requested: Mutex<Vec<(PathBuf, ColorSpace)>>,
 }
 impl AssetLoader for RampAssets {
     fn load_environment(&self, _path: &Path) -> Option<EnvironmentMap> {
@@ -217,7 +218,11 @@ impl AssetLoader for RampAssets {
             .push((path.to_path_buf(), space));
         Some(Arc::new(Ramp))
     }
-    fn load_ptex(&self, _path: &Path, _space: ColorSpace) -> Option<Arc<dyn PtexTexture>> {
+    fn load_ptex(&self, path: &Path, space: ColorSpace) -> Option<Arc<dyn PtexTexture>> {
+        self.ptex_requested
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), space));
         None
     }
 }
@@ -325,4 +330,127 @@ def Scope "Render"
     let bounded = run("adaptive_bounded", "float crust:displacementBound = 0.1");
     assert_eq!(bounded.stats.displacement.meshes, 1);
     assert_eq!(bounded.stats.displacement.frustum_skipped, 0);
+}
+
+/// A displacement is resolved only for a mesh: a `PxrDisplace` material bound
+/// to a sphere opens no displacement map, the same material on a mesh opens
+/// it raw.
+#[test]
+fn only_meshes_open_displacement_maps() {
+    let material = r#"    def Material "Rock"
+    {
+        token outputs:ri:surface.connect = </World/Rock/Bsdf.outputs:bxdf_out>
+        token outputs:ri:displacement.connect = </World/Rock/PxrDisplace.outputs:displace>
+        def Shader "Bsdf"
+        {
+            uniform token info:id = "PxrDisneyBsdf"
+            token outputs:bxdf_out
+        }
+        def Shader "PxrDisplace"
+        {
+            uniform token info:id = "PxrDisplace"
+            float inputs:dispAmount = 0.1
+            float inputs:dispScalar.connect = </World/Rock/Tex.outputs:resultR>
+            token outputs:displace
+        }
+        def Shader "Tex"
+        {
+            uniform token info:id = "PxrPtexture"
+            asset inputs:filename = @height.ptx@
+            float outputs:resultR
+        }
+    }
+"#;
+    let sphere = r#"    def Sphere "Ball" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding = </World/Rock>
+    }
+"#;
+    let assets = RampAssets::default();
+    load_with("sphere_only", &format!("{material}{sphere}"), 0, &assets);
+    assert!(
+        assets.ptex_requested.lock().unwrap().is_empty(),
+        "a sphere opens no displacement map"
+    );
+    let assets = RampAssets::default();
+    let mesh = ground("Ground", "none", "Rock", "");
+    load_with(
+        "sphere_and_mesh",
+        &format!("{material}{sphere}{mesh}"),
+        0,
+        &assets,
+    );
+    let requested = assets.ptex_requested.lock().unwrap();
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0].1, ColorSpace::Raw);
+}
+
+/// A displacement connected to a `UsdUVTexture` that names no file keeps the
+/// input's own authored constant, as a shading input does.
+#[test]
+fn an_unusable_texture_keeps_the_authored_constant() {
+    let material = preview_material(
+        "Fallback",
+        r#"float inputs:displacement = 0.05
+            float inputs:displacement.connect = </World/Fallback/Map.outputs:r>
+            token outputs:surface
+        }
+        def Shader "Map"
+        {
+            uniform token info:id = "UsdUVTexture"
+            float outputs:r"#,
+    );
+    let body = format!("{material}{}", ground("Ground", "none", "Fallback", ""));
+    let scene = load_with("unusable_texture", &body, 1, &RampAssets::default());
+    let y = height_at(&scene, 0.5, 0.5).expect("hit");
+    assert!((y - 0.05).abs() < 1e-5, "{y}");
+}
+
+/// The displacement texture's primvar reader names the chart a mesh reads
+/// when its surface reads none: here `uv2`, which the fallback names (`st`,
+/// `uv`, `st0`, `UVMap`) would never find.
+#[test]
+fn a_displacement_texture_names_its_chart() {
+    let material = preview_material("Height", &format!("float {TEXTURED}")).replace(
+        r#"string inputs:varname = "st""#,
+        r#"string inputs:varname = "uv2""#,
+    );
+    let mesh = ground("Ground", "none", "Height", "").replace("primvars:st", "primvars:uv2");
+    let scene = load_with(
+        "named_chart",
+        &format!("{material}{mesh}"),
+        2,
+        &RampAssets::default(),
+    );
+    for x in [0.25f32, 0.75] {
+        let y = height_at(&scene, x, 0.5).expect("hit");
+        assert!((y - (0.2 * x - 0.1)).abs() < 1e-4, "x = {x}: {y}");
+    }
+}
+
+/// A `PxrDisplace` whose `info:id` is authored as a string is found too.
+#[test]
+fn a_string_info_id_is_read() {
+    let material = r#"    def Material "Rock"
+    {
+        token outputs:ri:surface.connect = </World/Rock/Bsdf.outputs:bxdf_out>
+        token outputs:ri:displacement.connect = </World/Rock/PxrDisplace.outputs:displace>
+        def Shader "Bsdf"
+        {
+            uniform token info:id = "PxrDisneyBsdf"
+            token outputs:bxdf_out
+        }
+        def Shader "PxrDisplace"
+        {
+            uniform string info:id = "PxrDisplace"
+            float inputs:dispAmount = 0.1
+            float inputs:dispScalar = 1
+            token outputs:displace
+        }
+    }
+"#;
+    let body = format!("{material}{}", ground("Ground", "none", "Rock", ""));
+    let scene = load("string_id", &body, 1);
+    let y = height_at(&scene, 0.5, 0.5).expect("hit");
+    assert!((y - 0.1).abs() < 1e-5, "{y}");
 }

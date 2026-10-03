@@ -242,7 +242,7 @@ behind the existing `jit` feature. The interpreter ↔ JIT bit-identity pin exte
 The program runs with these `ShadeCtx` fields:
 - `uv` and `uv_width` from the owner corner;
 - `position` and `normal` in local space;
-- `tangent` zero and `view = normal`.
+- `tangent` zero and `view = −normal`, a head-on viewer (`ShadeCtx.view` points toward the surface).
 
 So `position`- and `normal`-driven graphs work, and view-dependent nodes have no
 meaningful value. That is documented.
