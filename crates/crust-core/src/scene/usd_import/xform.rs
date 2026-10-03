@@ -1,6 +1,6 @@
 //! Prim transforms: the local `xformOp:*` composer and the conversions to glam.
 
-use glam::{Mat4 as GMat4, Vec3};
+use glam::Mat4 as GMat4;
 use openusd::gf::Matrix4d;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
@@ -10,6 +10,7 @@ use openusd_schemas::geom::{
 use openusd_schemas::lux::{RectLight, SphereLight};
 use tracing::warn;
 
+use super::attrs::{decode_f32, decode_vec3, value_at};
 use super::time::{eval_time, xform_time};
 
 /// USD authors 4x4 matrices as row-vector row-major (translation in the
@@ -113,15 +114,11 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
     // Suffixes name op instances (`xformOp:translate:pivot`); the kind is
     // the first segment.
     let kind = kind.split(':').next().unwrap_or(kind);
-    let value = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&prim.attribute(name))?;
 
     match kind {
-        "translate" => Some(GMat4::from_translation(value_as_vec3(&value)?)),
-        "scale" => Some(GMat4::from_scale(value_as_vec3(&value)?)),
+        "translate" => Some(GMat4::from_translation(decode_vec3(&value)?)),
+        "scale" => Some(GMat4::from_scale(decode_vec3(&value)?)),
         "transform" => match value {
             sdf::Value::Matrix4d(m) => Some(usd_mat_to_glam(m)),
             _ => None,
@@ -135,14 +132,14 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
             )),
             _ => None,
         },
-        "rotateX" => Some(GMat4::from_rotation_x(value_as_f32(&value)?.to_radians())),
-        "rotateY" => Some(GMat4::from_rotation_y(value_as_f32(&value)?.to_radians())),
-        "rotateZ" => Some(GMat4::from_rotation_z(value_as_f32(&value)?.to_radians())),
+        "rotateX" => Some(GMat4::from_rotation_x(decode_f32(&value)?.to_radians())),
+        "rotateY" => Some(GMat4::from_rotation_y(decode_f32(&value)?.to_radians())),
+        "rotateZ" => Some(GMat4::from_rotation_z(decode_f32(&value)?.to_radians())),
         // Euler triples: the vector components are always the X/Y/Z-axis
         // angles in degrees; the op name gives the application order, first
         // named axis applied to the point first (so it sits rightmost).
         "rotateXYZ" | "rotateXZY" | "rotateYXZ" | "rotateYZX" | "rotateZXY" | "rotateZYX" => {
-            let v = value_as_vec3(&value)?;
+            let v = decode_vec3(&value)?;
             let rx = GMat4::from_rotation_x(v.x.to_radians());
             let ry = GMat4::from_rotation_y(v.y.to_radians());
             let rz = GMat4::from_rotation_z(v.z.to_radians());
@@ -155,24 +152,6 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
                 _ => rx * ry * rz, // rotateZYX
             })
         }
-        _ => None,
-    }
-}
-
-fn value_as_vec3(value: &sdf::Value) -> Option<Vec3> {
-    match value {
-        sdf::Value::Vec3f(v) => Some(Vec3::new(v.x, v.y, v.z)),
-        sdf::Value::Vec3d(v) => Some(Vec3::new(v.x as f32, v.y as f32, v.z as f32)),
-        sdf::Value::Vec3h(v) => Some(Vec3::new(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
-        _ => None,
-    }
-}
-
-fn value_as_f32(value: &sdf::Value) -> Option<f32> {
-    match value {
-        sdf::Value::Float(v) => Some(*v),
-        sdf::Value::Double(v) => Some(*v as f32),
-        sdf::Value::Half(v) => Some(v.to_f32()),
         _ => None,
     }
 }

@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
@@ -24,11 +23,10 @@ use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32,
-    infinite_light_escape_mask, light_ray_mask,
+    attr_bool, attr_f32, attr_token, attr_vec3, custom_bool, custom_color3, custom_f32,
+    infinite_light_escape_mask, light_ray_mask, value_at,
 };
 use super::materials::asset_value_path;
-use super::time::eval_time;
 use super::{ImportCaches, ImportCtx};
 
 /// The `LightAPI` quantities every UsdLux light shares.
@@ -60,7 +58,7 @@ fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
     };
     let intensity = finite("intensity", attr_f32(&light.intensity_attr()), 1.0);
     let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
-    let color = match attr_color3f(&light.color_attr()) {
+    let color = match attr_vec3(&light.color_attr()).map(|c| c.to_array()) {
         Some(c) if c.iter().any(|x| !x.is_finite()) => {
             warn!(
                 "{}: inputs:color = {c:?} is not finite — using its fallback (1, 1, 1)",
@@ -169,11 +167,7 @@ fn lux_shaping(
     )
     .unwrap_or(0.0);
 
-    let ies_file = prim
-        .attribute("inputs:shaping:ies:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
+    let ies_file = value_at(&prim.attribute("inputs:shaping:ies:file"))
         .and_then(|v| asset_value_path(&v, caches.stage_path));
     if let Some(path) = ies_file {
         let profile = match caches.ies.get(&path) {
@@ -463,11 +457,7 @@ pub(super) fn emit_cylinder_light(
 /// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
 /// resolved path: a rig commonly reuses one card texture on many lights.
 fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crate::LightTexture>> {
-    let value = prim
-        .attribute("inputs:texture:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&prim.attribute("inputs:texture:file"))?;
     let path = asset_value_path(&value, caches.stage_path)?;
     if let Some(cached) = caches.light_textures.get(&path) {
         return cached.clone();
@@ -689,15 +679,7 @@ pub(super) fn emit_dome_light(
     // `normalize` does not apply to a dome (its sizeFactor is 1).
     let tint = lux_params(prim, light).emission;
 
-    let format = light
-        .texture_format_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Token(t) => Some(t.to_string()),
-            _ => None,
-        });
+    let format = attr_token(&light.texture_format_attr());
     let map = match dome_texture_path(light, stage_path) {
         Some(texture) => match format.as_deref() {
             // `automatic` infers from the image; for the equirectangular
@@ -760,10 +742,6 @@ pub(super) fn emit_dome_light(
 /// a root layer sitting anywhere else would otherwise resolve it against the
 /// wrong directory and silently fall back to the dome's uniform colour.
 fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
-    let value = light
-        .texture_file_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&light.texture_file_attr())?;
     asset_value_path(&value, stage_path)
 }

@@ -75,6 +75,7 @@ mod xform;
 use adaptive::{Frustum, ScreenRate};
 use attrs::{
     custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
+    value_at,
 };
 use camera::{build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
@@ -90,7 +91,7 @@ use settings::{
     render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
-use time::{EvalTimeScope, eval_time};
+use time::EvalTimeScope;
 use volume::emit_volume;
 use xform::{local_matrix_at, resets_xform_stack_at};
 
@@ -473,11 +474,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
 /// fills/bounces and a debug dome this way, and all four used to light the
 /// shot.
 fn is_invisible(prim: &Prim) -> bool {
-    prim.attribute("visibility")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .is_some_and(|v| v.as_str() == Some("invisible"))
+    value_at(&prim.attribute("visibility")).is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
 /// Drops a stage the traversal is done with, or — for a single-stage import
@@ -1055,12 +1052,7 @@ impl<'a> ImportCaches<'a> {
 /// with a `GEO_PROXY` scope (`purpose = "proxy"`, bound only for `preview`)
 /// next to its `GEO`, and the proxies drew as grey duplicates of 1 505 meshes.
 fn non_render_purpose(prim: &Prim) -> Option<&'static str> {
-    let value = prim
-        .attribute("purpose")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    match value.as_str()? {
+    match value_at(&prim.attribute("purpose"))?.as_str()? {
         "proxy" => Some("proxy"),
         "guide" => Some("guide"),
         _ => None,

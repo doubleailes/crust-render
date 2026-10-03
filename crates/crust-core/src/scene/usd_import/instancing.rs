@@ -25,7 +25,6 @@ use crust_rt::{
     Geometry, InstanceHitId, RayMask, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{
@@ -37,11 +36,10 @@ use tracing::{debug, warn};
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
-use super::attrs::{custom_token, prim_ray_mask};
+use super::attrs::{custom_token, decode_i32s, decode_vec3fs, prim_ray_mask, value_at};
 use super::materials::resolve_material;
 use super::mesh::{MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
-use super::time::eval_time;
 use super::xform::{local_matrix_at, resets_xform_stack_at};
 use super::{ImportCaches, is_invisible, non_render_purpose, prim_at};
 
@@ -798,9 +796,7 @@ fn read_instancer(
         }
     };
 
-    let Ok(Some(sdf::Value::IntVec(proto_indices))) = instancer
-        .proto_indices_attr()
-        .get_at::<sdf::Value>(eval_time())
+    let Some(proto_indices) = value_at(&instancer.proto_indices_attr()).and_then(decode_i32s)
     else {
         if report {
             warn!(
@@ -811,18 +807,18 @@ fn read_instancer(
         return None;
     };
 
-    let positions = value_vec3f_array(&instancer.positions_attr()).unwrap_or_default();
-    let scales = value_vec3f_array(&instancer.scales_attr());
+    let positions = value_at(&instancer.positions_attr())
+        .and_then(decode_vec3fs)
+        .unwrap_or_default();
+    let scales = value_at(&instancer.scales_attr()).and_then(decode_vec3fs);
     let orientations = instance_orientations(instancer);
-    let ids = match instancer.ids_attr().get_at::<sdf::Value>(eval_time()) {
-        Ok(Some(sdf::Value::Int64Vec(v))) => Some(v),
+    let ids = match value_at(&instancer.ids_attr()) {
+        Some(sdf::Value::Int64Vec(v)) => Some(v),
         _ => None,
     };
-    let invisible: std::collections::HashSet<i64> = match instancer
-        .invisible_ids_attr()
-        .get_at::<sdf::Value>(eval_time())
+    let invisible: std::collections::HashSet<i64> = match value_at(&instancer.invisible_ids_attr())
     {
-        Ok(Some(sdf::Value::Int64Vec(v))) => v.into_iter().collect(),
+        Some(sdf::Value::Int64Vec(v)) => v.into_iter().collect(),
         _ => Default::default(),
     };
 
@@ -1098,29 +1094,15 @@ pub(super) fn emit_point_instancer(
     );
 }
 
-/// A `point3f[]` / `float3[]` attribute as a plain vector.
-fn value_vec3f_array(attr: &openusd::usd::Attribute) -> Option<Vec<Vec3f>> {
-    match attr.get_at::<sdf::Value>(eval_time()) {
-        Ok(Some(sdf::Value::Vec3fVec(v))) => Some(v),
-        _ => None,
-    }
-}
-
 /// Per-instance rotations, preferring single-precision `orientationsf`
 /// over half-precision `orientations` as USD specifies.
 fn instance_orientations(instancer: &PointInstancer) -> Option<Vec<glam::Quat>> {
     let quat = |w: f32, x: f32, y: f32, z: f32| glam::Quat::from_xyzw(x, y, z, w).normalize();
-    if let Ok(Some(sdf::Value::QuatfVec(v))) = instancer
-        .orientationsf_attr()
-        .get_at::<sdf::Value>(eval_time())
-    {
+    if let Some(sdf::Value::QuatfVec(v)) = value_at(&instancer.orientationsf_attr()) {
         return Some(v.iter().map(|q| quat(q.w, q.x, q.y, q.z)).collect());
     }
-    match instancer
-        .orientations_attr()
-        .get_at::<sdf::Value>(eval_time())
-    {
-        Ok(Some(sdf::Value::QuathVec(v))) => Some(
+    match value_at(&instancer.orientations_attr()) {
+        Some(sdf::Value::QuathVec(v)) => Some(
             v.iter()
                 .map(|q| quat(q.w.to_f32(), q.x.to_f32(), q.y.to_f32(), q.z.to_f32()))
                 .collect(),
