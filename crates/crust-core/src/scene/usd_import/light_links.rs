@@ -293,12 +293,11 @@ impl LightLinks {
         if self.pending.is_empty() {
             return;
         }
-        // The interned paths, by id.
-        let mut by_id: Vec<Option<&sdf::Path>> = vec![None; self.paths.len()];
-        for (p, &id) in &self.paths {
-            by_id[id as usize] = Some(p);
-        }
-        let paths: Vec<&sdf::Path> = by_id.into_iter().map(|p| p.expect("dense ids")).collect();
+        // The interned paths, by id: `intern` hands out `0..n` in order, so
+        // sorting by id puts each path at its own index.
+        let mut by_id: Vec<(&sdf::Path, u32)> = self.paths.iter().map(|(p, &id)| (p, id)).collect();
+        by_id.sort_unstable_by_key(|&(_, id)| id);
+        let paths: Vec<&sdf::Path> = by_id.into_iter().map(|(p, _)| p).collect();
         // How many geometries (and volumes) each path accounts for: the
         // population the shadow bits are allocated by.
         let n_geoms = world.count();
@@ -311,29 +310,25 @@ impl LightLinks {
             weight[id as usize] += 1;
         }
 
-        // 1. Lights whose `lightLink` includes no receiver leave the list.
-        let mut nothing: Vec<usize> = Vec::new();
+        // 1. Lights whose `lightLink` includes no receiver leave the list,
+        //    from the highest index down so each removal leaves the indices
+        //    still to remove in place.
+        let mut nothing: Vec<(usize, &sdf::Path)> = Vec::new();
         let mut kept: Vec<&Pending> = Vec::new();
         for p in &self.pending {
             match &p.light {
                 Some(q) if !paths.iter().any(|path| q.is_path_included(path)) => {
-                    nothing.push(p.index)
+                    nothing.push((p.index, &p.path))
                 }
                 _ => kept.push(p),
             }
         }
-        nothing.sort_unstable_by(|a, b| b.cmp(a));
-        for &index in &nothing {
-            let path = &self
-                .pending
-                .iter()
-                .find(|p| p.index == index)
-                .expect("recorded")
-                .path;
+        nothing.sort_unstable_by_key(|&(index, _)| std::cmp::Reverse(index));
+        for &(index, path) in &nothing {
             demote(lights, world, index, path);
         }
         // Indices of the lights that stay, after the removals above.
-        let shifted = |index: usize| index - nothing.iter().filter(|&&r| r < index).count();
+        let shifted = |index: usize| index - nothing.iter().filter(|&&(r, _)| r < index).count();
 
         let n = lights.count();
         let mut links = RuntimeLinks {
@@ -345,18 +340,12 @@ impl LightLinks {
 
         // 2. Light-link classes: receivers with the same answer for every
         //    linked light share one.
-        let linked: Vec<(usize, &Pending)> = kept
+        let linked: Vec<Linked> = kept
             .iter()
-            .filter(|p| p.light.is_some())
-            .map(|p| (shifted(p.index), *p))
+            .filter_map(|p| Linked::new(shifted(p.index), p, p.light.as_ref()))
             .collect();
         if !linked.is_empty() {
-            let (class_of, classes) = classify(
-                &paths,
-                linked
-                    .iter()
-                    .map(|(_, p)| p.light.as_ref().expect("filtered")),
-            );
+            let (class_of, classes) = classify(&paths, linked.iter().map(|l| l.query));
             if classes.len() >= EVERY_CLASS as usize {
                 warn!(
                     "{} light-link classes exceed crust's {}; light links are ignored",
@@ -376,7 +365,7 @@ impl LightLinks {
                 for &(v, id) in &self.volumes {
                     volumes[v as usize].light_class = class_of[id as usize] as u16;
                 }
-                for (bit, (index, p)) in linked.iter().enumerate() {
+                for (bit, l) in linked.iter().enumerate() {
                     let mut set = vec![0u64; classes.len().div_ceil(64)];
                     let mut members = 0;
                     for (c, key) in classes.iter().enumerate() {
@@ -388,20 +377,19 @@ impl LightLinks {
                     debug!(
                         "{}: collection:lightLink illuminates {members} of {} receiver \
                          class(es)",
-                        p.path,
+                        l.path,
                         classes.len()
                     );
-                    links.illuminates[*index] = Some(set.into_boxed_slice());
+                    links.illuminates[l.index] = Some(set.into_boxed_slice());
                 }
                 any = true;
             }
         }
 
         // 3. Shadow classes, encoded in the masks' free bits (design D3).
-        let restricted: Vec<(usize, &Pending)> = kept
+        let restricted: Vec<Linked> = kept
             .iter()
-            .filter(|p| p.shadow.is_some())
-            .map(|p| (shifted(p.index), *p))
+            .filter_map(|p| Linked::new(shifted(p.index), p, p.shadow.as_ref()))
             .collect();
         if !restricted.is_empty() {
             encode_shadows(
@@ -420,6 +408,26 @@ impl LightLinks {
         if any {
             lights.set_links(links);
         }
+    }
+}
+
+/// A light that stays in the list, with one of its two link queries: where
+/// it sits once the lights that illuminate nothing are gone, and the link it
+/// restricts.
+struct Linked<'a> {
+    index: usize,
+    path: &'a sdf::Path,
+    query: &'a MembershipQuery,
+}
+
+impl<'a> Linked<'a> {
+    /// `None` when `query` is — the light does not restrict that link.
+    fn new(index: usize, light: &'a Pending, query: Option<&'a MembershipQuery>) -> Option<Self> {
+        Some(Linked {
+            index,
+            path: &light.path,
+            query: query?,
+        })
     }
 }
 
@@ -471,17 +479,12 @@ fn encode_shadows(
     weight: &[usize],
     runs: &[(u32, u32)],
     vols: &[(u32, u32)],
-    restricted: &[(usize, &Pending)],
+    restricted: &[Linked],
     world: &mut WorldBuilder,
     volumes: &mut [VolumeRegion],
     links: &mut RuntimeLinks,
 ) {
-    let (class_of, classes) = classify(
-        paths,
-        restricted
-            .iter()
-            .map(|(_, p)| p.shadow.as_ref().expect("filtered")),
-    );
+    let (class_of, classes) = classify(paths, restricted.iter().map(|l| l.query));
     let full = |key: &Key| (0..restricted.len()).all(|b| key.get(b));
     // Population per class, then the bit each gets.
     let mut population = vec![0usize; classes.len()];
@@ -539,10 +542,10 @@ fn encode_shadows(
     for m in links.shadow_masks.iter_mut() {
         *m = RayMask(MASK_SHADOW.0 | CLASS_BITS);
     }
-    for (bit, (index, p)) in restricted.iter().enumerate() {
+    for (bit, l) in restricted.iter().enumerate() {
         if classes.iter().all(|k| k.get(bit)) {
             // Shadowed by everything after all: an ordinary light, MIS kept.
-            debug!("{}: collection:shadowLink includes every occluder", p.path);
+            debug!("{}: collection:shadowLink includes every occluder", l.path);
             continue;
         }
         let in_overflow = overflow.iter().filter(|&&c| classes[c].get(bit)).count();
@@ -551,7 +554,7 @@ fn encode_shadows(
                 "{}: collection:shadowLink cannot be encoded ({} occluder classes share \
                  crust's overflow bit and it includes only some) — shadowed by every \
                  occluder",
-                p.path,
+                l.path,
                 overflow.len()
             );
             continue;
@@ -572,11 +575,11 @@ fn encode_shadows(
         debug!(
             "{}: collection:shadowLink ignores {excluded} of {} occluder class(es) — sampled \
              by NEE alone at non-delta vertices",
-            p.path,
+            l.path,
             classes.len()
         );
-        links.shadow_masks[*index] = RayMask(mask);
-        links.nee_only[*index] = true;
+        links.shadow_masks[l.index] = RayMask(mask);
+        links.nee_only[l.index] = true;
     }
 }
 

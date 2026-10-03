@@ -6,19 +6,16 @@ use tracing::{debug, warn};
 
 use crate::volume::{DensityField, VolumeRegion};
 
-use super::attrs::{
-    custom_color3, custom_f32, custom_f32_array, custom_i32, custom_i32_array, custom_token,
-};
+use super::attrs::{custom_color3, custom_f32, custom_f32_array, custom_i32, custom_i32_array};
 
 /// Import a `crust:volume:*` prim as a `VolumeRegion`. The local box is
 /// `[-size/2, size/2]^3` when the prim authors a `size` attribute (a
 /// `Cube`'s convention; USD's default cube size is 2) and the unit cube
 /// `[-0.5, 0.5]^3` otherwise; placement, orientation and scale come from
-/// the composed prim transform.
-pub(super) fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
-    let ty = custom_token(prim, "crust:volume:type").expect("checked by dispatch");
-
-    let field = match ty.as_str() {
+/// the composed prim transform. `ty` is the prim's `crust:volume:type`, which
+/// the traversal read to dispatch it here.
+pub(super) fn emit_volume(prim: &Prim, ty: &str, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
+    let field = match ty {
         "homogeneous" => DensityField::Homogeneous,
         "smoke" => DensityField::Noise {
             scale: custom_f32(prim, "crust:volume:noiseScale").unwrap_or(4.0),

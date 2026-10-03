@@ -361,8 +361,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
-            emit_volume(&prim, this_world, &mut ctx.volumes);
+        } else if let Some(ty) = custom_token(&prim, "crust:volume:type") {
+            emit_volume(&prim, &ty, this_world, &mut ctx.volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_mesh(
