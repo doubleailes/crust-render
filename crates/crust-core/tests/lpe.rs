@@ -7,8 +7,8 @@
 use crust_core::rt::Geometry;
 use crust_core::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, AreaLight, Buffer, Camera,
-    DomeLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, PixelFilter, Precision,
-    RenderSettings, Renderer, SamplingStrategy, SphereShape, Vec3A, WorldBuilder,
+    DistantLight, DomeLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, PixelFilter,
+    Precision, RenderSettings, Renderer, SamplingStrategy, SphereShape, Vec3A, WorldBuilder,
 };
 use std::sync::Arc;
 
@@ -583,4 +583,128 @@ fn raw_aovs_disturb_nothing_and_are_zero_off_diffuse_surfaces() {
     }
     // The glass ball and the sky are in frame: some pixels have no filter.
     assert!(f[1].contains(&0.0));
+}
+
+/// A wall of quads alternating two diffuse colours (a checkerboard; crust's
+/// hand-built test scenes have no texture loader, and per sample a texel is
+/// just a colour), lit by one distant light, with a mirror ball in front.
+fn checker_scene(spp: u32) -> Renderer {
+    let mut world = WorldBuilder::new();
+    let red = Arc::new(OpenPBR::diffuse(Vec3A::new(0.8, 0.1, 0.1)));
+    let green = Arc::new(OpenPBR::diffuse(Vec3A::new(0.1, 0.6, 0.1)));
+    let n = 12;
+    let size = 1.0;
+    for i in 0..n {
+        for j in 0..n {
+            let (x, y) = (-6.0 + i as f32 * size, -6.0 + j as f32 * size);
+            let material: Arc<OpenPBR> = if (i + j) % 2 == 0 {
+                red.clone()
+            } else {
+                green.clone()
+            };
+            world.attach(
+                Geometry::TriangleMesh {
+                    vertices: vec![
+                        [x, y, 0.0],
+                        [x + size, y, 0.0],
+                        [x + size, y + size, 0.0],
+                        [x, y + size, 0.0],
+                    ],
+                    indices: vec![[0, 1, 2], [0, 2, 3]],
+                    normals: None,
+                },
+                material,
+            );
+        }
+    }
+    // A mirror: no diffuse lobe.
+    world.attach(
+        Geometry::Sphere {
+            center: Vec3A::new(0.0, 0.0, 2.0),
+            radius: 0.6,
+        },
+        Arc::new(OpenPBR {
+            base_metalness: 1.0,
+            specular_roughness: 0.0,
+            ..OpenPBR::diffuse(Vec3A::splat(0.9))
+        }),
+    );
+    let mut lights = LightList::new();
+    // Head-on, so the wall's irradiance is the same everywhere.
+    lights.add(DistantLight::new(
+        Vec3A::new(0.0, 0.0, -1.0),
+        Vec3A::splat(3.0),
+        1.0,
+    ));
+    let camera = Camera::new(
+        Vec3A::new(0.0, 0.0, 5.0),
+        Vec3A::ZERO,
+        Vec3A::Y,
+        60.0,
+        W as f32 / H as f32,
+        0.0,
+        5.0,
+    );
+    let settings = RenderSettings::new(spp, 1, W, H, spp, 0.0, 0).with_indirect_clamp(0.0);
+    Renderer::new(camera, world.commit(), lights, settings)
+}
+
+fn spread(v: &[f32]) -> f64 {
+    let m = mean(v);
+    let var = v.iter().map(|&x| (x as f64 - m).powi(2)).sum::<f64>() / v.len() as f64;
+    var.sqrt() / m.abs().max(1e-12)
+}
+
+/// Raw light is the light without the surface's colour: across a
+/// checkerboard of two diffuse colours under uniform light it is uniform —
+/// at the checks' borders too, where a pixel mixes both colours, because
+/// each sample is divided by its own — while the lighting shows the board.
+/// A mirror has no diffuse colour, so no raw light.
+#[test]
+fn raw_light_is_flat_across_a_checkerboard_and_zero_on_a_mirror() {
+    let lit = lpe("C<RD>[LO]");
+    let rawv = raw_lpe("C<RD>[LO]");
+    let filter = diffuse_filter_var();
+    let r = checker_scene(16);
+    let req = request(vec![lit.clone(), rawv.clone(), filter.clone()]);
+    let (b, f, _) = r.render_with_aovs(true, &|_, _| {}, &req);
+    let (l, rw, fl) = (
+        f.var_channels(&b, &lit),
+        f.var_channels(&b, &rawv),
+        f.var_channels(&b, &filter),
+    );
+    // The wall: every pixel whose filter is that of the checks (the red
+    // channel of either colour is at least 0.1 · (1 − F̄)), checks' borders
+    // included, away from the mirror ball's silhouette — there some samples
+    // hit the ball, whose filter is 0, and the pixel's light and colour are
+    // diluted together (the documented per-pixel limit, not the board).
+    let (cx, cy) = ((W / 2) as f32, (H / 2) as f32);
+    let wall: Vec<usize> = (0..W * H)
+        .filter(|&q| {
+            let (x, y) = ((q % W) as f32, (q / W) as f32);
+            fl[0][q] > 0.05 && ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() > 5.0
+        })
+        .collect();
+    assert!(wall.len() > W * H / 2, "{}", wall.len());
+    // Red and green: the channels the two colours differ in (blue is 0.1 in
+    // both).
+    for c in 0..2 {
+        let lit_c: Vec<f32> = wall.iter().map(|&q| l[c][q]).collect();
+        let raw_c: Vec<f32> = wall.iter().map(|&q| rw[c][q]).collect();
+        let (sl, sr) = (spread(&lit_c), spread(&raw_c));
+        assert!(
+            sl > 0.4,
+            "channel {c}: the lighting should show the board ({sl})"
+        );
+        assert!(
+            sr < 0.1,
+            "channel {c}: raw light should not ({sr} vs lighting {sl})"
+        );
+    }
+    // The mirror ball's centre: no diffuse colour, no raw light.
+    let centre = (H / 2) * W + W / 2;
+    for c in 0..3 {
+        assert_eq!(fl[c][centre], 0.0, "filter on the mirror");
+        assert_eq!(rw[c][centre], 0.0, "raw light on the mirror");
+    }
 }

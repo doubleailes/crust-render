@@ -523,9 +523,14 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
                 // Raw light divides by the diffuse colour of the camera's
                 // first hit, which only means something when every path the
                 // expression accepts starts by reflecting off it diffusely.
-                let starts = crate::lpe::Lpe::compile(&[expr])
-                    .is_ok_and(|l| l.starts_with_diffuse_reflection(0));
-                if !starts {
+                let lpe = match crate::lpe::Lpe::compile(&[expr]) {
+                    Ok(lpe) => lpe,
+                    Err(e) => {
+                        warn!("{path}: light path expression {expr:?}: {e}; no channel written");
+                        return None;
+                    }
+                };
+                if !lpe.starts_with_diffuse_reflection(0) {
                     warn!(
                         "{path}: crust:aov:raw needs an expression whose every path starts \
                          with a diffuse reflection (C<RD>…); {expr:?} does not, so no channel \

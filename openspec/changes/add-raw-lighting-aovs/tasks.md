@@ -39,12 +39,16 @@
       filter per channel, 0 below 1e-4 (D6). Accumulate `diffuse_albedo`
       filtered, 0 where the camera ray escapes.
 - [x] 4.3 Tests:
-      - `rawLight × diffuse_albedo == C<RD>[LO]` per pixel to rounding on an
-        untextured diffuse surface, also with the indirect clamp;
-      - per sample (a 1-spp box-filter render), the identity on a textured
-        surface;
-      - `rawLight` shows no texture where `C<RD>[LO]` does;
-      - raw channels are 0 where the camera sees a mirror, glass or the sky;
+      - per sample (a 1-spp box-filter render, where a pixel is a sample),
+        `rawLight × diffuse_albedo == C<RD>[LO]` in every pixel, edges
+        included, with and without the indirect clamp;
+      - across a checkerboard of two diffuse colours under uniform light
+        (the test scenes have no texture loader; per sample a texel is just a
+        colour), `rawLight` is flat — at the checks' borders too — while
+        `C<RD>[LO]` shows the board; balls of two colours have the same raw
+        light;
+      - raw channels and the filter are 0 on a zero-roughness mirror, on
+        glass and on the sky;
       - the beauty and every other AOV are unchanged by adding raw AOVs.
 - [x] 4.4 Zero-request gate: callgrind instruction count on cornellbox at
       `-s 2` unchanged; `check_images.sh check` passes.

@@ -92,3 +92,68 @@ it.
 - **WHEN** an `lpe` var authors `sourceName = "C.*[LO]"` and
   `crust:aov:raw = true`
 - **THEN** a warning names the var, and the product has no channel for it
+
+## MODIFIED Requirements
+
+### Requirement: Canonical raw sources and aliases
+
+A RenderVar with `sourceType = "raw"` SHALL be matched by its `sourceName`
+(or, if that is empty, by its channel name) against a fixed table of canonical
+names and aliases. The table's definitions are listed below; aliases appear in
+parentheses.
+
+**Sources:**
+
+- `color` (`Ci`, `C`, `RGBA`, `beauty`, `HdrColor`, `Combined`): the beauty.
+- `alpha` (`a`, `A`, `opacity`): filtered geometric coverage of the primary
+  ray. A visible dome or sky contributes colour and 0 alpha.
+- `depth` (`cameraDepth`, `z`, `Z`, `Depth`): camera-space distance along the
+  view axis, in scene units. This is not clip-space.
+- `distance` (`DistanceToCameraSD`): Euclidean distance from the camera to the
+  first hit.
+- `P` (`Pworld`, `__Pworld`, `Position`) and `Peye` (`Pcam`, `__Pcam`):
+  first-hit position, in world space and camera space respectively.
+- `normal` (`N`, `Nworld`, `__Nworld`, `Normal`) and `Neye` (`Nn`): the
+  shading normal, facing the ray, in world space and camera space
+  respectively. Values are in [-1, 1].
+- `primvars:st` (`st`, `uv`, `UV`): the first hit's UV.
+- `sampleCount` (`__sampleCount`): the samples the pixel took.
+- `variance` (`crust:variance`): the variance of the pixel's luminance mean.
+- `albedo` (`DiffuseAlbedoSD`): the albedo for denoising (see "Albedo for
+  denoising").
+- `diffuse_albedo` (`DiffuseFilter`, `diffuseFilter`): the diffuse colour of
+  the camera ray's first hit (see "Diffuse filter AOV"). It is no longer an
+  alias of `albedo`.
+- `rawLight` (`RawLighting`, `rawLighting`), `rawGI` (`RawGI`) and
+  `rawTotalLight` (`RawTotalLighting`): diffuse light without the surface
+  colour (see "Raw light AOVs").
+
+**Refused as not yet supported:** the geometric normal `Ng`, and the identity
+sources `primId` (`id`, `ID`, `Object Index`), `instanceId` (`id2`) and
+`elementId` (`faceindex`), and the Cryptomatte names (`crypto_object`,
+`crypto_material`, `crypto_asset`, `CryptoObject`, `CryptoMaterial`,
+`CryptoAsset`). Each is refused with a warning saying it is not supported yet.
+ID mattes are planned through OpenEXRId, not Cryptomatte, in the change
+`add-identity-aovs-openexrid` (see "Identity and ID mattes").
+
+A name not in the table SHALL be refused with one warning per var. A refused
+var SHALL produce no channel. Data AOVs SHALL keep their clear value where the
+primary ray escapes.
+
+#### Scenario: Alias resolves to the canonical source
+
+- **WHEN** a RenderVar authors `sourceName = "Z"` and `dataType = "float"`
+- **THEN** the product contains a channel `Z` holding camera-space depth, and
+  `+inf` where nothing was hit
+
+#### Scenario: Unknown source is refused, not zero-filled
+
+- **WHEN** a RenderVar authors `sourceName = "diffuse_direct"` with
+  `sourceType = "raw"`
+- **THEN** a warning names the var, and the product has no channel for it
+
+#### Scenario: World normal in [-1, 1]
+
+- **WHEN** a RenderVar requests `normal` on a sphere facing the camera
+- **THEN** the channel holds world-space unit normals whose components span
+  negative and positive values, not remapped to [0, 1]
