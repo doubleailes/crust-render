@@ -528,6 +528,20 @@ impl Renderer {
             }
         };
         let scratch = || PathScratch::new(self.settings.max_depth as usize);
+        // The integrator is monomorphised on the profiler switch; this picks
+        // the instance once per pixel step, for both sweeps below.
+        let advance = |i: usize,
+                       j: usize,
+                       work: &mut UnitWork,
+                       scratch: &mut PathScratch,
+                       st: &mut PixelState,
+                       target: u32| {
+            if profiling {
+                self.advance_pixel::<true>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+            } else {
+                self.advance_pixel::<false>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+            }
+        };
 
         // First sweep: every pixel to the first check point (or to the
         // budget). The path scratch is held per rayon worker rather than
@@ -536,15 +550,7 @@ impl Renderer {
             .par_iter_mut()
             .for_each_init(scratch, |scratch, unit| {
                 unit.for_each_pixel(|i, j, work, st| {
-                    if profiling {
-                        self.advance_pixel::<true>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    } else {
-                        self.advance_pixel::<false>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    }
+                    advance(i, j, work, scratch, st, sweep_to);
                     st.finish_round(cfg.spp, threshold);
                 });
                 // Once per unit, and a no-op unless `--profile` is on.
@@ -587,15 +593,7 @@ impl Renderer {
                                 return;
                             }
                         }
-                        if profiling {
-                            self.advance_pixel::<true>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        } else {
-                            self.advance_pixel::<false>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        }
+                        advance(i, j, work, scratch, st, target);
                         st.finish_round(cfg.spp, threshold);
                     });
                     profile::flush();

@@ -400,6 +400,15 @@ pub struct Volumes {
     regions: Vec<VolumeRegion>,
 }
 
+/// The span the delta-tracking walks cover: from the earliest start to the
+/// latest end of [`Volumes`]' active intervals (`(region, start, end)`).
+#[inline]
+fn union_span(spans: &[(usize, f32, f32)]) -> (f32, f32) {
+    let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
+    let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+    (start, end)
+}
+
 impl Volumes {
     pub fn new(regions: Vec<VolumeRegion>) -> Self {
         Self { regions }
@@ -456,8 +465,7 @@ impl Volumes {
                 emitted: Vec3A::ZERO,
             };
         }
-        let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-        let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+        let (start, end) = union_span(&spans);
 
         let mut t = start;
         let mut w = Vec3A::ONE;
@@ -549,8 +557,7 @@ impl Volumes {
             return tr;
         }
 
-        let start = spans.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-        let end = spans.iter().map(|s| s.2).fold(0.0f32, f32::max);
+        let (start, end) = union_span(&spans);
         let mut t = start;
         let mut w = Vec3A::ONE;
         loop {
