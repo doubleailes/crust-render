@@ -111,6 +111,24 @@ impl GuidingField {
         self.tree.dtree_at(pos).pdf(dir_to_canonical(dir))
     }
 
+    /// The bounce sampler's solid-angle density wherever guiding is available
+    /// ([`GuidingField::trained_at`]): the one-sample mixture
+    /// `α·p_guide + (1−α)·p_bsdf`, with α the configured `guide_prob`. Both
+    /// MIS halves use it — the bounce side for the sample it drew, NEE for
+    /// the bounce density competing with its light sample.
+    ///
+    /// Unclamped, and the two sides differ there: the bounce side floors the
+    /// result at `1e-4`, the NEE side does not, so where the mixture falls
+    /// below `1e-4` the two MIS weights see different densities. That is
+    /// audit finding §1.5 (`docs/code_audit_2026-10-03.md`), a known
+    /// mismatch in the guide-mixture ↔ NEE pair left for a deliberate
+    /// decision; this helper reproduces today's behaviour on both sides.
+    #[inline]
+    pub fn mixture_pdf(&self, guide_pdf: f32, bsdf_pdf: f32) -> f32 {
+        let alpha = self.cfg.guide_prob;
+        alpha * guide_pdf + (1.0 - alpha) * bsdf_pdf
+    }
+
     /// Splat a training pass's samples and adapt the tree resolution.
     /// `next_iteration` is the 1-based index of the pass about to start.
     /// Takes any iterator of samples, so a pass's training samples can be

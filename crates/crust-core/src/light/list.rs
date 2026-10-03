@@ -334,12 +334,17 @@ impl LightList {
     /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
     /// rounds differently when `n` is not a power of two — so the default
     /// renders bit-identically to the renderer before selection was a choice.
+    ///
+    /// Floored at `1e-6`, here rather than at each caller so no MIS half can
+    /// forget it: NEE divides by this density, and both MIS weights compare
+    /// it against the bounce density.
     pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32) -> PdfSolidAngle {
         PdfSolidAngle::from_measure(if self.pmf.is_empty() {
             light_pdf.get() / self.lights.len() as f32
         } else {
             light_pdf.get() * pmf
         })
+        .max(1e-6)
     }
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it

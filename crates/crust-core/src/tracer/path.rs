@@ -185,7 +185,8 @@ fn sample_bounce_direction(
         if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]])
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
-            let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
+            // Floored on this side only: see `GuidingField::mixture_pdf`.
+            let pdf = g.field.mixture_pdf(p_guide, p_bsdf).max(1e-4);
             return Some(ScatterSample {
                 ray: sp.make_ray(wi),
                 value,
@@ -220,8 +221,11 @@ fn sample_bounce_direction(
             sp.eval(r, wi).is_some(),
             "a continuous sample from a material with no continuous component"
         );
-        let p_guide = g.field.pdf(rec.p, wi);
-        sample.pdf = (alpha * p_guide + (1.0 - alpha) * sample.pdf).max(1e-4);
+        // Floored on this side only: see `GuidingField::mixture_pdf`.
+        sample.pdf = g
+            .field
+            .mixture_pdf(g.field.pdf(rec.p, wi), sample.pdf)
+            .max(1e-4);
         Some(sample)
     }
 }
@@ -413,7 +417,7 @@ fn bounce_emission_weight(
         let Some(point_pdf) = light.pdf_at_point(from, hit.rec.p) else {
             return strategy.unopposed_weight();
         };
-        let light_pdf = lights.density(point_pdf, pmf).max(1e-6);
+        let light_pdf = lights.density(point_pdf, pmf);
         strategy.bounce_weight(bounce_pdf, light_pdf)
     } else {
         strategy.unopposed_weight()
@@ -490,7 +494,7 @@ pub(super) fn escaped_emission(
         };
         let weight = match (competing, pdf) {
             (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
-                let light_pdf = lights.density(pdf, pmf).max(1e-6);
+                let light_pdf = lights.density(pdf, pmf);
                 strategy.bounce_weight(bounce_pdf, light_pdf)
             }
             // No NEE ran for this vertex, the strategy does not sample lights
@@ -771,7 +775,7 @@ fn volume_nee<const PROFILE: bool>(
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
-    let light_pdf = lights.density(s.pdf, pmf).max(1e-6);
+    let light_pdf = lights.density(s.pdf, pmf);
     // The phase function is its own pdf, in solid angle. A shadow-linked
     // light has no competing bounce strategy (see `bounce_emission_weight`).
     let weight = if lights.nee_only(index) {
@@ -1181,7 +1185,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
             };
             if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
-                let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
+                let light_pdf = lights.density(ls.pdf, pmf);
                 // The competing strategy for this MIS weight is the
                 // bounce sampler, whose density toward the light is the
                 // guide/BSDF mixture whenever guiding is available at
@@ -1189,10 +1193,9 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 // bounce side weights with the mixture makes the two
                 // weights sum past one and double-counts emission.
                 let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
-                    Some(g) if g.field.trained_at(rec.p) => {
-                        let alpha = g.field.config().guide_prob;
-                        alpha * g.field.pdf(rec.p, light_dir_unit) + (1.0 - alpha) * brdf_pdf
-                    }
+                    Some(g) if g.field.trained_at(rec.p) => g
+                        .field
+                        .mixture_pdf(g.field.pdf(rec.p, light_dir_unit), brdf_pdf),
                     _ => brdf_pdf,
                 });
                 // A shadow-linked light is NEE's alone here: the bounce side
