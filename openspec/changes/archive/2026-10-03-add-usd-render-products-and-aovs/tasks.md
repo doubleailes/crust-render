@@ -137,29 +137,14 @@
 - [x] 7.6 Record the cost per added LPE var (callgrind, cornellbox) and
       `bench_ab.sh` on the scene set in the `aovs` design record.
 
-## Phase 3: identity
+## Phase 3: identity — moved
 
-## 8. Prim identity and ID mattes
+Phase 3 moved to its own change, **`add-identity-aovs-openexrid`**, so this
+one could be archived with Phases 1–2 complete:
 
-ID mattes are written as OpenEXRId deep EXRs, not Cryptomatte (design D14).
-**8.1–8.4 are on hold** until a deep EXR writer exists: the `exr` crate
-writes flat images only. 8.5 is not blocked.
+- ID mattes as OpenEXRId deep EXRs (design D14) and the identity AOVs
+  (prim-path table, `primId` / `instanceId` / `elementId`) — on hold until
+  crust can write deep EXRs;
+- `sourceType = "primvar"` — not blocked.
 
-- [ ] 8.1 *(on hold)* Keep a `geom_id → interned prim path` run table for
-      every geometry prim when an identity AOV is requested, extending
-      `LightLinks`' runs and scoped by `ImportCaches::epoch`. Also keep the
-      bound material path and the `kind` ancestor.
-- [ ] 8.2 *(on hold)* Add the `primId`, `instanceId` and `elementId`
-      (authored face index) AOVs.
-- [ ] 8.3 *(on hold)* A deep scanline EXR writer: upstream in `exr`, or
-      in-tree in safe Rust. Round-trip test against a deep file OpenEXR
-      itself reads.
-- [ ] 8.4 *(on hold)* OpenEXRId output: per-pixel (id, coverage) samples
-      weighted by the beauty's pixel filter, and the name table, in the
-      layout OpenEXRId specifies. Check that coverage sums to 1 on covered
-      pixels.
-- [ ] 8.5 Add `sourceType = "primvar"`: register the requested primvars
-      before mesh load, keep them per mesh, and evaluate them at the first
-      hit.
-- [ ] 8.6 Docs and samples for Phase 3. Retire the matching Known-gaps
-      entries.
+The tasks that were 8.1–8.6 here are that change's tasks 1–3.

@@ -27,7 +27,7 @@ Scenes are loaded exclusively from **USD** (`.usda` / `.usdc` / `.usdz`) via the
 | `Material` / `resolve` / `ShadingPoint`, OpenPBR, MaterialX (`crust-mtlx`, `crust-jit`), `UsdPreviewSurface` | `materials` | `docs/openpbr_reference_alignment.md`, `docs/shading_performance.md`, `docs/material_fidelity.md` |
 | lights, light selection (`power` / `uniform` / `learned`), UsdLux units, shaping, IES | `lighting` | `docs/light_sampling.md` |
 | UV / UDIM textures, `.tx` streaming, Ptex (preload and streaming), ray-cone filtering | `textures` | `docs/ptex_streaming.md`, `docs/color_management.md` |
-| AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, the per-product EXR writer | `aovs` (spec in the change until archived: `openspec/changes/add-usd-render-products-and-aovs/`) | `site/content/docs/usd/aovs.md` |
+| AOVs: `RenderProduct` / `RenderVar` resolution, the source vocabulary and its aliases, accumulation modes, light path expressions and their routing, albedo, light groups, the per-product EXR writer | `aovs` | `site/content/docs/usd/aovs.md` |
 | USD import: streaming import, schema mapping, subdivision, displacement, instancing, time, camera, settings, Moana, ALab | `usd-scene-import` | `docs/alab_profile.md`, `docs/moana_profile.md`, `docs/issues/` |
 
 Before changing a feature, read its design record: most sections end in a trap that was

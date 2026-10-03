@@ -8,14 +8,22 @@ and writes the output image. This is the only user-facing surface of the tool.
 ## Requirements
 ### Requirement: Command-line argument parsing
 
-The CLI SHALL accept `-i/--input` (USD scene path), `-o/--output` (output path,
-default `output.exr`), `-l/--level` (log verbosity, default `info`),
-`--scanline` (row-order rendering instead of the default 16×16 tiles),
-`-s/--samples` (override the scene's samples-per-pixel), `--strategy`
-(override the scene's MIS sampling strategy: `power` | `balance` | `light` |
-`bsdf`), and `--subdiv-level <n>` (override the scene's subdivision refinement
-level, 0–6; clamped to 6 with a warning). `-b/--bucket` SHALL still be accepted,
-for compatibility with existing command lines, and SHALL have no effect.
+The CLI SHALL accept the following flags:
+
+- `-i/--input`: the USD scene path.
+- `-o/--output`: the output path. When the stage authors RenderProducts, this
+  overrides the first product's path. Otherwise it is the single EXR's path,
+  default `output.exr`.
+- `-l/--level`: log verbosity, default `info`.
+- `--scanline`: row-order rendering instead of the default 16×16 tiles.
+- `-s/--samples`: override the scene's samples-per-pixel.
+- `--strategy`: override the scene's MIS sampling strategy: `power` |
+  `balance` | `light` | `bsdf`.
+- `--subdiv-level <n>`: override the scene's subdivision refinement level,
+  0–6; clamped to 6 with a warning.
+
+`-b/--bucket` SHALL still be accepted, for compatibility with existing command
+lines, and SHALL have no effect.
 
 #### Scenario: Rendering a scene file
 
@@ -50,6 +58,13 @@ for compatibility with existing command lines, and SHALL have no effect.
   `subdivisionScheme = "catmullClark"`
 - **THEN** those meshes render as their cages, whatever the scene's
   `crust:subdivisionLevel`
+
+#### Scenario: Output overrides the first product
+
+- **WHEN** the stage authors products `a.exr` and `b.exr`, and the user passes
+  `-o out/x.exr`
+- **THEN** the first product is written to `out/x.exr` and the second to
+  `b.exr`
 
 ### Requirement: Adaptive subdivision flag
 
