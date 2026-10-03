@@ -40,7 +40,7 @@ use crate::camera::Camera;
 use crate::light::{Light, LightList};
 use crate::material::ShadingPoint;
 use crate::ray::{MASK_INDIRECT, Ray, TRACE_T_MIN};
-use crate::rt_world::World;
+use crate::rt_world::{World, WorldHit};
 use crate::{PathSampler, Vec3A};
 use rayon::prelude::*;
 
@@ -138,6 +138,9 @@ struct Receiver {
 ///
 /// `lights` must already carry the global (power) selection: untrained cells
 /// fall back to it.
+///
+/// Three phases: [`trace_receivers`] (which estimates every light at each
+/// receiver with [`estimate_lights`]), [`Grid::fit`], and [`build_cache`].
 pub(crate) fn train(
     world: &World,
     camera: &Camera,
@@ -160,17 +163,32 @@ pub(crate) fn train(
         );
         return None;
     }
+    let receivers = trace_receivers(world, camera, lights, width, height, frame);
+    let grid = Grid::fit(&receivers)?;
+    build_cache(lights, &receivers, &grid)
+}
+
+/// The training paths' receivers, in a deterministic order: one coarse
+/// camera path per `stride`² pixels, each estimating every light at each of
+/// its first `1 + TRAIN_BOUNCES` vertices.
+fn trace_receivers(
+    world: &World,
+    camera: &Camera,
+    lights: &LightList,
+    width: usize,
+    height: usize,
+    frame: isize,
+) -> Vec<Receiver> {
     // Vertices per path, times lights, times paths, within `MAX_PAIRS`.
-    let per_path = (1 + TRAIN_BOUNCES) * n;
+    let per_path = (1 + TRAIN_BOUNCES) * lights.count();
     let stride = TRAIN_STRIDE.max(
         ((width * height * per_path) as f64 / MAX_PAIRS as f64)
             .sqrt()
             .ceil() as usize,
     );
     let (gw, gh) = (width.div_ceil(stride), height.div_ceil(stride));
-    let list = lights.lights();
 
-    // Parallel over rows, collected in row order: the reduction below is then
+    // Parallel over rows, collected in row order: the reduction is then
     // sequential and the cache the same whatever the thread count.
     let rows: Vec<Vec<Receiver>> = (0..gh)
         .into_par_iter()
@@ -204,62 +222,11 @@ pub(crate) fn train(
                     let vertex = root.new_domain(1 + depth as i32);
                     let cos = ray.direction().normalize().dot(hit.rec.normal).abs();
                     let sp = ShadingPoint::new(hit.mat, &ray, &hit.rec, cos);
-                    let p = hit.rec.p;
-                    // Trained through the same links NEE applies, or the
-                    // cell tables would favour lights this receiver cannot use.
-                    let class = world.light_class(hit.geom_id);
-                    let contrib = list
-                        .iter()
-                        .enumerate()
-                        .map(|(k, light)| {
-                            let mut sum = 0.0f32;
-                            if !lights.illuminates(k, class) {
-                                return sum;
-                            }
-                            for s in 0..LIGHT_SAMPLES {
-                                let d = vertex
-                                    .new_domain(8 + (k * LIGHT_SAMPLES + s) as i32)
-                                    .draw_sample_f32::<2>();
-                                let Some(ls) = light.sample_li(p, d[0], d[1]) else {
-                                    continue;
-                                };
-                                if ls.radiance == Vec3A::ZERO
-                                    || ls.pdf.get().is_nan()
-                                    || ls.pdf.get() <= 0.0
-                                {
-                                    continue;
-                                }
-                                let Some((f, _)) = sp.eval(&ray, ls.direction) else {
-                                    continue;
-                                };
-                                let c = ls.radiance * f;
-                                if c == Vec3A::ZERO {
-                                    continue;
-                                }
-                                let shadow = Ray::new(p, ls.direction)
-                                    .with_time(ray.time())
-                                    .with_mask(lights.shadow_mask(k));
-                                // The integrator's visibility, cutouts included:
-                                // a light seen through a leaf card is trained at
-                                // the share the card lets through.
-                                let through = crate::tracer::surface_visibility(
-                                    world,
-                                    &shadow,
-                                    crate::tracer::shadow_t_max(ls.distance),
-                                    &mut crate::stats::RayStats::default(),
-                                );
-                                if through == 0.0 {
-                                    continue;
-                                }
-                                let e = through * utils::luminance(c) / ls.pdf.get();
-                                if e.is_finite() {
-                                    sum += e;
-                                }
-                            }
-                            sum / LIGHT_SAMPLES as f32
-                        })
-                        .collect();
-                    out.push(Receiver { p, contrib });
+                    let contrib = estimate_lights(world, lights, &ray, &hit, &sp, vertex);
+                    out.push(Receiver {
+                        p: hit.rec.p,
+                        contrib,
+                    });
                     let Some(sample) = sp.scatter_importance(&ray, vertex.new_domain(2)) else {
                         break;
                     };
@@ -277,63 +244,153 @@ pub(crate) fn train(
             out
         })
         .collect();
-    let receivers: Vec<Receiver> = rows.into_iter().flatten().collect();
-    if receivers.is_empty() {
-        return None;
-    }
+    rows.into_iter().flatten().collect()
+}
 
-    // The grid spans the receivers' **robust** bounds: per axis, the
-    // `OUTLIER` to `1 - OUTLIER` quantiles. The full bounds let a few bounce
-    // vertices far outside the set (ALab's exterior) stretch the grid until
-    // four cells covered the whole frame. Receivers outside are not trained,
-    // and points outside read the global table. Cells are cubic, sized for
-    // about `RECEIVERS_PER_CELL` receivers per occupied cell. Receivers lie
-    // on surfaces, so occupied cells grow as the resolution squared.
-    let finite: Vec<Vec3A> = receivers
+/// Every light's NEE contribution at the receiver `hit` (shaded as `sp`,
+/// reached along `ray`), estimated with the integrand itself, `L · f · V / p`,
+/// through the same `sample_li`, BSDF `eval` and shadow-ray query NEE uses,
+/// at `LIGHT_SAMPLES` samples each.
+fn estimate_lights(
+    world: &World,
+    lights: &LightList,
+    ray: &Ray,
+    hit: &WorldHit,
+    sp: &ShadingPoint,
+    vertex: PathSampler,
+) -> Vec<f32> {
+    let p = hit.rec.p;
+    // Trained through the same links NEE applies, or the
+    // cell tables would favour lights this receiver cannot use.
+    let class = world.light_class(hit.geom_id);
+    lights
+        .lights()
         .iter()
-        .map(|r| r.p)
-        .filter(|p| p.is_finite())
-        .collect();
-    if finite.is_empty() {
-        return None;
-    }
-    let quantile = |axis: usize, q: f64| {
-        let mut v: Vec<f32> = finite.iter().map(|p| p[axis]).collect();
-        let k = ((v.len() - 1) as f64 * q).round() as usize;
-        *v.select_nth_unstable_by(k, f32::total_cmp).1
-    };
-    let lo = Vec3A::new(
-        quantile(0, OUTLIER),
-        quantile(1, OUTLIER),
-        quantile(2, OUTLIER),
-    );
-    let hi = Vec3A::new(
-        quantile(0, 1.0 - OUTLIER),
-        quantile(1, 1.0 - OUTLIER),
-        quantile(2, 1.0 - OUTLIER),
-    );
-    let extent = (hi - lo).max_element().max(1e-6);
-    let res =
-        ((receivers.len() as f64 / RECEIVERS_PER_CELL).sqrt() as usize).clamp(1, MAX_RESOLUTION);
-    let cell = extent / res as f32;
-    // Pad by half a cell so points on the boundary land inside.
-    let origin = lo - Vec3A::splat(cell * 0.5);
-    let inv_cell = 1.0 / cell;
-    let dim = |a: f32| (((a + cell) * inv_cell).ceil() as usize).max(1);
-    let size = hi - lo;
-    let dims = [dim(size.x), dim(size.y), dim(size.z)];
+        .enumerate()
+        .map(|(k, light)| {
+            let mut sum = 0.0f32;
+            if !lights.illuminates(k, class) {
+                return sum;
+            }
+            for s in 0..LIGHT_SAMPLES {
+                let d = vertex
+                    .new_domain(8 + (k * LIGHT_SAMPLES + s) as i32)
+                    .draw_sample_f32::<2>();
+                let Some(ls) = light.sample_li(p, d[0], d[1]) else {
+                    continue;
+                };
+                if ls.radiance == Vec3A::ZERO || ls.pdf.get().is_nan() || ls.pdf.get() <= 0.0 {
+                    continue;
+                }
+                let Some((f, _)) = sp.eval(ray, ls.direction) else {
+                    continue;
+                };
+                let c = ls.radiance * f;
+                if c == Vec3A::ZERO {
+                    continue;
+                }
+                let shadow = Ray::new(p, ls.direction)
+                    .with_time(ray.time())
+                    .with_mask(lights.shadow_mask(k));
+                // The integrator's visibility, cutouts included:
+                // a light seen through a leaf card is trained at
+                // the share the card lets through.
+                let through = crate::tracer::surface_visibility(
+                    world,
+                    &shadow,
+                    crate::tracer::shadow_t_max(ls.distance),
+                    &mut crate::stats::RayStats::default(),
+                );
+                if through == 0.0 {
+                    continue;
+                }
+                let e = through * utils::luminance(c) / ls.pdf.get();
+                if e.is_finite() {
+                    sum += e;
+                }
+            }
+            sum / LIGHT_SAMPLES as f32
+        })
+        .collect()
+}
 
+/// The uniform grid the cache's cells tile.
+struct Grid {
+    origin: Vec3A,
+    inv_cell: f32,
+    dims: [usize; 3],
+}
+
+impl Grid {
+    /// The grid over the receivers' **robust** bounds: per axis, the
+    /// `OUTLIER` to `1 - OUTLIER` quantiles. The full bounds let a few bounce
+    /// vertices far outside the set (ALab's exterior) stretch the grid until
+    /// four cells covered the whole frame. Receivers outside are not trained,
+    /// and points outside read the global table. Cells are cubic, sized for
+    /// about `RECEIVERS_PER_CELL` receivers per occupied cell. Receivers lie
+    /// on surfaces, so occupied cells grow as the resolution squared.
+    ///
+    /// `None` without a single finite receiver.
+    fn fit(receivers: &[Receiver]) -> Option<Grid> {
+        let finite: Vec<Vec3A> = receivers
+            .iter()
+            .map(|r| r.p)
+            .filter(|p| p.is_finite())
+            .collect();
+        if finite.is_empty() {
+            return None;
+        }
+        let quantile = |axis: usize, q: f64| {
+            let mut v: Vec<f32> = finite.iter().map(|p| p[axis]).collect();
+            let k = ((v.len() - 1) as f64 * q).round() as usize;
+            *v.select_nth_unstable_by(k, f32::total_cmp).1
+        };
+        let lo = Vec3A::new(
+            quantile(0, OUTLIER),
+            quantile(1, OUTLIER),
+            quantile(2, OUTLIER),
+        );
+        let hi = Vec3A::new(
+            quantile(0, 1.0 - OUTLIER),
+            quantile(1, 1.0 - OUTLIER),
+            quantile(2, 1.0 - OUTLIER),
+        );
+        let extent = (hi - lo).max_element().max(1e-6);
+        let res = ((receivers.len() as f64 / RECEIVERS_PER_CELL).sqrt() as usize)
+            .clamp(1, MAX_RESOLUTION);
+        let cell = extent / res as f32;
+        // Pad by half a cell so points on the boundary land inside.
+        let origin = lo - Vec3A::splat(cell * 0.5);
+        let inv_cell = 1.0 / cell;
+        let dim = |a: f32| (((a + cell) * inv_cell).ceil() as usize).max(1);
+        let size = hi - lo;
+        Some(Grid {
+            origin,
+            inv_cell,
+            dims: [dim(size.x), dim(size.y), dim(size.z)],
+        })
+    }
+
+    /// The cell holding `p`, if the grid does.
+    fn cell_of(&self, p: Vec3A) -> Option<usize> {
+        let dims = self.dims;
+        let c = (p - self.origin) * self.inv_cell;
+        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
+        (x < dims[0] && y < dims[1] && z < dims[2]).then(|| (z * dims[1] + y) * dims[0] + x)
+    }
+}
+
+/// Sums the receivers' estimates per cell of `grid` and gives every cell
+/// with enough of them its own pick table; `None` when no cell trained.
+fn build_cache(lights: &LightList, receivers: &[Receiver], grid: &Grid) -> Option<LightCache> {
+    let n = lights.count();
+    let dims = grid.dims;
     // Sequential reduction in receiver order: deterministic.
     let mut sums: std::collections::HashMap<usize, (u32, Vec<f64>)> =
         std::collections::HashMap::new();
-    let cell_of = |p: Vec3A| {
-        let c = (p - origin) * inv_cell;
-        let (x, y, z) = (c.x as usize, c.y as usize, c.z as usize);
-        (x < dims[0] && y < dims[1] && z < dims[2]).then(|| (z * dims[1] + y) * dims[0] + x)
-    };
     let mut order = Vec::new();
-    for r in &receivers {
-        let Some(c) = r.p.is_finite().then(|| cell_of(r.p)).flatten() else {
+    for r in receivers {
+        let Some(c) = r.p.is_finite().then(|| grid.cell_of(r.p)).flatten() else {
             continue;
         };
         let e = sums.entry(c).or_insert_with(|| {
@@ -372,8 +429,8 @@ pub(crate) fn train(
         return None;
     }
     Some(LightCache {
-        origin,
-        inv_cell,
+        origin: grid.origin,
+        inv_cell: grid.inv_cell,
         dims,
         slot,
         lights: n,
