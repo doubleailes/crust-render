@@ -507,11 +507,13 @@ pub(super) fn escaped_emission(
     radiance
 }
 
-/// NEE shadow test used at surface and volume vertices alike: ZERO when a
-/// surface occludes the segment, otherwise the volumetric transmittance
-/// through every region it crosses (stochastic for heterogeneous regions,
-/// exact for homogeneous ones). MIS weights are unaffected — transmittance
-/// is part of the integrand on both strategies, not of either pdf.
+/// NEE shadow test used at surface and volume vertices alike: ZERO when the
+/// surfaces block the segment, otherwise what they let through
+/// ([`surface_visibility`]: 1, or a cutout's share) times the volumetric
+/// transmittance through every region it crosses (stochastic for
+/// heterogeneous regions, exact for homogeneous ones). MIS weights are
+/// unaffected — transmittance is part of the integrand on both strategies,
+/// not of either pdf.
 fn shadow_transmittance<const PROFILE: bool>(
     world: &World,
     volumes: &Volumes,
@@ -520,25 +522,18 @@ fn shadow_transmittance<const PROFILE: bool>(
     vertex: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
-    // Dedicated occlusion query: any hit in range means full shadow, so the
-    // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    if world.occluded(shadow_ray, TRACE_T_MIN, shadow_t_max(distance)) {
-        // Blocked — unless only cutouts block it, which the any-hit query
-        // cannot tell apart. An open segment crosses no cutout either, so it
-        // keeps the fast answer.
-        if !world.has_cutouts() {
-            stats.shadow_occluded += 1;
-            return Vec3A::ZERO;
-        }
-        return cutout_shadow(world, volumes, shadow_ray, distance, vertex, stats);
+    let through = surface_visibility(world, shadow_ray, shadow_t_max(distance), stats);
+    if through == 0.0 {
+        stats.shadow_occluded += 1;
+        return Vec3A::ZERO;
     }
     if volumes.is_empty() {
-        return Vec3A::ONE;
+        return Vec3A::splat(through);
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
+    through * volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -597,33 +592,36 @@ pub(crate) fn shadow_t_max(distance: f32) -> f32 {
     (distance - TRACE_T_MIN).min(distance * (1.0 - 1e-6))
 }
 
-/// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
-/// in a world with cutouts: `Π (1 − opacity)` over every hit up to the light,
-/// or zero at the first hit on a material without a cutout, times the volume
-/// transmittance. Deterministic where the bounce side is stochastic
-/// ([`pass_cutouts`]): both estimate the same visibility, and the product is
-/// the lower-variance of the two.
-#[cold]
-#[inline(never)]
-fn cutout_shadow(
+/// The share of light the surfaces along `ray`'s `(TRACE_T_MIN, t_max)` let
+/// through: 1 for an open segment, 0 when it is blocked, and in a world with
+/// cutouts, for a segment the any-hit query found blocked, `Π (1 − opacity)`
+/// over every hit ([`cutout_through`]). Deterministic where the bounce side is
+/// stochastic ([`pass_cutouts`]): both estimate the same visibility, and the
+/// product is the lower-variance of the two.
+///
+/// The one visibility shadow rays see: NEE's ([`shadow_transmittance`]) and
+/// the learned light cache's training, whose shadow rays must see what the
+/// integrator does. Neither counts a shadow ray here; `stats` gets only the
+/// cutout walk's rays.
+#[inline(always)]
+pub(crate) fn surface_visibility(
     world: &World,
-    volumes: &Volumes,
     ray: &Ray,
-    distance: f32,
-    vertex: PathSampler,
+    t_max: f32,
     stats: &mut RayStats,
-) -> Vec3A {
-    let t_max = shadow_t_max(distance);
-    let through = cutout_through(world, ray, t_max, stats);
-    if through == 0.0 {
-        stats.shadow_occluded += 1;
-        return Vec3A::ZERO;
+) -> f32 {
+    // Dedicated occlusion query: any hit in range means full shadow, so the
+    // early-exit traversal beats searching for the closest hit.
+    if !world.occluded(ray, TRACE_T_MIN, t_max) {
+        return 1.0;
     }
-    if volumes.is_empty() {
-        return Vec3A::splat(through);
+    // Blocked — unless only cutouts block it, which the any-hit query cannot
+    // tell apart. An open segment crosses no cutout either, so it keeps the
+    // fast answer.
+    if !world.has_cutouts() {
+        return 0.0;
     }
-    let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    through * volumes.transmittance(ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
+    cutout_through(world, ray, t_max, stats)
 }
 
 /// The fraction of the segment `(TRACE_T_MIN, t_max)` of `ray` that cutouts let
@@ -633,9 +631,11 @@ fn cutout_shadow(
 /// [`pass_cutouts`] keeps, which treats the hit past its last crossing as
 /// present, so a stack exactly that deep is clear on both sides.
 ///
-/// Shared by NEE ([`cutout_shadow`]) and the learned light cache's training,
-/// whose shadow rays must see the visibility the integrator does.
-pub(crate) fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
+/// The cold half of [`surface_visibility`], out of line so a world without
+/// cutouts carries none of it.
+#[cold]
+#[inline(never)]
+fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = 1.0;
     for crossing in 0..=MAX_CUTOUT_CROSSINGS {
@@ -683,7 +683,7 @@ fn point_sampled(rec: &HitRecord) -> HitRecord {
 /// depth, emits nothing and leaves the previous vertex's MIS record to
 /// whatever the segment does reach.
 ///
-/// Its shadow-side twin is [`cutout_shadow`].
+/// Its shadow-side twin is [`surface_visibility`].
 #[cold]
 #[inline(never)]
 fn pass_cutouts<'w>(

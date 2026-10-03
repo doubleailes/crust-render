@@ -14,7 +14,7 @@ use crate::volume::Volumes;
 use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
-pub(crate) use path::{cutout_through, shadow_t_max};
+pub(crate) use path::{shadow_t_max, surface_visibility};
 mod settings;
 
 use path::{K_CAMERA, K_TIME, trace_path};
@@ -33,6 +33,16 @@ pub(crate) use path::PathScratch;
 /// given. Presentation (progress bars,
 /// logging) is the caller's concern — the engine has no UI dependencies.
 pub type ProgressCallback<'a> = &'a (dyn Fn(u64, u64) + Sync);
+
+/// The extra sampler domain that tells pixel `(i, j)`'s 256×256 tile apart
+/// from the others: OpenQMC decorrelates pixels only within one such tile,
+/// so images wider or taller than 256 take one more domain per tile to stay
+/// fully decorrelated (the frame seed alone is constant within a render).
+/// Tile 0 — every pixel of an image up to 256 across — is 0.
+#[inline]
+pub(crate) fn pixel_tile(i: usize, j: usize) -> i32 {
+    (i >> 8) as i32 + ((j >> 8) as i32) * 4096
+}
 
 /// Per-pass guiding state handed down the integrator.
 struct GuidingContext<'a> {
@@ -718,10 +728,7 @@ impl Renderer {
     ) {
         let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
 
-        // OpenQMC decorrelates pixels within a 256×256 tile; distinguish tiles
-        // with an extra domain so images wider/taller than 256 stay fully
-        // decorrelated (the frame seed alone is constant within one render).
-        let tile = (i >> 8) as i32 + ((j >> 8) as i32) * 4096;
+        let tile = pixel_tile(i, j);
 
         // Is the shutter coordinate worth sampling at all? `ray.time` is read
         // by exactly one thing — a moving instance interpolating its

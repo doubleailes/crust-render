@@ -132,7 +132,7 @@ consumed as ordinary dependencies:
      through is no vertex — no depth, no emission, no MIS record — and the previous
      vertex's record meets whatever the segment does reach, so bounce-hit emission
      behind a cutout keeps its weight. The shadow side is its twin
-     (`cutout_through`, under `cutout_shadow`): `Π(1 − opacity)` over every crossing,
+     (`cutout_through`, under `surface_visibility`): `Π(1 − opacity)` over every crossing,
      deterministic, and 0 at the first opaque hit. The two estimate the same
      visibility, which is what keeps NEE and the bounce side describing one integrand
      (`every_sampling_strategy_agrees_through_a_cutout`, in
@@ -143,7 +143,7 @@ consumed as ordinary dependencies:
      (`cutout_opacity_ignores_the_ray_footprint`). And both follow at most 256
      crossings and treat the hit past them as present, so a stack exactly that deep is
      clear to both (`a_cutout_stack_at_the_crossing_limit_is_clear_on_both_sides`).
-     The learned light cache's training shadow rays go through `cutout_through` too. Both are `#[cold]` and out of line, and
+     The learned light cache's training shadow rays go through the same `surface_visibility`. Both walks are `#[cold]` and out of line, and
      gated on `World::has_cutouts` (any material's `has_cutout`, fixed at commit): a
      world without one takes exactly the old code, bit for bit. With one, a shadow ray
      still asks the any-hit query first and walks hit by hit only when it is blocked,

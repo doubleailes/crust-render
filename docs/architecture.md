@@ -139,7 +139,8 @@ other. The pairs:
   `Material::emitted_at`.
 - **Cutouts.** A hit a path passes through (`pass_cutouts`, probability
   `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_through`, behind
-  `cutout_shadow` and the light cache's training) are one visibility: both ask
+  `surface_visibility`, which NEE and the light cache's training share) are one
+  visibility: both ask
   `Material::opacity` point-sampled, both follow at most 256 crossings, both
   are gated on `World::has_cutouts`; change one and NEE and the bounce side
   disagree.
