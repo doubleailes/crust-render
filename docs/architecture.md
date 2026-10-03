@@ -250,9 +250,12 @@ documentation (`site/content/docs/reference/environment-variables.md`), and make
 | "did the image change?" | `scripts/check_images.sh record|check` (16 spp, see `CLAUDE.md` § Measuring a change) |
 | "is it faster?" | `scripts/bench_ab.sh` (interleaved A/B), callgrind for sub-5% changes |
 
-CI (`.github/workflows/rust.yml`, toolchain pinned) runs `cargo fmt --check`,
-`cargo clippy --workspace --all-targets -D warnings` and
-`cargo test --workspace`.
+CI (`.github/workflows/rust.yml`) runs `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` and
+`cargo deny --locked check` (advisories, licences, sources; policy in `deny.toml`). The
+toolchain is pinned in `rust-toolchain.toml`, which the `fmt` job checks against
+`RUST_VERSION`, and dependencies in the committed `Cargo.lock`. `rust-version` (1.96, set
+by cranelift) is the oldest toolchain that builds the workspace.
 
 ## Technical debt register
 

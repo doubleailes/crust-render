@@ -2,7 +2,9 @@
 name = "crust-mtlx"
 version = { workspace = true }
 edition = { workspace = true }
-license-file = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "MaterialX .mtlx reader: XML to a name-addressed graph, compiled to a slot-indexed shading program, with the BSDF tree flattened to weighted lobes. Safe Rust, no renderer dependency."
 
 [lib]

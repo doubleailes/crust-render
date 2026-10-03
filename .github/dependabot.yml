@@ -9,3 +9,9 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+  # Every action in .github/workflows is pinned by commit SHA; this keeps the
+  # pins (and their `# vX.Y.Z` comments) moving.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

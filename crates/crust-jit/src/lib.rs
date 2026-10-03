@@ -30,14 +30,17 @@
 //! `crust-core` is also `deny` rather than `forbid`, but only for a test-only
 //! allocator — as the plan requires: calling generated code cannot be done
 //! without it.
-//! `deny(unsafe_code)` holds everywhere except four audited blocks, each with
+//! `deny(unsafe_code)` holds everywhere except five audited blocks, each with
 //! its safety argument beside it: the transmute of the finalized code pointer
-//! to a function type ([`JitProgram::new`]), the raw-pointer accesses in the
-//! two callbacks ([`host_apply`], [`host_texture`]), and the release of the
-//! code memory in `JitProgram`'s `Drop`. The generated code itself reads and
-//! writes only slots of the array [`JitProgram::eval`] sizes, which holds
-//! because `new` refuses any program whose operands are not all earlier
-//! slots.
+//! to a function type ([`JitProgram::new`]), the call into the generated code
+//! ([`JitProgram::eval`]), the raw-pointer accesses in the two callbacks
+//! ([`host_apply`], [`host_texture`]), and the release of the code memory in
+//! `JitProgram`'s `Drop`. The function-pointer type and both callbacks are
+//! declared `unsafe extern "C"`, so none of them can be called from safe code
+//! with arguments that break their contract; their `# Safety` sections state
+//! it. The generated code itself reads and writes only slots of the array
+//! [`JitProgram::eval`] sizes, which holds because `new` refuses any program
+//! whose operands are not all earlier slots.
 #![deny(unsafe_code)]
 
 use cranelift_codegen::ir::condcodes::FloatCC;
@@ -52,7 +55,11 @@ use std::mem::{offset_of, size_of};
 
 /// The generated function: fills `slots[consts.len()..]` given the constant
 /// prefix already in place.
-type Shade = extern "C" fn(*mut Val, *const ShadeCtx);
+///
+/// `unsafe` because the code dereferences both pointers unchecked: `slots`
+/// must be valid for the program's `len` initialised `Val`s with the
+/// constant prefix in place, and `ctx` must point to a live `ShadeCtx`.
+type Shade = unsafe extern "C" fn(*mut Val, *const ShadeCtx);
 
 /// A program compiled to machine code, evaluated exactly as
 /// [`Program::eval`] evaluates it.
@@ -241,11 +248,17 @@ impl JitProgram {
             slots.resize(self.len, Val::ZERO);
         }
         slots[..self.consts.len()].copy_from_slice(&self.consts);
-        // The generated code writes slots `consts.len()..len` — each exactly
-        // once, in order, reading only lower slots — and reads `ctx` only
-        // through `host_apply`. `slots` has exactly `len` initialised
-        // elements, so every access is in bounds.
-        (self.func)(slots.as_mut_ptr(), ctx);
+        #[allow(unsafe_code)]
+        // SAFETY: `func` is this program's code, alive until `Drop`, which
+        // cannot run while `&self` is borrowed. The generated code writes
+        // slots `consts.len()..len` — each exactly once, in order, reading
+        // only lower slots — and reads `ctx` only through `host_apply`.
+        // `slots` has exactly `len` initialised elements with the constant
+        // prefix copied in above, so every access is in bounds, and `ctx` is
+        // a live reference for the whole call.
+        unsafe {
+            (self.func)(slots.as_mut_ptr(), ctx);
+        }
     }
 
     /// Ops emitted as machine code, and ops handed back to the interpreter.
@@ -259,8 +272,15 @@ impl JitProgram {
 /// `op` is one of the program's ops, `slots` the slot array, `slot` the op's
 /// own index, `ctx` the shading point. Reads `slots[..slot]` and writes
 /// `slots[slot]`.
-extern "C" fn host_apply(op: *const Op, slots: *mut Val, slot: usize, ctx: *const ShadeCtx) {
-    #[allow(unsafe_code)]
+///
+/// # Safety
+///
+/// `op` must point to a live `Op`, `ctx` to a live `ShadeCtx`, and `slots`
+/// to at least `slot + 1` `Val`s of which the first `slot` are initialised,
+/// with no other reference to them for the duration of the call. Only
+/// generated code calls it, with the arguments [`JitProgram::eval`] supplies.
+#[allow(unsafe_code)]
+unsafe extern "C" fn host_apply(op: *const Op, slots: *mut Val, slot: usize, ctx: *const ShadeCtx) {
     // SAFETY: the generated code passes `op` as the address of an element of
     // the `JitProgram`'s boxed `_ops`, which outlives every call; `slots` and
     // `ctx` are the pointers `JitProgram::eval` passed in, valid for `len`
@@ -276,7 +296,14 @@ extern "C" fn host_apply(op: *const Op, slots: *mut Val, slot: usize, ctx: *cons
 /// Samples a texture from generated code, which has already computed the
 /// lookup coordinates and footprint exactly as the interpreter's texture op
 /// does; writes the slot's lanes and `arity`.
-extern "C" fn host_texture(
+///
+/// # Safety
+///
+/// `tex` must point to a live `TextureRef` and `out` to a writable `Val`
+/// that nothing else references during the call. Only generated code calls
+/// it, with pointers into the program's ops and [`JitProgram::eval`]'s slots.
+#[allow(unsafe_code)]
+unsafe extern "C" fn host_texture(
     tex: *const TextureRef,
     u: f32,
     v: f32,
@@ -284,7 +311,6 @@ extern "C" fn host_texture(
     arity: usize,
     out: *mut Val,
 ) {
-    #[allow(unsafe_code)]
     // SAFETY: `tex` is the address of a `TextureRef` inside one of the
     // `JitProgram`'s boxed `_ops`, which outlives every call; `out` is a slot
     // of the array `JitProgram::eval` passed in, in bounds, and nothing else

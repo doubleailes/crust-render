@@ -2,7 +2,9 @@
 name = "crust-rt"
 version = { workspace = true }
 edition = { workspace = true }
-license-file = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "Crust Render's ray tracing kernel: Embree-shaped scene/geometry API over a parallel SBVH build collapsed to BVH4, in safe Rust"
 
 [lib]

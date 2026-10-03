@@ -126,6 +126,16 @@ impl std::fmt::Display for MtlxError {
     }
 }
 
+impl std::error::Error for MtlxError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MtlxError::Io(e) => Some(e),
+            MtlxError::Xml(e) => Some(e),
+            MtlxError::NoSuchMaterial(_) | MtlxError::Unsupported(_) => None,
+        }
+    }
+}
+
 impl Doc {
     /// Parses a `.mtlx` file.
     pub fn open(path: &std::path::Path) -> Result<Doc, MtlxError> {

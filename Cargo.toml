@@ -4,8 +4,18 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-license-file = "LICENSE"
+# The oldest toolchain that builds the workspace, checked with
+# `cargo +1.96 check --workspace --all-targets --locked`. Set by cranelift
+# (rust-version 1.96 as locked), which the renderer's default `jit` feature
+# pulls; crust's own code needs only 1.88 (let chains, `is_multiple_of`).
+# CI builds with the newer pin in rust-toolchain.toml.
+rust-version = "1.96"
+# SPDX form of LICENSE, so cargo-deny can check our own crates too.
+license = "MIT"
 version = "0.4.0"
+# Nothing here goes to crates.io: crust-core and crust-assets depend on git
+# repositories, which crates.io refuses. Releases are the GitHub binaries.
+publish = false
 
 [workspace.dependencies]
 glam = "0.33.2"
@@ -20,8 +30,8 @@ exr = "1.74.2"
 # `.tx` reader's `tiff` below instead of adding a second copy.
 image = { version = "0.25.10", default-features = false, features = ["png", "hdr", "jpeg", "tiff"] }
 # Pure-Rust Ptex reader (package `ptex-rust`, lib name `ptex`). Pinned by `rev`
-# because the crate is not published and `Cargo.lock` is not checked in —
-# without it a fresh clone silently takes whatever `main` points at. Hoisted so
+# because the crate is not published: without it, `cargo update` would take
+# whatever `main` points at. Hoisted so
 # the decoder crate and the probe examples that read `.ptx` directly can never
 # disagree on the pin: two crates naming a git dependency must match URL and rev
 # byte for byte, or Cargo sees two packages with the same lib name.

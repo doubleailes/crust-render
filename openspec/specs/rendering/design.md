@@ -34,8 +34,8 @@ consumed as ordinary dependencies:
   loop over the index bits. 0.2.4 evaluates it from two compile-time 256-entry byte
   tables per dimension (the product is linear over GF(2), so the two lookups XORed are
   the loop's result exactly): render instructions −10–18%, render time −6–20%, every
-  image bit-identical. The workspace requires `0.2.4` because `Cargo.lock` is not
-  committed. Profile the sampler before assuming a cost is the BSDF's — `draw_block`
+  image bit-identical. The workspace requires `0.2.4`, so no lock file can
+  resolve an older one. Profile the sampler before assuming a cost is the BSDF's — `draw_block`
   is inlined into its callers (`scatter_resolved`, NEE, the camera) and easy to misread
   as their own.
   **Do not replace `u32::reverse_bits` with a lookup table** — measured slower both ways
