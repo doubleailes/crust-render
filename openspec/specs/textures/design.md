@@ -100,10 +100,10 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     rendered as multicoloured speckle. `image_file` rewrites the tag to
     unassociated alpha before decoding, which is exact because every caller
     drops alpha. Only a TIFF is read into memory to be patched; other formats
-    stream from the file. An `#[ignore]`d canary
-    (`the_tiff_crate_still_needs_the_workaround`, run with `--ignored`) fails
-    once an upgrade fixes the crate. It is ignored because `Cargo.lock` is not
-    checked in, so an upstream fix would otherwise break a fresh clone's CI.
+    stream from the file. A canary test
+    (`the_tiff_crate_still_needs_the_workaround`) fails once an upgrade fixes
+    the crate. `Cargo.lock` is committed, so it fails in the change that bumps
+    `tiff`, never on a fresh clone.
   - `UvMap` (`rt_world.rs`) carries per-triangle **corner** UVs, not per-vertex:
     USD's `st` is usually `faceVarying`, and a vertex on a UV seam has one
     position but two texture coordinates. Held as the chart's values plus one

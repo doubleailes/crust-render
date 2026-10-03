@@ -58,10 +58,12 @@ cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # did th
 cargo test -p crust-mtlx --test osl_oracle          # MaterialX nodes vs MaterialX's own OSL implementation
 scripts/osl_oracle.py                               # regenerate those values (needs materialx + exact-math OSL)
 
-# CI (toolchain pinned, RUSTFLAGS=-D warnings), three parallel jobs:
+# CI (toolchain pinned by rust-toolchain.toml, Cargo.lock committed,
+# RUSTFLAGS=-D warnings), four parallel jobs:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
+cargo deny --locked check                           # advisories, licences, sources (deny.toml)
 # ...and .github/workflows/nightly.yml in parallel: clippy + tests on a pinned nightly
 # (NIGHTLY_PINNED; red means this code) and on the latest one (allowed to fail, and
 # run daily), plus the nightly-only `bvh8` feature. Reproduce the pinned leg with:

@@ -1,0 +1,8 @@
+# The toolchain CI gates with (RUST_VERSION in .github/workflows/rust.yml,
+# which checks that the two agree). Clippy's lint set grows with every
+# stable, so building with a different one reproduces neither a green nor a
+# red gate. Bump both together. `cargo +nightly-...` still overrides this for
+# the nightly-only recipes.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

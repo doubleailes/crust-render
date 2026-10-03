@@ -1,6 +1,5 @@
 /target
 image.ppm
-Cargo.lock
 output.exr
 output.png
 /test_images

@@ -2,7 +2,9 @@
 name = "crust-assets"
 version = { workspace = true }
 edition = { workspace = true }
-license-file = { workspace = true }
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "Host-side asset decoders for Crust Render: crust_core::AssetLoader over exr, image and ptex-rs (environment maps, Ptex, UV/UDIM textures)"
 
 [lib]

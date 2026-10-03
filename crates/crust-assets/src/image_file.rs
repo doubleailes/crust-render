@@ -182,12 +182,10 @@ mod tests {
     }
 
     /// The upstream bug this module works around, as a canary: when it
-    /// fails, `tiff` has fixed it and the workaround can go. Ignored because
-    /// `Cargo.lock` is not checked in and `tiff` is a caret requirement, so
-    /// a fixed 0.11.x would otherwise fail a fresh clone's CI with no change
-    /// here. Run with `cargo test -p crust-assets -- --ignored`.
+    /// fails, `tiff` has fixed it and the workaround can go. `Cargo.lock` is
+    /// committed, so this can only start failing in the change that moves
+    /// `tiff` in the lock — the one that should remove the workaround.
     #[test]
-    #[ignore = "canary for an upstream tiff fix; run with --ignored"]
     fn the_tiff_crate_still_needs_the_workaround() {
         assert_ne!(rgb8(&rgbx_tiff(&PIXELS, 0)), RGB);
     }

@@ -143,8 +143,8 @@ Schema mapping:
   `UsdGeomSphere` → analytic `Sphere` geometry.
 - **Subdivision surfaces** (`scene/subdiv.rs`, via the pure-Rust
   [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
-  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned to the upstream git
-  tag `0.3.0` because `Cargo.lock` is not checked in). Read from USD, never from a crust
+  Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned by `rev` to the commit of
+  its `0.5.0` release tag). Read from USD, never from a crust
   attribute on the prim: every mesh is a subdivision surface
   unless its `subdivisionScheme` is `none`, with an unauthored scheme taking the schema
   fallback, `catmullClark` → Catmark (`bilinear` → Bilinear, `loop` → Loop on

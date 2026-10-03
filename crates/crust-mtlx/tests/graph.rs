@@ -290,6 +290,19 @@ fn a_missing_file_is_an_io_error() {
 }
 
 #[test]
+fn an_error_boxes_and_keeps_its_cause() {
+    use std::error::Error;
+    let err = Doc::open(std::path::Path::new("/nonexistent/dir/none.mtlx"))
+        .err()
+        .expect("a missing file must not open");
+    let boxed: Box<dyn Error> = Box::new(err);
+    let cause = boxed.source().expect("an I/O error carries its cause");
+    assert!(cause.downcast_ref::<std::io::Error>().is_some(), "{cause}");
+    let unsupported: Box<dyn Error> = Box::new(MtlxError::Unsupported("x".into()));
+    assert!(unsupported.source().is_none());
+}
+
+#[test]
 fn compile_reports_a_missing_material_node() {
     let dir = std::env::temp_dir().join("crust_mtlx_missing");
     std::fs::create_dir_all(&dir).unwrap();
