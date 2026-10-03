@@ -173,17 +173,14 @@ fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
 
 /// Counts the native placements of every prototype on `stage`, per top-level
 /// subtree, into `caches.placements`: the same walk and pruning as
-/// [`traverse_into`] (abstract, inactive, non-render purpose, invisible), not
-/// descending into an instance or a `PointInstancer`, whose contents the
-/// traversal does not reach directly either.
+/// [`traverse_into`] (abstract, then [`prune_reason`]), not descending into an
+/// instance or a `PointInstancer`, whose contents the traversal does not reach
+/// directly either. An invisible subtree is pruned outright: the traversal
+/// walks it only for cameras, and places nothing from it.
 fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
     let mut stack = vec![(prim_at(stage, sdf::Path::abs_root()), GMat4::IDENTITY)];
     while let Some((prim, parent_world)) = stack.pop() {
-        if prim.is_abstract().unwrap_or(false)
-            || !prim.is_active().unwrap_or(true)
-            || non_render_purpose(&prim).is_some()
-            || is_invisible(&prim)
-        {
+        if prim.is_abstract().unwrap_or(false) || prune_reason(&prim).is_some() {
             continue;
         }
         let local = local_matrix_at(stage, &prim);
@@ -276,17 +273,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             debug!("Skipping abstract (class) prim {}", prim.path());
             continue;
         }
-        // USD prunes an inactive prim and its whole namespace subtree from
-        // the composed scene — the standard way a stage disables geometry
-        // (e.g. an LOD or a too-dense archive) without editing its source.
-        if !prim.is_active().unwrap_or(true) {
-            debug!("Skipping inactive prim {}", prim.path());
-            continue;
-        }
-        if let Some(purpose) = non_render_purpose(&prim) {
-            debug!("Skipping {purpose}-purpose prim {}", prim.path());
-            continue;
-        }
+        let invisible = match prune_reason(&prim) {
+            Some(PruneReason::Invisible) => true,
+            Some(reason) => {
+                debug!("Skipping {reason} prim {}", prim.path());
+                continue;
+            }
+            None => false,
+        };
 
         let local = local_matrix_at(stage, &prim);
         let resets = resets_xform_stack_at(stage, &prim);
@@ -298,7 +292,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // Pruning it outright would make `--camera` fail on it and move the
         // first-camera fallback. Instances are not entered — crust never
         // takes a camera from a prototype.
-        let hidden = parent_hidden || is_invisible(&prim);
+        let hidden = parent_hidden || invisible;
         if hidden {
             if !parent_hidden {
                 debug!("Skipping invisible prim {} and its subtree", prim.path());
@@ -461,6 +455,53 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
         }
     }
     true
+}
+
+/// Why a walk of the stage leaves a prim and its whole subtree out of what a
+/// render draws. These are the rules every walk shares — the traversal
+/// ([`traverse_into`]), the placement count ([`count_placements`]) and the
+/// prototype walk (`instancing::prototype_prunes`) — so that the count makes
+/// the same decision as the traversal, or a prototype's shared/unshared
+/// verdict (and so its adaptive level) would change. Each caller logs on its
+/// own terms and adds its own rules: the stage walks also skip abstract
+/// (`class`) prims, which a prototype walk must not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PruneReason {
+    /// `active = false`. USD prunes an inactive prim and its whole namespace
+    /// subtree from the composed scene — the standard way a stage disables
+    /// geometry (e.g. an LOD or a too-dense archive) without editing its
+    /// source.
+    Inactive,
+    /// A purpose a final render does not draw ([`non_render_purpose`]).
+    Purpose(&'static str),
+    /// `visibility = "invisible"` ([`is_invisible`]).
+    Invisible,
+}
+
+/// Reads as the adjective the skip messages use: "Skipping {reason} prim".
+impl std::fmt::Display for PruneReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PruneReason::Inactive => f.write_str("inactive"),
+            PruneReason::Purpose(purpose) => write!(f, "{purpose}-purpose"),
+            PruneReason::Invisible => f.write_str("invisible"),
+        }
+    }
+}
+
+/// The first [`PruneReason`] that applies to `prim`, checked in the order
+/// above; `None` when the prim is drawn.
+fn prune_reason(prim: &Prim) -> Option<PruneReason> {
+    if !prim.is_active().unwrap_or(true) {
+        return Some(PruneReason::Inactive);
+    }
+    if let Some(purpose) = non_render_purpose(prim) {
+        return Some(PruneReason::Purpose(purpose));
+    }
+    if is_invisible(prim) {
+        return Some(PruneReason::Invisible);
+    }
+    None
 }
 
 /// Whether `prim` authors `visibility = "invisible"` at the evaluated time.

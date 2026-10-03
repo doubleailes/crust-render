@@ -41,7 +41,7 @@ use super::materials::resolve_material;
 use super::mesh::{MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
 use super::xform::{local_matrix_at, resets_xform_stack_at};
-use super::{ImportCaches, is_invisible, non_render_purpose, prim_at};
+use super::{ImportCaches, prim_at, prune_reason};
 
 /// How deep prototypes may nest before the importer gives up. USD forbids
 /// an instancing cycle, but a malformed stage can still describe one, and
@@ -308,36 +308,16 @@ pub(super) fn collect_proto_parts(
 /// openusd cannot read. `report` logs why; the placement count's walk passes `false`,
 /// so a skipped prim is reported once.
 fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
-    // Same pruning as the top-level traversal: an inactive prim (and
-    // its subtree) is absent from the composed scene, prototype or not.
-    if !prim.is_active().unwrap_or(true) {
+    // Same pruning as the top-level traversal: an inactive prim (and its
+    // subtree) is absent from the composed scene, prototype or not. Abstract
+    // prims are kept (see `collect_proto_parts`). Visibility counts from the
+    // prototype root down, as UsdImaging computes it for a prototype: an
+    // invisible part of a prototype is missing from every instance. No camera
+    // is taken from a prototype, so here an invisible subtree is simply pruned.
+    if let Some(reason) = prune_reason(prim) {
         if report {
             debug!(
-                "Skipping inactive prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-        }
-        return true;
-    }
-    if let Some(purpose) = non_render_purpose(prim) {
-        if report {
-            debug!(
-                "Skipping {purpose}-purpose prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-        }
-        return true;
-    }
-    // Visibility counts from the prototype root down, as UsdImaging
-    // computes it for a prototype: an invisible part of a prototype is
-    // missing from every instance. No camera is taken from a prototype,
-    // so here the subtree is simply pruned.
-    if is_invisible(prim) {
-        if report {
-            debug!(
-                "Skipping invisible prim {} (prototype {})",
+                "Skipping {reason} prim {} (prototype {})",
                 prim.path(),
                 root.path()
             );
