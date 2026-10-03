@@ -691,12 +691,41 @@ fn alphas(v: Val) -> (f32, f32) {
     (f(ax), f(ay))
 }
 
+/// What `prepare` builds for one leaf: its lobe, the probability weight it
+/// is selected by, and the directional albedo `E(ωo)` its throughput is
+/// `1 − E·weight` of (`None` for an opaque leaf, whose throughput is 0).
+type PreparedLobe = (Lobe, f32, Option<Vec3A>);
+
+/// The vertex as every arm of `prepare` reads it: the leaf's slot values,
+/// the hit, and the view cosine in the leaf's own frame.
+struct LeafInputs<'a> {
+    w: &'a Walk<'a>,
+    nv: f32,
+}
+
+impl LeafInputs<'_> {
+    #[inline(always)]
+    fn s(&self, i: u32) -> Val {
+        self.w.slots[i as usize]
+    }
+
+    #[inline(always)]
+    fn rgb(&self, i: u32) -> Vec3A {
+        sanitize(self.s(i).rgb())
+    }
+
+    #[inline(always)]
+    fn film(&self, tf: &Option<crust_mtlx::ThinFilm>) -> Option<(f32, f32)> {
+        tf.map(|t| (self.s(t.thickness).x().max(0.0), self.s(t.ior).x().max(1.0)))
+            .filter(|(d, _)| *d > 0.0)
+    }
+}
+
 /// Builds a leaf's lobe and frame at the vertex, and returns the directional
 /// albedo `E(ωo)` its throughput is `1 − E·weight` of — `None` for an opaque
 /// leaf, whose throughput is 0.
 fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
     let s = |i: u32| w.slots[i as usize];
-    let rgb = |i: u32| sanitize(s(i).rgb());
     let n = leaf
         .normal
         .map(|i| s(i).rgb())
@@ -715,94 +744,22 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
     }
     let v = frame.to_local(w.v_world);
     let nv = v.z.clamp(1e-6, 1.0);
-    let film = |tf: &Option<crust_mtlx::ThinFilm>| {
-        tf.map(|t| (s(t.thickness).x().max(0.0), s(t.ior).x().max(1.0)))
-            .filter(|(d, _)| *d > 0.0)
-    };
+    let at = LeafInputs { w, nv };
     let (lobe, select, throughput) = match &leaf.bsdf {
         Bsdf::Diffuse {
             model,
             color,
             roughness,
-        } => {
-            let color = rgb(*color);
-            let r = s(*roughness).x().clamp(0.0, 1.0);
-            let albedo = match model {
-                DiffuseModel::Eon => mx::eon_dir_albedo(nv, r, color),
-                DiffuseModel::OrenNayar => color * mx::oren_nayar_dir_albedo(nv, r),
-                DiffuseModel::Burley => color * mx::burley_dir_albedo(nv, r),
-            };
-            (
-                Lobe::Diffuse {
-                    model: *model,
-                    color,
-                    roughness: r,
-                },
-                luminance(albedo).max(MIN_SELECT),
-                None,
-            )
-        }
+        } => prepare_diffuse(&at, *model, *color, *roughness),
         Bsdf::Subsurface {
             color,
             radius,
             anisotropy,
-        } => {
-            let color = rgb(*color).min(Vec3A::ONE);
-            // `radius` is a vector3; a float broadcasts.
-            let r = s(*radius);
-            let radius = sanitize(if r.arity >= 3 {
-                r.rgb()
-            } else {
-                Vec3A::splat(r.x())
-            });
-            let lobe = if radius.max_element() > 0.0 {
-                let anisotropy = s(*anisotropy).x();
-                Lobe::Subsurface {
-                    color,
-                    radius,
-                    anisotropy: if anisotropy.is_finite() {
-                        anisotropy.clamp(-0.99, 0.99)
-                    } else {
-                        0.0
-                    },
-                    ior: iface.ior,
-                    alpha: iface.alpha,
-                }
-            } else {
-                // A zero mean free path exits where it entered: a diffuse in
-                // the subsurface colour, which is also what MaterialX's GLSL
-                // renders it as.
-                Lobe::Diffuse {
-                    model: DiffuseModel::OrenNayar,
-                    color,
-                    roughness: 0.0,
-                }
-            };
-            (lobe, luminance(color).max(MIN_SELECT), None)
-        }
-        Bsdf::Translucent { color } => {
-            let color = rgb(*color);
-            (
-                Lobe::Translucent { color },
-                luminance(color).max(MIN_SELECT),
-                None,
-            )
-        }
+        } => prepare_subsurface(&at, iface, *color, *radius, *anisotropy),
+        Bsdf::Translucent { color } => prepare_translucent(&at, *color),
         Bsdf::Sheen {
             color, roughness, ..
-        } => {
-            let color = rgb(*color);
-            let r = s(*roughness).x().clamp(0.0, 1.0);
-            let e = mx::imageworks_sheen_dir_albedo(nv, r);
-            (
-                Lobe::Sheen {
-                    color,
-                    roughness: r,
-                },
-                (luminance(color) * e).max(MIN_SELECT),
-                Some(Vec3A::splat(e)),
-            )
-        }
+        } => prepare_sheen(&at, *color, *roughness),
         Bsdf::Dielectric {
             tint,
             ior,
@@ -810,84 +767,13 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             mode,
             thin_film,
             ..
-        } => {
-            let ior = s(*ior).x();
-            let ior = if ior.is_finite() && ior > 0.0 {
-                ior
-            } else {
-                1.5
-            };
-            let (ax, ay) = alphas(s(*roughness));
-            let tint = rgb(*tint);
-            // In the ray-facing frame: entering the interior from the front,
-            // leaving it from the back.
-            let eta = if w.rec.front_face { ior } else { 1.0 / ior };
-            let fresnel = Fresnel {
-                model: FresnelModel::Dielectric { ior: eta },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            // MaterialX's throughput for every dielectric mode: `1 − E_R·w`,
-            // the reflection albedo alone. BSDL's table where it applies (no
-            // film); MaterialX's Fresnel-weighted fit with a film.
-            let e_r = if fresnel.thin_film.is_some() {
-                let f = fresnel.eval(nv);
-                fresnel.dir_albedo(nv, avg) * mx::ggx_energy_compensation(nv, avg, f)
-            } else {
-                Vec3A::splat(1.0 - dielectric_refl_filter(nv, avg.sqrt(), ior))
-            };
-            let e = luminance(e_r);
-            let select = match mode {
-                ScatterMode::R => e,
-                ScatterMode::T => (1.0 - e) * luminance(tint),
-                ScatterMode::RT => e + (1.0 - e) * luminance(tint),
-            };
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint,
-                    ax,
-                    ay,
-                    mode: *mode,
-                    eta,
-                    thin_walled: w.thin_walled,
-                },
-                select.max(MIN_SELECT),
-                Some(e_r),
-            )
-        }
+        } => prepare_dielectric(&at, *tint, *ior, *roughness, *mode, thin_film),
         Bsdf::Conductor {
             ior,
             extinction,
             roughness,
             thin_film,
-        } => {
-            let (ax, ay) = alphas(s(*roughness));
-            let fresnel = Fresnel {
-                model: FresnelModel::Conductor {
-                    n: rgb(*ior),
-                    k: rgb(*extinction),
-                },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            let e = fresnel.dir_albedo(nv, avg)
-                * mx::ggx_energy_compensation(nv, avg, fresnel.eval(nv));
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint: Vec3A::ONE,
-                    ax,
-                    ay,
-                    mode: ScatterMode::R,
-                    eta: 1.0,
-                    thin_walled: false,
-                },
-                luminance(e).max(MIN_SELECT),
-                // MaterialX: a conductor is opaque.
-                None,
-            )
-        }
+        } => prepare_conductor(&at, *ior, *extinction, *roughness, thin_film),
         Bsdf::Schlick {
             color0,
             color82,
@@ -896,37 +782,14 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             roughness,
             mode,
             thin_film,
-        } => {
-            let (ax, ay) = alphas(s(*roughness));
-            let f0 = rgb(*color0);
-            let fresnel = Fresnel {
-                model: FresnelModel::Schlick {
-                    f0,
-                    f82: rgb(*color82),
-                    f90: rgb(*color90),
-                    exponent: s(*exponent).x().max(0.0),
-                },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            let e = fresnel.dir_albedo(nv, avg)
-                * mx::ggx_energy_compensation(nv, avg, fresnel.eval(nv));
-            let e_avg = (e.x + e.y + e.z) / 3.0;
-            let eta = mx::f0_to_ior(Vec3A::splat((f0.x + f0.y + f0.z) / 3.0)).x;
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint: Vec3A::ONE,
-                    ax,
-                    ay,
-                    mode: *mode,
-                    eta: if w.rec.front_face { eta } else { 1.0 / eta },
-                    thin_walled: w.thin_walled,
-                },
-                e_avg.max(MIN_SELECT),
-                Some(Vec3A::splat(e_avg)),
-            )
-        }
+        } => prepare_schlick(
+            &at,
+            [*color0, *color82, *color90],
+            *exponent,
+            *roughness,
+            *mode,
+            thin_film,
+        ),
     };
     (
         Prepared {
@@ -938,6 +801,235 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             category: leaf.bsdf.category(),
         },
         throughput,
+    )
+}
+
+/// A diffuse leaf: selected by its model's directional albedo, and opaque.
+#[inline(always)]
+fn prepare_diffuse(
+    at: &LeafInputs<'_>,
+    model: DiffuseModel,
+    color: u32,
+    roughness: u32,
+) -> PreparedLobe {
+    let color = at.rgb(color);
+    let r = at.s(roughness).x().clamp(0.0, 1.0);
+    let albedo = match model {
+        DiffuseModel::Eon => mx::eon_dir_albedo(at.nv, r, color),
+        DiffuseModel::OrenNayar => color * mx::oren_nayar_dir_albedo(at.nv, r),
+        DiffuseModel::Burley => color * mx::burley_dir_albedo(at.nv, r),
+    };
+    (
+        Lobe::Diffuse {
+            model,
+            color,
+            roughness: r,
+        },
+        luminance(albedo).max(MIN_SELECT),
+        None,
+    )
+}
+
+/// A subsurface leaf, entered through `iface`.
+#[inline(always)]
+fn prepare_subsurface(
+    at: &LeafInputs<'_>,
+    iface: Interface,
+    color: u32,
+    radius: u32,
+    anisotropy: u32,
+) -> PreparedLobe {
+    let color = at.rgb(color).min(Vec3A::ONE);
+    // `radius` is a vector3; a float broadcasts.
+    let r = at.s(radius);
+    let radius = sanitize(if r.arity >= 3 {
+        r.rgb()
+    } else {
+        Vec3A::splat(r.x())
+    });
+    let lobe = if radius.max_element() > 0.0 {
+        let anisotropy = at.s(anisotropy).x();
+        Lobe::Subsurface {
+            color,
+            radius,
+            anisotropy: if anisotropy.is_finite() {
+                anisotropy.clamp(-0.99, 0.99)
+            } else {
+                0.0
+            },
+            ior: iface.ior,
+            alpha: iface.alpha,
+        }
+    } else {
+        // A zero mean free path exits where it entered: a diffuse in
+        // the subsurface colour, which is also what MaterialX's GLSL
+        // renders it as.
+        Lobe::Diffuse {
+            model: DiffuseModel::OrenNayar,
+            color,
+            roughness: 0.0,
+        }
+    };
+    (lobe, luminance(color).max(MIN_SELECT), None)
+}
+
+/// A translucent (diffuse transmission) leaf.
+#[inline(always)]
+fn prepare_translucent(at: &LeafInputs<'_>, color: u32) -> PreparedLobe {
+    let color = at.rgb(color);
+    (
+        Lobe::Translucent { color },
+        luminance(color).max(MIN_SELECT),
+        None,
+    )
+}
+
+/// A sheen leaf.
+#[inline(always)]
+fn prepare_sheen(at: &LeafInputs<'_>, color: u32, roughness: u32) -> PreparedLobe {
+    let color = at.rgb(color);
+    let r = at.s(roughness).x().clamp(0.0, 1.0);
+    let e = mx::imageworks_sheen_dir_albedo(at.nv, r);
+    (
+        Lobe::Sheen {
+            color,
+            roughness: r,
+        },
+        (luminance(color) * e).max(MIN_SELECT),
+        Some(Vec3A::splat(e)),
+    )
+}
+
+/// A dielectric leaf.
+#[inline(always)]
+fn prepare_dielectric(
+    at: &LeafInputs<'_>,
+    tint: u32,
+    ior: u32,
+    roughness: u32,
+    mode: ScatterMode,
+    thin_film: &Option<crust_mtlx::ThinFilm>,
+) -> PreparedLobe {
+    let ior = at.s(ior).x();
+    let ior = if ior.is_finite() && ior > 0.0 {
+        ior
+    } else {
+        1.5
+    };
+    let (ax, ay) = alphas(at.s(roughness));
+    let tint = at.rgb(tint);
+    // In the ray-facing frame: entering the interior from the front,
+    // leaving it from the back.
+    let eta = if at.w.rec.front_face { ior } else { 1.0 / ior };
+    let fresnel = Fresnel {
+        model: FresnelModel::Dielectric { ior: eta },
+        thin_film: at.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    // MaterialX's throughput for every dielectric mode: `1 − E_R·w`,
+    // the reflection albedo alone. BSDL's table where it applies (no
+    // film); MaterialX's Fresnel-weighted fit with a film.
+    let e_r = if fresnel.thin_film.is_some() {
+        let f = fresnel.eval(at.nv);
+        fresnel.dir_albedo(at.nv, avg) * mx::ggx_energy_compensation(at.nv, avg, f)
+    } else {
+        Vec3A::splat(1.0 - dielectric_refl_filter(at.nv, avg.sqrt(), ior))
+    };
+    let e = luminance(e_r);
+    let select = match mode {
+        ScatterMode::R => e,
+        ScatterMode::T => (1.0 - e) * luminance(tint),
+        ScatterMode::RT => e + (1.0 - e) * luminance(tint),
+    };
+    (
+        Lobe::Specular {
+            fresnel,
+            tint,
+            ax,
+            ay,
+            mode,
+            eta,
+            thin_walled: at.w.thin_walled,
+        },
+        select.max(MIN_SELECT),
+        Some(e_r),
+    )
+}
+
+/// A conductor leaf.
+#[inline(always)]
+fn prepare_conductor(
+    at: &LeafInputs<'_>,
+    ior: u32,
+    extinction: u32,
+    roughness: u32,
+    thin_film: &Option<crust_mtlx::ThinFilm>,
+) -> PreparedLobe {
+    let (ax, ay) = alphas(at.s(roughness));
+    let fresnel = Fresnel {
+        model: FresnelModel::Conductor {
+            n: at.rgb(ior),
+            k: at.rgb(extinction),
+        },
+        thin_film: at.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    let e = fresnel.dir_albedo(at.nv, avg)
+        * mx::ggx_energy_compensation(at.nv, avg, fresnel.eval(at.nv));
+    (
+        Lobe::Specular {
+            fresnel,
+            tint: Vec3A::ONE,
+            ax,
+            ay,
+            mode: ScatterMode::R,
+            eta: 1.0,
+            thin_walled: false,
+        },
+        luminance(e).max(MIN_SELECT),
+        // MaterialX: a conductor is opaque.
+        None,
+    )
+}
+
+/// A generalized-Schlick leaf.
+#[inline(always)]
+fn prepare_schlick(
+    at: &LeafInputs<'_>,
+    [color0, color82, color90]: [u32; 3],
+    exponent: u32,
+    roughness: u32,
+    mode: ScatterMode,
+    thin_film: &Option<crust_mtlx::ThinFilm>,
+) -> PreparedLobe {
+    let (ax, ay) = alphas(at.s(roughness));
+    let f0 = at.rgb(color0);
+    let fresnel = Fresnel {
+        model: FresnelModel::Schlick {
+            f0,
+            f82: at.rgb(color82),
+            f90: at.rgb(color90),
+            exponent: at.s(exponent).x().max(0.0),
+        },
+        thin_film: at.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    let e = fresnel.dir_albedo(at.nv, avg)
+        * mx::ggx_energy_compensation(at.nv, avg, fresnel.eval(at.nv));
+    let e_avg = (e.x + e.y + e.z) / 3.0;
+    let eta = mx::f0_to_ior(Vec3A::splat((f0.x + f0.y + f0.z) / 3.0)).x;
+    (
+        Lobe::Specular {
+            fresnel,
+            tint: Vec3A::ONE,
+            ax,
+            ay,
+            mode,
+            eta: if at.w.rec.front_face { eta } else { 1.0 / eta },
+            thin_walled: at.w.thin_walled,
+        },
+        e_avg.max(MIN_SELECT),
+        Some(Vec3A::splat(e_avg)),
     )
 }
 
