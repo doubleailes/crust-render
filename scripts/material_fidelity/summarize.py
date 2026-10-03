@@ -38,8 +38,8 @@ SURFACES = ("standard_surface", "open_pbr_surface", "gltf_pbr")
 
 
 def supported_categories():
-    """The category arms of `Compiler`'s dispatch in crust-mtlx/src/eval.rs."""
-    src = (REPO / "crates/crust-mtlx/src/eval.rs").read_text()
+    """The category arms of `Compiler`'s dispatch in crust-mtlx/src/eval/compiler.rs."""
+    src = (REPO / "crates/crust-mtlx/src/eval/compiler.rs").read_text()
     start = src.index("match node.category.as_str()")
     end = src.index("other =>", start)
     arms = re.findall(r'^\s*((?:"[a-z0-9_]+"\s*\|?\s*)+)=>', src[start:end], re.M)

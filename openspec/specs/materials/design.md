@@ -191,7 +191,7 @@
   query then fails and the surface falls back to grey — which is what the two
   DPEL assets (MaterialX Teapot, MaterialX Lion) did on import. The reader is
   the standalone `crust-mtlx` crate — `parse.rs` (XML → a flat,
-  name-addressable graph), `value.rs` (the one runtime value), `eval.rs` (the
+  name-addressable graph), `value.rs` (the one runtime value), `eval/` (the
   graph compiled to a slot-indexed program), `bsdf.rs` (the closure tree),
   `surface.rs` (the three surface-shader nodes expanded into closure trees) —
   and crust-core evaluates what it describes: `closure/` collapses the tree at
