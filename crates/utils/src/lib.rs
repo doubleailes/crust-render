@@ -1,3 +1,10 @@
+//! Stateless math shared by the workspace: sampling warps (cosine
+//! hemisphere, concentric disk, uniform sphere and ball), the MIS heuristics,
+//! the one Rec.709 `luminance`, frame alignment and small vector helpers.
+//!
+//! Nothing here holds state or draws randomness: callers pass in the uniform
+//! numbers, which come from `openqmc` (CLAUDE.md: no RNG outside it).
+//!
 #![forbid(unsafe_code)]
 
 mod common;
