@@ -157,7 +157,7 @@ struct TileId {
 /// `the_microcache_absorbs_most_taps`.
 type MicroSlots = [Option<(TileId, ptex::PixelData)>; MICRO_SLOTS];
 
-/// See [`MicroSlots`]: four is the corner case's tap count, not a round
+/// See `MicroSlots`: four is the corner case's tap count, not a round
 /// number. Dropping it to two is what the 0.000 above measures.
 pub const MICRO_SLOTS: usize = 4;
 
@@ -231,7 +231,7 @@ pub fn micro_slot_max(total: usize) -> usize {
 static MICRO_BYTES: std::sync::LazyLock<crate::tiled::StripedCounter> =
     std::sync::LazyLock::new(Default::default);
 
-/// Bytes retained across every thread's microcache. See [`MICRO_BYTES`].
+/// Bytes retained across every thread's microcache. See `MICRO_BYTES`.
 pub fn micro_retained_bytes() -> u64 {
     MICRO_BYTES.load()
 }

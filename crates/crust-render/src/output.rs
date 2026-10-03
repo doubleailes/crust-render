@@ -3,7 +3,7 @@
 use crust_core::Buffer;
 use std::path::Path;
 
-/// Compress a linear f32 into [0,1] and encode it as an sRGB byte, through
+/// Compress a linear f32 into `[0, 1]` and encode it as an sRGB byte, through
 /// the same transfer function the texture decoders invert.
 fn tone_map(linear: f32) -> u8 {
     let srgb = crust_assets::linear_to_srgb(linear.clamp(0.0, 1.0));

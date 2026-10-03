@@ -17,7 +17,7 @@ use crate::error::AssetError;
 /// UV-texture path: that one narrows to 8 bits when preloading, and a
 /// light's texture is exactly where the range above 1.0 matters.
 ///
-/// A failure is logged as a warning; [`try_read_rgb_image`] returns it.
+/// A failure is logged as a warning; `try_read_rgb_image` returns it.
 pub fn read_rgb_image(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
     try_read_rgb_image(path).map_err(|e| warn!("{e}")).ok()
 }
@@ -94,7 +94,7 @@ fn decode_exr_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3
 /// the streaming EXR reader already does; a missing colour channel otherwise
 /// reads 0.
 ///
-/// A failure is logged as a warning; [`try_read_exr_rgb`] returns it.
+/// A failure is logged as a warning; `try_read_exr_rgb` returns it.
 pub fn read_exr_rgb(path: &Path) -> Option<(Vec<f32>, usize, usize)> {
     try_read_exr_rgb(path).map_err(|e| warn!("{e}")).ok()
 }
