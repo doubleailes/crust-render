@@ -7,6 +7,7 @@
 use glam::Vec3A;
 use utils::luminance;
 
+use crate::aov::FirstHit;
 use crate::guiding::SampleData;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
@@ -68,7 +69,7 @@ pub fn ray_color(
     // The one-shot entry point (benches and tests), so a scratch per call is
     // the right trade — the renderer's own paths reuse one per work unit.
     let mut scratch = PathScratch::new(depth.max(0) as usize);
-    trace_path::<false>(
+    trace_path::<false, false>(
         r,
         world,
         lights,
@@ -234,6 +235,9 @@ pub(crate) struct PathScratch {
     /// path's own flag says a walk is pending. Kept here, not in the path,
     /// so a path that never walks never initialises it.
     sss_exit: PendingExit,
+    /// What the camera ray met at vertex 0 — written by the AOV
+    /// instantiation of [`trace_path`] only, read by the film after it.
+    pub(super) first: FirstHit,
 }
 
 impl PathScratch {
@@ -242,6 +246,7 @@ impl PathScratch {
         Self {
             records: Vec::with_capacity(max_depth),
             sss_exit: PendingExit::default(),
+            first: FirstHit::Escaped,
         }
     }
 }
@@ -743,9 +748,15 @@ fn volume_nee<const PROFILE: bool>(
 /// own until the cutout branches tipped it over the threshold, and out of
 /// line it costs cornellbox 1.4% of its instructions (callgrind, 2 spp);
 /// forced, the tree before cutouts measured 0.4% *fewer*.
+///
+/// `AOV` is the film's instantiation: it also records what the camera ray met
+/// at vertex 0 in `scratch.first` (see [`FirstHit`]). It observes only — no
+/// draw, no weight — so both instantiations return the same radiance, and
+/// with `AOV = false` every `if AOV` block compiles away, leaving the
+/// function the beauty-only render has always run.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-pub(super) fn trace_path<const PROFILE: bool>(
+pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     r: &Ray,
     world: &World,
     lights: &LightList,
@@ -784,6 +795,10 @@ pub(super) fn trace_path<const PROFILE: bool>(
     // cornellbox, which never walks, 1% of its instructions.
     let mut sss_pending = false;
     let sss_exit = &mut scratch.sss_exit;
+    let first = &mut scratch.first;
+    if AOV {
+        *first = FirstHit::Escaped;
+    }
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
@@ -884,6 +899,9 @@ pub(super) fn trace_path<const PROFILE: bool>(
             } => {
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
+                if AOV && records.is_empty() {
+                    *first = FirstHit::Volume { p };
+                }
                 let wi = ray.direction().normalize();
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
@@ -976,6 +994,9 @@ pub(super) fn trace_path<const PROFILE: bool>(
             let medium = *ray.medium().expect("t_med implies a medium");
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
+            if AOV && records.is_empty() {
+                *first = FirstHit::Volume { p: pos };
+            }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
                 ray.direction().normalize(),
@@ -1097,6 +1118,13 @@ pub(super) fn trace_path<const PROFILE: bool>(
             let _p = profile::scope_if::<PROFILE>(Section::EvalBsdfs);
             ShadingPoint::new(mat, &ray, &rec, cos_o)
         };
+        if AOV && records.is_empty() {
+            *first = FirstHit::Surface {
+                p: rec.p,
+                n: sp.normal(),
+                uv: rec.has_uv.then_some(rec.uv),
+            };
+        }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
         match &prev {

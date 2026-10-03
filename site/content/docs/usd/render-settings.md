@@ -60,8 +60,9 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 
 | attribute | default | meaning |
 |-----------|---------|---------|
-| `int2 resolution` | `(640, 360)` | image width and height in pixels |
-| `rel camera` | first camera on the stage | the camera to render through. [`--camera`](@/docs/reference/command-line.md#camera) overrides it. |
+| `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
+| `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
+| `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
 
 ## Sampling
 

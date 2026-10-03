@@ -12,6 +12,7 @@
 #![deny(unsafe_code)]
 
 mod aabb;
+pub mod aov;
 mod buffer;
 mod camera;
 pub mod config;
@@ -56,6 +57,9 @@ pub use crust_mtlx as mtlx;
 pub use crust_rt as rt;
 
 pub use aabb::AABB;
+pub use aov::{
+    Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, ChannelKind, Precision,
+};
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{Config, PtexMipSpace, TriPackets, config};

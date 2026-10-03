@@ -25,6 +25,8 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod products;
+
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 enum LoggerLevel {
     Debug,
@@ -41,10 +43,13 @@ struct Cli {
     /// When absent, falls back to a hard-coded procedural scene.
     #[arg(short, long)]
     input: Option<String>,
-    /// Output image path. The linear EXR is written here and a tone-mapped
-    /// sRGB PNG next to it (same path with a .png extension).
-    #[arg(short, long, default_value = "output.exr")]
-    output: String,
+    /// Output image path. Without RenderProducts on the stage, the linear EXR
+    /// is written here (default `output.exr`) and a tone-mapped sRGB PNG next
+    /// to it (same path with a .png extension). When the stage authors
+    /// RenderProducts, this replaces the first product's `productName`, as
+    /// husk's `-o` does; the other products keep theirs.
+    #[arg(short, long)]
+    output: Option<String>,
     /// Verbose level
     #[arg(short, long, default_value = "info")]
     level: LoggerLevel,
@@ -277,6 +282,38 @@ fn write_png(
     img.save(path)
 }
 
+/// The render of a stage without RenderProducts: the beauty as an RGB EXR at
+/// `output`, then the tone-mapped sRGB PNG next to it. `write_rgb_file`, as
+/// it always was — this output is byte-identical to the one before AOVs.
+fn write_beauty(
+    buffer: &Buffer,
+    img_width: usize,
+    img_height: usize,
+    output: &str,
+) -> std::result::Result<(), ExitCode> {
+    debug!(
+        "Writing {}x{} linear EXR to {}",
+        img_width, img_height, output
+    );
+    match write_rgb_file(output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
+        Ok(_) => info!("Image written to: {:?}", output),
+        Err(e) => {
+            error!("Error writing image: {}", e);
+            return Err(ExitCode::FAILURE);
+        }
+    }
+    let png_path = Path::new(output).with_extension("png");
+    debug!("Tone mapping to sRGB PNG at {}", png_path.display());
+    match write_png(buffer, img_width, img_height, &png_path) {
+        Ok(_) => info!("Image written to: {:?}", png_path),
+        Err(e) => {
+            error!("Error writing PNG: {}", e);
+            return Err(ExitCode::FAILURE);
+        }
+    }
+    Ok(())
+}
+
 /// A filename-safe UTC timestamp, `YYYYMMDDTHHMMSSZ`.
 ///
 /// Hand-rolled rather than pulled from `chrono` or `time`: neither is in the
@@ -422,6 +459,37 @@ fn main() -> ExitCode {
             warn!("--auto-tx: {failed} tile(s) failed to convert; their textures were preloaded");
         }
     }
+    // What to write: the stage's RenderProducts, with `-o` replacing the
+    // first one's path; with none, the single beauty EXR at `-o`.
+    let mut aovs = scene.aovs;
+    if let (Some(first), Some(o)) = (aovs.products.first_mut(), &output) {
+        debug!(
+            "-o {o} replaces {}'s productName {:?}",
+            first.prim_path, first.name
+        );
+        first.name = o.clone();
+    }
+    if !aovs.products.is_empty() {
+        aovs.products.retain(|p| {
+            if p.name.is_empty() {
+                warn!(
+                    "{} authors no productName; nothing written for it",
+                    p.prim_path
+                );
+            } else if p.vars.is_empty() {
+                warn!(
+                    "{}: no RenderVar crust can write; nothing written for it",
+                    p.prim_path
+                );
+            } else {
+                return true;
+            }
+            false
+        });
+        if aovs.products.is_empty() {
+            warn!("No RenderProduct can be written; writing the beauty to -o instead");
+        }
+    }
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
@@ -521,7 +589,13 @@ fn main() -> ExitCode {
         }
         progress_bar.set_position(done);
     };
-    let (buffer, ray_stats) = renderer.render_with_stats(!cli.scanline, &progress);
+    let (buffer, film, ray_stats) = if aovs.products.is_empty() {
+        let (buffer, rays) = renderer.render_with_stats(!cli.scanline, &progress);
+        (buffer, None, rays)
+    } else {
+        let (buffer, film, rays) = renderer.render_with_aovs(!cli.scanline, &progress, &aovs);
+        (buffer, Some(film), rays)
+    };
     bar.finish();
     // Close Timer
     let duration: Duration = start.elapsed();
@@ -537,27 +611,44 @@ fn main() -> ExitCode {
         stats.profile = crust_core::profile::take();
     }
     info!("Render finished in {duration:?}");
-    // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
-    debug!(
-        "Writing {}x{} linear EXR to {}",
-        img_width, img_height, output
-    );
-    match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
-        Ok(_) => info!("Image written to: {:?}", output),
-        Err(e) => {
-            error!("Error writing image: {}", e);
-            return ExitCode::FAILURE;
+    if let Some(film) = &film {
+        // One EXR per product, then the PNG from the first one's beauty.
+        let mut written = Vec::new();
+        for product in &aovs.products {
+            let path = Path::new(&product.name);
+            match products::write_product(path, product, &buffer, film) {
+                Ok(channels) => {
+                    debug!("{}: {}", path.display(), channels.join(" "));
+                    written.push(format!("{} ({} channels)", path.display(), channels.len()));
+                }
+                Err(e) => {
+                    error!("Error writing {}: {e}", product.prim_path);
+                    return ExitCode::FAILURE;
+                }
+            }
         }
-    }
-    let png_path = Path::new(&output).with_extension("png");
-    debug!("Tone mapping to sRGB PNG at {}", png_path.display());
-    match write_png(&buffer, img_width, img_height, &png_path) {
-        Ok(_) => info!("Image written to: {:?}", png_path),
-        Err(e) => {
-            error!("Error writing PNG: {}", e);
-            return ExitCode::FAILURE;
+        info!("Products written: {}", written.join(", "));
+        let first = &aovs.products[0];
+        if first.beauty().is_some() {
+            let png_path = Path::new(&first.name).with_extension("png");
+            match write_png(&buffer, img_width, img_height, &png_path) {
+                Ok(_) => info!("Image written to: {:?}", png_path),
+                Err(e) => {
+                    error!("Error writing PNG: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            debug!("{} has no beauty var; no PNG preview", first.prim_path);
         }
+    } else if let Err(code) = write_beauty(
+        &buffer,
+        img_width,
+        img_height,
+        output.as_deref().unwrap_or("output.exr"),
+    ) {
+        return code;
     }
     let output_elapsed = output_start.elapsed();
     stats.record("Write output", 0, output_elapsed);
@@ -963,7 +1054,7 @@ mod tests {
         .expect("valid flags");
         assert_eq!(cli.frame, Some(1012.5));
         assert_eq!(cli.input.as_deref(), Some("scene.usda"));
-        assert_eq!(cli.output, "out.exr");
+        assert_eq!(cli.output.as_deref(), Some("out.exr"));
         assert!(cli.bucket, "the old flag still parses");
         assert!(!cli.scanline);
         assert_eq!(cli.samples, Some(12));
@@ -981,7 +1072,9 @@ mod tests {
     fn cli_defaults_when_nothing_is_given() {
         let cli = Cli::try_parse_from(["crust-render"]).expect("no flags is valid");
         assert!(cli.input.is_none());
-        assert_eq!(cli.output, "output.exr");
+        // No default here: `output.exr` applies only when the stage authors
+        // no RenderProduct, which the CLI cannot know until it has loaded it.
+        assert!(cli.output.is_none());
         assert!(!cli.scanline, "tiles are the default");
         assert!(cli.samples.is_none());
         assert!(cli.strategy.is_none());

@@ -854,6 +854,47 @@ sample.
 4. **Whether `alpha` should include volume opacity in Phase 1** rather than
    later (D6).
 
+## Phase 1 as built
+
+Where the implementation departs from, or sharpens, the decisions above.
+
+- **The request lives on `Scene`, not `RenderSettings`** (`Scene::aovs`,
+  an `AovRequest`). `RenderSettings` is `Copy` and is copied through every
+  builder method; a list of products cannot be. The resolver is its own
+  sibling, `usd_import/products.rs`, and the vocabulary is `crust-core/src/aov.rs`.
+- **`Ng` is refused, not implemented.** The kernel's `RayHit` carries one
+  normal — the interpolated one where a mesh has normals — so a geometric
+  normal would mean widening the kernel's hit record (a `Tri4` bit-identity
+  pair) for one AOV. It is in the "not supported yet" list with `albedo` and
+  the IDs.
+- **`normal` is the shading point's normal** (`ShadingPoint::normal`, the
+  record `Material::resolve` returned). UsdPreviewSurface and OpenPBR apply
+  their normal maps there; a MaterialX closure applies its `normal` input per
+  leaf (`closure::prepare`), after resolve, so for those the AOV is the
+  interpolated normal. Recorded in Known gaps.
+- **The zero-AOV gate had a trap.** The first version passed the pixel index
+  and the AOV planes as new `advance_pixel` arguments and branched on the film
+  per pixel: +3.6M instructions on cornellbox at 2 spp (+0.086%, against a
+  run-to-run spread of ±0.2M), all inside `advance_pixel::<false, false>`'s
+  sample loop — the extra arguments changed the loop's codegen, not its work.
+  `advance_pixel` now has exactly its old signature; the pixel index and the
+  camera frame travel in the unit's `UnitAov`, and the film branch is taken
+  once per work unit (a `macro_rules!` stamps each unit loop for both `AOV`
+  values). Measured after: 4,178.84M–4,178.89M against the base's
+  4,179.76M–4,179.96M, and all 33 goldens bit-identical.
+- **Guided renders are not repeatable** with two or more training
+  iterations, before and after this change: whether the final pass is guided
+  depends on the wall-clock efficiency estimate `ΔEff`. The bit-identity
+  tests for guided AOVs therefore use one training iteration, which skips the
+  estimate. Not an AOV issue, but any future guided golden needs the same.
+- **The no-products EXR is not byte-repeatable even before this change**
+  (the `exr` crate writes parallel-compressed blocks in completion order).
+  Task 3.5's "byte-identical" is checked as identical pixels plus an
+  identical PNG; see `openspec/specs/image-output/design.md`.
+- **`exr_diff` compares every channel bitwise** (so equal infinities in a
+  depth pass match), and keeps its first output line's format for
+  `check_images.sh`.
+
 ## Known gaps (to be carried into `openspec/specs/aovs/design.md` when archived)
 
 - Every Non-Goal above, which is warned when authored, not silent.
@@ -861,6 +902,12 @@ sample.
 - LPE extensions (RenderMan lobe tokens and prefixes, Arnold `A`, `!`
   inversion) are not parsed.
 - `B` is not an event; the dome is `L`.
+- `Ng` (geometric normal) is refused: the kernel reports one normal per hit.
+- `normal` / `Neye` ignore a MaterialX closure's own `normal` input (applied
+  per leaf, after the shading point exists); UsdPreviewSurface and OpenPBR
+  normal maps are honoured.
+- Guided renders with ≥ 2 training iterations are not repeatable (`ΔEff` is
+  wall-clock), so neither are their AOVs.
 
 ## Sources
 

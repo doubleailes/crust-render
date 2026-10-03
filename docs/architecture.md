@@ -69,7 +69,7 @@ crust-render::main
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
- │       ├─ index stage (payloads unloaded) → RenderSettings, camera choice, chunk list
+ │       ├─ index stage (payloads unloaded) → RenderSettings, RenderProducts (AovRequest), camera choice, chunk list
  │       ├─ for each chunk: open masked stage → traverse_into → drop stage
  │       │     prims dispatch to mesh / shapes / instancing / lights / volume / camera
  │       │     materials resolve through materials::resolve_material (cached per stage epoch)
@@ -77,11 +77,14 @@ crust-render::main
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
  ├─ Renderer::new(scene)                     light selection table, optional learned light cache
- ├─ Renderer::render_with_stats(tiled, progress)
- │   └─ per tile → per pixel → per sample: render_pixel → trace_path
+ ├─ Renderer::render_with_stats(tiled, progress)     no products
+ │  or Renderer::render_with_aovs(…, &scene.aovs)    products: + AovFilm
+ │   └─ per tile → per pixel → per sample: advance_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples
+ │         AOV instantiation only: the first hit → the unit's AOV planes
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
+       no products: write_rgb_file at -o; products: one scanline EXR each (products.rs)
 ```
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
@@ -117,6 +120,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv.rs` (OpenSubdiv refinement); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs` |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
@@ -158,6 +162,20 @@ other. The pairs:
   per masked stage.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`.
+- **AOVs observe; they never steer.** `trace_path::<_, AOV>` and
+  `advance_pixel::<_, AOV>` must return the same radiance and take the same
+  draws with `AOV` on and off (`the_beauty_is_bit_identical_with_and_without_aovs`),
+  and the `AOV = false` instantiations are the code the beauty-only render
+  always ran — pinned by callgrind's instruction count on cornellbox, not by a
+  test. A filtered AOV uses exactly the beauty's per-sample weight `wx·wy` and
+  its `weight_sum` (with the same `/ taken` fallback in `AovFilm::store`), and
+  a guided render's AOVs blend with the beauty's own pass weights
+  (`blend_weights`); change either side alone and an AOV stops matching the
+  image it was rendered with. AOV planes are per pixel, in the pixel's own
+  sample order, so tiles ↔ scanlines stays bit-identical for every channel.
+- **Products ↔ settings.** The render's camera and resolution are the first
+  `RenderProduct`'s (`import_render_products`), applied before the camera is
+  imported; a product that differs is refused rather than resampled.
 
 ## Environment switches
 

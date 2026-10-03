@@ -66,6 +66,7 @@ mod lights;
 mod materials;
 mod mesh;
 mod preview;
+mod products;
 mod settings;
 mod shapes;
 mod time;
@@ -85,6 +86,7 @@ use lights::{
 };
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
+use products::import_render_products;
 use settings::{
     CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
     render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
@@ -579,6 +581,12 @@ pub(crate) fn load_scene(
     }
     // Render settings come first — the camera importer needs the aspect ratio.
     let mut settings = import_render_settings(&index);
+    // The products the render writes. The first one's camera and resolution
+    // are the render's: the settings' own unless that product overrides them.
+    let products = import_render_products(&index);
+    if let Some((w, h)) = products.resolution {
+        settings = settings.with_resolution(w, h);
+    }
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
     // Geometry, not tracer, settings: every mesh whose scheme is not `none`
     // is refined to this one level, so it must be known before the traversal.
@@ -592,7 +600,11 @@ pub(crate) fn load_scene(
     // because the traversal needs it before it meets any camera.
     let wanted_camera = match requested_camera {
         Some(p) => Some(CameraChoice::Requested(p)),
-        None => render_settings_camera(&index).map(CameraChoice::Settings),
+        None => products
+            .camera
+            .clone()
+            .or_else(|| render_settings_camera(&index))
+            .map(CameraChoice::Settings),
     };
     if let Some(choice) = &wanted_camera {
         debug!("Rendering through {choice}");
@@ -852,6 +864,7 @@ pub(crate) fn load_scene(
 
     let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
+    scene.aovs = products.request;
     Ok(scene)
 }
 

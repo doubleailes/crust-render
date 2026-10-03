@@ -80,6 +80,18 @@ impl Camera {
         self.origin
     }
 
+    /// The camera's frame at shutter open, for the camera-space AOVs:
+    /// right, up, and backward (the view direction is `−w`, as in a USD
+    /// camera). `get_ray` builds `v = w × u`, so `w = u × v`.
+    pub(crate) fn frame(&self) -> crate::aov::CameraFrame {
+        crate::aov::CameraFrame {
+            origin: self.origin,
+            u: self.u,
+            v: self.v,
+            w: self.u.cross(self.v),
+        }
+    }
+
     pub fn pixel_span(&self, res_w: usize, res_h: usize) -> f32 {
         0.5 * (self.horizontal.length() / res_w.max(1) as f32
             + self.vertical.length() / res_h.max(1) as f32)

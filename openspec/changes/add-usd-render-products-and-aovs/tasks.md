@@ -2,21 +2,22 @@
 
 ## 1. Product and var resolution (`usd_import/settings.rs`)
 
-- [ ] 1.1 Resolve settings → `products` → `RenderProduct` → `orderedVars` →
+- [x] 1.1 Resolve settings → `products` → `RenderProduct` → `orderedVars` →
       `RenderVar` with the typed `openusd-schemas` views, at `eval_time()`. A
       product overlays only the base attributes it authors (D2), keeps
       `orderedVars` order, and uses a var targeted twice in one product
       once. Accept `sourceType` and `driver:parameters:aov:name` authored as
       string or token.
-- [ ] 1.2 Collect `driver:parameters:*` (product) and
+- [x] 1.2 Collect `driver:parameters:*` (product) and
       `driver:parameters:aov:*` (var), plus the renderer filter attributes
       named in D7, by prefix-filtering `authored_property_names()`.
-- [ ] 1.3 Build an `AovRequest` on `RenderSettings` that lists, per product:
+- [x] 1.3 Build an `AovRequest` on `RenderSettings` (built: on `Scene`, see
+      design.md § Phase 1 as built) that lists, per product:
       path, layers, sources, type, accumulation mode and clear value. Take the
       render's camera and resolution from the first product. Refuse
       `deepRaster`, a mismatched camera or resolution, `intrinsic`, unknown
       sources and type mismatches, each with one `WARN` (D17).
-- [ ] 1.4 Tests:
+- [x] 1.4 Tests:
       - inheritance and override;
       - time-sampled `productName`;
       - the Houdini-authored var from `arnold-usd` `test_0228` (D4, D7);
@@ -27,26 +28,26 @@
 
 ## 2. Film and first-hit AOVs (`tracer/`)
 
-- [ ] 2.1 Make `trace_path` generic over `const AOV: bool`. With
+- [x] 2.1 Make `trace_path` generic over `const AOV: bool`. With
       `AOV = true`, fill a `FirstHit` (position, distance, depth, shading and
       geometric normals, UV, hit/escape) in `PathScratch` at vertex 0. Expose
       the shading normal from `ShadingPoint` to `crate` only.
-- [ ] 2.2 Add per-unit SoA AOV planes beside `PixelState`:
+- [x] 2.2 Add per-unit SoA AOV planes beside `PixelState`:
       - filtered accumulation uses the beauty's `wx·wy`;
       - closest accumulation keeps (depth, value) for in-box samples, with a
         nearest-to-centre fallback (D7);
       - also track alpha, `sampleCount`, and `variance` (from `var_map`).
-- [ ] 2.3 Copy the planes in the serial gather; return them through a new
+- [x] 2.3 Copy the planes in the serial gather; return them through a new
       `render_with_aovs` entry point. Blend guided passes with the beauty's
       weights (D9).
-- [ ] 2.4 Tests:
+- [x] 2.4 Tests:
       - beauty bit-identical with and without AOVs;
       - every channel bit-identical across tiles and scanlines;
       - depth never blended at an edge;
       - normal on a sphere;
       - alpha is 0 on a dome-only pixel;
       - `sampleCount` equals spp with adaptive off.
-- [ ] 2.5 Gate the zero-AOV path:
+- [x] 2.5 Gate the zero-AOV path:
       - callgrind instruction count on cornellbox at `-s 2` is unchanged (within
         callgrind's run-to-run noise of zero);
       - `scripts/check_images.sh check` passes against goldens recorded
@@ -54,29 +55,29 @@
 
 ## 3. EXR writer (`crust-render/src/main.rs`)
 
-- [ ] 3.1 Write each product as a single-part, scanline, ZIP16 EXR through
+- [x] 3.1 Write each product as a single-part, scanline, ZIP16 EXR through
       `AnyChannels::sort`, following `crust-assets/src/tiled/exr_write.rs`.
       Name channels as D15 says, with HALF/FLOAT/UINT precision, the
       `software` and `colorInteropID` headers, and copied
       `driver:parameters` text attributes. Create parent directories.
-- [ ] 3.2 Keep the no-products path on `write_rgb_file`, byte-identical.
-- [ ] 3.3 Make the PNG from the first product's beauty.
-- [ ] 3.4 Teach `examples/exr_diff` to diff every named channel. It reads
+- [x] 3.2 Keep the no-products path on `write_rgb_file`, byte-identical.
+- [x] 3.3 Make the PNG from the first product's beauty.
+- [x] 3.4 Teach `examples/exr_diff` to diff every named channel. It reads
       only the first layer today.
-- [ ] 3.5 Tests: channel names and order for the D15 examples; half on
+- [x] 3.5 Tests: channel names and order for the D15 examples; half on
       request; UINT `-1`; the no-products EXR is byte-identical to a pre-change
       reference.
 
 ## 4. CLI and docs
 
-- [ ] 4.1 Make `-o` an `Option<String>` with D16 semantics. Update
+- [x] 4.1 Make `-o` an `Option<String>` with D16 semantics. Update
       `cli_defaults_when_nothing_is_given` and `cli_parses_its_flags`.
-- [ ] 4.2 Add one `INFO` line listing the products written.
-- [ ] 4.3 Add `samples/aovs.usda`: a Solaris-style `/Render` with two products
+- [x] 4.2 Add one `INFO` line listing the products written.
+- [x] 4.3 Add `samples/aovs.usda`: a Solaris-style `/Render` with two products
       covering every Phase 1 source and one deliberately unknown var.
-- [ ] 4.4 Run `scripts/material_fidelity` on one case and confirm its output
+- [x] 4.4 Run `scripts/material_fidelity` on one case and confirm its output
       paths are unchanged (Migration Plan).
-- [ ] 4.5 Docs:
+- [x] 4.5 Docs:
       - new `openspec/specs/image-output/design.md`;
       - new `site/content/docs/usd/aovs.md` (the D5 table, spaces, modes,
         the `depth` divergence);
