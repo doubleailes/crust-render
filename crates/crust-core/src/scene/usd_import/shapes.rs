@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use crust_rt::{CubicCurveSegment, CurveSegment, Geometry, SceneBuilder as RtSceneBuilder};
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::gf::Vec3f;
-use openusd::sdf;
 use openusd::usd::Prim;
 use openusd_schemas::geom::{
     BasisCurves as UsdBasisCurves, Curves as UsdCurves, PointBased, Sphere as UsdSphere,
@@ -15,8 +13,10 @@ use tracing::{debug, warn};
 use crate::material::Material;
 use crate::rt_world::WorldBuilder;
 
-use super::attrs::{custom_token, prim_motion_translate, prim_ray_mask};
-use super::time::eval_time;
+use super::attrs::{
+    attr_f32, custom_token, decode_f32s, decode_i32s, decode_vec3fs, prim_motion_translate,
+    prim_ray_mask, value_at,
+};
 
 // -----------------------------------------------------------------------
 // Sphere
@@ -24,17 +24,7 @@ use super::time::eval_time;
 
 /// The authored `radius`, defaulting to USD's 1.0.
 pub(super) fn sphere_radius(sphere: &UsdSphere) -> f32 {
-    sphere
-        .radius_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Double(d) => Some(d as f32),
-            sdf::Value::Float(f) => Some(f),
-            _ => None,
-        })
-        .unwrap_or(1.0)
+    attr_f32(&sphere.radius_attr()).unwrap_or(1.0)
 }
 
 pub(super) fn emit_sphere(
@@ -164,24 +154,8 @@ pub(super) fn curve_segments(
     prim: &Prim,
     curves: &UsdBasisCurves,
 ) -> Option<(Vec<CurveSegment>, Vec<CubicCurveSegment>)> {
-    let points: Option<Vec<Vec3f>> = curves
-        .points_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Vec3fVec(v) => Some(v),
-            _ => None,
-        });
-    let counts: Option<Vec<i32>> = curves
-        .curve_vertex_counts_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::IntVec(v) => Some(v),
-            _ => None,
-        });
+    let points = value_at(&curves.points_attr()).and_then(decode_vec3fs);
+    let counts = value_at(&curves.curve_vertex_counts_attr()).and_then(decode_i32s);
     let (points, counts) = match (points, counts) {
         (Some(p), Some(c)) => (p, c),
         _ => {
@@ -194,15 +168,8 @@ pub(super) fn curve_segments(
     };
     let pts: Vec<Vec3A> = points.iter().map(|p| Vec3A::new(p.x, p.y, p.z)).collect();
 
-    let widths: Vec<f32> = curves
-        .widths_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::FloatVec(v) => Some(v),
-            _ => None,
-        })
+    let widths: Vec<f32> = value_at(&curves.widths_attr())
+        .and_then(decode_f32s)
         .unwrap_or_else(|| vec![1.0]);
 
     // USD defaults: type = cubic, basis = bezier.

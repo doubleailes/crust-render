@@ -31,6 +31,7 @@
 //! that matters.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,6 +76,7 @@ mod xform;
 use adaptive::{Frustum, ScreenRate};
 use attrs::{
     custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
+    value_at,
 };
 use camera::{build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
@@ -90,7 +92,7 @@ use settings::{
     render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
-use time::{EvalTimeScope, eval_time};
+use time::EvalTimeScope;
 use volume::emit_volume;
 use xform::{local_matrix_at, resets_xform_stack_at};
 
@@ -172,17 +174,14 @@ fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
 
 /// Counts the native placements of every prototype on `stage`, per top-level
 /// subtree, into `caches.placements`: the same walk and pruning as
-/// [`traverse_into`] (abstract, inactive, non-render purpose, invisible), not
-/// descending into an instance or a `PointInstancer`, whose contents the
-/// traversal does not reach directly either.
+/// [`traverse_into`] (abstract, then [`prune_reason`]), not descending into an
+/// instance or a `PointInstancer`, whose contents the traversal does not reach
+/// directly either. An invisible subtree is pruned outright: the traversal
+/// walks it only for cameras, and places nothing from it.
 fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
     let mut stack = vec![(prim_at(stage, sdf::Path::abs_root()), GMat4::IDENTITY)];
     while let Some((prim, parent_world)) = stack.pop() {
-        if prim.is_abstract().unwrap_or(false)
-            || !prim.is_active().unwrap_or(true)
-            || non_render_purpose(&prim).is_some()
-            || is_invisible(&prim)
-        {
+        if prim.is_abstract().unwrap_or(false) || prune_reason(&prim).is_some() {
             continue;
         }
         let local = local_matrix_at(stage, &prim);
@@ -247,14 +246,11 @@ struct ImportCtx<'a> {
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
     settings: RenderSettings,
-    /// The stage file, for resolving asset paths against its directory.
-    stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
     /// resolved (a chunk's mask may exclude what they name). Dropped as soon
     /// as the links are resolved, before the top-level BVH commit that is
     /// the import's memory peak.
     index: Option<Stage>,
-    assets: &'a dyn AssetLoader,
 }
 
 /// Walks `root` and its subtree, emitting geometry, lights and volumes
@@ -275,17 +271,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             debug!("Skipping abstract (class) prim {}", prim.path());
             continue;
         }
-        // USD prunes an inactive prim and its whole namespace subtree from
-        // the composed scene — the standard way a stage disables geometry
-        // (e.g. an LOD or a too-dense archive) without editing its source.
-        if !prim.is_active().unwrap_or(true) {
-            debug!("Skipping inactive prim {}", prim.path());
-            continue;
-        }
-        if let Some(purpose) = non_render_purpose(&prim) {
-            debug!("Skipping {purpose}-purpose prim {}", prim.path());
-            continue;
-        }
+        let invisible = match prune_reason(&prim) {
+            Some(PruneReason::Invisible) => true,
+            Some(reason) => {
+                debug!("Skipping {reason} prim {}", prim.path());
+                continue;
+            }
+            None => false,
+        };
 
         let local = local_matrix_at(stage, &prim);
         let resets = resets_xform_stack_at(stage, &prim);
@@ -297,7 +290,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // Pruning it outright would make `--camera` fail on it and move the
         // first-camera fallback. Instances are not entered — crust never
         // takes a camera from a prototype.
-        let hidden = parent_hidden || is_invisible(&prim);
+        let hidden = parent_hidden || invisible;
         if hidden {
             if !parent_hidden {
                 debug!("Skipping invisible prim {} and its subtree", prim.path());
@@ -368,8 +361,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
-            emit_volume(&prim, this_world, &mut ctx.volumes);
+        } else if let Some(ty) = custom_token(&prim, "crust:volume:type") {
+            emit_volume(&prim, &ty, this_world, &mut ctx.volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_mesh(
@@ -400,15 +393,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
             emit_distant_light(&mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(
-                &mut ctx.lights,
-                &prim,
-                &light,
-                this_world,
-                ctx.stage_path,
-                ctx.assets,
-                &mut ctx.caches.asset_time,
-            );
+            emit_dome_light(&mut ctx.lights, &prim, &light, this_world, &mut ctx.caches);
         }
         ctx.links.saw(
             prim.path(),
@@ -462,6 +447,53 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
     true
 }
 
+/// Why a walk of the stage leaves a prim and its whole subtree out of what a
+/// render draws. These are the rules every walk shares — the traversal
+/// ([`traverse_into`]), the placement count ([`count_placements`]) and the
+/// prototype walk (`instancing::prototype_prunes`) — so that the count makes
+/// the same decision as the traversal, or a prototype's shared/unshared
+/// verdict (and so its adaptive level) would change. Each caller logs on its
+/// own terms and adds its own rules: the stage walks also skip abstract
+/// (`class`) prims, which a prototype walk must not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PruneReason {
+    /// `active = false`. USD prunes an inactive prim and its whole namespace
+    /// subtree from the composed scene — the standard way a stage disables
+    /// geometry (e.g. an LOD or a too-dense archive) without editing its
+    /// source.
+    Inactive,
+    /// A purpose a final render does not draw ([`non_render_purpose`]).
+    Purpose(&'static str),
+    /// `visibility = "invisible"` ([`is_invisible`]).
+    Invisible,
+}
+
+/// Reads as the adjective the skip messages use: "Skipping {reason} prim".
+impl std::fmt::Display for PruneReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PruneReason::Inactive => f.write_str("inactive"),
+            PruneReason::Purpose(purpose) => write!(f, "{purpose}-purpose"),
+            PruneReason::Invisible => f.write_str("invisible"),
+        }
+    }
+}
+
+/// The first [`PruneReason`] that applies to `prim`, checked in the order
+/// above; `None` when the prim is drawn.
+fn prune_reason(prim: &Prim) -> Option<PruneReason> {
+    if !prim.is_active().unwrap_or(true) {
+        return Some(PruneReason::Inactive);
+    }
+    if let Some(purpose) = non_render_purpose(prim) {
+        return Some(PruneReason::Purpose(purpose));
+    }
+    if is_invisible(prim) {
+        return Some(PruneReason::Invisible);
+    }
+    None
+}
+
 /// Whether `prim` authors `visibility = "invisible"` at the evaluated time.
 ///
 /// Visibility is inherited and cannot be undone below: an `invisible`
@@ -473,11 +505,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
 /// fills/bounces and a debug dome this way, and all four used to light the
 /// shot.
 fn is_invisible(prim: &Prim) -> bool {
-    prim.attribute("visibility")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .is_some_and(|v| v.as_str() == Some("invisible"))
+    value_at(&prim.attribute("visibility")).is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
 /// Drops a stage the traversal is done with, or — for a single-stage import
@@ -650,9 +678,7 @@ pub(crate) fn load_scene(
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
-        stage_path: path,
         index: Some(index),
-        assets,
     };
 
     let traverse_start = Instant::now();
@@ -786,7 +812,10 @@ pub(crate) fn load_scene(
     }
     if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
         // The two reads of one camera must agree, or every level was chosen
-        // for a viewpoint the render does not use.
+        // for a viewpoint the render does not use. Both go through
+        // `camera::camera_frame`, but `screen_projection` may have read the
+        // camera on the index stage or a stage masked to it, and the render
+        // camera comes from the traversal's stage.
         debug_assert!(
             (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
             "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
@@ -1000,6 +1029,10 @@ struct ImportCaches<'a> {
     ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
     /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
     light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
+    /// Resolved path → a `DomeLight`'s decoded environment map. A stage rarely
+    /// has two domes on one file, but a decode is the most expensive load
+    /// there is, so it is never done twice.
+    environments: HashMap<std::path::PathBuf, Option<Arc<crate::EnvironmentMap>>>,
 }
 
 impl ImportCaches<'_> {
@@ -1022,6 +1055,31 @@ impl ImportCaches<'_> {
         let key = (self.subtree_of(prim), proto_path.to_string());
         self.placements.get(&key).copied().unwrap_or(0)
     }
+
+    /// One host decode through `assets`, memoized in the map `cache` selects:
+    /// keyed by `key` (a resolved path, plus whatever else changes the
+    /// decode), and remembering a failure too, so a file that would not load
+    /// is not retried per material or light. The decode's time is billed to
+    /// [`asset_time`](Self::asset_time). `report` runs after each actual
+    /// decode — never on a cache hit — with what it returned, which is where
+    /// a load's log line belongs.
+    fn load_cached<K: Eq + Hash, V: Clone>(
+        &mut self,
+        cache: fn(&mut Self) -> &mut HashMap<K, Option<V>>,
+        key: K,
+        load: impl FnOnce(&dyn AssetLoader, &K) -> Option<V>,
+        report: impl FnOnce(&K, Option<&V>),
+    ) -> Option<V> {
+        if let Some(hit) = cache(self).get(&key) {
+            return hit.clone();
+        }
+        let started = Instant::now();
+        let loaded = load(self.assets, &key);
+        self.asset_time += started.elapsed();
+        report(&key, loaded.as_ref());
+        cache(self).insert(key, loaded.clone());
+        loaded
+    }
 }
 
 impl<'a> ImportCaches<'a> {
@@ -1039,6 +1097,7 @@ impl<'a> ImportCaches<'a> {
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
             light_textures: HashMap::new(),
+            environments: HashMap::new(),
         }
     }
 }
@@ -1055,12 +1114,7 @@ impl<'a> ImportCaches<'a> {
 /// with a `GEO_PROXY` scope (`purpose = "proxy"`, bound only for `preview`)
 /// next to its `GEO`, and the proxies drew as grey duplicates of 1 505 meshes.
 fn non_render_purpose(prim: &Prim) -> Option<&'static str> {
-    let value = prim
-        .attribute("purpose")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    match value.as_str()? {
+    match value_at(&prim.attribute("purpose"))?.as_str()? {
         "proxy" => Some("proxy"),
         "guide" => Some("guide"),
         _ => None,

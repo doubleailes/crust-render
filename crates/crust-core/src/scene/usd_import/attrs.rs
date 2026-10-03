@@ -1,10 +1,12 @@
 //! Typed readers for authored attributes: the `crust:*` custom attributes, the
 //! per-prim geometry flags (ray mask, motion), the subdivision level, and
-//! schema-attribute value decoding. Every read resolves at [`eval_time`].
+//! the value decoders every attribute read of the importer goes through
+//! ([`value_at`] + `decode_*`). Every read resolves at [`eval_time`].
 
 use glam::{Vec3, Vec3A};
+use openusd::gf::Vec3f;
 use openusd::sdf;
-use openusd::usd::Prim;
+use openusd::usd::{Attribute, Prim};
 use tracing::warn;
 
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
@@ -150,71 +152,75 @@ pub(super) fn resolve_adaptive_max_level(host: Option<u32>, authored: Option<i32
     resolve_subdiv_level(host, authored)
 }
 
-pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+// -----------------------------------------------------------------------
+// Value decoding
+// -----------------------------------------------------------------------
+//
+// Every typed read in the importer is `value_at` plus one `decode_*`. The
+// decoders accept every encoding the importer has met for a type (a float
+// authored as `double`, a bool as an `int`, a colour as `double3`) and
+// narrow to `f32` with a plain `as`, so a value already read one way reads
+// to the same bits through any of them.
+
+/// `attr`'s value at [`eval_time`], or `None` when it is unauthored, blocked
+/// or unreadable. The one place an attribute is read at the evaluation time;
+/// openusd's own xformable composition is asked at
+/// [`xform_time`](super::time::xform_time) instead.
+pub(super) fn value_at(attr: &Attribute) -> Option<sdf::Value> {
+    attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
+}
+
+/// An `int`.
+pub(super) fn decode_i32(v: &sdf::Value) -> Option<i32> {
     match v {
-        sdf::Value::Int(i) => Some(i),
+        sdf::Value::Int(i) => Some(*i),
         _ => None,
     }
 }
 
-pub(super) fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A `float`, `double` or `half`, as `f32`.
+pub(super) fn decode_f32(v: &sdf::Value) -> Option<f32> {
     match v {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
+        sdf::Value::Float(f) => Some(*f),
+        sdf::Value::Double(d) => Some(*d as f32),
+        sdf::Value::Half(h) => Some(h.to_f32()),
         _ => None,
     }
 }
 
-pub(super) fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A `bool`, or an `int` (non-zero is true): authoring tools sometimes write
+/// bools as ints.
+pub(super) fn decode_bool(v: &sdf::Value) -> Option<bool> {
     match v {
-        sdf::Value::Bool(b) => Some(b),
-        // Authoring tools sometimes write bools as ints.
-        sdf::Value::Int(i) => Some(i != 0),
+        sdf::Value::Bool(b) => Some(*b),
+        sdf::Value::Int(i) => Some(*i != 0),
         _ => None,
     }
 }
 
-pub(super) fn custom_token(prim: &Prim, name: &str) -> Option<String> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A `token` or a `string`. Unlike `sdf::Value::as_str`, not an `asset`.
+pub(super) fn decode_token(v: &sdf::Value) -> Option<&str> {
     match v {
-        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
+        sdf::Value::Token(t) => Some(t.as_str()),
         sdf::Value::String(s) => Some(s),
         _ => None,
     }
 }
 
-pub(super) fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A three-component vector (`float3`, `double3`, `half3` and the roles
+/// spelled with them: `color3f`, `point3f`, `vector3d`, …), as `f32`.
+pub(super) fn decode_vec3(v: &sdf::Value) -> Option<Vec3> {
     match v {
-        sdf::Value::Vec3f(c) => Some(Vec3A::new(c.x, c.y, c.z)),
-        sdf::Value::Vec3d(c) => Some(Vec3A::new(c.x as f32, c.y as f32, c.z as f32)),
+        sdf::Value::Vec3f(c) => Some(Vec3::new(c.x, c.y, c.z)),
+        sdf::Value::Vec3d(c) => Some(Vec3::new(c.x as f32, c.y as f32, c.z as f32)),
+        sdf::Value::Vec3h(c) => Some(Vec3::new(c.x.to_f32(), c.y.to_f32(), c.z.to_f32())),
         _ => None,
     }
 }
 
-pub(super) fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A `float[]` or `double[]`, as `f32`. Takes the value so a `float[]` moves
+/// out without a copy.
+pub(super) fn decode_f32s(v: sdf::Value) -> Option<Vec<f32>> {
     match v {
         sdf::Value::FloatVec(v) => Some(v),
         sdf::Value::DoubleVec(v) => Some(v.into_iter().map(|d| d as f32).collect()),
@@ -222,44 +228,67 @@ pub(super) fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
     }
 }
 
-pub(super) fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// An `int[]`.
+pub(super) fn decode_i32s(v: sdf::Value) -> Option<Vec<i32>> {
     match v {
         sdf::Value::IntVec(v) => Some(v),
         _ => None,
     }
 }
 
-// -----------------------------------------------------------------------
-// Attribute helpers
-// -----------------------------------------------------------------------
-
-pub(super) fn attr_f32(attr: &openusd::usd::Attribute) -> Option<f32> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
+/// A `float3[]` (`point3f[]`, `vector3f[]`, …), as authored.
+pub(super) fn decode_vec3fs(v: sdf::Value) -> Option<Vec<Vec3f>> {
+    match v {
+        sdf::Value::Vec3fVec(v) => Some(v),
         _ => None,
     }
 }
 
-pub(super) fn attr_bool(attr: &openusd::usd::Attribute) -> Option<bool> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        sdf::Value::Bool(b) => Some(b),
-        // Authoring tools sometimes write bools as ints.
-        sdf::Value::Int(i) => Some(i != 0),
-        _ => None,
-    }
+pub(super) fn attr_f32(attr: &Attribute) -> Option<f32> {
+    decode_f32(&value_at(attr)?)
 }
 
-pub(super) fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        // color3f is stored as Vec3f in sdf::Value
-        sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
-        _ => None,
-    }
+pub(super) fn attr_bool(attr: &Attribute) -> Option<bool> {
+    decode_bool(&value_at(attr)?)
+}
+
+pub(super) fn attr_vec3(attr: &Attribute) -> Option<Vec3> {
+    decode_vec3(&value_at(attr)?)
+}
+
+pub(super) fn attr_token(attr: &Attribute) -> Option<String> {
+    decode_token(&value_at(attr)?).map(str::to_owned)
+}
+
+// The same reads for a prim's attribute by name — the `crust:*` custom
+// attributes and the schema attributes read off a prim directly.
+
+pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
+    decode_i32(&value_at(&prim.attribute(name))?)
+}
+
+pub(super) fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
+    attr_f32(&prim.attribute(name))
+}
+
+pub(super) fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
+    attr_bool(&prim.attribute(name))
+}
+
+pub(super) fn custom_token(prim: &Prim, name: &str) -> Option<String> {
+    attr_token(&prim.attribute(name))
+}
+
+pub(super) fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
+    attr_vec3(&prim.attribute(name)).map(Vec3A::from)
+}
+
+pub(super) fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
+    decode_f32s(value_at(&prim.attribute(name))?)
+}
+
+pub(super) fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
+    decode_i32s(value_at(&prim.attribute(name))?)
 }
 
 #[cfg(test)]

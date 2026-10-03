@@ -23,7 +23,10 @@ use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
 use crate::scene::subdiv;
 
 use super::adaptive::{self, Aabb, ScreenRate};
-use super::attrs::{custom_i32, prim_motion_translate, prim_ray_mask};
+use super::attrs::{
+    custom_i32, decode_f32s, decode_i32s, decode_vec3fs, prim_motion_translate, prim_ray_mask,
+    value_at,
+};
 use super::time::eval_time;
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
@@ -750,31 +753,9 @@ fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
 /// Reads a mesh prim's authored arrays. `None` when any of the three
 /// required attributes is missing.
 pub(super) fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
-    let int_vec = |v: sdf::Value| match v {
-        sdf::Value::IntVec(v) => Some(v),
-        _ => None,
-    };
-    let points = match mesh
-        .points_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?
-    {
-        sdf::Value::Vec3fVec(v) => v,
-        _ => return None,
-    };
-    let counts = int_vec(
-        mesh.face_vertex_counts_attr()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()?,
-    )?;
-    let indices = int_vec(
-        mesh.face_vertex_indices_attr()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()?,
-    )?;
+    let points = decode_vec3fs(value_at(&mesh.points_attr())?)?;
+    let counts = decode_i32s(value_at(&mesh.face_vertex_counts_attr())?)?;
+    let indices = decode_i32s(value_at(&mesh.face_vertex_indices_attr())?)?;
     Some((points, counts, indices))
 }
 
@@ -827,12 +808,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
         "primvars:st0",
         "primvars:UVMap",
     ]) {
-        let value = prim
-            .attribute(name)
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten();
-        let values = match value {
+        let values = match value_at(&prim.attribute(name)) {
             // `texCoord2f[]` and `float2[]` are the same bits; which one an
             // exporter writes is a matter of taste.
             Some(sdf::Value::Vec2fVec(v)) => v.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
@@ -841,15 +817,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
         if values.is_empty() {
             continue;
         }
-        let indices = match prim
-            .attribute(format!("{name}:indices"))
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
-        {
-            Some(sdf::Value::IntVec(v)) => Some(v),
-            _ => None,
-        };
+        let indices = value_at(&prim.attribute(format!("{name}:indices"))).and_then(decode_i32s);
         // USD's fallback interpolation for a primvar is `constant`, but for
         // `st` in practice it is always authored; treating an unauthored
         // metadatum as faceVarying would mis-index a vertex-interpolated
@@ -1022,17 +990,9 @@ pub(super) fn mesh_source(
     };
 
     let int_array =
-        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
-        {
-            Some(sdf::Value::IntVec(v)) => v,
-            _ => Vec::new(),
-        };
+        |attr: openusd::usd::Attribute| value_at(&attr).and_then(decode_i32s).unwrap_or_default();
     let float_array =
-        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
-        {
-            Some(sdf::Value::FloatVec(v)) => v,
-            _ => Vec::new(),
-        };
+        |attr: openusd::usd::Attribute| value_at(&attr).and_then(decode_f32s).unwrap_or_default();
     let crease_indices = int_array(mesh.crease_indices_attr());
     let crease_lengths = int_array(mesh.crease_lengths_attr());
     let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());

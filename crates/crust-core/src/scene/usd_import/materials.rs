@@ -15,9 +15,10 @@ use tracing::{debug, warn};
 
 use crate::material::{Material, OpenPBR};
 
-use super::attrs::custom_f32;
+use super::attrs::{
+    attr_bool, attr_f32, attr_token, attr_vec3, custom_color3, custom_f32, decode_token, value_at,
+};
 use super::preview::preview_surface_material;
-use super::time::eval_time;
 use super::{ImportCaches, prim_at};
 
 /// Memoizes resolved materials by binding path (and shares one default),
@@ -262,26 +263,19 @@ fn default_material() -> Arc<dyn Material> {
     Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)))
 }
 
+/// The shader's `info:id`, authored as a token or a string.
+///
+/// `Shader::id()` (openusd-schemas 0.7) is asked first, but it answers only
+/// part of the question, so the attribute is then read directly. It reads
+/// `get::<tf::Token>()`, an exact-variant decode, so a `string`-typed
+/// `info:id` comes back as an `Err`; it returns `None` unless
+/// `info:implementationSource` is `id`; and it reads the default value, not
+/// the evaluation time's.
 pub(super) fn shader_info_id(shader: &Shader) -> Option<String> {
-    // `Shader::id()` is the higher-level accessor and does the correct
-    // `get::<String>()` (which extracts from both String and Token variants).
     if let Ok(Some(id)) = shader.id() {
         return Some(id);
     }
-    // Fallback for older openusd revisions or shaders that author info:id
-    // via a raw attribute rather than the schema helper.
-    shader
-        .attribute("info:id")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            // `Token` carries an interned `tf::Token`, `String` a plain
-            // `String`, so the two arms cannot bind the same name.
-            sdf::Value::Token(t) => Some(t.as_str().to_owned()),
-            sdf::Value::String(t) => Some(t),
-            _ => None,
-        })
+    attr_token(&shader.attribute("info:id"))
 }
 
 /// Whether the material has a child `Shader` prim with this `info:id`.
@@ -294,13 +288,9 @@ fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
     let Ok(children) = prim_at(stage, mat_path.clone()).children() else {
         return false;
     };
-    children.iter().any(
-        |c| match c.attribute("info:id").get_at::<sdf::Value>(eval_time()) {
-            Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
-            Ok(Some(sdf::Value::String(t))) => t == id,
-            _ => false,
-        },
-    )
+    children
+        .iter()
+        .any(|c| value_at(&c.attribute("info:id")).is_some_and(|v| decode_token(&v) == Some(id)))
 }
 
 /// Maps RenderMan's `PxrDisneyBsdf` onto [`OpenPBR`].
@@ -333,7 +323,7 @@ fn disney_to_openpbr(
     // Called with the whole attribute name, `inputs:` included: a literal, so
     // reading an input allocates no name.
     let f = |n: &str| custom_f32(&prim, n);
-    let c = |n: &str| custom_vec3(&prim, n);
+    let c = |n: &str| custom_color3(&prim, n);
 
     let mut o = OpenPBR::default();
 
@@ -341,7 +331,7 @@ fn disney_to_openpbr(
     // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
     // decodes it to linear. Do the same, or every surface renders washed out.
     if let Some(rgb) = c("inputs:baseColor") {
-        o.base_color = srgb_to_linear(rgb);
+        o.base_color = gamma22_to_linear(rgb);
     }
     if let Some(v) = f("inputs:metallic") {
         o.base_metalness = v;
@@ -541,22 +531,19 @@ pub(super) fn load_uv_texture(
     space: crate::ColorSpace,
     caches: &mut ImportCaches<'_>,
 ) -> Option<Arc<dyn crate::Texture2D>> {
-    let key = (path.to_string_lossy().into_owned(), space);
-    if let Some(hit) = caches.materials.textures.get(&key) {
-        return hit.clone();
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_texture(path, space);
-    let elapsed = started.elapsed();
-    caches.asset_time += elapsed;
-    if loaded.is_none() {
-        debug!(
-            "Texture {} ({space:?}) not loadable by the host",
-            path.display()
-        );
-    }
-    caches.materials.textures.insert(key, loaded.clone());
-    loaded
+    caches.load_cached(
+        |c| &mut c.materials.textures,
+        (path.to_string_lossy().into_owned(), space),
+        |assets, _| assets.load_texture(path, space),
+        |_, loaded| {
+            if loaded.is_none() {
+                debug!(
+                    "Texture {} ({space:?}) not loadable by the host",
+                    path.display()
+                );
+            }
+        },
+    )
 }
 
 /// The per-face colour texture a material binds, if any.
@@ -571,11 +558,7 @@ pub(super) fn material_ptex(
     caches: &mut ImportCaches<'_>,
 ) -> Option<crate::PtexRef> {
     let prim = prim_at(stage, mat_path.clone());
-    let value = prim
-        .attribute("inputs:surfaceMap")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&prim.attribute("inputs:surfaceMap"))?;
     let path = asset_value_path(&value, caches.stage_path)?;
 
     // Keyed on the resolved filesystem path, which — unlike a prototype-scoped
@@ -583,15 +566,14 @@ pub(super) fn material_ptex(
     // texture is opened once however many materials or chunks reference it.
     // Negative results are cached too: a 600 MB file that failed to open
     // should not be retried per material.
-    let key = path.to_string_lossy().into_owned();
-    if let Some(hit) = caches.materials.ptex.get(&key) {
-        return hit.clone().map(crate::PtexRef);
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_ptex(&path);
-    caches.asset_time += started.elapsed();
-    caches.materials.ptex.insert(key, loaded.clone());
-    loaded.map(crate::PtexRef)
+    caches
+        .load_cached(
+            |c| &mut c.materials.ptex,
+            path.to_string_lossy().into_owned(),
+            |assets, _| assets.load_ptex(&path),
+            |_, _| {},
+        )
+        .map(crate::PtexRef)
 }
 
 /// An `asset`-valued attribute as a filesystem path.
@@ -601,6 +583,17 @@ pub(super) fn material_ptex(
 /// production stage's `../../../textures/foo.ptx` work at all, since the layer
 /// authoring it is nested several directories below the root. The authored
 /// string is only a fallback, anchored against the root layer.
+///
+/// The rule for single-file assets: a light's IES profile and `RectLight`
+/// texture, the `DomeLight` texture and a material's Ptex `inputs:surfaceMap`.
+/// openusd reports `resolved_path` whenever such a file exists, so the
+/// root-layer fallback only decides where a path openusd could not find is
+/// looked for. UsdUVTexture files take [`attribute_asset_path`] instead,
+/// which differs exactly there: it anchors an unresolved relative path
+/// against the authoring layer, because a `<UDIM>` path names a set of files
+/// and never resolves. Routing these sites through it would move the lookup
+/// for a missing or string-typed path from the root layer's directory to the
+/// authoring layer's.
 pub(super) fn asset_value_path(
     value: &sdf::Value,
     stage_path: &Path,
@@ -642,11 +635,14 @@ pub(super) fn asset_value_path(
 /// `@../../texture/…<UDIM>.exr@`, and 1 718 texture sets failed to load. The
 /// strongest spec in the attribute's property stack is the layer whose opinion
 /// supplies the value, which is exactly what USD anchors against.
+///
+/// The rule for UsdUVTexture `inputs:file` only (`preview.rs`); every other
+/// asset goes through [`asset_value_path`], whose doc says why they differ.
 pub(super) fn attribute_asset_path(
     attr: &openusd::usd::Attribute,
     stage_path: &Path,
 ) -> Option<std::path::PathBuf> {
-    let value = attr.get_at::<sdf::Value>(eval_time()).ok().flatten()?;
+    let value = value_at(attr)?;
     let resolved = matches!(&value, sdf::Value::AssetPath(p)
         if p.resolved_path().is_some_and(|r| !r.is_empty()));
     let authored = value.as_str().map(str::to_owned);
@@ -664,30 +660,18 @@ pub(super) fn attribute_asset_path(
     asset_value_path(&value, stage_path)
 }
 
-/// sRGB transfer function, decoding a display-referred colour to linear.
-///
-/// The plain 2.2 power law rather than the piecewise sRGB curve: it is what
-/// the `PxrColorCorrect` gamma node in the island's materials actually
-/// applies, and matching the reference render matters more here than matching
-/// the standard.
-fn srgb_to_linear(c: Vec3A) -> Vec3A {
+/// Decodes a display-referred colour to linear with the flat gamma 2.2 power
+/// law, `max(c, 0)^2.2` — deliberately **not** the piecewise sRGB EOTF
+/// (crust-assets' `srgb_to_linear`), which differs from it most in the
+/// darks. 2.2 is what the `PxrColorCorrect` gamma node in the island's
+/// materials actually applies, and matching the reference render matters
+/// more here than matching the standard (`docs/color_management.md`).
+fn gamma22_to_linear(c: Vec3A) -> Vec3A {
     Vec3A::new(
         c.x.max(0.0).powf(2.2),
         c.y.max(0.0).powf(2.2),
         c.z.max(0.0).powf(2.2),
     )
-}
-
-fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
-        sdf::Value::Vec3d(p) => Some(Vec3A::new(p.x as f32, p.y as f32, p.z as f32)),
-        _ => None,
-    }
 }
 
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input
@@ -696,9 +680,11 @@ fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
 fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
     let mut o = OpenPBR::default();
 
-    let f = |n: &str, d: f32| shader_input_f32(shader, n).unwrap_or(d);
-    let c = |n: &str, d: Vec3A| shader_input_vec3(shader, n).unwrap_or(d);
-    let b = |n: &str, d: bool| shader_input_bool(shader, n).unwrap_or(d);
+    // Each input by its whole attribute name (`inputs:roughness`) — literals,
+    // so no name is built per read.
+    let f = |n: &str, d: f32| attr_f32(&shader.attribute(n)).unwrap_or(d);
+    let c = |n: &str, d: Vec3A| attr_vec3(&shader.attribute(n)).map_or(d, Vec3A::from);
+    let b = |n: &str, d: bool| attr_bool(&shader.attribute(n)).unwrap_or(d);
 
     // Base
     o.base_weight = f("inputs:baseWeight", o.base_weight);
@@ -774,41 +760,4 @@ fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
     o.geometry_thin_walled = b("inputs:geometryThinWalled", o.geometry_thin_walled);
 
     Arc::new(o)
-}
-
-/// A shader input by its whole attribute name (`inputs:roughness`) — the
-/// callers pass literals, so no name is built per read.
-fn shader_input_f32(shader: &Shader, attr_name: &str) -> Option<f32> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        _ => None,
-    }
-}
-
-fn shader_input_bool(shader: &Shader, attr_name: &str) -> Option<bool> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Bool(b) => Some(b),
-        _ => None,
-    }
-}
-
-fn shader_input_vec3(shader: &Shader, attr_name: &str) -> Option<Vec3A> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
-        // USD encodes color3f as an sdf::Value::Vec3f — no dedicated variant.
-        _ => None,
-    }
 }

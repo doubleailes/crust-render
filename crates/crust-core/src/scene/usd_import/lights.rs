@@ -2,11 +2,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
@@ -20,15 +18,12 @@ use crate::light::{
 };
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
-use crate::rt_world::WorldBuilder;
-use crate::scene::AssetLoader;
 
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32,
-    infinite_light_escape_mask, light_ray_mask,
+    attr_bool, attr_f32, attr_token, attr_vec3, custom_bool, custom_color3, custom_f32,
+    infinite_light_escape_mask, light_ray_mask, value_at,
 };
 use super::materials::asset_value_path;
-use super::time::eval_time;
 use super::{ImportCaches, ImportCtx};
 
 /// The `LightAPI` quantities every UsdLux light shares.
@@ -60,7 +55,7 @@ fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
     };
     let intensity = finite("intensity", attr_f32(&light.intensity_attr()), 1.0);
     let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
-    let color = match attr_color3f(&light.color_attr()) {
+    let color = match attr_vec3(&light.color_attr()).map(|c| c.to_array()) {
         Some(c) if c.iter().any(|x| !x.is_finite()) => {
             warn!(
                 "{}: inputs:color = {c:?} is not finite — using its fallback (1, 1, 1)",
@@ -169,19 +164,14 @@ fn lux_shaping(
     )
     .unwrap_or(0.0);
 
-    let ies_file = prim
-        .attribute("inputs:shaping:ies:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
+    let ies_file = value_at(&prim.attribute("inputs:shaping:ies:file"))
         .and_then(|v| asset_value_path(&v, caches.stage_path));
     if let Some(path) = ies_file {
-        let profile = match caches.ies.get(&path) {
-            Some(cached) => cached.clone(),
-            None => {
-                let started = Instant::now();
-                let loaded = caches.assets.load_ies(&path);
-                caches.asset_time += started.elapsed();
+        let profile = caches.load_cached(
+            |c| &mut c.ies,
+            path,
+            |assets, path| assets.load_ies(path),
+            |path, loaded| {
                 if loaded.is_none() {
                     warn!(
                         "{}: could not load IES profile {} — the light renders \
@@ -190,10 +180,8 @@ fn lux_shaping(
                         path.display()
                     );
                 }
-                caches.ies.insert(path, loaded.clone());
-                loaded
-            }
-        };
+            },
+        );
         shaping.ies = profile.map(|profile| IesShaping {
             profile,
             angle_scale: finite(
@@ -244,9 +232,17 @@ fn perpendicular(a: Vec3A, b: Vec3A) -> bool {
     a.dot(b).abs() <= 1e-5 * a.length() * b.length()
 }
 
-/// Attaches a sphere, disk or cylinder light — the three UsdLux lights
-/// defined on a round [`UnitShape`] — of the given `radius` (and, for the
-/// cylinder, `length`) under the prim transform `world_xf`.
+/// A sphere, disk or cylinder light's shape — the three UsdLux lights defined
+/// on a round [`UnitShape`] — at its authored size.
+struct RoundShape {
+    unit: UnitShape,
+    radius: f32,
+    /// The cylinder's `inputs:length`; unused by the other two.
+    length: f32,
+}
+
+/// Attaches a sphere, disk or cylinder light of the given [`RoundShape`]
+/// under the prim transform `world_xf`.
 ///
 /// Where `world_xf` is a similarity over the axes the shape is round in, the
 /// geometry is the kernel's world-space analytic primitive, as a sphere light
@@ -257,18 +253,19 @@ fn perpendicular(a: Vec3A, b: Vec3A) -> bool {
 /// samples the same [`AffineShape`] (or, for the round sphere, the historical
 /// [`SphereShape`], so existing scenes render exactly as before), and
 /// `normalize` divides by its world-space area.
-#[allow(clippy::too_many_arguments)]
 fn emit_round_light(
-    world: &mut WorldBuilder,
-    lights: &mut LightList,
+    ctx: &mut ImportCtx,
     prim: &Prim,
-    unit: UnitShape,
+    shape: RoundShape,
     world_xf: GMat4,
-    radius: f32,
-    length: f32,
     params: LuxParams,
     shaping: Option<Shaping>,
 ) {
+    let RoundShape {
+        unit,
+        radius,
+        length,
+    } = shape;
     // A negative or zero radius (or length) would pass the affine check —
     // a negative scale is a reflection, still invertible — while the kernel
     // refuses the matching primitive, leaving a light NEE samples on a
@@ -362,13 +359,15 @@ fn emit_round_light(
             transform_end: None,
         }
     });
-    let geom_id = world.attach_masked(geometry, material.clone(), light_ray_mask(prim));
+    let geom_id = ctx
+        .world
+        .attach_masked(geometry, material.clone(), light_ray_mask(prim));
 
     let shape: AreaShape = match round_sphere {
         Some(sphere) => sphere.into(),
         None => affine.into(),
     };
-    lights.add(AreaLight::new(shape, material, geom_id));
+    ctx.lights.add(AreaLight::new(shape, material, geom_id));
     debug!(
         "{:?} light {}: area={} normalize={} radiance={:?} ({})",
         unit,
@@ -394,17 +393,12 @@ pub(super) fn emit_sphere_light(
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Sphere,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Sphere,
         radius,
-        0.0,
-        params,
-        shaping,
-    );
+        length: 0.0,
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `UsdLuxDiskLight`: a disk of `inputs:radius` (0.5) in the local XY
@@ -419,17 +413,12 @@ pub(super) fn emit_disk_light(
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Disk,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Disk,
         radius,
-        0.0,
-        params,
-        shaping,
-    );
+        length: 0.0,
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `UsdLuxCylinderLight`: a tube of `inputs:radius` (0.5) and
@@ -447,51 +436,39 @@ pub(super) fn emit_cylinder_light(
     let length = attr_f32(&light.length_attr()).unwrap_or(1.0);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Cylinder,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Cylinder,
         radius,
         length,
-        params,
-        shaping,
-    );
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
 /// resolved path: a rig commonly reuses one card texture on many lights.
 fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crate::LightTexture>> {
-    let value = prim
-        .attribute("inputs:texture:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&prim.attribute("inputs:texture:file"))?;
     let path = asset_value_path(&value, caches.stage_path)?;
-    if let Some(cached) = caches.light_textures.get(&path) {
-        return cached.clone();
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_light_texture(&path);
-    caches.asset_time += started.elapsed();
-    match &loaded {
-        Some(t) => debug!(
-            "RectLight {}: texture {} ({}x{})",
-            prim.path(),
-            path.display(),
-            t.width(),
-            t.height()
-        ),
-        None => warn!(
-            "RectLight at {}: could not load inputs:texture:file {} — the light \
-             emits its uniform colour",
-            prim.path(),
-            path.display()
-        ),
-    }
-    caches.light_textures.insert(path, loaded.clone());
-    loaded
+    caches.load_cached(
+        |c| &mut c.light_textures,
+        path,
+        |assets, path| assets.load_light_texture(path),
+        |path, loaded| match loaded {
+            Some(t) => debug!(
+                "RectLight {}: texture {} ({}x{})",
+                prim.path(),
+                path.display(),
+                t.width(),
+                t.height()
+            ),
+            None => warn!(
+                "RectLight at {}: could not load inputs:texture:file {} — the light \
+                 emits its uniform colour",
+                prim.path(),
+                path.display()
+            ),
+        },
+    )
 }
 
 /// `UsdLuxRectLight`: a `width × height` rectangle (1 × 1) in the local XY
@@ -667,8 +644,9 @@ pub(super) fn emit_distant_light(
 /// Imports a `UsdLuxDomeLight` as an infinite environment.
 ///
 /// `inputs:texture:file` is resolved against the USD layer's directory and
-/// handed to the host's [`AssetLoader`] — crust-core decodes nothing
-/// itself. Without a file, or when the host declines, the dome is its
+/// handed to the host's [`AssetLoader`](crate::scene::AssetLoader) —
+/// crust-core decodes nothing itself, and decodes one file once however many
+/// domes name it. Without a file, or when the host declines, the dome is its
 /// uniform `intensity × color × 2^exposure` (× the colour temperature's
 /// blackbody, when enabled).
 ///
@@ -680,42 +658,31 @@ pub(super) fn emit_dome_light(
     prim: &Prim,
     light: &DomeLight,
     world_xf: GMat4,
-    stage_path: &Path,
-    assets: &dyn AssetLoader,
-    // Accumulates time spent in the host's decoder, so the report can
-    // separate "decoding a 14k HDRI" from the rest of the traversal.
-    asset_time: &mut Duration,
+    caches: &mut ImportCaches,
 ) {
     // `normalize` does not apply to a dome (its sizeFactor is 1).
     let tint = lux_params(prim, light).emission;
 
-    let format = light
-        .texture_format_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Token(t) => Some(t.to_string()),
-            _ => None,
-        });
-    let map = match dome_texture_path(light, stage_path) {
+    let format = attr_token(&light.texture_format_attr());
+    let map = match dome_texture_path(light, caches.stage_path) {
         Some(texture) => match format.as_deref() {
             // `automatic` infers from the image; for the equirectangular
             // images a dome light normally carries that means latlong.
-            None | Some("latlong") | Some("automatic") => {
-                let started = Instant::now();
-                let loaded = assets.load_environment(&texture);
-                *asset_time += started.elapsed();
-                if loaded.is_none() {
-                    warn!(
-                        "DomeLight at {}: could not load {} — falling back to \
-                         the uniform colour",
-                        prim.path(),
-                        texture.display()
-                    );
-                }
-                loaded.map(Arc::new)
-            }
+            None | Some("latlong") | Some("automatic") => caches.load_cached(
+                |c| &mut c.environments,
+                texture,
+                |assets, texture| assets.load_environment(texture).map(Arc::new),
+                |texture, loaded| {
+                    if loaded.is_none() {
+                        warn!(
+                            "DomeLight at {}: could not load {} — falling back to \
+                             the uniform colour",
+                            prim.path(),
+                            texture.display()
+                        );
+                    }
+                },
+            ),
             Some(other) => {
                 warn!(
                     "DomeLight at {}: texture:format \"{other}\" is not supported \
@@ -760,10 +727,6 @@ pub(super) fn emit_dome_light(
 /// a root layer sitting anywhere else would otherwise resolve it against the
 /// wrong directory and silently fall back to the dome's uniform colour.
 fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
-    let value = light
-        .texture_file_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = value_at(&light.texture_file_attr())?;
     asset_value_path(&value, stage_path)
 }
