@@ -120,13 +120,12 @@ impl StreamingTexture {
                             return None;
                         }
                         Ok((f, _)) => {
-                            if let Some(id) = cache.intern(f.clone()) {
-                                charts.push(Chart {
-                                    number: 1001 + u + 10 * v,
-                                    file: f,
-                                    id,
-                                });
-                            }
+                            let id = cache.intern(f.clone());
+                            charts.push(Chart {
+                                number: 1001 + u + 10 * v,
+                                file: f,
+                                id,
+                            });
                         }
                         Err(e) => tracing::debug!("{}: {e}", p.display()),
                     }
@@ -148,7 +147,7 @@ impl StreamingTexture {
                     return None;
                 }
                 Ok((f, _)) => {
-                    let id = cache.intern(f.clone())?;
+                    let id = cache.intern(f.clone());
                     charts.push(Chart {
                         number: 1001,
                         file: f,
