@@ -1,0 +1,105 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    doc = "A rough glass ball on a white floor under a small, bright sphere light: almost all the light in the ball's shadow is a caustic, reached only by rare, very bright paths (floor -> glass -> light). The heavy-tailed case for path guiding: before passes were blended by sample budget, an inverse-variance blend gave most of the weight to whichever low-spp training pass missed those paths, and the caustic came out dark. Render with --indirect-clamp 0 to see the caustic at full strength; the default firefly clamp removes most of it."
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        double3 xformOp:translate = (0, 2.0, 3.0)
+        float xformOp:rotateX = -30
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+        float focalLength = 30
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        float fStop = 1000
+        float focusDistance = 3.5
+        token projection = "perspective"
+    }
+
+    def Scope "Materials"
+    {
+        def Material "white"
+        {
+            token outputs:surface.connect = </World/Materials/white/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.7, 0.7, 0.7)
+                float inputs:specularWeight = 0.0
+                token outputs:surface
+            }
+        }
+        def Material "glass"
+        {
+            token outputs:surface.connect = </World/Materials/glass/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                float inputs:specularRoughness = 0.05
+                float inputs:specularIor = 1.5
+                float inputs:transmissionWeight = 1.0
+                color3f inputs:transmissionColor = (1, 1, 1)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "floor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        uniform bool doubleSided = 1
+        float3[] extent = [(-6, 0, -6), (6, 0, 6)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(-6, 0, -6), (6, 0, -6), (6, 0, 6), (-6, 0, 6)]
+        rel material:binding = </World/Materials/white>
+    }
+    def Mesh "back" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        uniform bool doubleSided = 1
+        float3[] extent = [(-6, 0, -3), (6, 6, -3)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -3), (6, 0, -3), (6, 6, -3), (-6, 6, -3)]
+        rel material:binding = </World/Materials/white>
+    }
+
+    def Sphere "ball" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.6
+        double3 xformOp:translate = (0, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/glass>
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:radius = 0.04
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 3000
+        double3 xformOp:translate = (0.9, 2.6, -1.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+# Path guiding is on so the guided blend is exercised; set crust:pathGuiding =
+# false to compare with plain BSDF sampling at the same samplesPerPixel. The
+# huge minimum turns adaptive early-stop off, so every pixel takes the budget.
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (256, 256)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 10
+        int crust:minSamplesPerPixel = 1000000
+        bool crust:pathGuiding = true
+        int crust:guidingTrainIterations = 4
+        float crust:guidingProb = 0.5
+    }
+}

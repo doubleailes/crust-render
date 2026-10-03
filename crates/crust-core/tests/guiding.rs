@@ -8,14 +8,18 @@ use std::path::PathBuf;
 
 use crust_core::{RenderSettings, Renderer, Scene};
 
-fn sample_scene() -> PathBuf {
+fn sample(name: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     root.parent()
         .unwrap()
         .parent()
         .unwrap()
         .join("samples")
-        .join("cornellbox_guided.usda")
+        .join(name)
+}
+
+fn sample_scene() -> PathBuf {
+    sample("cornellbox_guided.usda")
 }
 
 /// Render the sample scene small and return per-pixel luminance.
@@ -56,6 +60,58 @@ fn guided_render_is_unbiased() {
     assert!(
         rel < 0.05,
         "guided mean {guided:.5} vs unguided mean {unguided:.5} — relative diff {rel:.4} > 5%"
+    );
+}
+
+/// Mean luminance over the shadow of `caustic_guided.usda`'s glass ball,
+/// where nearly all the light is a caustic, averaged over `frames` seeds.
+fn caustic_shadow_mean(guided: bool, frames: std::ops::RangeInclusive<isize>) -> f64 {
+    const RES: usize = 64;
+    const SPP: u32 = 256;
+    // The shadow spans 51–88% of the image from the top; the buffer's row 0
+    // is the bottom (the writer flips rows on output).
+    let (y0, y1) = (RES * 12 / 100, RES * 49 / 100);
+    let (x0, x1) = (RES * 12 / 100, RES * 64 / 100);
+    let n = frames.clone().count() as f64;
+    let mut total = 0.0;
+    for frame in frames {
+        let scene =
+            Scene::from_usd(&sample("caustic_guided.usda")).expect("load caustic_guided.usda");
+        // Every pixel takes the whole budget (min = spp), and the firefly
+        // clamp is off: it would remove most of the caustic on both sides.
+        let settings = RenderSettings::new(SPP, 10, RES, RES, SPP, 0.05, frame)
+            .with_guiding(guided, 4, 0.5)
+            .with_indirect_clamp(0.0);
+        let buf = Renderer::new(scene.camera, scene.world, scene.lights, settings).render();
+        let mut sum = 0.0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let c = buf.get_pixel(x, y);
+                sum += (0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z) as f64;
+            }
+        }
+        total += sum / ((y1 - y0) * (x1 - x0)) as f64;
+    }
+    total / n
+}
+
+/// Rare, very bright paths must not darken a guided render. With passes
+/// blended by inverse *estimated* variance, a low-spp training pass that
+/// missed the caustic looked low-variance and took most of the weight, and
+/// this test measured a ratio of 0.52 (0.098 against 0.188: the shadow
+/// without its caustic). Weighted by sample budget it measures 0.89. The
+/// shadow is heavy-tailed, so 8 seeds leave about 8% of noise in the ratio
+/// (16 seeds at 256² measured 1.03 ± 0.05); the tolerance sits between the
+/// two outcomes, several standard errors from either.
+#[test]
+#[ignore = "renders sixteen small frames; run explicitly with --ignored"]
+fn guided_caustic_is_not_darkened() {
+    let unguided = caustic_shadow_mean(false, 1..=8);
+    let guided = caustic_shadow_mean(true, 1..=8);
+    let ratio = guided / unguided.max(1e-6);
+    assert!(
+        (ratio - 1.0).abs() < 0.25,
+        "guided caustic shadow {guided:.4} vs unguided {unguided:.4} — ratio {ratio:.3}"
     );
 }
 
