@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Render settings | Crust Render</title>
+<meta name="description" content="The crust:* attributes of the RenderSettings prim.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Render settings">
+  <meta name="twitter:description" content="The crust:* attributes of the RenderSettings prim.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Render settings">
+  <meta property="og:description" content="The crust:* attributes of the RenderSettings prim.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-01T08:00:00+00:00">
+  <meta property="og:site_name" content="Render settings">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Usd",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Render Settings",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/render-settings/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#example">Example</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#standard-attributes">Standard attributes</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#sampling">Sampling</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-samplesperpixel">crust:samplesPerPixel</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-minsamplesperpixel">crust:minSamplesPerPixel</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-variancethreshold">crust:varianceThreshold</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-adaptiveneighbourtolerance">crust:adaptiveNeighbourTolerance</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#light-transport">Light transport</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-maxdepth">crust:maxDepth</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-indirectclamp">crust:indirectClamp</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-samplingstrategy">crust:samplingStrategy</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-lightselection">crust:lightSelection</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#pixel-filter">Pixel filter</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-pixelfilter">crust:pixelFilter</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-pixelfilterradius">crust:pixelFilterRadius</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#sampler-seed">Sampler seed</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-frame">crust:frame</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#path-guiding">Path guiding</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-pathguiding">crust:pathGuiding</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-guidingtrainiterations">crust:guidingTrainIterations</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-guidingprob">crust:guidingProb</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#geometry">Geometry</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionlevel">crust:subdivisionLevel</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionedgelength">crust:subdivisionEdgeLength</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#lights">Lights</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-domelightcameravisibility">crust:domeLightCameraVisibility</a></li>
+  											
+  									</ul>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Render settings</h1>
+        <p class="lead">Sampling, light transport, filtering, path guiding and subdivision, set on the stage’s <code>RenderSettings</code> prim.</p>
+        <p>All the attributes on this page go on the <code>RenderSettings</code> prim. This is the prim named
+by the stage's <code>renderSettingsPrimPath</code> metadata, or <code>/Render/settings</code> if there is none.
+See <a href="https://doubleailes.github.io/crust-render/docs/usd/overview/#which-prim-holds-the-render-settings">Overview</a>.</p>
+<h2 id="example">Example</h2>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Scope &quot;Render&quot;
+{
+    def RenderSettings &quot;settings&quot;
+    {
+        # standard UsdRender attributes
+        rel camera = &lt;&#x2F;World&#x2F;cam&gt;
+        int2 resolution = (1920, 1080)
+
+        # sampling
+        int crust:samplesPerPixel = 512
+        int crust:minSamplesPerPixel = 64
+        float crust:varianceThreshold = 0.02
+        int crust:maxDepth = 16
+
+        # light transport
+        token crust:samplingStrategy = &quot;power&quot;
+        token crust:lightSelection = &quot;learned&quot;
+        float crust:indirectClamp = 0
+
+        # reconstruction
+        token crust:pixelFilter = &quot;gaussian&quot;
+        float crust:pixelFilterRadius = 2
+
+        # path guiding
+        bool crust:pathGuiding = true
+        int crust:guidingTrainIterations = 8
+
+        # geometry
+        int crust:subdivisionLevel = 2
+    }
+}
+</code></pre>
+<h2 id="standard-attributes">Standard attributes</h2>
+<p>Crust Render also reads these standard <code>UsdRenderSettings</code> attributes:</p>
+<table><thead><tr><th>attribute</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>int2 resolution</code></td><td><code>(640, 360)</code></td><td>image width and height in pixels. The first render product's own <code>resolution</code> overrides it.</td></tr>
+<tr><td><code>rel camera</code></td><td>first camera on the stage</td><td>the camera to render through. The first render product's own <code>camera</code> overrides it, and <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#camera"><code>--camera</code></a> overrides both.</td></tr>
+<tr><td><code>rel products</code></td><td>none</td><td>the <code>RenderProduct</code>s to write: output files and the AOVs in each. See <a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a>. Without products, the render writes one RGB EXR at <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#output"><code>-o</code></a>.</td></tr>
+</tbody></table>
+<h2 id="sampling">Sampling</h2>
+<h3 id="crust-samplesperpixel">crust:samplesPerPixel</h3>
+<p><code>int</code>, default <strong>128</strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#samples"><code>-s</code>, <code>--samples</code></a>.</p>
+<p>The maximum number of samples per pixel. Adaptive sampling can stop a pixel before it
+gets there.</p>
+<h3 id="crust-minsamplesperpixel">crust:minSamplesPerPixel</h3>
+<p><code>int</code>, default <strong>32</strong>.</p>
+<p>The number of samples every pixel takes before adaptive sampling may stop it. It is never
+lower than ⌈√<code>samplesPerPixel</code>⌉. A negative value is refused with a warning, and the
+default is used.</p>
+<p>When <code>crust:samplesPerPixel</code> is at or below this value, adaptive sampling never stops a
+pixel early: every pixel takes the full count.</p>
+<h3 id="crust-variancethreshold">crust:varianceThreshold</h3>
+<p><code>float</code>, default <strong>0.05</strong>.</p>
+<p>The adaptive sampling target. A pixel stops once the relative standard error of its
+estimate is below this value, after at least <code>crust:minSamplesPerPixel</code> samples. A pixel
+that hasn't seen any light yet keeps sampling.</p>
+<p>Lower values mean less noise and longer renders.</p>
+<h3 id="crust-adaptiveneighbourtolerance">crust:adaptiveNeighbourTolerance</h3>
+<p><code>float</code>, default <strong>1.0</strong>.</p>
+<p>A pixel is not allowed to stop while one of its four direct neighbours is much less
+converged than it is. This value is how much less converged a neighbour may be, in units
+of the convergence measure. It stops isolated pixels in a noisy area from stopping too
+early.</p>
+<p>A negative value turns the comparison off. A value that isn't finite (<code>nan</code>, <code>inf</code>) is
+refused with a warning, and the default is used.</p>
+<h2 id="light-transport">Light transport</h2>
+<h3 id="crust-maxdepth">crust:maxDepth</h3>
+<p><code>int</code>, default <strong>32</strong>.</p>
+<p>The maximum number of bounces along a path. Russian roulette usually ends paths sooner.</p>
+<h3 id="crust-indirectclamp">crust:indirectClamp</h3>
+<p><code>float</code>, default <strong>10</strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#indirect-clamp"><code>--indirect-clamp</code></a>.</p>
+<p>The firefly clamp. Each sample's indirect light is capped at this value in its largest
+channel (linear units; the hue is kept). <code>0</code> turns the clamp off.</p>
+<p>The clamp biases the image: it is the only biased default. Set it to <code>0</code> for reference
+renders and measurements.</p>
+<h3 id="crust-samplingstrategy">crust:samplingStrategy</h3>
+<p><code>token</code>, default <strong><code>power</code></strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#strategy"><code>--strategy</code></a>.</p>
+<p>How light sampling and BSDF sampling are combined.</p>
+<table><thead><tr><th>value</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>power</code></td><td>power-heuristic (β = 2) multiple importance sampling. <code>mis</code> is accepted as another name for it.</td></tr>
+<tr><td><code>balance</code></td><td>balance-heuristic multiple importance sampling</td></tr>
+<tr><td><code>light</code></td><td>light sampling only (diagnostic)</td></tr>
+<tr><td><code>bsdf</code></td><td>BSDF sampling only (diagnostic)</td></tr>
+</tbody></table>
+<p>An unknown name logs a warning and uses <code>power</code>.</p>
+<h3 id="crust-lightselection">crust:lightSelection</h3>
+<p><code>token</code>, default <strong><code>power</code></strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#light-selection"><code>--light-selection</code></a>.</p>
+<p>How light sampling picks which light to sample.</p>
+<table><thead><tr><th>value</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>power</code></td><td>by emitted power, defensively: half the shadow rays are shared evenly among the finite lights, and lights at infinity keep their uniform share</td></tr>
+<tr><td><code>uniform</code></td><td>every light is equally likely</td></tr>
+<tr><td><code>learned</code></td><td>visibility-aware: a short pre-pass learns, for each region of the scene, which lights reach it</td></tr>
+</tbody></table>
+<p>An unknown name logs a warning and uses <code>power</code>.</p>
+<h2 id="pixel-filter">Pixel filter</h2>
+<h3 id="crust-pixelfilter">crust:pixelFilter</h3>
+<p><code>token</code>, default <strong><code>triangle</code></strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#filter"><code>--filter</code></a>.</p>
+<p>The pixel reconstruction filter.</p>
+<table><thead><tr><th>value</th><th>default radius (pixels)</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>box</code></td><td>0.5</td><td>one-pixel box</td></tr>
+<tr><td><code>triangle</code></td><td>1.0</td><td>tent filter</td></tr>
+<tr><td><code>gaussian</code></td><td>1.5</td><td>truncated Gaussian</td></tr>
+<tr><td><code>blackman</code></td><td>1.5</td><td>4-term Blackman–Harris window</td></tr>
+<tr><td><code>mitchell</code></td><td>2.0</td><td>Mitchell–Netravali. Sharp, but its negative lobes can ring.</td></tr>
+</tbody></table>
+<p>An unknown name logs a warning and uses <code>triangle</code>.</p>
+<h3 id="crust-pixelfilterradius">crust:pixelFilterRadius</h3>
+<p><code>float</code>, default <strong>the filter's own radius</strong> (see the table above). CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#filter-radius"><code>--filter-radius</code></a>.</p>
+<p>The filter radius in pixels, measured from the pixel center. Very small or negative
+values are raised to a minimum of 0.01.</p>
+<h2 id="sampler-seed">Sampler seed</h2>
+<h3 id="crust-frame">crust:frame</h3>
+<p><code>int</code>, default <strong>0</strong>.</p>
+<p>Seeds the sampler, so that successive frames of an animation get different noise patterns
+instead of the same one. It doesn't choose which time is rendered.</p>
+<p><a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#frame"><code>--frame</code></a> chooses the time and replaces this
+seed with the frame number.</p>
+<h2 id="path-guiding">Path guiding</h2>
+<p>Path guiding learns where light comes from during a few training passes. It then sends
+part of the bounce rays in those directions. It helps scenes where most light arrives
+along a few indirect paths, such as a room lit through a door. It is off by default.</p>
+<h3 id="crust-pathguiding">crust:pathGuiding</h3>
+<p><code>bool</code>, default <strong>false</strong>.</p>
+<p>Turns path guiding on.</p>
+<h3 id="crust-guidingtrainiterations">crust:guidingTrainIterations</h3>
+<p><code>int</code>, default <strong>4</strong>, minimum 1.</p>
+<p>The number of training passes before the final render.</p>
+<h3 id="crust-guidingprob">crust:guidingProb</h3>
+<p><code>float</code>, default <strong>0.5</strong>.</p>
+<p>The probability, at each bounce, of sampling the learned guide instead of the BSDF.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def RenderSettings &quot;settings&quot;
+{
+    bool crust:pathGuiding = true
+    int crust:guidingTrainIterations = 8
+    float crust:guidingProb = 0.5
+}
+</code></pre>
+<p><code>samples/cornellbox_guided.usda</code> is an example. Set <code>crust:pathGuiding = false</code> there to
+compare with plain BSDF sampling at the same sample count.</p>
+<h2 id="geometry">Geometry</h2>
+<h3 id="crust-subdivisionlevel">crust:subdivisionLevel</h3>
+<p><code>int</code>, default <strong>0</strong>, maximum <strong>6</strong>. CLI: <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#subdiv-level"><code>--subdiv-level</code></a>.</p>
+<p>How many times to refine every mesh whose <code>subdivisionScheme</code> is not <code>none</code>. An
+unauthored <code>subdivisionScheme</code> counts as USD's default, <code>catmullClark</code>, so most exported
+meshes are subdivision meshes.</p>
+<ul>
+<li>At <strong>0</strong>, nothing is refined. A subdivision mesh renders its control cage with smooth
+normals.</li>
+<li>Each level multiplies a mesh's face count by four. Values above 6 are clamped with a
+warning.</li>
+</ul>
+<p>USD has no per-mesh refinement level, so this one level applies to the whole stage. To
+keep a mesh from being subdivided, author <code>subdivisionScheme = "none"</code> on it.</p>
+
+<div class="alert alert-warning d-flex" role="alert">
+  <div class="flex-shrink-1 alert-icon">⚠️</div>
+  <div class="w-100"><p>Older scenes put <code>crust:subdivisionLevel</code> on each <code>Mesh</code>. That is no longer read: a
+warning is logged once, and the mesh uses the <code>RenderSettings</code> level instead.</p>
+</div>
+</div>
+<p>With <a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionedgelength"><code>crust:subdivisionEdgeLength</code></a> set, this is the
+highest level adaptive subdivision may choose.</p>
+<h3 id="crust-subdivisionedgelength">crust:subdivisionEdgeLength</h3>
+<p><code>float</code>, in pixels, unset by default. CLI:
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#subdiv-edge-length"><code>--subdiv-edge-length</code></a>.</p>
+<p>Turns on adaptive subdivision. Each control-cage edge is cut until its segments are at
+most this many pixels long, seen from the render camera at the edge's own distance. So
+the near part of a mesh is refined and its far part keeps its cage.</p>
+<ul>
+<li><a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionlevel"><code>crust:subdivisionLevel</code></a> becomes the ceiling (2^level
+segments per edge), 3 when it is unauthored.</li>
+<li>Only geometry used once is adaptive. A prototype placed several times is refined to
+<code>crust:subdivisionLevel</code> (else 0) everywhere.</li>
+<li>Faces outside the camera's view are not refined.</li>
+<li>The camera must be named by <code>rel camera</code> on this prim or by <code>--camera</code>. Otherwise a
+warning is logged and the uniform level applies.</li>
+<li>A value that is not a positive number is ignored with a warning.</li>
+</ul>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def RenderSettings &quot;settings&quot;
+{
+    rel camera = &lt;&#x2F;World&#x2F;Cam&gt;
+    float crust:subdivisionEdgeLength = 2
+}
+</code></pre>
+<p><code>samples/subdivision_adaptive.usda</code> places one cube five times at growing distances,
+refined to levels 3, 3, 2, 1 and 0.</p>
+<h2 id="lights">Lights</h2>
+<h3 id="crust-domelightcameravisibility">crust:domeLightCameraVisibility</h3>
+<p><code>bool</code>, default <strong>true</strong>.</p>
+<p>Whether camera rays see the lights at infinity: dome lights, distant lights and the
+backdrop. <code>false</code> hides all of them from the camera, whatever the lights themselves
+author. How they light the scene doesn't change.</p>
+<p>Hydra's standard <code>domeLightCameraVisibility</code> setting, as used by usdview and hdEmbree, is
+read too. If both are authored, <code>crust:domeLightCameraVisibility</code> wins.</p>
+<p>To hide one dome light rather than all of them, use
+<a href="https://doubleailes.github.io/crust-render/docs/usd/lights/#crust-light-cameravisible"><code>crust:light:cameraVisible</code></a> on that
+light.</p>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;usd&#x2F;render-settings.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;reference&#x2F;environment-variables&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Environment variables
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

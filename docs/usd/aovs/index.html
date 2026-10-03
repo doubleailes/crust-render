@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Render products and AOVs | Crust Render</title>
+<meta name="description" content="RenderProduct and RenderVar: which files a render writes, and which AOVs go in them.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Render products and AOVs">
+  <meta name="twitter:description" content="RenderProduct and RenderVar: which files a render writes, and which AOVs go in them.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Render products and AOVs">
+  <meta property="og:description" content="RenderProduct and RenderVar: which files a render writes, and which AOVs go in them.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/usd/aovs/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-03T08:00:00+00:00">
+  <meta property="og:site_name" content="Render products and AOVs">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Usd",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Aovs",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/aovs/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#how-a-render-asks-for-aovs">How a render asks for AOVs</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#products">Products</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#vars">Vars</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#channel-names">Channel names</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#types-and-precision">Types and precision</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#source-types">Source types</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#sources">Sources</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#spaces">Spaces</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#where-the-camera-ray-meets-no-surface">Where the camera ray meets no surface</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#accumulation">Accumulation</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#the-exr-files">The EXR files</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#guarantees">Guarantees</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/aovs/#not-supported">Not supported</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Render products and AOVs</h1>
+        <p class="lead">AOVs are asked for the way USD defines it: <code>RenderProduct</code>s on the <code>RenderSettings</code> prim, each listing its <code>RenderVar</code>s. Scenes exported from Houdini Solaris work unchanged.</p>
+        <h2 id="how-a-render-asks-for-aovs">How a render asks for AOVs</h2>
+<p>AOVs (arbitrary output variables, or render passes) are requested only through the
+<code>UsdRender</code> schema. There is no <code>crust:*</code> attribute and no command-line flag for them.</p>
+<ul>
+<li>The <code>RenderSettings</code> prim lists its products in <code>rel products</code>.</li>
+<li>Each <code>RenderProduct</code> is one output file, named by <code>productName</code>. It lists its channels
+in <code>rel orderedVars</code>, in order.</li>
+<li>Each <code>RenderVar</code> is one layer of channels. <code>sourceName</code> says what to compute,
+<code>sourceType</code> how to read that name, and <code>dataType</code> its type.</li>
+</ul>
+<p>A stage without <code>products</code> renders exactly as before: one RGB EXR at
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#output"><code>-o</code></a> (default <code>output.exr</code>), plus the PNG.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Scope &quot;Render&quot;
+{
+    def RenderSettings &quot;settings&quot;
+    {
+        rel camera = &lt;&#x2F;World&#x2F;Cam&gt;
+        int2 resolution = (1920, 1080)
+        rel products = [&lt;&#x2F;Render&#x2F;Products&#x2F;beauty&gt;, &lt;&#x2F;Render&#x2F;Products&#x2F;data&gt;]
+    }
+
+    def Scope &quot;Products&quot;
+    {
+        def RenderProduct &quot;beauty&quot;
+        {
+            token productName = &quot;renders&#x2F;beauty.0001.exr&quot;
+            rel orderedVars = [&lt;&#x2F;Render&#x2F;Products&#x2F;Vars&#x2F;C&gt;]
+        }
+
+        def RenderProduct &quot;data&quot;
+        {
+            token productName = &quot;renders&#x2F;data.0001.exr&quot;
+            rel orderedVars = [&lt;&#x2F;Render&#x2F;Products&#x2F;Vars&#x2F;Z&gt;, &lt;&#x2F;Render&#x2F;Products&#x2F;Vars&#x2F;N&gt;]
+        }
+
+        def Scope &quot;Vars&quot;
+        {
+            def RenderVar &quot;C&quot;
+            {
+                uniform token dataType = &quot;color4f&quot;
+                uniform string sourceName = &quot;Ci&quot;
+            }
+
+            def RenderVar &quot;Z&quot;
+            {
+                uniform token dataType = &quot;float&quot;
+                uniform string sourceName = &quot;depth&quot;
+            }
+
+            def RenderVar &quot;N&quot;
+            {
+                uniform token dataType = &quot;normal3f&quot;
+                uniform string sourceName = &quot;normal&quot;
+            }
+        }
+    }
+}
+</code></pre>
+<p><code>samples/aovs.usda</code> asks for every source on this page.</p>
+<h2 id="products">Products</h2>
+<p>A product starts from the settings prim's <code>camera</code> and <code>resolution</code> and overrides only
+what it authors itself, as <code>UsdRenderComputeSpec</code> does.</p>
+<ul>
+<li><strong>One camera and resolution per render.</strong> They are the first product's. Usually that
+means the settings' own values. <a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#camera"><code>--camera</code></a>
+still wins over both. A later product that resolves to another camera or resolution is
+skipped with a warning.</li>
+<li><strong><code>productName</code></strong> is read at the frame being rendered, so a time-sampled name gives one
+file per frame. A relative path is relative to the working directory, and missing
+directories are created.</li>
+<li><strong><a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#output"><code>-o</code></a></strong> replaces the first product's
+<code>productName</code>, as husk's <code>-o</code> does. The other products keep theirs.</li>
+<li><strong>Two products with the same path</strong> cannot both be written: the later one is skipped
+with a warning. This includes a product whose path <code>-o</code> gives to the first.</li>
+<li><strong><code>productType</code></strong> must be <code>raster</code> (the default). A <code>deepRaster</code> product is skipped with
+a warning.</li>
+<li><strong>The PNG preview</strong> is made from the first product's beauty var and written beside that
+product, with a <code>.png</code> extension. A first product with no beauty var gets no PNG.</li>
+</ul>
+<p>Text attributes authored as <code>driver:parameters:*</code> on a product are copied into its EXR
+header: <code>driver:parameters:artist</code> as <code>artist</code>, and <code>driver:parameters:OpenEXR:&lt;key&gt;</code> as
+<code>&lt;key&gt;</code>. A forwarded <code>colorInteropID</code> is refused with a warning: crust sets it to the space
+it rendered in.</p>
+<h2 id="vars">Vars</h2>
+<h3 id="channel-names">Channel names</h3>
+<p>A var is one layer of channels named <code>&lt;layer&gt;.&lt;component&gt;</code>. The layer is the var's
+<code>driver:parameters:aov:name</code> if authored, otherwise the <code>RenderVar</code> prim name.</p>
+<table><thead><tr><th>kind</th><th>channels</th></tr></thead><tbody>
+<tr><td>colour</td><td><code>&lt;layer&gt;.R</code>, <code>.G</code>, <code>.B</code> (and <code>.A</code> for a 4-channel type)</td></tr>
+<tr><td>vector (positions, normals)</td><td><code>&lt;layer&gt;.X</code>, <code>.Y</code>, <code>.Z</code></td></tr>
+<tr><td>UV</td><td><code>&lt;layer&gt;.U</code>, <code>.V</code></td></tr>
+<tr><td>scalar</td><td>one channel named <code>&lt;layer&gt;</code></td></tr>
+</tbody></table>
+<p>The product's first beauty var is written without a prefix: <code>R</code>, <code>G</code>, <code>B</code>[, <code>A</code>]. Every
+viewer shows it as the image. A var named <code>Z</code> therefore gives the conventional <code>Z</code>
+channel.</p>
+<p>An authored <code>driver:parameters:aov:channel_prefix</code> replaces the layer name. Two vars that
+would write the same channel name are not both written: the second is skipped with a
+warning.</p>
+<h3 id="types-and-precision">Types and precision</h3>
+<p><code>dataType</code> gives the number of channels and their precision. An authored
+<code>driver:parameters:aov:format</code> (Houdini writes both) overrides it.</p>
+<table><thead><tr><th>type</th><th>stored as</th></tr></thead><tbody>
+<tr><td><code>half</code>, <code>half3</code>, <code>color3h</code>, ...</td><td>HALF</td></tr>
+<tr><td><code>float</code>, <code>float3</code>, <code>color3f</code>, <code>normal3f</code>, <code>point3f</code>, <code>texCoord2f</code>, ...</td><td>FLOAT</td></tr>
+<tr><td><code>int</code></td><td>UINT; <code>-1</code> is written as <code>0xFFFFFFFF</code></td></tr>
+</tbody></table>
+<p>The type must fit the source: three or four channels for the beauty, three for positions
+and normals, two for UVs, one for scalars. An integer type is accepted only for
+<code>sampleCount</code>. A var whose type does not fit is skipped with a warning.</p>
+<h3 id="source-types">Source types</h3>
+<table><thead><tr><th><code>sourceType</code></th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>raw</code> (default)</td><td><code>sourceName</code> is looked up in the table below. An empty <code>sourceName</code> uses the channel name.</td></tr>
+<tr><td><code>lpe</code></td><td>Light path expressions. Not supported yet: skipped with a warning.</td></tr>
+<tr><td><code>primvar</code></td><td>Not supported yet: skipped with a warning.</td></tr>
+<tr><td><code>intrinsic</code></td><td>Unimplemented in UsdRender itself: skipped with a warning.</td></tr>
+</tbody></table>
+<p><code>sourceType</code> and <code>driver:parameters:aov:name</code> may be authored as a <code>token</code> or a
+<code>string</code>; both are read.</p>
+<h2 id="sources">Sources</h2>
+<p>USD does not standardise AOV names. Crust Render uses Hydra's names where Hydra has one,
+and accepts the RenderMan, Arnold, Karma and Blender names as aliases. Names are
+case-sensitive.</p>
+<table><thead><tr><th>name</th><th>aliases</th><th>type</th><th>accumulation</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>color</code></td><td><code>Ci</code>, <code>C</code>, <code>RGBA</code>, <code>beauty</code>, <code>HdrColor</code>, <code>Combined</code></td><td><code>color3f</code> / <code>color4f</code></td><td>filtered</td><td>The beauty: the same image a render without products writes. <code>color4f</code> adds alpha.</td></tr>
+<tr><td><code>alpha</code></td><td><code>a</code>, <code>A</code>, <code>opacity</code></td><td><code>float</code></td><td>filtered</td><td>Coverage: the fraction of camera samples that hit geometry.</td></tr>
+<tr><td><code>depth</code></td><td><code>cameraDepth</code>, <code>z</code>, <code>Z</code>, <code>Depth</code></td><td><code>float</code></td><td>closest</td><td>Camera-space depth: distance from the camera plane along the view axis, in scene units. <code>+inf</code> where nothing was hit.</td></tr>
+<tr><td><code>distance</code></td><td><code>DistanceToCameraSD</code></td><td><code>float</code></td><td>closest</td><td>Distance from the camera position to the first hit. <code>+inf</code> where nothing was hit.</td></tr>
+<tr><td><code>P</code></td><td><code>Pworld</code>, <code>__Pworld</code>, <code>Position</code></td><td><code>point3f</code></td><td>closest</td><td>World-space position of the first hit.</td></tr>
+<tr><td><code>Peye</code></td><td><code>Pcam</code>, <code>__Pcam</code></td><td><code>point3f</code></td><td>closest</td><td>Camera-space position of the first hit.</td></tr>
+<tr><td><code>normal</code></td><td><code>N</code>, <code>Nworld</code>, <code>__Nworld</code>, <code>Normal</code></td><td><code>normal3f</code></td><td>filtered</td><td>World-space shading normal, facing the camera.</td></tr>
+<tr><td><code>Neye</code></td><td><code>Nn</code></td><td><code>normal3f</code></td><td>filtered</td><td>The same normal in camera space.</td></tr>
+<tr><td><code>primvars:st</code></td><td><code>st</code>, <code>uv</code>, <code>UV</code></td><td><code>texCoord2f</code></td><td>filtered</td><td>The first hit's texture coordinates.</td></tr>
+<tr><td><code>sampleCount</code></td><td><code>__sampleCount</code></td><td><code>float</code> / <code>int</code></td><td>per pixel</td><td>Samples the pixel took: shows where adaptive sampling stopped early.</td></tr>
+<tr><td><code>variance</code></td><td><code>crust:variance</code></td><td><code>float</code></td><td>per pixel</td><td>Variance of the pixel's luminance mean: the quantity adaptive sampling stops on.</td></tr>
+</tbody></table>
+<p>Any other name is skipped with a warning, and no channel is written for it. Crust Render
+never writes a black channel that looks valid.</p>
+
+<div class="alert alert-warning d-flex" role="alert">
+  <div class="flex-shrink-1 alert-icon">⚠️</div>
+  <div class="w-100"><p><strong><code>depth</code> is camera depth, not clip-space.</strong> Hydra's own definition of <code>depth</code> is the
+rasteriser's clip-space value in [0, 1]. Crust Render follows the production renderers'
+Hydra delegates (hdPrman, Arnold), which map <code>depth</code> to camera-space depth, because that
+is what compositors expect from a <code>Z</code> channel.</p>
+</div>
+</div>
+<h3 id="spaces">Spaces</h3>
+<ul>
+<li><strong>World space</strong> is the stage's world, the frame every other crust quantity uses.</li>
+<li><strong>Camera space</strong> is the USD camera's: X right, Y up, looking down −Z. Points in front
+of the camera have a negative <code>Peye.Z</code>, and <code>depth</code> is <code>−Peye.Z</code>.</li>
+<li><strong>Normals</strong> stay in [−1, 1]. They are never remapped to [0, 1].</li>
+</ul>
+<h3 id="where-the-camera-ray-meets-no-surface">Where the camera ray meets no surface</h3>
+<ul>
+<li><strong>Escaped</strong> (the sky or a dome): the beauty gets the background; <code>alpha</code> is 0; data
+AOVs keep their clear value. A visible dome is colour without coverage, as compositing
+expects.</li>
+<li><strong>Volume scatter</strong>: <code>depth</code>, <code>distance</code>, <code>P</code> and <code>Peye</code> are the scatter point; the
+normals and UVs keep their clear value; <code>alpha</code> is 0.</li>
+<li><strong>Cutouts</strong>: a surface the camera ray passes through is not a hit. The AOVs describe
+what is behind it, as the beauty does.</li>
+</ul>
+<h2 id="accumulation">Accumulation</h2>
+<p>A pixel takes many samples. Each AOV combines them in one of two ways.</p>
+<ul>
+<li>
+<p><strong>filtered</strong>: the samples' average, weighted by the same pixel-filter weights as the
+beauty. Colour, alpha, normals and UVs use it by default. A filtered normal at an
+object's edge is a blend of the object's normal and the clear value, which is what a
+denoiser expects.</p>
+<p>A clear value that is not a finite number (depth and distance clear to <code>+inf</code>) cannot
+be averaged in. A filtered var with such a clear value averages only the samples that
+hit something, and keeps the clear value where none did.</p>
+</li>
+<li>
+<p><strong>closest</strong>: the value of the sample nearest the camera. Depth, distance and positions
+use it by default. It never blends two surfaces, so a depth or position pass has no
+in-between values at an edge.</p>
+<p>Only samples that land inside the pixel's own square count: the default triangle
+filter places samples up to one pixel outside it, and those would fatten edges. A
+pixel whose samples all landed outside its square takes the sample nearest its centre.</p>
+</li>
+</ul>
+<p>These authored attributes change the mode, first match wins:</p>
+<ol>
+<li><code>driver:parameters:aov:multiSampled</code>: <code>true</code> is filtered, <code>false</code> is closest.</li>
+<li>Arnold's <code>arnold:filter</code>: <code>closest_filter</code> is closest, anything else filtered.</li>
+<li>Karma's <code>driver:parameters:aov:filter</code>: <code>["closest", ...]</code> is closest.</li>
+<li>RenderMan's <code>ri:accumulationRule</code> or <code>ri:displayChannel:filter</code>: <code>zmin</code> is closest.
+Other rules (<code>zmax</code>, <code>min</code>, <code>max</code>, <code>sum</code>, ...) are refused with a warning.</li>
+</ol>
+<p><code>driver:parameters:aov:clearValue</code> replaces the clear value: what a pixel holds where
+nothing was hit. Houdini authors <code>0</code> for every var, including depth.</p>
+<p>The beauty, <code>sampleCount</code> and <code>variance</code> are per-pixel quantities and ignore the mode.</p>
+<h2 id="the-exr-files">The EXR files</h2>
+<p>Each product is one single-part, scanline, ZIP-compressed EXR. The header carries
+<code>software = crust-render &lt;version&gt;</code> and <code>colorInteropID = lin_rec709_scene</code>, the ASWF
+Color Interop tag for crust's rendering space, which applies to the colour channels.</p>
+<p>An authored <code>renderingColorSpace</code> other than linear Rec.709 is refused with a warning:
+crust renders in one colour space.</p>
+<h2 id="guarantees">Guarantees</h2>
+<ul>
+<li>Asking for AOVs never changes the beauty. It is bit-identical to the same render
+without products.</li>
+<li>Every channel is bit-identical between the default tiles and
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#scanline"><code>--scanline</code></a>.</li>
+<li>A render whose products ask for nothing beyond a 3-channel beauty does no AOV work at
+all.</li>
+<li>AOVs see exactly the samples the beauty took, adaptive sampling and path guiding
+included. A guided render blends its passes' AOVs with the same weights as its beauty.</li>
+</ul>
+<h2 id="not-supported">Not supported</h2>
+<p>Each of these is refused with a warning when authored, never ignored silently:</p>
+<ul>
+<li>light path expressions (<code>sourceType = "lpe"</code>), <code>albedo</code>, light groups;</li>
+<li>identity AOVs (<code>primId</code>, <code>instanceId</code>, <code>elementId</code>) and Cryptomatte;</li>
+<li><code>sourceType = "primvar"</code>;</li>
+<li>the geometric normal <code>Ng</code>;</li>
+<li>deep output (<code>productType = "deepRaster"</code>);</li>
+<li>more than one camera or resolution in a render;</li>
+<li><code>pixelAspectRatio</code>, <code>dataWindowNDC</code>, <code>disableMotionBlur</code>, <code>instantaneousShutter</code> and
+<code>disableDepthOfField</code> (warned only when authored with a value that would change the
+image).</li>
+</ul>
+<p>The <code>resolution</code> fallback is crust's 640×360, not the schema's 2048×1080, so scenes
+without a <code>resolution</code> keep their size.</p>
+<p>For MaterialX surfaces whose <code>normal</code> input is connected (a normal map inside the
+MaterialX graph), <code>normal</code> and <code>Neye</code> give the interpolated mesh normal, before that
+input. UsdPreviewSurface normal maps are applied.</p>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;usd&#x2F;aovs.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;reference&#x2F;environment-variables&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Environment variables
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Environment variables | Crust Render</title>
+<meta name="description" content="Every CRUST_* environment switch, its default and its effect.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Environment variables">
+  <meta name="twitter:description" content="Every CRUST_* environment switch, its default and its effect.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Environment variables">
+  <meta property="og:description" content="Every CRUST_* environment switch, its default and its effect.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-01T08:00:00+00:00">
+  <meta property="og:site_name" content="Environment variables">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Reference",
+            "item": "https://doubleailes.github.io/crust-render/docs/reference/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Environment Variables",
+            "item": "https://doubleailes.github.io/crust-render/docs/reference/environment-variables/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#what-they-are-for">What they are for</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#value-syntax">Value syntax</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#summary">Summary</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#usd-import">USD import</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-stream-import">CRUST_STREAM_IMPORT</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-mesh-bake">CRUST_MESH_BAKE</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-subdiv">CRUST_SUBDIV</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-displace">CRUST_DISPLACE</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-adaptive-per-face">CRUST_ADAPTIVE_PER_FACE</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-adaptive-frustum">CRUST_ADAPTIVE_FRUSTUM</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#ray-tracing">Ray tracing</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-bvh-packet-sah">CRUST_BVH_PACKET_SAH</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tri-packets">CRUST_TRI_PACKETS</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#shading">Shading</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-mtlx-opt">CRUST_MTLX_OPT</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-shader-jit">CRUST_SHADER_JIT</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#textures">Textures</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ray-cones">CRUST_RAY_CONES</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex">CRUST_TEX</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-max">CRUST_TEX_MAX</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-mip">CRUST_TEX_MIP</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-stream">CRUST_TEX_STREAM</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-cache-mb">CRUST_TEX_CACHE_MB</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#ptex">Ptex</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex">CRUST_PTEX</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-max-log2">CRUST_PTEX_MAX_LOG2</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-mip">CRUST_PTEX_MIP</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream">CRUST_PTEX_STREAM</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-cache-mb">CRUST_PTEX_CACHE_MB</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream-min-mb">CRUST_PTEX_STREAM_MIN_MB</a></li>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream-mipspace">CRUST_PTEX_STREAM_MIPSPACE</a></li>
+  											
+  									</ul>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#other-variables">Other variables</a></li>
+  							
+  									<ul>
+  											
+  											<li><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#rayon-num-threads">RAYON_NUM_THREADS</a></li>
+  											
+  									</ul>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Environment variables</h1>
+        <p class="lead">The <code>CRUST_*</code> variables switch optimizations off and tune memory budgets. A normal render needs none of them.</p>
+        <h2 id="what-they-are-for">What they are for</h2>
+<p>Each <code>CRUST_*</code> switch exists to compare an optimization against the behaviour it
+replaced. Unset, every switch keeps the default: the optimized behaviour. Setting a switch
+to its "off" value brings back the old behaviour. The image is then either bit-identical
+or differs in the documented way.</p>
+<p>So the environment is for <strong>diagnosis and tuning</strong>, not for look development. To change
+how a scene looks, use the <a href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD attributes</a> or the
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">command line</a>.</p>
+<p>Typical uses:</p>
+<ul>
+<li><strong>Isolate a problem.</strong> <code>CRUST_TEX=0</code> renders without UV textures. If an artifact goes
+away, it comes from a texture. <code>CRUST_SUBDIV=0</code> does the same for subdivision.</li>
+<li><strong>Fit a scene in memory.</strong> <code>CRUST_TEX_CACHE_MB</code>, <code>CRUST_PTEX_STREAM</code> and
+<code>CRUST_TRI_PACKETS=indexed</code> trade speed for memory.</li>
+<li><strong>Check a speed-up.</strong> Render once with the switch on and once with it off.</li>
+</ul>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash"># render without any UV or Ptex texture
+CRUST_TEX=0 CRUST_PTEX=0 crust-render -i scene.usda -o untextured.exr
+
+# stream Ptex with a 2 GiB budget
+CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_CACHE_MB=2048 \
+    crust-render -i island.usda --stats
+</code></pre>
+<p>On Windows PowerShell, set a variable with <code>$env:CRUST_TEX = "0"</code> before running
+<code>crust-render</code>.</p>
+<h2 id="value-syntax">Value syntax</h2>
+<p>The variables are read once, when the render starts.</p>
+<p><strong>Booleans</strong> accept:</p>
+<table><thead><tr><th>off</th><th>on</th></tr></thead><tbody>
+<tr><td><code>0</code>, <code>false</code>, <code>off</code>, <code>no</code></td><td><code>1</code>, <code>true</code>, <code>on</code>, <code>yes</code></td></tr>
+</tbody></table>
+<p><strong>Numbers</strong> must be integers in the range given for each variable. <strong>Keywords</strong> must be
+one of the listed names.</p>
+<p>A value that can't be read logs one warning naming the variable and the accepted values,
+then the default is used. A typo never stops a render, so read the warnings.</p>
+<h2 id="summary">Summary</h2>
+<table><thead><tr><th>variable</th><th>default</th><th>area</th></tr></thead><tbody>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-stream-import"><code>CRUST_STREAM_IMPORT</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-mesh-bake"><code>CRUST_MESH_BAKE</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-subdiv"><code>CRUST_SUBDIV</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-displace"><code>CRUST_DISPLACE</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-adaptive-per-face"><code>CRUST_ADAPTIVE_PER_FACE</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-adaptive-frustum"><code>CRUST_ADAPTIVE_FRUSTUM</code></a></td><td>on</td><td>USD import</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-bvh-packet-sah"><code>CRUST_BVH_PACKET_SAH</code></a></td><td>on</td><td>ray tracing</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tri-packets"><code>CRUST_TRI_PACKETS</code></a></td><td><code>auto</code></td><td>ray tracing</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-mtlx-opt"><code>CRUST_MTLX_OPT</code></a></td><td>on</td><td>shading</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-shader-jit"><code>CRUST_SHADER_JIT</code></a></td><td>on</td><td>shading</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ray-cones"><code>CRUST_RAY_CONES</code></a></td><td>on</td><td>textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex"><code>CRUST_TEX</code></a></td><td>on</td><td>UV textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-max"><code>CRUST_TEX_MAX</code></a></td><td>1024</td><td>UV textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-mip"><code>CRUST_TEX_MIP</code></a></td><td>on</td><td>UV textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-stream"><code>CRUST_TEX_STREAM</code></a></td><td>on</td><td>UV textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-tex-cache-mb"><code>CRUST_TEX_CACHE_MB</code></a></td><td>1024</td><td>UV textures</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex"><code>CRUST_PTEX</code></a></td><td>on</td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-max-log2"><code>CRUST_PTEX_MAX_LOG2</code></a></td><td>5 preloaded / uncapped streamed</td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-mip"><code>CRUST_PTEX_MIP</code></a></td><td>on</td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream"><code>CRUST_PTEX_STREAM</code></a></td><td><strong>off</strong></td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-cache-mb"><code>CRUST_PTEX_CACHE_MB</code></a></td><td>1024</td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream-min-mb"><code>CRUST_PTEX_STREAM_MIN_MB</code></a></td><td>8</td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#crust-ptex-stream-mipspace"><code>CRUST_PTEX_STREAM_MIPSPACE</code></a></td><td><code>linear</code></td><td>Ptex</td></tr>
+<tr><td><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/#rayon-num-threads"><code>RAYON_NUM_THREADS</code></a></td><td>all cores</td><td>threads</td></tr>
+</tbody></table>
+<h2 id="usd-import">USD import</h2>
+<h3 id="crust-stream-import">CRUST_STREAM_IMPORT</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, a large stage is imported one top-level subtree at a time. Each subtree is composed
+through its own masked stage and released before the next, so only about one subtree of
+composed USD is in memory at once. On the Moana Island this cut peak memory from 117 GiB
+to 44 GiB, with the same image. Small scenes are always imported through one stage.</p>
+<p><code>0</code> imports the whole scene through one stage.</p>
+<h3 id="crust-mesh-bake">CRUST_MESH_BAKE</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, a mesh placed only once is baked into world space. <code>0</code> keeps every mesh as an
+instance with its own transform.</p>
+<p>The result is not bit-identical: an instanced mesh is intersected in its local space, so
+a very small number of pixels differ in the last bit.</p>
+<h3 id="crust-subdiv">CRUST_SUBDIV</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> renders every mesh as its faceted control cage, whatever <code>--subdiv-level</code> or
+<a href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/#crust-subdivisionlevel"><code>crust:subdivisionLevel</code></a> say.</p>
+<p>This isn't the same as <code>--subdiv-level 0</code>, which still shades the cage with smooth
+normals. Use <code>CRUST_SUBDIV=0</code> to tell whether an artifact comes from subdivision.</p>
+<h3 id="crust-displace">CRUST_DISPLACE</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> imports every mesh undisplaced, whatever its material's
+<a href="https://doubleailes.github.io/crust-render/docs/usd/materials/#displacement">displacement</a> says. A mesh with
+<code>subdivisionScheme = "none"</code> then renders as its faceted cage again instead of being diced
+bilinearly so it can be displaced. The result is bit-identical to the same stage with its
+displacement inputs removed, so use it to tell whether a change in shape comes from
+displacement.</p>
+<h3 id="crust-adaptive-per-face">CRUST_ADAPTIVE_PER_FACE</h3>
+<p>Boolean, default <strong>on</strong>. Only with
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#subdiv-edge-length"><code>--subdiv-edge-length</code></a>.</p>
+<p><code>0</code> refines each mesh to one level, chosen for its nearest point to the camera, instead
+of cutting each face by its own size on screen. A large mesh close to the camera is then
+refined everywhere, its far end included. Use it to compare the two.</p>
+<h3 id="crust-adaptive-frustum">CRUST_ADAPTIVE_FRUSTUM</h3>
+<p>Boolean, default <strong>on</strong>. Only with
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#subdiv-edge-length"><code>--subdiv-edge-length</code></a>.</p>
+<p><code>0</code> refines geometry outside the camera's view by its distance like the rest, so its
+reflections and shadows keep their detail, at the cost of memory.</p>
+<h2 id="ray-tracing">Ray tracing</h2>
+<h3 id="crust-bvh-packet-sah">CRUST_BVH_PACKET_SAH</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, the BVH builder sizes its leaves by how many SIMD packets of triangles they hold. <code>0</code>
+uses the older per-triangle leaf cost.</p>
+<p>The trees have different shapes, so ties between exactly equal hits can resolve
+differently. The difference is noise, not bias.</p>
+<h3 id="crust-tri-packets">CRUST_TRI_PACKETS</h3>
+<p>Keyword, default <strong><code>auto</code></strong>.</p>
+<p>The memory layout of the ray tracing kernel's triangle packets. Every layout gives
+bit-identical results.</p>
+<table><thead><tr><th>value</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>auto</code></td><td>the measured default, currently <code>gathered</code></td></tr>
+<tr><td><code>gathered</code></td><td>192-byte packets that carry their vertices. Fastest.</td></tr>
+<tr><td><code>indexed</code></td><td>92-byte packets of vertex indices. About a quarter less kernel memory per triangle, with 13–30% slower traversal. On the Moana island at subdivision level 1 it saves 8.4 GiB of 36.6 for an 8–9% slower render, and the import gets slightly faster.</td></tr>
+</tbody></table>
+<p>Use <code>indexed</code> when a scene doesn't otherwise fit in memory.</p>
+<h2 id="shading">Shading</h2>
+<h3 id="crust-mtlx-opt">CRUST_MTLX_OPT</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, MaterialX shading programs are optimized when they are compiled (constant folding,
+hoisting, removing unused nodes). <code>0</code> runs them as compiled. Bit-identical.</p>
+<h3 id="crust-shader-jit">CRUST_SHADER_JIT</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, MaterialX shading programs are compiled to machine code. <code>0</code> interprets them instead.
+Bit-identical, only slower.</p>
+<p>The JIT exists only in builds with the <code>jit</code> feature, which is the default. A build with
+<code>--no-default-features</code> always interprets.</p>
+<h2 id="textures">Textures</h2>
+<h3 id="crust-ray-cones">CRUST_RAY_CONES</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, each texture lookup estimates its footprint from a ray cone and picks a matching mip
+level. <code>0</code> makes every footprint zero, so the finest mip level is always read. This shows
+whether an artifact comes from texture filtering.</p>
+<h3 id="crust-tex">CRUST_TEX</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> declines every UV texture, so each surface renders with its constant (untextured)
+parameter values.</p>
+<h3 id="crust-tex-max">CRUST_TEX_MAX</h3>
+<p>Integer ≥ 1, default <strong>1024</strong>.</p>
+<p>The largest edge, in pixels, of a UV texture tile that is loaded fully into memory. Larger
+images are reduced to fit. Textures streamed from a <code>.tx</code> file aren't affected.</p>
+<h3 id="crust-tex-mip">CRUST_TEX_MIP</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> builds no mip pyramid for UV textures loaded into memory, so every lookup reads full
+resolution.</p>
+<h3 id="crust-tex-stream">CRUST_TEX_STREAM</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p>On, a UV texture with a <code>.tx</code> file beside it is streamed tile by tile from that file. <code>0</code>
+loads every texture fully into memory, even when a <code>.tx</code> exists. See
+<a href="https://doubleailes.github.io/crust-render/docs/reference/command-line/#auto-tx"><code>--auto-tx</code></a> to create the <code>.tx</code> files.</p>
+<h3 id="crust-tex-cache-mb">CRUST_TEX_CACHE_MB</h3>
+<p>Integer ≥ 1, default <strong>1024</strong>.</p>
+<p>The memory budget, in MiB, of the tile cache for streamed <code>.tx</code> textures. <code>0</code> is refused
+(the default is used).</p>
+<h2 id="ptex">Ptex</h2>
+<h3 id="crust-ptex">CRUST_PTEX</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> declines every Ptex texture. Surfaces fall back to their authored constant colour.</p>
+<h3 id="crust-ptex-max-log2">CRUST_PTEX_MAX_LOG2</h3>
+<p>Integer in 0–14, default <strong>5</strong> when preloaded, <strong>uncapped</strong> when streamed.</p>
+<p>The highest Ptex face resolution read, as the log2 of the face edge: <code>5</code> is 32 texels,
+<code>10</code> is 1024. Faces authored at a higher resolution are read at this one. Unset, preloaded
+Ptex is capped at 5 and streamed Ptex isn't capped.</p>
+<h3 id="crust-ptex-mip">CRUST_PTEX_MIP</h3>
+<p>Boolean, default <strong>on</strong>.</p>
+<p><code>0</code> builds no per-face mip pyramid for Ptex textures.</p>
+<h3 id="crust-ptex-stream">CRUST_PTEX_STREAM</h3>
+<p>Boolean, default <strong>off</strong>.</p>
+<p><code>1</code> streams Ptex tiles through a cache instead of loading every file fully into memory.
+This is the only switch that is off by default.</p>
+
+<div class="alert alert-warning d-flex" role="alert">
+  <div class="flex-shrink-1 alert-icon">⚠️</div>
+  <div class="w-100"><p>On its own, <code>CRUST_PTEX_STREAM=1</code> usually changes nothing. With Ptex mip maps on (the
+default), a mip-mapped <code>.ptx</code> is only streamed if
+<a href="#crust-ptex-stream-mipspace"><code>CRUST_PTEX_STREAM_MIPSPACE=file</code></a> is also set. Otherwise it
+is loaded into memory. Set both to get the memory saving.</p>
+</div>
+</div>
+<h3 id="crust-ptex-cache-mb">CRUST_PTEX_CACHE_MB</h3>
+<p>Integer ≥ 1, default <strong>1024</strong>.</p>
+<p>The memory budget, in MiB, for streamed Ptex tiles. It is shared by every streamed file.</p>
+<h3 id="crust-ptex-stream-min-mb">CRUST_PTEX_STREAM_MIN_MB</h3>
+<p>Integer ≥ 0, default <strong>8</strong>.</p>
+<p>A Ptex file that would take less than this many MiB in memory is loaded fully even when
+streaming is on: a texture smaller than the cache space it would take is cheaper to load.
+<code>0</code> streams every file.</p>
+<h3 id="crust-ptex-stream-mipspace">CRUST_PTEX_STREAM_MIPSPACE</h3>
+<p>Keyword, default <strong><code>linear</code></strong>.</p>
+<p>Which mip levels a streamed <code>.ptx</code> may use.</p>
+<table><thead><tr><th>value</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>linear</code></td><td>Refuse the file's stored mip levels. A mip-mapped <code>.ptx</code> is loaded into memory instead, and its mip levels are rebuilt in linear light. Correct, but uses the most memory.</td></tr>
+<tr><td><code>file</code></td><td>Use the file's own stored mip levels and stream them. Uses much less memory, but minified textures come out slightly darker.</td></tr>
+</tbody></table>
+<p>Crust Render reads Ptex colour as display-encoded (gamma 2.2) and decodes it, while the
+mip levels stored in a <code>.ptx</code> were averaged in the file's own encoding. Averaging encoded
+values makes the coarser levels too dark. The full-resolution level is always correct, so
+the error only shows where a texture is seen from far away.</p>
+<p><code>file</code> is what production Ptex caches do. It cut the Moana Island's Ptex memory from
+5.98 GiB to 0.61 GiB. Choosing it accepts that bias in exchange for the memory.</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust-render -i island.usda
+</code></pre>
+<h2 id="other-variables">Other variables</h2>
+<h3 id="rayon-num-threads">RAYON_NUM_THREADS</h3>
+<p>Read by the <a href="https://docs.rs/rayon">rayon</a> thread pool, not by Crust Render itself. It
+sets the number of render threads. Unset, every core is used.</p>
+<pre data-lang="bash" class="language-bash "><code class="language-bash" data-lang="bash">RAYON_NUM_THREADS=8 crust-render -i scene.usda
+</code></pre>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;reference&#x2F;environment-variables.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;getting-started&#x2F;quick-start&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Quick Start
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;usd&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>

@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-regular.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="https://doubleailes.github.io/crust-render/fonts/vendor/jost/jost-v4-latin-700.woff2"  type="font/woff2" crossorigin>
+
+
+<link rel="stylesheet" href="https://doubleailes.github.io/crust-render/main.css">
+
+
+
+  
+  
+    
+  
+
+  
+  
+    
+    
+  
+  
+  
+    
+  
+  
+  
+  
+    
+  
+  
+  
+
+
+  <meta name="robots" content="index, follow">
+  <meta name="googlebot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="bingbot" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+
+	
+
+
+	
+
+<title>Volumes | Crust Render</title>
+<meta name="description" content="Homogeneous, procedural smoke and voxel-grid volumes with crust:volume:* attributes.">
+<link rel="canonical" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">
+
+
+  <meta name="twitter:card" content="summary_large_image">
+  
+    <meta name="twitter:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+  <meta name="twitter:title" content="Volumes">
+  <meta name="twitter:description" content="Homogeneous, procedural smoke and voxel-grid volumes with crust:volume:* attributes.">
+  <meta name="twitter:site" content="@">
+  <meta name="twitter:creator" content="@">
+  
+  <meta property="og:title" content="Volumes">
+  <meta property="og:description" content="Homogeneous, procedural smoke and voxel-grid volumes with crust:volume:* attributes.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://doubleailes.github.io/crust-render/docs/usd/volumes/">
+
+  
+    <meta property="og:image" content="https://doubleailes.github.io/crust-render/docs&#x2F;getting-started&#x2F;introduction&#x2F;preview.png">
+  
+
+  <meta property="og:updated_time" content="2026-10-01T08:00:00+00:00">
+  <meta property="og:site_name" content="Volumes">
+
+  
+
+  
+
+  
+  <meta property="article:publisher" content="https://www.facebook.com/">
+  <meta property="article:author" content="https://www.facebook.com/">
+  <meta property="og:locale" content="en_US">
+
+
+
+
+
+  
+
+
+
+
+
+<script type="application/ld+json">
+  {
+    "@context": "http://schema.org",
+    "@type": "BreadcrumbList",
+    
+      
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          {
+            "@type": "ListItem",
+            "position":  1 ,
+            "name": "Home",
+            "item": "https://doubleailes.github.io/crust-render/"
+          },
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  2 ,
+            "name": "Docs",
+            "item": "https://doubleailes.github.io/crust-render/docs/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  3 ,
+            "name": "Usd",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/"
+          },
+        
+      
+        
+        
+        
+        
+        
+        
+        
+        
+          
+          
+          {
+            "@type": "ListItem",
+            "position":  4 ,
+            "name": "Volumes",
+            "item": "https://doubleailes.github.io/crust-render/docs/usd/volumes/"
+          },
+        
+      
+    
+  }
+</script>
+
+
+
+
+
+
+  <meta name="theme-color" content="#fff">
+  <link rel="apple-touch-icon" sizes="180x180" href="https://doubleailes.github.io/crust-render/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="https://doubleailes.github.io/crust-render/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="https://doubleailes.github.io/crust-render/favicon-16x16.png">
+  
+    <link rel="manifest" href="https://doubleailes.github.io/crust-render/site.webmanifest" crossorigin>
+  
+
+
+  
+
+</head>
+
+  
+
+<body class="docs single">
+  
+  
+  
+  
+<div class="header-bar fixed-top"></div>
+<header class="navbar fixed-top navbar-expand-md navbar-light">
+	<div class="container">
+		<input class="menu-btn order-0" type="checkbox" id="menu-btn">
+		<label class="menu-icon d-md-none" for="menu-btn"><span class="navicon"></span></label>
+		<a class="navbar-brand order-1 order-md-0 me-auto" href="https://doubleailes.github.io/crust-render">Crust Render</a>
+		<button id="mode" class="btn btn-link order-2 order-md-4" type="button" aria-label="Toggle mode">
+			<span class="toggle-dark"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-moon"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+			<span class="toggle-light"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-sun"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></span>
+		</button>
+		<ul class="navbar-nav fork-me order-3 order-md-5">
+			
+				
+					<li class="nav-item">
+						<a class="nav-link" href="https://github.com/doubleailes/crust-render"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-github"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg><span class="ms-2 visually-hidden">GitHub</span></a>
+					</li>
+				
+			
+		</ul>
+		<div class="collapse navbar-collapse order-4 order-md-1">
+			<ul class="navbar-nav main-nav me-auto order-5 order-md-2">
+				
+					
+				
+				
+				
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Docs</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">CLI</a>
+						</li>
+					
+						<li class="nav-item docs active">
+							<a class="nav-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">USD</a>
+						</li>
+					
+				
+			</ul>
+			<div class="break order-6 d-md-none"></div>
+			
+				<form class="navbar-form flex-grow-1 order-7 order-md-3">
+					<input id="userinput" class="form-control is-search" type="search" placeholder="Search docs..."
+						aria-label="Search docs..." autocomplete="off">
+					<div id="suggestions" class="shadow bg-white rounded"></div>
+				</form>
+			
+		</div>
+	</div>
+</header>
+
+
+
+  
+<div class="wrap container" role="document">
+  <div class="content">
+    <div class="row flex-xl-nowrap">
+	  
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+	<nav class="docs-links" aria-label="Main navigation">
+			
+			
+			
+			
+					
+					
+					
+							<h3>Getting Started</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/introduction/">Introduction</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/getting-started/quick-start/">Quick Start</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Reference</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/command-line/">Command line</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>USD attributes</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/render-settings/">Render settings</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/aovs/">Render products and AOVs</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/geometry/">Geometry</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/lights/">Lights</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/usd/materials/">Materials and textures</a></li>
+							                           
+									<li><a class="docs-link active" href="https://doubleailes.github.io/crust-render/docs/usd/volumes/">Volumes</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Architecture</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/overview/">Overview</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/design-choices/">Design choices</a></li>
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/architecture/limitations/">Limitations</a></li>
+							
+					</ul>
+					
+					
+					
+					
+							<h3>Help</h3>
+							<ul class="list-unstyled">
+							                           
+									<li><a class="docs-link" href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+							
+					</ul>
+					
+					
+			
+	</nav>
+</div>
+
+	  
+  
+  <nav class="docs-toc d-none d-xl-block col-xl-3" aria-label="Secondary navigation">
+  	<div class="page-links">
+  			<h3>On this page</h3>
+  			<nav id="TableOfContents">
+  					<ul>
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#how-a-volume-is-defined">How a volume is defined</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#crust-volume-type">crust:volume:type</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#medium-properties">Medium properties</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#smoke">Smoke</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#grid">Grid</a></li>
+  							
+  							
+  							<li><a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#examples">Examples</a></li>
+  							
+  							
+  					</ul>
+  			</nav>
+  	</div>
+  </nav>
+  
+
+      <main class="docs-content col-lg-11 col-xl-9">
+        <h1>Volumes</h1>
+        <p class="lead">A prim with a <code>crust:volume:type</code> attribute becomes a box of fog, smoke, absorbing medium or fire.</p>
+        <h2 id="how-a-volume-is-defined">How a volume is defined</h2>
+<p>Any prim with a <code>crust:volume:type</code> attribute is imported as a <strong>volume region</strong>. It is
+not rendered as a surface. The region is a box:</p>
+<ul>
+<li>If the prim authors a <code>size</code> attribute, as a <code>Cube</code> does, the box goes from <code>-size/2</code> to
+<code>+size/2</code> on each axis. USD's default <code>Cube</code> size is 2.</li>
+<li>Otherwise the box is the unit cube, from <code>-0.5</code> to <code>+0.5</code>.</li>
+</ul>
+<p>The prim's transform places, rotates and scales the box. Volumes are lit by every light,
+cast shadows, and scatter light between surfaces.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Cube &quot;Fog&quot;
+{
+    double size = 2
+    token crust:volume:type = &quot;homogeneous&quot;
+    color3f crust:volume:sigmaS = (0.15, 0.15, 0.15)
+    color3f crust:volume:sigmaA = (0.01, 0.015, 0.025)
+    float crust:volume:anisotropy = 0.3
+    float3 xformOp:scale = (5, 3, 5)
+    uniform token[] xformOpOrder = [&quot;xformOp:scale&quot;]
+}
+</code></pre>
+<p>Crust Render doesn't read <code>UsdVolVolume</code> or OpenVDB files. Volumes are only the three
+types on this page.</p>
+<h2 id="crust-volume-type">crust:volume:type</h2>
+<p><code>token</code>, <strong>required</strong>.</p>
+<table><thead><tr><th>value</th><th>density inside the box</th></tr></thead><tbody>
+<tr><td><code>homogeneous</code></td><td>constant: 1 everywhere</td></tr>
+<tr><td><code>smoke</code></td><td>procedural fractal noise; see <a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#smoke">Smoke</a></td></tr>
+<tr><td><code>grid</code></td><td>a voxel grid authored on the prim; see <a href="https://doubleailes.github.io/crust-render/docs/usd/volumes/#grid">Grid</a></td></tr>
+</tbody></table>
+<p>Any other value logs a warning, and the prim is skipped.</p>
+<h2 id="medium-properties">Medium properties</h2>
+<p>These attributes apply to every volume type. At each point, the scattering and absorption
+coefficients are <code>sigma × densityScale × density</code>, where <code>density</code> comes from the
+volume type.</p>
+<table><thead><tr><th>attribute</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>crust:volume:sigmaS</code></td><td><code>color3f</code></td><td>(0.5, 0.5, 0.5)</td><td>scattering coefficient per channel, per scene unit, at density 1</td></tr>
+<tr><td><code>crust:volume:sigmaA</code></td><td><code>color3f</code></td><td>(0, 0, 0)</td><td>absorption coefficient per channel, per scene unit, at density 1</td></tr>
+<tr><td><code>crust:volume:densityScale</code></td><td><code>float</code></td><td>1.0</td><td>multiplies both coefficients</td></tr>
+<tr><td><code>crust:volume:anisotropy</code></td><td><code>float</code></td><td>0.0</td><td>Henyey–Greenstein <code>g</code>, between -1 and 1: above 0 scatters forward, below 0 scatters backward, 0 scatters evenly</td></tr>
+<tr><td><code>crust:volume:emission</code></td><td><code>color3f</code></td><td>(0, 0, 0)</td><td>emitted radiance. Its contribution is weighted by absorption, so emission follows the density, as fire does. It has no effect where <code>sigmaA</code> is 0.</td></tr>
+</tbody></table>
+<p>Some typical media:</p>
+<table><thead><tr><th>medium</th><th>settings</th></tr></thead><tbody>
+<tr><td>thin fog</td><td><code>sigmaS</code> ≈ 0.1–0.2, <code>sigmaA</code> ≈ 0.01</td></tr>
+<tr><td>white smoke</td><td>high <code>sigmaS</code>, low <code>sigmaA</code>, <code>anisotropy</code> ≈ 0.2</td></tr>
+<tr><td>dark, sooty smoke</td><td><code>sigmaA</code> close to <code>sigmaS</code></td></tr>
+<tr><td>coloured liquid or glass tint</td><td><code>sigmaS</code> = 0, coloured <code>sigmaA</code></td></tr>
+<tr><td>fire</td><td><code>sigmaA</code> &gt; 0, bright <code>emission</code>, low <code>sigmaS</code></td></tr>
+</tbody></table>
+<h2 id="smoke">Smoke</h2>
+<p>With <code>crust:volume:type = "smoke"</code>, the density is fractal value noise (fBm), evaluated
+over the box's local coordinates from 0 to 1:</p>
+<p><code>density = max(0, fbm − threshold) / (1 − threshold)</code></p>
+<p>The threshold carves wispy holes, which make the noise look like smoke rather than haze.
+The noise is deterministic: the same seed renders the same smoke on any machine.</p>
+<table><thead><tr><th>attribute</th><th>type</th><th>default</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>crust:volume:noiseScale</code></td><td><code>float</code></td><td>4.0</td><td>base frequency: the number of noise cells across the box at the first octave</td></tr>
+<tr><td><code>crust:volume:noiseOctaves</code></td><td><code>int</code></td><td>4</td><td>number of noise octaves, at least 1</td></tr>
+<tr><td><code>crust:volume:noiseGain</code></td><td><code>float</code></td><td>0.5</td><td>amplitude multiplier from one octave to the next</td></tr>
+<tr><td><code>crust:volume:noiseLacunarity</code></td><td><code>float</code></td><td>2.0</td><td>frequency multiplier from one octave to the next</td></tr>
+<tr><td><code>crust:volume:noiseThreshold</code></td><td><code>float</code></td><td>0.3</td><td>noise level below which density is 0. Clamped to 0–0.999.</td></tr>
+<tr><td><code>crust:volume:noiseSeed</code></td><td><code>int</code></td><td>0</td><td>changes the noise pattern</td></tr>
+</tbody></table>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Cube &quot;Smoke&quot;
+{
+    double size = 2
+    token crust:volume:type = &quot;smoke&quot;
+    float crust:volume:densityScale = 12
+    color3f crust:volume:sigmaS = (0.8, 0.8, 0.8)
+    color3f crust:volume:sigmaA = (0.08, 0.08, 0.08)
+    float crust:volume:anisotropy = 0.2
+    float crust:volume:noiseScale = 4
+    int crust:volume:noiseOctaves = 4
+    float crust:volume:noiseThreshold = 0.25
+    int crust:volume:noiseSeed = 42
+    float3 xformOp:scale = (0.9, 1.6, 0.9)
+    uniform token[] xformOpOrder = [&quot;xformOp:scale&quot;]
+}
+</code></pre>
+<h2 id="grid">Grid</h2>
+<p>With <code>crust:volume:type = "grid"</code>, the density comes from a voxel grid authored on the
+prim. The grid fills the box. Values are taken at voxel centres and interpolated
+trilinearly. Outside the outer voxel centres, the edge values are held.</p>
+<table><thead><tr><th>attribute</th><th>type</th><th>required</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>crust:volume:gridDims</code></td><td><code>int[3]</code></td><td>yes</td><td>number of voxels along x, y and z: <code>[nx, ny, nz]</code></td></tr>
+<tr><td><code>crust:volume:gridData</code></td><td><code>float[]</code></td><td>yes</td><td><code>nx × ny × nz</code> density values</td></tr>
+</tbody></table>
+<p>The data is ordered with <strong>x fastest</strong>, then y, then z: the voxel <code>(x, y, z)</code> is at index
+<code>x + nx × (y + ny × z)</code>.</p>
+<p>The prim is skipped with a warning if either attribute is missing, if <code>gridDims</code> doesn't
+have exactly three values, or if the length of <code>gridData</code> isn't <code>nx × ny × nz</code>.</p>
+<pre data-lang="usda" class="language-usda "><code class="language-usda" data-lang="usda">def Cube &quot;Puff&quot;
+{
+    double size = 1
+    token crust:volume:type = &quot;grid&quot;
+    float crust:volume:densityScale = 6
+    color3f crust:volume:sigmaS = (0.7, 0.7, 0.7)
+    int[] crust:volume:gridDims = [2, 2, 2]
+    float[] crust:volume:gridData = [0, 1, 1, 0, 1, 0, 0, 1]
+}
+</code></pre>
+<p>For large grids, write the <code>.usda</code> from a script, or store the data in a binary <code>.usdc</code>
+layer.</p>
+<h2 id="examples">Examples</h2>
+<ul>
+<li><code>samples/fog.usda</code>: homogeneous fog in a room, with light shafts around a ball.</li>
+<li><code>samples/smoke.usda</code>: procedural smoke, a glowing homogeneous "ember" and a small grid
+volume.</li>
+</ul>
+
+        
+          
+<p class="edit-page"><a href="https:&#x2F;&#x2F;github.com&#x2F;doubleailes&#x2F;crust-render/blob/main/content&#x2F;docs&#x2F;usd&#x2F;volumes.md"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-edit-2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>Edit this page on GitHub</a></p>
+
+        
+        
+<div class="docs-navigation d-flex justify-content-between">
+  
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+        
+      
+        
+        
+          
+            
+              
+              <a href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;reference&#x2F;environment-variables&#x2F;">
+                <div class="card my-1">
+                  <div class="card-body py-2">
+                    &larr; Environment variables
+                  </div>
+                </div>
+              </a>
+            
+            
+            
+          
+        
+      
+        
+        
+          
+        
+      
+    
+  
+
+  
+  
+  
+  
+  
+    
+    
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+      
+    
+      
+      
+        
+          
+          
+          <a class="ms-auto" href="https:&#x2F;&#x2F;doubleailes.github.io&#x2F;crust-render&#x2F;docs&#x2F;architecture&#x2F;overview&#x2F;">
+            <div class="card my-1">
+              <div class="card-body py-2">
+                Overview &rarr;
+              </div>
+            </div>
+          </a>
+          
+          
+          
+        
+      
+    
+      
+      
+        
+      
+    
+  
+</div>
+
+      </main>
+    </div>
+  </div>
+</div>
+
+
+  
+    
+<footer class="footer text-muted">
+	<div class="container">
+		<div class="row">
+			<div class="col-lg-8 order-last order-lg-first">
+				<ul class="list-inline">
+					
+						<li class="list-inline-item">Powered by <a href="https://pages.github.com/">GitHub Pages</a>, <a href="https://www.getzola.org/">Zola</a>, and <a href="https://github.com/aaranxu/adidoks">AdiDoks</a></li>
+					
+				</ul>
+			</div>
+			<div class="col-lg-8 order-first order-lg-last text-lg-end">
+				<ul class="list-inline">
+					
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/reference/environment-variables/">Environment variables</a></li>
+						
+							<li class="list-inline-item"><a href="https://doubleailes.github.io/crust-render/docs/help/faq/">FAQ</a></li>
+						
+					
+				</ul>
+			</div>
+		</div>
+	</div>
+</footer>
+
+  
+
+  
+<script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/main.js" defer></script>
+
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/plugins/elasticlunr.min.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/search_index.en.js" defer></script>
+  <script type="text/javascript" src="https://doubleailes.github.io/crust-render/js/search.js" defer></script>
+
+  
+</body>
+</html>
