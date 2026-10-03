@@ -786,6 +786,116 @@ fn volume_nee<const PROFILE: bool>(
     s.radiance * phase_val * tr * weight / light_pdf.get()
 }
 
+/// Direct lighting at a surface vertex: one light picked by the light
+/// list's selection, one point sampled on it, and the connection weighted by
+/// MIS against the bounce sampler. The surface twin of [`volume_nee`].
+///
+/// `inline(always)` like the other once-per-`trace_path` helpers: it is part
+/// of every surface vertex, and out of line it is a call the integrator did
+/// not pay before it was extracted.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn surface_nee<const PROFILE: bool>(
+    ray: &Ray,
+    rec: &HitRecord,
+    sp: &ShadingPoint,
+    class_here: u16,
+    guiding_here: Option<&GuidingContext>,
+    world: &World,
+    volumes: &Volumes,
+    lights: &LightList,
+    strategy: SamplingStrategy,
+    v: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    // The light strategy is "pick one light with the light list's
+    // selection probability `pmf` (power-proportional by default), then
+    // sample a point on it with its own `sample_li`", so its solid-angle
+    // density is `light.pdf · pmf`. `bounce_emission_weight` evaluates
+    // the same expression for a bounce-hit light — both MIS weights must
+    // describe the same strategy or emission is double-counted.
+    let mut nee = Vec3A::ZERO;
+    let _p = profile::scope_if::<PROFILE>(Section::SurfaceLighting);
+    let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
+    // `sample_li` returns `None` when the light cannot be reached from
+    // this point at all — below a dome's horizon, or a degenerate
+    // coincident point.
+    // A picked light that does not illuminate this receiver contributes
+    // nothing, and its pick probability stays what it was, so the bounce
+    // side, which zeroes the same light, still describes one strategy.
+    if let Some((light_index, pmf)) = strategy
+        .samples_lights()
+        .then(|| lights.pick_index_at(rec.p, nee_s[0]))
+        .flatten()
+        && lights.illuminates(light_index, class_here)
+        && let Some(ls) = lights
+            .light(light_index)
+            .sample_li(rec.p, nee_s[1], nee_s[2])
+    {
+        stats.light_samples += 1;
+        let light_dir_unit = ls.direction;
+
+        // A connection carries light only if the light's radiance, the
+        // BSDF and the visibility toward it are all non-zero, and the
+        // three tests run cheapest first. Radiance is free (a shaped
+        // light outside its cone carries zero). The BSDF — delta and
+        // transmissive materials return None from `eval`, since they
+        // cannot see a light-sampled direction and pick up emission via
+        // BSDF sampling instead, and a light below the horizon gets a
+        // zero value — is cheaper than the shadow ray: the shading point
+        // already ran any pattern network, so `eval` reads no texture.
+        // (Before that split a textured `eval` went after the ray, so an
+        // occluded light never paid for the network.) Either order is
+        // bit-identical: a skipped test's contribution would be exactly
+        // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
+        // which nothing else reads.
+        let mut visibility = || {
+            let shadow_ray = Ray::new(rec.p, light_dir_unit)
+                .with_time(ray.time())
+                .with_mask(lights.shadow_mask(light_index));
+            let tr =
+                shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, ls.distance, v, stats);
+            (tr != Vec3A::ZERO).then_some(tr)
+        };
+        let connection = if ls.radiance == Vec3A::ZERO {
+            None
+        } else {
+            sp.eval(ray, light_dir_unit)
+                .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
+                .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
+        };
+        if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
+            let light_pdf = lights.density(ls.pdf, pmf);
+            // The competing strategy for this MIS weight is the
+            // bounce sampler, whose density toward the light is the
+            // guide/BSDF mixture whenever guiding is available at
+            // this vertex — using the plain BSDF pdf here while the
+            // bounce side weights with the mixture makes the two
+            // weights sum past one and double-counts emission.
+            let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
+                Some(g) if g.field.trained_at(rec.p) => g
+                    .field
+                    .mixture_pdf(g.field.pdf(rec.p, light_dir_unit), brdf_pdf),
+                _ => brdf_pdf,
+            });
+            // A shadow-linked light is NEE's alone here: the bounce side
+            // collects none of it at a continuous vertex.
+            let weight = if lights.nee_only(light_index) {
+                1.0
+            } else {
+                strategy.light_weight(light_pdf, bounce_pdf)
+            };
+            // `brdf_value` already carries the geometric cosine —
+            // `Material::eval` returns `brdf · |cos|` (unsigned, so a
+            // continuous transmission lobe can see a light behind the
+            // ray-facing normal). Applying it again here is what used
+            // to make this an integral of `brdf · cos²`.
+            nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
+        }
+    }
+    nee
+}
+
 /// The integrator: an iterative path tracer in two passes. The forward walk
 /// traces one segment per bounce (each hit serves both as the previous
 /// vertex's potential light hit and as the next vertex — the old recursion
@@ -1122,98 +1232,19 @@ pub(super) fn trace_path<const PROFILE: bool>(
         let guiding_here = if prev.is_some() { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
-        // The light strategy is "pick one light with the light list's
-        // selection probability `pmf` (power-proportional by default), then
-        // sample a point on it with its own `sample_li`", so its solid-angle
-        // density is `light.pdf · pmf`. `bounce_emission_weight` evaluates
-        // the same expression for a bounce-hit light — both MIS weights must
-        // describe the same strategy or emission is double-counted.
-        let mut nee = Vec3A::ZERO;
-        let lighting = profile::scope_if::<PROFILE>(Section::SurfaceLighting);
-        let nee_s = v.new_domain(K_NEE).draw_sample_f32::<4>();
-        // `sample_li` returns `None` when the light cannot be reached from
-        // this point at all — below a dome's horizon, or a degenerate
-        // coincident point.
-        // A picked light that does not illuminate this receiver contributes
-        // nothing, and its pick probability stays what it was, so the bounce
-        // side, which zeroes the same light, still describes one strategy.
-        if let Some((light_index, pmf)) = strategy
-            .samples_lights()
-            .then(|| lights.pick_index_at(rec.p, nee_s[0]))
-            .flatten()
-            && lights.illuminates(light_index, class_here)
-            && let Some(ls) = lights
-                .light(light_index)
-                .sample_li(rec.p, nee_s[1], nee_s[2])
-        {
-            stats.light_samples += 1;
-            let light_dir_unit = ls.direction;
-
-            // A connection carries light only if the light's radiance, the
-            // BSDF and the visibility toward it are all non-zero, and the
-            // three tests run cheapest first. Radiance is free (a shaped
-            // light outside its cone carries zero). The BSDF — delta and
-            // transmissive materials return None from `eval`, since they
-            // cannot see a light-sampled direction and pick up emission via
-            // BSDF sampling instead, and a light below the horizon gets a
-            // zero value — is cheaper than the shadow ray: the shading point
-            // already ran any pattern network, so `eval` reads no texture.
-            // (Before that split a textured `eval` went after the ray, so an
-            // occluded light never paid for the network.) Either order is
-            // bit-identical: a skipped test's contribution would be exactly
-            // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
-            // which nothing else reads.
-            let mut visibility = || {
-                let shadow_ray = Ray::new(rec.p, light_dir_unit)
-                    .with_time(ray.time())
-                    .with_mask(lights.shadow_mask(light_index));
-                let tr = shadow_transmittance::<PROFILE>(
-                    world,
-                    volumes,
-                    &shadow_ray,
-                    ls.distance,
-                    v,
-                    stats,
-                );
-                (tr != Vec3A::ZERO).then_some(tr)
-            };
-            let connection = if ls.radiance == Vec3A::ZERO {
-                None
-            } else {
-                sp.eval(&ray, light_dir_unit)
-                    .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
-                    .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
-            };
-            if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
-                let light_pdf = lights.density(ls.pdf, pmf);
-                // The competing strategy for this MIS weight is the
-                // bounce sampler, whose density toward the light is the
-                // guide/BSDF mixture whenever guiding is available at
-                // this vertex — using the plain BSDF pdf here while the
-                // bounce side weights with the mixture makes the two
-                // weights sum past one and double-counts emission.
-                let bounce_pdf = PdfSolidAngle::from_measure(match guiding_here {
-                    Some(g) if g.field.trained_at(rec.p) => g
-                        .field
-                        .mixture_pdf(g.field.pdf(rec.p, light_dir_unit), brdf_pdf),
-                    _ => brdf_pdf,
-                });
-                // A shadow-linked light is NEE's alone here: the bounce side
-                // collects none of it at a continuous vertex.
-                let weight = if lights.nee_only(light_index) {
-                    1.0
-                } else {
-                    strategy.light_weight(light_pdf, bounce_pdf)
-                };
-                // `brdf_value` already carries the geometric cosine —
-                // `Material::eval` returns `brdf · |cos|` (unsigned, so a
-                // continuous transmission lobe can see a light behind the
-                // ray-facing normal). Applying it again here is what used
-                // to make this an integral of `brdf · cos²`.
-                nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
-            }
-        }
-        drop(lighting);
+        let nee = surface_nee::<PROFILE>(
+            &ray,
+            &rec,
+            &sp,
+            class_here,
+            guiding_here,
+            world,
+            volumes,
+            lights,
+            strategy,
+            v,
+            stats,
+        );
 
         let mut vrec = VertexRec {
             atten,
