@@ -18,15 +18,21 @@ fn sample_scene() -> PathBuf {
         .join("cornellbox_guided.usda")
 }
 
+/// Guiding with `train_iterations` passes and α = 0.5.
+fn guiding(train_iterations: u32) -> crust_core::GuidingConfig {
+    crust_core::GuidingConfig {
+        train_iterations,
+        guide_prob: 0.5,
+        ..Default::default()
+    }
+}
+
 /// Render the sample scene small and return per-pixel luminance.
 fn render_lum(guided: bool, spp: u32, train_iterations: u32) -> Vec<f64> {
     const RES: usize = 96;
     let scene = Scene::from_usd(&sample_scene()).expect("load cornellbox_guided.usda");
-    let settings = RenderSettings::new(spp, 8, RES, RES, 16, 0.05, 0).with_guiding(
-        guided,
-        train_iterations,
-        0.5,
-    );
+    let settings = RenderSettings::new(spp, 8, RES, RES, 16, 0.05, 0)
+        .with_guiding(guided.then(|| guiding(train_iterations)));
     let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
     let buf = renderer.render();
     let mut out = Vec::with_capacity(RES * RES);
@@ -64,7 +70,7 @@ fn guided_render_is_unbiased() {
 #[ignore = "renders a frame; run explicitly with --ignored"]
 fn guided_render_with_tiles_smoke() {
     let scene = Scene::from_usd(&sample_scene()).expect("load cornellbox_guided.usda");
-    let settings = RenderSettings::new(8, 6, 64, 64, 4, 0.05, 0).with_guiding(true, 3, 0.5);
+    let settings = RenderSettings::new(8, 6, 64, 64, 4, 0.05, 0).with_guiding(Some(guiding(3)));
     let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
     let buf = renderer.render_with(crust_core::RenderOrder::Tiles, None).0;
     // The closed box is lit: the image cannot be black.
@@ -88,7 +94,7 @@ fn guided_tiles_and_rows_are_bit_identical() {
     let (w, h) = (37, 21);
     let render = |tiled: bool| {
         let scene = Scene::from_usd(&sample_scene()).expect("load cornellbox_guided.usda");
-        let settings = RenderSettings::new(8, 6, w, h, 4, 0.05, 0).with_guiding(true, 3, 0.5);
+        let settings = RenderSettings::new(8, 6, w, h, 4, 0.05, 0).with_guiding(Some(guiding(3)));
         let renderer = Renderer::new(scene.camera, scene.world, scene.lights, settings);
         if tiled {
             renderer.render_with(crust_core::RenderOrder::Tiles, None).0

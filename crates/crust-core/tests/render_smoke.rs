@@ -98,12 +98,18 @@ fn strategy_and_filter_builders_replace_their_field() {
 
 #[test]
 fn guiding_builder_clamps_its_probability() {
-    // Guiding has no getter, so the clamp is observable only through a
-    // render completing — but the builder must at least accept edge values.
     let s = RenderSettings::new(2, 2, 4, 4, 2, 0.0, 0);
-    let _ = s.with_guiding(true, 0, 0.0);
-    let _ = s.with_guiding(true, 100, 1.0);
-    let off = s.with_guiding(false, 3, 0.5);
+    let cfg = |train_iterations, guide_prob| crust_core::GuidingConfig {
+        train_iterations,
+        guide_prob,
+        ..Default::default()
+    };
+    let low = s.with_guiding(Some(cfg(0, 0.0))).guiding().unwrap();
+    assert_eq!((low.train_iterations, low.guide_prob), (1, 0.1));
+    let high = s.with_guiding(Some(cfg(100, 1.0))).guiding().unwrap();
+    assert_eq!((high.train_iterations, high.guide_prob), (100, 0.9));
+    let off = s.with_guiding(None);
+    assert!(off.guiding().is_none());
     assert_eq!(off.samples_per_pixel(), 2);
 }
 

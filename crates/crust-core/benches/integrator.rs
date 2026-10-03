@@ -82,7 +82,11 @@ fn bench_simple_world_guided(c: &mut Criterion) {
                 VARIANCE_THRESHOLD,
                 0,
             )
-            .with_guiding(true, 2, 0.5);
+            .with_guiding(Some(crust_core::GuidingConfig {
+                train_iterations: 2,
+                guide_prob: 0.5,
+                ..Default::default()
+            }));
             let renderer = Renderer::new(cam, world, lights, render_settings);
             let _ = renderer.render();
         })

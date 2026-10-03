@@ -7,6 +7,7 @@ use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSetting
 use tracing::{debug, warn};
 
 use crate::filter::PixelFilter;
+use crate::guiding::GuidingConfig;
 use crate::light::LightSelection;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 
@@ -230,7 +231,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     );
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
-        .with_guiding(guiding, guiding_iters, guiding_prob)
+        .with_guiding(guiding.then(|| GuidingConfig {
+            train_iterations: guiding_iters,
+            guide_prob: guiding_prob,
+            ..GuidingConfig::default()
+        }))
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)

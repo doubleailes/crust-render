@@ -6,7 +6,7 @@ use utils::luminance;
 use crate::buffer::Buffer;
 use crate::camera::Camera;
 use crate::filter::FilterSampler;
-use crate::guiding::{GuidingConfig, GuidingField, SampleData};
+use crate::guiding::{GuidingField, SampleData};
 use crate::profile::{self, Section};
 use crate::rt_world::World;
 use crate::stats::RayStats;
@@ -218,7 +218,7 @@ impl Renderer {
     }
 
     fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {
-        if self.settings.guiding {
+        if self.settings.guiding.is_some() {
             return self.render_guided(tiled, progress);
         }
         let (buf, _, pass) = self.render_pass(self.final_pass_config(tiled), None, progress);
@@ -269,11 +269,8 @@ impl Renderer {
                 return (buf, pass.rays);
             }
         };
-        let cfg = GuidingConfig {
-            train_iterations: self.settings.guiding_train_iterations,
-            guide_prob: self.settings.guiding_prob,
-            ..GuidingConfig::default()
-        };
+        // Only reached with guiding on (see `render_impl`).
+        let cfg = self.settings.guiding.unwrap_or_default();
         let mut field = GuidingField::new(bounds, cfg);
         let base_seed = self.settings.frame as u32;
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
