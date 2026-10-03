@@ -1399,6 +1399,7 @@ mod products {
                 precision: Precision::Float,
                 accumulation: Accumulation::Filtered,
                 clear: source.default_clear(),
+                expression: None,
             }
         }
 

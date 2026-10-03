@@ -90,39 +90,39 @@
 
 ## 5. Lobe taxonomy (`material/`)
 
-- [ ] 5.1 Give every OpenPBR `Lobe` and every `closure::Lobe` variant an
+- [x] 5.1 Give every OpenPBR `Lobe` and every `closure::Lobe` variant an
       event (`R`/`T` × `D`/`G`/`S`/`s`) and a label (D10). Write an exhaustive
       `match` test so that a new lobe cannot be added unlabelled. A lobe at
       zero roughness and delta samples are `S`.
-- [ ] 5.2 Add per-lobe evaluation that returns `eval_all`'s summands (and
+- [x] 5.2 Add per-lobe evaluation that returns `eval_all`'s summands (and
       the NEE equivalents) without changing `eval_all`'s result. Pin that
       `Σ f_j == eval_all` bitwise where the sum order matches, and within
       1 ulp elsewhere.
-- [ ] 5.3 Add `Material::albedo()` (D12), with a default of 1 and a `DEBUG`
+- [x] 5.3 Add `Material::albedo()` (D12), with a default of 1 and a `DEBUG`
       count of materials that use it. Add the first-non-delta-hit `albedo`
       AOV.
 
 ## 6. LPE engine (`crust-core/src/lpe/`)
 
-- [ ] 6.1 Write the parser for the OSL grammar subset (D10). Refused tokens
+- [x] 6.1 Write the parser for the OSL grammar subset (D10). Refused tokens
       give a `WARN` with the column.
-- [ ] 6.2 Build Thompson NFA → one combined DFA for all LPE vars, with
+- [x] 6.2 Build Thompson NFA → one combined DFA for all LPE vars, with
       per-state accepting bitmasks and a `u16` state. Fold labels to symbol
       indices at import. Cap at 64 LPE vars.
-- [ ] 6.3 Tests on the parser and DFA, against the OSL wiki's examples and
+- [x] 6.3 Tests on the parser and DFA, against the OSL wiki's examples and
       the canonical list in `design.md`.
 
 ## 7. Routing (`tracer/path.rs`)
 
-- [ ] 7.1 During the forward walk, record per-vertex DFA state(s), per-lobe
+- [x] 7.1 During the forward walk, record per-vertex DFA state(s), per-lobe
       NEE shares, per-lobe bounce factors, and the `L`/`O` class of each
       emission. Do this only in the `AOV` instantiation.
-- [ ] 7.2 Run the masked backward gather per (AOV, reachable state) (D11),
+- [x] 7.2 Run the masked backward gather per (AOV, reachable state) (D11),
       with the "lobes agree" fast path. Reuse the beauty's vertex-0 clamp
       factor (D9).
-- [ ] 7.3 Read `crust:light:lpeTag` on every light kind, with the fallback
+- [x] 7.3 Read `crust:light:lpeTag` on every light kind, with the fallback
       attributes from D13 once they are verified.
-- [ ] 7.4 Tests:
+- [x] 7.4 Tests:
       - `C.*[LO]` bit-identical to the beauty;
       - the partition from the spec sums to the beauty;
       - with `--indirect-clamp`, the partition still sums;
@@ -131,27 +131,33 @@
       - light groups;
       - NEE-only versus BSDF-only (`--strategy light|bsdf`) agree per AOV in
         expectation.
-- [ ] 7.5 Add `samples/aovs_lpe.usda` with the compositing set (direct and
+- [x] 7.5 Add `samples/aovs_lpe.usda` with the compositing set (direct and
       indirect diffuse and glossy, transmission, emission, volume) and two
       light groups.
-- [ ] 7.6 Record the cost per added LPE var (callgrind, cornellbox) and
+- [x] 7.6 Record the cost per added LPE var (callgrind, cornellbox) and
       `bench_ab.sh` on the scene set in the `aovs` design record.
 
 ## Phase 3: identity
 
-## 8. Prim identity and Cryptomatte
+## 8. Prim identity and ID mattes
 
-- [ ] 8.1 Keep a `geom_id → interned prim path` run table for every
-      geometry prim when an identity AOV is requested, extending
+ID mattes are written as OpenEXRId deep EXRs, not Cryptomatte (design D14).
+**8.1–8.4 are on hold** until a deep EXR writer exists: the `exr` crate
+writes flat images only. 8.5 is not blocked.
+
+- [ ] 8.1 *(on hold)* Keep a `geom_id → interned prim path` run table for
+      every geometry prim when an identity AOV is requested, extending
       `LightLinks`' runs and scoped by `ImportCaches::epoch`. Also keep the
       bound material path and the `kind` ancestor.
-- [ ] 8.2 Add the `primId`, `instanceId` and `elementId` (authored face
-      index) AOVs.
-- [ ] 8.3 Write MurmurHash3_x86_32 in safe Rust and test it against the
-      Cryptomatte vector (`"torus"`).
-- [ ] 8.4 Add Cryptomatte accumulation (fixed per-pixel rank arrays plus
-      spill), layers, and header manifest. Check that coverage sums to 1 on
-      covered pixels.
+- [ ] 8.2 *(on hold)* Add the `primId`, `instanceId` and `elementId`
+      (authored face index) AOVs.
+- [ ] 8.3 *(on hold)* A deep scanline EXR writer: upstream in `exr`, or
+      in-tree in safe Rust. Round-trip test against a deep file OpenEXR
+      itself reads.
+- [ ] 8.4 *(on hold)* OpenEXRId output: per-pixel (id, coverage) samples
+      weighted by the beauty's pixel filter, and the name table, in the
+      layout OpenEXRId specifies. Check that coverage sums to 1 on covered
+      pixels.
 - [ ] 8.5 Add `sourceType = "primvar"`: register the requested primvars
       before mesh load, keep them per mesh, and evaluate them at the first
       hit.

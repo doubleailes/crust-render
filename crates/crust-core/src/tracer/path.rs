@@ -22,7 +22,9 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{EVERY_CLASS, Light, LightList, PathSampler, profile};
 
 use super::GuidingContext;
+use super::route::{NO_EVENT, Route, RouteCtx};
 use super::settings::SamplingStrategy;
+use crate::lpe::LobeSplit;
 
 // OpenQMC domain-tree keys. The camera and the path subtree hang off the root
 // (per-pixel, per-sample) sampler; each per-event sub-domain hangs off the
@@ -110,19 +112,28 @@ pub(super) fn ray_cones_enabled() -> bool {
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
 // instructions on cornellbox with profiling off.
 #[inline(always)]
-fn sample_bounce_direction(
+fn sample_bounce_direction<const AOV: bool>(
     r: &Ray,
     rec: &HitRecord,
     sp: &ShadingPoint,
     guiding: Option<&GuidingContext>,
     sampler: PathSampler,
+    split: Option<&mut LobeSplit>,
 ) -> Option<ScatterSample> {
+    // The material's own sample — split by lobe at the direction it drew
+    // (see `ShadingPoint::scatter_split`) when light path expressions want
+    // the split, which only the AOV instantiation can ask for.
+    let mut split = if AOV { split } else { None };
+    let mut scatter = |dom| match split.as_deref_mut() {
+        Some(out) => sp.scatter_split(r, dom, out),
+        None => sp.scatter_importance(r, dom),
+    };
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
     // first dimension is the α-coin and next two are the guide-sampling seed.
     let bsdf_dom = sampler.new_domain(K_BSDF);
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
-        _ => return sp.scatter_importance(r, bsdf_dom),
+        _ => return scatter(bsdf_dom),
     };
     let alpha = g.field.config().guide_prob;
     let gs = sampler.new_domain(K_GUIDE).draw_sample_f32::<4>();
@@ -133,6 +144,10 @@ fn sample_bounce_direction(
         if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]])
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
+            if AOV && let Some(out) = split {
+                // `value` is `eval` toward `wi`, so the split is `eval`'s.
+                sp.eval_lobes(r, wi, out);
+            }
             let pdf = (alpha * p_guide + (1.0 - alpha) * p_bsdf).max(1e-4);
             return Some(ScatterSample {
                 ray: sp.make_ray(wi),
@@ -149,10 +164,10 @@ fn sample_bounce_direction(
             });
         }
         // Material with no continuous component: pure BSDF sampling.
-        sp.scatter_importance(r, bsdf_dom)
+        scatter(bsdf_dom)
     } else {
         // BSDF branch.
-        let mut sample = sp.scatter_importance(r, bsdf_dom)?;
+        let mut sample = scatter(bsdf_dom)?;
         if sample.delta {
             // Only this branch can reach the delta lobe, so the coin scaled
             // its selection probability by 1-α.
@@ -238,6 +253,17 @@ pub(crate) struct PathScratch {
     /// What the camera ray met at vertex 0 — written by the AOV
     /// instantiation of [`trace_path`] only, read by the film after it.
     pub(super) first: FirstHit,
+    /// The light path expressions and albedo the render asks for, set on
+    /// the scratch of an AOV pass only.
+    pub(super) route_ctx: Option<std::sync::Arc<RouteCtx>>,
+    /// The path's routing record and per-sample results ([`Route`]).
+    pub(super) route: Route,
+    /// Per-lobe shares — NEE's toward the light, the bounce's toward the
+    /// direction sampled — filled by the AOV instantiation only. Here rather
+    /// than on the walk's stack: building them per path cost the beauty-only
+    /// render 0.28% of its instructions even though nothing read them.
+    nee_split: LobeSplit,
+    bounce_split: LobeSplit,
 }
 
 impl PathScratch {
@@ -247,6 +273,10 @@ impl PathScratch {
             records: Vec::with_capacity(max_depth),
             sss_exit: PendingExit::default(),
             first: FirstHit::Escaped,
+            route_ctx: None,
+            route: Route::default(),
+            nee_split: LobeSplit::default(),
+            bounce_split: LobeSplit::default(),
         }
     }
 }
@@ -453,6 +483,63 @@ pub(super) fn escaped_emission(
         radiance += emitted * weight;
     }
     radiance
+}
+
+/// [`escaped_emission`], one light at a time: `f(light, contribution)` for
+/// each light at infinity it adds (`None` for a backdrop), in its order, so
+/// the contributions sum to its result bit for bit (the AOV instantiation
+/// asserts it in debug builds). The light-path-expression routing's view of
+/// an escape: each light's share ends an `L` event with that light's tag.
+/// A pair with `escaped_emission`: change one, change both.
+fn escaped_split(
+    prev: &Option<PrevVertex>,
+    lights: &LightList,
+    direction: Vec3A,
+    mask: RayMask,
+    strategy: SamplingStrategy,
+    mut f: impl FnMut(Option<usize>, Vec3A),
+) {
+    if lights.escapes_to_backdrop(mask) {
+        for backdrop in lights.backdrops() {
+            if let Some((emitted, _)) = backdrop.escaped(Vec3A::ZERO, direction) {
+                f(None, emitted * strategy.unopposed_weight());
+            }
+        }
+        return;
+    }
+    if lights.count() == 0 {
+        return;
+    }
+    let competing = match prev {
+        Some(PrevVertex::Surface(p)) => p.continuous().then_some((p.pos, p.pdf)),
+        Some(PrevVertex::Phase { pos, pdf, .. }) => Some((*pos, *pdf)),
+        None => None,
+    };
+    let class = match prev {
+        Some(PrevVertex::Surface(p)) => p.class,
+        Some(PrevVertex::Phase { class, .. }) => *class,
+        None => EVERY_CLASS,
+    };
+    let from = competing.map_or(Vec3A::ZERO, |(p, _)| p);
+    for (index, light, pmf) in lights.infinite_indexed_seen_by(from, mask) {
+        if !lights.illuminates(index, class) {
+            continue;
+        }
+        if competing.is_some() && lights.nee_only(index) && strategy.samples_lights() {
+            continue;
+        }
+        let Some((emitted, pdf)) = light.escaped(from, direction) else {
+            continue;
+        };
+        let weight = match (competing, pdf) {
+            (Some((_, bounce_pdf)), Some(pdf)) if strategy.samples_lights() && pmf > 0.0 => {
+                let light_pdf = lights.density(pdf, pmf).max(1e-6);
+                strategy.bounce_weight(bounce_pdf, light_pdf)
+            }
+            _ => strategy.unopposed_weight(),
+        };
+        f(Some(index), emitted * weight);
+    }
 }
 
 /// NEE shadow test used at surface and volume vertices alike: ZERO when a
@@ -799,6 +886,21 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     if AOV {
         *first = FirstHit::Escaped;
     }
+    // The routing: the render's expressions, and this path's record. Both
+    // `None`/unused outside the AOV instantiation.
+    let route_ctx = if AOV {
+        scratch.route_ctx.as_deref()
+    } else {
+        None
+    };
+    let routing = route_ctx.filter(|c| c.routes());
+    let albedo_on = route_ctx.is_some_and(|c| c.albedo);
+    let route = &mut scratch.route;
+    if AOV {
+        route.begin();
+    }
+    let split = &mut scratch.nee_split;
+    let bounce_split = &mut scratch.bounce_split;
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
@@ -817,8 +919,12 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     let _p = profile::scope_if::<PROFILE>(Section::Trace);
                     world.intersect(&ray, 0.001, f32::INFINITY)
                 };
+                let cut0 = stats.cutout_passes;
                 if world.has_cutouts() {
                     pass_cutouts(world, &ray, &mut hit, v, stats);
+                }
+                if AOV {
+                    route.terminal_ts((stats.cutout_passes - cut0) as u16);
                 }
                 if let Some(hit) = hit {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
@@ -834,6 +940,9 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
                         last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
+                        if let Some(ctx) = routing {
+                            route.next_emit(ctx.emitter(lights, hit.geom_id));
+                        }
                     }
                 }
             }
@@ -852,9 +961,16 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // Patched in place, on the cold side only: an `if` that yields the
         // hit from either arm copies all of it at every vertex (+0.8% of
         // cornellbox's instructions, which has no cutout).
+        let cut0 = stats.cutout_passes;
         if world.has_cutouts() && !exiting {
             pass_cutouts(world, &ray, &mut hit_opt, v, stats);
         }
+        // Cutouts passed on the way here: `Ts` events before this vertex.
+        let arrival_ts = if AOV {
+            (stats.cutout_passes - cut0) as u16
+        } else {
+            0
+        };
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
         // Free-flight candidate in the carried homogeneous medium
@@ -951,6 +1067,20 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                         }
                     }
                 }
+                if let Some(ctx) = routing {
+                    // `V`, then the light NEE picked — the same draw
+                    // `volume_nee` made, so the same light.
+                    route.vertex(arrival_ts);
+                    let pick = v.new_domain(K_NEE).draw_sample_f32::<4>();
+                    let light = lights
+                        .pick_index_at(p, pick[0])
+                        .map_or(NO_EVENT, |(i, _)| ctx.light(i));
+                    route.nee(light, std::iter::once((ctx.volume(), vrec.nee)));
+                    route.bounce(std::iter::once((ctx.volume(), vrec.factor)));
+                }
+                if albedo_on {
+                    route.albedo_at(Vec3A::ONE);
+                }
                 if !survived {
                     stats.vertices += 1;
                     records.push(vrec);
@@ -1042,6 +1172,14 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     }
                 }
             }
+            if let Some(ctx) = routing {
+                // A medium scatter is a `V` event; it runs no NEE.
+                route.vertex(arrival_ts);
+                route.bounce(std::iter::once((ctx.volume(), vrec.factor)));
+            }
+            if albedo_on {
+                route.albedo_at(Vec3A::ONE);
+            }
             if !survived {
                 stats.vertices += 1;
                 records.push(vrec);
@@ -1069,10 +1207,45 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // by chance, so it is a bounce-side MIS event just like hitting
             // an emissive surface.
             let unit_direction = Vec3A::normalize(ray.direction());
-            let background = escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy);
+            // With light path expressions, each light's share is routed by
+            // its own `L`, and the background is their sum — the additions
+            // `escaped_emission` makes, in its order, so bit for bit its
+            // answer (asserted in debug builds) without evaluating every
+            // light at infinity twice.
+            let background = if let Some(ctx) = routing {
+                route.escape_lights_begin();
+                escaped_split(
+                    &prev,
+                    lights,
+                    unit_direction,
+                    ray.mask(),
+                    strategy,
+                    |light, e| {
+                        let sym = light.map_or(ctx.backdrop(), |i| ctx.light(i));
+                        route.escape_light(sym, e);
+                    },
+                );
+                let total = route.escaped_total();
+                debug_assert!(
+                    total.to_array().map(f32::to_bits)
+                        == escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
+                            .to_array()
+                            .map(f32::to_bits),
+                    "escaped_split must sum to escaped_emission"
+                );
+                total
+            } else {
+                escaped_emission(&prev, lights, unit_direction, ray.mask(), strategy)
+            };
             // Segment emission is already weighted; the background pays the
             // volume transmittance of the final segment.
             terminal = vol_emit + vol_tr * background;
+            if AOV {
+                route.terminal_ts(arrival_ts);
+                if routing.is_some() {
+                    route.escape_begin(vol_emit, vol_tr, background);
+                }
+            }
             break;
         };
         let rec: HitRecord = hit.rec;
@@ -1133,9 +1306,18 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     let last = records.last_mut().expect("prev implies a record");
                     last.next_emit = atten * emitted;
                     last.next_emit_weight = bounce_emission_weight(p, lights, &hit, strategy);
+                    if let Some(ctx) = routing {
+                        route.next_emit(ctx.emitter(lights, hit.geom_id));
+                    }
                 }
             }
             None => emit_here = emitted,
+        }
+        if let Some(ctx) = routing {
+            route.vertex(arrival_ts);
+            if emit_here.length_squared() > 0.0 {
+                route.emit(ctx.emitter(lights, hit.geom_id));
+            }
         }
 
         // Guide secondary bounces only: primary vertices vary per pixel far
@@ -1234,6 +1416,21 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 // ray-facing normal). Applying it again here is what used
                 // to make this an integral of `brdf · cos²`.
                 nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
+                if let Some(ctx) = routing {
+                    // Each lobe's share, in the beauty's own expression. A
+                    // walk's exit is part of the walk's event: no event here.
+                    sp.eval_lobes(&ray, light_dir_unit, split);
+                    let light_pdf = light_pdf.get();
+                    route.nee(
+                        ctx.light(light_index),
+                        split.iter().map(|(e, f)| {
+                            (
+                                if exiting { NO_EVENT } else { ctx.lobe(e) },
+                                ls.radiance * f * shadow_tr * weight / light_pdf,
+                            )
+                        }),
+                    );
+                }
             }
         }
         drop(lighting);
@@ -1252,13 +1449,30 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // === 2. Indirect Lighting via BSDF (or guided) Sampling ===
         let mut bounce = {
             let _p = profile::scope_if::<PROFILE>(Section::Bounce);
-            sample_bounce_direction(&ray, &rec, &sp, guiding_here, v)
+            sample_bounce_direction::<AOV>(
+                &ray,
+                &rec,
+                &sp,
+                guiding_here,
+                v,
+                routing.is_some().then_some(&mut *bounce_split),
+            )
         };
         // A subsurface leaf was selected: walk the interior now. The walk is
         // part of this surface event — the entry's record carries its weight
         // and the exit is the next vertex — so it spends no path depth.
         // (Replaced only when it walks: passing the sample through a `match`
         // or a rebinding moves all of it at every vertex.)
+        // The event a walk's entry is, known only before the walk replaces
+        // the sample with its exit.
+        let walk_event = if AOV {
+            bounce
+                .as_ref()
+                .filter(|s| s.subsurface.is_some())
+                .map(|s| sp.delta_event(s))
+        } else {
+            None
+        };
         if let Some(sample) = bounce.take_if(|s| s.subsurface.is_some()) {
             // A `--profile` section like `Trace` or `EvalBsdfs`, one per walk
             // rather than per ray: monomorphised on `PROFILE`, it compiles
@@ -1270,6 +1484,16 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         }
         if bounce.is_none() {
             stats.ended_absorbed += 1;
+        }
+        // The albedo: through delta interfaces to the first surface that is
+        // not one (a walk's entry is a surface, not an interface).
+        if albedo_on && !exiting {
+            match &bounce {
+                Some(s) if s.delta && walk_event.is_none() => {
+                    route.albedo_through(s.value / s.pdf);
+                }
+                _ => route.albedo_at(sp.albedo()),
+            }
         }
         if let Some(sample) = bounce {
             let dir = sample.ray.direction().normalize();
@@ -1288,6 +1512,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // to the whole continuation (bounce-hit emission included).
             beta *= atten * factor;
             let mut survived = true;
+            let mut rr_survive = 1.0f32;
             if records.len() >= RR_START_BOUNCE {
                 stats.rr_tested += 1;
                 let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
@@ -1298,6 +1523,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     } else {
                         factor /= p_survive;
                         beta /= p_survive;
+                        rr_survive = p_survive;
                     }
                 }
             }
@@ -1314,6 +1540,26 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     });
                 }
                 vrec.factor = factor;
+                if let Some(ctx) = routing {
+                    // The continuation per lobe, in the beauty's expression:
+                    // `value / pdf`, then the roulette's compensation.
+                    if exiting {
+                        route.bounce(std::iter::once((NO_EVENT, factor)));
+                    } else if let Some(e) = walk_event {
+                        route.bounce(std::iter::once((ctx.lobe(e), factor)));
+                    } else if sample.delta {
+                        route.bounce(std::iter::once((ctx.lobe(sp.delta_event(&sample)), factor)));
+                    } else {
+                        let pdf = sample.pdf;
+                        route.bounce(bounce_split.iter().map(|(e, f)| {
+                            let x = f / pdf;
+                            (
+                                ctx.lobe(e),
+                                if rr_survive < 1.0 { x / rr_survive } else { x },
+                            )
+                        }));
+                    }
+                }
                 if sss_pending {
                     let exit = &*sss_exit;
                     // The exit vertex sees the walk arrive from outside,
@@ -1376,6 +1622,11 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     let _gather = profile::scope_if::<PROFILE>(Section::Contributions);
     let mut radiance = terminal;
     for (index, vrec) in records.iter().enumerate().rev() {
+        if AOV && index == 0 {
+            // What arrives at the primary vertex from beyond it: the input
+            // of the beauty's indirect clamp, whose factor the AOVs reuse.
+            route.r1 = radiance;
+        }
         if let Some(t) = &vrec.train {
             // The full incident radiance (reflected + the raw hit emission),
             // weighted by the cosine to match this tracer's estimator. One
@@ -1412,6 +1663,14 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                         + vrec.nee
                         + vrec.factor * (vrec.next_emit * vrec.next_emit_weight + radiance))
         };
+    }
+    if AOV {
+        if albedo_on {
+            route.finish_albedo();
+        }
+        if let Some(ctx) = routing {
+            route.gather(ctx, records, indirect_clamp);
+        }
     }
     radiance
 }

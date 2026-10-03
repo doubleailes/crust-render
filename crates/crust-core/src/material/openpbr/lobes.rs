@@ -6,6 +6,7 @@ use std::f32::consts::PI;
 use glam::Vec3A;
 use utils::luminance;
 
+use crate::lpe::{LobeEvent, LobeLabel, LobeSplit, Scatter, microfacet_scatter};
 use crate::material::brdf::*;
 
 use super::OpenPBR;
@@ -171,6 +172,9 @@ impl LobePmf {
 // Lobe evaluations. Each returns a *linear-space* BRDF value (no cosine).
 // ---------------------------------------------------------------------------
 
+// Forced inline: `eval_all` is the hot caller, and the second one
+// (`eval_split`, the AOV routing's) made LLVM keep it out of line.
+#[inline(always)]
 fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) -> Vec3A {
     // EON diffuse (energy-preserving Fujii Oren-Nayar) — the model the
     // OpenPBR spec names for the base diffuse slab. `base_diffuse_roughness`
@@ -504,6 +508,122 @@ pub(super) fn eval_all(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, entering: bo
     let dark = coat_darkening(m);
     let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
     fuzz + base_atten * (coat + coat_atten * (dark * (diffuse + spec_metal) + spec_diel))
+}
+
+// ---------------------------------------------------------------------------
+// Light path expression events
+// ---------------------------------------------------------------------------
+
+impl Lobe {
+    /// The event a sample of this lobe is, for light path expressions. Total
+    /// over the enum, so a new lobe cannot be added without one.
+    pub(super) fn event(self, m: &OpenPBR) -> LobeEvent {
+        match self {
+            Lobe::Diffuse => LobeEvent::reflect(Scatter::Diffuse, LobeLabel::Diffuse),
+            Lobe::Specular => {
+                let (ax, ay) =
+                    roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
+                LobeEvent::reflect(microfacet_scatter((ax * ay).sqrt()), LobeLabel::Specular)
+            }
+            Lobe::Coat => {
+                let (ax, ay) =
+                    roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+                LobeEvent::reflect(microfacet_scatter((ax * ay).sqrt()), LobeLabel::Coat)
+            }
+            Lobe::Fuzz => LobeEvent::reflect(Scatter::Glossy, LobeLabel::Sheen),
+            Lobe::Transmission => {
+                // A thin wall is a delta interface; thick transmission is a
+                // Walter BTDF at the specular roughness.
+                let scatter = if transmission_is_continuous(m) {
+                    let (ax, ay) = roughness_to_alpha_aniso(
+                        m.specular_roughness,
+                        m.specular_roughness_anisotropy,
+                    );
+                    microfacet_scatter((ax * ay).sqrt())
+                } else {
+                    Scatter::Singular
+                };
+                LobeEvent::transmit(scatter, LobeLabel::Transmission)
+            }
+        }
+    }
+}
+
+/// [`eval_all`], split by lobe into `out` (each share without the cosine,
+/// as `eval_all` returns it). The shares are `eval_all`'s own summands with
+/// the layering factors each one is multiplied by there — fuzz, then the
+/// coat, then the diffuse and the specular (metal and dielectric together:
+/// one lobe, `'specular'`) under the coat's attenuation — so they sum to
+/// `eval_all` up to the order of the additions. Lobes whose weight is zero
+/// are left out, as `eval_all` skips them.
+pub(super) fn eval_split(
+    m: &OpenPBR,
+    v_local: Vec3A,
+    l_local: Vec3A,
+    entering: bool,
+    out: &mut LobeSplit,
+) {
+    out.clear();
+    if v_local.z <= 0.0 {
+        return;
+    }
+    if l_local.z <= 0.0 {
+        if transmission_is_continuous(m) {
+            out.push(
+                Lobe::Transmission.event(m),
+                eval_transmission(m, v_local, l_local, entering).0,
+            );
+        }
+        return;
+    }
+    let h_local = (v_local + l_local).normalize();
+    let (ax, ay) = roughness_to_alpha_aniso(m.specular_roughness, m.specular_roughness_anisotropy);
+    let f_avg_diel = f0_from_ior(m.specular_ior);
+    let coat_atten = coat_attenuation(m, v_local.z, l_local.z);
+    let dark = coat_darkening(m);
+    let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
+
+    if m.fuzz_weight > 0.0 {
+        out.push(Lobe::Fuzz.event(m), eval_fuzz(m, v_local, l_local, h_local));
+    }
+    if m.coat_weight > 0.0 {
+        let (ax_coat, ay_coat) =
+            roughness_to_alpha_aniso(m.coat_roughness, m.coat_roughness_anisotropy);
+        out.push(
+            Lobe::Coat.event(m),
+            base_atten * eval_coat(m, v_local, l_local, h_local, ax_coat, ay_coat),
+        );
+    }
+    let diffuse = eval_diffuse(m, v_local, l_local, f_avg_diel);
+    out.push(
+        Lobe::Diffuse.event(m),
+        base_atten * (coat_atten * (dark * diffuse)),
+    );
+    if m.specular_weight > 0.0 || m.base_metalness > 0.0 {
+        let (diel, metal) = eval_specular(m, v_local, l_local, h_local, ax, ay);
+        out.push(
+            Lobe::Specular.event(m),
+            base_atten * (coat_atten * (dark * metal + diel)),
+        );
+    }
+}
+
+/// The surface's albedo for denoising (OIDN's feature): every lobe's tint
+/// times its layer weight, with no directional integral — a noise-free
+/// colour that follows the textures. Clamped to [0, 1].
+pub(super) fn albedo(m: &OpenPBR) -> Vec3A {
+    let diffuse_color = m.base_color.lerp(m.subsurface_color, m.subsurface_weight) * m.base_weight;
+    let tw = m.transmission_weight.clamp(0.0, 1.0);
+    let dielectric = diffuse_color * (1.0 - tw) + m.transmission_color * tw;
+    let specular = m.specular_color * (f0_from_ior(m.specular_ior) * m.specular_weight);
+    let metal = m.base_metalness.clamp(0.0, 1.0);
+    let base = (dielectric + specular) * (1.0 - metal) + m.base_color * (m.base_weight * metal);
+    let coat_w = m.coat_weight.clamp(0.0, 1.0);
+    let coated = base * Vec3A::ONE.lerp(m.coat_color, coat_w)
+        + Vec3A::splat(coat_w * f0_from_ior(m.coat_ior));
+    coated
+        .lerp(m.fuzz_color, m.fuzz_weight.clamp(0.0, 1.0))
+        .clamp(Vec3A::ZERO, Vec3A::ONE)
 }
 
 // ---------------------------------------------------------------------------

@@ -321,7 +321,7 @@ are aliases, matched case-sensitively, as Arnold and RenderMan do.
 | `primId` | `id`, `ID`, `Object Index` | int | closest | Phase 3. Stable per-prim integer: hash of the prim path (D14). Clear `-1` (written as u32 `0xFFFFFFFF`). |
 | `instanceId` | `id2` | int | closest | Phase 3. Instance index within its instancer, else `-1`. |
 | `elementId` | `faceindex` | int | closest | Phase 3. *Authored* face index (pre-triangulation), else `-1`. |
-| `crypto_object` / `crypto_material` / `crypto_asset` | `CryptoObject`, `CryptoMaterial`, `CryptoAsset` | (layers) | rank-weighted | Phase 3. Cryptomatte v1.2 (D14). |
+| ID mattes | — | (deep) | coverage-weighted | Phase 3, on hold: OpenEXRId deep EXRs, not Cryptomatte (D14). The Cryptomatte names (`crypto_object` …) stay refused. |
 
 \* `diffuse_albedo` is Arnold's diffuse-only albedo, so it is an alias only
 for an OpenPBR surface whose albedo is entirely diffuse. Phase 2 decides
@@ -658,7 +658,7 @@ question.
 The user writes `C.*<L.'key'>`. Automatic per-tag splitting (Karma's
 `C_key`) is not done; the user asks for each group with its own var.
 
-### D14. Identity and Cryptomatte (Phase 3)
+### D14. Identity and ID mattes (Phase 3) — ID mattes on hold
 
 **A prim-path table.** Import keeps a compact `geom_id → interned prim path`
 table for every geometry prim, not only for emitters.
@@ -679,28 +679,26 @@ an int.
 - **Rejected: Hydra's dense index.** Compositors key mattes across frames, so
   stability matters more than density.
 
-**Cryptomatte** follows the Psyop v1.2 spec exactly:
+**ID mattes: OpenEXRId, not Cryptomatte.** The project chose
+[OpenEXRId](https://github.com/MercenariesEngineering/openexrid) over
+Cryptomatte v1.2 for ID mattes. OpenEXRId stores mattes as a *deep* EXR:
+each pixel holds its own list of samples, each with an object id and its
+coverage, and the names the ids stand for travel in the file.
 
-- **Hash.** `MurmurHash3_x86_32`, seed 0, over UTF-8. The result is converted
-  to float32 bits, with the exponent fixed if it would be 0 or 255.
-  Spec test vector: `"torus"` → 4053562365 → −1.54943624832e+30.
-- **Layers.** `<name>00`, `<name>01`, … holding (id, coverage) pairs in
-  `.r/.g/.b/.a`. The default is 6 ranks (3 layers);
-  `driver:parameters:aov:cryptomatterank` overrides it.
-- **Header metadata.** `cryptomatte/<key>/{name, hash, conversion, manifest}`.
-  The manifest is in the header, with no sidecar.
-- **Coverage.** Uses the beauty's filter weights, as the spec requires ("same
-  kernel as beauty"), summed per ID and normalised by the pixel's weight sum.
-  Cutout pass-through contributes to the surfaces behind it, weighted by
-  opacity.
-- **Names:**
-  - `crypto_object`: prim path;
-  - `crypto_material`: bound material path;
-  - `crypto_asset`: the nearest ancestor with `kind = component` or
-    `assembly`, else the top-level prim.
-- **Memory.** Accumulation needs a small per-pixel map from ID to weight.
-  A unit keeps a fixed small array per pixel (rank × 2, plus spill), so this
-  is never a full-frame hashmap.
+- **On hold.** The `exr` crate (1.74) reads and writes flat images only; its
+  README lists deep data as not yet supported. Nothing else here is blocked.
+- **Unblocking it** means one of: deep scanline writing landing in `exr`
+  (upstream contribution), or a deep scanline writer in-tree in safe Rust
+  (the OpenEXR deep format is documented). A C++/FFI writer would be
+  `unsafe`, which is a project decision.
+- **What carries over** from this record: the prim-path table and the
+  stable per-path `primId` above, which name the ids; coverage weighted by
+  the beauty's pixel filter, as for every filtered AOV; cutout pass-through
+  contributing to the surfaces behind it. The exact channel and metadata
+  layout is OpenEXRId's, to be taken from its specification when the work
+  resumes — not designed here.
+- **Superseded:** the Cryptomatte plan (MurmurHash3 names, ranked
+  `<name>NN.rgba` layers, header manifests) is dropped, not deferred.
 
 **`primvar` sources.** Primvars named by `sourceType = "primvar"` vars are
 added to a "keep" set before the meshes load. `import_render_settings` already
@@ -728,18 +726,17 @@ like `st`, and evaluated at the first hit.
   - **Scalars:** a single channel named after the layer (`Z`, `depth`,
     `sampleCount`). A var named `Z` therefore gives the conventional `Z`
     channel.
-  - **Cryptomatte:** `<name>NN.r/.g/.b/.a`, lower-case as the spec requires.
 - **Precision:**
   - `half*`/`color3h` → HALF;
   - `float*`/`color3f` → FLOAT;
   - `int` → UINT, with `-1` written as its two's-complement bit pattern.
 
-  Data AOVs default to FLOAT; Cryptomatte must be FLOAT.
+  Data AOVs default to FLOAT. (ID mattes are deep, OpenEXRId's own layout:
+  D14.)
 - **Header:**
   - `software` = `crust-render <version>`;
   - `colorInteropID` = `lin_rec709_scene`, crust's rendering space
     (`docs/color_management.md`), applying to the colour channels;
-  - Cryptomatte keys;
   - `driver:parameters:OpenEXR:*` / `driver:parameters:artist|comment` text
     attributes copied through.
 
@@ -895,6 +892,90 @@ Where the implementation departs from, or sharpens, the decisions above.
   depth pass match), and keeps its first output line's format for
   `check_images.sh`.
 
+## Phase 2 as built
+
+Light path expressions (`crust-core/src/lpe/`), the per-lobe routing
+(`tracer/route.rs`), the albedo and light groups. Where it departs from, or
+sharpens, D10–D13:
+
+- **"The lobes agree" is per expression, not per DFA state.** Every
+  expression of a render shares one DFA, so a diffuse and a glossy lobe lead
+  to different states as soon as any expression tells them apart — and the
+  first build, testing state equality, put `C.*[LO]` on the per-lobe sum and
+  lost bit-identity. The DFA now carries, per expression, Moore's partition
+  of its states (`Lpe::class`); lobes agree for an expression when their
+  states share its class, and states in one class compute that expression's
+  radiance identically, so the beauty's totals can stand in for the sum.
+- **The bounce is split at the local direction drawn.** Re-evaluating the
+  world direction a sample returns moves it by an ulp through the frame's
+  round trip, and a lobe at zero roughness (GGX α = 1e-4) changes its value
+  by 0.2% under that: the design's partition missed the beauty by 0.18% on a
+  coated ball. `OpenPBR::scatter_with::<SPLIT>` splits as it samples (the
+  `false` instantiation is `scatter_resolved`, instruction for instruction);
+  a MaterialX closure splits at the ray's own direction, which it stores
+  exactly as it evaluated it. NEE needs neither: the beauty's `eval` and the
+  split take the same world direction.
+- **Singular is α ≤ 1e-3** (roughness ≈ 0.03), not exactly zero: crust
+  floors GGX α at 1e-4, so nothing is exactly a mirror.
+- **MaterialX coats are found by shape.** A leaf knows its BSDF, not which
+  surface component it came from; a reflecting interface layered over
+  another reflecting interface is labelled `'coat'` (`standard_surface` and
+  `open_pbr_surface` both expand that way). A reflecting specular over a
+  transmission-only interface stays `'specular'`.
+- **Cutouts are `Ts` events** on the segment they are passed on (counted from
+  `stats.cutout_passes`, so `pass_cutouts` is untouched). Shadow rays through
+  a cutout add none: NEE's visibility is not an event in OSL either.
+- **A subsurface walk is one `TD 'subsurface'` event**; its exit vertex adds
+  none (its NEE and bounce pass the state through).
+- **The escape is split per light** by `escaped_split`, and with
+  expressions on the beauty's background *is* the split's sum — the same
+  additions in the same order, asserted bitwise in debug builds — so the
+  lights at infinity are not evaluated twice.
+- **Light groups read `crust:light:lpeTag` only.** Karma's, RenderMan's and
+  Arnold's attributes stay unread until their names are checked against real
+  exports (open question 2). Backdrops carry no tag.
+- **Albedo** (D12): the chain multiplies each delta interface's
+  `value / pdf`, clamped to [0, 1] per step; a volume scatter before any
+  surface reports 1; a `Material` queried directly (not OpenPBR, not a
+  closure) reports 1. No `DEBUG` count of such materials was added: which
+  materials take that path is only known per hit.
+- **Strategy agreement holds for lobes NEE can resolve.** Light-only and
+  BSDF-only agree per expression to ~1% at 2048 spp where every lobe is
+  rough; on a coat at zero roughness light-only is unbiased but renders it
+  black at any affordable sample count (it differs from BSDF-only by 7% in
+  the beauty itself, before any routing), so the test uses rough lobes.
+
+**Cost** (task 7.6). Instruction counts, cornellbox at `-s 2`, one thread;
+render = `advance_pixel` inclusive:
+
+| request | render | vs beauty | per added expression |
+|---|---|---|---|
+| no products | 3,686M | — | |
+| `N` only | 3,813M | +3.5% | |
+| 1 LPE | 4,491M | +21.8% | |
+| 4 LPEs | 4,971M | +34.9% | +160M (+4.3%) |
+| 8 LPEs | 5,326M | +44.5% | +89M (+2.4%) |
+| 16 LPEs | 6,170M | +67.4% | +105M (+2.9%) |
+
+The first expression pays for the lobe splits (NEE's and the bounce's,
+`eval_split`) and the routing record; each further one for its share of the
+backward gather, pruned by the expressions a state can still accept
+(`Lpe::live_mask`). Writing a product adds its channels' compression on top
+(~240M per colour layer here). Three optimizations got the first expression
+from +1.6G to these numbers: splitting only when an expression needs it, no
+re-drawn sample in `scatter_split`, and no heap allocation in the gather.
+
+The beauty-only render is unchanged: 4,161.8–4,161.9M instructions against
+Phase 1's 4,178.8M — lower, because `eval_diffuse` and `ShadingPoint::eval`
+are now forced inline (adding `eval_split` as a second caller had pushed
+them out of line, +0.28%, and inlining `eval_diffuse` back made `eval_all`
+cheaper than before). All 33 goldens bit-identical. `bench_ab.sh`, 5
+interleaved reps against the pre-AOV binary, render seconds (min / mean):
+cornellbox +0.1% / −0.4%, veach_mis +0.1% / −0.2%, materialx_showcase
++0.5% / +0.4%, openpbr_showcase −2.0% / +1.3% — noise. The MaterialX scene
+is the one that does pay something real: the closure walk's coat detection
+runs at every vertex, beauty or not.
+
 ## Known gaps (to be carried into `openspec/specs/aovs/design.md` when archived)
 
 - Every Non-Goal above, which is warned when authored, not silent.
@@ -908,6 +989,11 @@ Where the implementation departs from, or sharpens, the decisions above.
   normal maps are honoured.
 - Guided renders with ≥ 2 training iterations are not repeatable (`ΔEff` is
   wall-clock), so neither are their AOVs.
+- Light groups read `crust:light:lpeTag` only; other renderers' tag
+  attributes are not read, and backdrops carry no tag.
+- The albedo of a volume scatter before any surface is 1.
+- Light-only (`--strategy light`) renders near-mirror lobes black at
+  practical sample counts — true of the beauty as of every expression.
 
 ## Sources
 

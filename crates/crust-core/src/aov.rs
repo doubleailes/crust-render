@@ -47,6 +47,11 @@ pub enum AovSource {
     /// Variance of the pixel's luminance mean — adaptive sampling's
     /// stopping statistic.
     Variance,
+    /// The light a light path expression selects (`sourceType = "lpe"`;
+    /// the expression is the var's [`AovVar::expression`]).
+    Lpe,
+    /// The albedo at the first non-delta hit, for denoisers.
+    Albedo,
 }
 
 /// `(name, source)` for every canonical name and alias a `raw` var may ask
@@ -92,15 +97,15 @@ const RAW_NAMES: &[(&str, AovSource)] = &[
     ("__sampleCount", AovSource::SampleCount),
     ("variance", AovSource::Variance),
     ("crust:variance", AovSource::Variance),
+    ("albedo", AovSource::Albedo),
+    ("diffuse_albedo", AovSource::Albedo),
+    ("DiffuseAlbedoSD", AovSource::Albedo),
 ];
 
 /// Names a later phase of the AOV work will define, refused today with a
 /// reason that says so rather than "unknown".
 const LATER_NAMES: &[&str] = &[
     "Ng",
-    "albedo",
-    "diffuse_albedo",
-    "DiffuseAlbedoSD",
     "primId",
     "id",
     "ID",
@@ -155,6 +160,8 @@ impl AovSource {
             AovSource::St => "primvars:st",
             AovSource::SampleCount => "sampleCount",
             AovSource::Variance => "variance",
+            AovSource::Lpe => "lpe",
+            AovSource::Albedo => "albedo",
         }
     }
 
@@ -166,7 +173,9 @@ impl AovSource {
             | AovSource::P
             | AovSource::Peye
             | AovSource::Normal
-            | AovSource::Neye => 3,
+            | AovSource::Neye
+            | AovSource::Lpe
+            | AovSource::Albedo => 3,
             AovSource::St => 2,
             AovSource::Alpha
             | AovSource::Depth
@@ -178,7 +187,7 @@ impl AovSource {
 
     pub fn channel_kind(self) -> ChannelKind {
         match self {
-            AovSource::Color => ChannelKind::Color,
+            AovSource::Color | AovSource::Lpe | AovSource::Albedo => ChannelKind::Color,
             AovSource::P | AovSource::Peye | AovSource::Normal | AovSource::Neye => {
                 ChannelKind::Vector
             }
@@ -270,23 +279,36 @@ pub struct AovVar {
     pub precision: Precision,
     pub accumulation: Accumulation,
     pub clear: f32,
+    /// The light path expression of an [`AovSource::Lpe`] var, without any
+    /// `lpe:` prefix; `None` for every other source.
+    pub expression: Option<String>,
 }
 
 impl AovVar {
-    /// Whether this var adds the beauty's alpha as a fourth channel.
+    /// Whether this var adds the beauty's alpha as a fourth channel: a
+    /// `color4*` beauty or light path expression.
     pub fn with_alpha(&self) -> bool {
-        self.source == AovSource::Color && self.components == 4
+        matches!(self.source, AovSource::Color | AovSource::Lpe) && self.components == 4
     }
 
     /// The film slot holding this var's per-sample accumulation, if any.
-    fn slot_key(&self) -> Option<SlotKey> {
+    /// `lpes` is the render's expression list ([`AovLayout::lpes`]).
+    fn slot_key(&self, lpes: &[String]) -> Option<SlotKey> {
+        let lpe = match &self.expression {
+            Some(e) if self.source == AovSource::Lpe => lpes.iter().position(|x| x == e)? as u16,
+            _ => NO_LPE,
+        };
         self.source.needs_slot().then(|| SlotKey {
             source: self.source,
             accumulation: self.accumulation,
             clear_bits: self.clear.to_bits(),
+            lpe,
         })
     }
 }
+
+/// A slot that holds no light path expression.
+const NO_LPE: u16 = u16::MAX;
 
 /// One accepted `raster` RenderProduct.
 #[derive(Debug, Clone, PartialEq)]
@@ -337,6 +359,9 @@ pub(crate) struct SlotKey {
     pub(crate) source: AovSource,
     pub(crate) accumulation: Accumulation,
     clear_bits: u32,
+    /// For an [`AovSource::Lpe`] slot, the expression's index in
+    /// [`AovLayout::lpes`] — its bit in the compiled DFA.
+    lpe: u16,
 }
 
 impl SlotKey {
@@ -360,24 +385,44 @@ pub(crate) struct AovLayout {
     pub(crate) slots: Vec<SlotKey>,
     pub(crate) sample_count: bool,
     pub(crate) variance: bool,
+    /// The distinct light path expressions, in first-use order: expression
+    /// `i` is bit `i` of the compiled DFA's accept masks. At most
+    /// [`crate::lpe::MAX_EXPRESSIONS`] — the importer refuses the rest.
+    pub(crate) lpes: Vec<String>,
+    /// Whether a var asks for the albedo.
+    pub(crate) albedo: bool,
+    /// The compiled expressions and event symbols, built by the renderer
+    /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
+    pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
 }
 
 impl AovLayout {
     pub(crate) fn new(request: &AovRequest) -> Self {
         let mut layout = AovLayout::default();
+        for var in request.vars() {
+            if let Some(e) = &var.expression
+                && var.source == AovSource::Lpe
+                && !layout.lpes.contains(e)
+                && layout.lpes.len() < crate::lpe::MAX_EXPRESSIONS
+            {
+                layout.lpes.push(e.clone());
+            }
+        }
+        let lpes = layout.lpes.clone();
         let mut add = |key: SlotKey| {
             if !layout.slots.contains(&key) {
                 layout.slots.push(key);
             }
         };
         for var in request.vars() {
-            if let Some(key) = var.slot_key() {
+            if let Some(key) = var.slot_key(&lpes) {
                 add(key);
             }
             if var.with_alpha() {
                 add(ALPHA_OF_BEAUTY);
             }
         }
+        layout.albedo = request.vars().any(|v| v.source == AovSource::Albedo);
         layout.sample_count = request.vars().any(|v| v.source == AovSource::SampleCount);
         layout.variance = request.vars().any(|v| v.source == AovSource::Variance);
         layout
@@ -389,7 +434,17 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
     source: AovSource::Alpha,
     accumulation: Accumulation::Filtered,
     clear_bits: 0,
+    lpe: NO_LPE,
 };
+
+/// What one camera sample carries for the AOVs besides its first hit: the
+/// light each expression selected, and the albedo. Empty and unused unless
+/// the render asks for them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SampleExtras<'a> {
+    pub(crate) lpe: &'a [Vec3A],
+    pub(crate) albedo: Vec3A,
+}
 
 /// What the camera ray met at the path's first vertex, recorded by the
 /// AOV instantiation of the integrator and nothing else.
@@ -433,11 +488,19 @@ impl CameraFrame {
 /// One sample's value for `key`'s source, written into `out` (as many
 /// components as the source has). Where the sample saw nothing the source
 /// describes, the slot's clear value.
-fn sample_value(key: &SlotKey, hit: &FirstHit, cam: &CameraFrame, out: &mut [f32; 3]) {
+fn sample_value(
+    key: &SlotKey,
+    hit: &FirstHit,
+    extras: &SampleExtras,
+    cam: &CameraFrame,
+    out: &mut [f32; 3],
+) {
     let clear = key.clear();
     *out = [clear; 3];
     let put3 = |out: &mut [f32; 3], v: Vec3A| *out = [v.x, v.y, v.z];
     match (key.source, hit) {
+        (AovSource::Lpe, _) => put3(out, extras.lpe[key.lpe as usize]),
+        (AovSource::Albedo, _) => put3(out, extras.albedo),
         (AovSource::Alpha, FirstHit::Surface { .. }) => out[0] = 1.0,
         (AovSource::Alpha, _) => out[0] = 0.0,
         (AovSource::Depth, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
@@ -556,7 +619,14 @@ impl UnitAov {
     /// Folds one camera sample into the current pixel. `(fx, fy)` is the
     /// sample's film offset from the pixel's corner (the box is `[0, 1)²`),
     /// `weight` the beauty's filter weight for it.
-    pub(crate) fn add(&mut self, hit: &FirstHit, fx: f32, fy: f32, weight: f32) {
+    pub(crate) fn add(
+        &mut self,
+        hit: &FirstHit,
+        extras: &SampleExtras,
+        fx: f32,
+        fy: f32,
+        weight: f32,
+    ) {
         let (p, cam) = (self.pixel, &self.cam);
         let in_box = (0.0..1.0).contains(&fx) && (0.0..1.0).contains(&fy);
         let mut v = [0.0f32; 3];
@@ -564,7 +634,7 @@ impl UnitAov {
             let comps = slot.source.components();
             match slot.accumulation {
                 Accumulation::Filtered => {
-                    sample_value(slot, hit, cam, &mut v);
+                    sample_value(slot, hit, extras, cam, &mut v);
                     if slot.hits_only() {
                         // A sample that saw the quantity has a finite value;
                         // a miss has the (non-finite) clear value.
@@ -589,7 +659,7 @@ impl UnitAov {
                         dx * dx + dy * dy
                     };
                     if planes.closer(p, in_box, key) {
-                        sample_value(slot, hit, cam, &mut v);
+                        sample_value(slot, hit, extras, cam, &mut v);
                         planes.values[p * comps..(p + 1) * comps].copy_from_slice(&v[..comps]);
                         planes.key[p] = key;
                         planes.in_box[p] = in_box;
@@ -618,6 +688,9 @@ pub struct AovFilm {
     sample_count: Option<Vec<f32>>,
     /// Variance of the pixel's luminance mean, when a var asks for it.
     variance: Option<Vec<f32>>,
+    /// The render's light path expressions ([`AovLayout::lpes`]), to find
+    /// an LPE var's slot.
+    lpes: Vec<String>,
 }
 
 impl AovFilm {
@@ -636,6 +709,7 @@ impl AovFilm {
                 .collect(),
             sample_count: layout.sample_count.then(|| vec![0.0; pixels]),
             variance: layout.variance.then(|| vec![0.0; pixels]),
+            lpes: layout.lpes.clone(),
         }
     }
 
@@ -725,6 +799,7 @@ impl AovFilm {
             slots: first.slots.clone(),
             sample_count: first.sample_count.as_ref().map(|n| vec![0.0; n.len()]),
             variance: first.variance.as_ref().map(|v| vec![0.0; v.len()]),
+            lpes: first.lpes.clone(),
         };
         for slot in &mut out.slots {
             if slot.key.accumulation == Accumulation::Filtered {
@@ -857,7 +932,7 @@ impl AovFilm {
                 vec![top_down(&|q| v[q])]
             }
             _ => {
-                let slot = self.slot(&var.slot_key().expect("a slotted source"));
+                let slot = self.slot(&var.slot_key(&self.lpes).expect("a slotted source"));
                 let comps = var.source.components();
                 (0..comps)
                     .map(|c| top_down(&|q| slot.planes.values[q * comps + c]))
@@ -878,6 +953,11 @@ impl AovFilm {
 mod tests {
     use super::*;
 
+    const NONE: SampleExtras<'static> = SampleExtras {
+        lpe: &[],
+        albedo: Vec3A::ZERO,
+    };
+
     fn var(source: AovSource, accumulation: Accumulation) -> AovVar {
         AovVar {
             prim_path: "/Render/Vars/x".into(),
@@ -888,6 +968,7 @@ mod tests {
             precision: Precision::Float,
             accumulation,
             clear: source.default_clear(),
+            expression: None,
         }
     }
 
@@ -925,10 +1006,10 @@ mod tests {
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
         // Outside the box and nearer: ignored once an in-box sample exists.
-        unit.add(&at(1.0), -0.2, 0.5, 1.0);
-        unit.add(&at(10.0), 0.5, 0.5, 1.0);
-        unit.add(&at(2.0), 0.25, 0.75, 1.0);
-        unit.add(&at(5.0), 0.75, 0.25, 1.0);
+        unit.add(&at(1.0), &NONE, -0.2, 0.5, 1.0);
+        unit.add(&at(10.0), &NONE, 0.5, 0.5, 1.0);
+        unit.add(&at(2.0), &NONE, 0.25, 0.75, 1.0);
+        unit.add(&at(5.0), &NONE, 0.75, 0.25, 1.0);
         let mut film = AovFilm::new(&layout, 1, 1);
         film.store(&unit, 0, 0, 0, 4.0, 4, 0.0);
         let depth = film.var_channels(&Buffer::new(1, 1), &request.products[0].vars[0]);
@@ -961,8 +1042,8 @@ mod tests {
         let far = FirstHit::Volume {
             p: Vec3A::new(0.0, 0.0, -7.0),
         };
-        unit.add(&near, 1.6, 0.5, 1.0);
-        unit.add(&far, 1.2, 0.5, 1.0);
+        unit.add(&near, &NONE, 1.6, 0.5, 1.0);
+        unit.add(&far, &NONE, 1.2, 0.5, 1.0);
         let mut film = AovFilm::new(&layout, 1, 1);
         film.store(&unit, 0, 0, 0, 2.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![7.0]]);
@@ -992,8 +1073,8 @@ mod tests {
             uv: None,
         };
         let mut unit = UnitAov::new(&layout, cam, 1);
-        unit.add(&surface, 0.5, 0.5, 3.0);
-        unit.add(&FirstHit::Escaped, 0.5, 0.5, 1.0);
+        unit.add(&surface, &NONE, 0.5, 0.5, 3.0);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.0);
         let mut film = AovFilm::new(&layout, 1, 1);
         film.store(&unit, 0, 0, 0, 4.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![0.75]]);
@@ -1025,12 +1106,12 @@ mod tests {
         // weights, one that misses with weights of both signs.
         let mut unit = UnitAov::new(&layout, cam, 2);
         unit.pixel = 0;
-        unit.add(&at(2.0), 0.5, 0.5, 1.5);
-        unit.add(&at(4.0), 0.5, 0.5, 0.5);
-        unit.add(&FirstHit::Escaped, 0.5, 0.5, -0.25);
+        unit.add(&at(2.0), &NONE, 0.5, 0.5, 1.5);
+        unit.add(&at(4.0), &NONE, 0.5, 0.5, 0.5);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.25);
         unit.pixel = 1;
-        unit.add(&FirstHit::Escaped, 0.5, 0.5, 1.2);
-        unit.add(&FirstHit::Escaped, 0.5, 0.5, -0.2);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, 1.2);
+        unit.add(&FirstHit::Escaped, &NONE, 0.5, 0.5, -0.2);
         let mut film = AovFilm::new(&layout, 2, 1);
         film.store(&unit, 0, 0, 0, 1.75, 3, 0.0);
         film.store(&unit, 1, 1, 0, 1.0, 2, 0.0);

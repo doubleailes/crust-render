@@ -24,7 +24,7 @@ use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32,
+    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32, custom_token,
     infinite_light_escape_mask, light_ray_mask,
 };
 use super::materials::asset_value_path;
@@ -369,6 +369,7 @@ fn emit_round_light(
         None => affine.into(),
     };
     lights.add(AreaLight::new(shape, material, geom_id));
+    tag_last(lights, prim);
     debug!(
         "{:?} light {}: area={} normalize={} radiance={:?} ({})",
         unit,
@@ -594,6 +595,7 @@ pub(super) fn emit_rect_light(
         material,
         geom_id,
     ));
+    tag_last(&mut ctx.lights, prim);
     debug!(
         "RectLight: origin={:?} edge_u={:?} edge_v={:?} normalize={} radiance={:?}",
         origin, edge_u, edge_v, params.normalize, radiance
@@ -662,6 +664,7 @@ pub(super) fn emit_distant_light(
         mask.sees(crate::ray::MASK_CAMERA)
     );
     lights.add_masked(light, mask);
+    tag_last(lights, prim);
 }
 
 /// Imports a `UsdLuxDomeLight` as an infinite environment.
@@ -749,6 +752,19 @@ pub(super) fn emit_dome_light(
         mask.sees(crate::ray::MASK_CAMERA)
     );
     lights.add_masked(CoreDomeLight::new(tint, map, rotation), mask);
+    tag_last(lights, prim);
+}
+
+/// Gives the light just added its light-path-expression tag,
+/// `token crust:light:lpeTag` — the label a light group `<L.'tag'>` selects.
+/// Other renderers' tag attributes are not read yet: their exact names are
+/// still to be checked against real exports.
+fn tag_last(lights: &mut LightList, prim: &Prim) {
+    if let Some(tag) = custom_token(prim, "crust:light:lpeTag") {
+        debug!("{}: LPE tag {tag:?}", prim.path());
+        let index = lights.count() - 1;
+        lights.set_lpe_tag(index, Some(&tag));
+    }
 }
 
 /// The dome's `inputs:texture:file` as a filesystem path.

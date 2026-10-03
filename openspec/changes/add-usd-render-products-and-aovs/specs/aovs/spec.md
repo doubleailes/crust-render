@@ -47,7 +47,7 @@ parentheses.
 
 - `albedo` (Phase 2).
 - `primId`, `instanceId`, `elementId` (Phase 3).
-- `crypto_object`, `crypto_material`, `crypto_asset` (Phase 3).
+- ID mattes through OpenEXRId (Phase 3, on hold; not Cryptomatte).
 
 A name not in the table SHALL be refused with one warning per var. A refused
 var SHALL produce no channel. Data AOVs SHALL keep their clear value where the
@@ -178,24 +178,21 @@ interface, or 1 when there is none.
 - **THEN** the `albedo` channel shows the wall's texture, scaled by the pane's
   transmission
 
-### Requirement: Identity and Cryptomatte
+### Requirement: Identity and ID mattes
 
-*Phase 3.*
+*Phase 3, on hold: OpenEXRId needs a deep EXR writer, which the `exr` crate
+does not have.*
 
-`primId` SHALL be a stable integer per prim path (MurmurHash3 of the path).
-`crypto_object`, `crypto_material` and `crypto_asset` SHALL be written per
-Cryptomatte v1.2:
+`primId` SHALL be a stable integer per prim path. ID mattes SHALL be written
+as [OpenEXRId](https://github.com/MercenariesEngineering/openexrid) deep EXRs,
+not as Cryptomatte layers. Until a deep writer exists, a var asking for an
+identity source SHALL be refused with a warning, as today.
 
-- ranked (id, coverage) pairs in `<name>NN.r/.g/.b/.a`;
-- 6 ranks by default;
-- `cryptomatte/<key>/{name,hash,conversion,manifest}` header metadata;
-- coverage weighted by the beauty's pixel filter.
+#### Scenario: Identity sources are refused while on hold
 
-#### Scenario: Cryptomatte hash matches the spec vector
-
-- **WHEN** an object named `torus` is written to `crypto_object`
-- **THEN** its ID float is the bit pattern of 4053562365 with the exponent
-  rule applied (−1.54943624832e+30), and the manifest maps `torus` to it
+- **WHEN** a RenderVar asks for `primId` or a Cryptomatte name such as
+  `crypto_object`
+- **THEN** a warning names the var and no channel is written
 
 #### Scenario: Stable IDs across frames
 

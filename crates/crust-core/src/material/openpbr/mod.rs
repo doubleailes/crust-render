@@ -405,6 +405,25 @@ impl OpenPBR {
         rec: &HitRecord,
         sampler: PathSampler,
     ) -> Option<ScatterSample> {
+        self.scatter_with::<false>(r_in, rec, sampler, None)
+    }
+
+    /// The sampling behind [`OpenPBR::scatter_resolved`] and
+    /// [`OpenPBR::scatter_split`]. With `SPLIT`, a continuous sample's value
+    /// is also split by lobe into `split`, at the local direction just
+    /// drawn; without, every `if SPLIT` compiles away and this is the
+    /// scatter it always was.
+    #[inline(always)]
+    fn scatter_with<const SPLIT: bool>(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+        mut split: Option<&mut crate::lpe::LobeSplit>,
+    ) -> Option<ScatterSample> {
+        if SPLIT && let Some(out) = split.as_deref_mut() {
+            out.clear();
+        }
         let frame = Frame::new(rec.normal);
         let v_world = -r_in.direction().normalize();
         let v_local = frame.to_local(v_world);
@@ -434,6 +453,10 @@ impl OpenPBR {
                 let l_world = frame.to_world(l_local);
                 let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
                 let brdf = eval_all(self, v_local, l_local, rec.front_face);
+                if SPLIT && let Some(out) = split.as_deref_mut() {
+                    lobes::eval_split(self, v_local, l_local, rec.front_face, out);
+                    out.scale(Vec3A::splat(l_local.z.abs()));
+                }
                 let ray = match (rec.front_face, self.interior_medium()) {
                     (true, Some(medium)) => {
                         Ray::new_in_medium(rec.p + l_world * 1e-4, l_world, medium)
@@ -504,6 +527,12 @@ impl OpenPBR {
         let pdf = pdf_all(self, &pmf, v_local, l_local, rec.front_face).max(1e-4);
         let brdf = eval_all(self, v_local, l_local, rec.front_face);
         let n_dot_l = l_local.z.max(0.0);
+        if SPLIT && let Some(out) = split {
+            // `value` is `brdf · n_dot_l`; `l_local.z > 0` here, so the
+            // shares' `|cos|` is the same factor.
+            lobes::eval_split(self, v_local, l_local, rec.front_face, out);
+            out.scale(Vec3A::splat(l_local.z.abs()));
+        }
 
         let l_world = frame.to_world(l_local);
         // Convention across this codebase's materials: return brdf * cos as
@@ -543,6 +572,61 @@ impl OpenPBR {
             eval_all(self, v_local, l_local, rec.front_face) * l_local.z.abs(),
             pdf,
         ))
+    }
+}
+
+impl OpenPBR {
+    /// [`OpenPBR::eval_resolved`], split by lobe (each share with the cosine,
+    /// as `eval` returns it). `false` where `eval_resolved` answers `None`.
+    pub(crate) fn eval_lobes_resolved(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        wi: Vec3A,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> bool {
+        let frame = Frame::new(rec.normal);
+        let v_local = frame.to_local(-r_in.direction().normalize());
+        if v_local.z <= 0.0 {
+            out.clear();
+            return false;
+        }
+        let l_local = frame.to_local(wi.normalize());
+        lobes::eval_split(self, v_local, l_local, rec.front_face, out);
+        out.scale(Vec3A::splat(l_local.z.abs()));
+        true
+    }
+
+    /// [`OpenPBR::scatter_resolved`], also splitting a continuous sample's
+    /// value by lobe at exactly the direction sampled (empty for a delta
+    /// sample).
+    ///
+    /// At the *local* direction drawn, not the world direction the sample
+    /// returns: a direction taken to world space and back moves by an ulp,
+    /// and a lobe at zero roughness (GGX α = 1e-4) changes its value by
+    /// 0.2% under that — enough that a partition of light path expressions
+    /// would not sum to the beauty. `scatter_split_draws_the_same_direction`
+    /// pins that this is `scatter_resolved`'s sample, bit for bit.
+    pub(crate) fn scatter_split(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> Option<ScatterSample> {
+        out.clear();
+        self.scatter_with::<true>(r_in, rec, sampler, Some(out))
+    }
+
+    /// The event of a delta sample: OpenPBR's only delta lobe is thin-walled
+    /// transmission.
+    pub(crate) fn delta_event(&self) -> crate::lpe::LobeEvent {
+        Lobe::Transmission.event(self)
+    }
+
+    /// The albedo for denoising — see `lobes::albedo`.
+    pub(crate) fn albedo(&self) -> Vec3A {
+        lobes::albedo(self)
     }
 }
 

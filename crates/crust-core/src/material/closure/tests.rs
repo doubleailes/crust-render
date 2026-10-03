@@ -731,3 +731,107 @@ fn a_recycled_closure_answers_like_a_fresh_one() {
     assert_eq!(reused.eval(&r, &rec, wi), fresh.eval(&r, &rec, wi));
     assert!(!reused.transmits() && reused.medium().is_none());
 }
+
+/// A coat over a specular over a diffuse, the shape of `standard_surface`.
+const COATED: &str = r#"
+  <dielectric_bsdf name="coat" type="BSDF">
+    <input name="roughness" type="vector2" value="0.0001, 0.0001" />
+  </dielectric_bsdf>
+  <dielectric_bsdf name="spec" type="BSDF">
+    <input name="roughness" type="vector2" value="0.3, 0.3" />
+  </dielectric_bsdf>
+  <dielectric_bsdf name="refr" type="BSDF">
+    <input name="roughness" type="vector2" value="0.1, 0.1" />
+    <input name="scatter_mode" type="string" value="T" />
+  </dielectric_bsdf>
+  <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+  <mix name="body" type="BSDF">
+    <input name="fg" type="BSDF" nodename="refr" />
+    <input name="bg" type="BSDF" nodename="d" />
+    <input name="mix" type="float" value="0.5" />
+  </mix>
+  <layer name="base" type="BSDF">
+    <input name="top" type="BSDF" nodename="spec" />
+    <input name="base" type="BSDF" nodename="body" />
+  </layer>
+  <layer name="x" type="BSDF">
+    <input name="top" type="BSDF" nodename="coat" />
+    <input name="base" type="BSDF" nodename="base" />
+  </layer>"#;
+
+#[test]
+fn the_lobe_split_sums_to_eval_bitwise() {
+    use crate::lpe::LobeSplit;
+    let mut split = LobeSplit::default();
+    let mut checked = 0;
+    for (name, leaf) in LEAVES {
+        for (body, root) in [(doc(leaf), "x"), (doc(COATED), "x")] {
+            let c = resolved(&body, root, 0.6, true);
+            let r = arriving(0.6);
+            let rec = hit(true);
+            for k in 0..32 {
+                let phi = k as f32 * 0.7;
+                let z = 1.0 - 2.0 * ((k as f32 + 0.5) / 32.0);
+                let s = (1.0 - z * z).sqrt();
+                let wi = Vec3A::new(s * phi.cos(), s * phi.sin(), z);
+                let (value, _) = c.eval(&r, &rec, wi).expect("a leaf");
+                assert!(c.eval_lobes(wi, &mut split));
+                assert_eq!(split.len(), c.leaves().len());
+                let total = split.total();
+                assert_eq!(
+                    [total.x.to_bits(), total.y.to_bits(), total.z.to_bits()],
+                    [value.x.to_bits(), value.y.to_bits(), value.z.to_bits()],
+                    "{name}: {total} vs {value}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
+#[test]
+fn a_reflecting_interface_over_another_is_the_coat() {
+    use crate::lpe::{LobeLabel, Scatter};
+    let c = resolved(&doc(COATED), "x", 0.3, true);
+    let labels: Vec<_> = c
+        .leaves()
+        .iter()
+        .map(|l| {
+            (
+                l.event(false).label,
+                l.event(false).scatter,
+                l.event(true).label,
+            )
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            // The coat: a mirror, so singular.
+            (LobeLabel::Coat, Scatter::Singular, LobeLabel::Transmission),
+            // The base specular over a transmission-only interface stays
+            // specular.
+            (
+                LobeLabel::Specular,
+                Scatter::Glossy,
+                LobeLabel::Transmission
+            ),
+            (
+                LobeLabel::Specular,
+                Scatter::Glossy,
+                LobeLabel::Transmission
+            ),
+            (LobeLabel::Diffuse, Scatter::Diffuse, LobeLabel::Diffuse),
+        ]
+    );
+    // Alone, a dielectric is the specular.
+    let alone = resolved(&doc(LEAVES[3].1), "x", 0.3, true);
+    assert_eq!(alone.leaves()[0].event(false).label, LobeLabel::Specular);
+    // The albedo is within [0, 1] and tracks the tints.
+    let a = c.albedo();
+    assert!(
+        a.min_element() >= 0.0 && a.max_element() <= 1.0 && a.x > 0.1,
+        "{a}"
+    );
+}
