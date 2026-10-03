@@ -1,14 +1,11 @@
 //! Uniform refinement: the whole cage to one level, snapped to the limit.
 
-use opensubdiv_rs::far::{
-    FVarChannelDescriptor, PrimvarRefiner, TopologyDescriptor, TopologyRefinerFactory,
-    UniformOptions,
-};
+use opensubdiv_rs::far::{FVarChannelDescriptor, PrimvarRefiner, UniformOptions};
 use opensubdiv_rs::sdc;
 use openusd::gf::Vec3f;
 
 use super::normals::smooth_normals;
-use super::topology::{expand_crease_runs, validate_cage, validate_corners};
+use super::topology::prepare_cage;
 use super::{RefinedUvs, SubdivError, SubdivFaces, SubdivRequest, SubdivScheme, SubdividedMesh};
 
 /// Uniformly refines the cage to `req.level` and snaps the result to the
@@ -48,48 +45,18 @@ pub(crate) fn subdivide(
         out.faces = faces;
         return Ok(out);
     }
-    let (counts_us, indices_u32) = validate_cage(points.len(), counts, indices)?;
-    let (crease_pairs, crease_weights) = expand_crease_runs(
-        req.crease_indices,
-        req.crease_lengths,
-        req.crease_sharpnesses,
-    )?;
-    let corners = validate_corners(req.corner_indices, req.corner_sharpnesses)?;
-
-    let scheme = match req.scheme {
-        SubdivScheme::CatmullClark => sdc::SchemeType::Catmark,
-        SubdivScheme::Bilinear => sdc::SchemeType::Bilinear,
-        SubdivScheme::Loop => sdc::SchemeType::Loop,
-    };
-    // The face-varying rule is one per refiner, not per channel, so the
-    // authored chart's rule wins. The synthetic Ptex channel must refine
-    // bilinearly, and does under every rule but `none` (handled above) —
-    // each of its values is private to one face, so every one of its edges
-    // is a face-varying boundary, and its data is affine. Without a chart,
-    // `All`.
+    let cage = prepare_cage(points.len(), counts, indices, req)?;
     let chart = req.uvs.as_ref().filter(|c| c.face_varying);
-    let options = sdc::Options::default()
-        .with_vtx_boundary_interpolation(req.boundary)
-        .with_fvar_linear_interpolation(
-            chart.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
-        );
 
     // Loop cannot refine quads at all, and the Ptex channel only makes sense
     // for the quad-split schemes.
     let want_uvs = req.want_face_uvs && req.scheme != SubdivScheme::Loop;
     let (fvar_uvs, fvar_indices) = if want_uvs {
-        ptex_fvar_channel(&counts_us)
+        ptex_fvar_channel(&cage.counts)
     } else {
         (Vec::new(), Vec::new())
     };
-    // A face-varying chart's per-face-vertex indices are its channel's
-    // topology; its values seed the refinement.
-    let chart_indices: Vec<u32> = match chart {
-        Some(c) => (0..indices.len())
-            .map(|fv| c.value_index(fv) as u32)
-            .collect(),
-        None => Vec::new(),
-    };
+    let chart_indices = cage.chart_indices(chart);
     let mut channels = Vec::with_capacity(2);
     if want_uvs {
         channels.push(FVarChannelDescriptor::new(fvar_uvs.len(), &fvar_indices));
@@ -99,15 +66,7 @@ pub(crate) fn subdivide(
         channels.len() - 1
     });
 
-    let mut descriptor = TopologyDescriptor::new(points.len(), &counts_us, &indices_u32)
-        .with_creases(&crease_pairs, &crease_weights)
-        .with_corners(&corners.0, &corners.1);
-    if !channels.is_empty() {
-        descriptor = descriptor.with_fvar_channels(&channels);
-    }
-
-    let mut refiner =
-        TopologyRefinerFactory::create(descriptor, scheme, options).map_err(SubdivError::Refine)?;
+    let mut refiner = cage.refiner(points.len(), &channels)?;
     let level = req.level as usize;
     refiner.refine_uniform(UniformOptions::new(level));
 

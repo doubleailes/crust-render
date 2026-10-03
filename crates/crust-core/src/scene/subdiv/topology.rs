@@ -1,9 +1,101 @@
-//! Cage validation: the checks the refiner cannot make itself, and USD's
-//! crease runs and corners in the shapes it takes.
+//! Cage validation: the checks the refiner cannot make itself, USD's crease
+//! runs and corners in the shapes it takes, and the refiner both
+//! [`subdivide`](super::subdivide) and
+//! [`tessellate_adaptive`](super::tessellate_adaptive) build from them.
 
+use opensubdiv_rs::far::{
+    FVarChannelDescriptor, TopologyDescriptor, TopologyRefiner, TopologyRefinerFactory,
+};
 use opensubdiv_rs::sdc;
 
-use super::SubdivError;
+use super::{SubdivError, SubdivRequest, SubdivScheme, UvChannel};
+
+/// A cage checked whole and converted to the refiner's shapes, with the
+/// scheme and options it refines under — the setup uniform refinement and
+/// per-face tessellation share.
+pub(super) struct Cage {
+    /// `faceVertexCounts`, every entry at least 3.
+    pub(super) counts: Vec<usize>,
+    /// `faceVertexIndices`, every entry a valid point.
+    pub(super) indices: Vec<u32>,
+    crease_pairs: Vec<[u32; 2]>,
+    crease_weights: Vec<f32>,
+    corners: (Vec<u32>, Vec<f32>),
+    scheme: sdc::SchemeType,
+    options: sdc::Options,
+}
+
+/// Validates the cage, expands its creases and corners, and maps the scheme
+/// and boundary rule. The face-varying rule is one per refiner, not per
+/// channel, so the authored chart's rule wins. The synthetic Ptex channel must
+/// refine bilinearly, and does under every rule but `none` (which
+/// [`subdivide`](super::subdivide) refines apart) — each of its values is
+/// private to one face, so every one of its edges is a face-varying boundary,
+/// and its data is affine. Without a chart, `All`.
+pub(super) fn prepare_cage(
+    n_points: usize,
+    counts: &[i32],
+    indices: &[i32],
+    req: &SubdivRequest,
+) -> Result<Cage, SubdivError> {
+    let (counts, indices) = validate_cage(n_points, counts, indices)?;
+    let (crease_pairs, crease_weights) = expand_crease_runs(
+        req.crease_indices,
+        req.crease_lengths,
+        req.crease_sharpnesses,
+    )?;
+    let corners = validate_corners(req.corner_indices, req.corner_sharpnesses)?;
+    let scheme = match req.scheme {
+        SubdivScheme::CatmullClark => sdc::SchemeType::Catmark,
+        SubdivScheme::Bilinear => sdc::SchemeType::Bilinear,
+        SubdivScheme::Loop => sdc::SchemeType::Loop,
+    };
+    let chart = req.uvs.as_ref().filter(|c| c.face_varying);
+    let options = sdc::Options::default()
+        .with_vtx_boundary_interpolation(req.boundary)
+        .with_fvar_linear_interpolation(
+            chart.map_or(sdc::FVarLinearInterpolation::All, |c| c.linear),
+        );
+    Ok(Cage {
+        counts,
+        indices,
+        crease_pairs,
+        crease_weights,
+        corners,
+        scheme,
+        options,
+    })
+}
+
+impl Cage {
+    /// A face-varying chart's per-face-vertex indices: its channel's
+    /// topology, while its values seed the refinement. Empty without one.
+    pub(super) fn chart_indices(&self, chart: Option<&UvChannel>) -> Vec<u32> {
+        match chart {
+            Some(c) => (0..self.indices.len())
+                .map(|fv| c.value_index(fv) as u32)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The topology refiner for this cage of `n_points` points, carrying the
+    /// face-varying `channels`.
+    pub(super) fn refiner(
+        &self,
+        n_points: usize,
+        channels: &[FVarChannelDescriptor],
+    ) -> Result<TopologyRefiner, SubdivError> {
+        let mut descriptor = TopologyDescriptor::new(n_points, &self.counts, &self.indices)
+            .with_creases(&self.crease_pairs, &self.crease_weights)
+            .with_corners(&self.corners.0, &self.corners.1);
+        if !channels.is_empty() {
+            descriptor = descriptor.with_fvar_channels(channels);
+        }
+        TopologyRefinerFactory::create(descriptor, self.scheme, self.options)
+            .map_err(SubdivError::Refine)
+    }
+}
 
 /// The refiner indexes with `usize` counts and `u32` indices, and it cannot
 /// skip a malformed face the way `triangulate` does — so the cage is checked
@@ -112,7 +204,7 @@ pub(super) fn expand_crease_runs(
     Ok((pairs, weights))
 }
 
-pub(super) fn validate_corners(
+fn validate_corners(
     indices: &[i32],
     sharpnesses: &[f32],
 ) -> Result<(Vec<u32>, Vec<f32>), SubdivError> {
