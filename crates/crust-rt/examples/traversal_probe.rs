@@ -12,43 +12,12 @@
 //! Trust the counts from this build, not its timings: the counters are
 //! global atomics and contend across threads.
 
-use crust_rt::{Geometry, Ray, SceneBuilder};
-use glam::Vec3A;
+#[path = "../benches/fixtures/mod.rs"]
+mod fixtures;
 
-/// A UV sphere, as a stand-in for real mesh geometry at a chosen size.
-fn uv_sphere(segs: usize, rings: usize) -> Geometry {
-    let mut vertices = Vec::new();
-    for r in 0..=rings {
-        let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
-        for s in 0..=segs {
-            let th = (s as f32 / segs as f32) * std::f32::consts::TAU;
-            vertices.push(Vec3A::new(
-                phi.sin() * th.cos(),
-                phi.cos(),
-                phi.sin() * th.sin(),
-            ));
-        }
-    }
-    let row = segs + 1;
-    let mut indices = Vec::new();
-    for r in 0..rings {
-        for s in 0..segs {
-            let (a, b, c, d) = (
-                (r * row + s) as u32,
-                (r * row + s + 1) as u32,
-                ((r + 1) * row + s + 1) as u32,
-                ((r + 1) * row + s) as u32,
-            );
-            indices.push([a, b, c]);
-            indices.push([a, c, d]);
-        }
-    }
-    Geometry::TriangleMesh {
-        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
-        indices,
-        normals: None,
-    }
-}
+use crust_rt::{Geometry, Ray, SceneBuilder};
+use fixtures::unit_uv_sphere;
+use glam::Vec3A;
 
 fn probe(label: &str, geom: Geometry) {
     let mut b = SceneBuilder::new();
@@ -128,7 +97,7 @@ fn report(label: &str, prims: usize, hits: u64, rays: u64) {
 /// probe's `top-level` row.
 fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
     let mut inner = SceneBuilder::new();
-    inner.attach(uv_sphere(segs, rings));
+    inner.attach(unit_uv_sphere(segs, rings));
     let proto = std::sync::Arc::new(inner.commit());
 
     // Spacing must exceed the prototype's diameter. Packing unit spheres
@@ -206,7 +175,7 @@ fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
 /// another tree's root.
 fn probe_nested(label: &str, groups: usize, per_group: usize, segs: usize, rings: usize) {
     let mut leaf = SceneBuilder::new();
-    leaf.attach(uv_sphere(segs, rings));
+    leaf.attach(unit_uv_sphere(segs, rings));
     let proto = std::sync::Arc::new(leaf.commit());
 
     const SPACING: f32 = 2.5;
@@ -286,10 +255,10 @@ fn main() {
     // Same shape at growing primitive counts: nodes/ray should climb only
     // logarithmically, so if throughput falls much faster than this does,
     // the cost is per-visit rather than per-node-count.
-    probe("sphere 32x16", uv_sphere(32, 16));
-    probe("sphere 128x64", uv_sphere(128, 64));
-    probe("sphere 512x256", uv_sphere(512, 256));
-    probe("sphere 1024x512", uv_sphere(1024, 512));
+    probe("sphere 32x16", unit_uv_sphere(32, 16));
+    probe("sphere 128x64", unit_uv_sphere(128, 64));
+    probe("sphere 512x256", unit_uv_sphere(512, 256));
+    probe("sphere 1024x512", unit_uv_sphere(1024, 512));
 
     // Same geometry reached through instances. `nodes/ray` here counts
     // only the outer tree's nodes -- the inner descent is a separate

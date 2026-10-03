@@ -14,8 +14,8 @@ use tracing::{debug, warn};
 use crate::material::{Material, OpenPBR};
 
 use super::ImportCaches;
+use super::attrs::value_at;
 use super::materials::{attribute_asset_path, load_uv_texture, material_ptex, shader_info_id};
-use super::time::eval_time;
 
 /// A `UsdPreviewSurface` material: its constants as an [`OpenPBR`], wrapped in
 /// a [`crate::PreviewSurface`] when any input is driven by a `UsdUVTexture`.
@@ -183,12 +183,7 @@ fn preview_uv_input(
     // The value an input carries, connection followed.
     let value = |input: &shade::Input| -> Option<sdf::Value> {
         let produced = input.value_producing_attributes(ProducerFilter::Any).ok()?;
-        produced
-            .first()?
-            .attribute()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
+        value_at(produced.first()?.attribute())
     };
     let token = |input: &str| value(&tex.input(input)).and_then(|v| v.as_str().map(str::to_owned));
     let float4 = |input: &str| value(&tex.input(input)).and_then(|v| sdf_float4(&v));
@@ -243,14 +238,7 @@ fn preview_uv_input(
     // roughness map the dataset does not ship, and roughness 0 turned it into
     // a mirror where the schema's 0.5 is an ordinary surface.
     let fallback = float4(tk::TEX_FALLBACK)
-        .or_else(|| {
-            surface_input
-                .attribute()
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-                .and_then(|v| sdf_float4(&v))
-        })
+        .or_else(|| value_at(surface_input.attribute()).and_then(|v| sdf_float4(&v)))
         .or_else(|| preview_surface_default(name))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
     let loaded = load_uv_texture(&file, space, caches).map(crate::TextureRef);

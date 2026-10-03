@@ -122,9 +122,6 @@ fn thread_stripe() -> usize {
     })
 }
 
-/// Default cache budget, matching OIIO's own 1 GB.
-pub const DEFAULT_BUDGET_BYTES: u64 = crust_core::config::DEFAULT_CACHE_MB as u64 * 1024 * 1024;
-
 /// Which tile, of which level, of which file.
 ///
 /// The file is an interned index, not a path: a key is compared and hashed on
@@ -208,10 +205,6 @@ impl TileData {
             TileKind::U8 => self.bytes.len(),
             TileKind::Half => self.bytes.len() / 2,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -363,21 +356,6 @@ pub struct CacheCounters {
     pub total_bytes: u64,
 }
 
-impl CacheCounters {
-    pub fn is_empty(&self) -> bool {
-        self.micro_hits == 0 && self.hits == 0 && self.misses == 0
-    }
-
-    /// Fraction of lookups answered without touching the disk.
-    pub fn hit_rate(&self) -> f64 {
-        let total = self.micro_hits + self.hits + self.misses;
-        if total == 0 {
-            return 0.0;
-        }
-        (self.micro_hits + self.hits) as f64 / total as f64
-    }
-}
-
 /// One file's geometry plus the decoders that read it.
 struct FileSlot {
     file: TiledFile,
@@ -433,59 +411,34 @@ impl TileCache {
         }
     }
 
-    /// The budget from `CRUST_TEX_CACHE_MB` as parsed into
-    /// [`crust_core::config()`], or [`DEFAULT_BUDGET_BYTES`].
-    pub fn budget_from_env() -> u64 {
-        Self::budget_of(crust_core::config())
-    }
-
-    /// The tile cache budget `config` asks for, in bytes.
-    pub fn budget_of(config: &crust_core::Config) -> u64 {
-        config.tex_cache_mb.get() * 1024 * 1024
-    }
-
-    pub fn budget(&self) -> u64 {
-        self.budget
-    }
-
     pub fn resident(&self) -> u64 {
         self.resident.load(Ordering::Relaxed)
     }
 
     /// Registers a file and returns the index a [`TileId`] names it by.
-    pub fn intern(&self, file: TiledFile) -> Option<u32> {
-        let mut files = lock(&self.files)?;
+    pub fn intern(&self, file: TiledFile) -> u32 {
+        let mut files = lock(&self.files);
         let id = files.len() as u32;
         files.push(Arc::new(FileSlot {
             file,
             readers: Mutex::new(Vec::new()),
             seen: Mutex::new(std::collections::HashSet::new()),
         }));
-        Some(id)
-    }
-
-    pub fn file(&self, id: u32) -> Option<TiledFile> {
-        let files = lock(&self.files)?;
-        files.get(id as usize).map(|s| s.file.clone())
+        id
     }
 
     pub fn counters(&self) -> CacheCounters {
         let s = &self.stats;
         // Distinct tiles ever decoded, across every file.
         let distinct = lock(&self.files)
-            .map(|files| {
-                files
-                    .iter()
-                    .map(|f| lock(&f.seen).map(|s| s.len() as u64).unwrap_or(0))
-                    .sum::<u64>()
-            })
-            .unwrap_or(0);
-        let (files, total_bytes) = lock(&self.files)
-            .map(|files| {
-                let total = files.iter().map(|f| full_chain_bytes(&f.file)).sum();
-                (files.len() as u64, total)
-            })
-            .unwrap_or((0, 0));
+            .iter()
+            .map(|f| lock(&f.seen).len() as u64)
+            .sum::<u64>();
+        let (files, total_bytes) = {
+            let files = lock(&self.files);
+            let total = files.iter().map(|f| full_chain_bytes(&f.file)).sum();
+            (files.len() as u64, total)
+        };
         CacheCounters {
             files,
             loaded_tiles: s.decoded.load(Ordering::Relaxed),
@@ -528,22 +481,23 @@ impl TileCache {
 
     /// The tile, from the shard map or from disk.
     ///
-    /// `None` on any failure — a poisoned lock, an unknown file, a decode
-    /// error. The caller turns that into the texture's fallback colour; it must
-    /// never become a panic.
+    /// `None` on any failure — an unknown file, a decode error. The caller
+    /// turns that into the texture's fallback colour; it must never become a
+    /// panic.
     pub fn get(&self, id: TileId) -> Option<Arc<Tile>> {
-        if let Some(shard) = lock(self.shard(&id)).and_then(|mut m| {
-            m.get_mut(&id).map(|e| {
-                // Only when clear: a hit on a hot tile is otherwise a store
-                // to memory every thread reading that tile has cached.
-                if !e.used {
-                    e.used = true;
-                }
-                e.tile.clone()
-            })
-        }) {
+        // Bound first so the shard guard is dropped before the counter is
+        // touched, rather than held across the `if let` body.
+        let hit = lock(self.shard(&id)).get_mut(&id).map(|e| {
+            // Only when clear: a hit on a hot tile is otherwise a store
+            // to memory every thread reading that tile has cached.
+            if !e.used {
+                e.used = true;
+            }
+            e.tile.clone()
+        });
+        if let Some(tile) = hit {
             self.stats.hits.add(1);
-            return Some(shard);
+            return Some(tile);
         }
         self.stats.misses.add(1);
         self.page_in(id)
@@ -552,18 +506,19 @@ impl TileCache {
     fn page_in(&self, id: TileId) -> Option<Arc<Tile>> {
         let _p = crust_core::profile::scope(crust_core::profile::Section::TextureLoad);
         let slot = {
-            let files = lock(&self.files)?;
+            let files = lock(&self.files);
             files.get(id.file as usize)?.clone()
         };
 
         // Which distinct tiles this file has ever yielded. Only the *count*
         // is used, at report time, to separate a re-read after eviction from a
         // double fill — see `CacheStats::decoded`.
-        if let Some(mut seen) = lock(&slot.seen) {
-            seen.insert((id.level, id.tile));
-        }
+        lock(&slot.seen).insert((id.level, id.tile));
 
-        let mut dec = match lock(&slot.readers).and_then(|mut p| p.pop()) {
+        // Popped in its own statement: a guard in the `match` scrutinee would
+        // hold the pool's lock across opening a new reader.
+        let pooled = lock(&slot.readers).pop();
+        let mut dec = match pooled {
             Some(d) => d,
             None => match slot.file.reader() {
                 Ok(d) => d,
@@ -586,9 +541,7 @@ impl TileCache {
 
         // The cursor goes back whatever happened — a decode error leaves it
         // usable, and dropping it would quietly shrink the pool under load.
-        if let Some(mut pool) = lock(&slot.readers) {
-            pool.push(dec);
-        }
+        lock(&slot.readers).push(dec);
 
         let data = read?;
         let (width, height) = slot
@@ -621,18 +574,15 @@ impl TileCache {
         // shard, so holding this one across the call deadlocks the thread
         // against itself the first time a texture exceeds the budget — which
         // is to say, on every render the cache is actually for.
-        let inserted = match lock(self.shard(&id)) {
-            Some(mut m) => m
-                .insert(
-                    id,
-                    Entry {
-                        tile: tile.clone(),
-                        used: true,
-                    },
-                )
-                .is_none(),
-            None => false,
-        };
+        let inserted = lock(self.shard(&id))
+            .insert(
+                id,
+                Entry {
+                    tile: tile.clone(),
+                    used: true,
+                },
+            )
+            .is_none();
         self.stats.decoded.fetch_add(1, Ordering::Relaxed);
         if inserted {
             let now = self.resident.fetch_add(bytes, Ordering::Relaxed) + bytes;
@@ -670,9 +620,7 @@ impl TileCache {
         for _ in 0..2 {
             for _ in 0..SHARDS {
                 *hand = (*hand + 1) & (SHARDS - 1);
-                let Some(mut m) = lock(&self.shards[*hand]) else {
-                    continue;
-                };
+                let mut m = lock(&self.shards[*hand]);
                 let mut freed = 0u64;
                 m.retain(|_, e| {
                     if e.used {
@@ -702,11 +650,8 @@ impl TileCache {
 /// test build it can — and `unwrap()`ing here would turn one thread's failure
 /// into every other thread's. The data behind these locks is a cache: the worst
 /// a torn update can do is a wrong tile, and every write is a whole `Arc`.
-fn lock<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    match m.lock() {
-        Ok(g) => Some(g),
-        Err(poisoned) => Some(poisoned.into_inner()),
-    }
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Sets in the per-thread microcache. A file's tiles all land in one set, so
@@ -849,7 +794,7 @@ mod tests {
         let path = fixture("direct", 300, 200);
         let tf = TiledFile::open(&path).expect("open");
         let cache = TileCache::new(64 * 1024 * 1024);
-        let id = cache.intern(tf.clone()).expect("intern");
+        let id = cache.intern(tf.clone());
 
         let mut dec = tf.reader().expect("reader");
         for level in 0..tf.level_count() {
@@ -907,7 +852,7 @@ mod tests {
         let tf = TiledFile::open(&path).expect("open");
         let budget = 1024 * 1024;
         let cache = TileCache::new(budget);
-        let id = cache.intern(tf.clone()).expect("intern");
+        let id = cache.intern(tf.clone());
         let mut dec = tf.reader().expect("reader");
 
         let l0 = tf.level(0);
@@ -960,7 +905,7 @@ mod tests {
         // ~7 MiB against it — several sweeps' worth.
         let budget = 1024 * 1024;
         let cache = TileCache::new(budget);
-        let id = cache.intern(tf.clone()).expect("intern");
+        let id = cache.intern(tf.clone());
 
         let l0 = tf.level(0);
         let tiles = (l0.across * l0.down) as u32;
@@ -1002,7 +947,7 @@ mod tests {
         let path = fixture("threads", 512, 512);
         let tf = TiledFile::open(&path).expect("open");
         let cache = Arc::new(TileCache::new(512 * 1024));
-        let id = cache.intern(tf.clone()).expect("intern");
+        let id = cache.intern(tf.clone());
 
         // The expected contents, computed once, single-threaded.
         let mut dec = tf.reader().expect("reader");
@@ -1060,7 +1005,7 @@ mod tests {
         let path = fixture("micro", 256, 256);
         let tf = TiledFile::open(&path).expect("open");
         let cache = TileCache::new(64 * 1024 * 1024);
-        let id = cache.intern(tf).expect("intern");
+        let id = cache.intern(tf);
 
         let a = TileId {
             file: id,
@@ -1102,11 +1047,7 @@ mod tests {
         let cache = TileCache::new(64 * 1024 * 1024);
         // Five textures, as an ALab material has.
         let files: Vec<u32> = (0..5)
-            .map(|_| {
-                cache
-                    .intern(TiledFile::open(&path).expect("open"))
-                    .expect("intern")
-            })
+            .map(|_| cache.intern(TiledFile::open(&path).expect("open")))
             .collect();
         let taps = |cache: &TileCache| {
             for &file in &files {
@@ -1164,7 +1105,7 @@ mod tests {
         let path = fixture("broken", 128, 128);
         let tf = TiledFile::open(&path).expect("open");
         let cache = TileCache::new(1024 * 1024);
-        let id = cache.intern(tf).expect("intern");
+        let id = cache.intern(tf);
 
         // A tile index past the end of the level.
         assert!(
