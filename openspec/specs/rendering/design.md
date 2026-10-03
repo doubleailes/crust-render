@@ -443,3 +443,27 @@ randomness use `openqmc::pcg::Rng`.
   interiors (subsurface) render brighter than before, correctly. And bounce-hit emission
   (`next_emit`) is now attenuated by the arriving segment (tinted glass / smoke in front
   of an emitter used to pass emission through undimmed).
+
+## History: the iterative integrator and its estimator
+
+- **Recursion to two passes.** `trace_path` replaced a recursive integrator that
+  intersected every segment twice: once from the previous vertex to find emission
+  (`add_emission` traced the ray itself) and once as the next vertex. The forward walk
+  intersects each segment once and the backward gather folds the `VertexRec`s into the
+  same estimate. The recursion's rule at an exhausted depth was kept: the last bounce
+  still collects (MIS-weighted) emission from the surface it hits, but never anything
+  from lights at infinity.
+- **The double cosine.** `Material::eval` and `ScatterSample::value` return
+  `brdf · |cos|`, and the integrator used to multiply by the cosine again on both the
+  bounce and the NEE side, so every bounce integrated `brdf · cos²` — a Lambertian
+  surface reflected 2/3 of its albedo (0.64 × L in the furnace scene). Both strategies
+  applied the same extra factor, so every `--strategy` agreed on the dimmed answer and
+  no MIS test caught it; the white-furnace test
+  (`a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance`,
+  `crust-core/tests/render_smoke.rs`) did. Guiding training samples carry one cosine
+  for the same reason.
+- **NEE test order.** Surface NEE tests radiance, then the BSDF (`eval`), then the
+  shadow ray. Before `ShadingPoint` ran a material's pattern network once per vertex,
+  a textured `eval` went after the shadow ray, so an occluded light never paid for the
+  network; with the network already run, `eval` is the cheaper test. Either order is
+  bit-identical.

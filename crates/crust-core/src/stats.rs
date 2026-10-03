@@ -1230,10 +1230,10 @@ impl fmt::Display for RenderStats {
             } else {
                 // A mixed report is the normal case on a production stage, not
                 // a warning — the island streams 39 of 3 618 and preloads the
-                // rest by design. So the two reasons are named separately: one
-                // says the admission rule worked, the other says a file is
-                // broken. Calling both a fallback, as this line once did, read
-                // as 3 579 errors.
+                // rest by design. So every reason is named on its own: the
+                // policy ones (size threshold, budget, mip space) say the
+                // admission rule worked, and only a failed open — shouted —
+                // says a file is broken.
                 let mut parts = Vec::new();
                 if p.streamed > 0 {
                     parts.push(format!("{} streamed", thousands(p.streamed as usize)));

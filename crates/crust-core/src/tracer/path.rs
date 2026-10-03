@@ -231,8 +231,8 @@ fn sample_bounce_direction(
 }
 
 /// Everything recorded at one path vertex during the forward walk. The
-/// backward gather reconstructs the radiance estimate from these exactly as
-/// the old recursion did: `R = segment_emit + atten · (emit_here + nee +
+/// backward gather folds these into the radiance estimate, vertex by vertex:
+/// `R = segment_emit + atten · (emit_here + nee +
 /// factor · (next_emit·next_emit_weight + R_incoming))`.
 pub(super) struct VertexRec {
     /// Transmittance over the segment that arrived at this vertex —
@@ -844,9 +844,7 @@ fn surface_nee<const PROFILE: bool>(
         // BSDF sampling instead, and a light below the horizon gets a
         // zero value — is cheaper than the shadow ray: the shading point
         // already ran any pattern network, so `eval` reads no texture.
-        // (Before that split a textured `eval` went after the ray, so an
-        // occluded light never paid for the network.) Either order is
-        // bit-identical: a skipped test's contribution would be exactly
+        // Either order is bit-identical: a skipped test's contribution would be exactly
         // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
         // which nothing else reads.
         let mut visibility = || {
@@ -888,8 +886,8 @@ fn surface_nee<const PROFILE: bool>(
             // `brdf_value` already carries the geometric cosine —
             // `Material::eval` returns `brdf · |cos|` (unsigned, so a
             // continuous transmission lobe can see a light behind the
-            // ray-facing normal). Applying it again here is what used
-            // to make this an integral of `brdf · cos²`.
+            // ray-facing normal) — so none is applied here: the bounce
+            // side's `value / pdf` carries exactly one cosine too.
             nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
         }
     }
@@ -898,8 +896,8 @@ fn surface_nee<const PROFILE: bool>(
 
 /// The integrator: an iterative path tracer in two passes. The forward walk
 /// traces one segment per bounce (each hit serves both as the previous
-/// vertex's potential light hit and as the next vertex — the old recursion
-/// intersected every segment twice), records a `VertexRec` per vertex, and
+/// vertex's potential light hit and as the next vertex, so every segment is
+/// intersected once), records a `VertexRec` per vertex, and
 /// applies Russian roulette past `RR_START_BOUNCE`. The backward gather
 /// then folds the records into the radiance estimate and emits guiding
 /// training samples, which need the radiance arriving from the rest of the
@@ -959,10 +957,10 @@ pub(super) fn trace_path<const PROFILE: bool>(
 
         if remaining <= 0 {
             stats.ended_depth += 1;
-            // Depth exhausted. The old recursion still counted bounce-hit
-            // emission at the last vertex (its `add_emission` term traced
-            // the ray itself) but never the background — reproduce both,
-            // attenuating through any media the final segment crosses.
+            // Depth exhausted: no further vertex, but the last bounce still
+            // collects the emission of the surface it hits, MIS-weighted and
+            // attenuated through any media the final segment crosses. A ray
+            // escaping here collects nothing from lights at infinity.
             if let Some(p) = &prev {
                 stats.closest_hit += 1;
                 let mut hit = {
@@ -1283,12 +1281,9 @@ pub(super) fn trace_path<const PROFILE: bool>(
             let dir = sample.ray.direction().normalize();
             // `sample.value` is the material's `brdf · |cos|` (delta lobes
             // carry their whole throughput there instead), so the estimator is
-            // just `value / pdf`. This used to multiply by the cosine a second
-            // time, making every bounce an integral of `brdf · cos²` — a
-            // Lambertian surface then reflected 2/3 of its albedo. NEE applied
-            // the same extra factor, so the two stayed consistent with each
-            // other and every `--strategy` agreed on the dimmed answer, which
-            // is why no MIS test caught it; the furnace test did.
+            // just `value / pdf`, with no cosine of its own — as on the NEE
+            // side. `a_diffuse_ball_in_a_white_furnace_reflects_albedo_times_radiance`
+            // pins it.
             let mut factor = sample.value / sample.pdf;
 
             // Russian roulette on the continuation: survive with probability
@@ -1363,17 +1358,16 @@ pub(super) fn trace_path<const PROFILE: bool>(
 
     // Backward gather: fold the records into the estimate, deepest vertex
     // first, emitting guiding training samples along the way. `radiance` is
-    // what the old recursion returned to each vertex from its continuation
-    // (next vertex's emission suppressed — its MIS-weighted share enters
-    // separately through `next_emit`).
+    // what each vertex receives from its continuation (the next vertex's
+    // emission left out — its MIS-weighted share enters separately through
+    // `next_emit`).
     let _gather = profile::scope_if::<PROFILE>(Section::Contributions);
     let mut radiance = terminal;
     for (index, vrec) in records.iter().enumerate().rev() {
         if let Some(t) = &vrec.train {
             // The full incident radiance (reflected + the raw hit emission),
-            // weighted by the cosine to match this tracer's estimator. One
-            // cosine, not two: the material's value already carries it and the
-            // integrator no longer applies a second.
+            // weighted by the one cosine this tracer's estimator carries (in
+            // the material's value).
             train_out.push(SampleData {
                 pos: t.pos,
                 dir: t.dir,

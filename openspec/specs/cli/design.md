@@ -333,6 +333,12 @@ resident. Either side alone is bit-identical to the pre-filtering renderer, and 
 produce the same image as each other — which is what makes them an honest A/B of the two
 halves: the pyramid, and the footprint that selects from it.
 
+Every switch is a field of `crust_core::Config` (`config.rs`), read from the environment
+once per process. They used to be read where they were used, and parsed six different
+ways: some were cached, others re-read per prim or per texture open, a bad budget warned
+once per call site, and a bad `CRUST_TEX_MAX` not at all. `config.rs` now has one boolean
+grammar, one number grammar and one warning per bad value.
+
 ## Stats and render profile (`stats.rs`, `profile.rs`)
 
 From the `crust-core` crate description:
@@ -387,3 +393,6 @@ From the `crust-core` crate description:
   `RayStats` counter (MainLoop = pixels, Trace = closest-hit, Occlusion = shadow
   rays, EvalBsdfs = surface vertices) and that the local times partition the
   thread time.
+  The Ptex block's backend line names each preload reason separately (size threshold,
+  budget, linear mip space, failed open). It once called every preload a fallback, which
+  read the island's 3 579 by-design preloads — it streams 39 of 3 618 — as 3 579 errors.
