@@ -92,26 +92,15 @@ fn main() {
         );
     }
 
-    let mut jobs: Vec<PathBuf> = Vec::new();
-    if input.contains("<UDIM>") || input.contains("<UVTILE>") {
-        for v in 0..10u32 {
-            for u in 0..10u32 {
-                let name = input
-                    .replace("<UDIM>", &(1001 + u + 10 * v).to_string())
-                    .replace("<UVTILE>", &format!("u{}_v{}", u + 1, v + 1));
-                let p = PathBuf::from(&name);
-                if p.exists() {
-                    jobs.push(p);
-                }
-            }
-        }
-        if jobs.is_empty() {
+    // The renderer's own sweep, so this converts exactly the tiles it opens.
+    let jobs: Vec<PathBuf> = match crust_assets::existing_tiles(Path::new(&input)) {
+        Some(tiles) if tiles.is_empty() => {
             eprintln!("no tiles of {input} found on disk");
             std::process::exit(1);
         }
-    } else {
-        jobs.push(PathBuf::from(&input));
-    }
+        Some(tiles) => tiles.into_iter().map(|(_, p)| p).collect(),
+        None => vec![PathBuf::from(&input)],
+    };
 
     let mut total_in = 0u64;
     let mut total_out = 0u64;

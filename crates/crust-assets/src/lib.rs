@@ -50,7 +50,7 @@ pub use ptex_stream::{
 pub use ptex_texture::{
     DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
 };
-pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
+pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture, existing_tiles};
 
 use crust_core::{
     AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
@@ -398,24 +398,10 @@ impl FileAssets {
     /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
     /// disk, or the one image.
     fn tile_sources(path: &Path) -> Vec<std::path::PathBuf> {
-        let name = path.to_string_lossy();
-        if name.contains("<UDIM>") || name.contains("<UVTILE>") {
-            let mut tiles = Vec::new();
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    if let Some(p) =
-                        uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                        && p.exists()
-                    {
-                        tiles.push(p);
-                    }
-                }
-            }
-            tiles
-        } else if path.exists() {
-            vec![path.to_path_buf()]
-        } else {
-            Vec::new()
+        match existing_tiles(path) {
+            Some(tiles) => tiles.into_iter().map(|(_, p)| p).collect(),
+            None if path.exists() => vec![path.to_path_buf()],
+            None => Vec::new(),
         }
     }
 
@@ -712,11 +698,7 @@ impl FileAssets {
             .filter(|c| (c.as_path() == path) == (which == Candidates::Source));
         for candidate in candidates {
             let started = Instant::now();
-            let Some(tex) =
-                tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
-                    let name = candidate.to_string_lossy();
-                    uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                })
+            let Some(tex) = tiled::StreamingTexture::open(&candidate, space, self.cache.clone())
             else {
                 continue;
             };

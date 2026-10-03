@@ -111,6 +111,29 @@ fn a_single_image_wraps_instead_of_tiling() {
     assert_eq!(sampled(&tex, 3.5, 2.5), [7, 8, 9]);
 }
 
+/// The sweep lists only the tiles on disk, in ascending UDIM order whatever
+/// order they were written in — the order the streaming texture interns them
+/// and settles `auto` by.
+#[test]
+fn existing_tiles_lists_present_tiles_in_udim_order() {
+    let dir = scratch("sweep");
+    for n in [1012, 1001, 1002] {
+        write_tile(&dir.join(format!("s.{n}.png")), [0, 0, 0]);
+    }
+    write_tile(&dir.join("s.u3_v1.png"), [0, 0, 0]);
+    let numbers = |name: &str| {
+        existing_tiles(&dir.join(name)).map(|t| t.into_iter().map(|(n, _)| n).collect::<Vec<_>>())
+    };
+    assert_eq!(numbers("s.<UDIM>.png"), Some(vec![1001, 1002, 1012]));
+    assert_eq!(numbers("s.<UVTILE>.png"), Some(vec![1003]));
+    assert_eq!(numbers("gone.<UDIM>.png"), Some(vec![]));
+    assert_eq!(numbers("s.1001.png"), None);
+    assert_eq!(
+        existing_tiles(&dir.join("s.<UDIM>.png")).unwrap()[2].1,
+        dir.join("s.1012.png")
+    );
+}
+
 #[test]
 fn the_two_tokens_spell_the_same_grid() {
     for (u, v) in [(0, 0), (1, 0), (0, 1), (9, 9)] {
