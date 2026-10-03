@@ -272,12 +272,15 @@ pub(super) fn collect_proto_parts(
             // exactly the blow-up instancing exists to avoid — a prototype
             // holding 500 leaves, itself placed 500 times, must stay 500
             // outer instances, not 250 000.
+            let nested = NestedInstancer {
+                prim: &prim,
+                instancer: &instancer,
+                local: this_local,
+                mask,
+            };
             parts.extend(nested_instancer_parts(
                 stage,
-                &prim,
-                &instancer,
-                this_local,
-                mask,
+                nested,
                 caches,
                 depth + 1,
                 place,
@@ -381,6 +384,16 @@ fn placeholder_scene() -> Arc<RtScene> {
     )
 }
 
+/// A `PointInstancer` the prototype walk met, where it met it.
+struct NestedInstancer<'a> {
+    prim: &'a Prim,
+    instancer: &'a PointInstancer,
+    /// Its transform in the prototype root's frame.
+    local: GMat4,
+    /// Its own `crust:rayMask`, which the expanded part carries.
+    mask: RayMask,
+}
+
 /// Expands a `PointInstancer` found *inside* a prototype into one part.
 ///
 /// Each of its prototypes is grouped into a single scene ([`group_parts`]),
@@ -395,17 +408,19 @@ fn placeholder_scene() -> Arc<RtScene> {
 /// scatter, so a scatter of many-part prototypes became that many identical
 /// boxes — 64 724 of them over the Moana island's dunes, 99% of a render's
 /// instance descents (`docs/moana_profile.md`).
-#[allow(clippy::too_many_arguments)]
 fn nested_instancer_parts(
     stage: &Stage,
-    prim: &Prim,
-    instancer: &PointInstancer,
-    local: GMat4,
-    mask: RayMask,
+    nested: NestedInstancer,
     caches: &mut ImportCaches<'_>,
     depth: usize,
     place: ProtoPlace,
 ) -> Vec<ProtoPart> {
+    let NestedInstancer {
+        prim,
+        instancer,
+        local,
+        mask,
+    } = nested;
     let Some(layout) = read_instancer(prim, instancer, true) else {
         return Vec::new();
     };

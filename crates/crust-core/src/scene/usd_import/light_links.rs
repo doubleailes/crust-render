@@ -392,16 +392,13 @@ impl LightLinks {
             .filter_map(|p| Linked::new(shifted(p.index), p, p.shadow.as_ref()))
             .collect();
         if !restricted.is_empty() {
-            encode_shadows(
-                &paths,
-                &weight,
-                &self.runs,
-                &self.volumes,
-                &restricted,
-                world,
-                volumes,
-                &mut links,
-            );
+            let receivers = Receivers {
+                paths: &paths,
+                weight: &weight,
+                runs: &self.runs,
+                vols: &self.volumes,
+            };
+            receivers.encode_shadows(&restricted, world, volumes, &mut links);
             any = true;
         }
 
@@ -469,117 +466,127 @@ fn classify<'q>(
     (class_of, classes)
 }
 
-/// Design D3. Class 0 — occluders every restricted light is shadowed by —
-/// keeps `MASK_SHADOW`; every other shadow caster clears it and carries one
-/// class bit (3–30 by population, 31 shared). Unrestricted lights' rays carry
-/// `MASK_SHADOW` and every class bit, so they are blocked exactly as before.
-#[allow(clippy::too_many_arguments)]
-fn encode_shadows(
-    paths: &[&sdf::Path],
-    weight: &[usize],
-    runs: &[(u32, u32)],
-    vols: &[(u32, u32)],
-    restricted: &[Linked],
-    world: &mut WorldBuilder,
-    volumes: &mut [VolumeRegion],
-    links: &mut RuntimeLinks,
-) {
-    let (class_of, classes) = classify(paths, restricted.iter().map(|l| l.query));
-    let full = |key: &Key| (0..restricted.len()).all(|b| key.get(b));
-    // Population per class, then the bit each gets.
-    let mut population = vec![0usize; classes.len()];
-    for (path, &c) in class_of.iter().enumerate() {
-        population[c as usize] += weight[path];
-    }
-    let mut order: Vec<usize> = (0..classes.len()).filter(|&c| !full(&classes[c])).collect();
-    order.sort_by_key(|&c| std::cmp::Reverse(population[c]));
-    // `None` for class 0 (keeps MASK_SHADOW), else the class's bit.
-    let mut bit_of: Vec<Option<u32>> = vec![None; classes.len()];
-    for (rank, &c) in order.iter().enumerate() {
-        bit_of[c] = Some(if rank < ALLOCATED {
-            1 << (3 + rank)
-        } else {
-            OVERFLOW_BIT
-        });
-    }
-    let encode = |mask: RayMask, class: usize, authored: &mut bool| -> RayMask {
-        let high = mask.0 & CLASS_BITS;
-        if high != 0 && high != CLASS_BITS {
-            *authored = true;
+/// Every receiver the traversal recorded, as shadow linking reads them.
+struct Receivers<'a> {
+    /// The interned paths, by id.
+    paths: &'a [&'a sdf::Path],
+    /// How many geometries (and volumes) each path accounts for: the
+    /// population the shadow bits are allocated by.
+    weight: &'a [usize],
+    /// [`LightLinks::runs`] and [`LightLinks::volumes`].
+    runs: &'a [(u32, u32)],
+    vols: &'a [(u32, u32)],
+}
+
+impl Receivers<'_> {
+    /// Design D3. Class 0 — occluders every restricted light is shadowed by —
+    /// keeps `MASK_SHADOW`; every other shadow caster clears it and carries one
+    /// class bit (3–30 by population, 31 shared). Unrestricted lights' rays carry
+    /// `MASK_SHADOW` and every class bit, so they are blocked exactly as before.
+    fn encode_shadows(
+        &self,
+        restricted: &[Linked],
+        world: &mut WorldBuilder,
+        volumes: &mut [VolumeRegion],
+        links: &mut RuntimeLinks,
+    ) {
+        let (class_of, classes) = classify(self.paths, restricted.iter().map(|l| l.query));
+        let full = |key: &Key| (0..restricted.len()).all(|b| key.get(b));
+        // Population per class, then the bit each gets.
+        let mut population = vec![0usize; classes.len()];
+        for (path, &c) in class_of.iter().enumerate() {
+            population[c as usize] += self.weight[path];
         }
-        let base = mask.0 & !CLASS_BITS;
-        if base & MASK_SHADOW.0 == 0 {
-            // Not a shadow caster: no class bit, so no shadow ray matches it.
-            return RayMask(base);
+        let mut order: Vec<usize> = (0..classes.len()).filter(|&c| !full(&classes[c])).collect();
+        order.sort_by_key(|&c| std::cmp::Reverse(population[c]));
+        // `None` for class 0 (keeps MASK_SHADOW), else the class's bit.
+        let mut bit_of: Vec<Option<u32>> = vec![None; classes.len()];
+        for (rank, &c) in order.iter().enumerate() {
+            bit_of[c] = Some(if rank < ALLOCATED {
+                1 << (3 + rank)
+            } else {
+                OVERFLOW_BIT
+            });
         }
-        match bit_of[class] {
-            None => RayMask(base),
-            Some(bit) => RayMask((base & !MASK_SHADOW.0) | bit),
-        }
-    };
-    let mut authored = false;
-    let n_geoms = world.count();
-    for (k, &(start, id)) in runs.iter().enumerate() {
-        let end = runs.get(k + 1).map_or(n_geoms as u32, |r| r.0);
-        let class = class_of[id as usize] as usize;
-        for g in start..end {
-            let m = encode(world.mask(g), class, &mut authored);
-            world.set_mask(g, m);
-        }
-    }
-    for &(v, id) in vols {
-        let region = &mut volumes[v as usize];
-        region.mask = encode(region.mask, class_of[id as usize] as usize, &mut authored);
-    }
-    if authored {
-        warn!(
-            "crust:rayMask bits 3-31 are rewritten by shadow linking, which encodes \
-             occluder classes in them"
-        );
-    }
-    let overflow: Vec<usize> = order.iter().skip(ALLOCATED).copied().collect();
-    // Unrestricted lights: blocked by every caster, whatever its class.
-    for m in links.shadow_masks.iter_mut() {
-        *m = RayMask(MASK_SHADOW.0 | CLASS_BITS);
-    }
-    for (bit, l) in restricted.iter().enumerate() {
-        if classes.iter().all(|k| k.get(bit)) {
-            // Shadowed by everything after all: an ordinary light, MIS kept.
-            debug!("{}: collection:shadowLink includes every occluder", l.path);
-            continue;
-        }
-        let in_overflow = overflow.iter().filter(|&&c| classes[c].get(bit)).count();
-        if in_overflow != 0 && in_overflow != overflow.len() {
-            warn!(
-                "{}: collection:shadowLink cannot be encoded ({} occluder classes share \
-                 crust's overflow bit and it includes only some) — shadowed by every \
-                 occluder",
-                l.path,
-                overflow.len()
-            );
-            continue;
-        }
-        let mut mask = MASK_SHADOW.0;
-        for (c, b) in bit_of.iter().enumerate() {
-            if let Some(b) = b
-                && *b != OVERFLOW_BIT
-                && classes[c].get(bit)
-            {
-                mask |= b;
+        let encode = |mask: RayMask, class: usize, authored: &mut bool| -> RayMask {
+            let high = mask.0 & CLASS_BITS;
+            if high != 0 && high != CLASS_BITS {
+                *authored = true;
+            }
+            let base = mask.0 & !CLASS_BITS;
+            if base & MASK_SHADOW.0 == 0 {
+                // Not a shadow caster: no class bit, so no shadow ray matches it.
+                return RayMask(base);
+            }
+            match bit_of[class] {
+                None => RayMask(base),
+                Some(bit) => RayMask((base & !MASK_SHADOW.0) | bit),
+            }
+        };
+        let mut authored = false;
+        let n_geoms = world.count();
+        for (k, &(start, id)) in self.runs.iter().enumerate() {
+            let end = self.runs.get(k + 1).map_or(n_geoms as u32, |r| r.0);
+            let class = class_of[id as usize] as usize;
+            for g in start..end {
+                let m = encode(world.mask(g), class, &mut authored);
+                world.set_mask(g, m);
             }
         }
-        if in_overflow != 0 {
-            mask |= OVERFLOW_BIT;
+        for &(v, id) in self.vols {
+            let region = &mut volumes[v as usize];
+            region.mask = encode(region.mask, class_of[id as usize] as usize, &mut authored);
         }
-        let excluded = order.iter().filter(|&&c| !classes[c].get(bit)).count();
-        debug!(
-            "{}: collection:shadowLink ignores {excluded} of {} occluder class(es) — sampled \
+        if authored {
+            warn!(
+                "crust:rayMask bits 3-31 are rewritten by shadow linking, which encodes \
+             occluder classes in them"
+            );
+        }
+        let overflow: Vec<usize> = order.iter().skip(ALLOCATED).copied().collect();
+        // Unrestricted lights: blocked by every caster, whatever its class.
+        for m in links.shadow_masks.iter_mut() {
+            *m = RayMask(MASK_SHADOW.0 | CLASS_BITS);
+        }
+        for (bit, l) in restricted.iter().enumerate() {
+            if classes.iter().all(|k| k.get(bit)) {
+                // Shadowed by everything after all: an ordinary light, MIS kept.
+                debug!("{}: collection:shadowLink includes every occluder", l.path);
+                continue;
+            }
+            let in_overflow = overflow.iter().filter(|&&c| classes[c].get(bit)).count();
+            if in_overflow != 0 && in_overflow != overflow.len() {
+                warn!(
+                    "{}: collection:shadowLink cannot be encoded ({} occluder classes share \
+                 crust's overflow bit and it includes only some) — shadowed by every \
+                 occluder",
+                    l.path,
+                    overflow.len()
+                );
+                continue;
+            }
+            let mut mask = MASK_SHADOW.0;
+            for (c, b) in bit_of.iter().enumerate() {
+                if let Some(b) = b
+                    && *b != OVERFLOW_BIT
+                    && classes[c].get(bit)
+                {
+                    mask |= b;
+                }
+            }
+            if in_overflow != 0 {
+                mask |= OVERFLOW_BIT;
+            }
+            let excluded = order.iter().filter(|&&c| !classes[c].get(bit)).count();
+            debug!(
+                "{}: collection:shadowLink ignores {excluded} of {} occluder class(es) — sampled \
              by NEE alone at non-delta vertices",
-            l.path,
-            classes.len()
-        );
-        links.shadow_masks[l.index] = RayMask(mask);
-        links.nee_only[l.index] = true;
+                l.path,
+                classes.len()
+            );
+            links.shadow_masks[l.index] = RayMask(mask);
+            links.nee_only[l.index] = true;
+        }
     }
 }
 

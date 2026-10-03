@@ -18,7 +18,6 @@ use crate::light::{
 };
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
-use crate::rt_world::WorldBuilder;
 
 use super::attrs::{
     attr_bool, attr_f32, attr_token, attr_vec3, custom_bool, custom_color3, custom_f32,
@@ -233,9 +232,17 @@ fn perpendicular(a: Vec3A, b: Vec3A) -> bool {
     a.dot(b).abs() <= 1e-5 * a.length() * b.length()
 }
 
-/// Attaches a sphere, disk or cylinder light — the three UsdLux lights
-/// defined on a round [`UnitShape`] — of the given `radius` (and, for the
-/// cylinder, `length`) under the prim transform `world_xf`.
+/// A sphere, disk or cylinder light's shape — the three UsdLux lights defined
+/// on a round [`UnitShape`] — at its authored size.
+struct RoundShape {
+    unit: UnitShape,
+    radius: f32,
+    /// The cylinder's `inputs:length`; unused by the other two.
+    length: f32,
+}
+
+/// Attaches a sphere, disk or cylinder light of the given [`RoundShape`]
+/// under the prim transform `world_xf`.
 ///
 /// Where `world_xf` is a similarity over the axes the shape is round in, the
 /// geometry is the kernel's world-space analytic primitive, as a sphere light
@@ -246,18 +253,19 @@ fn perpendicular(a: Vec3A, b: Vec3A) -> bool {
 /// samples the same [`AffineShape`] (or, for the round sphere, the historical
 /// [`SphereShape`], so existing scenes render exactly as before), and
 /// `normalize` divides by its world-space area.
-#[allow(clippy::too_many_arguments)]
 fn emit_round_light(
-    world: &mut WorldBuilder,
-    lights: &mut LightList,
+    ctx: &mut ImportCtx,
     prim: &Prim,
-    unit: UnitShape,
+    shape: RoundShape,
     world_xf: GMat4,
-    radius: f32,
-    length: f32,
     params: LuxParams,
     shaping: Option<Shaping>,
 ) {
+    let RoundShape {
+        unit,
+        radius,
+        length,
+    } = shape;
     // A negative or zero radius (or length) would pass the affine check —
     // a negative scale is a reflection, still invertible — while the kernel
     // refuses the matching primitive, leaving a light NEE samples on a
@@ -351,13 +359,15 @@ fn emit_round_light(
             transform_end: None,
         }
     });
-    let geom_id = world.attach_masked(geometry, material.clone(), light_ray_mask(prim));
+    let geom_id = ctx
+        .world
+        .attach_masked(geometry, material.clone(), light_ray_mask(prim));
 
     let shape: AreaShape = match round_sphere {
         Some(sphere) => sphere.into(),
         None => affine.into(),
     };
-    lights.add(AreaLight::new(shape, material, geom_id));
+    ctx.lights.add(AreaLight::new(shape, material, geom_id));
     debug!(
         "{:?} light {}: area={} normalize={} radiance={:?} ({})",
         unit,
@@ -383,17 +393,12 @@ pub(super) fn emit_sphere_light(
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Sphere,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Sphere,
         radius,
-        0.0,
-        params,
-        shaping,
-    );
+        length: 0.0,
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `UsdLuxDiskLight`: a disk of `inputs:radius` (0.5) in the local XY
@@ -408,17 +413,12 @@ pub(super) fn emit_disk_light(
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Disk,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Disk,
         radius,
-        0.0,
-        params,
-        shaping,
-    );
+        length: 0.0,
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `UsdLuxCylinderLight`: a tube of `inputs:radius` (0.5) and
@@ -436,17 +436,12 @@ pub(super) fn emit_cylinder_light(
     let length = attr_f32(&light.length_attr()).unwrap_or(1.0);
     let params = lux_params(prim, light);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
-    emit_round_light(
-        &mut ctx.world,
-        &mut ctx.lights,
-        prim,
-        UnitShape::Cylinder,
-        world_xf,
+    let shape = RoundShape {
+        unit: UnitShape::Cylinder,
         radius,
         length,
-        params,
-        shaping,
-    );
+    };
+    emit_round_light(ctx, prim, shape, world_xf, params, shaping);
 }
 
 /// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
