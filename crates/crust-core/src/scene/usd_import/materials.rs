@@ -263,14 +263,18 @@ fn default_material() -> Arc<dyn Material> {
     Arc::new(OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)))
 }
 
+/// The shader's `info:id`, authored as a token or a string.
+///
+/// `Shader::id()` (openusd-schemas 0.7) is asked first, but it answers only
+/// part of the question, so the attribute is then read directly. It reads
+/// `get::<tf::Token>()`, an exact-variant decode, so a `string`-typed
+/// `info:id` comes back as an `Err`; it returns `None` unless
+/// `info:implementationSource` is `id`; and it reads the default value, not
+/// the evaluation time's.
 pub(super) fn shader_info_id(shader: &Shader) -> Option<String> {
-    // `Shader::id()` is the higher-level accessor and does the correct
-    // `get::<String>()` (which extracts from both String and Token variants).
     if let Ok(Some(id)) = shader.id() {
         return Some(id);
     }
-    // Fallback for older openusd revisions or shaders that author info:id
-    // via a raw attribute rather than the schema helper.
     attr_token(&shader.attribute("info:id"))
 }
 

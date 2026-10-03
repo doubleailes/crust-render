@@ -19,25 +19,7 @@ use super::time::{eval_time, xform_time};
 /// column-major layout of the transposed matrix — which is what we want
 /// for M * v evaluation.
 fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
-    let a = m.0;
-    GMat4::from_cols_array(&[
-        a[0] as f32,
-        a[1] as f32,
-        a[2] as f32,
-        a[3] as f32,
-        a[4] as f32,
-        a[5] as f32,
-        a[6] as f32,
-        a[7] as f32,
-        a[8] as f32,
-        a[9] as f32,
-        a[10] as f32,
-        a[11] as f32,
-        a[12] as f32,
-        a[13] as f32,
-        a[14] as f32,
-        a[15] as f32,
-    ])
+    GMat4::from_cols_array(&m.0.map(|x| x as f32))
 }
 
 /// Local-to-parent transform of `prim`, composed from its authored
