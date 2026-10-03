@@ -343,6 +343,15 @@ impl SlotKey {
     pub(crate) fn clear(&self) -> f32 {
         f32::from_bits(self.clear_bits)
     }
+
+    /// A filtered slot whose clear value cannot be averaged — depth and
+    /// distance clear to `+inf`. A miss times a filter weight is `±inf`
+    /// (Mitchell's lobes are signed), and `inf − inf` is NaN, so such a slot
+    /// averages only the samples that hit something, and keeps the clear
+    /// value where none did.
+    fn hits_only(&self) -> bool {
+        self.accumulation == Accumulation::Filtered && !self.clear().is_finite()
+    }
 }
 
 /// The slots a render accumulates, derived once from an [`AovRequest`].
@@ -467,21 +476,38 @@ struct SlotPlanes {
     /// not — and whether any sample inside the pixel's box was seen.
     key: Vec<f32>,
     in_box: Vec<bool>,
+    /// [`SlotKey::hits_only`] slots only, per pixel: the filter weight and
+    /// the count of the samples that hit.
+    hit_weight: Vec<f32>,
+    hits: Vec<u32>,
 }
 
 impl SlotPlanes {
     fn new(slot: &SlotKey, pixels: usize) -> Self {
         let comps = slot.source.components();
+        let hits_only = slot.hits_only();
         match slot.accumulation {
             Accumulation::Filtered => SlotPlanes {
                 values: vec![0.0; pixels * comps],
                 key: Vec::new(),
                 in_box: Vec::new(),
+                hit_weight: if hits_only {
+                    vec![0.0; pixels]
+                } else {
+                    Vec::new()
+                },
+                hits: if hits_only {
+                    vec![0; pixels]
+                } else {
+                    Vec::new()
+                },
             },
             Accumulation::Closest => SlotPlanes {
                 values: vec![slot.clear(); pixels * comps],
                 key: vec![f32::INFINITY; pixels],
                 in_box: vec![false; pixels],
+                hit_weight: Vec::new(),
+                hits: Vec::new(),
             },
         }
     }
@@ -539,6 +565,15 @@ impl UnitAov {
             match slot.accumulation {
                 Accumulation::Filtered => {
                     sample_value(slot, hit, cam, &mut v);
+                    if slot.hits_only() {
+                        // A sample that saw the quantity has a finite value;
+                        // a miss has the (non-finite) clear value.
+                        if !v[..comps].iter().all(|x| x.is_finite()) {
+                            continue;
+                        }
+                        planes.hit_weight[p] += weight;
+                        planes.hits[p] += 1;
+                    }
                     for (c, x) in v[..comps].iter().enumerate() {
                         planes.values[p * comps + c] += weight * x;
                     }
@@ -611,7 +646,9 @@ impl AovFilm {
     /// Copies a unit's pixel `p` into frame pixel `(x, y)`, resolving the
     /// filtered sums with the beauty's own estimator: `Σ wᵢ·vᵢ / Σ wᵢ`, or
     /// the plain mean where the weights cancel to nothing (see
-    /// `PixelState::estimate`).
+    /// `PixelState::estimate`). A [`SlotKey::hits_only`] slot divides by
+    /// the weight (or count) of its hits instead, and keeps its clear value
+    /// where nothing was hit.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn store(
         &mut self,
@@ -628,6 +665,19 @@ impl AovFilm {
             let comps = slot.key.source.components();
             let dst = &mut slot.planes;
             match slot.key.accumulation {
+                Accumulation::Filtered if slot.key.hits_only() => {
+                    let (w, n) = (src.hit_weight[p], src.hits[p]);
+                    for c in 0..comps {
+                        let sum = src.values[p * comps + c];
+                        dst.values[q * comps + c] = if n == 0 {
+                            slot.key.clear()
+                        } else if w > 0.0 {
+                            sum / w
+                        } else {
+                            sum / n as f32
+                        };
+                    }
+                }
                 Accumulation::Filtered => {
                     for c in 0..comps {
                         let sum = src.values[p * comps + c];
@@ -661,6 +711,12 @@ impl AovFilm {
     /// beauty. Closest slots take the closest sample across passes, the
     /// sample count sums, and the variance of the blended mean is
     /// `Σ (wₖ/total)² · varₖ`.
+    ///
+    /// A pass with no weight (its variance could not be estimated, as at
+    /// 1 spp) adds nothing to the variance, and nothing non-finite to a
+    /// filtered plane: `0 · inf` is NaN, where the beauty, finite, gets 0.
+    /// A [`SlotKey::hits_only`] slot takes the weighted mean of the passes
+    /// whose pixel hit something, and keeps its clear value where none did.
     pub(crate) fn blend(films: Vec<AovFilm>, weights: &[f64], total: f64) -> AovFilm {
         let first = films.first().expect("at least one pass");
         let mut out = AovFilm {
@@ -675,12 +731,46 @@ impl AovFilm {
                 slot.planes.values.fill(0.0);
             }
         }
+        // Per hits-only slot, per pixel: the share of the passes that hit.
+        let mut hit_share: Vec<Vec<f64>> = out
+            .slots
+            .iter()
+            .map(|s| {
+                if s.key.hits_only() {
+                    vec![0.0; out.width * out.height]
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
         for (film, w) in films.iter().zip(weights) {
             let share = *w / total;
-            for (dst, src) in out.slots.iter_mut().zip(&film.slots) {
+            for ((dst, src), hit_share) in out.slots.iter_mut().zip(&film.slots).zip(&mut hit_share)
+            {
                 match dst.key.accumulation {
+                    Accumulation::Filtered if dst.key.hits_only() => {
+                        if share == 0.0 {
+                            continue;
+                        }
+                        let comps = dst.key.source.components();
+                        for (q, h) in hit_share.iter_mut().enumerate() {
+                            let v = &src.planes.values[q * comps..(q + 1) * comps];
+                            if v.iter().all(|x| x.is_finite()) {
+                                *h += share;
+                                for (d, s) in dst.planes.values[q * comps..(q + 1) * comps]
+                                    .iter_mut()
+                                    .zip(v)
+                                {
+                                    *d += s * share as f32;
+                                }
+                            }
+                        }
+                    }
                     Accumulation::Filtered => {
                         for (d, s) in dst.planes.values.iter_mut().zip(&src.planes.values) {
+                            if share == 0.0 && !s.is_finite() {
+                                continue;
+                            }
                             *d += s * share as f32;
                         }
                     }
@@ -704,11 +794,28 @@ impl AovFilm {
             if let (Some(d), Some(s)) = (&mut out.sample_count, &film.sample_count) {
                 d.iter_mut().zip(s).for_each(|(d, s)| *d += s);
             }
-            if let (Some(d), Some(s)) = (&mut out.variance, &film.variance) {
+            if let (Some(d), Some(s)) = (&mut out.variance, &film.variance)
+                && share > 0.0
+            {
                 let share = share * share;
                 d.iter_mut()
                     .zip(s)
                     .for_each(|(d, s)| *d = (*d as f64 + share * *s as f64) as f32);
+            }
+        }
+        for (slot, hit_share) in out.slots.iter_mut().zip(&hit_share) {
+            if !slot.key.hits_only() {
+                continue;
+            }
+            let comps = slot.key.source.components();
+            for (q, h) in hit_share.iter().enumerate() {
+                for d in &mut slot.planes.values[q * comps..(q + 1) * comps] {
+                    *d = if *h > 0.0 {
+                        (*d as f64 / *h) as f32
+                    } else {
+                        slot.key.clear()
+                    };
+                }
             }
         }
         out
@@ -890,6 +997,85 @@ mod tests {
         let mut film = AovFilm::new(&layout, 1, 1);
         film.store(&unit, 0, 0, 0, 4.0, 2, 0.0);
         assert_eq!(film.var_channels(&Buffer::new(1, 1), &v), vec![vec![0.75]]);
+    }
+
+    #[test]
+    fn filtered_depth_with_signed_weights_never_goes_nan() {
+        let mut v = var(AovSource::Depth, Accumulation::Filtered);
+        v.clear = f32::INFINITY;
+        let request = AovRequest {
+            products: vec![AovProduct {
+                prim_path: "/p".into(),
+                name: "a.exr".into(),
+                vars: vec![v.clone()],
+                attributes: Vec::new(),
+            }],
+        };
+        let layout = AovLayout::new(&request);
+        let cam = CameraFrame {
+            origin: Vec3A::ZERO,
+            u: Vec3A::X,
+            v: Vec3A::Y,
+            w: Vec3A::Z,
+        };
+        let at = |z: f32| FirstHit::Volume {
+            p: Vec3A::new(0.0, 0.0, -z),
+        };
+        // Two pixels: one mixing hits and misses under Mitchell-like signed
+        // weights, one that misses with weights of both signs.
+        let mut unit = UnitAov::new(&layout, cam, 2);
+        unit.pixel = 0;
+        unit.add(&at(2.0), 0.5, 0.5, 1.5);
+        unit.add(&at(4.0), 0.5, 0.5, 0.5);
+        unit.add(&FirstHit::Escaped, 0.5, 0.5, -0.25);
+        unit.pixel = 1;
+        unit.add(&FirstHit::Escaped, 0.5, 0.5, 1.2);
+        unit.add(&FirstHit::Escaped, 0.5, 0.5, -0.2);
+        let mut film = AovFilm::new(&layout, 2, 1);
+        film.store(&unit, 0, 0, 0, 1.75, 3, 0.0);
+        film.store(&unit, 1, 1, 0, 1.0, 2, 0.0);
+        let depth = &film.var_channels(&Buffer::new(2, 1), &v)[0];
+        // The weighted mean of the hits alone; the miss-only pixel clears.
+        assert_eq!(depth, &vec![2.5, f32::INFINITY]);
+
+        // Blended with a zero-weight pass (a 1 spp pass whose variance
+        // could not be estimated), nothing goes NaN either.
+        let other = film.clone();
+        let blended = AovFilm::blend(vec![film, other], &[0.0, 1.0], 1.0);
+        assert_eq!(
+            &blended.var_channels(&Buffer::new(2, 1), &v)[0],
+            &vec![2.5, f32::INFINITY]
+        );
+    }
+
+    #[test]
+    fn a_zero_weight_pass_leaves_the_variance_finite() {
+        let v = var(AovSource::Variance, Accumulation::Filtered);
+        let request = AovRequest {
+            products: vec![AovProduct {
+                prim_path: "/p".into(),
+                name: "a.exr".into(),
+                vars: vec![v.clone()],
+                attributes: Vec::new(),
+            }],
+        };
+        let layout = AovLayout::new(&request);
+        let cam = CameraFrame {
+            origin: Vec3A::ZERO,
+            u: Vec3A::X,
+            v: Vec3A::Y,
+            w: Vec3A::Z,
+        };
+        let unit = UnitAov::new(&layout, cam, 1);
+        let mut one_spp = AovFilm::new(&layout, 1, 1);
+        one_spp.store(&unit, 0, 0, 0, 1.0, 1, f64::INFINITY);
+        let mut trained = AovFilm::new(&layout, 1, 1);
+        trained.store(&unit, 0, 0, 0, 4.0, 4, 0.5);
+        let blended = AovFilm::blend(vec![one_spp, trained], &[0.0, 2.0], 2.0);
+        assert_eq!(
+            blended.var_channels(&Buffer::new(1, 1), &v),
+            vec![vec![0.5]]
+        );
     }
 
     #[test]

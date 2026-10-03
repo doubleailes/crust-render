@@ -11,7 +11,8 @@ the `aovs` capability's.
   beside it. This is the path every sample, golden and test without products
   takes, and it is kept exactly as it was before products existed, so their
   output did not move.
-- **Products authored.** `crust-render/src/products.rs`: one EXR per accepted
+- **Products authored.** `mod products`, inline in `crust-render/src/main.rs`
+  (the CLI crate keeps one source file): one EXR per accepted
   product, at its `productName` (or `-o` for the first), then the PNG from the
   first product's beauty, beside that product.
 
@@ -50,6 +51,8 @@ is "same writer, same encoding, bit-identical pixels", checked with
   `driver:parameters:*` text values. `exr` refuses a standard attribute name
   as a custom one, so `comments`/`owner` go to their typed fields and any
   other standard name is refused with a `WARN` rather than failing the write.
+  A forwarded `colorInteropID` is refused too: it describes the pixels, and
+  only crust knows what space it wrote them in.
 - **Rows** are top-down in the file, the film's rows bottom-up — the same flip
   `Buffer::get_rgb` does, applied once in `AovFilm::var_channels`.
 - **Paths.** `productName` as authored, relative to the working directory as
@@ -66,7 +69,9 @@ several products (`samples/aovs.usda`) the later ones are written to their own
 that reason.
 
 A product with no `productName` and no `-o`, or with no var crust can write,
-is skipped with a `WARN`; if every product is skipped, the beauty goes to `-o`
+is skipped with a `WARN`, as is a product whose path an earlier product
+already writes (compared lexically, after `-o` is applied — the second write
+would replace the first file and lose its channels); if every product is skipped, the beauty goes to `-o`
 as if none were authored, so a render never silently writes nothing.
 
 ## Logging

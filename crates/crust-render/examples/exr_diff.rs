@@ -20,12 +20,20 @@
 use exr::prelude::*;
 use std::collections::BTreeMap;
 
+/// One channel: its layer's size, and its samples as f32 in row order.
+struct Channel {
+    size: (usize, usize),
+    values: Vec<f32>,
+}
+
 /// Every channel of every layer, by full name (`layer.channel`, or the bare
-/// channel name in an unnamed layer), as f32 in the file's row order.
+/// channel name in an unnamed layer). `width`/`height` are the first
+/// layer's; a multi-part file's other layers may differ, so each channel
+/// keeps its own size.
 struct Planes {
     width: usize,
     height: usize,
-    channels: BTreeMap<String, Vec<f32>>,
+    channels: BTreeMap<String, Channel>,
 }
 
 fn load(path: &str) -> Planes {
@@ -38,9 +46,12 @@ fn load(path: &str) -> Planes {
         .from_file(path)
         .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
     let mut channels = BTreeMap::new();
-    let (mut width, mut height) = (0, 0);
+    let (width, height) = image
+        .layer_data
+        .first()
+        .map_or((0, 0), |l| (l.size.width(), l.size.height()));
     for layer in &image.layer_data {
-        (width, height) = (layer.size.width(), layer.size.height());
+        let size = (layer.size.width(), layer.size.height());
         let prefix = layer
             .attributes
             .layer_name
@@ -49,7 +60,10 @@ fn load(path: &str) -> Planes {
             .unwrap_or_default();
         for channel in &layer.channel_data.list {
             let values = channel.sample_data.values_as_f32().collect();
-            channels.insert(format!("{prefix}{}", channel.name), values);
+            channels.insert(
+                format!("{prefix}{}", channel.name),
+                Channel { size, values },
+            );
         }
     }
     Planes {
@@ -67,11 +81,13 @@ fn main() {
     }
     let a = load(&args[0]);
     let b = load(&args[1]);
-    assert_eq!(
-        (a.width, a.height),
-        (b.width, b.height),
-        "resolutions differ"
-    );
+    if (a.width, a.height) != (b.width, b.height) {
+        println!(
+            "resolutions differ: {}x{} vs {}x{}",
+            a.width, a.height, b.width, b.height
+        );
+        std::process::exit(1);
+    }
     let (aw, ah) = (a.width, a.height);
     let total = aw * ah;
 
@@ -86,7 +102,30 @@ fn main() {
     };
     for name in names {
         match (a.channels.get(name), b.channels.get(name)) {
+            (Some(x), Some(y)) if x.size != y.size || x.size != (aw, ah) => {
+                // A layer of its own size: no pixel lines up with the image's,
+                // so the whole channel counts as different if the sizes do.
+                if x.size != y.size {
+                    channel_lines.push(format!(
+                        "  channel {name}: sizes differ, {}x{} vs {}x{}",
+                        x.size.0, x.size.1, y.size.0, y.size.1
+                    ));
+                    pixel_differs.iter_mut().for_each(|d| *d = true);
+                } else if x
+                    .values
+                    .iter()
+                    .zip(&y.values)
+                    .any(|(p, q)| p.to_bits() != q.to_bits())
+                {
+                    channel_lines.push(format!(
+                        "  channel {name}: differs (a {}x{} layer)",
+                        x.size.0, x.size.1
+                    ));
+                    pixel_differs.iter_mut().for_each(|d| *d = true);
+                }
+            }
             (Some(x), Some(y)) => {
+                let (x, y) = (&x.values, &y.values);
                 let mut n = 0usize;
                 let mut max_abs = 0.0f32;
                 for p in 0..total {
@@ -131,11 +170,13 @@ fn main() {
 
     // The beauty's error metrics.
     let rgb = |p: &Planes| -> Option<[Vec<f32>; 3]> {
-        Some([
-            p.channels.get("R")?.clone(),
-            p.channels.get("G")?.clone(),
-            p.channels.get("B")?.clone(),
-        ])
+        let plane = |n: &str| {
+            p.channels
+                .get(n)
+                .filter(|c| c.size == (aw, ah))
+                .map(|c| c.values.clone())
+        };
+        Some([plane("R")?, plane("G")?, plane("B")?])
     };
     let (Some(a), Some(b)) = (rgb(&a), rgb(&b)) else {
         println!("(no R, G, B in both files: no beauty metrics)");

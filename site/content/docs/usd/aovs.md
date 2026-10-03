@@ -92,6 +92,8 @@ what it authors itself, as `UsdRenderComputeSpec` does.
   directories are created.
 - **[`-o`](@/docs/reference/command-line.md#output)** replaces the first product's
   `productName`, as husk's `-o` does. The other products keep theirs.
+- **Two products with the same path** cannot both be written: the later one is skipped
+  with a warning. This includes a product whose path `-o` gives to the first.
 - **`productType`** must be `raster` (the default). A `deepRaster` product is skipped with
   a warning.
 - **The PNG preview** is made from the first product's beauty var and written beside that
@@ -99,7 +101,8 @@ what it authors itself, as `UsdRenderComputeSpec` does.
 
 Text attributes authored as `driver:parameters:*` on a product are copied into its EXR
 header: `driver:parameters:artist` as `artist`, and `driver:parameters:OpenEXR:<key>` as
-`<key>`.
+`<key>`. A forwarded `colorInteropID` is refused with a warning: crust sets it to the space
+it rendered in.
 
 ## Vars
 
@@ -205,6 +208,10 @@ A pixel takes many samples. Each AOV combines them in one of two ways.
   beauty. Colour, alpha, normals and UVs use it by default. A filtered normal at an
   object's edge is a blend of the object's normal and the clear value, which is what a
   denoiser expects.
+
+  A clear value that is not a finite number (depth and distance clear to `+inf`) cannot
+  be averaged in. A filtered var with such a clear value averages only the samples that
+  hit something, and keeps the clear value where none did.
 - **closest**: the value of the sample nearest the camera. Depth, distance and positions
   use it by default. It never blends two surfaces, so a depth or position pass has no
   in-between values at an edge.

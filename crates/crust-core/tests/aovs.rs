@@ -147,7 +147,9 @@ fn the_beauty_is_bit_identical_with_and_without_aovs() {
 #[test]
 fn every_channel_is_bit_identical_across_tiles_and_scanlines() {
     for guiding in [false, true] {
-        let r = scene(8, 0.05, guiding, true);
+        // 16 spp, as every image comparison here (CLAUDE.md, "Measuring a
+        // change"), with adaptive sampling on: `spp.min(8)` is the minimum.
+        let r = scene(16, 0.05, guiding, true);
         let vars = every_source();
         let req = request(vars.clone());
         let (tb, tf) = render(&r, true, &req);
@@ -277,7 +279,7 @@ fn world_and_camera_positions_agree_with_the_distances() {
 
 #[test]
 fn a_beauty_only_request_returns_an_empty_film() {
-    let r = scene(4, 0.0, false, false);
+    let r = scene(16, 0.0, false, false);
     let req = request(vec![var("beauty", AovSource::Color)]);
     assert!(!req.needs_film());
     let (b, film) = render(&r, true, &req);
