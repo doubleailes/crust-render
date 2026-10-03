@@ -49,7 +49,8 @@ use crate::ray::Ray;
 mod lobes;
 mod transmission;
 
-use lobes::{Frame, Lobe, LobePmf, coat_passage, eval_all, pdf_all};
+use crate::material::brdf::Frame;
+use lobes::{Lobe, LobePmf, coat_passage, eval_all, pdf_all};
 use transmission::{
     lobe_spread, sample_transmission_rough, sample_transmission_thin, transmission_is_continuous,
 };

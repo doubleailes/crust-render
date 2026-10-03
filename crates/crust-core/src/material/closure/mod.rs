@@ -36,9 +36,10 @@ use utils::{cosine_hemisphere, luminance};
 use crate::PathSampler;
 use crate::hittable::HitRecord;
 use crate::material::ScatterSample;
+pub use crate::material::brdf::Frame;
 use crate::material::brdf::{
     ggx_d_aniso, ggx_g2_smith_aniso, pdf_vndf_ggx_aniso_local, pdf_vndf_h_aniso_local,
-    sample_vndf_ggx_aniso_local, tangent_frame,
+    sample_vndf_ggx_aniso_local,
 };
 use crate::medium::Medium;
 use crate::ray::Ray;
@@ -63,51 +64,6 @@ const MIN_ALPHA: f32 = 1e-4;
 /// the layer weights): a lobe estimated near black keeps a small chance of
 /// being picked, so a sample can still reach it wherever it does reflect.
 const MIN_SELECT: f32 = 0.02;
-
-/// A leaf's shading frame: its own normal and tangent.
-#[derive(Clone, Copy, Debug)]
-pub struct Frame {
-    pub t: Vec3A,
-    pub b: Vec3A,
-    pub n: Vec3A,
-}
-
-impl Frame {
-    fn new(n: Vec3A, tangent: Vec3A) -> Frame {
-        let t = tangent - n * n.dot(tangent);
-        let (t, b) = if t.length_squared() > 1e-10 {
-            let t = t.normalize();
-            (t, n.cross(t))
-        } else {
-            tangent_frame(n)
-        };
-        Frame { t, b, n }
-    }
-
-    /// The frame turned by `angle` radians about its normal, right-handed:
-    /// the tangent moves toward the bitangent `n × t`
-    /// ([`crust_mtlx::Leaf::rotation`]). A non-finite angle turns nothing.
-    fn rotated(self, angle: f32) -> Frame {
-        if !angle.is_finite() {
-            return self;
-        }
-        let (sin, cos) = angle.sin_cos();
-        let t = self.t * cos + self.n.cross(self.t) * sin;
-        Frame {
-            t,
-            b: self.n.cross(t),
-            n: self.n,
-        }
-    }
-
-    fn to_local(self, v: Vec3A) -> Vec3A {
-        Vec3A::new(v.dot(self.t), v.dot(self.b), v.dot(self.n))
-    }
-
-    fn to_world(self, v: Vec3A) -> Vec3A {
-        self.t * v.x + self.b * v.y + self.n * v.z
-    }
-}
 
 /// What a resolved leaf evaluates.
 #[derive(Clone, Copy, Debug)]
@@ -738,7 +694,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
         .map(|i| s(i).rgb())
         .filter(|t| t.is_finite())
         .unwrap_or(w.rec.tangent);
-    let mut frame = Frame::new(n, tangent);
+    let mut frame = Frame::with_tangent(n, tangent);
     if let Some(r) = leaf.rotation {
         frame = frame.rotated(s(r).x());
     }
