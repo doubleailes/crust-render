@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use tracing::{debug, info, warn};
 use utils::luminance;
 
+use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, UnitAov};
 use crate::buffer::Buffer;
 use crate::camera::Camera;
 use crate::filter::FilterSampler;
@@ -175,18 +176,18 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Buffer {
-        self.render_impl(false, None).0
+        self.render_impl(false, None, None).0
     }
 
     pub fn render_with_tiles(&self) -> Buffer {
-        self.render_impl(true, None).0
+        self.render_impl(true, None, None).0
     }
 
     /// Renders with a progress callback — see [`ProgressCallback`]. With
     /// guiding enabled, only the final pass reports (training passes are
     /// silent, as before).
     pub fn render_with_progress(&self, tiled: bool, progress: ProgressCallback) -> Buffer {
-        self.render_impl(tiled, Some(progress)).0
+        self.render_impl(tiled, Some(progress), None).0
     }
 
     /// As [`Renderer::render_with_progress`], also returning what the
@@ -197,15 +198,48 @@ impl Renderer {
     /// With guiding enabled the counters cover **every** pass, training
     /// included, since all of them spend time.
     pub fn render_with_stats(&self, tiled: bool, progress: ProgressCallback) -> (Buffer, RayStats) {
-        self.render_impl(tiled, Some(progress))
+        let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
+        (buffer, rays)
     }
 
-    fn render_impl(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {
-        if self.settings.guiding {
-            return self.render_guided(tiled, progress);
+    /// As [`Renderer::render_with_stats`], also filling the AOVs `request`
+    /// asks for — see [`AovFilm`]. The beauty is bit-identical to
+    /// `render_with_stats`'s: the AOVs observe the same camera samples and
+    /// change none of them. A request that needs no film (no products, or
+    /// only a 3-channel beauty) takes the beauty-only path and returns an
+    /// empty film.
+    pub fn render_with_aovs(
+        &self,
+        tiled: bool,
+        progress: ProgressCallback,
+        request: &AovRequest,
+    ) -> (Buffer, AovFilm, RayStats) {
+        let (w, h) = (self.settings.width, self.settings.height);
+        if !request.needs_film() {
+            let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
+            return (buffer, AovFilm::empty(w, h), rays);
         }
-        let (buf, _, pass) = self.render_pass(self.final_pass_config(tiled), None, progress);
-        (buf, pass.rays)
+        let layout = AovLayout::new(request);
+        let (buffer, film, rays) = self.render_impl(tiled, Some(progress), Some(&layout));
+        (
+            buffer,
+            film.expect("a pass with a layout returns a film"),
+            rays,
+        )
+    }
+
+    fn render_impl(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+        layout: Option<&AovLayout>,
+    ) -> (Buffer, Option<AovFilm>, RayStats) {
+        if self.settings.guiding {
+            return self.render_guided(tiled, progress, layout);
+        }
+        let (buf, film, _, pass) =
+            self.render_pass(self.final_pass_config(tiled), None, progress, layout);
+        (buf, film, pass.rays)
     }
 
     /// Config of a final (image-quality) pass: full budget, adaptive
@@ -239,7 +273,12 @@ impl Renderer {
     /// `ΔEff = E_pg+/E_pg− < 1`, guiding costs more than the variance it
     /// removes here, and the final pass renders unguided instead (the
     /// training passes still blend in — they are unbiased either way).
-    fn render_guided(&self, tiled: bool, progress: Option<ProgressCallback>) -> (Buffer, RayStats) {
+    fn render_guided(
+        &self,
+        tiled: bool,
+        progress: Option<ProgressCallback>,
+        layout: Option<&AovLayout>,
+    ) -> (Buffer, Option<AovFilm>, RayStats) {
         // Every pass costs time, training included, so the counters cover
         // all of them rather than the final pass alone.
         let mut rays = RayStats::default();
@@ -247,9 +286,9 @@ impl Renderer {
             Some(b) => b,
             None => {
                 warn!("path guiding enabled but the scene has no bounding box; rendering unguided");
-                let (buf, _, pass) =
-                    self.render_pass(self.final_pass_config(tiled), None, progress);
-                return (buf, pass.rays);
+                let (buf, film, _, pass) =
+                    self.render_pass(self.final_pass_config(tiled), None, progress, layout);
+                return (buf, film, pass.rays);
             }
         };
         let cfg = GuidingConfig {
@@ -260,6 +299,8 @@ impl Renderer {
         let mut field = GuidingField::new(bounds, cfg);
         let base_seed = self.settings.frame as u32;
         let mut passes: Vec<(Buffer, f64)> = Vec::new();
+        // Each pass's AOVs, blended with the beauty's own weights at the end.
+        let mut films: Vec<AovFilm> = Vec::new();
         // (per-pixel variance map, seconds) of the first pass (untrained
         // field → effectively unguided) and of the last training pass
         // (most-trained field) — the two endpoints of the efficiency
@@ -284,7 +325,9 @@ impl Renderer {
                 adaptive: false,
             };
             let start = std::time::Instant::now();
-            let (buffer, samples, stats) = self.render_pass(train_cfg, Some(&gctx), None);
+            let (buffer, film, samples, stats) =
+                self.render_pass(train_cfg, Some(&gctx), None, layout);
+            films.extend(film);
             rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
             debug!(
@@ -352,29 +395,28 @@ impl Renderer {
             training: false,
         };
         let final_gctx = if guide_final { Some(&gctx) } else { None };
-        let (final_buffer, _, final_stats) =
-            self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
+        let (final_buffer, final_film, _, final_stats) =
+            self.render_pass(self.final_pass_config(tiled), final_gctx, progress, layout);
         rays.merge(&final_stats.rays);
         passes.push((final_buffer, final_stats.variance));
+        films.extend(final_film);
 
-        (self.blend_passes(passes), rays)
+        let film = (!films.is_empty()).then(|| {
+            let (weights, total) = blend_weights(&passes);
+            if total <= 0.0 {
+                films.pop().expect("checked non-empty")
+            } else {
+                AovFilm::blend(films, &weights, total)
+            }
+        });
+        (self.blend_passes(passes), film, rays)
     }
 
     /// Inverse-variance blend of independent unbiased passes. Passes whose
     /// variance could not be estimated (spp < 2) get zero weight; if nothing
     /// is weightable, the last (final) pass is returned as-is.
     fn blend_passes(&self, mut passes: Vec<(Buffer, f64)>) -> Buffer {
-        let weights: Vec<f64> = passes
-            .iter()
-            .map(|(_, var)| {
-                if var.is_finite() && *var > 0.0 {
-                    1.0 / var
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let total: f64 = weights.iter().sum();
+        let (weights, total) = blend_weights(&passes);
         if total <= 0.0 {
             return passes.pop().expect("at least the final pass exists").0;
         }
@@ -401,8 +443,9 @@ impl Renderer {
     }
 
     /// One full-frame pass at `spp` samples per pixel. Returns the image,
-    /// whatever training samples the pass recorded (empty unless a training
-    /// `GuidingContext` is supplied), and the pass's [`PassStats`].
+    /// its AOVs (when `layout` asks for any), whatever training samples the
+    /// pass recorded (empty unless a training `GuidingContext` is supplied),
+    /// and the pass's [`PassStats`].
     ///
     /// The work unit is a 16×16 tile or a `width`×1 row; the two differ in
     /// nothing but the tile list, and a render mode is scheduling only. A
@@ -423,7 +466,8 @@ impl Renderer {
         cfg: PassConfig,
         gctx: Option<&GuidingContext>,
         progress: Option<ProgressCallback>,
-    ) -> (Buffer, PassSamples, PassStats) {
+        layout: Option<&AovLayout>,
+    ) -> (Buffer, Option<AovFilm>, PassSamples, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
         let mut buffer = Buffer::new(w, h);
         let mut all_samples = PassSamples::default();
@@ -437,6 +481,10 @@ impl Renderer {
         // of the integrator (see `profile::scope_if`), so an unprofiled
         // render carries no trace of the profiler.
         let profiling = profile::enabled();
+        // The same for the film: the AOV instantiation runs only when a
+        // product asks for something beyond the beauty.
+        let cam = self.camera.frame();
+        let aov = layout.is_some();
 
         let threshold = self.settings.variance_threshold as f64;
         let tolerance = self.settings.adaptive_neighbour_tolerance;
@@ -504,7 +552,10 @@ impl Renderer {
         } else {
             generate_rows(w, h)
         };
-        let mut units: Vec<Unit> = tiles.into_iter().map(Unit::new).collect();
+        let mut units: Vec<Unit> = tiles
+            .into_iter()
+            .map(|tile| Unit::new(tile, layout, cam))
+            .collect();
         let total = units.len() as u64 + rounds as u64;
         // Incremented and reported under one lock, so the callback sees
         // completions in increasing order even though units finish on many
@@ -525,18 +576,25 @@ impl Renderer {
         units
             .par_iter_mut()
             .for_each_init(scratch, |scratch, unit| {
-                unit.for_each_pixel(|i, j, work, st| {
-                    if profiling {
-                        self.advance_pixel::<true>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    } else {
-                        self.advance_pixel::<false>(
-                            i, j, &cfg, &filter, gctx, work, scratch, st, sweep_to,
-                        );
-                    }
-                    st.finish_round(cfg.spp, threshold);
-                });
+                // Stamped once per `AOV` and chosen per unit, not per pixel:
+                // a per-pixel branch on the film cost the beauty-only render
+                // 0.02% of its instructions (callgrind, cornellbox at 2 spp).
+                macro_rules! sweep {
+                    ($aov:literal) => {
+                        unit.for_each_pixel(|i, j, p, work, st| {
+                            self.advance::<$aov>(
+                                profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
+                                sweep_to,
+                            );
+                            st.finish_round(cfg.spp, threshold);
+                        })
+                    };
+                }
+                if aov {
+                    sweep!(true)
+                } else {
+                    sweep!(false)
+                }
                 // Once per unit, and a no-op unless `--profile` is on.
                 profile::flush();
                 report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
@@ -562,32 +620,37 @@ impl Renderer {
             units
                 .par_iter_mut()
                 .for_each_init(scratch, |scratch, unit| {
-                    unit.for_each_pixel(|i, j, work, st| {
-                        if st.stopped {
-                            return;
-                        }
-                        // The stop rule: past the minimum (always, by now), its
-                        // own test, and no still-sampling cross neighbour much
-                        // less converged than it is.
-                        if st.converged {
-                            if held_by_neighbour(index, active, w, h, i, j, tolerance) {
-                                st.held = true;
-                            } else {
-                                st.stopped = true;
-                                return;
-                            }
-                        }
-                        if profiling {
-                            self.advance_pixel::<true>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        } else {
-                            self.advance_pixel::<false>(
-                                i, j, &cfg, &filter, gctx, work, scratch, st, target,
-                            );
-                        }
-                        st.finish_round(cfg.spp, threshold);
-                    });
+                    // Per unit, as in the first sweep.
+                    macro_rules! round {
+                        ($aov:literal) => {
+                            unit.for_each_pixel(|i, j, p, work, st| {
+                                if st.stopped {
+                                    return;
+                                }
+                                // The stop rule: past the minimum (always, by
+                                // now), its own test, and no still-sampling
+                                // cross neighbour much less converged than it is.
+                                if st.converged {
+                                    if held_by_neighbour(index, active, w, h, i, j, tolerance) {
+                                        st.held = true;
+                                    } else {
+                                        st.stopped = true;
+                                        return;
+                                    }
+                                }
+                                self.advance::<$aov>(
+                                    profiling, i, j, p, &cfg, &filter, gctx, work, scratch, st,
+                                    target,
+                                );
+                                st.finish_round(cfg.spp, threshold);
+                            })
+                        };
+                    }
+                    if aov {
+                        round!(true)
+                    } else {
+                        round!(false)
+                    }
                     profile::flush();
                 });
             report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
@@ -615,6 +678,23 @@ impl Renderer {
         // row gives rows in scanline order). Nothing full-frame is copied
         // to do it: the samples stay in the unit buffers, and only their
         // scanline-order runs are recorded, one per unit per row.
+        // The AOVs need no ordering: each pixel's planes were accumulated in
+        // its own sample order, so copying them in any order is exact.
+        let film = layout.map(|layout| {
+            let mut film = AovFilm::new(layout, w, h);
+            for unit in &units {
+                let aov = unit
+                    .work
+                    .aov
+                    .as_ref()
+                    .expect("a layout gives every unit planes");
+                unit.for_each_pixel_ref(|i, j, st| {
+                    let p = (j - unit.tile.y) * unit.tile.width + (i - unit.tile.x);
+                    film.store(aov, p, i, j, st.weight_sum, st.taken, st.estimate().1);
+                });
+            }
+            film
+        });
         let training = units.iter().any(|u| !u.work.samples.is_empty());
         let tiles_x = units.iter().take_while(|u| u.tile.y == 0).count().max(1);
         for unit in &units {
@@ -690,6 +770,7 @@ impl Renderer {
         );
         (
             buffer,
+            film,
             all_samples,
             PassStats {
                 variance: variance_sum / pixel_count,
@@ -699,12 +780,46 @@ impl Renderer {
         )
     }
 
+    /// [`Renderer::advance_pixel`], profiled or not: `profiling` is read
+    /// once per pass and `AOV` chosen once per unit, so each sample runs a
+    /// function that carries neither. With `AOV`, first points the unit's
+    /// film planes at pixel `p`.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn advance<const AOV: bool>(
+        &self,
+        profiling: bool,
+        i: usize,
+        j: usize,
+        p: usize,
+        cfg: &PassConfig,
+        filter: &FilterSampler,
+        gctx: Option<&GuidingContext>,
+        work: &mut UnitWork,
+        scratch: &mut PathScratch,
+        st: &mut PixelState,
+        target: u32,
+    ) {
+        if AOV && let Some(planes) = work.aov.as_mut() {
+            planes.pixel = p;
+        }
+        if profiling {
+            self.advance_pixel::<true, AOV>(i, j, cfg, filter, gctx, work, scratch, st, target);
+        } else {
+            self.advance_pixel::<false, AOV>(i, j, cfg, filter, gctx, work, scratch, st, target);
+        }
+    }
+
     /// Traces pixel `(i, j)`'s samples from `state.taken` up to `target`,
     /// accumulating into `state` and the unit's sample buffer and counters.
     /// A sample depends only on `(i, j, seed, sample index)`, never on when
     /// it is traced, so advancing in steps is the same as one loop.
+    ///
+    /// With `AOV`, each sample's first hit also goes into the unit's AOV
+    /// planes (at the pixel `advance_dispatch` set), with the sample's own
+    /// film offset and weight.
     #[allow(clippy::too_many_arguments)]
-    fn advance_pixel<const PROFILE: bool>(
+    fn advance_pixel<const PROFILE: bool, const AOV: bool>(
         &self,
         i: usize,
         j: usize,
@@ -784,7 +899,7 @@ impl Renderer {
             }
             drop(primary);
             unit.rays.camera_rays += 1;
-            let color = trace_path::<PROFILE>(
+            let color = trace_path::<PROFILE, AOV>(
                 &r,
                 &self.world,
                 &self.lights,
@@ -798,6 +913,9 @@ impl Renderer {
                 scratch,
                 &mut unit.rays,
             ) * (wx * wy);
+            if AOV && let Some(planes) = unit.aov.as_mut() {
+                planes.add(&scratch.first, fx, fy, wx * wy);
+            }
             state.sum += color;
             state.weight_sum += wx * wy;
             let lum = luminance(color) as f64;
@@ -968,6 +1086,9 @@ fn held_by_neighbour(
 struct UnitWork {
     samples: Vec<SampleData>,
     rays: RayStats,
+    /// The unit's AOV planes, beside (not inside) its `PixelState`s, so a
+    /// render without AOVs keeps the pixel state it always had.
+    aov: Option<UnitAov>,
 }
 
 /// One work unit of a pass — a tile or a row — and its pixels' state.
@@ -979,21 +1100,28 @@ struct Unit {
 }
 
 impl Unit {
-    fn new(tile: Tile) -> Self {
+    fn new(tile: Tile, layout: Option<&AovLayout>, cam: CameraFrame) -> Self {
+        let pixels = tile.width * tile.height;
         Unit {
-            pixels: vec![PixelState::new(); tile.width * tile.height],
+            pixels: vec![PixelState::new(); pixels],
             tile,
-            work: UnitWork::default(),
+            work: UnitWork {
+                aov: layout.map(|l| UnitAov::new(l, cam, pixels)),
+                ..UnitWork::default()
+            },
         }
     }
 
-    /// Every pixel of the unit, with its image coordinates, alongside the
-    /// unit's own buffers.
-    fn for_each_pixel(&mut self, mut f: impl FnMut(usize, usize, &mut UnitWork, &mut PixelState)) {
+    /// Every pixel of the unit, with its image coordinates and its index
+    /// within the unit, alongside the unit's own buffers.
+    fn for_each_pixel(
+        &mut self,
+        mut f: impl FnMut(usize, usize, usize, &mut UnitWork, &mut PixelState),
+    ) {
         let tile = &self.tile;
         for (p, st) in self.pixels.iter_mut().enumerate() {
             let (i, j) = (tile.x + p % tile.width, tile.y + p / tile.width);
-            f(i, j, &mut self.work, st);
+            f(i, j, p, &mut self.work, st);
         }
     }
 
@@ -1006,6 +1134,25 @@ impl Unit {
             f(i, j, st);
         }
     }
+}
+
+/// The inverse-variance weight of each pass and their sum — what
+/// [`Renderer::blend_passes`] and [`AovFilm::blend`] both apply, so a guided
+/// render's AOVs are the same combination of passes as its beauty. A pass
+/// whose variance could not be estimated weighs nothing.
+fn blend_weights(passes: &[(Buffer, f64)]) -> (Vec<f64>, f64) {
+    let weights: Vec<f64> = passes
+        .iter()
+        .map(|(_, var)| {
+            if var.is_finite() && *var > 0.0 {
+                1.0 / var
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total = weights.iter().sum();
+    (weights, total)
 }
 
 /// Per-pixel luminance of the inverse-variance blend of `passes` — the

@@ -38,7 +38,7 @@ attributes.
 | flag | value | default | overrides |
 |------|-------|---------|-----------|
 | [`-i`, `--input`](#input) | path | procedural scene | — |
-| [`-o`, `--output`](#output) | path | `output.exr` | — |
+| [`-o`, `--output`](#output) | path | `output.exr` | first `productName` |
 | [`-s`, `--samples`](#samples) | integer | scene / 128 | `crust:samplesPerPixel` |
 | [`-f`, `--frame`](#frame) | number | default values | `crust:frame` (seed) |
 | [`--camera`](#camera) | prim path | `RenderSettings.camera` | `rel camera` |
@@ -73,16 +73,26 @@ If the file can't be loaded, the run logs an error and exits with a non-zero sta
 
 ### output
 
-`-o, --output <OUTPUT>` — default `output.exr`
+`-o, --output <OUTPUT>`
 
-Where to write the image. Each render writes two files:
+Where to write the image. What it does depends on whether the stage authors
+[render products](@/docs/usd/aovs.md):
 
-- the **linear EXR** at this path, and
-- a **tone-mapped sRGB PNG** at the same path with a `.png` extension.
+- **No products** (most scenes). The render writes two files:
+  - the **linear EXR** at this path (default `output.exr`), and
+  - a **tone-mapped sRGB PNG** at the same path with a `.png` extension.
+- **Products authored, `-o` given.** `-o` replaces the first product's `productName`, as
+  husk's `-o` does. The other products keep their own paths.
+- **Products authored, no `-o`.** Each product is written to its `productName`.
+
+With products, the PNG is made from the first product's beauty and written beside it.
 
 ```bash
 crust-render -i shot.usda -o renders/shot.0001.exr
-# writes renders/shot.0001.exr and renders/shot.0001.png
+# without products: writes renders/shot.0001.exr and renders/shot.0001.png
+
+crust-render -i samples/aovs.usda
+# writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr
 ```
 
 ## Sampling and time

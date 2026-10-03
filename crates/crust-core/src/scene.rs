@@ -23,6 +23,10 @@ pub struct Scene {
     /// [`Scene::from_usd`]; empty for a hand-assembled scene. The host adds
     /// its own render and output phases before reporting.
     pub stats: RenderStats,
+    /// The `RenderProduct`s the stage asks for and the AOVs in each — see
+    /// [`AovRequest`](crate::AovRequest). Empty when the stage authors none,
+    /// which means "write the single beauty image".
+    pub aovs: crate::AovRequest,
 }
 
 impl Scene {
@@ -34,6 +38,7 @@ impl Scene {
             settings,
             volumes: Vec::new(),
             stats: RenderStats::new(),
+            aovs: crate::AovRequest::default(),
         }
     }
 

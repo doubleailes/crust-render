@@ -5,34 +5,58 @@
 //! cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
 //! ```
 //!
-//! Prints the number of differing pixels, the largest absolute and
-//! relative channel difference, the mean absolute difference, the RMSE and
-//! the relative MSE (against `a`, so pass the reference first). A pure
-//! performance change should report either zero differing pixels or a
-//! handful at the float epsilon (exact-tie ordering inside a BVH leaf),
-//! never a structural difference.
+//! Every named channel of every layer is compared, so a RenderProduct's AOVs
+//! are checked as well as its beauty; a channel present in only one file is a
+//! difference. The first line counts the pixels where *any* channel differs
+//! (`scripts/check_images.sh` reads it), then one line per differing channel.
+//!
+//! On the beauty (`R`, `G`, `B`, when both files have them) it also prints the
+//! largest absolute and relative channel difference, the mean absolute
+//! difference, the RMSE and the relative MSE (against `a`, so pass the
+//! reference first). A pure performance change should report either zero
+//! differing pixels or a handful at the float epsilon (exact-tie ordering
+//! inside a BVH leaf), never a structural difference.
 
 use exr::prelude::*;
+use std::collections::BTreeMap;
 
-fn load(path: &str) -> (usize, usize, Vec<f32>) {
-    let image = read_first_rgba_layer_from_file(
-        path,
-        |resolution, _| {
-            let (w, h) = (resolution.width(), resolution.height());
-            (w, h, vec![0.0f32; w * h * 4])
-        },
-        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
-         pos,
-         (r, g, b, a): (f32, f32, f32, f32)| {
-            let i = (pos.y() * *w + pos.x()) * 4;
-            pixels[i] = r;
-            pixels[i + 1] = g;
-            pixels[i + 2] = b;
-            pixels[i + 3] = a;
-        },
-    )
-    .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-    image.layer_data.channel_data.pixels
+/// Every channel of every layer, by full name (`layer.channel`, or the bare
+/// channel name in an unnamed layer), as f32 in the file's row order.
+struct Planes {
+    width: usize,
+    height: usize,
+    channels: BTreeMap<String, Vec<f32>>,
+}
+
+fn load(path: &str) -> Planes {
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .all_channels()
+        .all_layers()
+        .all_attributes()
+        .from_file(path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+    let mut channels = BTreeMap::new();
+    let (mut width, mut height) = (0, 0);
+    for layer in &image.layer_data {
+        (width, height) = (layer.size.width(), layer.size.height());
+        let prefix = layer
+            .attributes
+            .layer_name
+            .as_ref()
+            .map(|n| format!("{n}."))
+            .unwrap_or_default();
+        for channel in &layer.channel_data.list {
+            let values = channel.sample_data.values_as_f32().collect();
+            channels.insert(format!("{prefix}{}", channel.name), values);
+        }
+    }
+    Planes {
+        width,
+        height,
+        channels,
+    }
 }
 
 fn main() {
@@ -41,24 +65,96 @@ fn main() {
         eprintln!("usage: exr_diff <a.exr> <b.exr>");
         std::process::exit(2);
     }
-    let (aw, ah, a) = load(&args[0]);
-    let (bw, bh, b) = load(&args[1]);
-    assert_eq!((aw, ah), (bw, bh), "resolutions differ");
+    let a = load(&args[0]);
+    let b = load(&args[1]);
+    assert_eq!(
+        (a.width, a.height),
+        (b.width, b.height),
+        "resolutions differ"
+    );
+    let (aw, ah) = (a.width, a.height);
+    let total = aw * ah;
 
-    let mut differing_pixels = 0usize;
+    // Any channel: which pixels differ, and which channels.
+    let mut pixel_differs = vec![false; total];
+    let mut channel_lines = Vec::new();
+    let names: Vec<&String> = {
+        let mut n: Vec<&String> = a.channels.keys().chain(b.channels.keys()).collect();
+        n.sort();
+        n.dedup();
+        n
+    };
+    for name in names {
+        match (a.channels.get(name), b.channels.get(name)) {
+            (Some(x), Some(y)) => {
+                let mut n = 0usize;
+                let mut max_abs = 0.0f32;
+                for p in 0..total {
+                    // Bitwise, so a NaN or a signed zero that moved counts,
+                    // and two equal infinities (a depth's clear value) do not.
+                    if x[p].to_bits() != y[p].to_bits() {
+                        n += 1;
+                        pixel_differs[p] = true;
+                        let d = (x[p] - y[p]).abs();
+                        if d.is_finite() {
+                            max_abs = max_abs.max(d);
+                        }
+                    }
+                }
+                if n > 0 {
+                    channel_lines.push(format!(
+                        "  channel {name}: {n} pixels differ, max abs diff {max_abs:e}"
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                channel_lines.push(format!("  channel {name}: only in {}", args[0]));
+                pixel_differs.iter_mut().for_each(|d| *d = true);
+            }
+            (None, Some(_)) => {
+                channel_lines.push(format!("  channel {name}: only in {}", args[1]));
+                pixel_differs.iter_mut().for_each(|d| *d = true);
+            }
+            (None, None) => unreachable!("a name comes from one of the two"),
+        }
+    }
+    let differing_pixels = pixel_differs.iter().filter(|d| **d).count();
+    println!(
+        "{}x{}  differing pixels: {differing_pixels}/{total} ({:.4}%)",
+        aw,
+        ah,
+        100.0 * differing_pixels as f64 / total as f64
+    );
+    for line in &channel_lines {
+        println!("{line}");
+    }
+
+    // The beauty's error metrics.
+    let rgb = |p: &Planes| -> Option<[Vec<f32>; 3]> {
+        Some([
+            p.channels.get("R")?.clone(),
+            p.channels.get("G")?.clone(),
+            p.channels.get("B")?.clone(),
+        ])
+    };
+    let (Some(a), Some(b)) = (rgb(&a), rgb(&b)) else {
+        println!("(no R, G, B in both files: no beauty metrics)");
+        return;
+    };
     let mut max_abs = 0.0f32;
     let mut max_rel = 0.0f32;
     let mut sum_abs = 0.0f64;
     let mut sum_sq = 0.0f64;
     let mut sum_rel_sq = 0.0f64;
+    let mut shown = 0;
     // Per-pixel relative squared error (mean over channels), for the trimmed
     // relMSE below.
-    let mut pixel_rel = Vec::with_capacity(aw * ah);
-    for p in 0..aw * ah {
-        let mut pixel_differs = false;
+    let mut pixel_rel = Vec::with_capacity(total);
+    for p in 0..total {
+        let mut differs = false;
         let mut rel = 0.0f64;
         for c in 0..3 {
-            let (x, y) = (a[p * 4 + c], b[p * 4 + c]);
+            let (x, y) = (a[c][p], b[c][p]);
             let d = (x - y).abs();
             sum_abs += d as f64;
             sum_sq += (d as f64) * (d as f64);
@@ -66,7 +162,7 @@ fn main() {
             sum_rel_sq += r;
             rel += r / 3.0;
             if d != 0.0 {
-                pixel_differs = true;
+                differs = true;
                 max_abs = max_abs.max(d);
                 let scale = x.abs().max(y.abs());
                 if scale > 0.0 {
@@ -75,26 +171,17 @@ fn main() {
             }
         }
         pixel_rel.push(rel);
-        if pixel_differs {
-            differing_pixels += 1;
-            if differing_pixels <= 8 {
-                println!(
-                    "  differs at ({}, {}): {:?} vs {:?}",
-                    p % aw,
-                    p / aw,
-                    &a[p * 4..p * 4 + 3],
-                    &b[p * 4..p * 4 + 3]
-                );
-            }
+        if differs && shown < 8 {
+            shown += 1;
+            println!(
+                "  differs at ({}, {}): {:?} vs {:?}",
+                p % aw,
+                p / aw,
+                [a[0][p], a[1][p], a[2][p]],
+                [b[0][p], b[1][p], b[2][p]]
+            );
         }
     }
-    let total = aw * ah;
-    println!(
-        "{}x{}  differing pixels: {differing_pixels}/{total} ({:.4}%)",
-        aw,
-        ah,
-        100.0 * differing_pixels as f64 / total as f64
-    );
     println!("max abs diff: {max_abs:e}   max rel diff: {max_rel:e}");
     println!("mean abs diff: {:e}", sum_abs / (total * 3) as f64);
     // RMSE alongside the mean, because they answer different questions: the

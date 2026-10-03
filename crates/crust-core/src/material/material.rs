@@ -414,6 +414,12 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// The shading normal at this hit — after bump and normal mapping, the
+    /// one every query here shades with. For the AOVs only.
+    pub(crate) fn normal(&self) -> Vec3A {
+        self.rec.normal
+    }
+
     /// [`Material::emitted_at`] at this hit.
     pub fn emitted(&self) -> Vec3A {
         self.emitted

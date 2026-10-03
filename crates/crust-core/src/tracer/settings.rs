@@ -188,6 +188,14 @@ impl RenderSettings {
         }
     }
 
+    /// Override the image resolution — the first `RenderProduct`'s, when it
+    /// authors its own.
+    pub(crate) fn with_resolution(mut self, width: usize, height: usize) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
     /// Override the samples-per-pixel count (e.g. from a CLI flag). Clamped to >= 1.
     pub fn with_samples_per_pixel(mut self, spp: u32) -> Self {
         self.samples_per_pixel = spp.max(1);

@@ -57,7 +57,7 @@ impl std::fmt::Display for CameraChoice {
 /// The prim holding the stage's render settings: the one the stage's
 /// `renderSettingsPrimPath` metadatum names, else the conventional
 /// `/Render/settings`.
-fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
+pub(super) fn render_settings_path(stage: &Stage) -> Option<sdf::Path> {
     UsdRenderSettings::stage_settings_path(stage)
         .ok()
         .flatten()

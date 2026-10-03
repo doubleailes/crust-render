@@ -1,0 +1,192 @@
+#usda 1.0
+(
+    doc = """AOVs through UsdRender, the way Solaris exports them: a /Render scope whose
+settings list two RenderProducts, each with its RenderVars. The beauty product
+holds the colour with alpha, the sample count and the adaptive-sampling
+variance; the data product every Phase 1 geometric AOV (depth, distance,
+world and camera position and normal, st), one of them authored with
+Houdini's driver:parameters:aov:* keys, and one var crust does not know
+(`diffuse_direct`), which is refused with a warning and gets no channel.
+
+    cargo run --release -- -i samples/aovs.usda
+
+writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr. `-o x.exr`
+replaces the first product's path."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.2, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Ball"
+    {
+        double radius = 1.0
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Ends short of the frame's top, so the dome shows above it: colour,
+    # but no alpha and the clear value in every data AOV.
+    def Mesh "Floor"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-4, 0, -4), (4, 0, -4), (4, 0, 4), (-4, 0, 4)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def RectLight "KeyLight"
+    {
+        float inputs:width = 2
+        float inputs:height = 1.5
+        color3f inputs:color = (8, 8, 8)
+        double3 xformOp:translate = (0, 2.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.2, 0.25, 0.35)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (160, 90)
+        rel products = [</Render/Products/beauty>, </Render/Products/data>]
+        int crust:samplesPerPixel = 16
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 8
+        float crust:varianceThreshold = 0.05
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "beauty"
+        {
+            token productName = "renders/aovs_beauty.exr"
+            string driver:parameters:artist = "crust samples"
+            rel orderedVars = [
+                </Render/Products/Vars/C>,
+                </Render/Products/Vars/sampleCount>,
+                </Render/Products/Vars/variance>,
+            ]
+        }
+
+        def RenderProduct "data"
+        {
+            token productName = "renders/aovs_data.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/Z>,
+                </Render/Products/Vars/distance>,
+                </Render/Products/Vars/P>,
+                </Render/Products/Vars/Peye>,
+                </Render/Products/Vars/N>,
+                </Render/Products/Vars/Neye>,
+                </Render/Products/Vars/st>,
+                </Render/Products/Vars/alpha>,
+                </Render/Products/Vars/diffuse_direct>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            # The beauty with alpha: written bare, as R, G, B, A.
+            def RenderVar "C"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "Ci"
+                uniform token sourceType = "raw"
+            }
+
+            def RenderVar "sampleCount"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "sampleCount"
+            }
+
+            def RenderVar "variance"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "variance"
+            }
+
+            # As Houdini writes it: the channel name and format under
+            # driver:parameters:aov, closest-sample through multiSampled.
+            def RenderVar "Z"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "Z"
+                uniform token sourceType = "raw"
+                string driver:parameters:aov:name = "Z"
+                token driver:parameters:aov:format = "float"
+                bool driver:parameters:aov:multiSampled = 0
+            }
+
+            def RenderVar "distance"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "distance"
+            }
+
+            def RenderVar "P"
+            {
+                uniform token dataType = "point3f"
+                uniform string sourceName = "P"
+            }
+
+            def RenderVar "Peye"
+            {
+                uniform token dataType = "point3f"
+                uniform string sourceName = "Peye"
+            }
+
+            def RenderVar "N"
+            {
+                uniform token dataType = "normal3f"
+                uniform string sourceName = "N"
+                token driver:parameters:aov:format = "half3"
+            }
+
+            def RenderVar "Neye"
+            {
+                uniform token dataType = "normal3f"
+                uniform string sourceName = "Neye"
+            }
+
+            def RenderVar "st"
+            {
+                uniform token dataType = "texCoord2f"
+                uniform string sourceName = "st"
+            }
+
+            def RenderVar "alpha"
+            {
+                uniform token dataType = "float"
+                uniform string sourceName = "alpha"
+            }
+
+            # Not a crust source (Arnold's built-in LPE name): refused with a
+            # warning, and no channel is written for it.
+            def RenderVar "diffuse_direct"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "diffuse_direct"
+            }
+        }
+    }
+}

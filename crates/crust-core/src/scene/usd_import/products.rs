@@ -1,0 +1,513 @@
+//! `RenderSettings.products` → `RenderProduct` → `orderedVars` → `RenderVar`:
+//! which files a render writes and which AOVs go in them ([`AovRequest`]).
+//!
+//! A small resolver over the typed `openusd-schemas` views rather than
+//! `openusd_schemas::render::compute_render_spec`, which takes no time code:
+//! `productName` is *varying* precisely so a shot can time-sample it per
+//! frame, and every attribute here is read at the render's time code like
+//! every other one crust reads. It follows `UsdRenderComputeSpec` step by
+//! step otherwise — a product starts from the settings' base attributes and
+//! overrides only what it authors, vars keep `orderedVars` order, a var
+//! targeted twice in one product is used once — and a test pins the two to
+//! the same answer on a time-invariant stage.
+//!
+//! The vocabulary (what a `sourceName` means) is [`crate::aov`]'s. Everything
+//! refused here — a deep product, a mismatched camera, an unknown source, a
+//! type that cannot hold its source — is refused with one `WARN` naming the
+//! prim, and gets no file or channel rather than a black one that looks
+//! valid.
+
+use std::collections::HashMap;
+
+use openusd::sdf;
+use openusd::usd::{Prim, Stage};
+use openusd_schemas::render::{
+    RenderProduct, RenderSettings as UsdRenderSettings, RenderSettingsBase, RenderVar,
+};
+use tracing::{debug, warn};
+
+use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
+
+use super::attrs::{custom_bool, custom_token};
+use super::prim_at;
+use super::settings::render_settings_path;
+use super::time::eval_time;
+
+const DRIVER_PARAMETERS: &str = "driver:parameters:";
+
+/// The stage's products, and the camera and resolution the render takes from
+/// the first of them.
+#[derive(Debug, Default)]
+pub(super) struct RenderProducts {
+    pub(super) request: AovRequest,
+    /// The first product's resolved camera — the settings' own when the
+    /// product authors none.
+    pub(super) camera: Option<sdf::Path>,
+    /// The first product's resolved resolution, when the settings or the
+    /// product author one.
+    pub(super) resolution: Option<(usize, usize)>,
+}
+
+/// The base attributes a product inherits from the settings and may
+/// override — the two crust renders with. The other `RenderSettingsBase`
+/// attributes are not honoured (see [`warn_unhonoured`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Base {
+    camera: Option<sdf::Path>,
+    resolution: Option<(usize, usize)>,
+}
+
+fn read_resolution(view: &impl RenderSettingsBase) -> Option<(usize, usize)> {
+    let v = view
+        .resolution_attr()
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??;
+    let v = v.try_as_vec_2i()?;
+    (v.x > 0 && v.y > 0).then_some((v.x as usize, v.y as usize))
+}
+
+fn read_camera(view: &impl RenderSettingsBase) -> Option<sdf::Path> {
+    view.camera_rel().targets().ok()?.into_iter().next()
+}
+
+impl Base {
+    /// `view`'s authored opinions over `fallback`.
+    fn resolve(view: &impl RenderSettingsBase, fallback: &Base) -> Base {
+        Base {
+            camera: read_camera(view).or_else(|| fallback.camera.clone()),
+            resolution: read_resolution(view).or(fallback.resolution),
+        }
+    }
+}
+
+/// Resolves the render settings prim's products. Empty when the stage has no
+/// settings prim or the prim authors no `products` — the "write the single
+/// beauty EXR" case.
+pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
+    let Some(path) = render_settings_path(stage) else {
+        return RenderProducts::default();
+    };
+    let Some(settings) = UsdRenderSettings::get(stage, path.clone()).ok().flatten() else {
+        return RenderProducts::default();
+    };
+    let targets = settings
+        .products_rel()
+        .forwarded_targets()
+        .unwrap_or_default();
+    let base = Base::resolve(
+        &settings,
+        &Base {
+            camera: None,
+            resolution: None,
+        },
+    );
+    if targets.is_empty() {
+        return RenderProducts {
+            request: AovRequest::default(),
+            camera: base.camera,
+            resolution: base.resolution,
+        };
+    }
+    warn_unhonoured(&prim_at(stage, path.clone()));
+    if let Some(space) = custom_token(&prim_at(stage, path.clone()), "renderingColorSpace")
+        && !is_rec709_linear(&space)
+    {
+        warn!(
+            "{path}: renderingColorSpace = {space:?} is not honoured: crust renders in \
+             linear Rec.709 and tags its EXRs lin_rec709_scene"
+        );
+    }
+
+    let mut out = RenderProducts {
+        request: AovRequest::default(),
+        camera: base.camera.clone(),
+        resolution: base.resolution,
+    };
+    // The render's own base: the first accepted product's.
+    let mut render_base: Option<Base> = None;
+    // A var shared by several products is resolved, and warned about, once.
+    let mut vars: HashMap<sdf::Path, Option<AovVar>> = HashMap::new();
+
+    for product_path in targets {
+        let Some(product) = RenderProduct::get(stage, product_path.clone())
+            .ok()
+            .flatten()
+        else {
+            warn!("{path}.products targets {product_path}, which is not a RenderProduct; skipped");
+            continue;
+        };
+        let prim = prim_at(stage, product_path.clone());
+        let product_type =
+            custom_token(&prim, "productType").unwrap_or_else(|| "raster".to_owned());
+        if product_type != "raster" {
+            warn!(
+                "{product_path}: productType {product_type:?} is not supported (only \
+                 \"raster\"); no file is written for it"
+            );
+            continue;
+        }
+        let resolved = Base::resolve(&product, &base);
+        if let Some(camera) = &resolved.camera
+            && !prim_at(stage, camera.clone()).is_valid().unwrap_or(false)
+        {
+            warn!("{product_path}: camera {camera} does not exist on the stage; skipped");
+            continue;
+        }
+        match &render_base {
+            None => render_base = Some(resolved.clone()),
+            Some(first) if *first != resolved => {
+                warn!(
+                    "{product_path}: renders through {} at {}, but the render is {} at {} \
+                     (the first product's); crust renders one camera and resolution per \
+                     stage, so no file is written for it",
+                    describe_camera(&resolved.camera),
+                    describe_resolution(resolved.resolution),
+                    describe_camera(&first.camera),
+                    describe_resolution(first.resolution),
+                );
+                continue;
+            }
+            Some(_) => {}
+        }
+        warn_unhonoured(&prim);
+
+        let name = custom_token(&prim, "productName").unwrap_or_default();
+        let mut seen = Vec::new();
+        let mut product_vars = Vec::new();
+        for var_path in product
+            .ordered_vars_rel()
+            .forwarded_targets()
+            .unwrap_or_default()
+        {
+            if seen.contains(&var_path) {
+                debug!("{product_path}: {var_path} is targeted twice; using it once");
+                continue;
+            }
+            seen.push(var_path.clone());
+            let var = vars
+                .entry(var_path.clone())
+                .or_insert_with(|| resolve_var(stage, &var_path))
+                .clone();
+            product_vars.extend(var);
+        }
+        let attributes = driver_attributes(&prim);
+        debug!(
+            "{product_path}: {:?} with {} var(s): {}",
+            name,
+            product_vars.len(),
+            product_vars
+                .iter()
+                .map(|v| format!("{} = {}", v.name, v.source.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        out.request.products.push(AovProduct {
+            prim_path: product_path.to_string(),
+            name,
+            vars: product_vars,
+            attributes,
+        });
+    }
+    if let Some(first) = render_base {
+        out.camera = first.camera;
+        out.resolution = first.resolution;
+    }
+    out
+}
+
+fn describe_camera(camera: &Option<sdf::Path>) -> String {
+    camera
+        .as_ref()
+        .map_or_else(|| "the first camera".to_owned(), ToString::to_string)
+}
+
+fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
+    resolution.map_or_else(
+        || "the default resolution".to_owned(),
+        |(w, h)| format!("{w}x{h}"),
+    )
+}
+
+/// Whether a `renderingColorSpace` names crust's own rendering space.
+fn is_rec709_linear(space: &str) -> bool {
+    let s = space.to_ascii_lowercase();
+    s.is_empty() || (s.contains("lin") && (s.contains("rec709") || s.contains("srgb")))
+}
+
+/// `RenderSettingsBase` attributes crust does not honour, warned about only
+/// when authored with a value that would change the image — Houdini authors
+/// every one of them at its fallback, and those need no word.
+fn warn_unhonoured(prim: &Prim) {
+    let mut ignored = Vec::new();
+    let value = |name: &str| {
+        prim.attribute(name)
+            .get_at::<sdf::Value>(eval_time())
+            .ok()
+            .flatten()
+    };
+    if let Some(sdf::Value::Float(a)) = value("pixelAspectRatio")
+        && a != 1.0
+    {
+        ignored.push(format!("pixelAspectRatio = {a}"));
+    }
+    if let Some(v) = value("dataWindowNDC")
+        && let Some(w) = v.try_as_vec_4f()
+        && [w.x, w.y, w.z, w.w] != [0.0, 0.0, 1.0, 1.0]
+    {
+        ignored.push(format!(
+            "dataWindowNDC = ({}, {}, {}, {})",
+            w.x, w.y, w.z, w.w
+        ));
+    }
+    for flag in [
+        "disableMotionBlur",
+        "instantaneousShutter",
+        "disableDepthOfField",
+    ] {
+        if custom_bool(prim, flag) == Some(true) {
+            ignored.push(format!("{flag} = true"));
+        }
+    }
+    if !ignored.is_empty() {
+        warn!(
+            "{}: {} not honoured; rendering without it",
+            prim.path(),
+            ignored.join(", ")
+        );
+    }
+}
+
+/// A product's authored `driver:parameters:*` text values (outside the
+/// `aov:` namespace, which configures vars), for the EXR header:
+/// `driver:parameters:OpenEXR:<key>` as `<key>`, the rest by their name
+/// without the prefix (`artist`, `comment`).
+fn driver_attributes(prim: &Prim) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = prim
+        .authored_property_names()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.as_str();
+            let key = name.strip_prefix(DRIVER_PARAMETERS)?;
+            if key.starts_with("aov:") {
+                return None;
+            }
+            let value = custom_token(prim, name)?;
+            let key = key.strip_prefix("OpenEXR:").unwrap_or(key);
+            Some((key.to_owned(), value))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A float attribute authored as any numeric type — Houdini writes
+/// `clearValue` as a float, hand-written files as an int.
+fn custom_number(prim: &Prim, name: &str) -> Option<f32> {
+    match prim
+        .attribute(name)
+        .get_at::<sdf::Value>(eval_time())
+        .ok()??
+    {
+        sdf::Value::Float(f) => Some(f),
+        sdf::Value::Double(d) => Some(d as f32),
+        sdf::Value::Half(h) => Some(h.to_f32()),
+        sdf::Value::Int(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
+/// Components and precision of an Sdf type name or a Houdini
+/// `aov:format`: the first digit is the component count (none: 1), `int`
+/// is UINT, a `half` name or an `h` suffix is HALF, everything else FLOAT.
+/// `None` for a name that is no numeric type at all.
+pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
+    let base = name.trim_end_matches("[]");
+    const NUMERIC: &[&str] = &[
+        "float", "half", "double", "int", "uint", "color", "normal", "point", "vector", "texCoord",
+    ];
+    if !NUMERIC.iter().any(|n| base.starts_with(n)) {
+        return None;
+    }
+    let components = base
+        .chars()
+        .find(char::is_ascii_digit)
+        .map_or(1, |c| c.to_digit(10).expect("a digit") as usize);
+    if !(1..=4).contains(&components) {
+        return None;
+    }
+    let precision = if base.starts_with("int") || base.starts_with("uint") {
+        Precision::Uint
+    } else if base.starts_with("half") || base.ends_with('h') {
+        Precision::Half
+    } else {
+        Precision::Float
+    };
+    Some((components, precision))
+}
+
+/// Whether `source` can be written as `components` channels of `precision`.
+fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
+    let components_fit = match source {
+        AovSource::Color => components == 3 || components == 4,
+        s => components == s.components(),
+    };
+    let precision_fits = precision != Precision::Uint || source == AovSource::SampleCount;
+    components_fit && precision_fits
+}
+
+/// The accumulation a var's authored attributes ask for, first match wins:
+/// Hydra's `multiSampled`, then Arnold, Karma and RenderMan filter
+/// attributes. `None` when none is authored (or the one authored names a
+/// rule crust does not have, which is warned).
+fn authored_accumulation(prim: &Prim) -> Option<Accumulation> {
+    if let Some(multi) = custom_bool(prim, "driver:parameters:aov:multiSampled") {
+        return Some(if multi {
+            Accumulation::Filtered
+        } else {
+            Accumulation::Closest
+        });
+    }
+    if let Some(filter) = custom_token(prim, "arnold:filter") {
+        return Some(if filter == "closest_filter" {
+            Accumulation::Closest
+        } else {
+            Accumulation::Filtered
+        });
+    }
+    if let Some(filter) = custom_token(prim, "driver:parameters:aov:filter") {
+        let f = filter.trim_start();
+        return Some(
+            if f.starts_with("[\"closest\"") || f.starts_with("closest") {
+                Accumulation::Closest
+            } else {
+                Accumulation::Filtered
+            },
+        );
+    }
+    for name in ["ri:accumulationRule", "ri:displayChannel:filter"] {
+        if let Some(rule) = custom_token(prim, name) {
+            return match rule.as_str() {
+                "zmin" => Some(Accumulation::Closest),
+                "filter" | "" => Some(Accumulation::Filtered),
+                other => {
+                    warn!(
+                        "{}: {name} = {other:?} is not supported (only \"zmin\" and the \
+                         filtered default); using the source's default",
+                        prim.path()
+                    );
+                    None
+                }
+            };
+        }
+    }
+    None
+}
+
+/// One RenderVar as a channel layer, or `None` (warned) when crust cannot
+/// honour it.
+fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
+    if RenderVar::get(stage, path.clone()).ok().flatten().is_none() {
+        warn!("orderedVars targets {path}, which is not a RenderVar; skipped");
+        return None;
+    }
+    let prim = prim_at(stage, path.clone());
+    let prim_name = path.name().unwrap_or_default().to_owned();
+    let name = custom_token(&prim, "driver:parameters:aov:name")
+        .filter(|n| !n.is_empty())
+        .unwrap_or(prim_name);
+    let channel_prefix = custom_token(&prim, "driver:parameters:aov:channel_prefix")
+        .or_else(|| custom_token(&prim, "driver:parameters:aov:husk:channel_prefix"));
+
+    let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
+    let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
+    let source = match source_type.as_str() {
+        "raw" => {
+            let lookup = if source_name.is_empty() {
+                &name
+            } else {
+                &source_name
+            };
+            match AovSource::from_raw(lookup) {
+                Some(s) => s,
+                None if AovSource::is_planned(lookup) => {
+                    warn!("{path}: source {lookup:?} is not supported yet; no channel written");
+                    return None;
+                }
+                None => {
+                    warn!(
+                        "{path}: unknown raw source {lookup:?}; no channel written (crust's \
+                         AOV names are listed in the user documentation, usd/aovs)"
+                    );
+                    return None;
+                }
+            }
+        }
+        "lpe" => {
+            warn!(
+                "{path}: light path expression {source_name:?} is not supported yet; no \
+                 channel written"
+            );
+            return None;
+        }
+        "primvar" => {
+            warn!(
+                "{path}: primvar source {source_name:?} is not supported yet; no channel written"
+            );
+            return None;
+        }
+        "intrinsic" => {
+            warn!(
+                "{path}: sourceType \"intrinsic\" is unimplemented in UsdRender itself; no \
+                 channel written"
+            );
+            return None;
+        }
+        other => {
+            warn!("{path}: unknown sourceType {other:?}; no channel written");
+            return None;
+        }
+    };
+
+    let type_name = custom_token(&prim, "driver:parameters:aov:format")
+        .or_else(|| custom_token(&prim, "dataType"))
+        .unwrap_or_else(|| "color3f".to_owned());
+    let Some((components, precision)) = parse_data_type(&type_name) else {
+        warn!("{path}: data type {type_name:?} is not a numeric type; no channel written");
+        return None;
+    };
+    if !type_fits(source, components, precision) {
+        warn!(
+            "{path}: {} cannot be written as {type_name:?}; no channel written",
+            source.name()
+        );
+        return None;
+    }
+
+    let default = source.default_accumulation();
+    let accumulation = match authored_accumulation(&prim) {
+        Some(mode) if !source.accepts_accumulation() && mode != default => {
+            warn!(
+                "{path}: {} is a per-pixel quantity and cannot be accumulated as {mode:?}; \
+                 using {default:?}",
+                source.name()
+            );
+            default
+        }
+        Some(mode) => mode,
+        None => default,
+    };
+    let clear = custom_number(&prim, "driver:parameters:aov:clearValue")
+        .unwrap_or_else(|| source.default_clear());
+
+    Some(AovVar {
+        prim_path: path.to_string(),
+        name,
+        channel_prefix,
+        source,
+        components,
+        precision,
+        accumulation,
+        clear,
+    })
+}
