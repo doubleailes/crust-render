@@ -86,12 +86,12 @@ Phases are listed in the order they can land. Each phase ships on its own.
   - A first-non-delta-hit `albedo` AOV, for denoisers.
   - Light groups via `crust:light:lpeTag`, used as `<L.'tag'>`.
 - **Phase 3: identity.**
-  - Keep a `geom_id` → prim-path table past import.
-  - `primId` / `instanceId` AOVs.
-  - Cryptomatte v1.2 (`crypto_object`, `crypto_material`, `crypto_asset`)
-    with in-header manifests.
+  - **ID mattes through [OpenEXRId](https://github.com/MercenariesEngineering/openexrid)**
+    (deep EXR), not Cryptomatte. **On hold:** the `exr` crate writes no deep
+    data yet. The prim-path table and `primId` / `instanceId` it needs wait
+    with it.
   - `sourceType = "primvar"` for primvars kept at import because a var asked
-    for them.
+    for them. Not blocked.
 - **Guarantees across all phases:**
   - With no products, or only a beauty var, the render is bit-identical and
     costs the same instructions (callgrind, cornellbox).
@@ -108,7 +108,7 @@ Phases are listed in the order they can land. Each phase ships on its own.
   - definitions, spaces, units and clear values;
   - accumulation modes;
   - the LPE grammar and event alphabet;
-  - light groups and Cryptomatte;
+  - light groups and ID mattes (OpenEXRId, on hold);
   - the guarantees that tie AOVs to the beauty.
 
 ### Modified Capabilities
@@ -148,7 +148,7 @@ Phases are listed in the order they can land. Each phase ships on its own.
     Measured with `bench_ab.sh` and callgrind, and recorded in the `aovs`
     design record.
   - Memory: one full-frame f32 plane per channel. For example, 4K × 30
-    channels ≈ 1 GB. Cryptomatte adds per-pixel ID lists during accumulation.
+    channels ≈ 1 GB. ID mattes (on hold) would add per-pixel ID lists.
 - **Docs**
   - A new `openspec/specs/aovs/` (spec and design) and
     `openspec/specs/image-output/design.md`.
@@ -158,7 +158,8 @@ Phases are listed in the order they can land. Each phase ships on its own.
   - A new row in CLAUDE.md's documentation table.
   - Samples: `samples/aovs.usda` and `samples/aovs_lpe.usda`.
 - **Dependencies**: none new. `exr` already writes named channels, half/float/
-  u32 samples and custom header attributes. MurmurHash3 for Cryptomatte is
-  about 30 lines of safe Rust and is written in-tree. A denoiser (OIDN) is not
+  u32 samples and custom header attributes. It does not write deep data
+  (exr 1.74: "deep data: not yet supported"), which is what holds the
+  OpenEXRId ID mattes. A denoiser (OIDN) is not
   part of this change; it would be an `unsafe`/FFI dependency, which is a
   project decision.
