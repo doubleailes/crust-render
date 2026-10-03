@@ -206,8 +206,10 @@ The importer SHALL treat a `UsdGeomMesh` as a subdivision surface unless its
 `subdivisionScheme` is `none`. An unauthored scheme SHALL be USD's schema
 fallback, `catmullClark`, which is how production assets (ALab, Kitchen_set)
 mark their subdivision meshes. A mesh authoring `none` SHALL render as its
-faceted polygon cage. A `loop` mesh with any non-triangle face SHALL warn and
-render as its cage.
+faceted polygon cage, unless its bound material displaces it (see the
+`displacement` capability): such a mesh SHALL be refined with the `bilinear`
+scheme, so its faces keep their flat shape until displaced. A `loop` mesh with
+any non-triangle face SHALL warn and render as its cage.
 
 A refined mesh SHALL be uniformly subdivided to the stage's refinement level
 (see "Render settings from USD with defaults" and the CLI's `--subdiv-level`),
@@ -276,6 +278,13 @@ scheme or level.
 
 - **WHEN** a mesh authors `subdivisionScheme = "none"`
 - **THEN** it renders as its faceted polygon cage
+
+#### Scenario: Scheme none with displacement
+
+- **WHEN** a mesh authors `subdivisionScheme = "none"`, its material displaces it, and
+  the refinement level is 2
+- **THEN** it is refined bilinearly to level 2 and its level-2 vertices are displaced;
+  with `CRUST_DISPLACE=0` it renders as its faceted polygon cage
 
 #### Scenario: Textured subdivided mesh keeps its UVs
 
