@@ -17,7 +17,7 @@ mod path;
 pub(crate) use path::{shadow_t_max, surface_visibility};
 mod settings;
 
-use path::{K_CAMERA, K_TIME, trace_path};
+use path::{K_CAMERA, K_TIME, PathContext, trace_path};
 
 pub use path::ray_color;
 pub use settings::{
@@ -528,6 +528,20 @@ impl Renderer {
             }
         };
         let scratch = || PathScratch::new(self.settings.max_depth as usize);
+        let pass = PixelPass {
+            renderer: self,
+            cfg,
+            filter: &filter,
+            path: PathContext {
+                world: &self.world,
+                lights: &self.lights,
+                volumes: &self.volumes,
+                depth: self.settings.max_depth as i32,
+                strategy: self.settings.sampling_strategy,
+                indirect_clamp: self.settings.indirect_clamp,
+                guiding: gctx,
+            },
+        };
         // The integrator is monomorphised on the profiler switch; this picks
         // the instance once per pixel step, for both sweeps below.
         let advance = |i: usize,
@@ -537,9 +551,9 @@ impl Renderer {
                        st: &mut PixelState,
                        target: u32| {
             if profiling {
-                self.advance_pixel::<true>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+                pass.advance_pixel::<true>(i, j, work, scratch, st, target);
             } else {
-                self.advance_pixel::<false>(i, j, &cfg, &filter, gctx, work, scratch, st, target);
+                pass.advance_pixel::<false>(i, j, work, scratch, st, target);
             }
         };
 
@@ -706,25 +720,35 @@ impl Renderer {
             },
         )
     }
+}
 
+/// What every pixel step of one pass reads: the renderer, the pass's
+/// config and filter table, and the integrator's [`PathContext`]. Built
+/// once per pass, shared read-only by every worker.
+struct PixelPass<'a> {
+    renderer: &'a Renderer,
+    cfg: PassConfig,
+    filter: &'a FilterSampler,
+    path: PathContext<'a>,
+}
+
+impl PixelPass<'_> {
     /// Traces pixel `(i, j)`'s samples from `state.taken` up to `target`,
     /// accumulating into `state` and the unit's sample buffer and counters.
     /// A sample depends only on `(i, j, seed, sample index)`, never on when
     /// it is traced, so advancing in steps is the same as one loop.
-    #[allow(clippy::too_many_arguments)]
     fn advance_pixel<const PROFILE: bool>(
         &self,
         i: usize,
         j: usize,
-        cfg: &PassConfig,
-        filter: &FilterSampler,
-        gctx: Option<&GuidingContext>,
         unit: &mut UnitWork,
         scratch: &mut PathScratch,
         state: &mut PixelState,
         target: u32,
     ) {
         let _main = profile::scope_if::<PROFILE>(Section::MainLoop);
+        let (cfg, filter) = (&self.cfg, self.filter);
+        let renderer = self.renderer;
 
         let tile = pixel_tile(i, j);
 
@@ -739,14 +763,15 @@ impl Renderer {
         // Skipping the draw cannot perturb the other dimensions: `new_domain`
         // is a pure function of the parent state and takes `&self`, so a
         // domain that is never derived leaves `root` untouched.
-        let motion = self.world.has_motion();
+        let motion = renderer.world.has_motion();
 
         // One pixel's world-space width, for the primary ray's cone. Hoisted
         // out of the sample loop: it depends only on the camera and the
         // resolution, neither of which moves within a render.
         let pixel_span = ray_cones_enabled().then(|| {
-            self.camera
-                .pixel_span(self.settings.width, self.settings.height)
+            renderer
+                .camera
+                .pixel_span(renderer.settings.width, renderer.settings.height)
         });
 
         for sample in state.taken..target {
@@ -766,8 +791,8 @@ impl Renderer {
             // exactly. The historical `/ (w-1)` divisor stretched the pixel
             // grid over a plane 1 pixel too wide — a sub-pixel zoom of ~1/w
             // that also let the last row and column sample past v = 1.
-            let u = ((i as f32) + fx) / self.settings.width as f32;
-            let v = ((j as f32) + fy) / self.settings.height as f32;
+            let u = ((i as f32) + fx) / renderer.settings.width as f32;
+            let v = ((j as f32) + fy) / renderer.settings.height as f32;
             // `Ray::new` defaults `time` to 0.0, and `transforms_at` takes the
             // start transform at time 0, so this is the value a static scene
             // was already effectively using.
@@ -776,7 +801,7 @@ impl Renderer {
             } else {
                 0.0
             };
-            let mut r = self.camera.get_ray(u, v, [cam[2], cam[3]], time);
+            let mut r = renderer.camera.get_ray(u, v, [cam[2], cam[3]], time);
             if let Some(span) = pixel_span {
                 // `pixel_span` is the width one pixel covers at ray parameter
                 // 1; the cone wants it per world unit, and the direction is
@@ -790,15 +815,9 @@ impl Renderer {
             drop(primary);
             unit.rays.camera_rays += 1;
             let color = trace_path::<PROFILE>(
+                &self.path,
                 &r,
-                &self.world,
-                &self.lights,
-                &self.volumes,
-                self.settings.max_depth as i32,
-                self.settings.sampling_strategy,
-                self.settings.indirect_clamp,
                 root,
-                gctx,
                 &mut unit.samples,
                 scratch,
                 &mut unit.rays,

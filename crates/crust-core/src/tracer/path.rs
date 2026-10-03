@@ -116,6 +116,28 @@ fn phase_scattered(ray: &Ray, p: Vec3A, dir: Vec3A) -> Ray {
     .with_cone(cone)
 }
 
+/// What every level of the integrator reads and none of it changes: the
+/// scene, the light strategy and the pass's settings. Built once per pass
+/// (once per call for [`ray_color`]) and handed down by reference.
+///
+/// Borrowed by every helper rather than unpacked into their parameter
+/// lists. `trace_path` and the per-vertex helpers it calls are inlined, so
+/// LLVM sees through the reference to the fields, as it did to `&self.world`
+/// and `self.settings` before the struct existed.
+pub(super) struct PathContext<'a> {
+    pub(super) world: &'a World,
+    pub(super) lights: &'a LightList,
+    pub(super) volumes: &'a Volumes,
+    /// Maximum path depth: vertices a path may spend.
+    pub(super) depth: i32,
+    pub(super) strategy: SamplingStrategy,
+    /// The firefly clamp on what the primary vertex's continuation carries
+    /// back (see [`clamp_indirect`]); `None` leaves the estimate unbiased.
+    pub(super) indirect_clamp: Option<f32>,
+    /// The pass's guiding field, if it has one.
+    pub(super) guiding: Option<&'a GuidingContext<'a>>,
+}
+
 pub fn ray_color(
     r: &Ray,
     world: &World,
@@ -130,20 +152,16 @@ pub fn ray_color(
     // The one-shot entry point (benches and tests), so a scratch per call is
     // the right trade — the renderer's own paths reuse one per work unit.
     let mut scratch = PathScratch::new(depth.max(0) as usize);
-    trace_path::<false>(
-        r,
+    let ctx = PathContext {
         world,
         lights,
         volumes,
         depth,
         strategy,
-        None,
-        sampler,
-        None,
-        &mut no_training,
-        &mut scratch,
-        &mut stats,
-    )
+        indirect_clamp: None,
+        guiding: None,
+    };
+    trace_path::<false>(&ctx, r, sampler, &mut no_training, &mut scratch, &mut stats)
 }
 
 // `inline(always)`, as is `escaped_emission`: each is called once per
@@ -515,8 +533,7 @@ pub(super) fn escaped_emission(
 /// unaffected — transmittance is part of the integrand on both strategies,
 /// not of either pdf.
 fn shadow_transmittance<const PROFILE: bool>(
-    world: &World,
-    volumes: &Volumes,
+    ctx: &PathContext,
     shadow_ray: &Ray,
     distance: f32,
     vertex: PathSampler,
@@ -524,16 +541,19 @@ fn shadow_transmittance<const PROFILE: bool>(
 ) -> Vec3A {
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    let through = surface_visibility(world, shadow_ray, shadow_t_max(distance), stats);
+    let through = surface_visibility(ctx.world, shadow_ray, shadow_t_max(distance), stats);
     if through == 0.0 {
         stats.shadow_occluded += 1;
         return Vec3A::ZERO;
     }
-    if volumes.is_empty() {
+    if ctx.volumes.is_empty() {
         return Vec3A::splat(through);
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    through * volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
+    through
+        * ctx
+            .volumes
+            .transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -723,25 +743,50 @@ fn pass_cutouts<'w>(
     }
 }
 
+/// A volume-region scatter point, as [`volume_nee`] lights it.
+struct VolumeReceiver<'p> {
+    p: Vec3A,
+    /// The arriving direction, normalised: the phase function's `wi`.
+    wi: Vec3A,
+    phase: &'p PhaseMix,
+    /// The light-link class of the region(s) scattered in.
+    class: u16,
+    /// The path's shutter time, for the shadow ray.
+    time: f32,
+}
+
+/// A surface vertex, as [`surface_nee`] lights it.
+struct SurfaceReceiver<'s> {
+    /// The ray that arrived here.
+    ray: &'s Ray,
+    rec: &'s HitRecord,
+    sp: &'s ShadingPoint<'s>,
+    /// The receiver's light-link class.
+    class: u16,
+    /// The guiding field when it steers this vertex's bounce (secondary
+    /// vertices only): NEE's competing density is then the guide mixture.
+    guiding: Option<&'s GuidingContext<'s>>,
+}
+
 /// Direct lighting at a volume-region scatter point. The exact mirror of
 /// the surface NEE block: same light-selection strategy, with the
 /// phase function (value == pdf for the HG mixture) in place of
 /// `brdf·cos`, and the same phase pdf as the competing bounce density that
 /// `bounce_emission_weight`'s `Phase` arm uses.
-#[allow(clippy::too_many_arguments)]
 fn volume_nee<const PROFILE: bool>(
-    p: Vec3A,
-    wi: Vec3A,
-    phase: &PhaseMix,
-    class: u16,
-    world: &World,
-    volumes: &Volumes,
-    lights: &LightList,
-    strategy: SamplingStrategy,
+    ctx: &PathContext,
+    at: &VolumeReceiver,
     vertex: PathSampler,
-    time: f32,
     stats: &mut RayStats,
 ) -> Vec3A {
+    let &VolumeReceiver {
+        p,
+        wi,
+        phase,
+        class,
+        time,
+    } = at;
+    let (lights, strategy) = (ctx.lights, ctx.strategy);
     if !strategy.samples_lights() {
         return Vec3A::ZERO;
     }
@@ -770,8 +815,7 @@ fn volume_nee<const PROFILE: bool>(
     let shadow_ray = Ray::new(p, s.direction)
         .with_time(time)
         .with_mask(lights.shadow_mask(index));
-    let tr =
-        shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, s.distance, vertex, stats);
+    let tr = shadow_transmittance::<PROFILE>(ctx, &shadow_ray, s.distance, vertex, stats);
     if tr == Vec3A::ZERO {
         return Vec3A::ZERO;
     }
@@ -793,21 +837,21 @@ fn volume_nee<const PROFILE: bool>(
 /// `inline(always)` like the other once-per-`trace_path` helpers: it is part
 /// of every surface vertex, and out of line it is a call the integrator did
 /// not pay before it was extracted.
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn surface_nee<const PROFILE: bool>(
-    ray: &Ray,
-    rec: &HitRecord,
-    sp: &ShadingPoint,
-    class_here: u16,
-    guiding_here: Option<&GuidingContext>,
-    world: &World,
-    volumes: &Volumes,
-    lights: &LightList,
-    strategy: SamplingStrategy,
+    ctx: &PathContext,
+    at: &SurfaceReceiver,
     v: PathSampler,
     stats: &mut RayStats,
 ) -> Vec3A {
+    let &SurfaceReceiver {
+        ray,
+        rec,
+        sp,
+        class: class_here,
+        guiding: guiding_here,
+    } = at;
+    let (lights, strategy) = (ctx.lights, ctx.strategy);
     // The light strategy is "pick one light with the light list's
     // selection probability `pmf` (power-proportional by default), then
     // sample a point on it with its own `sample_li`", so its solid-angle
@@ -851,8 +895,7 @@ fn surface_nee<const PROFILE: bool>(
             let shadow_ray = Ray::new(rec.p, light_dir_unit)
                 .with_time(ray.time())
                 .with_mask(lights.shadow_mask(light_index));
-            let tr =
-                shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, ls.distance, v, stats);
+            let tr = shadow_transmittance::<PROFILE>(ctx, &shadow_ray, ls.distance, v, stats);
             (tr != Vec3A::ZERO).then_some(tr)
         };
         let connection = if ls.radiance == Vec3A::ZERO {
@@ -908,22 +951,24 @@ fn surface_nee<const PROFILE: bool>(
 /// own until the cutout branches tipped it over the threshold, and out of
 /// line it costs cornellbox 1.4% of its instructions (callgrind, 2 spp);
 /// forced, the tree before cutouts measured 0.4% *fewer*.
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(super) fn trace_path<const PROFILE: bool>(
+    ctx: &PathContext,
     r: &Ray,
-    world: &World,
-    lights: &LightList,
-    volumes: &Volumes,
-    depth: i32,
-    strategy: SamplingStrategy,
-    indirect_clamp: Option<f32>,
     sampler: PathSampler,
-    guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
     scratch: &mut PathScratch,
     stats: &mut RayStats,
 ) -> Vec3A {
+    let PathContext {
+        world,
+        lights,
+        volumes,
+        depth,
+        strategy,
+        indirect_clamp,
+        guiding,
+    } = *ctx;
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
     let path = sampler.new_domain(K_PATH);
@@ -1054,19 +1099,14 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
                 let dir = phase.sample(wi, ps[0], [ps[1], ps[2]]);
                 let phase_pdf = phase.pdf(wi.dot(dir)).max(1e-6);
-                let nee = volume_nee::<PROFILE>(
+                let receiver = VolumeReceiver {
                     p,
                     wi,
-                    &phase,
+                    phase: &phase,
                     class,
-                    world,
-                    volumes,
-                    lights,
-                    strategy,
-                    v,
-                    ray.time(),
-                    stats,
-                );
+                    time: ray.time(),
+                };
+                let nee = volume_nee::<PROFILE>(ctx, &receiver, v, stats);
 
                 // The walk weight goes into `atten` (it multiplies NEE and
                 // everything beyond); the continuation factor is ONE
@@ -1230,19 +1270,14 @@ pub(super) fn trace_path<const PROFILE: bool>(
         let guiding_here = if prev.is_some() { guiding } else { None };
 
         // === 1. Direct Lighting via Light Sampling ===
-        let nee = surface_nee::<PROFILE>(
-            &ray,
-            &rec,
-            &sp,
-            class_here,
-            guiding_here,
-            world,
-            volumes,
-            lights,
-            strategy,
-            v,
-            stats,
-        );
+        let receiver = SurfaceReceiver {
+            ray: &ray,
+            rec: &rec,
+            sp: &sp,
+            class: class_here,
+            guiding: guiding_here,
+        };
+        let nee = surface_nee::<PROFILE>(ctx, &receiver, v, stats);
 
         let mut vrec = VertexRec {
             atten,
