@@ -3,7 +3,7 @@
 See `proposal.md` for the four defects. This section covers only what shapes the fix.
 
 **One mesh path:**
-- `mesh_source` (`usd_import/mesh.rs`) reads `faceVertexCounts` / `faceVertexIndices`
+- `mesh_source` (`usd_import/mesh/source.rs`) reads `faceVertexCounts` / `faceVertexIndices`
   for every mesh, direct or prototype part.
 - It then picks a route: uniform `subdivide`, per-face `tessellate_adaptive`, or the
   base cage.
