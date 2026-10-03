@@ -428,6 +428,10 @@ impl Renderer {
     /// scanlines stay bit-identical with the comparison on. Each pixel
     /// draws the same sample indices, and checks at the same `taken`
     /// values, as it would if it ran alone.
+    ///
+    /// Three phases: [`PixelPass::first_sweep`],
+    /// [`PixelPass::adaptive_rounds`], and [`gather_pass`], which reads the
+    /// units back in scanline order.
     fn render_pass(
         &self,
         cfg: PassConfig,
@@ -435,18 +439,8 @@ impl Renderer {
         progress: Option<ProgressCallback>,
     ) -> (Buffer, PassSamples, PassStats) {
         let (w, h) = (self.settings.width, self.settings.height);
-        let mut buffer = Buffer::new(w, h);
-        let mut all_samples = PassSamples::default();
-        let mut variance_sum = 0.0f64;
-        let mut rays = RayStats::default();
-        let mut var_map = vec![0.0f64; w * h];
-        let pixel_count = (w * h) as f64;
         // One tabulation per pass, shared read-only by every worker.
         let filter = FilterSampler::new(self.settings.pixel_filter);
-        // Read once per pass and dispatched to one of two monomorphisations
-        // of the integrator (see `profile::scope_if`), so an unprofiled
-        // render carries no trace of the profiler.
-        let profiling = profile::enabled();
 
         let threshold = self.settings.variance_threshold as f64;
         let tolerance = self.settings.adaptive_neighbour_tolerance;
@@ -515,19 +509,7 @@ impl Renderer {
             generate_rows(w, h)
         };
         let mut units: Vec<Unit> = tiles.into_iter().map(Unit::new).collect();
-        let total = units.len() as u64 + rounds as u64;
-        // Incremented and reported under one lock, so the callback sees
-        // completions in increasing order even though units finish on many
-        // threads at once (see `ProgressCallback`). Taken once per unit,
-        // which no render will notice.
-        let done = std::sync::Mutex::new(0u64);
-        let report = |n: &mut u64| {
-            *n += 1;
-            if let Some(cb) = progress {
-                cb(*n, total);
-            }
-        };
-        let scratch = || PathScratch::new(self.settings.max_depth as usize);
+        let progress = PassProgress::new(progress, units.len() as u64 + rounds as u64);
         let pass = PixelPass {
             renderer: self,
             cfg,
@@ -541,154 +523,18 @@ impl Renderer {
                 indirect_clamp: self.settings.indirect_clamp,
                 guiding: gctx,
             },
-        };
-        // The integrator is monomorphised on the profiler switch; this picks
-        // the instance once per pixel step, for both sweeps below.
-        let advance = |i: usize,
-                       j: usize,
-                       work: &mut UnitWork,
-                       scratch: &mut PathScratch,
-                       st: &mut PixelState,
-                       target: u32| {
-            if profiling {
-                pass.advance_pixel::<true>(i, j, work, scratch, st, target);
-            } else {
-                pass.advance_pixel::<false>(i, j, work, scratch, st, target);
-            }
+            // Read once per pass and dispatched to one of two
+            // monomorphisations of the integrator (see `profile::scope_if`),
+            // so an unprofiled render carries no trace of the profiler.
+            profiling: profile::enabled(),
         };
 
-        // First sweep: every pixel to the first check point (or to the
-        // budget). The path scratch is held per rayon worker rather than
-        // per unit; one buffer serves every sample of every pixel it sees.
-        units
-            .par_iter_mut()
-            .for_each_init(scratch, |scratch, unit| {
-                unit.for_each_pixel(|i, j, work, st| {
-                    advance(i, j, work, scratch, st, sweep_to);
-                    st.finish_round(cfg.spp, threshold);
-                });
-                // Once per unit, and a no-op unless `--profile` is on.
-                profile::flush();
-                report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
-            });
+        pass.first_sweep(&mut units, sweep_to, threshold, &progress);
+        pass.adaptive_rounds(&mut units, &schedule, threshold, tolerance, &progress);
+        progress.finish();
+        let (buffer, all_samples, stats) = gather_pass(units, &cfg, w, h);
 
-        // The frozen buffers the decisions read: every pixel's index and
-        // whether it is still sampling, in image order.
-        let mut index = vec![f32::INFINITY; w * h];
-        let mut active = vec![false; w * h];
-        for &target in &schedule {
-            let mut any_active = false;
-            for unit in &units {
-                unit.for_each_pixel_ref(|i, j, st| {
-                    index[j * w + i] = st.index;
-                    active[j * w + i] = !st.stopped;
-                    any_active |= !st.stopped;
-                });
-            }
-            if !any_active {
-                break;
-            }
-            let (index, active) = (&index, &active);
-            units
-                .par_iter_mut()
-                .for_each_init(scratch, |scratch, unit| {
-                    unit.for_each_pixel(|i, j, work, st| {
-                        if st.stopped {
-                            return;
-                        }
-                        // The stop rule: past the minimum (always, by now), its
-                        // own test, and no still-sampling cross neighbour much
-                        // less converged than it is.
-                        if st.converged {
-                            if held_by_neighbour(index, active, w, h, i, j, tolerance) {
-                                st.held = true;
-                            } else {
-                                st.stopped = true;
-                                return;
-                            }
-                        }
-                        advance(i, j, work, scratch, st, target);
-                        st.finish_round(cfg.spp, threshold);
-                    });
-                    profile::flush();
-                });
-            report(&mut done.lock().unwrap_or_else(|e| e.into_inner()));
-        }
-        // An early finish still walks the callback to the total, one step at
-        // a time, as the contract says.
-        {
-            let mut n = done.lock().unwrap_or_else(|e| e.into_inner());
-            while *n < total {
-                report(&mut n);
-            }
-        }
-
-        // Units finish in unit order, but what the pass hands on — the
-        // guiding field's training samples and the pass variance, an f64
-        // sum — is gathered in *scanline* order (rows top-down, pixels left
-        // to right), whichever the unit shape. Both are order-dependent in
-        // floating point (the SD-tree accumulates the samples it is given),
-        // so this is what keeps a guided render bit-identical whichever
-        // order the pixels were rendered in.
-        //
-        // The unit results are replayed in that order straight from the
-        // tile grid (`generate_tiles` and `generate_rows` emit tile rows by
-        // increasing `y`, each left to right, so walking it backwards by
-        // row gives rows in scanline order). Nothing full-frame is copied
-        // to do it: the samples stay in the unit buffers, and only their
-        // scanline-order runs are recorded, one per unit per row.
-        let training = units.iter().any(|u| !u.work.samples.is_empty());
-        let tiles_x = units.iter().take_while(|u| u.tile.y == 0).count().max(1);
-        for unit in &units {
-            rays.merge(&unit.work.rays);
-        }
-        for ty in (0..units.len() / tiles_x).rev() {
-            let row = ty * tiles_x..(ty + 1) * tiles_x;
-            let (y0, rows) = (units[row.start].tile.y, units[row.start].tile.height);
-            for j in (y0..y0 + rows).rev() {
-                for k in row.clone() {
-                    let unit = &units[k];
-                    let tile = &unit.tile;
-                    for i in tile.x..tile.x + tile.width {
-                        let p = (j - tile.y) * tile.width + (i - tile.x);
-                        let st = &unit.pixels[p];
-                        let (color, var) = st.estimate();
-                        buffer.set_pixel(i, j, color);
-                        var_map[j * w + i] = var;
-                        variance_sum += var;
-                        if cfg.adaptive {
-                            rays.adaptive_pixels += 1;
-                            rays.adaptive_samples += st.taken as u64;
-                            if st.taken < cfg.spp {
-                                rays.early_stopped += 1;
-                            }
-                            if st.held {
-                                rays.neighbour_held += 1;
-                            }
-                            rays.spp_min = if rays.adaptive_pixels == 1 {
-                                st.taken
-                            } else {
-                                rays.spp_min.min(st.taken)
-                            };
-                            rays.spp_max = rays.spp_max.max(st.taken);
-                        }
-                        // Where this pixel's samples sit in its unit's
-                        // buffer: from where the previous pixel's ended.
-                        let start = if p == 0 {
-                            0
-                        } else {
-                            unit.pixels[p - 1].samples_end
-                        };
-                        let end = st.samples_end;
-                        if training && end > start {
-                            all_samples.push_run(k as u32, start, end);
-                        }
-                    }
-                }
-            }
-        }
-        all_samples.buffers = units.into_iter().map(|u| u.work.samples).collect();
-
+        let rays = &stats.rays;
         let elapsed = pass_start.elapsed();
         debug!(
             "pass done in {:?}: {} camera rays, {} closest-hit, {} shadow, {} vertices, \
@@ -708,18 +554,144 @@ impl Renderer {
             rays.rr_tested,
             rays.ended_escaped,
             rays.ended_depth,
-            variance_sum / pixel_count,
+            stats.variance,
         );
-        (
-            buffer,
-            all_samples,
-            PassStats {
-                variance: variance_sum / pixel_count,
-                var_map,
-                rays,
-            },
-        )
+        (buffer, all_samples, stats)
     }
+}
+
+/// A pass's progress, as the host's [`ProgressCallback`] sees it: one step
+/// per unit of the first sweep and one per adaptive round, `total` in all.
+struct PassProgress<'a> {
+    callback: Option<ProgressCallback<'a>>,
+    total: u64,
+    /// Incremented and reported under one lock, so the callback sees
+    /// completions in increasing order even though units finish on many
+    /// threads at once (see `ProgressCallback`). Taken once per unit,
+    /// which no render will notice.
+    done: std::sync::Mutex<u64>,
+}
+
+impl<'a> PassProgress<'a> {
+    fn new(callback: Option<ProgressCallback<'a>>, total: u64) -> Self {
+        PassProgress {
+            callback,
+            total,
+            done: std::sync::Mutex::new(0),
+        }
+    }
+
+    /// One more step done.
+    fn step(&self) {
+        self.report(&mut self.done.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    fn report(&self, n: &mut u64) {
+        *n += 1;
+        if let Some(cb) = self.callback {
+            cb(*n, self.total);
+        }
+    }
+
+    /// An early finish still walks the callback to the total, one step at
+    /// a time, as the contract says.
+    fn finish(&self) {
+        let mut n = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while *n < self.total {
+            self.report(&mut n);
+        }
+    }
+}
+
+/// Reads a pass's units back into its image, its training samples and its
+/// [`PassStats`].
+///
+/// Units finish in unit order, but what the pass hands on — the guiding
+/// field's training samples and the pass variance, an f64 sum — is gathered
+/// in *scanline* order (rows top-down, pixels left to right), whichever the
+/// unit shape. Both are order-dependent in floating point (the SD-tree
+/// accumulates the samples it is given), so this is what keeps a guided
+/// render bit-identical whichever order the pixels were rendered in.
+///
+/// The unit results are replayed in that order straight from the tile grid
+/// (`generate_tiles` and `generate_rows` emit tile rows by increasing `y`,
+/// each left to right, so walking it backwards by row gives rows in
+/// scanline order). Nothing full-frame is copied to do it: the samples stay
+/// in the unit buffers, and only their scanline-order runs are recorded,
+/// one per unit per row.
+fn gather_pass(
+    units: Vec<Unit>,
+    cfg: &PassConfig,
+    w: usize,
+    h: usize,
+) -> (Buffer, PassSamples, PassStats) {
+    let mut buffer = Buffer::new(w, h);
+    let mut all_samples = PassSamples::default();
+    let mut variance_sum = 0.0f64;
+    let mut rays = RayStats::default();
+    let mut var_map = vec![0.0f64; w * h];
+    let pixel_count = (w * h) as f64;
+
+    let training = units.iter().any(|u| !u.work.samples.is_empty());
+    let tiles_x = units.iter().take_while(|u| u.tile.y == 0).count().max(1);
+    for unit in &units {
+        rays.merge(&unit.work.rays);
+    }
+    for ty in (0..units.len() / tiles_x).rev() {
+        let row = ty * tiles_x..(ty + 1) * tiles_x;
+        let (y0, rows) = (units[row.start].tile.y, units[row.start].tile.height);
+        for j in (y0..y0 + rows).rev() {
+            for k in row.clone() {
+                let unit = &units[k];
+                let tile = &unit.tile;
+                for i in tile.x..tile.x + tile.width {
+                    let p = (j - tile.y) * tile.width + (i - tile.x);
+                    let st = &unit.pixels[p];
+                    let (color, var) = st.estimate();
+                    buffer.set_pixel(i, j, color);
+                    var_map[j * w + i] = var;
+                    variance_sum += var;
+                    if cfg.adaptive {
+                        rays.adaptive_pixels += 1;
+                        rays.adaptive_samples += st.taken as u64;
+                        if st.taken < cfg.spp {
+                            rays.early_stopped += 1;
+                        }
+                        if st.held {
+                            rays.neighbour_held += 1;
+                        }
+                        rays.spp_min = if rays.adaptive_pixels == 1 {
+                            st.taken
+                        } else {
+                            rays.spp_min.min(st.taken)
+                        };
+                        rays.spp_max = rays.spp_max.max(st.taken);
+                    }
+                    // Where this pixel's samples sit in its unit's
+                    // buffer: from where the previous pixel's ended.
+                    let start = if p == 0 {
+                        0
+                    } else {
+                        unit.pixels[p - 1].samples_end
+                    };
+                    let end = st.samples_end;
+                    if training && end > start {
+                        all_samples.push_run(k as u32, start, end);
+                    }
+                }
+            }
+        }
+    }
+    all_samples.buffers = units.into_iter().map(|u| u.work.samples).collect();
+    (
+        buffer,
+        all_samples,
+        PassStats {
+            variance: variance_sum / pixel_count,
+            var_map,
+            rays,
+        },
+    )
 }
 
 /// What every pixel step of one pass reads: the renderer, the pass's
@@ -730,9 +702,116 @@ struct PixelPass<'a> {
     cfg: PassConfig,
     filter: &'a FilterSampler,
     path: PathContext<'a>,
+    /// Run the integrator's profiled instance (`--profile`)?
+    profiling: bool,
 }
 
 impl PixelPass<'_> {
+    /// First sweep: every pixel to `sweep_to`, the first check point (or
+    /// the budget). The path scratch is held per rayon worker rather than
+    /// per unit; one buffer serves every sample of every pixel it sees.
+    fn first_sweep(
+        &self,
+        units: &mut [Unit],
+        sweep_to: u32,
+        threshold: f64,
+        progress: &PassProgress,
+    ) {
+        units.par_iter_mut().for_each_init(
+            || self.scratch(),
+            |scratch, unit| {
+                unit.for_each_pixel(|i, j, work, st| {
+                    self.advance(i, j, work, scratch, st, sweep_to);
+                    st.finish_round(self.cfg.spp, threshold);
+                });
+                // Once per unit, and a no-op unless `--profile` is on.
+                profile::flush();
+                progress.step();
+            },
+        );
+    }
+
+    /// The adaptive rounds, one per `schedule` entry: each decides which
+    /// pixels stop against the frozen convergence buffers, then takes the
+    /// pixels still sampling to the entry's `taken`. Ends early once no
+    /// pixel is sampling.
+    fn adaptive_rounds(
+        &self,
+        units: &mut [Unit],
+        schedule: &[u32],
+        threshold: f64,
+        tolerance: f32,
+        progress: &PassProgress,
+    ) {
+        let (w, h) = (self.renderer.settings.width, self.renderer.settings.height);
+        // The frozen buffers the decisions read: every pixel's index and
+        // whether it is still sampling, in image order.
+        let mut index = vec![f32::INFINITY; w * h];
+        let mut active = vec![false; w * h];
+        for &target in schedule {
+            let mut any_active = false;
+            for unit in units.iter() {
+                unit.for_each_pixel_ref(|i, j, st| {
+                    index[j * w + i] = st.index;
+                    active[j * w + i] = !st.stopped;
+                    any_active |= !st.stopped;
+                });
+            }
+            if !any_active {
+                break;
+            }
+            let (index, active) = (&index, &active);
+            units.par_iter_mut().for_each_init(
+                || self.scratch(),
+                |scratch, unit| {
+                    unit.for_each_pixel(|i, j, work, st| {
+                        if st.stopped {
+                            return;
+                        }
+                        // The stop rule: past the minimum (always, by
+                        // now), its own test, and no still-sampling cross
+                        // neighbour much less converged than it is.
+                        if st.converged {
+                            if held_by_neighbour(index, active, w, h, i, j, tolerance) {
+                                st.held = true;
+                            } else {
+                                st.stopped = true;
+                                return;
+                            }
+                        }
+                        self.advance(i, j, work, scratch, st, target);
+                        st.finish_round(self.cfg.spp, threshold);
+                    });
+                    profile::flush();
+                },
+            );
+            progress.step();
+        }
+    }
+
+    /// A worker's path scratch.
+    fn scratch(&self) -> PathScratch {
+        PathScratch::new(self.renderer.settings.max_depth as usize)
+    }
+
+    /// [`PixelPass::advance_pixel`] through the integrator instance the pass
+    /// runs: it is monomorphised on the profiler switch, and this picks the
+    /// instance once per pixel step.
+    fn advance(
+        &self,
+        i: usize,
+        j: usize,
+        work: &mut UnitWork,
+        scratch: &mut PathScratch,
+        st: &mut PixelState,
+        target: u32,
+    ) {
+        if self.profiling {
+            self.advance_pixel::<true>(i, j, work, scratch, st, target);
+        } else {
+            self.advance_pixel::<false>(i, j, work, scratch, st, target);
+        }
+    }
     /// Traces pixel `(i, j)`'s samples from `state.taken` up to `target`,
     /// accumulating into `state` and the unit's sample buffer and counters.
     /// A sample depends only on `(i, j, seed, sample index)`, never on when
