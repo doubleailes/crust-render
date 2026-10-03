@@ -262,39 +262,68 @@ impl RayStats {
 
     /// Sums another unit's counters into this one.
     pub fn merge(&mut self, o: &RayStats) {
+        // Destructured with no `..`, so a counter added to `RayStats` without
+        // a line here is a compile error rather than a silently unmerged sum.
+        let RayStats {
+            spp_min,
+            spp_max,
+            adaptive_pixels,
+            adaptive_samples,
+            early_stopped,
+            neighbour_held,
+            ended_absorbed,
+            volume_scatters,
+            medium_scatters,
+            sss_walks,
+            sss_exits,
+            sss_steps,
+            sss_rays,
+            cutout_passes,
+            cutout_rays,
+            light_samples,
+            shadow_occluded,
+            camera_rays,
+            closest_hit,
+            shadow_rays,
+            vertices,
+            rr_tested,
+            rr_killed,
+            ended_escaped,
+            ended_depth,
+        } = *o;
         // Min over pixels actually counted: a unit with no adaptive pixel has
         // `spp_min == 0`, which is not a pixel that took zero samples.
-        if o.adaptive_pixels > 0 {
+        if adaptive_pixels > 0 {
             self.spp_min = if self.adaptive_pixels == 0 {
-                o.spp_min
+                spp_min
             } else {
-                self.spp_min.min(o.spp_min)
+                self.spp_min.min(spp_min)
             };
         }
-        self.spp_max = self.spp_max.max(o.spp_max);
-        self.adaptive_pixels += o.adaptive_pixels;
-        self.adaptive_samples += o.adaptive_samples;
-        self.early_stopped += o.early_stopped;
-        self.neighbour_held += o.neighbour_held;
-        self.ended_absorbed += o.ended_absorbed;
-        self.volume_scatters += o.volume_scatters;
-        self.medium_scatters += o.medium_scatters;
-        self.sss_walks += o.sss_walks;
-        self.sss_exits += o.sss_exits;
-        self.sss_steps += o.sss_steps;
-        self.sss_rays += o.sss_rays;
-        self.cutout_passes += o.cutout_passes;
-        self.cutout_rays += o.cutout_rays;
-        self.light_samples += o.light_samples;
-        self.shadow_occluded += o.shadow_occluded;
-        self.camera_rays += o.camera_rays;
-        self.closest_hit += o.closest_hit;
-        self.shadow_rays += o.shadow_rays;
-        self.vertices += o.vertices;
-        self.rr_tested += o.rr_tested;
-        self.rr_killed += o.rr_killed;
-        self.ended_escaped += o.ended_escaped;
-        self.ended_depth += o.ended_depth;
+        self.spp_max = self.spp_max.max(spp_max);
+        self.adaptive_pixels += adaptive_pixels;
+        self.adaptive_samples += adaptive_samples;
+        self.early_stopped += early_stopped;
+        self.neighbour_held += neighbour_held;
+        self.ended_absorbed += ended_absorbed;
+        self.volume_scatters += volume_scatters;
+        self.medium_scatters += medium_scatters;
+        self.sss_walks += sss_walks;
+        self.sss_exits += sss_exits;
+        self.sss_steps += sss_steps;
+        self.sss_rays += sss_rays;
+        self.cutout_passes += cutout_passes;
+        self.cutout_rays += cutout_rays;
+        self.light_samples += light_samples;
+        self.shadow_occluded += shadow_occluded;
+        self.camera_rays += camera_rays;
+        self.closest_hit += closest_hit;
+        self.shadow_rays += shadow_rays;
+        self.vertices += vertices;
+        self.rr_tested += rr_tested;
+        self.rr_killed += rr_killed;
+        self.ended_escaped += ended_escaped;
+        self.ended_depth += ended_depth;
     }
 
     fn is_empty(&self) -> bool {
