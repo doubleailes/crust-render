@@ -95,3 +95,10 @@ render.
 
 - **Surfaces only.** Volumes and phase functions aren't guided.
 - **Luminance only.** The guide is trained on luminance, not per colour channel.
+- **Not yet worth its cost.** On `cornellbox_guided.usda`, an unguided render with the
+  same total samples has about 10% less error, and one with the same render time about
+  half.
+- **Sharp glass gets noisier.** Guiding also steers bounces off narrow lobes, such as
+  glass with low roughness, where it wastes samples. Caustics through such glass come
+  out several times noisier than without guiding. Turn guiding off for those scenes,
+  or lower [`crust:guidingProb`](@/docs/usd/render-settings.md#crust-guidingprob).

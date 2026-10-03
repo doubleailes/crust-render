@@ -333,3 +333,19 @@ fn batch_schedule_survives_a_budget_near_u32_max() {
     // A minimum past the budget schedules nothing.
     assert!(batch_schedule(64, u32::MAX).is_empty());
 }
+
+#[test]
+fn pass_weights_are_budget_shares() {
+    // The default guiding schedule (2, 2, 4, 8) before a 256-spp final pass.
+    let w = super::pass_weights(&[2, 2, 4, 8, 256]);
+    for (w, spp) in w.iter().zip([2.0, 2.0, 4.0, 8.0, 256.0]) {
+        assert_eq!(*w, spp / 272.0);
+    }
+    assert!((w.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn pass_weights_without_a_budget_are_zero_not_nan() {
+    assert!(super::pass_weights(&[]).is_empty());
+    assert_eq!(super::pass_weights(&[0, 0]), vec![0.0, 0.0]);
+}

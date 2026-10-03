@@ -294,7 +294,7 @@ reimplemented natively so the renderer stays dependency-light and 100% safe
 Rust. The renderer learns a spatio-directional distribution of incident
 radiance (a binary spatial tree over the scene whose leaves hold adaptive
 directional quadtrees) over progressive training passes with geometrically
-growing budgets (1, 2, 4, … spp), then renders the final image by one-sample
+growing budgets (2, 2, 4, 8, … spp), then renders the final image by one-sample
 MIS: each secondary bounce draws its direction from the learned distribution
 with probability `crust:guidingProb` and from the BSDF otherwise, dividing by
 the mixture pdf.
@@ -302,12 +302,12 @@ the mixture pdf.
 Enable it per scene with `bool crust:pathGuiding = true` on the
 RenderSettings prim. `crust:guidingTrainIterations` controls how many
 training passes run before the final pass (their total cost is
-`2^iterations − 1` spp — not wasted: every pass is blended into the final
-image weighted by inverse variance, so the training budget contributes at
-equal total spp). Guiding pays off on scenes where light is hard to
-find by chance — the bundled `samples/cornellbox_guided.usda` hides its only
-light behind a shroud so all transport is multi-bounce, and guiding cuts MSE
-against a converged reference by ~20% at equal final spp:
+`2^iterations` spp — not wasted: every pass is blended into the final
+image in proportion to its samples). Guiding is meant for scenes where light is
+hard to find by chance — the bundled `samples/cornellbox_guided.usda` hides its
+only light behind a shroud so all transport is multi-bounce. It does not pay off
+there yet: at equal render time an unguided render has about half the error
+(`openspec/specs/rendering/design.md`, "Known gaps: path guiding"):
 
 ```bash
 cargo run --release -- -i samples/cornellbox_guided.usda

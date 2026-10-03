@@ -187,12 +187,21 @@ consumed as ordinary dependencies:
 4. **Path guiding** (opt-in via `crust:pathGuiding`, `guiding/` module): a pure-Rust
    Practical Path Guiding SD-tree (`GuidingField`). `render_guided()` runs training
    passes at 2, 2, 4, 8, … spp (geometric, floored at 2 so every pass can estimate
-   its own variance), splats `(position, direction, luminance·cos²)` samples
+   the variance the efficiency estimate below needs), splats `(position, direction, luminance·cos²)` samples
    into the field between passes, then renders the final pass with one-sample MIS
    between the frozen field and the BSDF (mixture pdf; secondary bounces only —
    primary vertices sit far below the field's spatial resolution). All passes
-   (training + final) are blended into the output weighted by inverse variance, so
-   the training budget is not discarded. Delta/transmissive
+   (training + final) are blended into the output, each weighted by its share of the
+   total sample budget (`pass_weights`), so the training budget is not discarded.
+   The weights are fixed before rendering on purpose. They used to be inverse
+   *estimated* variances, taken from each pass's own samples, which is biased under
+   heavy-tailed transport: a low-spp pass that misses the rare bright paths is dark
+   *and* looks low-variance, so it takes the weight. On `caustic_guided.usda` (a
+   glass ball under a small light, 256², 1024 spp, 4 seeds, `--indirect-clamp 0`)
+   the caustic came out at 69% of a 32k-spp reference and its shadow at 84%; with
+   budget weights they are at 95% and 97% (unguided: 98%, 99%). On one seed a 2-spp
+   training pass took 80% of the weight. `guided_caustic_is_not_darkened` pins it.
+   Delta/transmissive
    materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
    sampling. The NEE weight competes against the same mixture pdf — keep the two sides
    consistent or emission gets double-counted.
@@ -200,7 +209,8 @@ consumed as ordinary dependencies:
    "Path Guiding in Disney's Zootopia 2"): efficiency `E = 1/(wall-clock cost × MRSE)`,
    comparing the first pass (field untrained → effectively unguided) against the last
    training pass (field most trained). MRSE normalizes each pass's per-pixel variance
-   by one *shared* reference image (the blend of all training passes) — never by the
+   by one *shared* reference image (the budget-weighted blend of all training
+   passes, for the same reason as the image blend) — never by the
    pass's own noisy mean, which would correlate numerator and denominator and break
    the 1/spp scaling the comparison relies on. If `ΔEff < 1`, the final pass renders
    unguided (training passes still blend in; every pass is unbiased either way).
@@ -403,6 +413,27 @@ carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a doma
 randomness use `openqmc::pcg::Rng`.
 
 ## Known gaps: path guiding
+
+- **`ΔEff` cannot see rare bright paths.** It compares 2-spp and last-training-pass
+  variances, and passes that small rarely contain a caustic path. On
+  `caustic_guided.usda` it measures 1.26–1.30 and keeps the final pass guided, which
+  is about 6× noisier there (shadow relMSE 2.56 against 0.42 unguided, 4 seeds at
+  1024 spp). A wrong "on" costs noise, never bias. Before budget weights it read
+  0.00–0.32 on the same seeds, but only because its reference image was biased.
+- **Narrow lobes are guided anyway.** The guide learns incident radiance, not its
+  product with the BSDF, and the guide/BSDF split is a fixed `crust:guidingProb`.
+  At a rough dielectric (`specularRoughness` 0.05) 36% of guide samples land
+  outside the lobe and contribute nothing, and BSDF samples where the guide density
+  is near zero carry `1/(1−α)` = 2× their weight. A caustic path crosses two such
+  vertices. Switching guiding off at the glass alone brings `caustic_guided.usda`
+  back to unguided noise (shadow relMSE 0.41), as does `crust:guidingProb` 0.1.
+  Production guiders skip lobes below a roughness threshold or learn α per region.
+- **On `cornellbox_guided.usda` guiding does not pay off as shipped.** At 256² and
+  64 final spp with 8 training iterations the render spends 320 spp and about 9× the
+  time of a 64-spp unguided render. Its relMSE (0.0248, 4 seeds) is 4.3× lower than
+  that render's, but 10% higher than unguided at the same 320 spp (0.0224) and 1.8×
+  higher than unguided at equal time (0.0135). `ΔEff` chose an unguided final pass
+  on 7 of 8 runs, and forcing it guided gave the same relMSE.
 
 - **Path guiding** covers surfaces only (no volume/phase guiding) and trains on luminance
   (no chromatic distributions). Thick transmission — dispersive or not — is a

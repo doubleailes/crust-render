@@ -89,10 +89,6 @@ impl PassSamples {
 }
 
 struct PassStats {
-    /// Mean per-pixel variance of the pixel estimate — the inverse-variance
-    /// blending weight (`f64::INFINITY` when spp < 2 makes estimation
-    /// impossible).
-    variance: f64,
     /// Per-pixel variance of the pixel-mean luminance, row-major. Feeds the
     /// guiding efficiency estimate, which normalizes it against a reference
     /// image shared by every pass being compared (`mean_relative_error`).
@@ -224,9 +220,11 @@ impl Renderer {
     /// 2 spp so every pass can estimate its own variance) build the guiding
     /// field, then the full per-pixel budget renders with the frozen field.
     /// Every pass is an unbiased image of the same scene, so instead of
-    /// discarding the training passes the final image blends all of them
-    /// weighted by inverse variance — passes rendered before the field
-    /// converged simply receive small weights.
+    /// discarding the training passes the final image blends all of them,
+    /// each weighted by its share of the total sample budget
+    /// ([`pass_weights`]). The weights are fixed before any pass renders:
+    /// a convex combination of unbiased images is unbiased only if its
+    /// weights do not depend on what the images hold.
     ///
     /// The training passes double as a guiding efficiency estimate
     /// (Li et al. 2026, "Path Guiding in Disney's Zootopia 2"): efficiency
@@ -259,7 +257,8 @@ impl Renderer {
         };
         let mut field = GuidingField::new(bounds, cfg);
         let base_seed = self.settings.frame as u32;
-        let mut passes: Vec<(Buffer, f64)> = Vec::new();
+        // Each pass's image and its configured spp, its blending weight.
+        let mut passes: Vec<(Buffer, u32)> = Vec::new();
         // (per-pixel variance map, seconds) of the first pass (untrained
         // field → effectively unguided) and of the last training pass
         // (most-trained field) — the two endpoints of the efficiency
@@ -288,12 +287,11 @@ impl Renderer {
             rays.merge(&stats.rays);
             let secs = start.elapsed().as_secs_f64();
             debug!(
-                "path guiding: training pass {}/{} at {} spp — {} samples, variance {:.3e}, {:.2}s",
+                "path guiding: training pass {}/{} at {} spp — {} samples, {:.2}s",
                 k + 1,
                 cfg.train_iterations,
                 spp,
                 samples.len(),
-                stats.variance,
                 secs
             );
             if k == 0 {
@@ -308,7 +306,7 @@ impl Renderer {
                 k + 1,
                 cfg.train_iterations
             );
-            passes.push((buffer, stats.variance));
+            passes.push((buffer, spp));
         }
 
         let guide_final = match (&eff_unguided, &eff_guided) {
@@ -355,27 +353,29 @@ impl Renderer {
         let (final_buffer, _, final_stats) =
             self.render_pass(self.final_pass_config(tiled), final_gctx, progress);
         rays.merge(&final_stats.rays);
-        passes.push((final_buffer, final_stats.variance));
+        passes.push((final_buffer, self.settings.samples_per_pixel));
 
         (self.blend_passes(passes), rays)
     }
 
-    /// Inverse-variance blend of independent unbiased passes. Passes whose
-    /// variance could not be estimated (spp < 2) get zero weight; if nothing
-    /// is weightable, the last (final) pass is returned as-is.
-    fn blend_passes(&self, mut passes: Vec<(Buffer, f64)>) -> Buffer {
-        let weights: Vec<f64> = passes
-            .iter()
-            .map(|(_, var)| {
-                if var.is_finite() && *var > 0.0 {
-                    1.0 / var
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let total: f64 = weights.iter().sum();
-        if total <= 0.0 {
+    /// Blend of independent unbiased passes, each weighted by its share of
+    /// the total sample budget ([`pass_weights`]); if no pass has a budget,
+    /// the last (final) pass is returned as-is.
+    ///
+    /// This used to weight each pass by the inverse of its *estimated*
+    /// variance, taken from the pass's own samples. Under heavy-tailed
+    /// transport (a caustic through glass from a small light) most low-spp
+    /// passes see none of the rare bright paths, so a pass's variance
+    /// estimate and its image fall together: on `caustic_guided.usda` one
+    /// 2-spp training pass took 80% of the weight and the caustic came out
+    /// at a quarter of its energy. Weights that depend on the values they
+    /// weight make the blend biased, so they are now fixed in advance — by
+    /// the *configured* budget, never by the samples an adaptive pass
+    /// actually took, which also depend on the pixel's values.
+    fn blend_passes(&self, mut passes: Vec<(Buffer, u32)>) -> Buffer {
+        let budgets: Vec<u32> = passes.iter().map(|(_, spp)| *spp).collect();
+        let weights = pass_weights(&budgets);
+        if weights.iter().all(|&w| w == 0.0) {
             return passes.pop().expect("at least the final pass exists").0;
         }
         debug!(
@@ -383,7 +383,7 @@ impl Renderer {
             passes.len(),
             weights
                 .iter()
-                .map(|w| (w / total * 100.0).round() as i32)
+                .map(|w| (w * 100.0).round() as i32)
                 .collect::<Vec<_>>()
         );
         let (width, height) = (self.settings.width, self.settings.height);
@@ -391,8 +391,8 @@ impl Renderer {
         for y in 0..height {
             for x in 0..width {
                 let mut c = Vec3A::ZERO;
-                for (pass, w) in passes.iter().zip(&weights) {
-                    c += pass.0.get_pixel(x, y) * (*w / total) as f32;
+                for ((pass, _), w) in passes.iter().zip(&weights) {
+                    c += pass.get_pixel(x, y) * *w as f32;
                 }
                 out.set_pixel(x, y, c);
             }
@@ -602,12 +602,12 @@ impl Renderer {
         }
 
         // Units finish in unit order, but what the pass hands on — the
-        // guiding field's training samples and the pass variance, an f64
-        // sum — is gathered in *scanline* order (rows top-down, pixels left
-        // to right), whichever the unit shape. Both are order-dependent in
-        // floating point (the SD-tree accumulates the samples it is given),
-        // so this is what keeps a guided render bit-identical whichever
-        // order the pixels were rendered in.
+        // guiding field's training samples, and the mean variance it logs,
+        // an f64 sum — is gathered in *scanline* order (rows top-down,
+        // pixels left to right), whichever the unit shape. Both are
+        // order-dependent in floating point (the SD-tree accumulates the
+        // samples it is given), so this is what keeps a guided render
+        // bit-identical whichever order the pixels were rendered in.
         //
         // The unit results are replayed in that order straight from the
         // tile grid (`generate_tiles` and `generate_rows` emit tile rows by
@@ -688,15 +688,7 @@ impl Renderer {
             rays.ended_depth,
             variance_sum / pixel_count,
         );
-        (
-            buffer,
-            all_samples,
-            PassStats {
-                variance: variance_sum / pixel_count,
-                var_map,
-                rays,
-            },
-        )
+        (buffer, all_samples, PassStats { var_map, rays })
     }
 
     /// Traces pixel `(i, j)`'s samples from `state.taken` up to `target`,
@@ -1008,29 +1000,33 @@ impl Unit {
     }
 }
 
-/// Per-pixel luminance of the inverse-variance blend of `passes` — the
+/// The blending weight of each pass: its sample budget over the total, so
+/// the weights sum to 1. Known before any pass renders, which is what keeps
+/// a blend of unbiased passes unbiased (see `Renderer::blend_passes`). An
+/// empty or all-zero budget gives all-zero weights, never NaN.
+fn pass_weights(spp: &[u32]) -> Vec<f64> {
+    let total: f64 = spp.iter().map(|&n| n as f64).sum();
+    if total <= 0.0 {
+        return vec![0.0; spp.len()];
+    }
+    spp.iter().map(|&n| n as f64 / total).collect()
+}
+
+/// Per-pixel luminance of the budget-weighted blend of `passes` — the
 /// reference image the guiding efficiency estimate normalizes against.
-/// Un-weightable passes (non-finite or zero variance) contribute nothing;
-/// if no pass is weightable the result is black and the floor in
-/// `mean_relative_error` takes over.
-fn blend_luminance(passes: &[(Buffer, f64)], width: usize, height: usize) -> Vec<f64> {
-    let weights: Vec<f64> = passes
-        .iter()
-        .map(|(_, var)| {
-            if var.is_finite() && *var > 0.0 {
-                1.0 / var
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let total: f64 = weights.iter().sum::<f64>().max(f64::MIN_POSITIVE);
+/// Same weights as the image blend, for the same reason: a reference that
+/// favoured whichever pass missed the bright samples would bias the very
+/// comparison it anchors. With no budget at all the result is black and
+/// the floor in `mean_relative_error` takes over.
+fn blend_luminance(passes: &[(Buffer, u32)], width: usize, height: usize) -> Vec<f64> {
+    let budgets: Vec<u32> = passes.iter().map(|(_, spp)| *spp).collect();
+    let weights = pass_weights(&budgets);
     let mut out = vec![0.0f64; width * height];
     for y in 0..height {
         for x in 0..width {
             let mut c = Vec3A::ZERO;
             for ((pass, _), w) in passes.iter().zip(&weights) {
-                c += pass.get_pixel(x, y) * (*w / total) as f32;
+                c += pass.get_pixel(x, y) * *w as f32;
             }
             out[y * width + x] = luminance(c) as f64;
         }
