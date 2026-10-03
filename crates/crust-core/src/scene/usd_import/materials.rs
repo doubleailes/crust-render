@@ -327,7 +327,7 @@ fn disney_to_openpbr(
     // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
     // decodes it to linear. Do the same, or every surface renders washed out.
     if let Some(rgb) = c("inputs:baseColor") {
-        o.base_color = srgb_to_linear(rgb);
+        o.base_color = gamma22_to_linear(rgb);
     }
     if let Some(v) = f("inputs:metallic") {
         o.base_metalness = v;
@@ -656,13 +656,13 @@ pub(super) fn attribute_asset_path(
     asset_value_path(&value, stage_path)
 }
 
-/// sRGB transfer function, decoding a display-referred colour to linear.
-///
-/// The plain 2.2 power law rather than the piecewise sRGB curve: it is what
-/// the `PxrColorCorrect` gamma node in the island's materials actually
-/// applies, and matching the reference render matters more here than matching
-/// the standard.
-fn srgb_to_linear(c: Vec3A) -> Vec3A {
+/// Decodes a display-referred colour to linear with the flat gamma 2.2 power
+/// law, `max(c, 0)^2.2` — deliberately **not** the piecewise sRGB EOTF
+/// (crust-assets' `srgb_to_linear`), which differs from it most in the
+/// darks. 2.2 is what the `PxrColorCorrect` gamma node in the island's
+/// materials actually applies, and matching the reference render matters
+/// more here than matching the standard (`docs/color_management.md`).
+fn gamma22_to_linear(c: Vec3A) -> Vec3A {
     Vec3A::new(
         c.x.max(0.0).powf(2.2),
         c.y.max(0.0).powf(2.2),
