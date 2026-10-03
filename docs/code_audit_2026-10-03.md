@@ -20,6 +20,84 @@ Findings already planned in an OpenSpec change say so in their *Plan* column.
 [`harden-usd-import`](../openspec/changes/harden-usd-import/proposal.md) covers §1.1–1.4
 and §1.8.
 
+## Status after the cleanup
+
+Branch `cleanup/tech-debt` worked through §2–§4 on 2026-10-03. Every commit
+was gated on `cargo fmt`, workspace `clippy -D warnings`, the test suite, and
+`scripts/check_images.sh` against goldens recorded *before* the first change.
+All 29 samples are bit-identical at the end. Hot-path commits were also
+measured with callgrind.
+
+Against the starting binary, instructions at 2 spp are:
+
+| Scene | Change |
+|---|---|
+| fog | −6.9% |
+| smoke | −2.8% |
+| subdivision_adaptive | −0.29% |
+| veach_mis | −0.23% |
+| cornellbox | −0.18% |
+| materialx_surfaces | −0.18% |
+
+No measured scene got slower. The fog gain is real in wall clock too: −5.1% by
+`bench_ab.sh`.
+
+**Done:**
+- **§2 duplicated logic.** All items except §2.4 and §2.5 (see below).
+  - In §2.1, the shared decoders take the union of value types the copies
+    accepted. Some oddly typed authoring is now read where it used to be
+    ignored: `half` floats, `int` bools, `double3`/`half3` colours, and
+    `string` tokens.
+  - In §2.6 the two asset-path rules stay separate on purpose, and each is now
+    documented.
+- **§3 long functions and files.** Every row, except that `trace_path`'s
+  per-vertex phase split sits on its own branch (see below).
+- **§4.1** `PathContext`. The `too_many_arguments` allows in `tracer/` went
+  from 5 to 1, and the three in the USD importer are gone.
+- **§4.2** for `ray_throughput` (now openqmc).
+- **§4.3** public surfaces and `Renderer::render_with`.
+- **§4.4** `Option<GuidingConfig>`, `HitRecord::uv`, `RayStats::merge`.
+- **§4.6–§4.9** all done.
+- **§4.10:** the crust-jit `unsafe extern "C"` callbacks, `lock()`, and the
+  `utils` crate doc.
+- **§1.10** (`gamma22_to_linear`).
+- **§5.3:** the rustdoc warnings are fixed, but the CI gate is not added yet.
+
+**Planned in [`harden-usd-import`](../openspec/changes/harden-usd-import/proposal.md):**
+§1.1–1.4, §1.8, §2.3, and the silent drop in the prototype walk.
+
+**Left open, with the reason:**
+- **§1.5:** the MIS clamp asymmetry needs a deliberate decision.
+  `GuidingField::mixture_pdf` now documents it.
+- **§1.9 / §2.5:** primvar interpolation is a behaviour change, not a cleanup.
+- **§1.11, §1.12:** found during the cleanup, so they come after it.
+- **§2.4:** dispatching on `type_name` would stop matching prims whose type
+  derives from a schema, which `X::get` accepts today. It needs a test against
+  openusd's `IsA` first.
+- **§2.12 leftovers:**
+  - `mtlx_bench` / `jit_bench` are both named in CLAUDE.md's probe list.
+  - `tex_probe`'s f64 sRGB curve differs from the f32 one by up to 1.9e-7, so
+    it stays, with a comment explaining why.
+  - `exr_diff` still has its own EXR loader.
+- **`trace_path` phases:** the split is on branch `cleanup/trace-path-phases`.
+  It is bit-identical but costs +0.23% (cornellbox) and +0.27% (veach_mis)
+  instructions from register allocation, so it needs a decision.
+- **§4.2 guiding PCG:** changes guided output.
+- **§4.4 `RenderSettings::new`:** reshaping it means choosing between the
+  constructor's unclamped and the builder's clamped sample count. That is a
+  behaviour question best settled with `harden-usd-import`'s validation.
+- **§4.5 `CRUST_BVH_PACKET_SAH`:** retiring it changes `cli/spec.md` and
+  `intersection-kernel/spec.md`, so it needs an OpenSpec change.
+- **§4.10:**
+  - `--bucket` is kept deliberately for old command lines.
+  - `degrees_to_radians` changes camera output.
+  - The vestigial `hittable.rs` / `aabb.rs` names remain.
+- **§5–§7:** tooling, tests and documentation were outside this pass.
+
+**Lesson for parallel work:** worktrees that share one `CARGO_TARGET_DIR`
+reuse each other's builds of the workspace crates. Touch the sources, or give
+each worktree its own target dir, before trusting a build.
+
 ## Contents
 
 0. [What came back clean](#0-what-came-back-clean)

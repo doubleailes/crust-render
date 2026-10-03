@@ -269,15 +269,44 @@ corners are derived at the hit. The subdivision stress grid went from 196 to
 96 kernel bytes per triangle and from 809 to 508 MiB peak RSS, bit-identical
 (up to exact-tie hits under the packet leaf rule).
 
+Paid down by the 2026-10-03 cleanup (`docs/code_audit_2026-10-03.md` has the
+item-by-item status; every sample bit-identical to goldens recorded before it,
+and no scene measured executes more instructions than before — fog −6.9%,
+smoke −2.8%, the rest −0.2 to −0.3%):
+
+- Module splits: crust-render's `main.rs` (1 088 → 304 lines, plus `cli`,
+  `logging`, `output`, `traversal_report`); `crust-mtlx`'s `eval/` and
+  `surface/`; `scene/subdiv/` (`tessellate_adaptive` 590 → 60 lines over a
+  shared `prepare_cage`); `usd_import/mesh/`; `load_scene` into its phases;
+  crust-rt's `commit_with` into phases with its tests in `scene/tests.rs`;
+  `RenderStats`' 690-line `Display` into one method per section; the closure
+  `prepare` match into one function per BSDF; `render_pass` and
+  `light_cache::train` into their phases.
+- One copy each of: the USD attribute decoders (about 40 hand-written reads),
+  prim pruning, asset load-and-cache, the camera frame, the UDIM tile sweep,
+  the cache-budget conversions, Russian roulette, `exp3`, the ray epsilon
+  (`ray::TRACE_T_MIN`), surface visibility (NEE and the light cache), the
+  shading `Frame`, the texture-chart type (`subdiv::UvSource`).
+- API shape: `PathContext` for the integrator's shared state;
+  `Renderer::render_with(RenderOrder, progress)` for four bool-taking
+  variants; `Option<GuidingConfig>` and `HitRecord::uv: Option<…>` for
+  flag-plus-value pairs; `RayStats::merge` exhaustive by destructuring; narrower
+  public surfaces in crust-core, crust-assets and crust-mtlx.
+- The volume integrator's per-segment lists live inline (`InlineList`),
+  which was the fog speed-up.
+- `cargo doc --no-deps --workspace` warning-free (38 before).
+
 Still open, roughly in order of payoff:
 
 1. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
    trait any more (the file holds `HitRecord`), and `aabb.rs` only re-exports
    the kernel's type.
-2. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
-   `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
-   way the importer now does. The largest source files left are
-   `stats.rs` (1 360) and `materialx.rs` (1 430); none is urgent.
+2. **Test files over 1 500 lines** (`usd_scene.rs` 3 122, `usd_inline.rs`
+   2 515, `crust-mtlx/tests/graph.rs` 1 989, `crust-rt/tests/kernel.rs` 1 675)
+   would split naturally by schema family, and `usd_scene.rs` / `usd_inline.rs`
+   rewrite the same stage-writing helper about twenty times (audit §6.1). The
+   largest source files left are `stats.rs` (1 686, now sectioned) and
+   `tracer/path.rs` (1 547); none is urgent.
 3. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
@@ -291,6 +320,12 @@ Still open, roughly in order of payoff:
    emits wide nodes directly (fused collapsing) is the remaining lever, and
    the composed USD stage, not the kernel, is most of a production scene's
    peak.
+
+5. **`trace_path`'s per-vertex phases wait on a decision.** Splitting it into
+   named phases (branch `cleanup/trace-path-phases`) is bit-identical but
+   costs +0.23% instructions on cornellbox and +0.27% on veach_mis from
+   register allocation, so it is kept off the main line until someone judges
+   the readability worth that.
 
 ## Further reading
 
