@@ -12,5 +12,7 @@ mod pattern;
 pub use openpbr::{InteriorCache, OpenPBR, ResolvedOpenPBR};
 pub mod materialx;
 pub use materialx::MtlxMaterial;
+pub mod displacement;
 pub mod preview_surface;
+pub use displacement::{DispRemap, Displacement, DisplacementValue, VertexCtx, VertexField};
 pub use preview_surface::PreviewSurface;

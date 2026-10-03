@@ -79,13 +79,37 @@ one axis) can't move. Its `crust:motion:translate` is ignored with a warning.
 
 `samples/motionblur.usda` shows both `crust:motion:translate` and `crust:rayMask = 6`.
 
+## crust:displacementBound
+
+`float`, local units, on a `Mesh` prim or on its `Material`. The largest distance the
+material's [displacement](@/docs/usd/materials.md#displacement) can move a vertex. The
+mesh prim's value wins. Next comes RenderMan's `primvars:displacementbound:sphere` on the
+mesh prim (the Moana Island authors it), then the material's `crust:displacementBound`.
+
+Only adaptive subdivision (`--subdiv-edge-length`) reads it. Geometry outside the camera's
+view is diced coarsely, and displacement can push geometry into view. So the view test
+grows each mesh's box by this bound. A constant displacement needs none, since its bound
+is exact. A textured displacement with no bound skips the view test altogether, so it
+is diced by distance alone, in view or not, and `--stats` counts it as
+"frustum test skipped".
+
+A bound that is too small is not enforced: the full offset is still applied, and one
+warning names the mesh.
+
+```usda
+def Mesh "Cliff" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    float crust:displacementBound = 0.5
+}
+```
+
 ## Standard geometry attributes
 
 Crust Render reads these standard `UsdGeom` attributes without any `crust:` attribute.
 
 | attribute | effect |
 |-----------|--------|
-| `subdivisionScheme` | any value other than `none` makes a mesh a subdivision mesh. Unauthored means `catmullClark`. The refinement level comes from [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel). |
+| `subdivisionScheme` | any value other than `none` makes a mesh a subdivision mesh. Unauthored means `catmullClark`. The refinement level comes from [`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel). A `none` mesh whose material [displaces](@/docs/usd/materials.md#displacement) it is refined as `bilinear`: its faces stay flat until displaced. Its hard edges then soften, since the displaced mesh shades with smooth normals. |
 | `visibility`, `purpose` | a prim with `visibility = "invisible"` is skipped with its whole subtree. Prims with purpose `guide` or `proxy` are skipped. |
 | `primvars:st` | UV coordinates for UV and UDIM textures |
 | `PointInstancer` and native instancing | prototypes are stored once and placed per instance |

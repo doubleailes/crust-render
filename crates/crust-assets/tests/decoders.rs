@@ -96,7 +96,10 @@ fn missing_files_decline_rather_than_panic() {
     assert!(FileAssets::new().load_environment(&ghost).is_none());
     assert!(
         FileAssets::new()
-            .load_ptex(&samples().join("does_not_exist.ptx"))
+            .load_ptex(
+                &samples().join("does_not_exist.ptx"),
+                crust_core::ColorSpace::Gamma22
+            )
             .is_none()
     );
     assert!(

@@ -10,13 +10,16 @@ use std::time::Instant;
 use glam::Vec3A;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
-use openusd_schemas::shade::{Material as UsdMaterial, MaterialBindingAPI, Shader, TerminalSource};
+use openusd_schemas::shade::{
+    Connectable, Material as UsdMaterial, MaterialBindingAPI, ProducerFilter, Shader,
+    TerminalSource,
+};
 use tracing::{debug, warn};
 
-use crate::material::{Material, OpenPBR};
+use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
 
 use super::attrs::custom_f32;
-use super::preview::preview_surface_material;
+use super::preview::{preview_displacement, preview_surface_material};
 use super::time::eval_time;
 use super::{ImportCaches, prim_at};
 
@@ -25,11 +28,11 @@ use super::{ImportCaches, prim_at};
 /// which is what lets `MeshKey` recognize shared mesh geometry.
 #[derive(Default)]
 pub(super) struct MaterialCache {
-    pub(super) by_path: HashMap<(u32, String), Arc<dyn Material>>,
+    pub(super) by_path: HashMap<(u32, String), BoundMaterial>,
     pub(super) default: Option<Arc<dyn Material>>,
     /// Resolved `.ptx` path -> the opened texture, or `None` if it could not
     /// be opened. Keyed by filesystem path, so it needs no epoch scoping.
-    pub(super) ptex: HashMap<String, Option<Arc<dyn crate::PtexTexture>>>,
+    pub(super) ptex: HashMap<(String, crate::ColorSpace), Option<Arc<dyn crate::PtexTexture>>>,
     /// `(resolved path, colour space)` -> the opened UV texture. Keyed by
     /// filesystem path for the same reason as `ptex`, and by colour space
     /// because the same file can legitimately be read both ways (a packed ORM
@@ -39,6 +42,10 @@ pub(super) struct MaterialCache {
     /// Which stage the prototype-scoped entries belong to; see
     /// [`MaterialCache::key`]. Kept in step with [`ImportCaches::epoch`].
     pub(super) epoch: u32,
+    /// The displacement of the `.mtlx` material the last resolution loaded,
+    /// handed from [`load_mtlx_material`] to [`resolve_bound`], which takes it
+    /// straight after: the document is compiled once, for both.
+    mtlx_displacement: Option<Arc<crate::materialx::MtlxDisplacement>>,
 }
 
 impl MaterialCache {
@@ -69,6 +76,20 @@ impl MaterialCache {
         };
         (epoch, path.to_string())
     }
+}
+
+/// A prim's resolved material and the displacement it defines, if any.
+///
+/// Resolved together and cached together, per `(epoch, path)`: displacement
+/// is a property of the material, but it is consumed once at import rather
+/// than per hit, so it lives beside the [`Material`] instead of inside it.
+/// `displacement` is always `None` under `CRUST_DISPLACE=0`, and every
+/// downstream step keys off its presence — so the off side is the code path
+/// that existed before displacement, not an approximation of it.
+#[derive(Clone)]
+pub(super) struct BoundMaterial {
+    pub(super) material: Arc<dyn Material>,
+    pub(super) displacement: Option<Arc<Displacement>>,
 }
 
 /// The binding purpose a final render resolves: USD's `full`, falling back to
@@ -110,11 +131,22 @@ fn bound_material(stage: &Stage, prim: &Prim) -> Option<sdf::Path> {
     None
 }
 
+/// The material bound to `prim` — [`resolve_bound`] for a prim that cannot
+/// be displaced (spheres, curves).
 pub(super) fn resolve_material(
     stage: &Stage,
     prim: &Prim,
     caches: &mut ImportCaches<'_>,
 ) -> Arc<dyn Material> {
+    resolve_bound(stage, prim, caches).material
+}
+
+/// The material bound to `prim`, with its displacement.
+pub(super) fn resolve_bound(
+    stage: &Stage,
+    prim: &Prim,
+    caches: &mut ImportCaches<'_>,
+) -> BoundMaterial {
     let mat_path = bound_material(stage, prim);
 
     let Some(mat_path) = mat_path else {
@@ -122,7 +154,10 @@ pub(super) fn resolve_material(
             "{} has no material binding — using default grey OpenPBR",
             prim.path()
         );
-        return caches.materials.default_material();
+        return BoundMaterial {
+            material: caches.materials.default_material(),
+            displacement: None,
+        };
     };
 
     let key = caches.materials.key(mat_path.as_str());
@@ -134,9 +169,229 @@ pub(super) fn resolve_material(
     // is what keeps one streamed chunk's `/__Prototype_N` apart from the
     // next's — see `MaterialCache::key`.
     debug!("Resolving material {mat_path} (epoch {})", key.0);
-    let resolved = resolve_material_uncached(stage, &mat_path, caches);
+    caches.materials.mtlx_displacement = None;
+    let material = resolve_material_uncached(stage, &mat_path, caches);
+    let mtlx = caches.materials.mtlx_displacement.take();
+    let displacement = if crate::config().displace {
+        resolve_displacement(stage, &mat_path, mtlx, caches).map(Arc::new)
+    } else {
+        None
+    };
+    if let Some(d) = &displacement {
+        debug!("Material {mat_path}: {d:?}");
+    }
+    let resolved = BoundMaterial {
+        material,
+        displacement,
+    };
     caches.materials.by_path.insert(key, resolved.clone());
     resolved
+}
+
+/// The scalar displacement a material defines, read from whichever of the
+/// three authoring paths it uses: RenderMan's `PxrDisplace`, a MaterialX
+/// `displacementshader`, or `UsdPreviewSurface.inputs:displacement`. `None`
+/// when it defines none — the common case, which costs one child scan.
+fn resolve_displacement(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    mtlx: Option<Arc<crate::materialx::MtlxDisplacement>>,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Displacement> {
+    let found = if let Some(shader) = child_shader(stage, mat_path, "PxrDisplace") {
+        pxr_displacement(stage, mat_path, &shader, caches)
+    } else if let Some(field) = mtlx {
+        Some(Displacement::new(DisplacementValue::Field {
+            field,
+            scale: 1.0,
+        }))
+    } else {
+        preview_displacement_of(stage, mat_path, caches)
+    }?;
+    // An authored bound on the material; a mesh prim's own overrides it.
+    let bound = custom_f32(&prim_at(stage, mat_path.clone()), "crust:displacementBound");
+    Some(found.with_authored_bound(bound))
+}
+
+/// The material's child `Shader` with this `info:id`, if any.
+fn child_shader(stage: &Stage, mat_path: &sdf::Path, id: &str) -> Option<Shader> {
+    let children = prim_at(stage, mat_path.clone()).children().ok()?;
+    let child = children.iter().find(|c| {
+        matches!(
+            c.attribute("info:id").get_at::<sdf::Value>(eval_time()),
+            Ok(Some(sdf::Value::Token(t))) if t.as_str() == id
+        )
+    })?;
+    Shader::get(stage, child.path().clone()).ok().flatten()
+}
+
+/// The value a shader input carries, its connection to the Material's
+/// interface followed — how the island authors every parameter.
+fn input_value(shader: &Shader, name: &str) -> Option<sdf::Value> {
+    shader
+        .input(name)
+        .value_producing_attributes(ProducerFilter::Any)
+        .ok()?
+        .into_iter()
+        .find_map(|a| {
+            a.attribute()
+                .get_at::<sdf::Value>(eval_time())
+                .ok()
+                .flatten()
+        })
+}
+
+fn input_f32(shader: &Shader, name: &str) -> Option<f32> {
+    match input_value(shader, name)? {
+        sdf::Value::Float(f) => Some(f),
+        sdf::Value::Double(d) => Some(d as f32),
+        sdf::Value::Int(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
+/// The shader whose output drives `shader.inputs:<name>`, if one does.
+fn upstream_shader(stage: &Stage, shader: &Shader, name: &str) -> Option<Shader> {
+    let produced = shader
+        .input(name)
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+        .ok()?;
+    let source = produced.first()?;
+    Shader::get(stage, source.path().prim_path()).ok().flatten()
+}
+
+/// RenderMan's `PxrDisplace`, read the way `PxrDisneyBsdf` is: off the
+/// Material's interface where the network is wired to it.
+///
+/// The offset is `dispAmount · T(map)`: `dispAmount` authored on the shader or
+/// connected to the interface (`inputs:dispScale` on the island);
+/// `dispScalar` either a value or the chains the island authors:
+/// `PxrPtexture → [PxrDispTransform] →`, its Ptex read raw from the
+/// texture's `filename` (connected to `inputs:displacementMap`) and remapped
+/// by the transform ([`DispRemap`]); or, as isDunesA's `soil` does, a
+/// `PxrBlend` multiply (`operation = 18`) of two `PxrPtexture`s in place of
+/// the one, their red channels multiplied. Any other network driving
+/// `dispScalar` (another blend operation, a UV `PxrTexture`) is refused with a
+/// warning, and so are `dispVector` / `modelDispVector`.
+fn pxr_displacement(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    displace: &Shader,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Displacement> {
+    for vector in ["dispVector", "modelDispVector"] {
+        let input = displace.input(vector);
+        let connected = input
+            .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+            .ok()
+            .is_some_and(|p| !p.is_empty());
+        if connected {
+            warn!(
+                "Material {mat_path}: PxrDisplace.{vector} is vector displacement, which \
+                 crust does not apply — ignored"
+            );
+        }
+    }
+    let amount = input_f32(displace, "dispAmount").filter(|a| a.is_finite() && *a != 0.0)?;
+
+    let Some(mut source) = upstream_shader(stage, displace, "dispScalar") else {
+        // A constant scalar: a uniform offset.
+        let s = input_f32(displace, "dispScalar").unwrap_or(0.0);
+        let c = amount * s;
+        return (c != 0.0 && c.is_finite())
+            .then(|| Displacement::new(DisplacementValue::Constant(c)));
+    };
+    let mut remap = DispRemap::None;
+    if shader_info_id(&source).as_deref() == Some("PxrDispTransform") {
+        // RenderMan's defaults for anything unauthored.
+        let mode = input_f32(&source, "dispRemapMode").unwrap_or(0.0) as i32;
+        let center = input_f32(&source, "dispCenter").unwrap_or(0.5);
+        let depth = input_f32(&source, "dispDepth").unwrap_or(1.0);
+        let height = input_f32(&source, "dispHeight").unwrap_or(1.0);
+        remap = match mode {
+            1 => DispRemap::Centered { center },
+            2 => DispRemap::DepthHeight {
+                center,
+                depth,
+                height,
+            },
+            _ => DispRemap::None,
+        };
+        source = upstream_shader(stage, &source, "dispScalar")?;
+    }
+    let refuse = |what: &Shader| {
+        warn!(
+            "Material {mat_path}: PxrDisplace.dispScalar is driven by {} ({:?}), which \
+             crust does not evaluate — the surface is not displaced",
+            what.path(),
+            shader_info_id(what)
+        );
+    };
+    let sources = match shader_info_id(&source).as_deref() {
+        Some("PxrPtexture") => vec![source],
+        // RenderMan's `PxrBlend` operation 18 is multiply — the island also
+        // uses it to mask its bump colour. `resultR` of the blend is the
+        // product of the two inputs' red channels.
+        Some("PxrBlend") if input_f32(&source, "operation").map(|o| o as i32) == Some(18) => {
+            let top = upstream_shader(stage, &source, "topRGB");
+            let bottom = upstream_shader(stage, &source, "bottomRGB");
+            match (top, bottom) {
+                (Some(t), Some(b))
+                    if [&t, &b]
+                        .iter()
+                        .all(|s| shader_info_id(s).as_deref() == Some("PxrPtexture")) =>
+                {
+                    vec![t, b]
+                }
+                _ => {
+                    refuse(&source);
+                    return None;
+                }
+            }
+        }
+        _ => {
+            refuse(&source);
+            return None;
+        }
+    };
+    let mut maps = Vec::with_capacity(sources.len());
+    for tex in &sources {
+        let file = tex
+            .input("filename")
+            .value_producing_attributes(ProducerFilter::Any)
+            .ok()?
+            .into_iter()
+            .find_map(|a| attribute_asset_path(a.attribute(), caches.stage_path))?;
+        maps.push(crate::PtexRef(load_ptex(
+            &file,
+            crate::ColorSpace::Raw,
+            caches,
+        )?));
+    }
+    Some(Displacement::new(DisplacementValue::Ptex {
+        maps,
+        remap,
+        scale: amount,
+    }))
+}
+
+/// The preview surface's `inputs:displacement`, when the material shades
+/// with a `UsdPreviewSurface`.
+fn preview_displacement_of(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Displacement> {
+    let mat = UsdMaterial::get(stage, mat_path.clone()).ok().flatten()?;
+    let resolved = mat
+        .compute_surface_source(SURFACE_RENDER_CONTEXTS)
+        .ok()
+        .flatten()?;
+    let shader = resolved.sources().iter().find_map(TerminalSource::shader)?;
+    if shader_info_id(shader).as_deref() != Some("UsdPreviewSurface") {
+        return None;
+    }
+    preview_displacement(stage, mat_path, shader, caches)
 }
 
 /// Render contexts `compute_surface_source` is asked for, strongest first.
@@ -514,11 +769,17 @@ fn load_mtlx_material(
                 );
             }
             debug!(
-                "MaterialX {} -> {} ({} textures resolved)",
+                "MaterialX {} -> {} ({} textures resolved{})",
                 file.display(),
                 l.summary,
-                l.textures
+                l.textures,
+                if l.displacement.is_some() {
+                    ", displaced"
+                } else {
+                    ""
+                }
             );
+            caches.materials.mtlx_displacement = l.displacement;
             Some(l.material)
         }
         Err(e) => {
@@ -578,20 +839,32 @@ pub(super) fn material_ptex(
         .flatten()?;
     let path = asset_value_path(&value, caches.stage_path)?;
 
-    // Keyed on the resolved filesystem path, which — unlike a prototype-scoped
-    // scene path — is stable across the streaming importer's stages, so one
-    // texture is opened once however many materials or chunks reference it.
-    // Negative results are cached too: a 600 MB file that failed to open
-    // should not be retried per material.
-    let key = path.to_string_lossy().into_owned();
+    load_ptex(&path, crate::ColorSpace::Gamma22, caches).map(crate::PtexRef)
+}
+
+/// Opens a Ptex file through the host, once per `(resolved path, space)`.
+///
+/// Keyed on the resolved filesystem path, which — unlike a prototype-scoped
+/// scene path — is stable across the streaming importer's stages, so one
+/// texture is opened once however many materials or chunks reference it.
+/// The space is in the key because the decode happens at open: a file read
+/// both as colour and as displacement is two textures, which is correct and
+/// rare. Negative results are cached too: a 600 MB file that failed to open
+/// should not be retried per material.
+pub(super) fn load_ptex(
+    path: &std::path::Path,
+    space: crate::ColorSpace,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Arc<dyn crate::PtexTexture>> {
+    let key = (path.to_string_lossy().into_owned(), space);
     if let Some(hit) = caches.materials.ptex.get(&key) {
-        return hit.clone().map(crate::PtexRef);
+        return hit.clone();
     }
     let started = Instant::now();
-    let loaded = caches.assets.load_ptex(&path);
+    let loaded = caches.assets.load_ptex(path, space);
     caches.asset_time += started.elapsed();
     caches.materials.ptex.insert(key, loaded.clone());
-    loaded.map(crate::PtexRef)
+    loaded
 }
 
 /// An `asset`-valued attribute as a filesystem path.

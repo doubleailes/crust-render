@@ -68,6 +68,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_STREAM_IMPORT`](#crust-stream-import) | on | USD import |
 | [`CRUST_MESH_BAKE`](#crust-mesh-bake) | on | USD import |
 | [`CRUST_SUBDIV`](#crust-subdiv) | on | USD import |
+| [`CRUST_DISPLACE`](#crust-displace) | on | USD import |
 | [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
 | [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
 | [`CRUST_BVH_PACKET_SAH`](#crust-bvh-packet-sah) | on | ray tracing |
@@ -121,6 +122,17 @@ Boolean, default **on**.
 
 This isn't the same as `--subdiv-level 0`, which still shades the cage with smooth
 normals. Use `CRUST_SUBDIV=0` to tell whether an artifact comes from subdivision.
+
+### CRUST_DISPLACE
+
+Boolean, default **on**.
+
+`0` imports every mesh undisplaced, whatever its material's
+[displacement](@/docs/usd/materials.md#displacement) says. A mesh with
+`subdivisionScheme = "none"` then renders as its faceted cage again instead of being diced
+bilinearly so it can be displaced. The result is bit-identical to the same stage with its
+displacement inputs removed, so use it to tell whether a change in shape comes from
+displacement.
 
 ### CRUST_ADAPTIVE_PER_FACE
 

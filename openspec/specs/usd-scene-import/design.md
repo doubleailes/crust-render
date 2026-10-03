@@ -441,6 +441,117 @@ Schema mapping:
   motion blur; primary rays draw a `K_TIME` shutter sample and every secondary/shadow ray
   inherits the path's time). Sample scenes: `samples/motionblur.usda`, `samples/curves.usda`.
 
+## Displacement
+
+Scalar displacement is applied **at import, once per distinct mesh**, between
+tessellation and the kernel (`scene/displace.rs`, called from `MeshArena::intern` on a key
+miss and from the non-invertible bake path). The kernel, the integrator and per-triangle
+render cost are untouched: a displaced mesh is an ordinary `TriangleMesh` whose points
+moved. Production pre-tessellating renderers (Hyperion, Arnold, Manuka) displace at the
+same point.
+
+- **Where it comes from.** `resolve_bound` returns the material with an optional
+  `Displacement` (materials design record § Material resolution), from `PxrDisplace`, a
+  MaterialX `displacementshader`, or `UsdPreviewSurface.inputs:displacement`.
+  `mesh_source` then asks for the charts the displacement reads (UVs, a Ptex face table)
+  even when the surface does not.
+- **The key is the undisplaced source plus the material.** The displaced result is a pure
+  function of both, so prims sharing a mesh pay once and the instancing decision, which
+  counts placements per key, is unchanged. Displacing at the end of `mesh_source` instead
+  would run per prim, before deduplication.
+- **One sample per unique vertex, from its owner corner**, the first face corner that
+  references it in face order. Positions are shared and each moves once, so the displaced
+  mesh has the undisplaced mesh's connectivity: watertight wherever that was, across UV
+  seams and Ptex face boundaries (`a_uv_seam_stays_closed`,
+  `a_ptex_face_boundary_stays_closed`, `a_per_face_mesh_at_mixed_rates_stays_closed`).
+  The owner table is built from the *source's own face lists*, whatever tessellation
+  produced them (cage, uniform refinement, per-face tessellation). That is one rule for
+  every path, and it needs no change to the per-face tessellator, whose `emit` closure
+  the change's design had planned to record charts in. Ptex corners come from the
+  refinement's face table (`SubdivFaces`, `TessellatedFaces`), or on a cage from Ptex's
+  quad and triangle conventions. Averaging all incident corners was rejected: it needs
+  incidence lists, costs a sample per corner, and at a discontinuous seam produces a
+  value neither side authored.
+- **Direction and units.** Along the unit pre-displacement normal (limit, refined smooth or
+  smooth cage normal), in **local** space before the placement transform, so a scaled
+  placement scales the offset. A faceted source gets area-weighted smooth normals for the
+  direction only. A face normal per face would send an edge's two sides two ways.
+- **Footprint = dicing rate.** Each lookup's width is the longer chart edge at the owner
+  corner (UV units, or face-local units for Ptex). A coarse tessellation reads a coarse mip
+  level, a low-pass of the map, rather than a random subsample that flickers between
+  rates. `samples/displacement.usda` shows it: at level 4 the ground's 64-texel rings
+  peak at 0.154 of a possible 0.3, and at level 6 (one vertex per texel) at 0.3.
+- **Normals are recomputed** from the displaced triangles (`smooth_normals`). A faceted
+  source stays faceted. Limit-normal precision is lost on displaced per-face meshes only.
+- **`none` meshes are diced bilinearly** when displaced, so a ground authored as one quad
+  can show its map. Under `CRUST_SUBDIV=0` or `CRUST_DISPLACE=0` they stay faceted cages.
+- **Deterministic and parallel.** The pass reads no USD, so it fans out over vertices in
+  fixed rayon chunks without touching the import's thread-local time. Every vertex is
+  independent, so the output is bit-identical at any thread count
+  (`the_result_does_not_depend_on_the_thread_count`).
+- **Adaptive dicing and the bound.** The per-mesh frustum and nearest-point tests and
+  `segment_culled`'s per-segment frustum test grow the **local** box by the bound before
+  it is carried to world (`Cull::Pad`). A displaced point lies within that box exactly,
+  whatever the placement's scale, so no `max_axis_scale` factor is needed. The bound is
+  `|c|` for a constant, else the mesh prim's `crust:displacementBound`, else its
+  `primvars:displacementbound:sphere` (RenderMan's, which the island authors), else the
+  material's `crust:displacementBound`. A displaced mesh with no bound turns its frustum
+  test off (`Cull::Off`, counted as "frustum test skipped"). Skipping the frustum for
+  every displaced mesh was rejected: it costs the island's out-of-view memory saving
+  wholesale. An undisplaced mesh's `Cull::Pad(0)` is the old box bit for bit
+  (`a_zero_pad_keeps_every_rate`). Offsets are never clamped to the bound, since the BVH
+  is built from the displaced points either way. A sampled offset past an authored bound
+  warns once per mesh.
+- **`--stats`** reports meshes, vertices, time (inside "Traverse prims"), the largest
+  `|offset|`, meshes displaced at cage resolution, and meshes whose frustum test was
+  skipped, only when a mesh was displaced. A non-constant displacement at cage
+  resolution warns once per load.
+
+- **Measured** (2026-10-03, `--stats`, one sequential run per side, so timings are
+  indicative and the deterministic counts are what matter):
+  - `samples/displacement.usda` (level 6): 3 meshes, 33 028 vertices displaced in about
+    10 ms, 65 536 triangles against 49 156 with `CRUST_DISPLACE=0` (the two one-quad
+    grounds dice to 8 192 each), "Traverse prims" ~37 ms against ~21 ms, peak RSS
+    37.4 against 33.5 MiB.
+  - ALab (`entry.usda`, `-s 1`, no displacement authored), against the binary before
+    this change: identical geometry (13 302 geometries, 21 166 922 triangles), no
+    displacement lines, peak 25.07 against 25.14 GiB, Traverse 2:09 against 2:13.
+  - The Moana island at `--subdiv-edge-length 2` (ceiling 3), `shotCam`, Ptex streamed,
+    `-s 4`, under a 56 GiB guard, `CRUST_DISPLACE` on against off on the same binary:
+    47 meshes and 574 924 vertices displaced in 0.21 s, max `|offset|` 6.25 (the
+    largest `dispScale`), 4 at cage resolution, none frustum-skipped (every displaced
+    mesh authors `primvars:displacementbound:sphere`); 63 602 769 against 63 600 590
+    triangles (bound padding brings a few more edges into view); 3 632 against 3 618
+    Ptex textures (the 14 displacement maps: 12 `displacementMap`s and isDunesA's two
+    blended ones); peak RSS 24.70 against 24.55 GiB; Traverse 3:22.0 against 3:13.1,
+    Load assets 24.4 against 22.6 s. (Before isDunesA's `PxrBlend` was read: 46 meshes,
+    548 397 vertices, 24.63 GiB.) Well inside the
+    guard, which the per-face tessellation's own 24.70 GiB had left room for.
+
+## Known gaps: displacement
+
+- **Hard edges soften on displaced `none` meshes.** They are diced bilinearly and shade
+  with smooth normals of the displaced surface. Keeping them sharp would need creases
+  synthesised on every cage edge.
+- **Rates ignore displacement.** Dicing is sized by the undisplaced cage on screen. A
+  strongly displaced region gets the cage's rate, and there is no re-dicing after
+  displacement. `--subdiv-edge-length` and `--subdiv-level` are the levers, and
+  `--stats` reports the largest offset so the need shows.
+- **A seam step.** Where a map is discontinuous across a UV seam, the one ring of triangles
+  at the seam stretches between the two sides' values (one owner per vertex). This is
+  inherent to the authoring.
+- **No vector displacement** (MaterialX `vector3`, `PxrDisplace.dispVector` /
+  `modelDispVector`): warned about and ignored.
+- **RenderMan networks beyond `PxrPtexture`, or a `PxrBlend` multiply of two, `→
+  [PxrDispTransform] → PxrDisplace`** are refused with a warning: any other `PxrBlend`
+  operation, a blend whose inputs are not both `PxrPtexture`, and a UV `PxrTexture`.
+  `operation = 18` is taken to be multiply from the island's own use of it (it masks a
+  bump colour with it too), not from RenderMan's documentation.
+- **No bump from sub-dicing detail**, no lazy or per-ray dicing, no displacement of
+  `UsdGeomSphere`, and no displacement beyond the per-mesh level on Loop meshes.
+- **MaterialX view-dependent nodes** have no meaningful value at a vertex (`view` is the
+  normal).
+
 ## Volumes, frame, camera and render settings
 
 - **Volumes**: any prim carrying `crust:volume:type` imports as a `VolumeRegion` (checked
@@ -620,6 +731,40 @@ They do different jobs. `sky_dome_cam_llc` authors `collection:lightLink:exclude
 part of the cool cast against the RenderMan reference) and the camera saw their sum.
 Dropping `sky_dome_cam_llc` (`active = false`) is still the memory lever, at the cost
 of the camera seeing the HDRI instead of the backdrop.
+
+### Displacement on the island
+
+How the island authors displacement, read off its `.usda` and confirmed by importing
+`isLavaRocks`, `isPalmDead` and `isDunesA` at `-l debug` (2026-10-03):
+
+- **The shared `BaseMaterial`** (`usd/materials/material.usda`), which nine elements'
+  displaced materials reference: `outputs:ri:displacement → PxrDisplace`, whose
+  `dispAmount` is connected to the interface's `inputs:dispScale`, and whose
+  `dispScalar ← PxrDispTransform.resultF ← PxrPtexture.resultR`. The Ptex's `filename`
+  is connected to the interface's `inputs:displacementMap`. The transform's
+  `dispRemapMode` is 2 (interpolate depth and height), its `dispCenter` connected to
+  `inputs:dispOffset` (0.5 everywhere it is authored, 0 once), and `dispDepth` /
+  `dispHeight` are unauthored, so RenderMan's defaults of 1 apply. `displacementMap` is
+  authored in the material layers of isBayCedarA1, isBeach, isDunesB, isGardeniaA,
+  isLavaRocks, isMountainB, isPalmDead, isPalmRig and isPandanusA; `dispScale` ranges
+  from 0.0625 to 6.25.
+- **isDunesA's `soil`** authors its own network instead: `dispScalar` comes from a
+  `PxrBlend` multiplying two Ptex maps (`smushy` × the `duneSide` mask) through a
+  `PxrDispTransform` (mode 2, centre 0.5, depth and height 0.35, `dispAmount` 5). The
+  reader accepts a `PxrBlend` with `operation = 18` (multiply) whose `topRGB` and
+  `bottomRGB` are both `PxrPtexture`s, reading the product of their raw red channels
+  at the vertex's owner face (`DisplacementValue::Ptex` holds a list of maps). On the
+  isDunesA element at level 0 that displaces `topsoil0001_geo`'s 4 859 cage vertices,
+  up to 1.75 (`5 × 0.35`). It was refused with a warning until 2026-10-03.
+- **The bound** is `primvars:displacementbound:sphere` on each displaced mesh prim,
+  equal to its `dispScale`. It is read as the mesh's bound when no
+  `crust:displacementBound` is authored. That settles the `add-mesh-displacement`
+  design's open question.
+- No material authors `dispVector` / `modelDispVector`.
+
+The displacement Ptex files are read raw and preloaded or streamed under the same policy
+as colour Ptex. At the default level 0 every island mesh is displaced at its cage
+resolution, which moves cage vertices only and warns once.
 
 ## Known gaps: instancing
 

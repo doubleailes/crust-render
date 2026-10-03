@@ -179,6 +179,15 @@
     not first: finding the reference means walking the prim's composition
     graph, which a stage of ordinary USD materials should not pay for.
   - Unbound geometry → grey diffuse `OpenPBR`.
+  - **Displacement is resolved beside the material, not inside it.** `resolve_bound`
+    returns a `BoundMaterial { material, displacement }`, cached together per
+    `(epoch, path)`. A `Displacement` (`material/displacement.rs`) is consumed once, at
+    import, by the mesh displacement pass (`usd-scene-import` design record §
+    Displacement), never per hit, so it is not a `Material` method and the
+    `tests/resolve.rs` pins are untouched. Sources, first match wins: a `PxrDisplace`
+    child shader (RenderMan / Moana), a `.mtlx` `displacementshader`, then
+    `UsdPreviewSurface.inputs:displacement`. `CRUST_DISPLACE=0` makes every displacement
+    `None`, which is the code path that existed before.
 
 ## MaterialX
 
@@ -443,6 +452,22 @@
     skipped leaf card in full. The integrator's side (stochastic pass-through
     on the bounce side, `Π(1 − opacity)` on shadow rays) is in the rendering
     record.
+  - **Displacement is a third program, run at vertices.** `crust-mtlx` follows a
+    `surfacematerial`'s `displacementshader` to a `displacement` node and records its
+    `float` `displacement` input and its `scale` as `Compiled::displacement`, two slots
+    that are **not** among `roots()`. crust-core slices them into their own program
+    (`Compiled::displacement_program`, `Program::optimize` to the two roots,
+    JIT-compiled like the opacity slice and pinned against the interpreter by
+    `the_jit_displacement_matches_the_interpreter`) *before* optimising the surface
+    program, which then prunes the displacement's ops: shading a hit never runs them.
+    `MtlxDisplacement` evaluates `value · scale` from a vertex `ShadeCtx`: the owner
+    corner's `uv` and footprint, the **local** position and normal (MaterialX
+    displacement is object space), a zero tangent and `view = normal`. So `position`-,
+    `normal`- and chart-driven graphs work, and view-dependent nodes have no meaningful
+    value. A `vector3` input (vector displacement), or a `displacementshader` that is not
+    a `displacement` node, is refused into `Closures::reported`, which the loader warns
+    once per material. A declined `image` falls back to its `default` (0.5 unless
+    authored), as it does for shading.
   - **Anisotropy rotation turns the leaf's frame.** `standard_surface`'s
     `main_tangent` / `coat_tangent` and glTF's `selected_tangent` are a
     `rotate3d` of the *authored* tangent about the leaf's own normal input,

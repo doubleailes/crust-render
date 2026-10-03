@@ -32,6 +32,13 @@ triangles in 39 GiB of kernel memory; that has not been measured here.
   alone would take about three hours.
 - **Ptex:** preloaded at the default 32×32 cap: 3 618 textures, 2 564 203 faces,
   6.02 GiB.
+- **Displacement:** not read when these figures were taken. Since `add-mesh-displacement`
+  the importer reads the island's `PxrDisplace` networks (the shared `BaseMaterial`'s
+  `inputs:displacementMap` → `PxrDispTransform` → `PxrDisplace`, see the
+  `usd-scene-import` design record § "Displacement on the island"). That opens the 14
+  displacement `.ptx` files as well, read raw, and moves every displaced mesh's cage
+  vertices at level 0. isDunesA's `soil`, whose map is a `PxrBlend` multiply of two Ptex,
+  is read too. `CRUST_DISPLACE=0` reproduces the setup measured here.
 
 ## The run
 

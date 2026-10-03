@@ -1987,3 +1987,105 @@ fn a_float_edf_weight_still_reads_as_three_equal_channels() {
         terms[0].0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Displacement
+// ---------------------------------------------------------------------------
+
+/// A `surfacematerial` with a diffuse surface and the given displacement
+/// node body, written to a temp file and compiled.
+fn compile_displaced(name: &str, displacement: &str) -> crust_mtlx::Compiled {
+    let doc = format!(
+        r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="diffuse" type="BSDF" />
+  <surface name="surf" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="diffuse" />
+  </surface>
+  {displacement}
+  <surfacematerial name="mat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="surf" />
+    <input name="displacementshader" type="displacementshader" nodename="disp" />
+  </surfacematerial>
+</materialx>"#
+    );
+    let dir = std::env::temp_dir().join("crust_mtlx_displacement_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.mtlx"));
+    std::fs::write(&path, doc).unwrap();
+    compile(&path, None, &decline).expect("compiles")
+}
+
+#[test]
+fn a_float_displacement_is_two_roots_outside_the_surface_program() {
+    let mut c = compile_displaced(
+        "float",
+        r#"<position name="pos" type="vector3" space="object" />
+  <extract name="py" type="float"><input name="in" type="vector3" nodename="pos" /><input name="index" type="integer" value="1" /></extract>
+  <displacement name="disp" type="displacementshader">
+    <input name="displacement" type="float" nodename="py" />
+    <input name="scale" type="float" value="0.05" />
+  </displacement>"#,
+    );
+    let d = c.displacement.expect("a scalar displacement");
+    assert!(!c.roots().contains(&d.value), "not a surface root");
+    for optimize in [false, true] {
+        let (program, roots) = c.displacement_program(optimize).expect("a program");
+        let mut slots = Vec::new();
+        program.eval(&ctx(), &mut slots);
+        // position.y = 2 at the default context, times 0.05.
+        assert_eq!(slots[roots.value as usize].x(), 2.0, "optimize {optimize}");
+        assert_eq!(slots[roots.scale as usize].x(), 0.05, "optimize {optimize}");
+    }
+    let full = c.program.ops.len();
+    c.optimize();
+    assert!(
+        c.displacement.is_none(),
+        "its slots are gone after optimize"
+    );
+    assert!(
+        c.program.ops.len() < full,
+        "the displacement ops were pruned"
+    );
+    assert!(c.closures.reported.is_empty());
+}
+
+#[test]
+fn a_vector_displacement_is_refused_and_reported() {
+    let c = compile_displaced(
+        "vector",
+        r#"<displacement name="disp" type="displacementshader">
+    <input name="displacement" type="vector3" value="0, 0.1, 0" />
+    <input name="scale" type="float" value="1" />
+  </displacement>"#,
+    );
+    assert!(c.displacement.is_none());
+    assert_eq!(c.closures.reported.len(), 1, "{:?}", c.closures.reported);
+    assert!(
+        c.closures
+            .reported
+            .iter()
+            .next()
+            .unwrap()
+            .contains("vector3"),
+        "{:?}",
+        c.closures.reported
+    );
+}
+
+#[test]
+fn no_displacementshader_is_no_displacement() {
+    let doc = r#"<?xml version="1.0"?>
+<materialx version="1.38">
+  <oren_nayar_diffuse_bsdf name="diffuse" type="BSDF" />
+  <surface name="surf" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="diffuse" /></surface>
+  <surfacematerial name="mat" type="material"><input name="surfaceshader" type="surfaceshader" nodename="surf" /></surfacematerial>
+</materialx>"#;
+    let dir = std::env::temp_dir().join("crust_mtlx_displacement_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("none.mtlx");
+    std::fs::write(&path, doc).unwrap();
+    let c = compile(&path, None, &decline).unwrap();
+    assert!(c.displacement.is_none());
+    assert!(c.closures.reported.is_empty());
+}

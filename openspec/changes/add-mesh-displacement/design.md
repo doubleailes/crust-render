@@ -313,7 +313,10 @@ the block is printed only when the mesh count is nonzero.
 
 ## Open Questions
 
-- **Should `crust:displacementBound` also be read from RenderMan's
-  `primvars:ri:attributes:displacementbound:sphere`** where the island authors it? It
-  is an additive attribute read and can follow once the probe in task 5.1 shows whether
-  the island authors it.
+- ~~**Should `crust:displacementBound` also be read from RenderMan's
+  `primvars:ri:attributes:displacementbound:sphere`** where the island authors it?~~
+  **Settled (task 5.1):** the island authors `primvars:displacementbound:sphere`
+  (without the `ri:attributes:` namespace) on every displaced mesh prim, equal to its
+  `dispScale`. It is read as the mesh's bound when `crust:displacementBound` is not
+  authored on the mesh. See the `usd-scene-import` design record § Rendering the Moana
+  island, "Displacement on the island".

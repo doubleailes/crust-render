@@ -23,7 +23,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crust_core::{PtexTexture, Vec3A};
+use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
 
 /// Default per-face resolution cap, as a log2 edge length: 32×32 texels.
@@ -144,7 +144,21 @@ impl PtexColor {
     /// process-global the rest of the program is reading. `PtexStream` needs
     /// the resolution cap on that seam too, since pinning the two backends
     /// against each other means asking both for the same one.
+    ///
+    /// Decodes as colour (gamma 2.2), what every Ptex read before displacement
+    /// was; [`PtexColor::open_in`] takes the space explicitly.
     pub fn open_with(path: &Path, mip: bool, max_log2: i8) -> Result<Self, AssetError> {
+        PtexColor::open_in(path, ColorSpace::Gamma22, mip, max_log2)
+    }
+
+    /// [`PtexColor::open_with`], decoding the stored samples as `space` —
+    /// [`ColorSpace::Raw`] for a displacement map, whose values are data.
+    pub fn open_in(
+        path: &Path,
+        space: ColorSpace,
+        mip: bool,
+        max_log2: i8,
+    ) -> Result<Self, AssetError> {
         let mut tx = ptex::PtexReader::open(path).map_err(AssetError::ptex(path))?;
 
         let n_chan = tx.num_channels();
@@ -212,13 +226,9 @@ impl PtexColor {
                     // 0 to all three, so it reads as greyscale rather than red.
                     let c = if ch < n_chan { ch } else { 0 };
                     let v = read_channel(&src[c * dt.size()..], dt) * scale;
-                    // Ptex colour here is display-encoded: the island's
-                    // shading network runs it through a gamma-1/2.2 node
-                    // (`PxrColorCorrect`) and the GL path declares
-                    // `sourceColorSpace = "sRGB"`. Both mean decode by 2.2,
-                    // and the engine works in linear light. Done once here
-                    // rather than per lookup.
-                    out[i * 3 + ch] = v.max(0.0).powf(2.2);
+                    // Done once here rather than per lookup; see
+                    // `decode_ptex` for why colour is decoded by 2.2.
+                    out[i * 3 + ch] = decode_ptex(v, space);
                 }
             }
             // Reduce in memory from the level just decoded, rather than
@@ -463,6 +473,26 @@ fn reduce_triangle(
                 texels[dst_off + (v * dw + u) * 3 + ch] = mean;
             }
         }
+    }
+}
+
+/// One sample, already scaled to `[0, 1]` for integer formats, decoded to
+/// the linear value the engine works in.
+///
+/// Ptex colour is display-encoded: the island's shading network runs it
+/// through a gamma-1/2.2 node (`PxrColorCorrect`) and the GL path declares
+/// `sourceColorSpace = "sRGB"`. Both mean decode by 2.2 — which is what a
+/// colour request asks for ([`ColorSpace::Gamma22`]). A displacement map is
+/// data and asks for [`ColorSpace::Raw`]: no curve and no clamp, since a
+/// `half` / `float` height may be negative. One function for both backends,
+/// so the preloaded and streamed paths cannot drift.
+#[inline]
+pub(crate) fn decode_ptex(v: f32, space: ColorSpace) -> f32 {
+    match space {
+        ColorSpace::Gamma22 => v.max(0.0).powf(2.2),
+        ColorSpace::Gamma18 => v.max(0.0).powf(1.8),
+        ColorSpace::Srgb => crate::srgb_to_linear(v.max(0.0)),
+        ColorSpace::Raw | ColorSpace::Auto => v,
     }
 }
 

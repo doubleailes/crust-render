@@ -168,6 +168,102 @@ so use a UsdLux light for a scene's main light sources.
 | `inputs:geometryOpacity` | `float` | 1.0 | 0 = fully cut out |
 | `inputs:geometryThinWalled` | `bool` | false | treat the surface as an infinitely thin sheet (leaves, paper) rather than the boundary of a solid |
 
+## Displacement
+
+A material can move the surface it's bound to, not just shade it. Crust Render reads a
+**scalar** displacement: each vertex of the mesh moves along its normal by a distance the
+material gives, in the mesh's own (local) units, so a scaled placement scales the offset
+with the mesh. Silhouettes, contact shadows and self-shadowing then come from the
+displaced shape. A normal map in the same material still perturbs the shading on top.
+
+Displacement is applied once, when the mesh is loaded, to the vertices its tessellation
+has. It adds no vertices of its own, so detail finer than the dicing rate is lost: set
+[`crust:subdivisionLevel`](@/docs/usd/render-settings.md#crust-subdivisionlevel) (or
+`--subdiv-level`, or adaptive `--subdiv-edge-length`) high enough for the map. At the
+default level 0 only the cage's vertices move, and the import warns once. Each lookup is
+filtered over the spacing between vertices, so a coarse tessellation reads a blurred
+version of the map rather than a random sample of it.
+
+A mesh with `subdivisionScheme = "none"` and a displacing material is diced bilinearly so
+that it has vertices to move. See [geometry](@/docs/usd/geometry.md#crust-displacementbound).
+
+### UsdPreviewSurface
+
+`inputs:displacement`, as a value or connected to a `UsdUVTexture`. The texture's output
+channel, `scale` and `bias` apply, as for any other input. The file is read as data (no
+colour decoding) unless `sourceColorSpace = "sRGB"` says otherwise.
+
+```usda
+def Shader "Surface"
+{
+    uniform token info:id = "UsdPreviewSurface"
+    float inputs:displacement.connect = </World/Looks/Ground/Height.outputs:r>
+    token outputs:surface
+}
+def Shader "Height"
+{
+    uniform token info:id = "UsdUVTexture"
+    asset inputs:file = @height.png@
+    float4 inputs:scale = (0.3, 0.3, 0.3, 1)
+    float outputs:r
+}
+```
+
+### MaterialX
+
+A `surfacematerial` whose `displacementshader` is a `displacement` node with a `float`
+`displacement` input is displaced by that input times the node's `scale`. The input can be
+any graph. It's evaluated at each vertex with the vertex's texture coordinate, and its
+object-space `position` and `normal`, as MaterialX defines displacement. Nodes that depend
+on the view direction have no meaningful value there. An `image` that can't be loaded
+falls back to its `default` (0.5 unless authored), as it does for shading.
+
+```xml
+<image name="height" type="float">
+  <input name="file" type="filename" value="height.png" />
+</image>
+<displacement name="disp" type="displacementshader">
+  <input name="displacement" type="float" nodename="height" />
+  <input name="scale" type="float" value="0.3" />
+</displacement>
+<surfacematerial name="ground" type="material">
+  <input name="surfaceshader" type="surfaceshader" nodename="surf" />
+  <input name="displacementshader" type="displacementshader" nodename="disp" />
+</surfacematerial>
+```
+
+A `vector3` `displacement` input is vector displacement, which is refused with a warning.
+
+### RenderMan (PxrDisplace)
+
+A material whose `outputs:ri:displacement` reaches a `PxrDisplace` (as on the Moana
+Island) is displaced by `dispAmount` times `dispScalar`. `dispScalar` can be a value, or a
+`PxrPtexture` whose file is read as data, optionally through a `PxrDispTransform` and its
+remap mode, centre, depth and height. In place of the one `PxrPtexture`, a `PxrBlend`
+that multiplies two of them (`operation = 18`) is read as the product of the two maps.
+Inputs connected to the material's interface (`inputs:dispScale`,
+`inputs:displacementMap`) are followed.
+
+Any other network driving `dispScalar`, such as another `PxrBlend` operation or a UV
+`PxrTexture`, is refused with a warning. RenderMan's
+`primvars:displacementbound:sphere` on the mesh is read as its
+[displacement bound](@/docs/usd/geometry.md#crust-displacementbound).
+
+### Watertight by construction
+
+A vertex shared by several faces moves once, sampled from the first face that uses it. A
+mesh therefore can't crack along a UV seam or between Ptex faces, even where the map
+itself jumps. Where it does jump, the step shows as one ring of stretched triangles at the
+seam.
+
+### Not supported
+
+- **Vector displacement** is refused with a warning, and the mesh is not displaced.
+- **Spheres** (`UsdGeomSphere`) are not displaced.
+
+`CRUST_DISPLACE=0` turns displacement off for an A/B; see
+[environment variables](@/docs/reference/environment-variables.md#crust-displace).
+
 ## .tx files
 
 A `.tx` is a tiled, mip-mapped texture file. When one exists beside a UV texture (same

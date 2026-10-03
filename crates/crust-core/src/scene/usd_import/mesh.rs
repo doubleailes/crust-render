@@ -18,12 +18,14 @@ use openusd_schemas::geom::{
 use rayon::prelude::*;
 use tracing::{debug, warn};
 
-use crate::material::Material;
+use crate::material::{Displacement, Material};
 use crate::rt_world::{FaceMap, FanSlice, SubFace, UvMap, WorldBuilder};
+use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 
-use super::adaptive::{self, Aabb, ScreenRate};
-use super::attrs::{custom_i32, prim_motion_translate, prim_ray_mask};
+use super::adaptive::{self, Aabb, Cull, ScreenRate};
+use super::attrs::{custom_f32, custom_i32, prim_motion_translate, prim_ray_mask};
+use super::materials::BoundMaterial;
 use super::time::eval_time;
 
 /// Identity of an imported mesh's shared geometry: a content hash of the
@@ -150,6 +152,13 @@ pub(super) struct MeshArena {
     /// import context because every path that reads a mesh — direct prims
     /// and prototype parts alike — already holds the arena.
     pub(super) subdiv: SubdivPolicy,
+    /// What displacement did, for `--stats`.
+    pub(super) displaced: crate::stats::DisplacementCounters,
+    /// Whether the one-per-load "displaced at cage resolution" warning fired.
+    cage_warned: bool,
+    /// Distinct meshes whose offsets exceeded their authored bound — one
+    /// warning each.
+    pub(super) bound_exceeded: u64,
 }
 
 /// The load-wide subdivision choices [`mesh_source`] applies to each mesh.
@@ -164,6 +173,9 @@ pub(super) struct SubdivPolicy {
     /// Subdivision meshes read, by the level each was refined to: a direct
     /// prim once per placement, a prototype's mesh once per version built.
     pub(super) levels: Vec<u64>,
+    /// Displaced meshes read for a placement in adaptive mode with no known
+    /// displacement bound, whose frustum test was therefore turned off.
+    pub(super) frustum_skipped: u64,
     /// Meshes tessellated per face, and adaptive meshes that took the
     /// per-mesh level instead (a `loop` mesh, a face-varying chart, or
     /// `CRUST_ADAPTIVE_PER_FACE=0`).
@@ -194,6 +206,7 @@ impl SubdivPolicy {
             level,
             adaptive: None,
             levels: Vec::new(),
+            frustum_skipped: 0,
             per_face_meshes: 0,
             per_face_fallbacks: 0,
             shared_meshes: 0,
@@ -222,6 +235,7 @@ impl SubdivPolicy {
         counts: &[i32],
         indices: &[i32],
         place: MeshPlace<'_>,
+        cull: Cull,
     ) -> u32 {
         let level = match (self.adaptive, place) {
             (None, _) => self.level,
@@ -233,7 +247,7 @@ impl SubdivPolicy {
                 let edge = adaptive::mean_edge_length(points, counts, indices);
                 let (sigma, distance) = match Aabb::of_points(points) {
                     Some(bounds) => (
-                        rate.sigma(xf, &bounds),
+                        rate.sigma_culled(xf, &bounds, cull),
                         Some(bounds.transformed(xf).distance_to(rate.eye)),
                     ),
                     None => (0.0, None),
@@ -296,6 +310,9 @@ impl MeshArena {
             slots: Vec::new(),
             by_key: HashMap::new(),
             subdiv,
+            displaced: Default::default(),
+            cage_warned: false,
+            bound_exceeded: 0,
         }
     }
 
@@ -305,11 +322,17 @@ impl MeshArena {
     ///
     /// Takes the source by value: its normals move into the slot rather than
     /// being copied, and nothing reads a source after it is interned.
+    ///
+    /// The key is the **undisplaced** source plus the material, which is all
+    /// the displaced result depends on: `displacement` is resolved from that
+    /// material. So a mesh is displaced here, on a miss, exactly once however
+    /// many prims share it, and displacement cannot change what is shared.
     pub(super) fn intern(
         &mut self,
         prim: &Prim,
         src: MeshSource,
         material: &Arc<dyn Material>,
+        displacement: Option<&Displacement>,
     ) -> Option<u32> {
         let key = MeshKey::new(&src, material);
         if let Some(&slot) = self.by_key.get(&key) {
@@ -320,6 +343,13 @@ impl MeshArena {
             return Some(slot);
         }
         let verts: Vec<[f32; 3]> = src.points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let (verts, normals) = match displacement {
+            Some(d) => {
+                let out = self.displace(prim, &src, &verts, d);
+                (out.points, out.normals)
+            }
+            None => (verts, src.normals),
+        };
         let want_faces = material.face_texture().is_some();
         let (tris, faces, uvs) = triangulate(
             &src.counts,
@@ -358,7 +388,7 @@ impl MeshArena {
             local: Some(MeshGeom {
                 verts,
                 tris,
-                normals: src.normals,
+                normals,
             }),
             faces,
             uvs,
@@ -367,6 +397,59 @@ impl MeshArena {
         });
         self.by_key.insert(key, slot);
         Some(slot)
+    }
+
+    /// Displaces one source's local-space `verts` (see `scene/displace.rs`),
+    /// and records what it did.
+    fn displace(
+        &mut self,
+        prim: &Prim,
+        src: &MeshSource,
+        verts: &[[f32; 3]],
+        d: &Displacement,
+    ) -> displace::Displaced {
+        let started = std::time::Instant::now();
+        let charts = owner_charts(src, verts.len(), d);
+        let normals = src.normals.as_deref();
+        let out = displace::displace(verts, &src.counts, &src.indices, normals, &charts, d);
+        let c = &mut self.displaced;
+        c.time += started.elapsed();
+        c.meshes += 1;
+        c.vertices += out.vertices;
+        c.max_offset = c.max_offset.max(out.max_abs);
+        if !src.refined {
+            c.at_cage += 1;
+            if !self.cage_warned && !d.is_constant() {
+                self.cage_warned = true;
+                warn!(
+                    "Mesh at {} (and possibly others) is displaced at its cage resolution, \
+                     so only cage vertices move — raise --subdiv-level or set \
+                     --subdiv-edge-length to dice it finer",
+                    prim.path()
+                );
+            }
+        }
+        if let Some(bound) = d.bound
+            && !d.is_constant()
+            && out.max_abs > bound
+        {
+            self.bound_exceeded += 1;
+            warn!(
+                "Mesh at {}: displacement reaches {} but its crust:displacementBound is {} — \
+                 applied unclamped; adaptive dicing may under-dice what it pushes into view",
+                prim.path(),
+                out.max_abs,
+                bound
+            );
+        }
+        debug!(
+            "Mesh at {}: displaced {} vertices, max |offset| {} ({:?})",
+            prim.path(),
+            out.vertices,
+            out.max_abs,
+            started.elapsed()
+        );
+        out
     }
 
     /// The slot's geometry as a committed local-space kernel scene, built on
@@ -462,10 +545,15 @@ pub(super) fn emit_mesh(
     prim: &Prim,
     mesh: &UsdMesh,
     world_xf: GMat4,
-    material: Arc<dyn Material>,
+    bound: BoundMaterial,
     meshes: &mut MeshArena,
     pending: &mut Vec<MeshPlacement>,
 ) {
+    let BoundMaterial {
+        material,
+        displacement,
+    } = bound;
+    let displacement = prim_displacement(prim, displacement);
     let want_faces = material.face_texture().is_some();
     let want_uvs = material.uses_uv();
     let Some(src) = mesh_source(
@@ -474,6 +562,7 @@ pub(super) fn emit_mesh(
         want_faces,
         want_uvs,
         material.uv_primvar(),
+        displacement.as_deref(),
         &mut meshes.subdiv,
         MeshPlace::World(&world_xf),
     ) else {
@@ -500,14 +589,16 @@ pub(super) fn emit_mesh(
                 prim.path()
             );
         }
-        let verts: Vec<[f32; 3]> = src
-            .points
+        // Displaced in local space, like every other path, before the
+        // (singular) transform flattens it.
+        let local: Vec<[f32; 3]> = src.points.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let local = match displacement.as_deref() {
+            Some(d) => meshes.displace(prim, &src, &local, d).points,
+            None => local,
+        };
+        let verts: Vec<[f32; 3]> = local
             .iter()
-            .map(|p| {
-                world_xf
-                    .transform_point3(Vec3::new(p.x, p.y, p.z))
-                    .to_array()
-            })
+            .map(|p| world_xf.transform_point3(Vec3::from_array(*p)).to_array())
             .collect();
         check_face_count(prim, src.base_face_count, material.as_ref());
         match triangulate(
@@ -570,7 +661,7 @@ pub(super) fn emit_mesh(
     // depends on how many times it is placed in total, which is not known
     // until the whole stage has been walked — so claim the `geom_id` now (it
     // must keep its traversal order) and decide in `flush_meshes`.
-    let Some(slot) = meshes.intern(prim, src, &material) else {
+    let Some(slot) = meshes.intern(prim, src, &material, displacement.as_deref()) else {
         return;
     };
     meshes.slots[slot as usize].n_place += 1;
@@ -895,6 +986,9 @@ pub(super) struct MeshSource {
     /// cage's UVs on refined triangles would stretch every texture across the
     /// patch it came from.
     pub(super) uvs: Option<UvSource>,
+    /// Whether the arrays are a refinement rather than the authored cage —
+    /// what `--stats` counts a displaced mesh "at cage resolution" by.
+    pub(super) refined: bool,
 }
 
 /// How a refined mesh's triangles map back to the cage faces Ptex addresses.
@@ -919,15 +1013,20 @@ pub(super) enum RefinedFaces {
 ///
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn mesh_source(
     prim: &Prim,
     mesh: &UsdMesh,
     want_faces: bool,
     want_uvs: bool,
     uv_primvar: Option<&str>,
+    displacement: Option<&Displacement>,
     policy: &mut SubdivPolicy,
     place: MeshPlace<'_>,
 ) -> Option<MeshSource> {
+    // A displacement reads its own chart, whether or not the surface does.
+    let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
+    let want_uvs = want_uvs || displacement.is_some_and(Displacement::needs_uv);
     let (points, counts, indices) = mesh_arrays(mesh)?;
     let base_face_count = counts.len();
     let uvs = want_uvs.then(|| mesh_uvs(prim, uv_primvar)).flatten();
@@ -939,6 +1038,7 @@ pub(super) fn mesh_source(
         subdiv_faces: None,
         base_face_count,
         uvs,
+        refined: false,
     };
 
     if !policy.legacy_warned && custom_i32(prim, "crust:subdivisionLevel").is_some() {
@@ -952,7 +1052,13 @@ pub(super) fn mesh_source(
         );
     }
 
-    let usd_scheme = subdivision_scheme(mesh);
+    let mut usd_scheme = subdivision_scheme(mesh);
+    // A displaced `none` mesh is diced bilinearly, so the displacement has
+    // vertices to move: its faces keep their flat shape until displaced.
+    // Under `CRUST_SUBDIV=0` it stays the faceted cage, as everything does.
+    if usd_scheme == SubdivisionScheme::None && displacement.is_some() && policy.enabled {
+        usd_scheme = SubdivisionScheme::Bilinear;
+    }
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
         return Some(cage(points, counts, indices, uvs));
     }
@@ -966,10 +1072,24 @@ pub(super) fn mesh_source(
     if policy.adaptive.is_some() && matches!(place, MeshPlace::World(_)) && !per_face {
         policy.per_face_fallbacks += 1;
     }
+    // A displaced mesh's culling boxes grow by its bound; with none known its
+    // frustum test is off, so displacement cannot push under-diced geometry
+    // into view.
+    let cull = match displacement {
+        None => Cull::Pad(0.0),
+        Some(d) => d.bound.map_or(Cull::Off, Cull::Pad),
+    };
+    if cull == Cull::Off
+        && let Some(rate) = policy.adaptive
+        && rate.frustum.is_some()
+        && matches!(place, MeshPlace::World(_))
+    {
+        policy.frustum_skipped += 1;
+    }
     let level = if per_face {
         policy.adaptive.map_or(0, |r| r.max)
     } else {
-        policy.level_for(prim, &points, &counts, &indices, place)
+        policy.level_for(prim, &points, &counts, &indices, place, cull)
     };
     // Loop refinement builds no face table (Ptex addresses quad sub-faces),
     // so a Ptex lookup on its triangles would read refined face ordinals as
@@ -1083,7 +1203,7 @@ pub(super) fn mesh_source(
         && let Some(rate) = policy.adaptive
         && let MeshPlace::World(xf) = place
     {
-        let segment = |pts: &[[f32; 3]]| rate.segment_at(xf, pts);
+        let segment = |pts: &[[f32; 3]]| rate.segment_culled(xf, pts, cull);
         match subdiv::tessellate_adaptive(&points, &counts, &indices, &req, rate.max, &segment) {
             Ok(t) => {
                 policy.per_face_meshes += 1;
@@ -1114,6 +1234,7 @@ pub(super) fn mesh_source(
                     normals: Some(t.normals),
                     subdiv_faces: t.faces.map(RefinedFaces::PerFace),
                     base_face_count,
+                    refined: true,
                     uvs: match (t.uvs, t.face_varying_uvs) {
                         (Some(values), _) => Some(UvSource {
                             values,
@@ -1153,6 +1274,7 @@ pub(super) fn mesh_source(
                 normals: Some(refined.normals),
                 subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
                 base_face_count,
+                refined: true,
                 uvs: refined.uvs.map(|uv| UvSource {
                     values: uv.values,
                     indices: uv.indices,
@@ -1170,6 +1292,75 @@ pub(super) fn mesh_source(
             Some(cage(points, counts, indices, uvs))
         }
     }
+}
+
+/// The material's displacement as `prim` applies it: a
+/// `crust:displacementBound` authored on the mesh prim overrides the
+/// material's, since the same look can be bound to meshes of very different
+/// scale. Failing that, RenderMan's `primvars:displacementbound:sphere` —
+/// which the Moana island authors on every displaced mesh, in object space,
+/// the same frame. A constant's bound stays exact.
+pub(super) fn prim_displacement(
+    prim: &Prim,
+    displacement: Option<Arc<Displacement>>,
+) -> Option<Arc<Displacement>> {
+    let d = displacement?;
+    let authored = custom_f32(prim, "crust:displacementBound")
+        .or_else(|| custom_f32(prim, "primvars:displacementbound:sphere"));
+    match authored {
+        Some(bound) => Some(Arc::new((*d).clone().with_authored_bound(Some(bound)))),
+        None => Some(d),
+    }
+}
+
+/// Every vertex's chart coordinates from its owner corner, for the charts
+/// `d` reads (see [`displace::owner_charts`]).
+///
+/// Built from the source's own face lists, whichever tessellation produced
+/// them — authored cage, uniform refinement, or per-face tessellation — so
+/// the owner rule is one rule: the first corner in face order. For Ptex the
+/// corner's face coordinate comes from the refinement's face table, or, on
+/// the cage, from Ptex's own quad and triangle conventions.
+fn owner_charts(src: &MeshSource, n_points: usize, d: &Displacement) -> Vec<VertexChart> {
+    const QUAD: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    const TRI: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+    let uv =
+        src.uvs.as_ref().filter(|_| d.needs_uv()).map(|uvs| {
+            move |fv: usize, p: usize| uvs.index_at(fv, p).map(|i| uvs.values[i as usize])
+        });
+    let counts = &src.counts;
+    let ptex = d.needs_ptex().then_some({
+        move |f: usize, k: usize| -> Option<(u32, [f32; 2])> {
+            match &src.subdiv_faces {
+                Some(RefinedFaces::Uniform(sub)) => sub
+                    .base_face
+                    .get(f)
+                    .copied()
+                    .flatten()
+                    .map(|b| (b, sub.corner_uvs[f][k])),
+                Some(RefinedFaces::PerFace(t)) => t
+                    .base_face
+                    .get(f)
+                    .copied()
+                    .flatten()
+                    .map(|b| (b, t.corner_uvs[f][k])),
+                // A refinement without a face table cannot address Ptex.
+                None if src.refined => None,
+                None => match counts[f] {
+                    4 => Some((f as u32, QUAD[k])),
+                    3 => Some((f as u32, TRI[k])),
+                    _ => None,
+                },
+            }
+        }
+    });
+    displace::owner_charts(
+        &src.counts,
+        &src.indices,
+        n_points,
+        uv.as_ref().map(|f| f as displace::UvAt<'_>),
+        ptex.as_ref().map(|f| f as displace::PtexAt<'_>),
+    )
 }
 
 /// The mesh's `faceVaryingLinearInterpolation`, mapped one to one. Unauthored
@@ -1903,6 +2094,7 @@ mod subdiv_policy_tests {
                 false,
                 false,
                 None,
+                None,
                 &mut policy,
                 MeshPlace::World(&GMat4::IDENTITY),
             )
@@ -1912,5 +2104,394 @@ mod subdiv_policy_tests {
             // Set by the first prim, so the second finds the warning spent.
             assert!(policy.legacy_warned, "after prim {n}");
         }
+    }
+
+    /// Every vertex's owner chart value is the value one of its own corners
+    /// holds — on the face-varying textured cube of `samples/subdivision.usda`
+    /// at level 0, uniform level 2, and per-face tessellation, where a vertex
+    /// on a seam has several candidate values.
+    #[test]
+    fn owner_charts_take_a_corner_of_their_own_vertex() {
+        use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
+        use crate::material::{Displacement, DisplacementValue};
+        use openusd::usd::Stage;
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/subdivision.usda");
+        let stage = Stage::builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let p = sdf::path("/World/CubeTextured").unwrap();
+        let prim = super::super::prim_at(&stage, p.clone());
+        let mesh = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
+        let d = Displacement::new(DisplacementValue::Uv(UvInput {
+            tex: None,
+            output: TexOutput::R,
+            scale: [1.0; 4],
+            bias: [0.0; 4],
+            fallback: [0.0; 4],
+            wrap: [Wrap::Repeat; 2],
+            tiled: false,
+        }));
+        let eye = GMat4::from_translation(glam::Vec3::new(0.0, 0.0, -6.0));
+        let rate = ScreenRate {
+            eye: glam::Vec3::ZERO,
+            f_px: 400.0,
+            target: 2.0,
+            max: 3,
+            frustum: None,
+        };
+        let policies = [
+            SubdivPolicy::new(0),
+            SubdivPolicy::new(2),
+            SubdivPolicy::adaptive(rate, 1),
+        ];
+        let mut seams = 0usize;
+        for mut policy in policies {
+            let src = mesh_source(
+                &prim,
+                &mesh,
+                false,
+                false,
+                None,
+                Some(&d),
+                &mut policy,
+                MeshPlace::World(&eye),
+            )
+            .expect("a source");
+            let uvs = src.uvs.as_ref().expect("the displacement asked for UVs");
+            let charts = owner_charts(&src, src.points.len(), &d);
+            let mut candidates = vec![Vec::new(); src.points.len()];
+            let mut off = 0usize;
+            for &fc in &src.counts {
+                for k in 0..fc as usize {
+                    let q = src.indices[off + k] as usize;
+                    if let Some(i) = uvs.index_at(off + k, q) {
+                        candidates[q].push(uvs.values[i as usize]);
+                    }
+                }
+                off += fc as usize;
+            }
+            for (v, c) in charts.iter().enumerate() {
+                assert!(c.owned, "vertex {v} is referenced");
+                let uv = c.uv.expect("charted");
+                assert!(
+                    candidates[v].contains(&uv),
+                    "vertex {v}: {uv:?} not a corner value"
+                );
+                // The first corner in face order.
+                assert_eq!(
+                    uv, candidates[v][0],
+                    "vertex {v}: owner is the first corner"
+                );
+                if candidates[v].iter().any(|x| *x != uv) {
+                    seams += 1;
+                }
+                assert!(c.uv_width > 0.0, "vertex {v} has a footprint");
+            }
+        }
+        assert!(seams > 0, "the cube's chart has seams to test");
+    }
+}
+
+#[cfg(test)]
+mod displacement_tests {
+    use super::*;
+    use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
+    use crate::material::{DisplacementValue, OpenPBR};
+    use crate::{PtexRef, PtexTexture, Texture2D, TextureRef};
+    use openusd::usd::Stage;
+
+    /// A texture that jumps between neighbouring UV islands: every value
+    /// differs on either side of a seam.
+    struct Jumpy;
+    impl Texture2D for Jumpy {
+        fn eval(&self, u: f32, v: f32, _width: f32) -> [f32; 4] {
+            let x = (u * 7.3 + v * 3.1).fract();
+            [x, x, x, 1.0]
+        }
+    }
+
+    /// A Ptex map whose faces hold different values along a shared edge.
+    struct PerFace;
+    impl PtexTexture for PerFace {
+        fn eval(&self, face: u32, u: f32, v: f32, _width: f32) -> Vec3A {
+            Vec3A::splat(face as f32 * 0.2 + u * 0.3 - v * 0.1)
+        }
+        fn num_faces(&self) -> usize {
+            6
+        }
+    }
+
+    fn uv_displacement() -> Displacement {
+        Displacement::new(DisplacementValue::Uv(UvInput {
+            tex: Some(TextureRef(Arc::new(Jumpy))),
+            output: TexOutput::R,
+            scale: [0.4; 4],
+            bias: [-0.2; 4],
+            fallback: [0.0; 4],
+            wrap: [Wrap::Repeat; 2],
+            tiled: false,
+        }))
+    }
+
+    fn ptex_displacement() -> Displacement {
+        Displacement::new(DisplacementValue::Ptex {
+            maps: vec![PtexRef(Arc::new(PerFace))],
+            remap: crate::material::DispRemap::None,
+            scale: 0.5,
+        })
+    }
+
+    /// A cube of `samples/subdivision.usda`, read under `policy`, displaced
+    /// by `d`: its local vertices and triangles.
+    fn displaced_cube(
+        name: &str,
+        policy: SubdivPolicy,
+        d: &Displacement,
+    ) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, SubdivPolicy) {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/subdivision.usda");
+        let stage = Stage::builder()
+            .open(path.to_str().unwrap())
+            .expect("stage opens");
+        let p = sdf::path(name).unwrap();
+        let prim = super::super::prim_at(&stage, p.clone());
+        let mesh = UsdMesh::get(&stage, p).unwrap().expect("a mesh");
+        let mut arena = MeshArena::new(policy);
+        // Close enough that the near faces dice finer than the far ones.
+        let eye = GMat4::IDENTITY;
+        let src = mesh_source(
+            &prim,
+            &mesh,
+            false,
+            false,
+            None,
+            Some(d),
+            &mut arena.subdiv,
+            MeshPlace::World(&eye),
+        )
+        .expect("a source");
+        let mat: Arc<dyn Material> = Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5)));
+        let slot = arena.intern(&prim, src, &mat, Some(d)).expect("a slot");
+        assert_eq!(arena.displaced.meshes, 1);
+        assert!(arena.displaced.max_offset > 0.0);
+        let geom = arena.slots[slot as usize].local.take().expect("local");
+        (geom.verts, geom.tris, arena.subdiv)
+    }
+
+    /// Every undirected edge is shared by exactly two triangles, once each
+    /// way: closed and consistently wound.
+    fn assert_closed(tris: &[[u32; 3]], what: &str) {
+        let mut directed = HashMap::<(u32, u32), u32>::new();
+        for t in tris {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *directed.entry((a, b)).or_default() += 1;
+            }
+        }
+        for (&(a, b), &n) in &directed {
+            assert_eq!(n, 1, "{what}: edge {a}->{b} used {n} times");
+            assert!(
+                directed.contains_key(&(b, a)),
+                "{what}: edge {a}->{b} has no twin"
+            );
+        }
+    }
+
+    /// Rays from far outside aimed at the centre, through points along the
+    /// cube's 12 cage edges — its UV seams and Ptex face boundaries — all
+    /// hit.
+    fn assert_seams_hit(verts: Vec<[f32; 3]>, tris: Vec<[u32; 3]>, what: &str) {
+        let mut b = WorldBuilder::new();
+        b.attach(
+            Geometry::TriangleMesh {
+                vertices: verts,
+                indices: tris,
+                normals: None,
+            },
+            Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5))),
+        );
+        let world = b.commit();
+        let corners = [-1.0f32, 1.0];
+        let mut rays = 0;
+        for axis in 0..3 {
+            for &a in &corners {
+                for &c in &corners {
+                    for k in 0..=64 {
+                        let t = -1.0 + 2.0 * k as f32 / 64.0;
+                        let mut p = [0.0f32; 3];
+                        p[axis] = t;
+                        p[(axis + 1) % 3] = a;
+                        p[(axis + 2) % 3] = c;
+                        let target = Vec3A::from_array(p);
+                        let origin = target * 10.0 + Vec3A::new(0.013, 0.007, 0.011);
+                        let ray = crate::ray::Ray::new(origin, -origin);
+                        assert!(
+                            world.intersect(&ray, 1e-4, f32::MAX).is_some(),
+                            "{what}: a ray through {target} passed through"
+                        );
+                        rays += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(rays, 12 * 65);
+    }
+
+    #[test]
+    fn a_uv_seam_stays_closed() {
+        for level in [0, 2] {
+            let (v, t, _) = displaced_cube(
+                "/World/CubeTextured",
+                SubdivPolicy::new(level),
+                &uv_displacement(),
+            );
+            let what = format!("UV cube at level {level}");
+            assert_closed(&t, &what);
+            assert_seams_hit(v, t, &what);
+        }
+    }
+
+    #[test]
+    fn a_ptex_face_boundary_stays_closed() {
+        for level in [0, 2] {
+            let (v, t, _) = displaced_cube(
+                "/World/CubeCatmullClark",
+                SubdivPolicy::new(level),
+                &ptex_displacement(),
+            );
+            let what = format!("Ptex cube at level {level}");
+            assert_closed(&t, &what);
+            assert_seams_hit(v, t, &what);
+        }
+    }
+
+    #[test]
+    fn a_per_face_mesh_at_mixed_rates_stays_closed() {
+        for (name, d) in [
+            ("/World/CubeTextured", uv_displacement()),
+            ("/World/CubeCatmullClark", ptex_displacement()),
+        ] {
+            // The eye sits just off the cube's +x+y+z corner, so its near
+            // faces dice at the ceiling and its far ones coarser.
+            let rate = ScreenRate {
+                eye: glam::Vec3::new(1.5, 1.5, 1.5),
+                f_px: 200.0,
+                target: 40.0,
+                max: 4,
+                frustum: None,
+            };
+            let (v, t, policy) = displaced_cube(name, SubdivPolicy::adaptive(rate, 1), &d);
+            assert_eq!(policy.per_face_meshes, 1, "{name}: tessellated per face");
+            let bins = policy.rate_bins.iter().filter(|&&n| n > 0).count();
+            assert!(
+                bins > 1,
+                "{name}: rates should vary, got {:?}",
+                policy.rate_bins
+            );
+            assert_closed(&t, name);
+            assert_seams_hit(v, t, name);
+        }
+    }
+
+    /// A one-quad `none` ground on a fresh stage, authoring `attrs`.
+    fn ground_stage(name: &str, attrs: &str) -> (Stage, sdf::Path) {
+        let dir = std::env::temp_dir().join("crust_mesh_displacement_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.usda"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"#usda 1.0
+def Mesh "G"
+{{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0, 0, 0), (0, 0, 1), (1, 0, 1), (1, 0, 0)]
+    texCoord2f[] primvars:st = [(0, 0), (0, 1), (1, 1), (1, 0)] (interpolation = "vertex")
+    {attrs}
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let stage = Stage::builder().open(path.to_str().unwrap()).unwrap();
+        (stage, sdf::path("/G").unwrap())
+    }
+
+    /// The bound's precedence: the mesh's `crust:displacementBound`, then its
+    /// RenderMan `primvars:displacementbound:sphere`, then the material's
+    /// (already on the displacement); a constant keeps its exact bound.
+    #[test]
+    fn the_mesh_bound_wins_over_rendermans_and_the_materials() {
+        let material = Arc::new(uv_displacement().with_authored_bound(Some(0.3)));
+        let cases = [
+            (
+                "both",
+                "float crust:displacementBound = 0.7\n    custom float primvars:displacementbound:sphere = 5",
+                Some(0.7),
+            ),
+            (
+                "rman",
+                "custom float primvars:displacementbound:sphere = 5",
+                Some(5.0),
+            ),
+            ("none", "", Some(0.3)),
+        ];
+        for (name, attrs, want) in cases {
+            let (stage, p) = ground_stage(&format!("bound_{name}"), attrs);
+            let prim = super::super::prim_at(&stage, p);
+            let d = prim_displacement(&prim, Some(material.clone())).unwrap();
+            assert_eq!(d.bound, want, "{name}");
+        }
+        let unbounded = Arc::new(uv_displacement());
+        let (stage, p) = ground_stage("bound_unset", "");
+        let prim = super::super::prim_at(&stage, p);
+        assert_eq!(
+            prim_displacement(&prim, Some(unbounded)).unwrap().bound,
+            None
+        );
+        let constant = Arc::new(Displacement::new(DisplacementValue::Constant(-0.2)));
+        let (stage, p) = ground_stage("bound_const", "float crust:displacementBound = 9");
+        let prim = super::super::prim_at(&stage, p);
+        assert_eq!(
+            prim_displacement(&prim, Some(constant)).unwrap().bound,
+            Some(0.2)
+        );
+    }
+
+    /// "A bound that is too small": the offset is applied in full, and the
+    /// mesh is warned about once.
+    #[test]
+    fn a_bound_too_small_warns_without_clamping() {
+        let (stage, p) = ground_stage("too_small", "float crust:displacementBound = 0.01");
+        let prim = super::super::prim_at(&stage, p.clone());
+        let mesh = UsdMesh::get(&stage, p).unwrap().unwrap();
+        // 0.4 · x − 0.2 on `Jumpy`: up to 0.2 away, far past 0.01.
+        let d = prim_displacement(&prim, Some(Arc::new(uv_displacement()))).unwrap();
+        let mut arena = MeshArena::new(SubdivPolicy::new(2));
+        let src = mesh_source(
+            &prim,
+            &mesh,
+            false,
+            false,
+            None,
+            Some(&d),
+            &mut arena.subdiv,
+            MeshPlace::World(&GMat4::IDENTITY),
+        )
+        .unwrap();
+        let mat: Arc<dyn Material> = Arc::new(OpenPBR::diffuse(Vec3A::splat(0.5)));
+        let slot = arena.intern(&prim, src, &mat, Some(&d)).unwrap();
+        assert_eq!(arena.bound_exceeded, 1, "one warning");
+        assert!(
+            arena.displaced.max_offset > 0.05,
+            "{}",
+            arena.displaced.max_offset
+        );
+        let geom = arena.slots[slot as usize].local.as_ref().unwrap();
+        let highest = geom.verts.iter().map(|v| v[1].abs()).fold(0.0f32, f32::max);
+        assert_eq!(highest, arena.displaced.max_offset, "unclamped");
     }
 }

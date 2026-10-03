@@ -1,0 +1,175 @@
+#usda 1.0
+(
+    doc = """Scalar displacement at tessellation time.
+
+    Left: a ground authored as ONE quad with subdivisionScheme = "none",
+    displaced through UsdPreviewSurface.inputs:displacement by a UsdUVTexture
+    height map (textures/displacement_height.png, concentric rings peaking at
+    1.0 in the centre) times scale 0.3. A displaced "none" mesh is diced
+    bilinearly so the displacement has vertices to move; its faces stay flat
+    until displaced.
+
+    Middle: the same quad displaced by the same map and scale through a
+    MaterialX displacementshader (displacement_height.mtlx). It matches the
+    left ground vertex for vertex.
+
+    Right: a Catmull-Clark cube with a constant UsdPreviewSurface
+    displacement of 0.1: its limit surface pushed 0.1 outward.
+
+    All three are diced at crust:subdivisionLevel = 6 on the RenderSettings
+    prim (or --subdiv-level), one vertex per texel of the 64x64 map. At level
+    0 only cage vertices move, and the import warns. CRUST_DISPLACE=0 renders
+    the stage as if no material authored a displacement: the grounds flat
+    quads, the cube its undisplaced limit surface."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky_gradient.exr@
+        token inputs:texture:format = "latlong"
+        float inputs:intensity = 0.4
+    }
+
+    def DistantLight "Sun"
+    {
+        bool inputs:normalize = 1
+        float inputs:intensity = 3
+        color3f inputs:color = (1.0, 0.94, 0.82)
+        float inputs:angle = 1
+        float xformOp:rotateX = -22
+        float xformOp:rotateY = 110
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 18
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 3.0, 5.4)
+        float xformOp:rotateX = -30
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Scope "Materials"
+    {
+        # Height map: displacement = 0.3 * r, read raw (the input is data).
+        def Material "Height"
+        {
+            token outputs:surface.connect = </World/Materials/Height/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.5, 0.42)
+                float inputs:roughness = 0.7
+                float inputs:displacement.connect = </World/Materials/Height/Map.outputs:r>
+                token outputs:surface
+            }
+
+            def Shader "Map"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @textures/displacement_height.png@
+                float4 inputs:scale = (0.3, 0.3, 0.3, 1)
+                token inputs:wrapS = "clamp"
+                token inputs:wrapT = "clamp"
+                float2 inputs:st.connect = </World/Materials/Height/Reader.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "Reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+
+        # The same map and scale through MaterialX.
+        def Material "HeightMtlx" (
+            prepend references = @displacement_height.mtlx@</MaterialX/Materials/mtlx_height>
+        )
+        {
+        }
+
+        # A constant offset: every vertex 0.1 along its normal.
+        def Material "Puffed"
+        {
+            token outputs:surface.connect = </World/Materials/Puffed/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.2, 0.35, 0.6)
+                float inputs:roughness = 0.35
+                float inputs:displacement = 0.1
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "Ground" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, -1), (-1, 0, 1), (1, 0, 1), (1, 0, -1)]
+        texCoord2f[] primvars:st = [(0, 1), (0, 0), (1, 0), (1, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </World/Materials/Height>
+        double3 xformOp:translate = (-2.4, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "GroundMtlx" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, -1), (-1, 0, 1), (1, 0, 1), (1, 0, -1)]
+        texCoord2f[] primvars:st = [(0, 1), (0, 0), (1, 0), (1, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </World/Materials/HeightMtlx>
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Cube" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        point3f[] points = [(-0.6, -0.6, 0.6), (0.6, -0.6, 0.6), (0.6, 0.6, 0.6), (-0.6, 0.6, 0.6),
+                            (-0.6, -0.6, -0.6), (0.6, -0.6, -0.6), (0.6, 0.6, -0.6), (-0.6, 0.6, -0.6)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3,
+                                   5, 4, 7, 6,
+                                   4, 0, 3, 7,
+                                   1, 5, 6, 2,
+                                   3, 2, 6, 7,
+                                   4, 5, 1, 0]
+        rel material:binding = </World/Materials/Puffed>
+        double3 xformOp:translate = (2.6, 0.7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (320, 180)
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 4
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+        int crust:frame = 0
+        # The dicing rate the displacement is applied at (the default is 0,
+        # which moves cage vertices only; --subdiv-level overrides it).
+        int crust:subdivisionLevel = 6
+    }
+}
