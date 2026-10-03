@@ -84,7 +84,7 @@ crust-render::main
  │         backward gather: MIS-weighted radiance, guiding training samples
  │         AOV instantiation only: the first hit → the unit's AOV planes
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
-       no products: write_rgb_file at -o; products: one scanline EXR each (products.rs)
+       no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, `mod products`)
 ```
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel

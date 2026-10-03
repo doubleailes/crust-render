@@ -509,3 +509,67 @@ fn the_resolver_agrees_with_compute_render_spec() {
         assert_eq!(their_vars, our_vars, "{}", ours.prim_path);
     }
 }
+
+/// The products are resolved on the index stage, where payloads are
+/// unloaded; a shot camera inside a payload is not composed there, and must
+/// not make every product disappear.
+#[test]
+fn a_shot_camera_under_a_payload_keeps_the_products() {
+    write_stage(
+        "payload_camera_payload",
+        r#"#usda 1.0
+(
+    defaultPrim = "Shot"
+)
+
+def Xform "Shot"
+{
+    def Camera "cam"
+    {
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Sphere "ball"
+    {
+    }
+}
+"#,
+    );
+    let path = write_stage(
+        "payload_camera",
+        &format!(
+            r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World" (
+    prepend payload = @./payload_camera_payload.usda@
+)
+{{
+}}
+
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        rel camera = </World/cam>
+        uniform int2 resolution = (48, 32)
+        rel products = [</Render/p>]
+    }}
+    def RenderProduct "p"
+    {{
+        token productName = "p.exr"
+        rel orderedVars = [</Render/beauty>]
+    }}
+    {BEAUTY_VAR}
+}}
+"#
+        ),
+    );
+    let scene = Scene::from_usd(&path).expect("loads");
+    assert_eq!(scene.aovs.products.len(), 1);
+    assert_eq!(scene.aovs.products[0].name, "p.exr");
+    assert_eq!(scene.settings.get_dimensions(), (48, 32));
+}

@@ -146,13 +146,12 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
             );
             continue;
         }
+        // The camera's existence is not checked here: this is the index
+        // stage, with payloads unloaded, and a shot camera under a payload
+        // (the production case) is not composed on it. A camera that really
+        // is missing is the traversal's to find, which warns and falls back
+        // to the first camera (`CameraChoice::Settings`).
         let resolved = Base::resolve(&product, &base);
-        if let Some(camera) = &resolved.camera
-            && !prim_at(stage, camera.clone()).is_valid().unwrap_or(false)
-        {
-            warn!("{product_path}: camera {camera} does not exist on the stage; skipped");
-            continue;
-        }
         match &render_base {
             None => render_base = Some(resolved.clone()),
             Some(first) if *first != resolved => {
@@ -318,32 +317,63 @@ fn custom_number(prim: &Prim, name: &str) -> Option<f32> {
 }
 
 /// Components and precision of an Sdf type name or a Houdini
-/// `aov:format`: the first digit is the component count (none: 1), `int`
-/// is UINT, a `half` name or an `h` suffix is HALF, everything else FLOAT.
-/// `None` for a name that is no numeric type at all.
+/// `aov:format`, or `None` for anything else. The whole name must be one of
+/// the spellings below — a prefix match would let `floatgarbage` through as
+/// a float:
+///
+/// - `float`, `half`, `double`, `int`, `uint`, alone (one component) or
+///   followed by `2`, `3` or `4` (Houdini's `float3`, `half4`, ...);
+/// - `color3`/`color4`, `normal3`, `point3`, `vector3`, `texCoord2`/
+///   `texCoord3`, followed by `f`, `h` or `d`.
+///
+/// `int`/`uint` are UINT, `half` and the `h` suffix HALF, everything else
+/// FLOAT (a `double` is accumulated and written as f32).
 pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
-    let base = name.trim_end_matches("[]");
-    const NUMERIC: &[&str] = &[
-        "float", "half", "double", "int", "uint", "color", "normal", "point", "vector", "texCoord",
+    const SCALARS: &[(&str, Precision)] = &[
+        ("float", Precision::Float),
+        ("half", Precision::Half),
+        ("double", Precision::Float),
+        ("int", Precision::Uint),
+        ("uint", Precision::Uint),
     ];
-    if !NUMERIC.iter().any(|n| base.starts_with(n)) {
-        return None;
-    }
-    let components = base
-        .chars()
-        .find(char::is_ascii_digit)
-        .map_or(1, |c| c.to_digit(10).expect("a digit") as usize);
-    if !(1..=4).contains(&components) {
-        return None;
-    }
-    let precision = if base.starts_with("int") || base.starts_with("uint") {
-        Precision::Uint
-    } else if base.starts_with("half") || base.ends_with('h') {
-        Precision::Half
-    } else {
-        Precision::Float
+    const ROLES: &[(&str, &[usize])] = &[
+        ("color", &[3, 4]),
+        ("normal", &[3]),
+        ("point", &[3]),
+        ("vector", &[3]),
+        ("texCoord", &[2, 3]),
+    ];
+    let digit = |rest: &str| -> Option<usize> {
+        let n = rest.parse::<usize>().ok()?;
+        (rest.len() == 1 && (2..=4).contains(&n)).then_some(n)
     };
-    Some((components, precision))
+    for (family, precision) in SCALARS {
+        if let Some(rest) = name.strip_prefix(family) {
+            if rest.is_empty() {
+                return Some((1, *precision));
+            }
+            return digit(rest).map(|n| (n, *precision));
+        }
+    }
+    for (family, counts) in ROLES {
+        if let Some(rest) = name.strip_prefix(family) {
+            let mut chars = rest.chars();
+            let (Some(n), Some(suffix), None) = (chars.next(), chars.next(), chars.next()) else {
+                return None;
+            };
+            let n = n.to_digit(10)? as usize;
+            if !counts.contains(&n) {
+                return None;
+            }
+            let precision = match suffix {
+                'f' | 'd' => Precision::Float,
+                'h' => Precision::Half,
+                _ => return None,
+            };
+            return Some((n, precision));
+        }
+    }
+    None
 }
 
 /// Whether `source` can be written as `components` channels of `precision`.
@@ -510,4 +540,47 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         accumulation,
         clear,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_types_parse_whole_names_only() {
+        let ok = [
+            ("float", (1, Precision::Float)),
+            ("half", (1, Precision::Half)),
+            ("int", (1, Precision::Uint)),
+            ("double", (1, Precision::Float)),
+            ("float3", (3, Precision::Float)),
+            ("half4", (4, Precision::Half)),
+            ("color3f", (3, Precision::Float)),
+            ("color4h", (4, Precision::Half)),
+            ("normal3f", (3, Precision::Float)),
+            ("point3d", (3, Precision::Float)),
+            ("vector3h", (3, Precision::Half)),
+            ("texCoord2f", (2, Precision::Float)),
+        ];
+        for (name, want) in ok {
+            assert_eq!(parse_data_type(name), Some(want), "{name}");
+        }
+        for name in [
+            "floatgarbage",
+            "float5",
+            "float1",
+            "float33",
+            "color3",
+            "color3x",
+            "color2f",
+            "normal4f",
+            "texCoord2fz",
+            "float[]",
+            "string",
+            "token",
+            "",
+        ] {
+            assert_eq!(parse_data_type(name), None, "{name}");
+        }
+    }
 }
