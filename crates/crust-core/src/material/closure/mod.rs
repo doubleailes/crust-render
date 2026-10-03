@@ -157,9 +157,50 @@ pub struct Prepared {
     select: f32,
     /// The MaterialX category, for probes.
     pub category: &'static str,
+    /// A reflecting interface layered over another reflecting interface: the
+    /// coat, for light path expressions (`'coat'` rather than `'specular'`).
+    /// MaterialX leaves carry no component name, so the tree's shape is
+    /// what tells — see `ResolvedClosure::walk`.
+    pub coat: bool,
 }
 
 impl Prepared {
+    /// The event this leaf contributes toward a direction on the reflecting
+    /// side, or (`transmitted`) the far side. Total over [`Lobe`].
+    pub fn event(&self, transmitted: bool) -> crate::lpe::LobeEvent {
+        use crate::lpe::{LobeEvent, LobeLabel, Scatter, microfacet_scatter};
+        match self.lobe {
+            Lobe::Diffuse { .. } => LobeEvent::reflect(Scatter::Diffuse, LobeLabel::Diffuse),
+            Lobe::Translucent { .. } => {
+                LobeEvent::transmit(Scatter::Diffuse, LobeLabel::Translucent)
+            }
+            Lobe::Sheen { .. } => LobeEvent::reflect(Scatter::Glossy, LobeLabel::Sheen),
+            Lobe::Subsurface { .. } => LobeEvent::transmit(Scatter::Diffuse, LobeLabel::Subsurface),
+            Lobe::Specular {
+                ax,
+                ay,
+                thin_walled,
+                ..
+            } => {
+                if transmitted {
+                    let scatter = if thin_walled {
+                        Scatter::Singular
+                    } else {
+                        microfacet_scatter(mx::average_alpha(ax, ay))
+                    };
+                    LobeEvent::transmit(scatter, LobeLabel::Transmission)
+                } else {
+                    let label = if self.coat {
+                        LobeLabel::Coat
+                    } else {
+                        LobeLabel::Specular
+                    };
+                    LobeEvent::reflect(microfacet_scatter(mx::average_alpha(ax, ay)), label)
+                }
+            }
+        }
+    }
+
     /// A one-line description of the lobe's parameters, for probes.
     pub fn describe(&self) -> String {
         let c = |v: Vec3A| format!("({:.4} {:.4} {:.4})", v.x, v.y, v.z);
@@ -233,6 +274,7 @@ const EMPTY: Prepared = Prepared {
     v: Vec3A::Z,
     select: 0.0,
     category: "",
+    coat: false,
 };
 
 /// A MaterialX closure tree collapsed at one vertex.
@@ -493,11 +535,26 @@ impl ResolvedClosure {
                 }
             }
             Closure::Layer { top, base } => {
+                let first = self.len;
                 let t_top = self.walk(cl, *top, weight, iface, w);
+                let middle = self.len;
                 // A dielectric over the base is what a random walk below it
                 // is entered through.
                 let under = interface_of(cl, *top, w.slots).unwrap_or(iface);
                 let t_base = self.walk(cl, *base, weight * t_top, under, w);
+                // A reflecting interface over another one is a coat — the
+                // shape `standard_surface` and `open_pbr_surface` both expand
+                // to. (A reflecting specular over a transmission-only one is
+                // the base specular over its refraction, and stays specular.)
+                let reflects =
+                    |p: &Prepared| matches!(p.lobe, Lobe::Specular { mode, .. } if mode.reflects());
+                if self.leaves[middle..self.len].iter().any(reflects) {
+                    for p in &mut self.leaves[first..middle] {
+                        if reflects(p) {
+                            p.coat = true;
+                        }
+                    }
+                }
                 t_top * t_base
             }
             Closure::Mix { fg, bg, mix } => {
@@ -543,6 +600,87 @@ impl ResolvedClosure {
             pdf += self.p(i) * p;
         }
         (value, pdf)
+    }
+
+    /// [`ResolvedClosure::eval`], split by leaf: each leaf's term of the
+    /// sum `eval` computes, in the same order, so the shares add up to
+    /// `eval`'s value bit for bit. `false` where `eval` answers `None`.
+    pub fn eval_lobes(&self, wi: Vec3A, out: &mut crate::lpe::LobeSplit) -> bool {
+        self.eval_lobes_at(wi.normalize(), out)
+    }
+
+    /// [`ResolvedClosure::eval_lobes`] toward an already normalised `wi`,
+    /// normalised no further — the terms `scatter`'s own `eval_pdf(world)`
+    /// sums for a continuous sample, so they sum to its value bit for bit.
+    fn eval_lobes_at(&self, wi: Vec3A, out: &mut crate::lpe::LobeSplit) -> bool {
+        out.clear();
+        if self.len == 0 {
+            return false;
+        }
+        for leaf in &self.leaves[..self.len] {
+            let l = leaf.frame.to_local(wi);
+            let (f, _) = eval_lobe(&leaf.lobe, leaf.v, l);
+            out.push(leaf.event(l.z < 0.0), leaf.weight * f * l.z.abs());
+        }
+        true
+    }
+
+    /// [`ResolvedClosure::scatter`], also splitting a continuous sample's
+    /// value by leaf at exactly the direction sampled (the ray's direction,
+    /// which `scatter` stores as it evaluated it).
+    pub fn scatter_split(
+        &self,
+        r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> Option<ScatterSample> {
+        out.clear();
+        let sample = self.scatter(r_in, rec, sampler)?;
+        if !sample.delta {
+            self.eval_lobes_at(sample.ray.direction(), out);
+        }
+        Some(sample)
+    }
+
+    /// The event of a delta sample: a subsurface walk's entry, or a
+    /// thin-walled interface passing straight through.
+    pub fn delta_event(&self, sample: &ScatterSample) -> crate::lpe::LobeEvent {
+        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+        if sample.subsurface.is_some() {
+            LobeEvent::transmit(Scatter::Diffuse, LobeLabel::Subsurface)
+        } else {
+            LobeEvent::transmit(Scatter::Singular, LobeLabel::Transmission)
+        }
+    }
+
+    /// The albedo for denoising: each leaf's tint times its weight in the
+    /// tree — a reflecting interface's tint at normal incidence — clamped to
+    /// [0, 1].
+    pub fn albedo(&self) -> Vec3A {
+        let mut sum = Vec3A::ZERO;
+        for leaf in &self.leaves[..self.len] {
+            let tint = match leaf.lobe {
+                Lobe::Diffuse { color, .. }
+                | Lobe::Sheen { color, .. }
+                | Lobe::Translucent { color }
+                | Lobe::Subsurface { color, .. } => color,
+                Lobe::Specular {
+                    fresnel,
+                    tint,
+                    mode,
+                    ..
+                } => {
+                    if mode.reflects() {
+                        tint * fresnel.eval(1.0)
+                    } else {
+                        tint
+                    }
+                }
+            };
+            sum += leaf.weight * tint;
+        }
+        sum.clamp(Vec3A::ZERO, Vec3A::ONE)
     }
 
     /// [`crate::Material::eval`].
@@ -935,6 +1073,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             v,
             select,
             category: leaf.bsdf.category(),
+            coat: false,
         },
         throughput,
     )

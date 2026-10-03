@@ -120,7 +120,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
 | USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv.rs` (OpenSubdiv refinement); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
-| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs` |
+| AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `displacement.rs` (`Displacement`, resolved beside the material and consumed at import), `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
@@ -173,6 +173,19 @@ other. The pairs:
   (`blend_weights`); change either side alone and an AOV stops matching the
   image it was rendered with. AOV planes are per pixel, in the pixel's own
   sample order, so tiles ↔ scanlines stays bit-identical for every channel.
+- **Light path expressions route the beauty, not a copy of it.** The AOV
+  gather (`tracer/route.rs`) re-evaluates the beauty's backward recurrence
+  per expression and reuses its totals wherever the lobes agree for that
+  expression, so `C.*[LO]` is the beauty bit for bit
+  (`the_full_path_expression_is_the_beauty_bitwise`). Three pairs keep that
+  true: `eval_all` ↔ `eval_split` (OpenPBR's per-lobe summands, pinned to
+  rounding by `the_lobe_split_sums_to_eval_within_rounding`) and the closure's
+  `eval_pdf` ↔ `eval_lobes` (pinned bitwise); `scatter_resolved` ↔
+  `scatter_split`, one generic `scatter_with` so the split is taken at the
+  *local* direction drawn (a world round trip moves a zero-roughness lobe's
+  value by 0.2%); `escaped_emission` ↔ `escaped_split` (asserted bitwise in
+  debug builds). The indirect clamp's factor is the beauty's, applied to
+  every expression's continuation.
 - **Products ↔ settings.** The render's camera and resolution are the first
   `RenderProduct`'s (`import_render_products`), applied before the camera is
   imported; a product that differs is refused rather than resampled.

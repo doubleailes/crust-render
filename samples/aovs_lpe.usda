@@ -1,0 +1,300 @@
+#usda 1.0
+(
+    doc = """Light path expression AOVs: the compositing set of passes, two light
+groups and the denoiser's albedo and normal, asked for the way Solaris writes
+them (sourceType = "lpe", OSL LPE syntax).
+
+The passes partition the beauty — every path's first event is exactly one of
+diffuse (RD), glossy (RG), singular (RS: the coat), transmission (T.) or a
+volume scatter (V.), or the camera sees emission directly — so in a
+compositor the direct and indirect diffuse, glossy, specular, transmission,
+volume and emission layers add back up to the beauty. So do the two light
+groups, `key` and `fill` (crust:light:lpeTag), with the sky and the glowing
+ball (an emissive material, not a light: `O`).
+
+    cargo run --release -- -i samples/aovs_lpe.usda
+
+writes renders/aovs_lpe.exr (+ .png)."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (0, 1.5, 7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Materials"
+    {
+        # Diffuse base, glossy specular, a clear coat at zero roughness.
+        def Material "paint"
+        {
+            token outputs:surface.connect = </World/Materials/paint/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.7, 0.25, 0.1)
+                float inputs:specularRoughness = 0.35
+                float inputs:coatWeight = 1.0
+                float inputs:coatRoughness = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "glass"
+        {
+            token outputs:surface.connect = </World/Materials/glass/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                float inputs:specularRoughness = 0.05
+                float inputs:transmissionWeight = 1.0
+                color3f inputs:transmissionColor = (0.8, 0.95, 0.85)
+                token outputs:surface
+            }
+        }
+
+        def Material "floor"
+        {
+            token outputs:surface.connect = </World/Materials/floor/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0.5, 0.5, 0.5)
+                float inputs:specularRoughness = 0.6
+                token outputs:surface
+            }
+        }
+
+        # Emissive, but no light: its light is `O`, not `L`.
+        def Material "glow"
+        {
+            token outputs:surface.connect = </World/Materials/glow/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "crust:openpbr"
+                color3f inputs:baseColor = (0, 0, 0)
+                float inputs:emissionLuminance = 2.0
+                color3f inputs:emissionColor = (0.2, 0.6, 1.0)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "Floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, -6), (6, 0, -6), (6, 0, 6), (-6, 0, 6)]
+        rel material:binding = </World/Materials/floor>
+    }
+
+    def Sphere "Painted" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1.0
+        double3 xformOp:translate = (-1.3, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/paint>
+    }
+
+    def Sphere "Glass" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.8
+        double3 xformOp:translate = (1.2, 0.8, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/glass>
+    }
+
+    def Sphere "Glow" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.25
+        double3 xformOp:translate = (0.1, 0.25, 1.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/glow>
+    }
+
+    # A thin haze over the floor: `V` events.
+    def Cube "Haze"
+    {
+        double size = 1
+        token crust:volume:type = "homogeneous"
+        color3f crust:volume:sigmaS = (0.25, 0.25, 0.25)
+        color3f crust:volume:sigmaA = (0.02, 0.02, 0.02)
+        float crust:volume:anisotropy = 0.2
+        double3 xformOp:translate = (0, 0.4, 0)
+        double3 xformOp:scale = (8, 0.8, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def SphereLight "Key"
+    {
+        float inputs:radius = 0.5
+        float inputs:intensity = 60
+        color3f inputs:color = (1, 0.9, 0.8)
+        token crust:light:lpeTag = "key"
+        double3 xformOp:translate = (-3, 4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "Fill"
+    {
+        float inputs:radius = 0.8
+        float inputs:intensity = 8
+        color3f inputs:color = (0.7, 0.8, 1)
+        token crust:light:lpeTag = "fill"
+        double3 xformOp:translate = (4, 2, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.15, 0.18, 0.25)
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Cam>
+        int2 resolution = (320, 180)
+        rel products = [</Render/Products/lpe>]
+        int crust:samplesPerPixel = 64
+        int crust:maxDepth = 8
+        int crust:minSamplesPerPixel = 16
+        float crust:varianceThreshold = 0.05
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "lpe"
+        {
+            token productName = "renders/aovs_lpe.exr"
+            rel orderedVars = [
+                </Render/Products/Vars/beauty>,
+                </Render/Products/Vars/diffuse_direct>,
+                </Render/Products/Vars/diffuse_indirect>,
+                </Render/Products/Vars/glossy_direct>,
+                </Render/Products/Vars/glossy_indirect>,
+                </Render/Products/Vars/specular>,
+                </Render/Products/Vars/transmission>,
+                </Render/Products/Vars/volume>,
+                </Render/Products/Vars/emission>,
+                </Render/Products/Vars/key>,
+                </Render/Products/Vars/fill>,
+                </Render/Products/Vars/sky_and_glow>,
+                </Render/Products/Vars/coat>,
+                </Render/Products/Vars/albedo>,
+                </Render/Products/Vars/N>,
+            ]
+        }
+
+        def Scope "Vars"
+        {
+            def RenderVar "beauty"
+            {
+                uniform token dataType = "color4f"
+                uniform string sourceName = "Ci"
+            }
+            def RenderVar "diffuse_direct"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RD>[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "diffuse_indirect"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RD>.+[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "glossy_direct"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RG>[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "glossy_indirect"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RG>.+[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "specular"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<RS>.*[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "transmission"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<T.>.*[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "volume"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C<V.>.*[LO]"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "emission"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C[LO]"
+                uniform token sourceType = "lpe"
+            }
+            # Light groups.
+            def RenderVar "key"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*<L.'key'>"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "fill"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*<L.'fill'>"
+                uniform token sourceType = "lpe"
+            }
+            def RenderVar "sky_and_glow"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "C.*(<L.[^'key' 'fill']>|O)"
+                uniform token sourceType = "lpe"
+            }
+            # A lobe label: the coat alone, whatever follows.
+            def RenderVar "coat"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "lpe:C<R.'coat'>.*[LO]"
+                uniform token sourceType = "lpe"
+            }
+            # Denoiser inputs.
+            def RenderVar "albedo"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "albedo"
+            }
+            def RenderVar "N"
+            {
+                uniform token dataType = "normal3f"
+                uniform string sourceName = "N"
+            }
+        }
+    }
+}

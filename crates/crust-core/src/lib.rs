@@ -23,6 +23,7 @@ mod guiding;
 mod hittable;
 mod light;
 mod light_cache;
+pub mod lpe;
 mod lux;
 mod material;
 mod medium;

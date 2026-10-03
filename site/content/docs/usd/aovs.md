@@ -146,7 +146,7 @@ and normals, two for UVs, one for scalars. An integer type is accepted only for
 | `sourceType` | meaning |
 |--------------|---------|
 | `raw` (default) | `sourceName` is looked up in the table below. An empty `sourceName` uses the channel name. |
-| `lpe` | Light path expressions. Not supported yet: skipped with a warning. |
+| `lpe` | `sourceName` is a [light path expression](#light-path-expressions). An `lpe:` prefix (Hydra's) is dropped. |
 | `primvar` | Not supported yet: skipped with a warning. |
 | `intrinsic` | Unimplemented in UsdRender itself: skipped with a warning. |
 
@@ -172,6 +172,7 @@ case-sensitive.
 | `primvars:st` | `st`, `uv`, `UV` | `texCoord2f` | filtered | The first hit's texture coordinates. |
 | `sampleCount` | `__sampleCount` | `float` / `int` | per pixel | Samples the pixel took: shows where adaptive sampling stopped early. |
 | `variance` | `crust:variance` | `float` | per pixel | Variance of the pixel's luminance mean: the quantity adaptive sampling stops on. |
+| `albedo` | `diffuse_albedo`, `DiffuseAlbedoSD` | `color3f` | filtered | The surface colour at the first hit that is not a perfect mirror or clear glass, for denoisers. See [Albedo](#albedo). |
 
 Any other name is skipped with a warning, and no channel is written for it. Crust Render
 never writes a black channel that looks valid.
@@ -233,6 +234,128 @@ nothing was hit. Houdini authors `0` for every var, including depth.
 
 The beauty, `sampleCount` and `variance` are per-pixel quantities and ignore the mode.
 
+## Light path expressions
+
+A var with `sourceType = "lpe"` holds the light that travels along the paths its
+expression describes. The syntax is OSL's, as RenderMan, Arnold and Karma accept it, so
+expressions copied from their documentation work unchanged.
+
+A path is a sequence of **events**, from the camera to a light:
+
+| event | meaning |
+|-------|---------|
+| `C` | the camera: every path starts with it |
+| `R`, `T` | reflection, transmission at a surface |
+| `V` | a scatter in a volume (a volume prim, or the medium inside glass or skin) |
+| `L` | emission from a light: an area, sphere, rect, disk, cylinder, dome or distant light |
+| `O` | emission from anything else: an emissive material, a volume's own emission |
+
+`R` and `T` events also have a scatter kind:
+
+| kind | meaning |
+|------|---------|
+| `D` | diffuse |
+| `G` | glossy: a rough specular, coat or sheen lobe |
+| `S` | singular: a mirror-like lobe (roughness about 0.03 or less), thin glass |
+| `s` | straight: a cutout's transparent part, passed through |
+
+and a **label**: the OpenPBR component the lobe belongs to — `'diffuse'`, `'specular'`,
+`'coat'`, `'sheen'`, `'transmission'`, `'subsurface'` or `'translucent'`. A light's label
+is its [`crust:light:lpeTag`](@/docs/usd/lights.md#crust-light-lpetag).
+
+The grammar:
+
+| syntax | means |
+|--------|-------|
+| `<RD>`, `<T.>`, `<RG'coat'>` | one event: type, scatter kind, labels; `.` is anything |
+| `D`, `R`, `'coat'` | shorthands for `<.D>`, `<R.>`, `<..'coat'>` |
+| `.` | any one event |
+| `[LO]`, `[^R]`, `<R[DG]>`, `<RS[^'coat']>` | sets of events, or of values in one position |
+| `*`, `+`, `{n}`, `{n,m}`, `{n,}` | repetition |
+| `(…)`, `\|` | grouping, alternation |
+
+The whole path must match: `C<RD>L` is direct diffuse light only.
+
+```usda
+def RenderVar "diffuse_indirect"
+{
+    uniform token dataType = "color3f"
+    uniform string sourceName = "C<RD>.+[LO]"
+    uniform token sourceType = "lpe"
+}
+```
+
+The usual compositing set — each path's first event is exactly one of these, so the
+layers add back up to the beauty:
+
+| layer | expression |
+|-------|------------|
+| direct, indirect diffuse | `C<RD>[LO]`, `C<RD>.+[LO]` |
+| direct, indirect glossy | `C<RG>[LO]`, `C<RG>.+[LO]` |
+| mirror-like reflection | `C<RS>.*[LO]` |
+| transmission | `C<T.>.*[LO]` |
+| volume | `C<V.>.*[LO]` |
+| emission seen directly | `C[LO]` |
+
+### Light groups
+
+Tag lights with `crust:light:lpeTag`, then ask for each group with its own var:
+
+```usda
+def SphereLight "Key"
+{
+    token crust:light:lpeTag = "key"
+}
+
+def RenderVar "key"
+{
+    uniform token dataType = "color3f"
+    uniform string sourceName = "C.*<L.'key'>"
+    uniform token sourceType = "lpe"
+}
+```
+
+`C.*<L.[^'key' 'fill']>` is every light that is in neither group.
+
+### What the expressions guarantee
+
+- Each expression is an unbiased estimate of the light it selects. A lobe's share of a
+  sample goes to that lobe's events even when another lobe drew the sample.
+- A set of expressions that splits the paths between them adds up to the beauty, to
+  floating-point rounding, firefly clamp included.
+- `C.*[LO]` is the beauty, bit for bit.
+- `color4f` adds the beauty's alpha (coverage).
+
+### Not supported
+
+Refused with a warning that quotes the expression and the column:
+
+- `?` (OSL has none; write `{0,1}`), `!` inversion;
+- RenderMan lobe tokens (`D1`, `U2`, …) and prefixes (`unoccluded`, `shadows`, …);
+- `B`: crust has no background event. A dome is a light, `L`.
+
+At most 64 different expressions per render.
+
+### Cost
+
+The first expression of a render costs about a fifth of the render's time: every
+vertex splits its BSDF by lobe. Each further expression adds 2 to 4% (cornellbox,
+measured by instruction count). Every expression is one more colour layer to compress
+when the EXR is written.
+
+## Albedo
+
+`albedo` is the surface colour a denoiser such as OIDN wants beside the beauty and the
+normal: each lobe's colour times its weight in the material, clamped to [0, 1], with no
+lighting.
+
+It is taken at the first hit that is not a perfect mirror or clear glass. Through a
+window or a mirror, the albedo is what lies beyond it, dimmed by the window. A path that
+escapes reports what the glass in front of the sky let through, or 1 with no glass.
+
+A volume scatter before any surface reports 1. Materials crust can't describe as lobes
+report 1 too.
+
 ## The EXR files
 
 Each product is one single-part, scanline, ZIP-compressed EXR. The header carries
@@ -257,7 +380,6 @@ crust renders in one colour space.
 
 Each of these is refused with a warning when authored, never ignored silently:
 
-- light path expressions (`sourceType = "lpe"`), `albedo`, light groups;
 - identity AOVs (`primId`, `instanceId`, `elementId`) and Cryptomatte;
 - `sourceType = "primvar"`;
 - the geometric normal `Ng`;

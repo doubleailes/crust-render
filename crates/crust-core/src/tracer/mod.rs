@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use tracing::{debug, info, warn};
 use utils::luminance;
 
-use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, UnitAov};
+use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, SampleExtras, UnitAov};
 use crate::buffer::Buffer;
 use crate::camera::Camera;
 use crate::filter::FilterSampler;
@@ -16,6 +16,7 @@ use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
 pub(crate) use path::{cutout_through, shadow_t_max};
+mod route;
 mod settings;
 
 use path::{K_CAMERA, K_TIME, ray_cones_enabled, trace_path};
@@ -26,6 +27,7 @@ pub use settings::{
 };
 
 pub(crate) use path::PathScratch;
+pub(crate) use route::RouteCtx;
 
 /// Render-progress callback: invoked with `(completed, total)` work units
 /// (scanline rows, or tiles under bucket rendering) as a pass advances.
@@ -219,7 +221,22 @@ impl Renderer {
             let (buffer, _, rays) = self.render_impl(tiled, Some(progress), None);
             return (buffer, AovFilm::empty(w, h), rays);
         }
-        let layout = AovLayout::new(request);
+        let mut layout = AovLayout::new(request);
+        if !layout.lpes.is_empty() || layout.albedo {
+            // One DFA for every expression of the render, over the lights'
+            // tags; shared read-only by every worker.
+            let tags: Vec<Option<&str>> = (0..self.lights.count())
+                .map(|i| self.lights.lpe_tag(i))
+                .collect();
+            let ctx = route::RouteCtx::new(&layout.lpes, &tags, layout.albedo);
+            debug!(
+                "AOVs: {} light path expression(s){}, albedo {}",
+                layout.lpes.len(),
+                ctx.describe(),
+                if layout.albedo { "on" } else { "off" }
+            );
+            layout.route = Some(std::sync::Arc::new(ctx));
+        }
         let (buffer, film, rays) = self.render_impl(tiled, Some(progress), Some(&layout));
         (
             buffer,
@@ -568,7 +585,12 @@ impl Renderer {
                 cb(*n, total);
             }
         };
-        let scratch = || PathScratch::new(self.settings.max_depth as usize);
+        let route_ctx = layout.and_then(|l| l.route.clone());
+        let scratch = || {
+            let mut s = PathScratch::new(self.settings.max_depth as usize);
+            s.route_ctx = route_ctx.clone();
+            s
+        };
 
         // First sweep: every pixel to the first check point (or to the
         // budget). The path scratch is held per rayon worker rather than
@@ -914,7 +936,11 @@ impl Renderer {
                 &mut unit.rays,
             ) * (wx * wy);
             if AOV && let Some(planes) = unit.aov.as_mut() {
-                planes.add(&scratch.first, fx, fy, wx * wy);
+                let extras = SampleExtras {
+                    lpe: &scratch.route.out,
+                    albedo: scratch.route.albedo,
+                };
+                planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }
             state.sum += color;
             state.weight_sum += wx * wy;

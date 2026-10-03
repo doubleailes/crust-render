@@ -1,6 +1,6 @@
 +++
 title = "Lights"
-description = "Camera visibility of UsdLux lights."
+description = "Camera visibility and light groups of UsdLux lights."
 date = 2026-10-01T08:00:00+00:00
 updated = 2026-10-01T08:00:00+00:00
 draft = false
@@ -104,6 +104,26 @@ def SphereLight "Masked"
 
 `samples/light_visibility.usda` shows the three cases side by side: the default, a light
 with `crust:light:cameraVisible = 1`, and a light with `crust:rayMask = 7`.
+
+## Light groups
+
+### crust:light:lpeTag
+
+`token`, unset by default.
+
+The light's group for [light path expression AOVs](@/docs/usd/aovs.md#light-groups): the
+label its `L` events carry, so `C.*<L.'key'>` holds the light of every light tagged
+`key`. Any light type takes it, dome and distant lights included. An empty tag is no tag.
+
+```usda
+def RectLight "Key"
+{
+    token crust:light:lpeTag = "key"
+}
+```
+
+Other renderers' light-group attributes (Karma's, RenderMan's, Arnold's) are not read
+yet.
 
 ## Emissive materials
 

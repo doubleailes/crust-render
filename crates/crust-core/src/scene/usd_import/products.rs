@@ -127,6 +127,7 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     let mut render_base: Option<Base> = None;
     // A var shared by several products is resolved, and warned about, once.
     let mut vars: HashMap<sdf::Path, Option<AovVar>> = HashMap::new();
+    let mut lpes: Vec<String> = Vec::new();
 
     for product_path in targets {
         let Some(product) = RenderProduct::get(stage, product_path.clone())
@@ -187,6 +188,22 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 .entry(var_path.clone())
                 .or_insert_with(|| resolve_var(stage, &var_path))
                 .clone();
+            // One DFA holds every expression of the render, each accepting
+            // as one bit of a u64.
+            if let Some(v) = &var
+                && let Some(e) = &v.expression
+                && !lpes.contains(e)
+            {
+                if lpes.len() == crate::lpe::MAX_EXPRESSIONS {
+                    warn!(
+                        "{var_path}: more than {} distinct light path expressions in one \
+                         render; no channel written",
+                        crate::lpe::MAX_EXPRESSIONS
+                    );
+                    continue;
+                }
+                lpes.push(e.clone());
+            }
             product_vars.extend(var);
         }
         let attributes = driver_attributes(&prim);
@@ -379,7 +396,7 @@ pub(super) fn parse_data_type(name: &str) -> Option<(usize, Precision)> {
 /// Whether `source` can be written as `components` channels of `precision`.
 fn type_fits(source: AovSource, components: usize, precision: Precision) -> bool {
     let components_fit = match source {
-        AovSource::Color => components == 3 || components == 4,
+        AovSource::Color | AovSource::Lpe => components == 3 || components == 4,
         s => components == s.components(),
     };
     let precision_fits = precision != Precision::Uint || source == AovSource::SampleCount;
@@ -451,6 +468,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
 
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
+    let mut expression = None;
     let source = match source_type.as_str() {
         "raw" => {
             let lookup = if source_name.is_empty() {
@@ -474,11 +492,13 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             }
         }
         "lpe" => {
-            warn!(
-                "{path}: light path expression {source_name:?} is not supported yet; no \
-                 channel written"
-            );
-            return None;
+            let expr = crate::lpe::strip_prefix(&source_name);
+            if let Err(e) = crate::lpe::validate(expr) {
+                warn!("{path}: light path expression {expr:?}: {e}; no channel written");
+                return None;
+            }
+            expression = Some(expr.to_owned());
+            AovSource::Lpe
         }
         "primvar" => {
             warn!(
@@ -539,6 +559,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         precision,
         accumulation,
         clear,
+        expression,
     })
 }
 

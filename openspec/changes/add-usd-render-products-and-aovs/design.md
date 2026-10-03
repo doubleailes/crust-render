@@ -895,6 +895,90 @@ Where the implementation departs from, or sharpens, the decisions above.
   depth pass match), and keeps its first output line's format for
   `check_images.sh`.
 
+## Phase 2 as built
+
+Light path expressions (`crust-core/src/lpe/`), the per-lobe routing
+(`tracer/route.rs`), the albedo and light groups. Where it departs from, or
+sharpens, D10–D13:
+
+- **"The lobes agree" is per expression, not per DFA state.** Every
+  expression of a render shares one DFA, so a diffuse and a glossy lobe lead
+  to different states as soon as any expression tells them apart — and the
+  first build, testing state equality, put `C.*[LO]` on the per-lobe sum and
+  lost bit-identity. The DFA now carries, per expression, Moore's partition
+  of its states (`Lpe::class`); lobes agree for an expression when their
+  states share its class, and states in one class compute that expression's
+  radiance identically, so the beauty's totals can stand in for the sum.
+- **The bounce is split at the local direction drawn.** Re-evaluating the
+  world direction a sample returns moves it by an ulp through the frame's
+  round trip, and a lobe at zero roughness (GGX α = 1e-4) changes its value
+  by 0.2% under that: the design's partition missed the beauty by 0.18% on a
+  coated ball. `OpenPBR::scatter_with::<SPLIT>` splits as it samples (the
+  `false` instantiation is `scatter_resolved`, instruction for instruction);
+  a MaterialX closure splits at the ray's own direction, which it stores
+  exactly as it evaluated it. NEE needs neither: the beauty's `eval` and the
+  split take the same world direction.
+- **Singular is α ≤ 1e-3** (roughness ≈ 0.03), not exactly zero: crust
+  floors GGX α at 1e-4, so nothing is exactly a mirror.
+- **MaterialX coats are found by shape.** A leaf knows its BSDF, not which
+  surface component it came from; a reflecting interface layered over
+  another reflecting interface is labelled `'coat'` (`standard_surface` and
+  `open_pbr_surface` both expand that way). A reflecting specular over a
+  transmission-only interface stays `'specular'`.
+- **Cutouts are `Ts` events** on the segment they are passed on (counted from
+  `stats.cutout_passes`, so `pass_cutouts` is untouched). Shadow rays through
+  a cutout add none: NEE's visibility is not an event in OSL either.
+- **A subsurface walk is one `TD 'subsurface'` event**; its exit vertex adds
+  none (its NEE and bounce pass the state through).
+- **The escape is split per light** by `escaped_split`, and with
+  expressions on the beauty's background *is* the split's sum — the same
+  additions in the same order, asserted bitwise in debug builds — so the
+  lights at infinity are not evaluated twice.
+- **Light groups read `crust:light:lpeTag` only.** Karma's, RenderMan's and
+  Arnold's attributes stay unread until their names are checked against real
+  exports (open question 2). Backdrops carry no tag.
+- **Albedo** (D12): the chain multiplies each delta interface's
+  `value / pdf`, clamped to [0, 1] per step; a volume scatter before any
+  surface reports 1; a `Material` queried directly (not OpenPBR, not a
+  closure) reports 1. No `DEBUG` count of such materials was added: which
+  materials take that path is only known per hit.
+- **Strategy agreement holds for lobes NEE can resolve.** Light-only and
+  BSDF-only agree per expression to ~1% at 2048 spp where every lobe is
+  rough; on a coat at zero roughness light-only is unbiased but renders it
+  black at any affordable sample count (it differs from BSDF-only by 7% in
+  the beauty itself, before any routing), so the test uses rough lobes.
+
+**Cost** (task 7.6). Instruction counts, cornellbox at `-s 2`, one thread;
+render = `advance_pixel` inclusive:
+
+| request | render | vs beauty | per added expression |
+|---|---|---|---|
+| no products | 3,686M | — | |
+| `N` only | 3,813M | +3.5% | |
+| 1 LPE | 4,491M | +21.8% | |
+| 4 LPEs | 4,971M | +34.9% | +160M (+4.3%) |
+| 8 LPEs | 5,326M | +44.5% | +89M (+2.4%) |
+| 16 LPEs | 6,170M | +67.4% | +105M (+2.9%) |
+
+The first expression pays for the lobe splits (NEE's and the bounce's,
+`eval_split`) and the routing record; each further one for its share of the
+backward gather, pruned by the expressions a state can still accept
+(`Lpe::live_mask`). Writing a product adds its channels' compression on top
+(~240M per colour layer here). Three optimizations got the first expression
+from +1.6G to these numbers: splitting only when an expression needs it, no
+re-drawn sample in `scatter_split`, and no heap allocation in the gather.
+
+The beauty-only render is unchanged: 4,161.8–4,161.9M instructions against
+Phase 1's 4,178.8M — lower, because `eval_diffuse` and `ShadingPoint::eval`
+are now forced inline (adding `eval_split` as a second caller had pushed
+them out of line, +0.28%, and inlining `eval_diffuse` back made `eval_all`
+cheaper than before). All 33 goldens bit-identical. `bench_ab.sh`, 5
+interleaved reps against the pre-AOV binary, render seconds (min / mean):
+cornellbox +0.1% / −0.4%, veach_mis +0.1% / −0.2%, materialx_showcase
++0.5% / +0.4%, openpbr_showcase −2.0% / +1.3% — noise. The MaterialX scene
+is the one that does pay something real: the closure walk's coat detection
+runs at every vertex, beauty or not.
+
 ## Known gaps (to be carried into `openspec/specs/aovs/design.md` when archived)
 
 - Every Non-Goal above, which is warned when authored, not silent.
@@ -908,6 +992,11 @@ Where the implementation departs from, or sharpens, the decisions above.
   normal maps are honoured.
 - Guided renders with ≥ 2 training iterations are not repeatable (`ΔEff` is
   wall-clock), so neither are their AOVs.
+- Light groups read `crust:light:lpeTag` only; other renderers' tag
+  attributes are not read, and backdrops carry no tag.
+- The albedo of a volume scatter before any surface is 1.
+- Light-only (`--strategy light`) renders near-mirror lobes black at
+  practical sample counts — true of the beauty as of every expression.
 
 ## Sources
 
