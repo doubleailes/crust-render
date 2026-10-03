@@ -34,10 +34,10 @@ openusd = { version = "0.7", default-features = false }
 openusd-schemas = { version = "0.7", default-features = false, features = ["geom", "lux", "shade", "render"] }
 # Pure-Rust OpenSubdiv port (Far topology refinement + Sdc rules) driving
 # Catmull-Clark subdivision at USD import: zero dependencies,
-# `forbid(unsafe_code)`. Pinned by `rev`, the commit release tag `0.5.0`
-# points at, rather than by the tag itself: a tag can be moved, a commit
-# cannot. Bumping it means naming the new release's commit here.
-opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", rev = "c672796f9587c369b26ea7df03cff0a8534eecd2" }
+# `forbid(unsafe_code)`. Pinned to a release tag; the committed `Cargo.lock`
+# records the commit it resolved to (c672796), so a moved tag changes nothing
+# until a `cargo update`, and then shows as a lock diff in review.
+opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0.5.0" }
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }

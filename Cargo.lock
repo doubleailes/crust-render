@@ -1025,7 +1025,7 @@ checksum = "51d68d6c59b746e652496de5e1e8d1fa50141ccb67e9d734ad7056f4a8e7ea56"
 [[package]]
 name = "opensubdiv-rs"
 version = "0.5.0"
-source = "git+https://github.com/doubleailes/OpenSubdiv-rs?rev=c672796f9587c369b26ea7df03cff0a8534eecd2#c672796f9587c369b26ea7df03cff0a8534eecd2"
+source = "git+https://github.com/doubleailes/OpenSubdiv-rs?tag=0.5.0#c672796f9587c369b26ea7df03cff0a8534eecd2"
 
 [[package]]
 name = "openusd"
