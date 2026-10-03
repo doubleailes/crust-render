@@ -54,7 +54,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   compensation, the dielectric / conductor / Hoffman–Schlick and Airy thin-film
   Fresnel models, Oren–Nayar / EON / Burley diffuse and Imageworks sheen with
   their albedo fits). Also the surface-shader builders in
-  `crates/crust-mtlx/src/surface.rs`, which reproduce the structure of
+  `crates/crust-mtlx/src/surface/`, which reproduce the structure of
   `libraries/bxdf/{open_pbr_surface,standard_surface,gltf_pbr}.mtlx`, and the
   nodedef defaults they carry.
 - **Source:** <https://github.com/AcademySoftwareFoundation/MaterialX>, 1.39.

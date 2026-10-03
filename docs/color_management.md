@@ -103,7 +103,7 @@ takes the texture's `sourceColorSpace` instead (see the textures table).
 | `PxrDisneyBsdf.baseColor` | `usd_import/materials.rs`, `disney_to_openpbr` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
 | `crust:openpbr` — all 7 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** | ✅ intentional — native format is linear-authored |
 | MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_walk` | whatever the feeding node declares | ✅ correct per MaterialX |
-| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/surface.rs` / `bsdf.rs`, through the compiler | **none**: the value as authored | ⚠️ correct only for `lin_rec709` documents — see [Known gaps](#known-gaps) #4 |
+| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/surface/` / `bsdf.rs`, through the compiler | **none**: the value as authored | ⚠️ correct only for `lin_rec709` documents — see [Known gaps](#known-gaps) #4 |
 | same, fed by an `image` | `crust-assets/src/uv_texture/` | the `image`'s own `colorspace`, as for any texture | ✅ correct per MaterialX |
 
 [^1]: `baseColor`, `specularColor`, `transmissionColor`, `subsurfaceColor`,
