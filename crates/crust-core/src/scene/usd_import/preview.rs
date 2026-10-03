@@ -11,7 +11,7 @@ use openusd_schemas::shade::{
 };
 use tracing::{debug, warn};
 
-use crate::material::{Material, OpenPBR};
+use crate::material::{Displacement, DisplacementValue, Material, OpenPBR};
 
 use super::ImportCaches;
 use super::materials::{attribute_asset_path, load_uv_texture, material_ptex, shader_info_id};
@@ -73,17 +73,19 @@ pub(super) fn preview_surface_material(
     for (target, is_textured) in textured {
         if is_textured
             && let Some((input, varname)) =
-                preview_uv_input(stage, mat_path, shader, target.input_name(), caches)
+                preview_uv_input(stage, mat_path, shader, target.input_name(), false, caches)
         {
             note(varname);
             inputs.push((target, input));
         }
     }
     let normal = if ps.normal.texture().is_some() {
-        preview_uv_input(stage, mat_path, shader, "normal", caches).map(|(input, varname)| {
-            note(varname);
-            input
-        })
+        preview_uv_input(stage, mat_path, shader, "normal", false, caches).map(
+            |(input, varname)| {
+                note(varname);
+                input
+            },
+        )
     } else {
         None
     };
@@ -91,11 +93,13 @@ pub(super) fn preview_surface_material(
     // per hit. (A constant one is already thresholded into
     // `geometry_opacity`.)
     let cutout = if !opacity_transmission(&ps) && ps.opacity.texture().is_some() {
-        preview_uv_input(stage, mat_path, shader, "opacity", caches).map(|(input, varname)| {
-            note(varname);
-            let threshold = ps.opacity_threshold.value().copied().unwrap_or(0.0);
-            (input, threshold)
-        })
+        preview_uv_input(stage, mat_path, shader, "opacity", false, caches).map(
+            |(input, varname)| {
+                note(varname);
+                let threshold = ps.opacity_threshold.value().copied().unwrap_or(0.0);
+                (input, threshold)
+            },
+        )
     } else {
         None
     };
@@ -138,11 +142,17 @@ pub(super) fn preview_surface_material(
 /// file paths — resolves the same as one authored on the node. `None` when the
 /// input does not resolve to a texture output crust can use; the surface then
 /// keeps that input's constant.
+///
+/// `data` marks an input whose texture holds data rather than colour (a
+/// displacement height): its `auto` / unauthored `sourceColorSpace` is read
+/// raw instead of by the file-format rule, so an 8-bit RGB height map is not
+/// decoded as sRGB. An authored `sRGB` still wins.
 fn preview_uv_input(
     stage: &Stage,
     mat_path: &sdf::Path,
     shader: &Shader,
     name: &str,
+    data: bool,
     caches: &mut ImportCaches<'_>,
 ) -> Option<(crate::material::preview_surface::UvInput, Option<String>)> {
     use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
@@ -206,7 +216,10 @@ fn preview_uv_input(
         );
         return None;
     };
-    let space = crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref());
+    let space = match crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref()) {
+        crate::ColorSpace::Auto if data => crate::ColorSpace::Raw,
+        space => space,
+    };
 
     // Which chart the texture reads. crust carries one per mesh (see
     // `mesh_uvs`), so a reader naming another primvar is approximated by it.
@@ -279,6 +292,50 @@ fn preview_uv_input(
     Some((input, varname))
 }
 
+/// `UsdPreviewSurface.inputs:displacement`, as a [`Displacement`].
+///
+/// Read by name: `ReadPreviewSurface` carries no displacement field. Either a
+/// value — a constant offset, `None` at the schema default of 0 — or a
+/// `UsdUVTexture`, read through [`preview_uv_input`] exactly as a shading input
+/// is (channel, `scale`, `bias`, wrap), its file decoded raw unless
+/// `sourceColorSpace` says otherwise. A texture the host cannot load falls
+/// back to its constant, as a shading input does.
+pub(super) fn preview_displacement(
+    stage: &Stage,
+    mat_path: &sdf::Path,
+    shader: &Shader,
+    caches: &mut ImportCaches<'_>,
+) -> Option<Displacement> {
+    let input = shader.input("displacement");
+    let textured = input
+        .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
+        .ok()
+        .is_some_and(|p| !p.is_empty());
+    if textured {
+        let (uv, _varname) =
+            preview_uv_input(stage, mat_path, shader, "displacement", true, caches)?;
+        if uv.tex.is_none() {
+            let c = uv.scalar(uv.fallback);
+            return (c != 0.0 && c.is_finite())
+                .then(|| Displacement::new(DisplacementValue::Constant(c)));
+        }
+        return Some(Displacement::new(DisplacementValue::Uv(uv)));
+    }
+    let value = input
+        .value_producing_attributes(ProducerFilter::Any)
+        .ok()
+        .and_then(|p| p.into_iter().next())
+        .and_then(|a| {
+            a.attribute()
+                .get_at::<sdf::Value>(eval_time())
+                .ok()
+                .flatten()
+        })
+        .and_then(|v| sdf_float4(&v))?;
+    let c = value[0];
+    (c != 0.0 && c.is_finite()).then(|| Displacement::new(DisplacementValue::Constant(c)))
+}
+
 /// A `UsdPreviewSurface` input's schema default, widened to four channels the
 /// way [`sdf_float4`] widens an authored value — what the input reads when a
 /// texture drives it, the texture fails, and nothing else was authored.
@@ -298,6 +355,7 @@ fn preview_surface_default(input: &str) -> Option<[f32; 4]> {
         "opacity" => v(1.0),
         "ior" => v(1.5),
         "occlusion" => v(1.0),
+        "displacement" => v(0.0),
         _ => return None,
     })
 }

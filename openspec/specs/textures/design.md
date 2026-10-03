@@ -472,8 +472,10 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     rather than a new rule.** `crust:mipspace` refuses a `.tx` whose levels were reduced
     in the wrong colour space, because the failure is invisible — level 0 is perfectly
     correct and only minification is wrong, which by eye is a filtering bug and nothing
-    else. A `.ptx` has no marker and needs none: crust decodes Ptex by 2.2 and the file
-    reduced before that, so the mismatch is unconditional. `MipSpace::Linear` (the
+    else. A `.ptx` has no marker and needs none: crust decodes colour Ptex by 2.2 and the
+    file reduced before that, so the mismatch is unconditional for colour. A `Raw`
+    (displacement) request has no curve, so its stored chain is already in the right
+    space and is admitted. `MipSpace::Linear` (the
     default) therefore declines such a texture at admission and preloads it, reported as
     its own `backend` reason. The gate asks about the *texture*
     (`PtexStream::chain_is_exact`), not the switch, so the two configurations with no
@@ -543,8 +545,9 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     `adjedge` data: mean texel difference across shared edges is 1.5–16x lower under
     `v0=(0,0)` than transposed, and 1.9–97x lower than between unrelated faces.
     Alongside those, 10 textures / 28 816 faces against 57 632 triangles (exactly 2 per
-    quad). The importer warns when a texture's `numFaces` disagrees with its mesh. Not reproduced: no
-    displacement (`inputs:displacementMap` is unread); the island's authored
+    quad). The importer warns when a texture's `numFaces` disagrees with its mesh. Not reproduced:
+    displacement beyond the cage (`inputs:displacementMap` is now read raw through
+    `PxrDisplace`, but at the default level 0 it moves cage vertices only); the island's authored
     `catmullClark` cages were measured *unrefined* (the default level 0 still leaves
     them unrefined, only shaded with smooth cage normals; Ptex is
     indifferent either way, since face ids index cage faces and subdivided face tables
@@ -631,10 +634,14 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   against a declared working space — not a second pyramid cache here, which would also
   have to read level 0 to answer a coarse lookup. `PtexColor` remains the default and
   the oracle. Both backends decode `uint8`, `uint16`, `half` and `float` Ptex
-  samples at full range (no clip above 1.0), but both then apply the display
-  decode `powf(2.2)` to every `.ptx` unconditionally: there is no per-texture
-  colour space, so a linear HDR `.ptx` is decoded as though it were display-encoded
-  — and the streamed `u8` LUT fast path only covers 8-bit files. Filtering across
+  samples at full range (no clip above 1.0). Every Ptex request carries a
+  `ColorSpace` (`AssetLoader::load_ptex(path, space)`), applied per request by
+  both backends through one `decode_ptex`: a displacement map asks for `Raw` and
+  is read with no curve and no clamp, while every **colour** `.ptx` still asks for
+  `Gamma22` — there is no authored colour space for colour Ptex, so a linear HDR
+  colour `.ptx` is decoded as though it were display-encoded. The import cache is
+  keyed on `(resolved path, space)`, so a file read both ways is opened twice. The
+  streamed `u8` LUT fast path covers 8-bit files in either space. Filtering across
   face boundaries is still not attempted (see the filtering caveats), and the streaming
   path does not change that. Cost on the worst case (`samples/ptex_quads.usda`, two
   textured planes filling frame): ~2.8x the preloaded render, against ~2x for the UV
@@ -716,7 +723,8 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   (above). On the
   `UsdPreviewSurface` side: texture **alpha** is not carried (both samplers return
   opaque RGB, so `outputs:a` reads 1.0 before `scale`/`bias`), `UsdTransform2d` is
-  not evaluated, `occlusion`/`displacement`/`specularColor` are not read, and a
+  not evaluated, `occlusion`/`specularColor` are not read (`displacement` is, at import —
+  see the `usd-scene-import` design record § Displacement), and a
   texture's `fallback` default when unauthored is the surface input's constant, then
   its schema default, rather than the spec's opaque black (deliberately — see above). A **subdivided** mesh
   shades through its *refined* chart (`faceVarying` under the mesh's

@@ -68,6 +68,23 @@ pub struct Compiled {
     /// but the difference between "no textures authored" and "no textures
     /// found" is worth surfacing.
     pub textures: usize,
+    /// The material's scalar displacement, when its `displacementshader` is
+    /// a `displacement` node with a `float` input. Not one of [`roots`]: it
+    /// is evaluated at mesh vertices, never per hit, so the host slices it
+    /// out with [`Compiled::displacement_program`] *before*
+    /// [`Compiled::optimize`], which then prunes it from the surface program
+    /// (and clears this, whose slots it no longer holds).
+    ///
+    /// [`roots`]: Compiled::roots
+    pub displacement: Option<DisplacementRoots>,
+}
+
+/// Where a `displacement` node's two inputs land in [`Compiled::program`]:
+/// the offset is `value · scale`, along the normal, in object space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplacementRoots {
+    pub value: u32,
+    pub scale: u32,
 }
 
 impl Compiled {
@@ -83,6 +100,7 @@ impl Compiled {
     /// closure parameter at its slot's new home. Every root keeps its value
     /// bit for bit at every shading point; only the work to reach it shrinks.
     pub fn optimize(&mut self) {
+        self.displacement = None;
         let (program, remap) = self.program.optimize(&self.roots());
         // Every root is live, so every root was placed.
         self.closures.for_each_slot(|s| {
@@ -90,6 +108,70 @@ impl Compiled {
         });
         self.program = program;
     }
+
+    /// The displacement's own program: both roots, optimised to what they
+    /// depend on when `optimize` is set (bit for bit the values the full
+    /// program computes), else the whole program as compiled. The roots come
+    /// back at their slots in the returned program.
+    pub fn displacement_program(&self, optimize: bool) -> Option<(Program, DisplacementRoots)> {
+        let d = self.displacement?;
+        if !optimize {
+            return Some((self.program.clone(), d));
+        }
+        let (program, remap) = self.program.optimize(&[d.value, d.scale]);
+        let at = |s: u32| remap[s as usize].expect("a root survives optimization");
+        Some((
+            program,
+            DisplacementRoots {
+                value: at(d.value),
+                scale: at(d.scale),
+            },
+        ))
+    }
+}
+
+/// Reads a `surfacematerial`'s `displacementshader` into `c`'s program.
+///
+/// Only MaterialX's scalar form is applied: a `displacement` node whose
+/// `displacement` input is a `float`, times its `scale`. A `vector3` input
+/// (vector displacement) or any other node is reported in `reported` and
+/// yields nothing, so the surface renders undisplaced with one warning.
+fn displacement(
+    c: &mut Compiler<'_>,
+    root: &Node,
+    reported: &mut std::collections::BTreeSet<String>,
+) -> Option<DisplacementRoots> {
+    if root.category != "surfacematerial" {
+        return None;
+    }
+    let node = bsdf::connected_node(c, root, "displacementshader")?;
+    if node.category != "displacement" {
+        reported.insert(format!(
+            "displacementshader '{}' is a {} node, not displacement — not applied",
+            node.name, node.category
+        ));
+        return None;
+    }
+    let input = node.input("displacement");
+    let producer = bsdf::connected_node(c, &node, "displacement");
+    let vector = input.is_some_and(|i| i.type_name == "vector3")
+        || producer.is_some_and(|p| p.type_name == "vector3");
+    if vector {
+        reported.insert(format!(
+            "displacement '{}' is vector3 (vector displacement) — not applied",
+            node.name
+        ));
+        return None;
+    }
+    input?;
+    let value = c.input_or(&node, "displacement", Val::ZERO);
+    let scale = c.input_or(&node, "scale", Val::ONE);
+    // A literal zero offset displaces nothing.
+    let zero = |s: u32| c.fold(s).is_some_and(|v| v.x() == 0.0);
+    if zero(value) || zero(scale) {
+        return None;
+    }
+    Some(DisplacementRoots { value, scale })
 }
 
 /// Parses a `.mtlx` and compiles the named material node.
@@ -119,6 +201,7 @@ pub fn compile(
     let mut c = Compiler::new(&doc, load_texture);
     let mut closures = Closures::default();
     flatten(&mut c, &root, &mut closures);
+    let displacement = displacement(&mut c, &root, &mut closures.reported);
     // Counted off the compiled program rather than inside the loader
     // closure: the compiler memoises, so a texture feeding three nodes is
     // loaded once, and the program is the record of what actually resolved.
@@ -142,5 +225,6 @@ pub fn compile(
         root_name: root.name.clone(),
         unsupported,
         textures,
+        displacement,
     })
 }

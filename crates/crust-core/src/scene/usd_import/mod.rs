@@ -83,7 +83,7 @@ use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
     emit_sphere_light,
 };
-use materials::{MaterialCache, resolve_material};
+use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use settings::{
     CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
@@ -371,7 +371,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if custom_token(&prim, "crust:volume:type").is_some() {
             emit_volume(&prim, this_world, &mut ctx.volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-            let mat = resolve_material(stage, &prim, &mut ctx.caches);
+            let mat = resolve_bound(stage, &prim, &mut ctx.caches);
             emit_mesh(
                 &mut ctx.world,
                 &prim,
@@ -803,6 +803,11 @@ pub(crate) fn load_scene(
             rate_bins: ctx.caches.meshes.subdiv.rate_bins.clone(),
         };
     }
+
+    stats.displacement = crate::stats::DisplacementCounters {
+        frustum_skipped: ctx.caches.meshes.subdiv.frustum_skipped,
+        ..ctx.caches.meshes.displaced.clone()
+    };
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);

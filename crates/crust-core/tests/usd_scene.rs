@@ -1260,6 +1260,7 @@ impl crust_core::AssetLoader for SlowPtexAssets {
     fn load_ptex(
         &self,
         path: &std::path::Path,
+        _space: crust_core::ColorSpace,
     ) -> Option<std::sync::Arc<dyn crust_core::PtexTexture>> {
         std::thread::sleep(self.delay);
         self.loaded.lock().unwrap().push(path.to_path_buf());

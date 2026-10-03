@@ -1,0 +1,98 @@
+#usda 1.0
+(
+    doc = """RenderMan displacement through Ptex, as the Moana island authors it.
+
+    Two quads, one per face of textures/quad_f32.ptx: a float Ptex holding
+    values up to about 10, read raw (no gamma). The material is a
+    PxrDisneyBsdf with a
+    PxrDisplace whose dispAmount is connected to the Material's
+    inputs:dispScale = 0.05, and whose dispScalar reads a PxrPtexture whose
+    filename is connected to the Material's inputs:displacementMap — the
+    island's own wiring. Each vertex moves by 0.05 times the Ptex value at its
+    owner face and position. The mesh authors subdivisionScheme = "none", so
+    it is diced bilinearly to crust:subdivisionLevel = 3 for the displacement
+    to have vertices to move."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky_gradient.exr@
+        token inputs:texture:format = "latlong"
+        float inputs:intensity = 0.5
+    }
+
+    def DistantLight "Sun"
+    {
+        bool inputs:normalize = 1
+        float inputs:intensity = 3
+        float inputs:angle = 1
+        float xformOp:rotateX = -35
+        float xformOp:rotateY = 120
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 18
+        float horizontalAperture = 20.955
+        double3 xformOp:translate = (1, 2.2, 2.6)
+        float xformOp:rotateX = -40
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Material "Rock"
+    {
+        asset inputs:displacementMap = @textures/quad_f32.ptx@
+        float inputs:dispScale = 0.05
+        token outputs:ri:surface.connect = </World/Rock/PxrDisneyBsdf.outputs:bxdf_out>
+        token outputs:ri:displacement.connect = </World/Rock/PxrDisplace.outputs:displace>
+
+        def Shader "PxrDisneyBsdf"
+        {
+            uniform token info:id = "PxrDisneyBsdf"
+            color3f inputs:baseColor = (0.6, 0.55, 0.5)
+            float inputs:roughness = 0.7
+            token outputs:bxdf_out
+        }
+
+        def Shader "PxrDisplace"
+        {
+            uniform token info:id = "PxrDisplace"
+            float inputs:dispAmount.connect = </World/Rock.inputs:dispScale>
+            float inputs:dispScalar = 0
+            float inputs:dispScalar.connect = </World/Rock/PxrPtexture_displacement.outputs:resultR>
+            token outputs:displace
+        }
+
+        def Shader "PxrPtexture_displacement"
+        {
+            uniform token info:id = "PxrPtexture"
+            asset inputs:filename.connect = </World/Rock.inputs:displacementMap>
+            float outputs:resultR
+        }
+    }
+
+    def Mesh "Quads" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (0, 0, -1), (1, 0, -1), (2, 0, -1)]
+        rel material:binding = </World/Rock>
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        int2 resolution = (240, 160)
+        int crust:samplesPerPixel = 32
+        int crust:maxDepth = 4
+        int crust:subdivisionLevel = 3
+    }
+}

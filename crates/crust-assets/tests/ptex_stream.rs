@@ -915,3 +915,92 @@ fn a_texture_with_no_levels_below_the_base_is_admitted() {
         PtexStream::open_with(&path, BUDGET, micro_max(BUDGET), None, true).expect("stream");
     assert!(!uncapped.chain_is_exact());
 }
+
+/// A displacement map is read raw: an 8-bit texel `t` is `t / 255`, where the
+/// same texel read as colour is `(t / 255)^2.2` — on both backends.
+///
+/// Every texel of the `u8` fixtures' base level is checked at its centre with
+/// `width = 0`, which is the texel itself with no bilinear blend; the value
+/// 128 the scenario names is among them or not, but the rule is per texel.
+#[test]
+fn raw_ptex_skips_the_colour_curve_on_both_backends() {
+    use crust_core::ColorSpace;
+    for name in ["quad_u8", "quad_tiled"] {
+        let path = fixture(name);
+        let cap = 10;
+        let raw_pre = PtexColor::open_in(&path, ColorSpace::Raw, false, cap).expect(name);
+        let raw_stream = PtexStream::open_in(
+            &path,
+            ColorSpace::Raw,
+            8 << 20,
+            micro_max(8 << 20),
+            Some(cap),
+            false,
+        )
+        .expect(name);
+        let col_pre = PtexColor::open_in(&path, ColorSpace::Gamma22, false, cap).expect(name);
+
+        let mut reader = ptex::PtexReader::open(&path).expect(name);
+        let n_chan = reader.num_channels();
+        let mut checked = 0usize;
+        for face in 0..reader.num_faces() {
+            let info = *reader.face_info(face).expect(name);
+            let res = ptex::Res::new(info.res.ulog2.min(cap), info.res.vlog2.min(cap));
+            let data = reader.get_data_at_res(face, res).expect(name);
+            let (w, h) = (res.u(), res.v());
+            for j in 0..h {
+                for i in 0..w {
+                    let t = data[(j * w + i) * n_chan];
+                    let (u, v) = ((i as f32 + 0.5) / w as f32, (j as f32 + 0.5) / h as f32);
+                    let want_raw = t as f32 * (1.0 / 255.0);
+                    let want_col = want_raw.max(0.0).powf(2.2);
+                    let f = face as u32;
+                    assert_eq!(
+                        raw_pre.eval(f, u, v, 0.0).x,
+                        want_raw,
+                        "{name} {face} preload raw"
+                    );
+                    assert_eq!(
+                        raw_stream.eval(f, u, v, 0.0).x,
+                        want_raw,
+                        "{name} {face} stream raw"
+                    );
+                    assert_eq!(
+                        col_pre.eval(f, u, v, 0.0).x,
+                        want_col,
+                        "{name} {face} colour"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "{name}: nothing checked");
+    }
+}
+
+/// The streamed ↔ preloaded invariant holds for raw data too, mips and all
+/// faces, at a resolution both hold.
+#[test]
+fn streamed_and_preloaded_agree_when_raw() {
+    use crust_core::ColorSpace;
+    for &(name, cap) in FIXTURES {
+        let path = fixture(name);
+        let pre = PtexColor::open_in(&path, ColorSpace::Raw, true, cap).expect(name);
+        let stream = PtexStream::open_in(
+            &path,
+            ColorSpace::Raw,
+            8 << 20,
+            micro_max(8 << 20),
+            Some(cap),
+            true,
+        )
+        .expect(name);
+        for face in 0..PtexTexture::num_faces(&pre) as u32 {
+            for &(u, v) in &grid() {
+                let a = pre.eval(face, u, v, 0.0);
+                let b = stream.eval(face, u, v, 0.0);
+                assert_eq!(bits(a), bits(b), "{name} raw face {face} at ({u}, {v})");
+            }
+        }
+    }
+}

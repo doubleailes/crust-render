@@ -32,8 +32,12 @@
 //!   is thresholded into `geometry_opacity`, a texture becomes the mask
 //!   [`PreviewSurface::with_cutout`] samples.
 //!
+//! `displacement` is read too, but not here: it moves geometry at import
+//! (`scene/displace.rs`), through [`UvInput::sample_at`], rather than shading
+//! a hit.
+//!
 //! What it does not: `UsdTransform2d` (warned about, identity chart),
-//! `occlusion` and `displacement` (no counterpart in the integrator), and a
+//! `occlusion` (no counterpart in the integrator), and a
 //! texture's alpha (the host samplers return opaque RGB, so `outputs:a` reads
 //! 1.0 before `scale`/`bias`).
 
@@ -144,15 +148,24 @@ impl UvInput {
     /// The four output channels at a hit, `scale`/`bias` applied.
     #[inline]
     fn sample(&self, rec: &HitRecord) -> [f32; 4] {
+        self.sample_at(rec.has_uv.then_some(rec.uv), rec.uv_width)
+    }
+
+    /// The four output channels at chart point `uv` over a footprint `width`
+    /// UV units wide, `scale`/`bias` applied — [`UvInput::sample`] without a
+    /// hit, which is how displacement reads the same node at a vertex. `None`
+    /// is a surface with no chart, which reads at `(0, 0)`.
+    #[inline]
+    pub fn sample_at(&self, uv: Option<(f32, f32)>, width: f32) -> [f32; 4] {
         let Some(tex) = &self.tex else {
             return self.fallback;
         };
-        let (u, v) = if rec.has_uv { rec.uv } else { (0.0, 0.0) };
+        let (u, v) = uv.unwrap_or((0.0, 0.0));
         let texel = if self.tiled {
-            tex.eval(u, v, rec.uv_width)
+            tex.eval(u, v, width)
         } else {
             match (self.wrap[0].apply(u), self.wrap[1].apply(v)) {
-                (Some(u), Some(v)) => tex.eval(u, v, rec.uv_width),
+                (Some(u), Some(v)) => tex.eval(u, v, width),
                 _ => [0.0; 4],
             }
         };
@@ -163,7 +176,7 @@ impl UvInput {
     /// feeding a float input is a type mismatch; its red channel is read,
     /// which is what Hydra does.
     #[inline]
-    fn scalar(&self, s: [f32; 4]) -> f32 {
+    pub fn scalar(&self, s: [f32; 4]) -> f32 {
         match self.output {
             TexOutput::R | TexOutput::Rgb => s[0],
             TexOutput::G => s[1],

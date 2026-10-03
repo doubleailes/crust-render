@@ -46,6 +46,15 @@ render.
   leaves faces outside the camera's view at their control cage, which reflections and
   shadows then see. Loop subdivision meshes are refined to one level per mesh.
 
+- **Displacement is scalar and applied at the dicing rate.** Vector displacement is
+  refused. Detail finer than the tessellation is lost, since nothing turns it into bump.
+  The dicing rate ignores displacement: a strongly displaced region is diced as finely as
+  its undisplaced cage asks. A displaced `subdivisionScheme = "none"` mesh loses its hard
+  edges. Where a map jumps across a UV seam, one ring of triangles stretches across the
+  step. RenderMan displacement networks other than a `PxrPtexture` (or a `PxrBlend` multiply of
+  two) through an optional `PxrDispTransform` are refused. See
+  [displacement](@/docs/usd/materials.md#displacement).
+
 ## Materials and textures
 
 - **Native subsurface is approximate.** The `crust:openpbr` subsurface lobe is still a
@@ -61,7 +70,11 @@ render.
 - **Streamed Ptex can't rebuild its mip levels in linear light.** A mip-mapped `.ptx` is
   loaded fully unless
   [`CRUST_PTEX_STREAM_MIPSPACE=file`](@/docs/reference/environment-variables.md#crust-ptex-stream-mipspace)
-  accepts the file's own, slightly darker, levels.
+  accepts the file's own, slightly darker, levels. Displacement Ptex is read raw, so its
+  stored levels are already correct and it streams.
+- **Colour Ptex is always decoded by gamma 2.2.** There is no way to declare a colour
+  `.ptx` linear, so linear colour Ptex data renders too dark. Ptex read as a displacement
+  map is read raw.
 - **Some inputs are read but not used**, with a warning: `subsurface*` and `specularTint`
   on `PxrDisneyBsdf`, and `UsdTransform2d` on `UsdPreviewSurface` textures.
 

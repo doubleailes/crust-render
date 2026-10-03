@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!-- The height map of displacement.usda's preview-surface ground, as a
+     MaterialX displacement: the same file read raw (no colorspace) times the
+     same scale, so the two grounds displace identically. -->
+<materialx version="1.38">
+  <image name="height" type="float">
+    <input name="file" type="filename" value="textures/displacement_height.png" />
+  </image>
+  <displacement name="disp" type="displacementshader">
+    <input name="displacement" type="float" nodename="height" />
+    <input name="scale" type="float" value="0.3" />
+  </displacement>
+  <standard_surface name="surf" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.42, 0.5, 0.55" />
+    <input name="specular_roughness" type="float" value="0.6" />
+  </standard_surface>
+  <surfacematerial name="mtlx_height" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="surf" />
+    <input name="displacementshader" type="displacementshader" nodename="disp" />
+  </surfacematerial>
+</materialx>

@@ -357,6 +357,30 @@ pub struct RenderStats {
     /// Adaptive subdivision's choices; empty (and not reported) in uniform
     /// subdivision.
     pub subdivision: SubdivisionCounters,
+    /// Scalar displacement applied at import; all zero (and not reported)
+    /// for a scene without displacement.
+    pub displacement: DisplacementCounters,
+}
+
+/// What the displacement pass did over a load.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DisplacementCounters {
+    /// Distinct meshes displaced — once per distinct mesh, however many prims
+    /// share it.
+    pub meshes: u64,
+    /// Unique vertices displaced across those meshes.
+    pub vertices: u64,
+    /// Time spent displacing (charts, offsets, normals), within "Traverse
+    /// prims".
+    pub time: Duration,
+    /// The largest `|offset|` applied, in local units.
+    pub max_offset: f32,
+    /// Displaced meshes left at their authored cage resolution — the
+    /// displacement then moves only cage vertices.
+    pub at_cage: u64,
+    /// Displaced meshes with no known bound, whose adaptive frustum test was
+    /// turned off so displacement cannot push under-diced geometry into view.
+    pub frustum_skipped: u64,
 }
 
 /// What adaptive subdivision chose over a load.
@@ -829,6 +853,34 @@ impl fmt::Display for RenderStats {
                 .collect();
             if !bins.is_empty() {
                 writeln!(f, "    {:<26} {}", "edge rates", bins.join(" · "))?;
+            }
+        }
+        let d = &self.displacement;
+        if d.meshes > 0 {
+            writeln!(
+                f,
+                "  {:<28} {} meshes, {} vertices in {:.2?}, max |offset| {}",
+                "displacement",
+                thousands(d.meshes as usize),
+                thousands(d.vertices as usize),
+                d.time,
+                d.max_offset
+            )?;
+            if d.at_cage > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {}",
+                    "at cage resolution",
+                    thousands(d.at_cage as usize)
+                )?;
+            }
+            if d.frustum_skipped > 0 {
+                writeln!(
+                    f,
+                    "    {:<26} {}",
+                    "frustum test skipped",
+                    thousands(d.frustum_skipped as usize)
+                )?;
             }
         }
         if s.volumes > 0 {

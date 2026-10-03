@@ -43,6 +43,7 @@ impl Scene {
     }
 }
 
+mod displace;
 mod subdiv;
 mod tessellate;
 mod usd_import;
@@ -227,9 +228,21 @@ pub trait AssetLoader: Send + Sync {
     /// alongside the texture in every Ptex material the Moana island ships,
     /// so the fallback is a plausible flat colour rather than a black hole.
     ///
+    /// `space` says how to decode the stored samples, exactly as for
+    /// [`Self::load_texture`]: a colour map is display-encoded
+    /// ([`crate::ColorSpace::Gamma22`], the island's convention) while a
+    /// displacement map is data ([`crate::ColorSpace::Raw`]). The file does
+    /// not say which it is, and decoding a height map by 2.2 would bend every
+    /// offset toward zero.
+    ///
     /// Defaulted to `None` so a host that only cares about environment maps —
     /// and [`NoAssets`] — needs no extra ceremony.
-    fn load_ptex(&self, path: &std::path::Path) -> Option<std::sync::Arc<dyn crate::PtexTexture>> {
+    fn load_ptex(
+        &self,
+        path: &std::path::Path,
+        space: crate::ColorSpace,
+    ) -> Option<std::sync::Arc<dyn crate::PtexTexture>> {
+        let _ = space;
         tracing::warn!(
             "Asset loader does not decode Ptex: {} ignored — the surface falls \
              back to its constant baseColor.",

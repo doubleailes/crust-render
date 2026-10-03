@@ -38,7 +38,7 @@ use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
 use super::attrs::{custom_token, prim_ray_mask};
-use super::materials::resolve_material;
+use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
 use super::time::eval_time;
@@ -184,7 +184,10 @@ pub(super) fn collect_proto_parts(
         let mask = prim_ray_mask(&prim);
 
         if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
-            let material = resolve_material(stage, &prim, caches);
+            let bound = resolve_bound(stage, &prim, caches);
+            let material = bound.material;
+            let displacement = super::mesh::prim_displacement(&prim, bound.displacement);
+            let displacement = displacement.as_deref();
             // Unshared: the part's own world transform, for adaptive subdivision.
             let part_world = match place {
                 ProtoPlace::Unshared(world) => Some(world * this_local),
@@ -200,11 +203,12 @@ pub(super) fn collect_proto_parts(
                 material.face_texture().is_some(),
                 material.uses_uv(),
                 material.uv_primvar(),
+                displacement,
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()
                     .map_or(MeshPlace::Shared, MeshPlace::World),
-            ) && let Some(slot) = caches.meshes.intern(&prim, src, &material)
+            ) && let Some(slot) = caches.meshes.intern(&prim, src, &material, displacement)
             {
                 let faces = caches.meshes.slots[slot as usize].faces.clone();
                 let uvs = caches.meshes.slots[slot as usize].uvs.clone();

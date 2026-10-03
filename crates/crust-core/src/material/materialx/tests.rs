@@ -177,3 +177,77 @@ fn a_schlick_edf_falls_off_with_the_exit_cosine() {
     let want = Vec3A::new(4.0, 2.0, 1.0) * 0.84;
     assert!(grazing.abs_diff_eq(want, 1e-4), "{grazing} vs {want}");
 }
+
+/// A displacement graph over the vertex's position, normal and chart.
+const DISPLACED: &str = r#"
+    <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+    <surface name="s" type="surfaceshader"><input name="bsdf" type="BSDF" nodename="d" /></surface>
+    <position name="p" type="vector3" />
+    <normal name="n" type="vector3" />
+    <texcoord name="t" type="vector2" />
+    <dotproduct name="pn" type="float">
+      <input name="in1" type="vector3" nodename="p" /><input name="in2" type="vector3" nodename="n" />
+    </dotproduct>
+    <extract name="u" type="float">
+      <input name="in" type="vector2" nodename="t" /><input name="index" type="integer" value="0" />
+    </extract>
+    <sin name="w" type="float"><input name="in" type="float" nodename="pn" /></sin>
+    <multiply name="h" type="float">
+      <input name="in1" type="float" nodename="w" /><input name="in2" type="float" nodename="u" />
+    </multiply>
+    <displacement name="disp" type="displacementshader">
+      <input name="displacement" type="float" nodename="h" />
+      <input name="scale" type="float" value="0.25" />
+    </displacement>
+    <surfacematerial name="m" type="material">
+      <input name="surfaceshader" type="surfaceshader" nodename="s" />
+      <input name="displacementshader" type="displacementshader" nodename="disp" />
+    </surfacematerial>"#;
+
+fn vertex(i: usize) -> crate::VertexCtx {
+    let f = i as f32 * 0.37;
+    crate::VertexCtx {
+        uv: Some([f.fract(), (f * 1.3).fract()]),
+        uv_width: 0.01,
+        ptex: None,
+        ptex_width: 0.0,
+        position: Vec3A::new(f.sin() * 3.0, f.cos(), f * 0.1),
+        normal: Vec3A::new(f.cos(), 0.5, f.sin()).normalize(),
+    }
+}
+
+/// The displacement program evaluates the graph at the vertex: `scale ·
+/// sin(p · n) · u`, from the local position, normal and owner chart.
+#[test]
+fn a_materialx_displacement_evaluates_at_the_vertex() {
+    let loaded = load_inline("displaced", DISPLACED).expect("loads");
+    let d = loaded.displacement.expect("a displacement");
+    for i in 0..64 {
+        let v = vertex(i);
+        let want = 0.25 * v.position.dot(v.normal).sin() * v.uv.unwrap()[0];
+        let got = d.eval_interpreted(&v);
+        assert!((got - want).abs() < 1e-5, "vertex {i}: {got} vs {want}");
+    }
+}
+
+/// The JIT build of the displacement root matches the interpreter bit for
+/// bit, the pin every other MaterialX program carries.
+#[cfg(feature = "jit")]
+#[test]
+fn the_jit_displacement_matches_the_interpreter() {
+    use crate::VertexField;
+    let loaded = load_inline("displaced_jit", DISPLACED).expect("loads");
+    let d = loaded.displacement.expect("a displacement");
+    if !crate::config().shader_jit {
+        return;
+    }
+    assert!(d.is_jit(), "the displacement program is JIT-compiled");
+    for i in 0..256 {
+        let v = vertex(i);
+        assert_eq!(
+            d.eval(&v).to_bits(),
+            d.eval_interpreted(&v).to_bits(),
+            "vertex {i}"
+        );
+    }
+}

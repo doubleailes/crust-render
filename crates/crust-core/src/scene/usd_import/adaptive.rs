@@ -74,11 +74,51 @@ impl Frustum {
     }
 }
 
+/// How a mesh's culling boxes account for displacement.
+///
+/// A displaced point lies within its undisplaced local box grown by the
+/// displacement bound on every axis, so growing the **local** box before it is
+/// carried to world bounds the displaced geometry exactly, whatever the
+/// placement's scale or rotation — no separate `max_axis_scale` factor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Cull {
+    /// Grow local boxes by this many local units (0: undisplaced, untouched).
+    Pad(f32),
+    /// A displaced mesh with no known bound: never treated as out of view.
+    Off,
+}
+
+impl Cull {
+    /// `bounds`, grown as this says — or `None` when the frustum test is off.
+    fn padded(self, bounds: &Aabb) -> Option<Aabb> {
+        match self {
+            // Bit for bit the undisplaced box: adding 0.0 would turn a -0.0
+            // corner into +0.0.
+            Cull::Pad(0.0) => Some(*bounds),
+            Cull::Pad(p) => Some(Aabb {
+                min: bounds.min - Vec3::splat(p),
+                max: bounds.max + Vec3::splat(p),
+            }),
+            Cull::Off => None,
+        }
+    }
+}
+
 impl ScreenRate {
     /// Pixels per local unit of a placement: its stretch over its distance to
     /// the camera. Infinite when the camera is inside `bounds` (in the
     /// placement's local frame, carried to world by `xf`).
+    #[cfg(test)]
     pub(super) fn sigma(&self, xf: &GMat4, bounds: &Aabb) -> f32 {
+        self.sigma_culled(xf, bounds, Cull::Pad(0.0))
+    }
+
+    /// [`ScreenRate::sigma`] for a mesh displaced under `cull`: the frustum
+    /// test and the nearest-point distance both use the grown box.
+    pub(super) fn sigma_culled(&self, xf: &GMat4, bounds: &Aabb, cull: Cull) -> f32 {
+        let Some(bounds) = cull.padded(bounds) else {
+            return self.sigma_unculled(xf, bounds);
+        };
         let world = bounds.transformed(xf);
         if self.frustum.is_some_and(|f| !f.overlaps(&world)) {
             return 0.0;
@@ -114,15 +154,25 @@ impl ScreenRate {
     /// `points`, local units) stretched by `xf`, seen at the nearest point of
     /// the box around all of `points` carried to world. Infinite when the
     /// camera is inside that box.
+    #[cfg(test)]
     pub(super) fn segment_at(&self, xf: &GMat4, points: &[[f32; 3]]) -> f32 {
+        self.segment_culled(xf, points, Cull::Pad(0.0))
+    }
+
+    /// [`ScreenRate::segment_at`] for a mesh displaced under `cull`: the
+    /// segment's box is grown by the displacement bound before the frustum
+    /// test, and a mesh with no bound is never culled.
+    pub(super) fn segment_culled(&self, xf: &GMat4, points: &[[f32; 3]], cull: Cull) -> f32 {
         let Some(bounds) = Aabb::of_arrays(points) else {
             return 0.0;
         };
         // A segment wholly out of view is split once. Its box is padded by its
         // own diagonal first, as MoonRay pads a face's, so the limit curve —
         // which strays off its chord — is not culled on the frustum's edge.
-        if let Some(f) = self.frustum {
-            let world = bounds.transformed(xf);
+        if let Some(f) = self.frustum
+            && let Some(displaced) = cull.padded(&bounds)
+        {
+            let world = displaced.transformed(xf);
             let pad = Vec3::splat((world.max - world.min).length());
             let padded = Aabb {
                 min: world.min - pad,
@@ -366,6 +416,77 @@ mod tests {
         assert!(r.segment_at(&ahead, &seg) > 1.0);
         // Without the frustum the one behind is as fine as the one ahead.
         assert!(rate().segment_at(&behind, &seg) > 1.0);
+    }
+
+    /// "Displaced into view": a segment just beside the view, displaced by
+    /// up to its bound, is in view once its box grows by the bound — so it is
+    /// diced at its screen rate rather than split once.
+    #[test]
+    fn a_displacement_bound_brings_geometry_into_view() {
+        let r = ScreenRate {
+            frustum: Some(frustum()),
+            ..rate()
+        };
+        let id = GMat4::IDENTITY;
+        // At z = −10 the view reaches x = 10; this segment starts at 11.
+        let seg = [[11.0, 0.0, -10.0], [11.25, 0.0, -10.0]];
+        assert_eq!(
+            r.segment_culled(&id, &seg, Cull::Pad(0.0)),
+            0.0,
+            "out of view"
+        );
+        let rated = r.segment_culled(&id, &seg, Cull::Pad(2.0));
+        assert_eq!(rated, rate().segment_at(&id, &seg), "diced as if in view");
+        assert!(rated > 1.0);
+        // The per-mesh path: the same box, padded, is in view.
+        let b = Aabb {
+            min: Vec3::new(11.0, -0.5, -10.5),
+            max: Vec3::new(12.0, 0.5, -9.5),
+        };
+        assert_eq!(r.sigma_culled(&id, &b, Cull::Pad(0.0)), 0.0);
+        assert!(r.sigma_culled(&id, &b, Cull::Pad(2.0)) > 0.0);
+    }
+
+    /// "No bound known": the frustum term is off, so nothing is out of view.
+    #[test]
+    fn no_bound_turns_the_frustum_off() {
+        let r = ScreenRate {
+            frustum: Some(frustum()),
+            ..rate()
+        };
+        let behind = GMat4::from_translation(Vec3::new(0.0, 0.0, 3.0));
+        let seg = [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0]];
+        assert_eq!(
+            r.segment_culled(&behind, &seg, Cull::Off),
+            rate().segment_at(&behind, &seg)
+        );
+        let b = unit_box_at(Vec3::ZERO);
+        assert_eq!(
+            r.sigma_culled(&behind, &b, Cull::Off),
+            rate().sigma(&behind, &b)
+        );
+    }
+
+    /// An undisplaced mesh (`Pad(0)`) is rated exactly as before, bit for bit.
+    #[test]
+    fn a_zero_pad_keeps_every_rate() {
+        let r = ScreenRate {
+            frustum: Some(frustum()),
+            ..rate()
+        };
+        for k in 0..200 {
+            let f = k as f32 * 0.731;
+            let xf = GMat4::from_scale_rotation_translation(
+                Vec3::splat(0.5 + f.fract()),
+                Quat::from_rotation_y(f),
+                Vec3::new(f.sin() * 12.0, f.cos() * 3.0, -f % 15.0),
+            );
+            let seg = [[-0.0, 0.0, -0.0], [0.3, f.fract(), -0.0]];
+            assert_eq!(
+                r.segment_culled(&xf, &seg, Cull::Pad(0.0)).to_bits(),
+                r.segment_at(&xf, &seg).to_bits()
+            );
+        }
     }
 
     /// A unit cube centred `z` units in front of the camera.

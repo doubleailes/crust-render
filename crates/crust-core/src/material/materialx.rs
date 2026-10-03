@@ -80,6 +80,68 @@ struct Presence {
     slot: u32,
 }
 
+/// A material's MaterialX displacement, as the import's displacement pass
+/// evaluates it at each mesh vertex: its own slice of the program, holding
+/// only what the `displacement` node's `displacement` and `scale` depend on,
+/// run (or JIT-compiled) like [`Presence`]. The offset is their product.
+///
+/// It runs at vertices, not hits, so the context is built from the vertex:
+/// the owner corner's `uv` and footprint, the **local-space** position and
+/// normal (MaterialX displacement is in object space), no tangent, and a
+/// view straight down the normal — a view-dependent graph has no meaningful
+/// value here.
+pub struct MtlxDisplacement {
+    program: Program,
+    #[cfg(feature = "jit")]
+    jit: Option<crust_jit::JitProgram>,
+    roots: crust_mtlx::DisplacementRoots,
+}
+
+impl MtlxDisplacement {
+    fn eval_with(&self, ctx: &crate::VertexCtx, use_jit: bool) -> f32 {
+        let shade = ShadeCtx {
+            uv: ctx.uv.map_or((0.0, 0.0), |[u, v]| (u, v)),
+            normal: ctx.normal,
+            tangent: Vec3A::ZERO,
+            view: ctx.normal,
+            position: ctx.position,
+            uv_width: ctx.uv_width,
+        };
+        let _ = use_jit;
+        SLOTS.with(|cell| {
+            let mut slots = cell.borrow_mut();
+            match () {
+                #[cfg(feature = "jit")]
+                () if use_jit && self.jit.is_some() => {
+                    self.jit.as_ref().expect("checked").eval(&shade, &mut slots)
+                }
+                () => self.program.eval(&shade, &mut slots),
+            }
+            slots[self.roots.value as usize].x() * slots[self.roots.scale as usize].x()
+        })
+    }
+
+    /// The offset on the interpreter, whatever the JIT — the reference the
+    /// JIT is pinned against.
+    pub fn eval_interpreted(&self, ctx: &crate::VertexCtx) -> f32 {
+        self.eval_with(ctx, false)
+    }
+
+    /// Whether a JIT build backs this program.
+    pub fn is_jit(&self) -> bool {
+        #[cfg(feature = "jit")]
+        return self.jit.is_some();
+        #[cfg(not(feature = "jit"))]
+        false
+    }
+}
+
+impl crate::VertexField for MtlxDisplacement {
+    fn eval(&self, ctx: &crate::VertexCtx) -> f32 {
+        self.eval_with(ctx, true)
+    }
+}
+
 impl std::fmt::Debug for MtlxMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -326,6 +388,8 @@ pub struct Loaded {
     pub reported: Vec<String>,
     /// How many `image` nodes resolved to a real texture.
     pub textures: usize,
+    /// The material's scalar displacement, when it authors one.
+    pub displacement: Option<std::sync::Arc<MtlxDisplacement>>,
 }
 
 /// Is the MaterialX program optimiser on? `CRUST_MTLX_OPT=0` keeps the
@@ -369,6 +433,13 @@ pub fn load(
             c.root_name
         )));
     }
+    // Sliced out before the surface program is optimised, which prunes it:
+    // shading a hit never runs the displacement's ops. Not built at all under
+    // `CRUST_DISPLACE=0`, where nothing would read it.
+    let displacement = crate::config()
+        .displace
+        .then(|| c.displacement_program(optimize_enabled()))
+        .flatten();
     if optimize_enabled() {
         c.optimize();
     }
@@ -402,6 +473,14 @@ pub fn load(
             slot,
         }
     });
+    let displacement = displacement.map(|(program, roots)| {
+        std::sync::Arc::new(MtlxDisplacement {
+            #[cfg(feature = "jit")]
+            jit: jit_of(&program),
+            program,
+            roots,
+        })
+    });
     let reported: Vec<String> = c.closures.reported.iter().cloned().collect();
     let material = MtlxMaterial {
         #[cfg(feature = "jit")]
@@ -418,6 +497,7 @@ pub fn load(
         unsupported: c.unsupported,
         reported,
         textures: c.textures,
+        displacement,
     })
 }
 

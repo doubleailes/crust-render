@@ -874,7 +874,11 @@ impl AssetLoader for FileAssets {
         loaded.map(std::sync::Arc::new)
     }
 
-    fn load_ptex(&self, path: &Path) -> Option<std::sync::Arc<dyn PtexTexture>> {
+    fn load_ptex(
+        &self,
+        path: &Path,
+        space: crust_core::ColorSpace,
+    ) -> Option<std::sync::Arc<dyn PtexTexture>> {
         // A/B switch, in the spirit of CRUST_MESH_BAKE: decline every texture
         // so the same scene renders on its constant `baseColor` fallback. That
         // is how you tell "the Ptex lookup is wrong" from "the material or the
@@ -914,7 +918,7 @@ impl AssetLoader for FileAssets {
             );
         }
         if self.ptex_streaming && room {
-            match PtexStream::open_config(path, &self.config) {
+            match PtexStream::open_config_in(path, space, &self.config) {
                 Ok(tex) => {
                     // Admission. Opening read headers only, so this costs a
                     // seek and answers exactly: a texture that would preload
@@ -985,10 +989,10 @@ impl AssetLoader for FileAssets {
                 }
             }
         }
-        match PtexColor::open_with(path, self.config.ptex_mip, self.preload_max_log2()) {
+        match PtexColor::open_in(path, space, self.config.ptex_mip, self.preload_max_log2()) {
             Ok(tex) => {
                 debug!(
-                    "Loaded Ptex {} ({} faces, {:.1} MiB resident) in {:?}",
+                    "Loaded Ptex {} ({} faces, {:.1} MiB resident, {space:?}) in {:?}",
                     path.display(),
                     PtexTexture::num_faces(&tex),
                     tex.bytes() as f64 / (1024.0 * 1024.0),

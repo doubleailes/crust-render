@@ -34,8 +34,9 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
+use crate::ptex_texture::decode_ptex;
 use crate::read_channel;
-use crust_core::{PtexTexture, Vec3A};
+use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -327,6 +328,8 @@ pub struct PtexStream {
     /// `1 / one_value` for the sample type, folded in before the decode curve
     /// exactly as the preloading path folds it.
     scale: f32,
+    /// How the stored samples decode — gamma 2.2 for colour, raw for data.
+    space: ColorSpace,
     /// A triangle `.ptx` packs two triangles into each square of texels, so
     /// its reductions are symmetric by definition and the reader refuses an
     /// anisotropic one. Both axes therefore clamp together, as in `PtexColor`.
@@ -376,9 +379,19 @@ impl PtexStream {
 
     /// [`PtexStream::open`] with the budget and caps of `config`.
     pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, AssetError> {
+        PtexStream::open_config_in(path, ColorSpace::Gamma22, config)
+    }
+
+    /// [`PtexStream::open_config`], decoding the stored samples as `space`.
+    pub fn open_config_in(
+        path: &Path,
+        space: ColorSpace,
+        config: &crust_core::Config,
+    ) -> Result<Self, AssetError> {
         let total = budget_bytes(config);
-        PtexStream::open_with(
+        PtexStream::open_in(
             path,
+            space,
             total,
             micro_slot_max(total),
             config.ptex_max_log2,
@@ -394,8 +407,22 @@ impl PtexStream {
     /// is policy for the same reason the budget is — see [`micro_slot_max`],
     /// which derives the render-wide default. A test passes it directly so it
     /// can drive the case that matters: a tile larger than what may be kept.
+    ///
+    /// Decodes as colour (gamma 2.2); [`PtexStream::open_in`] takes the space.
     pub fn open_with(
         path: &Path,
+        budget_bytes: usize,
+        micro_max: usize,
+        cap: Option<i8>,
+        mip: bool,
+    ) -> Result<Self, AssetError> {
+        PtexStream::open_in(path, ColorSpace::Gamma22, budget_bytes, micro_max, cap, mip)
+    }
+
+    /// [`PtexStream::open_with`], decoding the stored samples as `space`.
+    pub fn open_in(
+        path: &Path,
+        space: ColorSpace,
         budget_bytes: usize,
         micro_max: usize,
         cap: Option<i8>,
@@ -417,7 +444,7 @@ impl PtexStream {
         let lut = (dt == ptex::DataType::UInt8).then(|| {
             let mut t = Box::new([0.0f32; 256]);
             for (i, e) in t.iter_mut().enumerate() {
-                *e = decode_sample(i as f32, scale);
+                *e = decode_sample(i as f32, scale, space);
             }
             t
         });
@@ -428,6 +455,7 @@ impl PtexStream {
             n_chan,
             dt,
             scale,
+            space,
             triangle: reader.mesh_type() == ptex::MeshType::Triangle,
             lut,
             cap,
@@ -475,11 +503,13 @@ impl PtexStream {
     ///   so `level_count` is 1 throughout. Degenerate, but it costs one pass
     ///   over headers already parsed to say so rather than preload a texture
     ///   that has nothing to get wrong.
+    /// - The texture is read raw (a displacement map): the file's encoding
+    ///   *is* the linear value, so its own reduction is the right one.
     ///
     /// Anything else reads a level the file reduced in its own encoding, and
     /// under the default policy is preloaded instead — see [`MipSpace`].
     pub fn chain_is_exact(&self) -> bool {
-        if !self.mip {
+        if !self.mip || matches!(self.space, ColorSpace::Raw | ColorSpace::Auto) {
             return true;
         }
         self.reader
@@ -651,7 +681,11 @@ impl PtexStream {
             let c = if ch < self.n_chan { ch } else { 0 };
             out[ch] = match &self.lut {
                 Some(t) => t[src[c] as usize],
-                None => decode_sample(read_channel(&src[c * dsize..], self.dt), self.scale),
+                None => decode_sample(
+                    read_channel(&src[c * dsize..], self.dt),
+                    self.scale,
+                    self.space,
+                ),
             };
         }
         out
@@ -724,15 +758,13 @@ impl MipSource for StreamFace<'_> {
     }
 }
 
-/// One raw sample, scaled and decoded to linear light.
+/// One raw sample, scaled and decoded as `space` (see [`decode_ptex`]).
 ///
-/// Ptex colour is display-encoded: the island's shading network gammas it
-/// (`PxrColorCorrect`) and the GL path declares `sourceColorSpace = "sRGB"`.
-/// Both mean decode by 2.2. Written once, called from the streaming decode
-/// and from the table that memoises it, so the two cannot drift.
+/// Written once, called from the streaming decode and from the table that
+/// memoises it, so the two cannot drift.
 #[inline]
-fn decode_sample(raw: f32, scale: f32) -> f32 {
-    (raw * scale).max(0.0).powf(2.2)
+fn decode_sample(raw: f32, scale: f32, space: ColorSpace) -> f32 {
+    decode_ptex(raw * scale, space)
 }
 
 impl PtexTexture for PtexStream {
@@ -821,11 +853,14 @@ mod tests {
         // that test a tolerance check without saying so.
         let scale = ptex::DataType::UInt8.one_value_inv();
         for i in 0..256u32 {
-            let table = decode_sample(i as f32, scale);
+            let table = decode_sample(i as f32, scale, ColorSpace::Gamma22);
             let scalar = (read_channel(&[i as u8], ptex::DataType::UInt8) * scale)
                 .max(0.0)
                 .powf(2.2);
             assert_eq!(table.to_bits(), scalar.to_bits(), "entry {i}");
+            // Raw is the scaled sample itself: no curve, no clamp.
+            let raw = decode_sample(i as f32, scale, ColorSpace::Raw);
+            assert_eq!(raw.to_bits(), (i as f32 * scale).to_bits(), "raw entry {i}");
         }
     }
 
