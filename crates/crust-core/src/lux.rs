@@ -482,7 +482,7 @@ impl IesProfile {
     }
 
     /// The profile's mean intensity over the (hemi)sphere it covers — what
-    /// `inputs:shaping:ies:normalize` divides by. See [`profile_power`].
+    /// `inputs:shaping:ies:normalize` divides by. See `profile_power`.
     pub fn power(&self) -> f32 {
         self.power
     }

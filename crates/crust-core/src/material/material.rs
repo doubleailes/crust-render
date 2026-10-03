@@ -153,7 +153,7 @@ pub trait Material: Send + Sync {
     }
 
     /// The per-face (Ptex) texture this material samples, if any — i.e.
-    /// whether it reads [`HitRecord::face_id`] and `face_uv`.
+    /// whether it reads [`HitRecord::face`].
     ///
     /// Resolving a triangle hit back to its source polygon needs a side table
     /// as large as the triangle list, so the importer builds one only for

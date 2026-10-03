@@ -22,7 +22,7 @@
 //! ported in [`mx`]): its Fresnel models, Turquin energy compensation on the
 //! microfacet lobes, EON / Oren–Nayar / Burley diffuse and Imageworks sheen.
 //! The one table that is not MaterialX's is the dielectric reflection
-//! throughput — BSDL's tabulated filter ([`bsdl_tables`]), what NVIDIA
+//! throughput — BSDL's tabulated filter (`bsdl_tables`), what NVIDIA
 //! Typhoon uses by default.
 
 mod bsdl_tables;

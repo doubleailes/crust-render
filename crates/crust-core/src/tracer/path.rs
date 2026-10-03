@@ -84,6 +84,10 @@ pub fn ray_color(
     )
 }
 
+// `inline(always)`, as is `escaped_emission`: each is called once per
+// `trace_path` instance, and once the integrator was monomorphised on the
+// profiler switch LLVM stopped inlining them into either copy — +1.1%
+// instructions on cornellbox with profiling off.
 /// Choose the bounce direction and the pdf its contribution is divided by.
 ///
 /// With guiding this is one-sample MIS between the guiding distribution and
@@ -95,19 +99,6 @@ pub fn ray_color(
 /// guide can never produce: they keep their placeholder pdf, are never mixed
 /// with a continuous density, and their value is divided by `1-α` to
 /// compensate for the coin reducing the delta lobe's selection probability.
-/// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
-/// footprint to zero, which makes every texture point-sample its finest level
-/// — the A/B that separates "the mip pyramids changed the image" from "the
-/// footprints did". Consulted per camera ray, so it reads the parsed
-/// [`crate::config()`], never the environment.
-pub(super) fn ray_cones_enabled() -> bool {
-    crate::config().ray_cones
-}
-
-// `inline(always)`, as is `escaped_emission`: each is called once per
-// `trace_path` instance, and once the integrator was monomorphised on the
-// profiler switch LLVM stopped inlining them into either copy — +1.1%
-// instructions on cornellbox with profiling off.
 #[inline(always)]
 fn sample_bounce_direction(
     r: &Ray,

@@ -4,7 +4,7 @@
 //! and the probes all name used to be parsed by each of them — the importer
 //! by an inline `match`, the CLI through mirror `clap` enums with a `From`
 //! into the engine's, and the probes by hand again. Each engine enum now
-//! carries its own table ([`named!`]), which gives it `FromStr` and `Display`
+//! carries its own table (`named!`), which gives it `FromStr` and `Display`
 //! and hands the CLI the list it builds `--help` from, so a name exists in
 //! exactly one place.
 

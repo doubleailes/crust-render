@@ -249,7 +249,7 @@ impl RenderSettings {
     /// its largest channel, scaling the colour down whole so the hue
     /// survives. Defaults to [`DEFAULT_INDIRECT_CLAMP`]; `0`, a negative or a
     /// non-finite value disables it, which is the unbiased estimator. See
-    /// [`clamp_indirect`](super::path::clamp_indirect) for what counts as indirect.
+    /// `clamp_indirect` (in `tracer/path.rs`) for what counts as indirect.
     ///
     /// Biased on purpose — energy is removed exactly where it is rare and
     /// bright — and the standard trade in production renderers (Cycles'

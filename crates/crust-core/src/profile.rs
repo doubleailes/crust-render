@@ -1,6 +1,7 @@
-//! Render profile: where the *render* spends its time, section by section.
+//! Render profile: where the *render* spends its time, section by section —
+//! the opt-in `--profile`, after Guerilla Render's "Render Profile".
 //!
-//! [`crate::stats`] times the coarse phases of a run — parse, build, render,
+//! `crate::stats` times the coarse phases of a run — parse, build, render,
 //! write — with one `Instant` each, which says the render took 38 s but not
 //! whether that was ray traversal, shading, texture lookups or light
 //! sampling. This module answers that, after Guerilla Render's "Render

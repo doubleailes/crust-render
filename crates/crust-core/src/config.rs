@@ -22,36 +22,6 @@ use std::sync::LazyLock;
 
 use tracing::warn;
 
-/// Which mip chain a streamed Ptex texture is allowed to read
-/// (`CRUST_PTEX_STREAM_MIPSPACE`).
-///
-/// **The chain is where the two backends part company, and the project's own
-/// standard for that is refusal rather than a footnote.** A `.tx` records
-/// the colour space its levels were reduced in (`crust:mipspace`) and a
-/// mismatch is refused outright, for the reason the mismatch is dangerous:
-/// level 0 stays perfectly correct and every coarser level is wrong, so it
-/// shows up only under minification and looks exactly like a filtering bug.
-///
-/// A `.ptx` has no such marker and needs none — the answer is known. Crust
-/// binds Ptex colour as display-encoded and decodes it by 2.2, while a
-/// `.ptx`'s stored levels were reduced in the file's own encoding. That is the
-/// mismatch, always, so the default is [`PtexMipSpace::Linear`]: a texture
-/// that would read a curve-decoded chain is declined and preloaded, where the
-/// preloading backend builds the pyramid in linear light from the decoded
-/// base.
-///
-/// [`PtexMipSpace::File`] is the opt-in that takes the file's chain instead.
-/// It is what every production Ptex cache does and what the measured
-/// residency figures in `docs/ptex_streaming.md` were taken with, so it is a
-/// real mode and not a debug switch — but it is a render that trades a known
-/// bias (darker minified texture, up to 0.147 on the tiled fixture) for the
-/// memory, and that trade is the operator's to make rather than the default.
-///
-/// The cost of the default is worth stating plainly: with the mip pyramid on
-/// — which it is unless `CRUST_PTEX_MIP=0` — every mipmapped `.ptx` preloads,
-/// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
-/// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
-/// comes back.
 /// `CRUST_TRI_PACKETS`: which triangle packet layout a kernel scene commits
 /// with — see `crust_rt::PacketLayout`. Both answer every query
 /// bit-identically; `gathered` is the layout before indexed packets existed
@@ -99,6 +69,36 @@ impl From<TriPackets> for crust_rt::PacketLayout {
     }
 }
 
+/// Which mip chain a streamed Ptex texture is allowed to read
+/// (`CRUST_PTEX_STREAM_MIPSPACE`).
+///
+/// **The chain is where the two backends part company, and the project's own
+/// standard for that is refusal rather than a footnote.** A `.tx` records
+/// the colour space its levels were reduced in (`crust:mipspace`) and a
+/// mismatch is refused outright, for the reason the mismatch is dangerous:
+/// level 0 stays perfectly correct and every coarser level is wrong, so it
+/// shows up only under minification and looks exactly like a filtering bug.
+///
+/// A `.ptx` has no such marker and needs none — the answer is known. Crust
+/// binds Ptex colour as display-encoded and decodes it by 2.2, while a
+/// `.ptx`'s stored levels were reduced in the file's own encoding. That is the
+/// mismatch, always, so the default is [`PtexMipSpace::Linear`]: a texture
+/// that would read a curve-decoded chain is declined and preloaded, where the
+/// preloading backend builds the pyramid in linear light from the decoded
+/// base.
+///
+/// [`PtexMipSpace::File`] is the opt-in that takes the file's chain instead.
+/// It is what every production Ptex cache does and what the measured
+/// residency figures in `docs/ptex_streaming.md` were taken with, so it is a
+/// real mode and not a debug switch — but it is a render that trades a known
+/// bias (darker minified texture, up to 0.147 on the tiled fixture) for the
+/// memory, and that trade is the operator's to make rather than the default.
+///
+/// The cost of the default is worth stating plainly: with the mip pyramid on
+/// — which it is unless `CRUST_PTEX_MIP=0` — every mipmapped `.ptx` preloads,
+/// so `CRUST_PTEX_STREAM=1` alone buys nothing on a normal render.
+/// `CRUST_PTEX_STREAM_MIPSPACE=file` is how the island's 5.98 -> 0.61 GiB
+/// comes back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PtexMipSpace {
     /// Refuse a chain reduced in the file's encoding; preload such a texture.

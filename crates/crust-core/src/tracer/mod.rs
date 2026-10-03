@@ -17,7 +17,7 @@ mod path;
 pub(crate) use path::{cutout_through, shadow_t_max};
 mod settings;
 
-use path::{K_CAMERA, K_TIME, ray_cones_enabled, trace_path};
+use path::{K_CAMERA, K_TIME, trace_path};
 
 pub use path::ray_color;
 pub use settings::{
@@ -1095,6 +1095,15 @@ fn generate_tiles(image_width: usize, image_height: usize, tile_size: usize) -> 
         }
     }
     tiles
+}
+
+/// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
+/// footprint to zero, which makes every texture point-sample its finest level
+/// — the A/B that separates "the mip pyramids changed the image" from "the
+/// footprints did". Consulted per camera ray, so it reads the parsed
+/// [`crate::config()`], never the environment.
+fn ray_cones_enabled() -> bool {
+    crate::config().ray_cones
 }
 
 #[cfg(test)]

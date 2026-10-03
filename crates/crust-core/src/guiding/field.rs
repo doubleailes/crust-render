@@ -98,7 +98,7 @@ impl GuidingField {
 
     /// Draw a world-space direction from the local guiding distribution with
     /// its solid-angle pdf. `None` while the local distribution is untrained.
-    /// `seed` is a single 2D QMC domain draw (see [`crate::guiding::DTree::sample`]).
+    /// `seed` is a single 2D QMC domain draw (see `DTree::sample`).
     #[must_use]
     pub fn sample(&self, pos: Vec3A, seed: [f32; 2]) -> Option<(Vec3A, f32)> {
         let (canonical, pdf) = self.tree.dtree_at(pos).sample(seed)?;

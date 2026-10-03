@@ -20,7 +20,7 @@ pub enum LightSelection {
     /// The default: by power (Shirley et al. 1996; pbrt-v4's
     /// `PowerLightSampler`), made defensive. Lights at infinity keep their
     /// uniform share, since they have no comparable power ([`Light::power`]).
-    /// The finite lights split the rest [`DEFENSIVE_SHARE`] evenly and the
+    /// The finite lights split the rest `DEFENSIVE_SHARE` evenly and the
     /// remainder in proportion to power, so no light falls below half its
     /// uniform share — power is blind to distance and visibility, and the
     /// even half is what bounds the cost where that blindness is wrong. It
@@ -235,7 +235,7 @@ impl LightList {
     ///
     /// [`LightSelection::Learned`] builds the power table here; the learned
     /// part needs the scene and is added by the renderer
-    /// ([`LightList::set_cache`]).
+    /// (`LightList::set_cache`).
     pub fn select_by(&mut self, selection: LightSelection) {
         self.pmf.clear();
         self.cdf.clear();
@@ -367,9 +367,10 @@ impl LightList {
     }
 
     /// Finds the light whose scene geometry has world id `geom_id`, with its
-    /// selection probability. Used by the integrator to attribute a
-    /// bounce-hit emissive surface to its light for MIS; emissive geometry
-    /// with no light-list entry returns `None`.
+    /// selection probability: the global-selection, by-reference form of
+    /// [`LightList::find_index_by_geom_at`], which is what the integrator uses
+    /// to attribute a bounce-hit emissive surface to its light for MIS.
+    /// Emissive geometry with no light-list entry returns `None`.
     pub fn find_by_geom(&self, geom_id: u32) -> Option<(&LightKind, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((&self.lights[index], self.pmf(index)))
