@@ -26,110 +26,15 @@
 //! bounces, and there are more of them so the touched working set is large
 //! too. Building takes tens of seconds and a few GiB.
 
-use crust_rt::{CommitOptions, Geometry, PacketLayout, Ray, Scene, SceneBuilder};
+#[path = "../benches/fixtures/mod.rs"]
+mod fixtures;
+
+use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
+use fixtures::{in_cube, instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere};
 use glam::{Affine3A, Vec3A};
+use openqmc::pcg::Rng;
 use std::sync::Arc;
 use std::time::Instant;
-
-fn uv_sphere(center: Vec3A, radius: f32, segs: usize, rings: usize) -> Geometry {
-    let mut vertices = Vec::with_capacity((segs + 1) * (rings + 1));
-    for r in 0..=rings {
-        let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
-        for s in 0..=segs {
-            let theta = (s as f32 / segs as f32) * std::f32::consts::TAU;
-            vertices.push(
-                center
-                    + radius
-                        * Vec3A::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()),
-            );
-        }
-    }
-    let mut indices = Vec::with_capacity(2 * segs * rings);
-    let row = segs + 1;
-    for r in 0..rings {
-        for s in 0..segs {
-            let a = (r * row + s) as u32;
-            let b = (r * row + s + 1) as u32;
-            let c = ((r + 1) * row + s + 1) as u32;
-            let d = ((r + 1) * row + s) as u32;
-            indices.push([a, b, c]);
-            indices.push([a, c, d]);
-        }
-    }
-    Geometry::TriangleMesh {
-        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
-        indices,
-        normals: None,
-    }
-}
-
-fn triangle_scene() -> Scene {
-    let mut b = SceneBuilder::new();
-    for x in -1..=1 {
-        for y in -1..=1 {
-            for z in -1..=1 {
-                b.attach(uv_sphere(
-                    Vec3A::new(x as f32, y as f32, z as f32) * 2.5,
-                    1.0,
-                    40,
-                    20,
-                ));
-            }
-        }
-    }
-    commit(b)
-}
-
-fn sphere_grid_scene() -> Scene {
-    let mut b = SceneBuilder::new();
-    for x in 0..12 {
-        for y in 0..12 {
-            for z in 0..12 {
-                b.attach(Geometry::Sphere {
-                    center: Vec3A::new(x as f32, y as f32, z as f32) * 2.0 - Vec3A::splat(12.0),
-                    radius: 0.6,
-                });
-            }
-        }
-    }
-    commit(b)
-}
-
-fn instance_scene() -> Scene {
-    let mut inner = SceneBuilder::new();
-    inner.attach(uv_sphere(Vec3A::ZERO, 1.0, 24, 12));
-    let inner = Arc::new(commit(inner));
-    let mut b = SceneBuilder::new();
-    for x in -2..=2 {
-        for y in -2..=2 {
-            for z in -2..=2 {
-                b.attach(Geometry::Instance {
-                    scene: Arc::clone(&inner),
-                    transform: Affine3A::from_translation(
-                        glam::Vec3::new(x as f32, y as f32, z as f32) * 2.5,
-                    ),
-                    transform_end: None,
-                });
-            }
-        }
-    }
-    commit(b)
-}
-
-/// A tiny deterministic generator for the large scenes (the same LCG as
-/// [`ray_batch`], seeded differently).
-struct Lcg(u32);
-
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (self.0 >> 8) as f32 / (1u32 << 24) as f32
-    }
-
-    fn in_cube(&mut self, half: f32) -> Vec3A {
-        Vec3A::new(self.next() - 0.5, self.next() - 0.5, self.next() - 0.5) * (2.0 * half)
-    }
-}
 
 /// Half-extent of the large scenes' cube.
 const LARGE_HALF: f32 = 50.0;
@@ -142,13 +47,13 @@ fn soup_scene(n: usize) -> Scene {
     let side = 2.0 * LARGE_HALF;
     let area = 8.0 * side * side / n as f32;
     let edge = (2.0 * area).sqrt();
-    let mut rng = Lcg(0x9E37_79B9);
+    let mut rng = Rng::new(0x9E37_79B9);
     let mut vertices = Vec::with_capacity(3 * n);
     let mut indices = Vec::with_capacity(n);
     for i in 0..n {
-        let c = rng.in_cube(LARGE_HALF);
+        let c = in_cube(&mut rng, LARGE_HALF);
         for _ in 0..3 {
-            vertices.push(c + rng.in_cube(0.5 * edge));
+            vertices.push(c + in_cube(&mut rng, 0.5 * edge));
         }
         let b = 3 * i as u32;
         indices.push([b, b + 1, b + 2]);
@@ -177,15 +82,15 @@ fn instance_field_scene(count: usize) -> Scene {
     let side = 2.0 * LARGE_HALF;
     // Cross-section pi r^2 per instance: mean free path V / (count pi r^2).
     let radius = (4.0 * side * side / (count as f32 * std::f32::consts::PI)).sqrt();
-    let mut rng = Lcg(0x85EB_CA6B);
+    let mut rng = Rng::new(0x85EB_CA6B);
     let mut b = SceneBuilder::new();
     for i in 0..count {
-        let axis = (rng.in_cube(1.0) + Vec3A::splat(1e-3)).normalize();
-        let scale = radius * (0.5 + rng.next());
+        let axis = (in_cube(&mut rng, 1.0) + Vec3A::splat(1e-3)).normalize();
+        let scale = radius * (0.5 + rng.next_f32());
         let transform = Affine3A::from_scale_rotation_translation(
             glam::Vec3::splat(scale),
-            glam::Quat::from_axis_angle(axis.into(), rng.next() * std::f32::consts::TAU),
-            rng.in_cube(LARGE_HALF).into(),
+            glam::Quat::from_axis_angle(axis.into(), rng.next_f32() * std::f32::consts::TAU),
+            in_cube(&mut rng, LARGE_HALF).into(),
         );
         b.attach(Geometry::Instance {
             scene: Arc::clone(&protos[i % protos.len()]),
@@ -194,21 +99,6 @@ fn instance_field_scene(count: usize) -> Scene {
         });
     }
     commit(b)
-}
-
-fn ray_batch(count: usize, extent: f32) -> Vec<Ray> {
-    let mut state = 0x2545_F491u32;
-    let mut next = || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (state >> 8) as f32 / (1u32 << 24) as f32
-    };
-    (0..count)
-        .map(|_| {
-            let origin = Vec3A::new(next() - 0.5, next() - 0.5, next() - 0.5) * (4.0 * extent);
-            let target = Vec3A::new(next() - 0.5, next() - 0.5, next() - 0.5) * extent;
-            Ray::new(origin, (target - origin).normalize())
-        })
-        .collect()
 }
 
 const RAYS: usize = 4096;
@@ -284,11 +174,11 @@ fn commit(b: SceneBuilder) -> Scene {
 }
 
 fn main() {
-    let tri = triangle_scene();
+    let tri = triangle_scene(commit);
     println!("tri_spheres: {} triangles", tri.primitive_count());
     probe("tri_spheres", &tri, 6.0);
-    probe("sphere_grid", &sphere_grid_scene(), 14.0);
-    probe("instances", &instance_scene(), 7.0);
+    probe("sphere_grid", &sphere_grid_scene(commit), 14.0);
+    probe("instances", &instance_scene(commit), 7.0);
 
     let mut args = std::env::args().skip(1).peekable();
     if args.peek().map(String::as_str) == Some("--layout") {
