@@ -24,6 +24,7 @@
 //! a concurrent-cache dependency precisely so this would still hold.
 #![forbid(unsafe_code)]
 
+mod budget;
 mod environment;
 mod error;
 mod ies;
@@ -31,26 +32,21 @@ mod image_file;
 mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
-pub mod tiled;
+mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb, read_rgb_image};
 pub use error::AssetError;
 pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
-    DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
-    MICRO_SLOTS as PTEX_MICRO_SLOTS, MipSpace as PtexMipSpace, PtexStream,
-    StreamStats as PtexStreamStats, cache_budget_from_env as ptex_cache_budget_from_env,
-    micro_reserve as ptex_micro_reserve, micro_retained_bytes as ptex_micro_retained_bytes,
-    micro_slot_max as ptex_micro_slot_max, micro_thread_bytes as ptex_micro_thread_bytes,
-    micro_threads as ptex_micro_threads, mip_space_from_env as ptex_mip_space_from_env,
-    stream_enabled as ptex_stream_enabled,
-    stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
+    DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB, MICRO_SLOTS as PTEX_MICRO_SLOTS,
+    PtexStream, micro_reserve as ptex_micro_reserve,
+    micro_retained_bytes as ptex_micro_retained_bytes, micro_slot_max as ptex_micro_slot_max,
+    micro_thread_bytes as ptex_micro_thread_bytes, micro_threads as ptex_micro_threads,
 };
-pub use ptex_texture::{
-    DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
-};
-pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
+pub use ptex_texture::{DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, read_channel};
+pub use tiled::{MadeTx, TxFormat, make_tx, make_tx_atomic};
+pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture, existing_tiles};
 
 use crust_core::{
     AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
@@ -300,7 +296,7 @@ impl FileAssets {
     /// process-global the rest of the program is reading.
     pub fn with_config(config: crust_core::Config) -> FileAssets {
         let streaming = config.tex_stream;
-        let budget = tiled::TileCache::budget_of(&config);
+        let budget = budget::tex_cache_bytes(&config);
         // DEBUG, not INFO: this is the default now, and a default render's
         // INFO lines are the four that do not scale with anything.
         if streaming {
@@ -315,7 +311,7 @@ impl FileAssets {
         if ptex_streaming {
             info!(
                 "Streaming Ptex with a {:.0} MiB cache",
-                ptex_stream::budget_bytes(&config) as f64 / (1024.0 * 1024.0)
+                budget::ptex_cache_bytes(&config) as f64 / (1024.0 * 1024.0)
             );
             // Said at construction rather than per texture, because under
             // the default policy it is the line that explains a render where
@@ -368,8 +364,8 @@ impl FileAssets {
     /// converted beside it (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's
     /// `autotx` does. The next render finds them current and converts nothing.
     ///
-    /// The conversion is [`tiled::make_tx_atomic`] with
-    /// [`tiled::TxFormat::FromSampleType`]: float sources keep `half` tiles,
+    /// The conversion is [`make_tx_atomic`] with
+    /// [`TxFormat::FromSampleType`]: float sources keep `half` tiles,
     /// 8-bit ones take `u8`, and the colour space recorded is the one the
     /// material binds with (`auto` resolved against the file). A tile that
     /// fails to convert — a read-only asset library, a full disk — sends that
@@ -398,24 +394,10 @@ impl FileAssets {
     /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
     /// disk, or the one image.
     fn tile_sources(path: &Path) -> Vec<std::path::PathBuf> {
-        let name = path.to_string_lossy();
-        if name.contains("<UDIM>") || name.contains("<UVTILE>") {
-            let mut tiles = Vec::new();
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    if let Some(p) =
-                        uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                        && p.exists()
-                    {
-                        tiles.push(p);
-                    }
-                }
-            }
-            tiles
-        } else if path.exists() {
-            vec![path.to_path_buf()]
-        } else {
-            Vec::new()
+        match existing_tiles(path) {
+            Some(tiles) => tiles.into_iter().map(|(_, p)| p).collect(),
+            None if path.exists() => vec![path.to_path_buf()],
+            None => Vec::new(),
         }
     }
 
@@ -587,7 +569,7 @@ impl FileAssets {
 
     /// The render's whole Ptex budget, `CRUST_PTEX_CACHE_MB`, in bytes.
     fn ptex_budget(&self) -> usize {
-        ptex_stream::budget_bytes(&self.config)
+        budget::ptex_cache_bytes(&self.config)
     }
 
     /// Streamed textures opened so far. Callers hold the lock.
@@ -712,11 +694,7 @@ impl FileAssets {
             .filter(|c| (c.as_path() == path) == (which == Candidates::Source));
         for candidate in candidates {
             let started = Instant::now();
-            let Some(tex) =
-                tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
-                    let name = candidate.to_string_lossy();
-                    uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                })
+            let Some(tex) = tiled::StreamingTexture::open(&candidate, space, self.cache.clone())
             else {
                 continue;
             };
@@ -923,7 +901,7 @@ impl AssetLoader for FileAssets {
                     // `DEFAULT_STREAM_MIN_MB` for the island distribution that
                     // makes this necessary rather than tidy.
                     let would = tex.preload_bytes(self.preload_max_log2());
-                    let floor = self.config.ptex_stream_min_mb * 1024 * 1024;
+                    let floor = budget::ptex_stream_min_bytes(&self.config);
                     if would < floor {
                         why = PreloadReason::TooSmall;
                         debug!(

@@ -312,6 +312,11 @@ fn probe_image(path: &str, box_: Option<(u32, u32, u32, u32)>) {
     println!("mean linear = {:.4}", lin / (3.0 * n));
 }
 
+/// The sRGB EOTF in `f64`, for averaging an image file's pixels.
+///
+/// Deliberately not `crust_assets::srgb_to_linear`: that one is `f32`, the
+/// renderer's decode, and differs from this in 254 of the 256 byte values (by
+/// up to 1.9e-7), so switching would change this probe's reported means.
 fn srgb_to_linear(c: f64) -> f64 {
     if c <= 0.04045 {
         c / 12.92

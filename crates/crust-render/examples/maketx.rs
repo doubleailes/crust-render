@@ -37,7 +37,7 @@
 //! A `<UDIM>` / `<UVTILE>` token converts the whole set, one `.tx` per tile,
 //! which is how the renderer expects to find them.
 
-use crust_assets::tiled::TxFormat;
+use crust_assets::TxFormat;
 use crust_core::ColorSpace;
 use std::path::{Path, PathBuf};
 
@@ -92,26 +92,15 @@ fn main() {
         );
     }
 
-    let mut jobs: Vec<PathBuf> = Vec::new();
-    if input.contains("<UDIM>") || input.contains("<UVTILE>") {
-        for v in 0..10u32 {
-            for u in 0..10u32 {
-                let name = input
-                    .replace("<UDIM>", &(1001 + u + 10 * v).to_string())
-                    .replace("<UVTILE>", &format!("u{}_v{}", u + 1, v + 1));
-                let p = PathBuf::from(&name);
-                if p.exists() {
-                    jobs.push(p);
-                }
-            }
-        }
-        if jobs.is_empty() {
+    // The renderer's own sweep, so this converts exactly the tiles it opens.
+    let jobs: Vec<PathBuf> = match crust_assets::existing_tiles(Path::new(&input)) {
+        Some(tiles) if tiles.is_empty() => {
             eprintln!("no tiles of {input} found on disk");
             std::process::exit(1);
         }
-    } else {
-        jobs.push(PathBuf::from(&input));
-    }
+        Some(tiles) => tiles.into_iter().map(|(_, p)| p).collect(),
+        None => vec![PathBuf::from(&input)],
+    };
 
     let mut total_in = 0u64;
     let mut total_out = 0u64;
@@ -152,14 +141,13 @@ fn main() {
 }
 
 /// One tile, through the same conversion `crust-render --auto-tx` runs
-/// (`crust_assets::tiled::make_tx`), written beside the source.
+/// (`crust_assets::make_tx`), written beside the source.
 fn convert(
     src: &Path,
     space: ColorSpace,
     format: TxFormat,
 ) -> Result<(PathBuf, &'static str, u64, u64), String> {
-    let made =
-        crust_assets::tiled::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
+    let made = crust_assets::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
     if made.clipped {
         eprintln!(
             "warning: {} holds values above 1.0 that a TIFF backing clips — \

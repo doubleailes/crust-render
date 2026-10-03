@@ -355,7 +355,7 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
     is the range and not a different lookup.
   - **Conversion is explicit, or opt-in automatic.** `examples/maketx` converts by
     hand, and `--auto-tx` converts on first use (Arnold's `autotx`). Both run one
-    conversion, `crust_assets::tiled::make_tx`. Automatic conversion stays behind a flag
+    conversion, `crust_assets::make_tx`. Automatic conversion stays behind a flag
     because a renderer that silently writes multi-gigabyte files next to a read-only
     asset library is a surprise nobody asked for.
   - **The microcache is keyed by cache as well as tile.** A `TileId`'s file index is

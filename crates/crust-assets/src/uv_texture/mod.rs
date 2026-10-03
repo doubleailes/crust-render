@@ -65,12 +65,12 @@ mod udim;
 use decode::{decode_exr_tile, decode_tile};
 use tile::{Texel, Tile};
 use udim::TileToken;
+pub use udim::existing_tiles;
 pub(crate) use udim::udim_number;
 
 use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
 
 pub(crate) use mip::{reduce_half, reduce_half_linear};
-pub(crate) use udim::expand_token;
 
 /// The decoded tiles, in whichever sample type the file warranted.
 enum Storage {
@@ -198,21 +198,10 @@ impl UvTexture {
             Ok::<_, AssetError>(tile)
         };
         if let Some(token) = token {
-            // Only tiles that exist on disk are opened, so a chart with holes
-            // costs nothing for the tiles it does not use. 10x10 covers the
-            // 1001..1100 range every DCC writes — and is what bounds the
-            // `<UVTILE>` sweep too, since the two tokens name the same grid.
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    let candidate = token.expand(&name, u, v);
-                    let p = Path::new(&candidate);
-                    if !p.exists() {
-                        continue;
-                    }
-                    match decode(p, udim_number(u, v)) {
-                        Ok(t) => tiles.push(t),
-                        Err(e) => warn!("{e} — skipping that UDIM tile"),
-                    }
+            for (number, p) in token.existing_tiles(&name) {
+                match decode(&p, number) {
+                    Ok(t) => tiles.push(t),
+                    Err(e) => warn!("{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {
@@ -266,18 +255,10 @@ impl UvTexture {
         let space = space.resolve_auto(false, 3);
         let mut tiles = Vec::new();
         if let Some(token) = token {
-            let name = path.to_string_lossy().into_owned();
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    let candidate = token.expand(&name, u, v);
-                    let p = Path::new(&candidate);
-                    if !p.exists() {
-                        continue;
-                    }
-                    match decode_exr_tile(p, udim_number(u, v), max_edge, space) {
-                        Ok(t) => tiles.push(t),
-                        Err(e) => warn!("{e} — skipping that UDIM tile"),
-                    }
+            for (number, p) in token.existing_tiles(&path.to_string_lossy()) {
+                match decode_exr_tile(&p, number, max_edge, space) {
+                    Ok(t) => tiles.push(t),
+                    Err(e) => warn!("{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {

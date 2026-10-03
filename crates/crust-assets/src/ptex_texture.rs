@@ -477,24 +477,17 @@ pub fn read_channel(src: &[u8], dt: ptex::DataType) -> f32 {
     }
 }
 
-/// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`], or
-/// [`DEFAULT_MAX_LOG2`].
-pub fn max_log2_from_env() -> i8 {
-    max_log2_from_env_opt().unwrap_or(DEFAULT_MAX_LOG2)
-}
-
 /// `CRUST_PTEX_MAX_LOG2` as parsed into [`crust_core::config()`] (validated
-/// there, to `0..=14`), or `None` when it is not set.
+/// there, to `0..=14`), or [`DEFAULT_MAX_LOG2`] when it is not set.
 ///
-/// The preloading path has no use for the distinction — an absent cap there
-/// means the default one, since preloading a production `.ptx` uncapped is
-/// what the cap exists to prevent. The streaming path does: it holds a cache
-/// rather than the texture, so *its* default is no cap at all, and only an
-/// explicitly authored ceiling should lower it. Reading the variable is
-/// still one function, so the validation and the warning cannot diverge
-/// between the two backends.
-pub fn max_log2_from_env_opt() -> Option<i8> {
-    crust_core::config().ptex_max_log2
+/// The preloading path's cap: an absent one means the default, since
+/// preloading a production `.ptx` uncapped is what the cap exists to prevent.
+/// The streaming path reads `ptex_max_log2` unwrapped instead — it holds a
+/// cache rather than the texture, so *its* default is no cap at all.
+pub fn max_log2_from_env() -> i8 {
+    crust_core::config()
+        .ptex_max_log2
+        .unwrap_or(DEFAULT_MAX_LOG2)
 }
 
 #[cfg(test)]
