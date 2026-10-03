@@ -37,7 +37,7 @@
 //! A `<UDIM>` / `<UVTILE>` token converts the whole set, one `.tx` per tile,
 //! which is how the renderer expects to find them.
 
-use crust_assets::tiled::TxFormat;
+use crust_assets::TxFormat;
 use crust_core::ColorSpace;
 use std::path::{Path, PathBuf};
 
@@ -141,14 +141,13 @@ fn main() {
 }
 
 /// One tile, through the same conversion `crust-render --auto-tx` runs
-/// (`crust_assets::tiled::make_tx`), written beside the source.
+/// (`crust_assets::make_tx`), written beside the source.
 fn convert(
     src: &Path,
     space: ColorSpace,
     format: TxFormat,
 ) -> Result<(PathBuf, &'static str, u64, u64), String> {
-    let made =
-        crust_assets::tiled::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
+    let made = crust_assets::make_tx_atomic(src, space, format).map_err(|e| e.to_string())?;
     if made.clipped {
         eprintln!(
             "warning: {} holds values above 1.0 that a TIFF backing clips — \

@@ -32,7 +32,7 @@ mod image_file;
 mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
-pub mod tiled;
+mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb, read_rgb_image};
@@ -40,15 +40,12 @@ pub use error::AssetError;
 pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
     DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB, MICRO_SLOTS as PTEX_MICRO_SLOTS,
-    MipSpace as PtexMipSpace, PtexStream, StreamStats as PtexStreamStats,
-    micro_reserve as ptex_micro_reserve, micro_retained_bytes as ptex_micro_retained_bytes,
-    micro_slot_max as ptex_micro_slot_max, micro_thread_bytes as ptex_micro_thread_bytes,
-    micro_threads as ptex_micro_threads, mip_space_from_env as ptex_mip_space_from_env,
-    stream_enabled as ptex_stream_enabled,
+    PtexStream, micro_reserve as ptex_micro_reserve,
+    micro_retained_bytes as ptex_micro_retained_bytes, micro_slot_max as ptex_micro_slot_max,
+    micro_thread_bytes as ptex_micro_thread_bytes, micro_threads as ptex_micro_threads,
 };
-pub use ptex_texture::{
-    DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
-};
+pub use ptex_texture::{DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, read_channel};
+pub use tiled::{MadeTx, TxFormat, make_tx, make_tx_atomic};
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture, existing_tiles};
 
 use crust_core::{
@@ -367,8 +364,8 @@ impl FileAssets {
     /// converted beside it (`foo.1001.exr` → `foo.1001.tx`), the way Arnold's
     /// `autotx` does. The next render finds them current and converts nothing.
     ///
-    /// The conversion is [`tiled::make_tx_atomic`] with
-    /// [`tiled::TxFormat::FromSampleType`]: float sources keep `half` tiles,
+    /// The conversion is [`make_tx_atomic`] with
+    /// [`TxFormat::FromSampleType`]: float sources keep `half` tiles,
     /// 8-bit ones take `u8`, and the colour space recorded is the one the
     /// material binds with (`auto` resolved against the file). A tile that
     /// fails to convert — a read-only asset library, a full disk — sends that

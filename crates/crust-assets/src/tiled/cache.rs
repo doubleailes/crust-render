@@ -206,10 +206,6 @@ impl TileData {
             TileKind::Half => self.bytes.len() / 2,
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 #[cfg(test)]
@@ -360,21 +356,6 @@ pub struct CacheCounters {
     pub total_bytes: u64,
 }
 
-impl CacheCounters {
-    pub fn is_empty(&self) -> bool {
-        self.micro_hits == 0 && self.hits == 0 && self.misses == 0
-    }
-
-    /// Fraction of lookups answered without touching the disk.
-    pub fn hit_rate(&self) -> f64 {
-        let total = self.micro_hits + self.hits + self.misses;
-        if total == 0 {
-            return 0.0;
-        }
-        (self.micro_hits + self.hits) as f64 / total as f64
-    }
-}
-
 /// One file's geometry plus the decoders that read it.
 struct FileSlot {
     file: TiledFile,
@@ -430,10 +411,6 @@ impl TileCache {
         }
     }
 
-    pub fn budget(&self) -> u64 {
-        self.budget
-    }
-
     pub fn resident(&self) -> u64 {
         self.resident.load(Ordering::Relaxed)
     }
@@ -448,11 +425,6 @@ impl TileCache {
             seen: Mutex::new(std::collections::HashSet::new()),
         }));
         id
-    }
-
-    pub fn file(&self, id: u32) -> Option<TiledFile> {
-        let files = lock(&self.files);
-        files.get(id as usize).map(|s| s.file.clone())
     }
 
     pub fn counters(&self) -> CacheCounters {

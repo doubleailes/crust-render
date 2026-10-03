@@ -39,11 +39,6 @@ use crust_core::{PtexTexture, Vec3A};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Is the streaming backend on? `CRUST_PTEX_STREAM=1` turns it on.
-pub fn stream_enabled() -> bool {
-    crust_core::config().ptex_stream
-}
-
 /// Default admission threshold: a texture streams only if **preloading** it
 /// would cost more than 8 MiB.
 ///
@@ -79,12 +74,6 @@ pub const DEFAULT_STREAM_MIN_MB: usize = crust_core::config::DEFAULT_PTEX_STREAM
 /// on [`crust_core::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
 /// into.
 pub use crust_core::PtexMipSpace as MipSpace;
-
-/// `CRUST_PTEX_STREAM_MIPSPACE` as parsed into [`crust_core::config()`]. See
-/// [`MipSpace`].
-pub fn mip_space_from_env() -> MipSpace {
-    crust_core::config().ptex_mip_space
-}
 
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
 /// of one texel.
