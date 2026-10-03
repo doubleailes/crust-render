@@ -403,14 +403,24 @@ pub(crate) fn subdivide(
 /// by where it happens to sit in the fan. Every sum is then normalized
 /// (zero-length sums fall back to +Y rather than yield NaNs; the kernel
 /// treats shading normals as directions only).
+///
+/// A malformed face — fewer than three corners, running past `indices`, or
+/// naming a point that does not exist — contributes nothing, the faces
+/// `triangulate` skips. Refined meshes never have one; an unvalidated cage
+/// handed to the displacement pass may.
 pub(crate) fn smooth_normals(verts: &[[f32; 3]], counts: &[i32], indices: &[i32]) -> Vec<[f32; 3]> {
     let at = |i: usize| Vec3A::from_array(verts[i]);
     let mut sums = vec![Vec3A::ZERO; verts.len()];
     let mut off = 0usize;
     for &fc in counts {
-        let fc = fc as usize;
-        let face = &indices[off..off + fc];
+        let fc = fc.max(0) as usize;
+        let Some(face) = indices.get(off..off + fc) else {
+            break;
+        };
         off += fc;
+        if fc < 3 || face.iter().any(|&i| i < 0 || i as usize >= verts.len()) {
+            continue;
+        }
         let v0 = at(face[0] as usize);
         let mut area = Vec3A::ZERO;
         for k in 1..fc - 1 {

@@ -160,8 +160,9 @@ impl ScreenRate {
     }
 
     /// [`ScreenRate::segment_at`] for a mesh displaced under `cull`: the
-    /// segment's box is grown by the displacement bound before the frustum
-    /// test, and a mesh with no bound is never culled.
+    /// segment's box is grown by the displacement bound for both the frustum
+    /// test and the nearest-point distance — displacement can bring it
+    /// closer — and a mesh with no bound is never culled.
     pub(super) fn segment_culled(&self, xf: &GMat4, points: &[[f32; 3]], cull: Cull) -> f32 {
         let Some(bounds) = Aabb::of_arrays(points) else {
             return 0.0;
@@ -169,8 +170,9 @@ impl ScreenRate {
         // A segment wholly out of view is split once. Its box is padded by its
         // own diagonal first, as MoonRay pads a face's, so the limit curve —
         // which strays off its chord — is not culled on the frustum's edge.
+        let displaced = cull.padded(&bounds);
         if let Some(f) = self.frustum
-            && let Some(displaced) = cull.padded(&bounds)
+            && let Some(displaced) = displaced
         {
             let world = displaced.transformed(xf);
             let pad = Vec3::splat((world.max - world.min).length());
@@ -182,7 +184,8 @@ impl ScreenRate {
                 return 0.0;
             }
         }
-        self.segment_with_sigma(self.sigma_unculled(xf, &bounds), points)
+        let near = displaced.unwrap_or(bounds);
+        self.segment_with_sigma(self.sigma_unculled(xf, &near), points)
     }
 
     /// [`ScreenRate::sigma`] without the frustum test, for a caller that has
@@ -436,7 +439,11 @@ mod tests {
             "out of view"
         );
         let rated = r.segment_culled(&id, &seg, Cull::Pad(2.0));
-        assert_eq!(rated, rate().segment_at(&id, &seg), "diced as if in view");
+        assert_eq!(
+            rated,
+            rate().segment_culled(&id, &seg, Cull::Pad(2.0)),
+            "diced as if in view"
+        );
         assert!(rated > 1.0);
         // The per-mesh path: the same box, padded, is in view.
         let b = Aabb {
@@ -445,6 +452,20 @@ mod tests {
         };
         assert_eq!(r.sigma_culled(&id, &b, Cull::Pad(0.0)), 0.0);
         assert!(r.sigma_culled(&id, &b, Cull::Pad(2.0)) > 0.0);
+    }
+
+    /// The rate is measured from the grown box too: a segment the
+    /// displacement can bring closer is diced for that nearer distance.
+    #[test]
+    fn a_displacement_bound_raises_the_rate_of_what_it_brings_closer() {
+        let id = GMat4::IDENTITY;
+        let seg = [[0.0, 0.0, -10.0], [0.25, 0.0, -10.0]];
+        let flat = rate().segment_culled(&id, &seg, Cull::Pad(0.0));
+        let near = rate().segment_culled(&id, &seg, Cull::Pad(5.0));
+        assert!(
+            near > 1.9 * flat,
+            "{near} at distance 5 against {flat} at 10"
+        );
     }
 
     /// "No bound known": the frustum term is off, so nothing is out of view.

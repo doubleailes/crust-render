@@ -299,7 +299,10 @@ fn preview_uv_input(
 /// `UsdUVTexture`, read through [`preview_uv_input`] exactly as a shading input
 /// is (channel, `scale`, `bias`, wrap), its file decoded raw unless
 /// `sourceColorSpace` says otherwise. A texture the host cannot load falls
-/// back to its constant, as a shading input does.
+/// back to its fallback, and a connection that is not a usable texture (no
+/// `inputs:file`, not a `UsdUVTexture`) to the input's own authored value, as
+/// a shading input does. The texture's primvar reader names the chart the
+/// mesh reads when the surface itself reads none.
 pub(super) fn preview_displacement(
     stage: &Stage,
     mat_path: &sdf::Path,
@@ -311,15 +314,26 @@ pub(super) fn preview_displacement(
         .value_producing_attributes(ProducerFilter::ShaderOutputsOnly)
         .ok()
         .is_some_and(|p| !p.is_empty());
+    let constant = |c: f32| {
+        (c != 0.0 && c.is_finite()).then(|| Displacement::new(DisplacementValue::Constant(c)))
+    };
     if textured {
-        let (uv, _varname) =
-            preview_uv_input(stage, mat_path, shader, "displacement", true, caches)?;
+        let Some((uv, varname)) =
+            preview_uv_input(stage, mat_path, shader, "displacement", true, caches)
+        else {
+            // Already warned about; the input keeps its own constant.
+            let own = input
+                .attribute()
+                .get_at::<sdf::Value>(eval_time())
+                .ok()
+                .flatten()
+                .and_then(|v| sdf_float4(&v))?;
+            return constant(own[0]);
+        };
         if uv.tex.is_none() {
-            let c = uv.scalar(uv.fallback);
-            return (c != 0.0 && c.is_finite())
-                .then(|| Displacement::new(DisplacementValue::Constant(c)));
+            return constant(uv.scalar(uv.fallback));
         }
-        return Some(Displacement::new(DisplacementValue::Uv(uv)));
+        return Some(Displacement::new(DisplacementValue::Uv(uv)).with_uv_primvar(varname));
     }
     let value = input
         .value_producing_attributes(ProducerFilter::Any)

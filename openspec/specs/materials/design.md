@@ -181,7 +181,8 @@
   - Unbound geometry → grey diffuse `OpenPBR`.
   - **Displacement is resolved beside the material, not inside it.** `resolve_bound`
     returns a `BoundMaterial { material, displacement }`, cached together per
-    `(epoch, path)`. A `Displacement` (`material/displacement.rs`) is consumed once, at
+    `(epoch, path)`; the displacement is resolved the first time a mesh asks, so a
+    material bound only to spheres or curves never opens its displacement maps. A `Displacement` (`material/displacement.rs`) is consumed once, at
     import, by the mesh displacement pass (`usd-scene-import` design record §
     Displacement), never per hit, so it is not a `Material` method and the
     `tests/resolve.rs` pins are untouched. Sources, first match wins: a `PxrDisplace`
@@ -462,7 +463,8 @@
     program, which then prunes the displacement's ops: shading a hit never runs them.
     `MtlxDisplacement` evaluates `value · scale` from a vertex `ShadeCtx`: the owner
     corner's `uv` and footprint, the **local** position and normal (MaterialX
-    displacement is object space), a zero tangent and `view = normal`. So `position`-,
+    displacement is object space), a zero tangent and a head-on viewer (`view = −normal`:
+    `view` points toward the surface). So `position`-,
     `normal`- and chart-driven graphs work, and view-dependent nodes have no meaningful
     value. A `vector3` input (vector displacement), or a `displacementshader` that is not
     a `displacement` node, is refused into `Closures::reported`, which the loader warns
