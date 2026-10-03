@@ -334,7 +334,16 @@ Refused with a warning that quotes the expression and the column:
 - RenderMan lobe tokens (`D1`, `U2`, …) and prefixes (`unoccluded`, `shadows`, …);
 - `B`: crust has no background event. A dome is a light, `L`.
 
-At most 64 different expressions per render.
+Limits, each refused with a warning when the scene loads:
+
+- at most 64 different expressions per render;
+- an expression whose repetitions unroll to more than 4096 events, such as nested bounds
+  `((.{32}){32}){32}`;
+- a set of expressions whose automaton would need more than 4096 states. A pattern like
+  `C.*<RD>.{16}[LO]` ("a diffuse event exactly 17 events before the end") doubles the
+  states with every bound; the compositing expressions above need a few dozen between them.
+
+A light tag that no expression names is ignored: that light counts as untagged.
 
 ### Cost
 

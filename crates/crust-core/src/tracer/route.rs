@@ -56,15 +56,26 @@ pub(crate) struct RouteCtx {
 impl RouteCtx {
     /// Compiles `expressions` against the lights' tags. `tags[i]` is light
     /// `i`'s tag.
+    ///
+    /// The importer compiles a render's expressions as it accepts them, so
+    /// this does not fail for an imported scene. A request built by hand
+    /// that does not compile is warned about, and its expressions route
+    /// nothing.
     pub(crate) fn new(expressions: &[String], tags: &[Option<&str>], albedo: bool) -> RouteCtx {
-        let names: Vec<&str> = tags.iter().flatten().copied().collect();
-        let lpe = (!expressions.is_empty()).then(|| {
+        let lpe = if expressions.is_empty() {
+            None
+        } else {
             let exprs: Vec<&str> = expressions.iter().map(String::as_str).collect();
-            Lpe::compile(&exprs, &names).unwrap_or_else(|(i, e)| {
-                // The importer refuses an expression that does not parse.
-                panic!("light path expression {:?} was validated: {e}", exprs[i])
-            })
-        });
+            match Lpe::compile(&exprs) {
+                Ok(lpe) => Some(lpe),
+                Err(e) => {
+                    tracing::warn!(
+                        "light path expressions do not compile ({e}); their channels stay black"
+                    );
+                    None
+                }
+            }
+        };
         let sym = |ty, label: LabelId| {
             lpe.as_ref()
                 .map_or(0, |l| l.symbol(ty, Scatter::None, label))

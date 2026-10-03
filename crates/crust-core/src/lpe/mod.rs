@@ -33,6 +33,43 @@ mod parse;
 pub use dfa::Lpe;
 pub use parse::ParseError;
 
+/// The most DFA states one render's expressions may compile to. Subset
+/// construction is exponential in the worst case — `C.*<RD>.{16}[LO]` needs
+/// about 2¹⁷ states — so it stops here and refuses the set, rather than
+/// running out of memory or `u16` state ids. Real compositing sets compile
+/// to tens of states.
+pub const MAX_STATES: usize = 4096;
+
+/// Why a set of expressions does not compile.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompileError {
+    /// Expression `index` does not parse.
+    Parse { index: usize, error: ParseError },
+    /// More than [`MAX_EXPRESSIONS`].
+    TooManyExpressions(usize),
+    /// So many distinct labels that the event alphabet would not fit a
+    /// `u16` symbol.
+    TooManyLabels(usize),
+    /// The DFA would exceed [`MAX_STATES`].
+    TooComplex,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::Parse { index, error } => write!(f, "expression {index}: {error}"),
+            CompileError::TooManyExpressions(n) => {
+                write!(f, "{n} expressions, at most {MAX_EXPRESSIONS} per render")
+            }
+            CompileError::TooManyLabels(n) => write!(f, "{n} distinct labels is too many"),
+            CompileError::TooComplex => write!(
+                f,
+                "the expressions need more than {MAX_STATES} automaton states"
+            ),
+        }
+    }
+}
+
 /// The type of an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]

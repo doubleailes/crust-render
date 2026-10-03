@@ -644,3 +644,53 @@ fn light_path_expressions_and_albedo_are_accepted() {
     );
     assert!(vars[2].with_alpha());
 }
+
+/// An expression the renderer could not compile is refused at import, with
+/// its var — never a panic once the scene has loaded.
+#[test]
+fn an_expression_too_complex_to_compile_is_refused_at_import() {
+    let scene = load(
+        "lpe_too_complex",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/ok>, </Render/blowup>, </Render/nested>, </Render/also_ok>]
+    }
+    def RenderVar "ok"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>[LO]"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "blowup"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C.*<RD>.{16}[LO]"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "nested"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C(((.{32}){32}){32}){32}L"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "also_ok"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C.*[LO]"
+        uniform token sourceType = "lpe"
+    }
+"#,
+    );
+    let names: Vec<_> = scene.aovs.products[0]
+        .vars
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(names, ["ok", "also_ok"]);
+}

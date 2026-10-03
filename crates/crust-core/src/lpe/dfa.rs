@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 
 use super::parse::{Ast, Pattern, Pred, Set, parse};
-use super::{EventType, LabelId, LobeEvent, LobeLabel, MAX_EXPRESSIONS, ParseError, Scatter};
+use super::{
+    CompileError, EventType, LabelId, LobeEvent, LobeLabel, MAX_EXPRESSIONS, MAX_STATES, Scatter,
+};
 
 /// A compiled set of light path expressions.
 #[derive(Debug, Clone)]
@@ -40,33 +42,39 @@ pub struct Lpe {
 pub const DEAD: u16 = 0;
 
 impl Lpe {
-    /// Compiles `expressions` (each without an `lpe:` prefix) with the light
-    /// tags `tags` as labels. Expression `i` accepts as bit `i`; at most
-    /// [`MAX_EXPRESSIONS`].
-    pub fn compile(expressions: &[&str], tags: &[&str]) -> Result<Lpe, (usize, ParseError)> {
-        assert!(
-            expressions.len() <= MAX_EXPRESSIONS,
-            "at most {MAX_EXPRESSIONS} expressions per render"
-        );
+    /// Compiles `expressions` (each without an `lpe:` prefix). Expression `i`
+    /// accepts as bit `i`; at most [`MAX_EXPRESSIONS`], and at most
+    /// [`MAX_STATES`] DFA states between them.
+    ///
+    /// The labels are the lobe labels and the ones the expressions name.
+    /// A light whose tag no expression names carries "no label" ([`Lpe::label`]
+    /// is `None` for it): nothing could tell it from an untagged light, and
+    /// keeping it out keeps the alphabet bounded by the expressions, not by
+    /// the scene.
+    pub fn compile(expressions: &[&str]) -> Result<Lpe, CompileError> {
+        if expressions.len() > MAX_EXPRESSIONS {
+            return Err(CompileError::TooManyExpressions(expressions.len()));
+        }
         let asts = expressions
             .iter()
             .enumerate()
-            .map(|(i, e)| parse(e).map_err(|err| (i, err)))
+            .map(|(index, e)| parse(e).map_err(|error| CompileError::Parse { index, error }))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Labels: none, the lobe labels, the light tags, then any label an
-        // expression names that nothing carries (it can still be excluded).
+        // Labels: none, the lobe labels, then every label an expression
+        // names (a light tag, or one nothing carries — it can still be
+        // excluded).
         let mut labels: Vec<Option<String>> = vec![None];
         labels.extend(LobeLabel::ALL.iter().map(|l| Some(l.name().to_owned())));
-        for t in tags {
-            if !labels.iter().any(|l| l.as_deref() == Some(*t)) {
-                labels.push(Some((*t).to_owned()));
-            }
-        }
         for ast in &asts {
             collect_labels(ast, &mut labels);
         }
         let symbols = EventType::COUNT * Scatter::COUNT * labels.len();
+        // Every symbol must fit a `u16` below `u16::MAX`, which the router
+        // keeps for "no event".
+        if symbols >= u16::MAX as usize {
+            return Err(CompileError::TooManyLabels(labels.len()));
+        }
 
         // Thompson construction.
         let mut nfa = Nfa::default();
@@ -82,7 +90,7 @@ impl Lpe {
         let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
         ids.insert(Vec::new(), DEAD);
         let first = nfa.closure(vec![start]);
-        let first_id = intern(&mut ids, &mut sets, first);
+        let first_id = intern(&mut ids, &mut sets, first)?;
         let mut table: Vec<u16> = Vec::new();
         let mut done = 0;
         while done < sets.len() {
@@ -97,12 +105,11 @@ impl Lpe {
                     }
                 }
                 let next = nfa.closure(next);
-                let id = intern(&mut ids, &mut sets, next);
+                let id = intern(&mut ids, &mut sets, next)?;
                 table.push(id);
             }
             done += 1;
         }
-        assert!(sets.len() <= u16::MAX as usize, "LPE DFA too large");
         let accept: Vec<u64> = sets
             .iter()
             .map(|set| {
@@ -276,14 +283,23 @@ fn count(class: &[u16]) -> usize {
     v.len()
 }
 
-fn intern(ids: &mut HashMap<Vec<usize>, u16>, sets: &mut Vec<Vec<usize>>, set: Vec<usize>) -> u16 {
+/// The id of `set`, adding it as a new DFA state if it is one — refused past
+/// [`MAX_STATES`], before an id could overflow.
+fn intern(
+    ids: &mut HashMap<Vec<usize>, u16>,
+    sets: &mut Vec<Vec<usize>>,
+    set: Vec<usize>,
+) -> Result<u16, CompileError> {
     if let Some(&id) = ids.get(&set) {
-        return id;
+        return Ok(id);
+    }
+    if sets.len() >= MAX_STATES {
+        return Err(CompileError::TooComplex);
     }
     let id = sets.len() as u16;
     ids.insert(set.clone(), id);
     sets.push(set);
-    id
+    Ok(id)
 }
 
 fn collect_labels(ast: &Ast, labels: &mut Vec<Option<String>>) {

@@ -931,6 +931,17 @@ sharpens, D10–D13:
   expressions on the beauty's background *is* the split's sum — the same
   additions in the same order, asserted bitwise in debug builds — so the
   lights at infinity are not evaluated twice.
+- **Expressions are bounded where they are accepted** (review of #199). An
+  expression's bounded repeats may unroll to at most 4096 events (nesting
+  multiplies them: `(((.{32}){32}){32}){32}` is a million), the render's
+  DFA to at most `lpe::MAX_STATES` = 4096 states (`.*x.{16}` alone needs
+  ~2¹⁷), and its alphabet must fit a `u16` below the router's "no event".
+  The importer compiles the render's accepted set with each new expression
+  and refuses one that breaks a bound, with one `WARN` — so `Lpe::compile`
+  returns a `CompileError` instead of asserting, and the renderer's compile
+  cannot fail on an imported scene. Only labels an expression names enter
+  the alphabet: a light tag nothing names reads as no tag, which no
+  expression could tell apart, so the scene's tag count no longer sizes it.
 - **Light groups read `crust:light:lpeTag` only.** Karma's, RenderMan's and
   Arnold's attributes stay unread until their names are checked against real
   exports (open question 2). Backdrops carry no tag.
