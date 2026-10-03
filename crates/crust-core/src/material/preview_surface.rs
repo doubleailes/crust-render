@@ -147,7 +147,7 @@ impl UvInput {
         let Some(tex) = &self.tex else {
             return self.fallback;
         };
-        let (u, v) = if rec.has_uv { rec.uv } else { (0.0, 0.0) };
+        let (u, v) = rec.uv.unwrap_or((0.0, 0.0));
         let texel = if self.tiled {
             tex.eval(u, v, rec.uv_width)
         } else {
@@ -514,8 +514,7 @@ mod tests {
         HitRecord {
             normal: Vec3A::Z,
             tangent: Vec3A::X,
-            uv: (u, 0.5),
-            has_uv: true,
+            uv: Some((u, 0.5)),
             ..HitRecord::default()
         }
     }

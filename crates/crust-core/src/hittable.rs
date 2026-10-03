@@ -24,14 +24,15 @@ pub struct HitRecord {
     /// can never be read off a hit that has no face.
     pub face: Option<FaceHit>,
     /// Interpolated `primvars:st` texture coordinates, the chart a *UV*
-    /// texture indexes — unrelated to `face_uv`, which is Ptex's per-face
+    /// texture indexes — unrelated to [`FaceHit::uv`], which is Ptex's per-face
     /// parameterisation. Deliberately **not** wrapped into `[0, 1]`: a UDIM
     /// set addresses its tiles by the integer part, so clamping here would
     /// collapse fourteen 4K tiles onto one.
     ///
-    /// Left at `(0, 0)` — with `has_uv` false — for geometry carrying no `st`
-    /// primvar, or whose material asks for no UV texture.
-    pub uv: (f32, f32),
+    /// `None` for geometry carrying no `st` primvar, or whose material asks
+    /// for no UV texture. An `Option` rather than a sentinel: the origin of
+    /// the chart is a perfectly ordinary texel.
+    pub uv: Option<(f32, f32)>,
     /// World-space surface tangent along increasing `u`, already
     /// orthogonalised against `normal` and unit length. The frame a
     /// tangent-space normal map is expressed in; the bitangent is
@@ -40,13 +41,8 @@ pub struct HitRecord {
     /// `Vec3A::ZERO` when no tangent is known, which a material must read as
     /// "shade with the geometric normal" rather than as a degenerate frame.
     /// The importer can only build one for *baked* (single-placement)
-    /// geometry — see [`crate::UvMap::tangents`].
+    /// geometry — see [`crate::tangent_of`].
     pub tangent: Vec3A,
-    /// Whether `uv` carries a real texture coordinate.
-    ///
-    /// Distinct from `uv != (0, 0)`: the origin of the chart is a perfectly
-    /// ordinary texel, so a sentinel value would alias onto valid data.
-    pub has_uv: bool,
     /// Width of the ray's texture footprint at this hit, in the *chart's* UV
     /// units — the filter width a UV texture should read `uv` with.
     ///
@@ -56,8 +52,8 @@ pub struct HitRecord {
     /// the behaviour that predates mip pyramids, which is what makes the
     /// switch an honest A/B.
     pub uv_width: f32,
-    /// Width of the ray's texture footprint at this hit, in `face_id`'s own
-    /// `[0, 1]²` — the filter width a Ptex texture should read `face_uv`
+    /// Width of the ray's texture footprint at this hit, in the face's own
+    /// `[0, 1]²` — the filter width a Ptex texture should read [`FaceHit::uv`]
     /// with. `0.0` carries the same meaning as `uv_width`, and it is `0.0`
     /// whenever `face` is `None`.
     pub face_width: f32,
@@ -87,9 +83,8 @@ impl Default for HitRecord {
             t: 0.0,
             front_face: false,
             face: None,
-            uv: (0.0, 0.0),
+            uv: None,
             tangent: Vec3A::ZERO,
-            has_uv: false,
             uv_width: 0.0,
             face_width: 0.0,
         }

@@ -15,27 +15,6 @@ use super::transmission::{eval_transmission, transmission_is_continuous};
 // Internal shading state
 // ---------------------------------------------------------------------------
 
-/// A local shading frame plus cached view / half / light vectors in world
-/// space. Kept small so it can move by value.
-pub(super) struct Frame {
-    pub(super) n: Vec3A,
-    pub(super) t: Vec3A,
-    pub(super) b: Vec3A,
-}
-
-impl Frame {
-    pub(super) fn new(n: Vec3A) -> Self {
-        let (t, b) = tangent_frame(n);
-        Self { n, t, b }
-    }
-    pub(super) fn to_local(&self, v: Vec3A) -> Vec3A {
-        to_tangent(v, self.t, self.b, self.n)
-    }
-    pub(super) fn to_world(&self, v_local: Vec3A) -> Vec3A {
-        from_tangent(v_local, self.t, self.b, self.n)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Discrete lobe PMF
 // ---------------------------------------------------------------------------

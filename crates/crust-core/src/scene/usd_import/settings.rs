@@ -2,11 +2,12 @@
 //! which camera the render was told to use.
 
 use openusd::sdf;
-use openusd::usd::Stage;
+use openusd::usd::{Prim, Stage};
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use tracing::{debug, warn};
 
 use crate::filter::PixelFilter;
+use crate::guiding::GuidingConfig;
 use crate::light::LightSelection;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 
@@ -159,33 +160,30 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     let guiding_prob = custom_f32(&prim, "crust:guidingProb").unwrap_or(DEFAULT_GUIDING_PROB);
 
     // MIS strategy: `power` (default) | `balance` | `light` | `bsdf`.
-    let strategy = match custom_token(&prim, "crust:samplingStrategy") {
-        None => SamplingStrategy::PowerMis,
-        Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:samplingStrategy: {e} — using power MIS");
-            SamplingStrategy::PowerMis
-        }),
-    };
+    let strategy = parsed_token(
+        &prim,
+        "crust:samplingStrategy",
+        SamplingStrategy::PowerMis,
+        "using power MIS",
+    );
 
     // Light selection: `power` (default) | `uniform` | `learned`.
-    let light_selection = match custom_token(&prim, "crust:lightSelection") {
-        None => LightSelection::Power,
-        Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:lightSelection: {e} — picking lights by power");
-            LightSelection::Power
-        }),
-    };
+    let light_selection = parsed_token(
+        &prim,
+        "crust:lightSelection",
+        LightSelection::Power,
+        "picking lights by power",
+    );
 
     // Pixel reconstruction filter: `box` | `triangle` (default) | `gaussian`
     // | `blackman` | `mitchell`, each at its conventional radius unless
     // `crust:pixelFilterRadius` overrides it (in pixels, from the center).
-    let mut filter = match custom_token(&prim, "crust:pixelFilter") {
-        None => PixelFilter::default(),
-        Some(name) => name.parse().unwrap_or_else(|e| {
-            warn!("crust:pixelFilter: {e} — using the triangle filter");
-            PixelFilter::default()
-        }),
-    };
+    let mut filter = parsed_token(
+        &prim,
+        "crust:pixelFilter",
+        PixelFilter::default(),
+        "using the triangle filter",
+    );
     if let Some(radius) = custom_f32(&prim, "crust:pixelFilterRadius") {
         filter = filter.with_radius(radius);
     }
@@ -233,12 +231,33 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     );
     RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
-        .with_guiding(guiding, guiding_iters, guiding_prob)
+        .with_guiding(guiding.then(|| GuidingConfig {
+            train_iterations: guiding_iters,
+            guide_prob: guiding_prob,
+            ..GuidingConfig::default()
+        }))
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
         .with_pixel_filter(filter)
         .with_indirect_clamp(indirect_clamp)
         .with_adaptive_neighbour_tolerance(neighbour_tolerance)
+}
+
+/// A token-valued render setting parsed into `T`: `default` when unauthored,
+/// and `default` with a warning — `"<name>: <why> — <fallback>"`, `fallback`
+/// saying what is used instead — when the token names nothing `T` knows.
+fn parsed_token<T>(prim: &Prim, name: &str, default: T, fallback: &str) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match custom_token(prim, name) {
+        None => default,
+        Some(token) => token.parse().unwrap_or_else(|e| {
+            warn!("{name}: {e} — {fallback}");
+            default
+        }),
+    }
 }
 
 /// Warns when `time` lies outside the stage's authored

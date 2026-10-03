@@ -266,6 +266,61 @@ pub fn from_tangent(v_local: Vec3A, t: Vec3A, b: Vec3A, n: Vec3A) -> Vec3A {
     t * v_local.x + b * v_local.y + n * v_local.z
 }
 
+/// An orthonormal shading frame: tangent `t`, bitangent `b = n × t`, normal
+/// `n`. The OpenPBR material builds one around the hit's normal; a MaterialX
+/// leaf around its own normal and tangent, optionally rotated.
+#[derive(Clone, Copy, Debug)]
+pub struct Frame {
+    pub t: Vec3A,
+    pub b: Vec3A,
+    pub n: Vec3A,
+}
+
+impl Frame {
+    /// Around `n` alone, with the tangent [`tangent_frame`] picks.
+    pub(crate) fn new(n: Vec3A) -> Frame {
+        let (t, b) = tangent_frame(n);
+        Frame { t, b, n }
+    }
+
+    /// Around `n`, with `tangent` projected into its plane; a tangent
+    /// parallel to `n` falls back to [`Frame::new`]'s.
+    pub(crate) fn with_tangent(n: Vec3A, tangent: Vec3A) -> Frame {
+        let t = tangent - n * n.dot(tangent);
+        let (t, b) = if t.length_squared() > 1e-10 {
+            let t = t.normalize();
+            (t, n.cross(t))
+        } else {
+            tangent_frame(n)
+        };
+        Frame { t, b, n }
+    }
+
+    /// The frame turned by `angle` radians about its normal, right-handed:
+    /// the tangent moves toward the bitangent `n × t`
+    /// ([`crust_mtlx::Leaf::rotation`]). A non-finite angle turns nothing.
+    pub(crate) fn rotated(self, angle: f32) -> Frame {
+        if !angle.is_finite() {
+            return self;
+        }
+        let (sin, cos) = angle.sin_cos();
+        let t = self.t * cos + self.n.cross(self.t) * sin;
+        Frame {
+            t,
+            b: self.n.cross(t),
+            n: self.n,
+        }
+    }
+
+    pub(crate) fn to_local(self, v: Vec3A) -> Vec3A {
+        to_tangent(v, self.t, self.b, self.n)
+    }
+
+    pub(crate) fn to_world(self, v_local: Vec3A) -> Vec3A {
+        from_tangent(v_local, self.t, self.b, self.n)
+    }
+}
+
 /// Estevez–Kulla "Charlie" sheen distribution, as used by glTF and OpenPBR
 /// fuzz. `roughness` is the fuzz roughness in [0, 1].
 pub fn sheen_charlie_d(n_dot_h: f32, roughness: f32) -> f32 {

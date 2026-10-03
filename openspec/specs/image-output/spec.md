@@ -4,8 +4,8 @@
 
 Persist the rendered pixel buffer to disk. The renderer writes a linear
 high-dynamic-range EXR, then converts it to a tone-mapped sRGB PNG for viewing.
-Both steps live in `crust-render/src/main.rs`; the engine crate only produces
-the `Buffer`.
+Both steps live in the CLI crate (`crust-render/src/main.rs` writes the EXR,
+`output.rs` the PNG); the engine crate only produces the `Buffer`.
 
 ## Requirements
 

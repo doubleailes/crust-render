@@ -210,7 +210,7 @@ pub struct FaceMap {
     /// before `sub`.
     pub corners: Option<Vec<[[f32; 2]; 3]>>,
     /// Face-space units per unit of local space, per triangle — see
-    /// [`triangle_density`]. Empty when [`FaceMap::build_density`] was never
+    /// `triangle_density`. Empty when [`FaceMap::build_density`] was never
     /// called, which every consumer reads as "point-sample".
     pub density: Vec<f32>,
 }
@@ -339,7 +339,7 @@ pub struct UvMap {
     /// triangle's *original* vertex order.
     pub corners: Vec<[u32; 3]>,
     /// Chart UV units per unit of local space, per triangle — see
-    /// [`triangle_density`]. Empty when [`UvMap::build_density`] was never
+    /// `triangle_density`. Empty when [`UvMap::build_density`] was never
     /// called, which every consumer reads as "point-sample".
     ///
     /// Kept as a table (4 bytes per triangle) rather than derived at the hit:
@@ -408,7 +408,7 @@ impl UvMap {
     ///
     /// Wants *local* vertices, not world-space ones, and is therefore built
     /// once per distinct mesh rather than once per placement — see
-    /// [`triangle_density`] for why.
+    /// `triangle_density` for why.
     pub fn build_density(&mut self, verts: &[[f32; 3]], tris: &[[u32; 3]]) {
         self.density.clear();
         self.density.reserve(tris.len());
@@ -766,15 +766,15 @@ impl World {
             m.resolve(h.prim_id, h.u, h.v, tables.swapped)
                 .map(|(id, u, v)| crate::hittable::FaceHit { id, uv: (u, v) })
         });
-        let (uv, tangent, has_uv) = match &tables.uv {
+        let (uv, tangent) = match &tables.uv {
             Some(m) => {
                 let verts = self.world_vertices(h.geom_id, h.prim_id, tables);
                 match m.resolve(h.prim_id, h.u, h.v, tables.swapped, verts) {
-                    Some((uv, tangent)) => (uv, tangent, true),
-                    None => ((0.0, 0.0), Vec3A::ZERO, false),
+                    Some((uv, tangent)) => (Some(uv), tangent),
+                    None => (None, Vec3A::ZERO),
                 }
             }
-            None => ((0.0, 0.0), Vec3A::ZERO, false),
+            None => (None, Vec3A::ZERO),
         };
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*
@@ -809,7 +809,6 @@ impl World {
                 face,
                 uv,
                 tangent,
-                has_uv,
                 uv_width,
                 face_width,
             },

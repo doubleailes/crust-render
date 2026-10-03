@@ -20,7 +20,7 @@ pub enum LightSelection {
     /// The default: by power (Shirley et al. 1996; pbrt-v4's
     /// `PowerLightSampler`), made defensive. Lights at infinity keep their
     /// uniform share, since they have no comparable power ([`Light::power`]).
-    /// The finite lights split the rest [`DEFENSIVE_SHARE`] evenly and the
+    /// The finite lights split the rest `DEFENSIVE_SHARE` evenly and the
     /// remainder in proportion to power, so no light falls below half its
     /// uniform share — power is blind to distance and visibility, and the
     /// even half is what bounds the cost where that blindness is wrong. It
@@ -235,7 +235,7 @@ impl LightList {
     ///
     /// [`LightSelection::Learned`] builds the power table here; the learned
     /// part needs the scene and is added by the renderer
-    /// ([`LightList::set_cache`]).
+    /// (`LightList::set_cache`).
     pub fn select_by(&mut self, selection: LightSelection) {
         self.pmf.clear();
         self.cdf.clear();
@@ -334,12 +334,17 @@ impl LightList {
     /// `light_pdf / n` it always was, not a multiplication by `1/n`, which
     /// rounds differently when `n` is not a power of two — so the default
     /// renders bit-identically to the renderer before selection was a choice.
+    ///
+    /// Floored at `1e-6`, here rather than at each caller so no MIS half can
+    /// forget it: NEE divides by this density, and both MIS weights compare
+    /// it against the bounce density.
     pub fn density(&self, light_pdf: PdfSolidAngle, pmf: f32) -> PdfSolidAngle {
         PdfSolidAngle::from_measure(if self.pmf.is_empty() {
             light_pdf.get() / self.lights.len() as f32
         } else {
             light_pdf.get() * pmf
         })
+        .max(1e-6)
     }
 
     /// Picks a light from one `[0, 1)` sample `u`, with the probability it
@@ -367,9 +372,10 @@ impl LightList {
     }
 
     /// Finds the light whose scene geometry has world id `geom_id`, with its
-    /// selection probability. Used by the integrator to attribute a
-    /// bounce-hit emissive surface to its light for MIS; emissive geometry
-    /// with no light-list entry returns `None`.
+    /// selection probability: the global-selection, by-reference form of
+    /// [`LightList::find_index_by_geom_at`], which is what the integrator uses
+    /// to attribute a bounce-hit emissive surface to its light for MIS.
+    /// Emissive geometry with no light-list entry returns `None`.
     pub fn find_by_geom(&self, geom_id: u32) -> Option<(&LightKind, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((&self.lights[index], self.pmf(index)))
@@ -384,7 +390,11 @@ impl LightList {
     }
 
     /// [`LightList::pick_at`] as an index into [`LightList::lights`].
-    #[inline]
+    ///
+    /// `inline(always)`: it runs at every NEE vertex, and plain `#[inline]`
+    /// left the decision to LLVM, which took it out of line once the
+    /// integrator's helpers moved (+0.5% instructions on cornellbox).
+    #[inline(always)]
     pub fn pick_index_at(&self, p: Vec3A, u: f32) -> Option<(usize, f32)> {
         match self.cache.as_ref().and_then(|c| c.lookup(p)) {
             Some((pmf, cdf)) => {

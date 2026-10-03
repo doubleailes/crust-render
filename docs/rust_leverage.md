@@ -310,7 +310,7 @@ is the first step of §4.6.
 | sentinel | location | better |
 |----------|----------|--------|
 | `HitRecord::NO_FACE = u32::MAX`, `face_uv` "meaningless" when set | `hittable.rs` | `Option<FaceHit { id, uv }>` ties the uv to the id |
-| `base_face = u32::MAX` | `scene/subdiv.rs`, `usd_import/mesh.rs` | same |
+| `base_face = u32::MAX` | `scene/subdiv/`, `usd_import/mesh/` | same |
 | `indirect_clamp == 0.0` means off | `tracer/settings.rs` | `Option<f32>` validated at construction |
 | `STRIPE = usize::MAX` means unset | `tiled/cache.rs` | `Cell<Option<usize>>` |
 

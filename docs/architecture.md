@@ -77,7 +77,7 @@ crust-render::main
  │       ├─ mesh::flush_meshes               bake-once vs instance, now that counts are final
  │       └─ WorldBuilder::commit             top-level SBVH (crust-rt)
  ├─ Renderer::new(scene)                     light selection table, optional learned light cache
- ├─ Renderer::render_with_stats(tiled, progress)
+ ├─ Renderer::render_with(order, progress)
  │   └─ per tile → per pixel → per sample: render_pixel → trace_path
  │         forward walk: intersect, resolve material (ShadingPoint), NEE, scatter
  │         backward gather: MIS-weighted radiance, guiding training samples
@@ -115,7 +115,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | area | modules |
 |------|---------|
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
-| USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv.rs` (OpenSubdiv refinement) |
+| USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv/` (OpenSubdiv refinement: `uniform.rs`, per-face `adaptive.rs`) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
 | materials | `material/openpbr/` (the übershader: `mod.rs` parameters + `Material` impl, `lobes.rs`, `transmission.rs`), `brdf.rs` (shared lobes), `materialx.rs` (MaterialX `Material` + import), `closure/` (MaterialX closure-tree evaluation, BSDL / MaterialX tables), `preview_surface.rs`, `emissive.rs`, `material.rs` (trait + `ShadingPoint`) |
@@ -139,7 +139,8 @@ other. The pairs:
   `Material::emitted_at`.
 - **Cutouts.** A hit a path passes through (`pass_cutouts`, probability
   `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_through`, behind
-  `cutout_shadow` and the light cache's training) are one visibility: both ask
+  `surface_visibility`, which NEE and the light cache's training share) are one
+  visibility: both ask
   `Material::opacity` point-sampled, both follow at most 256 crossings, both
   are gated on `World::has_cutouts`; change one and NEE and the bounce side
   disagree.
@@ -179,9 +180,9 @@ probe that needs another setting builds a `Config` and passes it
 | variable | default | owner | effect |
 |----------|---------|-------|--------|
 | `CRUST_STREAM_IMPORT` | on | `usd_import/mod.rs` | `0`: import under one stage instead of one masked stage per subtree |
-| `CRUST_MESH_BAKE` | on | `usd_import/mesh.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
+| `CRUST_MESH_BAKE` | on | `usd_import/mesh/bake.rs` | `0`: instance every mesh instead of baking single placements (not bit-identical: an instanced mesh is intersected in local space, so ~0.2% of cornellbox's pixels differ in the last ulp at 16 spp, relmse 4e-18) |
 | `CRUST_SUBDIV` | on | `usd_import/attrs.rs` | `0`: render every mesh as its faceted cage (unlike `--subdiv-level 0`, no smooth cage normals) |
-| `CRUST_ADAPTIVE_PER_FACE` | on | `usd_import/mesh.rs` (`mesh_source`) | In adaptive subdivision only. `0`: refine each unshared subdivision mesh to one level instead of tessellating it per face at its edges' own rates |
+| `CRUST_ADAPTIVE_PER_FACE` | on | `usd_import/mesh/source.rs` (`mesh_source`) | In adaptive subdivision only. `0`: refine each unshared subdivision mesh to one level instead of tessellating it per face at its edges' own rates |
 | `CRUST_ADAPTIVE_FRUSTUM` | on | `usd_import/adaptive.rs` (`Frustum`) | In adaptive subdivision only. `0`: rate geometry outside the camera's view by distance like the rest, instead of splitting each of its edges once |
 | `CRUST_BVH_PACKET_SAH` | on | `lib.rs` (`commit_options`) → every kernel `commit` | `0`: the per-triangle SAH leaf cost before packet-sized leaves (five to eight overlapping triangles split into two half-empty packets). Not bit-identical: the trees differ in shape, so exact-tie hits can differ; proven noise by the 1/√N check in the design record |
 | `CRUST_TRI_PACKETS` | `auto` (= `gathered`) | `lib.rs` (`packet_layout`) → every kernel `commit` | `gathered`: 192-byte vertex-carrying packets (the layout before indexed packets); `indexed`: 92-byte index packets, a quarter fewer kernel bytes per triangle for 13–30% slower traversal (8–9% on the Moana island at level 1, where a 3–4% faster import makes the whole run faster) — the opt-in for a scene that otherwise does not fit. Bit-identical |
@@ -268,16 +269,44 @@ corners are derived at the hit. The subdivision stress grid went from 196 to
 96 kernel bytes per triangle and from 809 to 508 MiB peak RSS, bit-identical
 (up to exact-tie hits under the packet leaf rule).
 
+Paid down by the 2026-10-03 cleanup (`docs/code_audit_2026-10-03.md` has the
+item-by-item status; every sample bit-identical to goldens recorded before it,
+and no scene measured executes more instructions than before — fog −6.9%,
+smoke −2.8%, the rest −0.2 to −0.3%):
+
+- Module splits: crust-render's `main.rs` (1 088 → 304 lines, plus `cli`,
+  `logging`, `output`, `traversal_report`); `crust-mtlx`'s `eval/` and
+  `surface/`; `scene/subdiv/` (`tessellate_adaptive` 590 → 60 lines over a
+  shared `prepare_cage`); `usd_import/mesh/`; `load_scene` into its phases;
+  crust-rt's `commit_with` into phases with its tests in `scene/tests.rs`;
+  `RenderStats`' 690-line `Display` into one method per section; the closure
+  `prepare` match into one function per BSDF; `render_pass` and
+  `light_cache::train` into their phases.
+- One copy each of: the USD attribute decoders (about 40 hand-written reads),
+  prim pruning, asset load-and-cache, the camera frame, the UDIM tile sweep,
+  the cache-budget conversions, Russian roulette, `exp3`, the ray epsilon
+  (`ray::TRACE_T_MIN`), surface visibility (NEE and the light cache), the
+  shading `Frame`, the texture-chart type (`subdiv::UvSource`).
+- API shape: `PathContext` for the integrator's shared state;
+  `Renderer::render_with(RenderOrder, progress)` for four bool-taking
+  variants; `Option<GuidingConfig>` and `HitRecord::uv: Option<…>` for
+  flag-plus-value pairs; `RayStats::merge` exhaustive by destructuring; narrower
+  public surfaces in crust-core, crust-assets and crust-mtlx.
+- The volume integrator's per-segment lists live inline (`InlineList`),
+  which was the fog speed-up.
+- `cargo doc --no-deps --workspace` warning-free (38 before).
+
 Still open, roughly in order of payoff:
 
 1. **`hittable.rs` and `aabb.rs` are vestigial names.** There is no `Hittable`
    trait any more (the file holds `HitRecord`), and `aabb.rs` only re-exports
    the kernel's type.
-2. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
-   `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
-   way the importer now does. The largest source files left are
-   `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
-   (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
+2. **Test files over 1 500 lines** (`usd_scene.rs` 3 122, `usd_inline.rs`
+   2 515, `crust-mtlx/tests/graph.rs` 1 989, `crust-rt/tests/kernel.rs` 1 675)
+   would split naturally by schema family, and `usd_scene.rs` / `usd_inline.rs`
+   rewrite the same stage-writing helper about twenty times (audit §6.1). The
+   largest source files left are `stats.rs` (1 686, now sectioned) and
+   `tracer/path.rs` (1 547); none is urgent.
 3. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
@@ -291,6 +320,12 @@ Still open, roughly in order of payoff:
    emits wide nodes directly (fused collapsing) is the remaining lever, and
    the composed USD stage, not the kernel, is most of a production scene's
    peak.
+
+5. **`trace_path`'s per-vertex phases wait on a decision.** Splitting it into
+   named phases (branch `cleanup/trace-path-phases`) is bit-identical but
+   costs +0.23% instructions on cornellbox and +0.27% on veach_mis from
+   register allocation, so it is kept off the main line until someone judges
+   the readability worth that.
 
 ## Further reading
 

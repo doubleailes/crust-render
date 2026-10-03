@@ -262,39 +262,68 @@ impl RayStats {
 
     /// Sums another unit's counters into this one.
     pub fn merge(&mut self, o: &RayStats) {
+        // Destructured with no `..`, so a counter added to `RayStats` without
+        // a line here is a compile error rather than a silently unmerged sum.
+        let RayStats {
+            spp_min,
+            spp_max,
+            adaptive_pixels,
+            adaptive_samples,
+            early_stopped,
+            neighbour_held,
+            ended_absorbed,
+            volume_scatters,
+            medium_scatters,
+            sss_walks,
+            sss_exits,
+            sss_steps,
+            sss_rays,
+            cutout_passes,
+            cutout_rays,
+            light_samples,
+            shadow_occluded,
+            camera_rays,
+            closest_hit,
+            shadow_rays,
+            vertices,
+            rr_tested,
+            rr_killed,
+            ended_escaped,
+            ended_depth,
+        } = *o;
         // Min over pixels actually counted: a unit with no adaptive pixel has
         // `spp_min == 0`, which is not a pixel that took zero samples.
-        if o.adaptive_pixels > 0 {
+        if adaptive_pixels > 0 {
             self.spp_min = if self.adaptive_pixels == 0 {
-                o.spp_min
+                spp_min
             } else {
-                self.spp_min.min(o.spp_min)
+                self.spp_min.min(spp_min)
             };
         }
-        self.spp_max = self.spp_max.max(o.spp_max);
-        self.adaptive_pixels += o.adaptive_pixels;
-        self.adaptive_samples += o.adaptive_samples;
-        self.early_stopped += o.early_stopped;
-        self.neighbour_held += o.neighbour_held;
-        self.ended_absorbed += o.ended_absorbed;
-        self.volume_scatters += o.volume_scatters;
-        self.medium_scatters += o.medium_scatters;
-        self.sss_walks += o.sss_walks;
-        self.sss_exits += o.sss_exits;
-        self.sss_steps += o.sss_steps;
-        self.sss_rays += o.sss_rays;
-        self.cutout_passes += o.cutout_passes;
-        self.cutout_rays += o.cutout_rays;
-        self.light_samples += o.light_samples;
-        self.shadow_occluded += o.shadow_occluded;
-        self.camera_rays += o.camera_rays;
-        self.closest_hit += o.closest_hit;
-        self.shadow_rays += o.shadow_rays;
-        self.vertices += o.vertices;
-        self.rr_tested += o.rr_tested;
-        self.rr_killed += o.rr_killed;
-        self.ended_escaped += o.ended_escaped;
-        self.ended_depth += o.ended_depth;
+        self.spp_max = self.spp_max.max(spp_max);
+        self.adaptive_pixels += adaptive_pixels;
+        self.adaptive_samples += adaptive_samples;
+        self.early_stopped += early_stopped;
+        self.neighbour_held += neighbour_held;
+        self.ended_absorbed += ended_absorbed;
+        self.volume_scatters += volume_scatters;
+        self.medium_scatters += medium_scatters;
+        self.sss_walks += sss_walks;
+        self.sss_exits += sss_exits;
+        self.sss_steps += sss_steps;
+        self.sss_rays += sss_rays;
+        self.cutout_passes += cutout_passes;
+        self.cutout_rays += cutout_rays;
+        self.light_samples += light_samples;
+        self.shadow_occluded += shadow_occluded;
+        self.camera_rays += camera_rays;
+        self.closest_hit += closest_hit;
+        self.shadow_rays += shadow_rays;
+        self.vertices += vertices;
+        self.rr_tested += rr_tested;
+        self.rr_killed += rr_killed;
+        self.ended_escaped += ended_escaped;
+        self.ended_depth += ended_depth;
     }
 
     fn is_empty(&self) -> bool {
@@ -660,6 +689,11 @@ pub(crate) fn breakdown(kinds: impl Iterator<Item = &'static str>) -> Vec<(&'sta
     out
 }
 
+/// [`thousands`] for a `u64` counter: how the report prints every count.
+fn count(n: u64) -> String {
+    thousands(n as usize)
+}
+
 pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -700,23 +734,47 @@ pub(crate) fn human_duration(d: Duration) -> String {
     }
 }
 
+/// Width of the report's horizontal rules — wide enough that the longest
+/// phase name ("Commit acceleration structure", nested one level) still
+/// clears the time column.
+const REPORT_WIDTH: usize = 84;
+/// Width of the phase tables' name column.
+const PHASE_NAME_WIDTH: usize = 36;
+
+/// One `label value` row of the report, label padded to the value column.
+fn row(f: &mut fmt::Formatter<'_>, label: &str, value: impl fmt::Display) -> fmt::Result {
+    writeln!(f, "  {:<28} {}", label, value)
+}
+
+/// A row nested one level under the [`row`] above it.
+fn sub_row(f: &mut fmt::Formatter<'_>, label: &str, value: impl fmt::Display) -> fmt::Result {
+    writeln!(f, "    {:<26} {}", label, value)
+}
+
 impl fmt::Display for RenderStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Wide enough that the longest phase name ("Commit acceleration
-        // structure", nested one level) still clears the time column.
-        const WIDTH: usize = 84;
-        const NAME: usize = 36;
-        let rule = "-".repeat(WIDTH);
-        let total = self.total();
-        let total_secs = total.as_secs_f64();
-        let pct = |d: Duration| {
-            if total_secs > 0.0 {
-                100.0 * d.as_secs_f64() / total_secs
-            } else {
-                0.0
-            }
-        };
+        let rule = "-".repeat(REPORT_WIDTH);
+        self.write_scene(f, &rule)?;
+        self.write_rays(f, &rule)?;
+        self.write_textures(f, &rule)?;
+        self.write_ptex(f, &rule)?;
+        if self.phases.is_empty() {
+            return Ok(());
+        }
+        self.write_phases(f, &rule)?;
+        // -- Render profile (`--profile`) --------------------------------
+        // After the phases, because it zooms into one of them: every figure
+        // below is thread time inside the Render row above.
+        if let Some(profile) = &self.profile {
+            profile.write_report(f, &rule, self.render_phase().map(|p| p.duration))?;
+        }
+        write!(f, "{rule}")
+    }
+}
 
+impl RenderStats {
+    /// The header block: image, scene inventory, memory.
+    fn write_scene(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         writeln!(f, "{rule}")?;
         writeln!(f, "Render Statistics")?;
         writeln!(f, "{rule}")?;
@@ -724,17 +782,17 @@ impl fmt::Display for RenderStats {
         let img = &self.image;
         if img.width > 0 && img.height > 0 {
             writeln!(f, "  {:<28} {}x{}", "resolution", img.width, img.height)?;
-            writeln!(f, "  {:<28} {}", "samples per pixel", img.samples_per_pixel)?;
-            writeln!(f, "  {:<28} {}", "max path depth", img.max_depth)?;
+            row(f, "samples per pixel", img.samples_per_pixel)?;
+            row(f, "max path depth", img.max_depth)?;
         }
 
         let s = &self.scene;
-        writeln!(f, "  {:<28} {}", "geometries", thousands(s.geometries))?;
+        row(f, "geometries", thousands(s.geometries))?;
 
         // Per-type breakdown, skipping what the scene does not use — a
         // wall of zeroes helps nobody.
         let mut breakdown = |title: &str, c: &PrimitiveCounts| -> fmt::Result {
-            writeln!(f, "  {:<28} {}", title, thousands(c.total()))?;
+            row(f, title, thousands(c.total()))?;
             for (label, count) in [
                 ("triangles", c.triangles),
                 ("spheres", c.spheres),
@@ -745,7 +803,7 @@ impl fmt::Display for RenderStats {
                 ("instances", c.instances),
             ] {
                 if count > 0 {
-                    writeln!(f, "    {:<26} {}", label, thousands(count))?;
+                    sub_row(f, label, thousands(count))?;
                 }
             }
             Ok(())
@@ -762,14 +820,14 @@ impl fmt::Display for RenderStats {
         // `geometries` on any stage that binds by hierarchy.
         if !self.materials.is_empty() {
             let n: usize = self.materials.iter().map(|(_, n)| n).sum();
-            writeln!(f, "  {:<28} {}", "allocated materials", thousands(n))?;
+            row(f, "allocated materials", thousands(n))?;
             for (kind, n) in &self.materials {
-                writeln!(f, "    {:<26} {}", kind, thousands(*n))?;
+                sub_row(f, kind, thousands(*n))?;
             }
         }
-        writeln!(f, "  {:<28} {}", "lights", thousands(s.lights))?;
+        row(f, "lights", thousands(s.lights))?;
         for (kind, n) in &self.light_kinds {
-            writeln!(f, "    {:<26} {}", kind, thousands(*n))?;
+            sub_row(f, kind, thousands(*n))?;
         }
         if let Some((target, max)) = self.subdivision.adaptive {
             let sub = &self.subdivision;
@@ -785,15 +843,14 @@ impl fmt::Display for RenderStats {
                 "  {:<28} {target} px, at most level {max}",
                 "adaptive subdivision"
             )?;
-            writeln!(
+            sub_row(
                 f,
-                "    {:<26} {}",
                 "subdivision levels",
                 if levels.is_empty() {
                     "none".to_string()
                 } else {
                     levels.join(" · ")
-                }
+                },
             )?;
             if sub.shared_meshes > 0 {
                 writeln!(
@@ -828,11 +885,11 @@ impl fmt::Display for RenderStats {
                 })
                 .collect();
             if !bins.is_empty() {
-                writeln!(f, "    {:<26} {}", "edge rates", bins.join(" · "))?;
+                sub_row(f, "edge rates", bins.join(" · "))?;
             }
         }
         if s.volumes > 0 {
-            writeln!(f, "  {:<28} {}", "volume regions", thousands(s.volumes))?;
+            row(f, "volume regions", thousands(s.volumes))?;
         }
 
         // Exact kernel bytes, then peak RSS. The difference is everything
@@ -840,12 +897,7 @@ impl fmt::Display for RenderStats {
         // showing both says where to look next.
         let fp = &s.footprint;
         if fp.total() > 0 {
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "kernel memory",
-                human_bytes(fp.total() as u64)
-            )?;
+            row(f, "kernel memory", human_bytes(fp.total() as u64))?;
             for (label, bytes) in [
                 ("vertices", fp.vertices),
                 ("vertex normals", fp.vertex_normals),
@@ -861,7 +913,7 @@ impl fmt::Display for RenderStats {
                 ("geometry tables", fp.geometry_tables),
             ] {
                 if bytes > 0 {
-                    writeln!(f, "    {:<26} {}", label, human_bytes(bytes as u64))?;
+                    sub_row(f, label, human_bytes(bytes as u64))?;
                 }
             }
             // How well the packets are used, and the one number a layout
@@ -891,19 +943,22 @@ impl fmt::Display for RenderStats {
             }
         }
         if let Some(peak) = peak_memory_bytes() {
-            writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
+            row(f, "peak memory (RSS)", human_bytes(peak))?;
         }
+        Ok(())
+    }
 
+    /// Ray statistics, when the render traced any.
+    fn write_rays(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Ray statistics -------------------------------------------
         let r = &self.rays;
         if !r.is_empty() {
-            let count = |n: u64| thousands(n as usize);
             let share = |n: u64, of: u64| 100.0 * n as f64 / of.max(1) as f64;
             writeln!(f, "{rule}")?;
             writeln!(f, "Ray Statistics")?;
             writeln!(f, "{rule}")?;
-            writeln!(f, "  {:<28} {}", "primary rays", count(r.camera_rays))?;
-            writeln!(f, "  {:<28} {}", "bounce rays", count(r.bounce_rays()))?;
+            row(f, "primary rays", count(r.camera_rays))?;
+            row(f, "bounce rays", count(r.bounce_rays()))?;
             writeln!(
                 f,
                 "  {:<28} {} ({:.1}% occluded)",
@@ -912,7 +967,7 @@ impl fmt::Display for RenderStats {
                 share(r.shadow_occluded, r.shadow_rays)
             )?;
             if r.sss_walks > 0 {
-                writeln!(f, "  {:<28} {}", "subsurface walk rays", count(r.sss_rays))?;
+                row(f, "subsurface walk rays", count(r.sss_rays))?;
             }
             if r.cutout_rays > 0 {
                 writeln!(
@@ -923,7 +978,7 @@ impl fmt::Display for RenderStats {
                     count(r.cutout_passes)
                 )?;
             }
-            writeln!(f, "  {:<28} {}", "total ray queries", count(r.total_rays()))?;
+            row(f, "total ray queries", count(r.total_rays()))?;
             // Throughput needs the render phase alone, not the whole run:
             // dividing by total would credit rays to time spent parsing.
             if let Some(render) = self.render_phase() {
@@ -950,7 +1005,7 @@ impl fmt::Display for RenderStats {
                 }
             }
 
-            writeln!(f, "  {:<28} {}", "shading points", count(r.vertices))?;
+            row(f, "shading points", count(r.vertices))?;
             for (label, n) in [
                 ("surfaces", r.surface_vertices()),
                 ("volume scatters", r.volume_scatters),
@@ -1048,7 +1103,7 @@ impl fmt::Display for RenderStats {
             // Every path ends exactly one way, so these four sum to the
             // primary rays — a quick check that the counters are honest.
             let ended = r.ended_escaped + r.ended_absorbed + r.rr_killed + r.ended_depth;
-            writeln!(f, "  {:<28} {}", "paths ended", count(ended))?;
+            row(f, "paths ended", count(ended))?;
             for (label, n) in [
                 ("escaped", r.ended_escaped),
                 ("absorbed", r.ended_absorbed),
@@ -1064,11 +1119,14 @@ impl fmt::Display for RenderStats {
                 )?;
             }
         }
+        Ok(())
+    }
 
+    /// The streamed `.tx` texture cache, when one was used.
+    fn write_textures(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Textures --------------------------------------------------
         let t = &self.textures;
         if !t.is_empty() {
-            let count = |n: u64| thousands(n as usize);
             writeln!(f, "{rule}")?;
             writeln!(f, "Textures")?;
             writeln!(f, "{rule}")?;
@@ -1085,16 +1143,15 @@ impl fmt::Display for RenderStats {
             }
         }
         if t.lookups() > 0 {
-            let count = |n: u64| thousands(n as usize);
             let share = |n: u64| 100.0 * n as f64 / t.lookups().max(1) as f64;
-            writeln!(f, "  {:<28} {}", "streamed files", count(t.files))?;
+            row(f, "streamed files", count(t.files))?;
             // Guerilla's texture memory triple. `total` is what preloading
             // would have held; `loaded` what was actually read (larger than
             // `still in cache` by whatever was evicted); `still in cache` is
             // what is resident now. loaded >> still in cache, with unloaded
             // tiles of the same order as loaded tiles, means the budget is
             // below the working set and the cache purged to fit.
-            writeln!(f, "  {:<28} {}", "total memory", human_bytes(t.total_bytes))?;
+            row(f, "total memory", human_bytes(t.total_bytes))?;
             // Every decode counts, so this can exceed `total memory` with no
             // eviction at all: many workers first touching the same small
             // tiles decode them concurrently. Say so, or it reads as a bug.
@@ -1113,12 +1170,7 @@ impl fmt::Display for RenderStats {
                     String::new()
                 }
             )?;
-            writeln!(
-                f,
-                "  {:<28} {}",
-                "still in cache",
-                human_bytes(t.resident_bytes)
-            )?;
+            row(f, "still in cache", human_bytes(t.resident_bytes))?;
             writeln!(
                 f,
                 "  {:<28} {} / {}",
@@ -1126,9 +1178,9 @@ impl fmt::Display for RenderStats {
                 human_bytes(t.peak_bytes),
                 human_bytes(t.budget_bytes)
             )?;
-            writeln!(f, "  {:<28} {}", "loaded tiles", count(t.loaded_tiles))?;
-            writeln!(f, "  {:<28} {}", "unloaded tiles", count(t.evictions))?;
-            writeln!(f, "  {:<28} {}", "lookups", count(t.lookups()))?;
+            row(f, "loaded tiles", count(t.loaded_tiles))?;
+            row(f, "unloaded tiles", count(t.evictions))?;
+            row(f, "lookups", count(t.lookups()))?;
             writeln!(
                 f,
                 "    {:<26} {} ({:.1}%)",
@@ -1171,13 +1223,17 @@ impl fmt::Display for RenderStats {
             // amount of budget removes it. Reporting it as thrashing sent the
             // first measured render chasing a cache size that was 0.006% full.
             if t.raced > 0 {
-                writeln!(f, "  {:<28} {}", "concurrent double fills", count(t.raced))?;
+                row(f, "concurrent double fills", count(t.raced))?;
             }
             if t.errors > 0 {
-                writeln!(f, "  {:<28} {}", "tile read errors", count(t.errors))?;
+                row(f, "tile read errors", count(t.errors))?;
             }
         }
+        Ok(())
+    }
 
+    /// Ptex residency and the backend that served it.
+    fn write_ptex(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Ptex ------------------------------------------------------
         let p = &self.ptex;
         if !p.is_empty() {
@@ -1186,12 +1242,6 @@ impl fmt::Display for RenderStats {
             writeln!(f, "{rule}")?;
             // The line the whole block exists for. An island run's peak RSS
             // cannot be read without knowing which backend produced it.
-            // A mixed report is the normal case on a production stage, not a
-            // warning — the island streams 39 of 3 618 and preloads the rest
-            // by design. So "declined" and "failed" are named separately:
-            // the first says the admission rule worked, the second says a
-            // file is broken, and calling both a fallback (as this line once
-            // did) reads as 3 579 errors.
             let backend = if p.streamed == 0
                 && p.below_threshold == 0
                 && p.budget_full == 0
@@ -1205,10 +1255,10 @@ impl fmt::Display for RenderStats {
             } else {
                 // A mixed report is the normal case on a production stage, not
                 // a warning — the island streams 39 of 3 618 and preloads the
-                // rest by design. So the two reasons are named separately: one
-                // says the admission rule worked, the other says a file is
-                // broken. Calling both a fallback, as this line once did, read
-                // as 3 579 errors.
+                // rest by design. So every reason is named on its own: the
+                // policy ones (size threshold, budget, mip space) say the
+                // admission rule worked, and only a failed open — shouted —
+                // says a file is broken.
                 let mut parts = Vec::new();
                 if p.streamed > 0 {
                     parts.push(format!("{} streamed", thousands(p.streamed as usize)));
@@ -1240,7 +1290,7 @@ impl fmt::Display for RenderStats {
                 }
                 parts.join(", ")
             };
-            writeln!(f, "  {:<28} {}", "backend", backend)?;
+            row(f, "backend", backend)?;
             writeln!(
                 f,
                 "  {:<28} {} ({} faces)",
@@ -1249,12 +1299,7 @@ impl fmt::Display for RenderStats {
                 thousands(p.faces as usize)
             )?;
             if p.preloaded_bytes > 0 {
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "preloaded resident",
-                    human_bytes(p.preloaded_bytes)
-                )?;
+                row(f, "preloaded resident", human_bytes(p.preloaded_bytes))?;
             }
             if p.streamed > 0 {
                 // Resident is live rather than peak, and the budget is the
@@ -1281,12 +1326,7 @@ impl fmt::Display for RenderStats {
                     human_bytes(p.micro_retained_bytes),
                     human_bytes(p.micro_reserve_bytes)
                 )?;
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "texel fetches",
-                    thousands(p.lookups() as usize)
-                )?;
+                row(f, "texel fetches", thousands(p.lookups() as usize))?;
                 writeln!(
                     f,
                     "  {:<28} {} ({:.1}%)",
@@ -1294,18 +1334,8 @@ impl fmt::Display for RenderStats {
                     thousands(p.micro_hits as usize),
                     100.0 * p.micro_rate()
                 )?;
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "  reader cache hits",
-                    thousands(p.cache_hits as usize)
-                )?;
-                writeln!(
-                    f,
-                    "  {:<28} {}",
-                    "  reads from disk",
-                    thousands(p.cache_misses as usize)
-                )?;
+                row(f, "  reader cache hits", thousands(p.cache_hits as usize))?;
+                row(f, "  reads from disk", thousands(p.cache_misses as usize))?;
                 // Same reasoning as the `.tx` block's re-read line: evictions
                 // running with the misses means the budget is under the
                 // working set, which is the one thing raising it fixes.
@@ -1322,10 +1352,21 @@ impl fmt::Display for RenderStats {
                 )?;
             }
         }
+        Ok(())
+    }
 
-        if self.phases.is_empty() {
-            return Ok(());
-        }
+    /// The two phase tables: by execution tree, then by time.
+    fn write_phases(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
+        const NAME: usize = PHASE_NAME_WIDTH;
+        let total = self.total();
+        let total_secs = total.as_secs_f64();
+        let pct = |d: Duration| {
+            if total_secs > 0.0 {
+                100.0 * d.as_secs_f64() / total_secs
+            } else {
+                0.0
+            }
+        };
 
         // -- Phases by execution tree ----------------------------------
         writeln!(f, "{rule}")?;
@@ -1379,14 +1420,7 @@ impl fmt::Display for RenderStats {
                 width = NAME - 3
             )?;
         }
-
-        // -- Render profile (`--profile`) --------------------------------
-        // After the phases, because it zooms into one of them: every figure
-        // below is thread time inside the Render row above.
-        if let Some(profile) = &self.profile {
-            profile.write_report(f, &rule, self.render_phase().map(|p| p.duration))?;
-        }
-        write!(f, "{rule}")
+        Ok(())
     }
 }
 

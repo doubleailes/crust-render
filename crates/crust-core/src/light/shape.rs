@@ -369,7 +369,7 @@ impl UnitShape {
 /// elliptical disk or an elliptical tube.
 ///
 /// A sphere seen from outside is sampled by its visible cone in local space
-/// (see [`LightShape::sample_solid_angle`] below). Otherwise — a disk, a tube,
+/// (see [`SolidAngleSampling::sample_solid_angle`]). Otherwise — a disk, a tube,
 /// or a point inside the sphere — sampling is uniform in the shape's *local*
 /// area and mapped through the placement, so in world space it is denser
 /// where the placement compresses the surface. That is fine — MIS needs a density both sides agree on, not a
@@ -494,7 +494,7 @@ impl LightShape for AffineShape {
     /// point faces the shading point in world space exactly when it does in
     /// local space, and the sampled cap is the ellipsoid's visible one. The
     /// world density is the local cone's times the solid-angle Jacobian of the
-    /// direction map (see [`AffineShape::world_solid_angle_pdf`]), so unlike
+    /// direction map (see `AffineShape::world_solid_angle_pdf`), so unlike
     /// the round sphere's it varies across the cap.
     #[inline(always)]
     fn solid_angle_sampler(&self, from: Vec3A) -> Option<SolidAngleSampler<'_>> {

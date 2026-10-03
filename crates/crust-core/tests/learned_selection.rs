@@ -193,10 +193,13 @@ fn learned_renders_are_deterministic_and_scheduling_free() {
     // statement about scheduling alone.
     let (a, _) = scene(LightSelection::Learned, 16);
     let (b, _) = scene(LightSelection::Learned, 16);
-    let tiles = a.render_with_tiles();
+    let tiles = a.render_with(crust_core::RenderOrder::Tiles, None).0;
     assert!(same(&tiles, &a.render()), "tiles vs scanlines");
     assert!(
-        same(&tiles, &b.render_with_tiles()),
+        same(
+            &tiles,
+            &b.render_with(crust_core::RenderOrder::Tiles, None).0
+        ),
         "two builds of the cache"
     );
 }

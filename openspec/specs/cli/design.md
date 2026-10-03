@@ -293,7 +293,7 @@ conversion (Hinnant's, era-shifted to March so leap days land at the end of a 40
 cycle) rather than taking `chrono` or `time`, neither of which is in the graph and
 either of which would be the largest dependency in this binary for the sake of naming a
 file. The format is fixed-width and zero-padded so lexical order is chronological;
-`utc_stamp_*` in `main.rs` pins that, plus the 2000-vs-2100 leap rule.
+`utc_stamp_*` in `crust-render/src/logging.rs` pins that, plus the 2000-vs-2100 leap rule.
 
 Fourth, **the `--stats` report is a log event too, on a target `-l` cannot silence.**
 It used to go straight to stdout on the grounds that it is a report to read rather
@@ -332,6 +332,12 @@ branch), while `CRUST_RAY_CONES=0` zeroes every footprint with the pyramids stil
 resident. Either side alone is bit-identical to the pre-filtering renderer, and the two
 produce the same image as each other — which is what makes them an honest A/B of the two
 halves: the pyramid, and the footprint that selects from it.
+
+Every switch is a field of `crust_core::Config` (`config.rs`), read from the environment
+once per process. They used to be read where they were used, and parsed six different
+ways: some were cached, others re-read per prim or per texture open, a bad budget warned
+once per call site, and a bad `CRUST_TEX_MAX` not at all. `config.rs` now has one boolean
+grammar, one number grammar and one warning per bad value.
 
 ## Stats and render profile (`stats.rs`, `profile.rs`)
 
@@ -387,3 +393,6 @@ From the `crust-core` crate description:
   `RayStats` counter (MainLoop = pixels, Trace = closest-hit, Occlusion = shadow
   rays, EvalBsdfs = surface vertices) and that the local times partition the
   thread time.
+  The Ptex block's backend line names each preload reason separately (size threshold,
+  budget, linear mip space, failed open). It once called every preload a fallback, which
+  read the island's 3 579 by-design preloads — it streams 39 of 3 618 — as 3 579 errors.

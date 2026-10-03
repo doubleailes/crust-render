@@ -8,17 +8,17 @@
 //! its only dependencies are an XML parser and `glam` — and it knows nothing
 //! about any particular material model; that is the consumer's half.
 //!
-//! The pipeline is three modules:
+//! The pipeline is three private modules, their items re-exported here:
 //!
-//! - [`parse`] — XML → a flat, name-addressable node graph.
-//! - [`eval`] — that graph compiled once into a slot-indexed [`Program`],
+//! - `parse` — XML → a flat, name-addressable node graph ([`Doc`]).
+//! - `eval` — that graph compiled once into a slot-indexed [`Program`],
 //!   evaluated per shading point with no name lookups and no allocation.
-//! - [`bsdf`] — the closure half of the graph read as the tree MaterialX
+//! - `bsdf` — the closure half of the graph read as the tree MaterialX
 //!   defines: BSDF leaves combined by `layer` / `mix` / `add` / `multiply`
 //!   ([`Closures`]), with the EDF terms and the interior volume beside it.
 //!   The three surface-shader nodes (`open_pbr_surface`, `standard_surface`,
 //!   `gltf_pbr`) expand into the tree of their MaterialX nodegraphs
-//!   ([`surface`]).
+//!   (`surface`).
 //!
 //! [`compile`] runs all three for one material node. The crate decodes *no
 //! pixels*: an `image` node's file is handed to the caller's
@@ -27,12 +27,12 @@
 //! streaming parser partly to keep it that way.
 #![forbid(unsafe_code)]
 
-pub mod bsdf;
-pub mod eval;
-pub mod parse;
-pub mod surface;
+mod bsdf;
+mod eval;
+mod parse;
+mod surface;
 mod texture;
-pub mod value;
+mod value;
 
 pub use bsdf::{
     Bsdf, Closure, Closures, DiffuseModel, Emission, Leaf, NodeId, ScatterMode, SheenMode, Slot,
@@ -42,8 +42,9 @@ pub use eval::{
     BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
 };
 pub use parse::{Doc, Input, MtlxError, Node, Source};
+pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 pub use texture::{Texture, TextureRef};
-pub use value::Val;
+pub use value::{Val, arity_of, parse_literal};
 
 /// Resolves an `image` node's `file` input — as authored, relative to the
 /// document — plus its `colorspace` attribute, into a sampler. `None` declines
@@ -73,23 +74,30 @@ pub struct Compiled {
 impl Compiled {
     /// Every program slot a consumer reads.
     pub fn roots(&self) -> Vec<u32> {
-        let mut roots = Vec::new();
         // `for_each_slot` visits mutably; walk a copy, the tree is small.
-        self.closures.clone().for_each_slot(|s| roots.push(*s));
-        roots
+        slots_of(&mut self.closures.clone())
     }
 
     /// Replaces the program with [`Program::optimize`]'s and points every
     /// closure parameter at its slot's new home. Every root keeps its value
     /// bit for bit at every shading point; only the work to reach it shrinks.
     pub fn optimize(&mut self) {
-        let (program, remap) = self.program.optimize(&self.roots());
+        let roots = slots_of(&mut self.closures);
+        let (program, remap) = self.program.optimize(&roots);
         // Every root is live, so every root was placed.
         self.closures.for_each_slot(|s| {
             *s = remap[*s as usize].expect("a root slot survives optimization");
         });
         self.program = program;
     }
+}
+
+/// Every slot `closures` reads, in [`Closures::for_each_slot`]'s order. The
+/// visitor takes `&mut` but this walk changes nothing.
+fn slots_of(closures: &mut Closures) -> Vec<u32> {
+    let mut slots = Vec::new();
+    closures.for_each_slot(|s| slots.push(*s));
+    slots
 }
 
 /// Parses a `.mtlx` and compiles the named material node.

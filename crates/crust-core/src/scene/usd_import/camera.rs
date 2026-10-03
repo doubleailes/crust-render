@@ -12,20 +12,53 @@ use super::attrs::attr_f32;
 use super::prim_at;
 use super::xform::{local_matrix_at, resets_xform_stack_at};
 
+/// A camera prim as both of its readers see it: the schema, where the camera
+/// is and which way it looks in world space, and its lens. Built in one place
+/// so that [`build_camera`] and [`screen_projection`] cannot describe two
+/// different cameras.
+struct CameraFrame {
+    cam: UsdCamera,
+    eye: Vec3,
+    /// The view direction and the image's up, unit length.
+    forward: Vec3,
+    up: Vec3,
+    /// From [`lens`], in the same units.
+    focal_length: f32,
+    vert_aperture: f32,
+}
+
+/// The [`CameraFrame`] of `prim`, or `None` when it is not a camera on `stage`.
+fn camera_frame(stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Option<CameraFrame> {
+    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
+    let world = local_to_world(stage, prim);
+    // USD camera looks down -Z with +Y up in local space.
+    let eye = world.transform_point3(Vec3::ZERO);
+    let forward = world.transform_vector3(Vec3::NEG_Z).normalize();
+    let up = world.transform_vector3(Vec3::Y).normalize();
+    let (focal_length, vert_aperture) = lens(&cam, settings);
+    Some(CameraFrame {
+        cam,
+        eye,
+        forward,
+        up,
+        focal_length,
+        vert_aperture,
+    })
+}
+
 pub(super) fn build_camera(
     stage: &Stage,
     prim: &Prim,
     settings: &RenderSettings,
 ) -> Option<Camera> {
-    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let world = local_to_world(stage, prim);
-
-    // USD camera looks down -Z with +Y up in local space.
-    let lookfrom_v = world.transform_point3(Vec3::ZERO);
-    let forward_v = world.transform_vector3(Vec3::NEG_Z).normalize();
-    let up_v = world.transform_vector3(Vec3::Y).normalize();
-
-    let (focal_length, vert_aperture) = lens(&cam, settings);
+    let CameraFrame {
+        cam,
+        eye: lookfrom_v,
+        forward: forward_v,
+        up: up_v,
+        focal_length,
+        vert_aperture,
+    } = camera_frame(stage, prim, settings)?;
     let f_stop = attr_f32(&cam.f_stop_attr()).unwrap_or(0.0);
     let focus_distance = attr_f32(&cam.focus_distance_attr()).unwrap_or(10.0);
 
@@ -75,24 +108,26 @@ fn lens(cam: &UsdCamera, settings: &RenderSettings) -> (f32, f32) {
 /// What adaptive subdivision needs of the render camera, read before the
 /// traversal builds it: the position and the pixels per world unit at unit
 /// distance, `image height / (2 tan(vfov / 2))` = `height · focal / aperture`.
-/// From the same attributes and the same [`lens`] as [`build_camera`], so the
-/// two describe one camera. `None` when `prim` is not a camera on `stage`.
+/// From the same [`camera_frame`] as [`build_camera`], so the two describe one
+/// camera. `None` when `prim` is not a camera on `stage`.
 pub(super) fn screen_projection(
     stage: &Stage,
     prim: &Prim,
     settings: &RenderSettings,
 ) -> Option<ScreenProjection> {
-    let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let world = local_to_world(stage, prim);
-    let eye = world.transform_point3(Vec3::ZERO);
-    let (focal_length, vert_aperture) = lens(&cam, settings);
+    let CameraFrame {
+        eye,
+        forward,
+        up,
+        focal_length,
+        vert_aperture,
+        ..
+    } = camera_frame(stage, prim, settings)?;
     let (w, h) = settings.get_dimensions();
     let f_px = h as f32 * focal_length / vert_aperture;
     // The view pyramid, as `build_camera` builds it: the vertical field of
     // view from the lens, the horizontal one from the image's aspect ratio.
     let tan_v = vert_aperture / (2.0 * focal_length);
-    let forward = world.transform_vector3(Vec3::NEG_Z).normalize();
-    let up = world.transform_vector3(Vec3::Y).normalize();
     (f_px.is_finite() && f_px > 0.0).then_some(ScreenProjection {
         eye,
         f_px,

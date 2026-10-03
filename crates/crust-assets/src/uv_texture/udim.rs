@@ -1,6 +1,13 @@
 //! Tile-set addressing: the `<UDIM>` / `<UVTILE>` filename tokens and the
 //! UDIM numbering every tile is keyed by.
 
+use std::path::{Path, PathBuf};
+
+/// Chart coordinates swept on each axis: 10x10 covers the 1001..1100 range
+/// every DCC writes, and bounds the `<UVTILE>` sweep too, since the two
+/// tokens name the same grid.
+const GRID: u32 = 10;
+
 /// The filename token that addresses a tile set, and how it spells a tile.
 ///
 /// Two spellings, one grid: a document may use either, and both index the
@@ -39,6 +46,24 @@ impl TileToken {
         }
     }
 
+    /// Every tile of the set `name` addresses that exists on disk, with its
+    /// UDIM number.
+    ///
+    /// Only tiles present on disk are listed, so a chart with holes costs
+    /// nothing for the tiles it does not use. The order is `v`-major, then
+    /// `u` — ascending UDIM number — and callers rely on it: the streaming
+    /// texture interns its files in this order, and the first tile listed is
+    /// the one that settles an `auto` colour space.
+    pub(super) fn existing_tiles(self, name: &str) -> Vec<(u32, PathBuf)> {
+        (0..GRID)
+            .flat_map(|v| (0..GRID).map(move |u| (u, v)))
+            .filter_map(|(u, v)| {
+                let p = PathBuf::from(self.expand(name, u, v));
+                p.exists().then_some((udim_number(u, v), p))
+            })
+            .collect()
+    }
+
     /// The token as authored, for the "nothing found" message.
     pub(super) fn as_str(self) -> &'static str {
         match self {
@@ -48,14 +73,18 @@ impl TileToken {
     }
 }
 
-/// Expands a `<UDIM>` / `<UVTILE>` token in `name` for chart coordinates
-/// `(u, v)`, or `None` when the name carries no token.
+/// The tiles a `<UDIM>` / `<UVTILE>` path names that exist on disk, each
+/// with its UDIM number, in ascending UDIM order; `None` when the path names
+/// a single image rather than a tile set.
 ///
-/// Shared with the streaming path so the two discover the same set of tiles:
-/// a sweep that disagreed about which files exist would make the two texture
-/// backends cover different parts of the chart.
-pub(crate) fn expand_token(name: &str, u: u32, v: u32) -> Option<String> {
-    TileToken::detect(name).map(|t| t.expand(name, u, v))
+/// The one sweep every consumer of a tile set uses — the preload and
+/// streaming textures, `--auto-tx` and the `maketx` example — so they
+/// discover the same set of tiles: a sweep that disagreed about which files
+/// exist would make the two texture backends cover different parts of the
+/// chart.
+pub fn existing_tiles(path: &Path) -> Option<Vec<(u32, PathBuf)>> {
+    let name = path.to_string_lossy();
+    TileToken::detect(&name).map(|t| t.existing_tiles(&name))
 }
 
 /// The UDIM number of the tile at zero-based chart coordinates.

@@ -2,7 +2,7 @@
 //! volumes, path guiding and USD import.
 //!
 //! `deny(unsafe_code)` rather than `forbid`, for exactly one reason: the
-//! subdivision allocation probe in `scene/subdiv.rs` installs a counting
+//! subdivision allocation probe in `scene/subdiv/tests.rs` installs a counting
 //! `GlobalAlloc`, and implementing that trait is inherently unsafe. `deny`
 //! lets that one test module opt out explicitly and visibly; `forbid` could
 //! not be overridden at all, and dropping the lint entirely would leave the
@@ -27,8 +27,6 @@ mod material;
 mod medium;
 pub mod names;
 mod pdf;
-/// The opt-in render profile (`--profile`): per-section thread time inside
-/// the render, after Guerilla Render's "Render Profile".
 pub mod profile;
 mod ray;
 mod rt_world;
@@ -38,7 +36,7 @@ mod scene;
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
-pub mod subsurface;
+mod subsurface;
 mod texture;
 mod tracer;
 mod volume;
@@ -59,16 +57,6 @@ pub use aabb::AABB;
 pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{Config, PtexMipSpace, TriPackets, config};
-
-/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
-/// `CRUST_BVH_PACKET_SAH` switches, read once.
-pub fn commit_options() -> crust_rt::CommitOptions {
-    let c = config();
-    crust_rt::CommitOptions {
-        layout: c.tri_packets.into(),
-        packet_sah: c.bvh_packet_sah,
-    }
-}
 pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
@@ -80,11 +68,13 @@ pub use light::{
     LightLinks, LightList, LightSample, LightSelection, LightShape, RectShape, SolidAngleSampler,
     SolidAngleSampling, SphereShape, UnitShape, projected_cone_solid_angle,
 };
-pub use lux::{
-    IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb, distant_illuminance,
-    distant_size_factor,
+// `IesShaping` stays public only because it is the type of the public
+// `Shaping::ies` field; nothing outside the importer builds one.
+pub use lux::{IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb};
+pub use material::{
+    Emissive, InteriorCache, Material, MtlxMaterial, OpenPBR, PreviewSurface, Resolution,
+    ResolvedOpenPBR, ScatterSample, ShadingPoint, closure, preview_surface,
 };
-pub use material::*;
 pub use medium::Medium;
 pub use pdf::{InvPdfArea, PdfSolidAngle};
 pub use ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, Ray, RayCone, RayMask};
@@ -97,8 +87,18 @@ pub use stats::{
 };
 pub use texture::{ColorSpace, PtexRef, PtexTexture, ResolvedColorSpace, Texture2D, TextureRef};
 pub use tracer::{
-    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings,
-    Renderer, SamplingStrategy, ray_color,
+    DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderOrder,
+    RenderSettings, Renderer, SamplingStrategy, ray_color,
 };
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};
+
+/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
+/// `CRUST_BVH_PACKET_SAH` switches, read once.
+pub(crate) fn commit_options() -> crust_rt::CommitOptions {
+    let c = config();
+    crust_rt::CommitOptions {
+        layout: c.tri_packets.into(),
+        packet_sah: c.bvh_packet_sah,
+    }
+}

@@ -20,7 +20,7 @@ use super::{Light, LightSample};
 /// (`inputs:angle`, default 0.53° — the sun's), and authors may set it to
 /// zero for perfectly sharp shadows. Rather than making that a delta light,
 /// which would need a second MIS path through the integrator, a zero angle
-/// is widened to [`MIN_DISTANT_ANGLE_DEG`]. The resulting penumbra is far
+/// is widened to `MIN_DISTANT_ANGLE_DEG`. The resulting penumbra is far
 /// below a pixel at any sane scene scale, and MIS handles the rest: when a
 /// bounce ray happens into the tiny cone the light pdf is enormous, so the
 /// bounce side's weight collapses to nothing and no firefly survives.

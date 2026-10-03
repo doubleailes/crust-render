@@ -1,7 +1,7 @@
 //! OpenPBR Surface — Academy Software Foundation shading model.
 //!
 //! Full parameter set matches the OpenPBR MaterialX reference
-//! (https://academysoftwarefoundation.github.io/OpenPBR/). Every field
+//! (<https://academysoftwarefoundation.github.io/OpenPBR/>). Every field
 //! defaults to the spec value, so USD scenes can specify only what they
 //! need. Formulas are aligned against the MaterialX nodegraph and the
 //! Adobe OpenPBR BSDF reference (github.com/adobe/openpbr-bsdf) — the
@@ -49,7 +49,8 @@ use crate::ray::Ray;
 mod lobes;
 mod transmission;
 
-use lobes::{Frame, Lobe, LobePmf, coat_passage, eval_all, pdf_all};
+use crate::material::brdf::Frame;
+use lobes::{Lobe, LobePmf, coat_passage, eval_all, pdf_all};
 use transmission::{
     lobe_spread, sample_transmission_rough, sample_transmission_thin, transmission_is_continuous,
 };

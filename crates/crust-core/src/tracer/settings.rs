@@ -3,6 +3,7 @@
 
 use crate::LightSelection;
 use crate::filter::PixelFilter;
+use crate::guiding::GuidingConfig;
 use crate::pdf::PdfSolidAngle;
 
 /// The indirect clamp a render gets unless the stage (`crust:indirectClamp`)
@@ -140,10 +141,9 @@ pub struct RenderSettings {
     // `with_adaptive_neighbour_tolerance`). Negative: no comparison.
     pub(super) adaptive_neighbour_tolerance: f32,
     pub(super) frame: isize,
-    // Path guiding (opt-in via `crust:pathGuiding`; see `with_guiding`).
-    pub(super) guiding: bool,
-    pub(super) guiding_train_iterations: u32,
-    pub(super) guiding_prob: f32,
+    // Path guiding: `None` unless opted in (`crust:pathGuiding`; see
+    // `with_guiding`).
+    pub(super) guiding: Option<GuidingConfig>,
     // MIS strategy (see `SamplingStrategy`; `crust:samplingStrategy` /
     // `--strategy`).
     pub(super) sampling_strategy: SamplingStrategy,
@@ -178,9 +178,7 @@ impl RenderSettings {
             variance_threshold,
             adaptive_neighbour_tolerance: DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
             frame,
-            guiding: false,
-            guiding_train_iterations: 4,
-            guiding_prob: 0.5,
+            guiding: None,
             sampling_strategy: SamplingStrategy::default(),
             pixel_filter: PixelFilter::default(),
             light_selection: LightSelection::default(),
@@ -205,13 +203,21 @@ impl RenderSettings {
         self.frame
     }
 
-    /// Enable (or disable) path guiding with the given number of training
-    /// iterations and guide-sampling probability α.
-    pub fn with_guiding(mut self, enabled: bool, train_iterations: u32, guide_prob: f32) -> Self {
-        self.guiding = enabled;
-        self.guiding_train_iterations = train_iterations.max(1);
-        self.guiding_prob = guide_prob.clamp(0.1, 0.9);
+    /// Enable path guiding with `config`, or disable it with `None`. At least
+    /// one training iteration is run, and the guide-sampling probability α is
+    /// clamped to `[0.1, 0.9]` so neither side of the mixture starves.
+    pub fn with_guiding(mut self, config: Option<GuidingConfig>) -> Self {
+        self.guiding = config.map(|c| GuidingConfig {
+            train_iterations: c.train_iterations.max(1),
+            guide_prob: c.guide_prob.clamp(0.1, 0.9),
+            ..c
+        });
         self
+    }
+
+    /// The guiding configuration in effect, `None` when guiding is off.
+    pub fn guiding(&self) -> Option<GuidingConfig> {
+        self.guiding
     }
 
     /// Select how light sampling and BSDF sampling combine — see
@@ -249,7 +255,7 @@ impl RenderSettings {
     /// its largest channel, scaling the colour down whole so the hue
     /// survives. Defaults to [`DEFAULT_INDIRECT_CLAMP`]; `0`, a negative or a
     /// non-finite value disables it, which is the unbiased estimator. See
-    /// [`clamp_indirect`](super::path::clamp_indirect) for what counts as indirect.
+    /// `clamp_indirect` (in `tracer/path.rs`) for what counts as indirect.
     ///
     /// Biased on purpose — energy is removed exactly where it is rare and
     /// bright — and the standard trade in production renderers (Cycles'

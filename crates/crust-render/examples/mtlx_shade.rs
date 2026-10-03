@@ -110,9 +110,8 @@ fn main() {
             t: 1.0,
             front_face: true,
             face: None,
-            uv: (u, v),
+            uv: Some((u, v)),
             tangent: Vec3A::X,
-            has_uv: true,
             // Point-sample: this probe reports what the graph evaluates to at a
             // named (u, v), not what a filtered render would show there.
             uv_width: 0.0,

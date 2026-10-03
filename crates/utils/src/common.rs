@@ -13,6 +13,14 @@ pub fn luminance(c: Vec3A) -> f32 {
     0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
 }
 
+/// `e^v` per channel — Beer–Lambert transmittance (`exp3(-σₜ·t)`) and the
+/// medium corrections built from it. Three scalar `exp`s, in channel order,
+/// so every caller rounds exactly as the inline form it replaced.
+#[inline]
+pub fn exp3(v: Vec3A) -> Vec3A {
+    Vec3A::new(v.x.exp(), v.y.exp(), v.z.exp())
+}
+
 /// Veach's balance heuristic: `w_a = pdf_a / (pdf_a + pdf_b)`.
 ///
 /// Historical note: before the sampling strategies were made configurable

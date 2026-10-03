@@ -31,6 +31,7 @@
 //! that matters.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ use tracing::{debug, info, warn};
 
 use crate::camera::Camera;
 use crate::light::LightList;
-use crate::rt_world::WorldBuilder;
+use crate::rt_world::{World, WorldBuilder};
 use crate::scene::AssetLoader;
 use crate::scene::Scene;
 use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters, SubdivisionCounters};
@@ -75,6 +76,7 @@ mod xform;
 use adaptive::{Frustum, ScreenRate};
 use attrs::{
     custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
+    value_at,
 };
 use camera::{build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
@@ -90,7 +92,7 @@ use settings::{
     render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
-use time::{EvalTimeScope, eval_time};
+use time::EvalTimeScope;
 use volume::emit_volume;
 use xform::{local_matrix_at, resets_xform_stack_at};
 
@@ -172,17 +174,14 @@ fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
 
 /// Counts the native placements of every prototype on `stage`, per top-level
 /// subtree, into `caches.placements`: the same walk and pruning as
-/// [`traverse_into`] (abstract, inactive, non-render purpose, invisible), not
-/// descending into an instance or a `PointInstancer`, whose contents the
-/// traversal does not reach directly either.
+/// [`traverse_into`] (abstract, then [`prune_reason`]), not descending into an
+/// instance or a `PointInstancer`, whose contents the traversal does not reach
+/// directly either. An invisible subtree is pruned outright: the traversal
+/// walks it only for cameras, and places nothing from it.
 fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
     let mut stack = vec![(prim_at(stage, sdf::Path::abs_root()), GMat4::IDENTITY)];
     while let Some((prim, parent_world)) = stack.pop() {
-        if prim.is_abstract().unwrap_or(false)
-            || !prim.is_active().unwrap_or(true)
-            || non_render_purpose(&prim).is_some()
-            || is_invisible(&prim)
-        {
+        if prim.is_abstract().unwrap_or(false) || prune_reason(&prim).is_some() {
             continue;
         }
         let local = local_matrix_at(stage, &prim);
@@ -247,14 +246,11 @@ struct ImportCtx<'a> {
     /// them, resolved after the last chunk (see [`light_links`]).
     links: LightLinks,
     settings: RenderSettings,
-    /// The stage file, for resolving asset paths against its directory.
-    stage_path: &'a Path,
     /// The whole stage with payloads unloaded, where light collections are
     /// resolved (a chunk's mask may exclude what they name). Dropped as soon
     /// as the links are resolved, before the top-level BVH commit that is
     /// the import's memory peak.
     index: Option<Stage>,
-    assets: &'a dyn AssetLoader,
 }
 
 /// Walks `root` and its subtree, emitting geometry, lights and volumes
@@ -275,17 +271,14 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             debug!("Skipping abstract (class) prim {}", prim.path());
             continue;
         }
-        // USD prunes an inactive prim and its whole namespace subtree from
-        // the composed scene — the standard way a stage disables geometry
-        // (e.g. an LOD or a too-dense archive) without editing its source.
-        if !prim.is_active().unwrap_or(true) {
-            debug!("Skipping inactive prim {}", prim.path());
-            continue;
-        }
-        if let Some(purpose) = non_render_purpose(&prim) {
-            debug!("Skipping {purpose}-purpose prim {}", prim.path());
-            continue;
-        }
+        let invisible = match prune_reason(&prim) {
+            Some(PruneReason::Invisible) => true,
+            Some(reason) => {
+                debug!("Skipping {reason} prim {}", prim.path());
+                continue;
+            }
+            None => false,
+        };
 
         let local = local_matrix_at(stage, &prim);
         let resets = resets_xform_stack_at(stage, &prim);
@@ -297,7 +290,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // Pruning it outright would make `--camera` fail on it and move the
         // first-camera fallback. Instances are not entered — crust never
         // takes a camera from a prototype.
-        let hidden = parent_hidden || is_invisible(&prim);
+        let hidden = parent_hidden || invisible;
         if hidden {
             if !parent_hidden {
                 debug!("Skipping invisible prim {} and its subtree", prim.path());
@@ -368,8 +361,8 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             // Prototypes are conventionally authored beneath the
             // instancer; they are drawn through it, never on their own.
             continue;
-        } else if custom_token(&prim, "crust:volume:type").is_some() {
-            emit_volume(&prim, this_world, &mut ctx.volumes);
+        } else if let Some(ty) = custom_token(&prim, "crust:volume:type") {
+            emit_volume(&prim, &ty, this_world, &mut ctx.volumes);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let mat = resolve_material(stage, &prim, &mut ctx.caches);
             emit_mesh(
@@ -400,15 +393,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
             emit_distant_light(&mut ctx.lights, &prim, &light, this_world);
         } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(
-                &mut ctx.lights,
-                &prim,
-                &light,
-                this_world,
-                ctx.stage_path,
-                ctx.assets,
-                &mut ctx.caches.asset_time,
-            );
+            emit_dome_light(&mut ctx.lights, &prim, &light, this_world, &mut ctx.caches);
         }
         ctx.links.saw(
             prim.path(),
@@ -462,6 +447,53 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
     true
 }
 
+/// Why a walk of the stage leaves a prim and its whole subtree out of what a
+/// render draws. These are the rules every walk shares — the traversal
+/// ([`traverse_into`]), the placement count ([`count_placements`]) and the
+/// prototype walk (`instancing::prototype_prunes`) — so that the count makes
+/// the same decision as the traversal, or a prototype's shared/unshared
+/// verdict (and so its adaptive level) would change. Each caller logs on its
+/// own terms and adds its own rules: the stage walks also skip abstract
+/// (`class`) prims, which a prototype walk must not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PruneReason {
+    /// `active = false`. USD prunes an inactive prim and its whole namespace
+    /// subtree from the composed scene — the standard way a stage disables
+    /// geometry (e.g. an LOD or a too-dense archive) without editing its
+    /// source.
+    Inactive,
+    /// A purpose a final render does not draw ([`non_render_purpose`]).
+    Purpose(&'static str),
+    /// `visibility = "invisible"` ([`is_invisible`]).
+    Invisible,
+}
+
+/// Reads as the adjective the skip messages use: "Skipping {reason} prim".
+impl std::fmt::Display for PruneReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PruneReason::Inactive => f.write_str("inactive"),
+            PruneReason::Purpose(purpose) => write!(f, "{purpose}-purpose"),
+            PruneReason::Invisible => f.write_str("invisible"),
+        }
+    }
+}
+
+/// The first [`PruneReason`] that applies to `prim`, checked in the order
+/// above; `None` when the prim is drawn.
+fn prune_reason(prim: &Prim) -> Option<PruneReason> {
+    if !prim.is_active().unwrap_or(true) {
+        return Some(PruneReason::Inactive);
+    }
+    if let Some(purpose) = non_render_purpose(prim) {
+        return Some(PruneReason::Purpose(purpose));
+    }
+    if is_invisible(prim) {
+        return Some(PruneReason::Invisible);
+    }
+    None
+}
+
 /// Whether `prim` authors `visibility = "invisible"` at the evaluated time.
 ///
 /// Visibility is inherited and cannot be undone below: an `invisible`
@@ -473,11 +505,7 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
 /// fills/bounces and a debug dome this way, and all four used to light the
 /// shot.
 fn is_invisible(prim: &Prim) -> bool {
-    prim.attribute("visibility")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .is_some_and(|v| v.as_str() == Some("invisible"))
+    value_at(&prim.attribute("visibility")).is_some_and(|v| v.as_str() == Some("invisible"))
 }
 
 /// Drops a stage the traversal is done with, or — for a single-stage import
@@ -557,64 +585,14 @@ pub(crate) fn load_scene(
         .to_str()
         .ok_or_else(|| crate::Error::NonUtf8Path(path.to_path_buf()))?;
 
-    // Open once without payloads: enough to read render settings and see
-    // the stage's shape, but none of the geometry. On a production scene
-    // the payloads *are* the cost — composing the whole Moana island
-    // costs openusd 75.74 GiB, where this costs a fraction of that.
     let open_start = Instant::now();
-    let index = Stage::builder()
-        .load(InitialLoadSet::LoadNone)
-        .open(path_str)
-        .map_err(|e| crate::Error::UsdOpen {
-            path: path.to_path_buf(),
-            source: e.into(),
-        })?;
-    debug!(
-        "Opened index stage (payloads unloaded) for {} in {:?}",
-        path.display(),
-        open_start.elapsed()
-    );
-    if let Some(t) = time {
-        check_time_range(&index, t);
-    }
-    // Render settings come first — the camera importer needs the aspect ratio.
-    let mut settings = import_render_settings(&index);
-    let domes_seen_by_camera = dome_light_camera_visibility(&index);
-    // Geometry, not tracer, settings: every mesh whose scheme is not `none`
-    // is refined to this one level, so it must be known before the traversal.
-    let subdiv_level = resolve_subdiv_level(
-        options.subdivision_level,
-        render_settings_subdiv_level(&index),
-    );
-    debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
-    // Which camera to render through: the host's explicit choice, else the
-    // stage's own `RenderSettings.camera`. Decided here, on the index stage,
-    // because the traversal needs it before it meets any camera.
-    let wanted_camera = match requested_camera {
-        Some(p) => Some(CameraChoice::Requested(p)),
-        None => render_settings_camera(&index).map(CameraChoice::Settings),
-    };
-    if let Some(choice) = &wanted_camera {
-        debug!("Rendering through {choice}");
-    }
-    let subdiv = subdiv_policy(
-        &index,
-        path,
-        path_str,
-        options,
-        subdiv_level,
-        wanted_camera.as_ref(),
-        &settings,
-    )?;
-    if let Some(t) = time {
-        // The sampler's frame seed follows the frame being rendered, so an
-        // image sequence gets independent noise per frame instead of one
-        // pattern swimming over moving geometry. Integer part only: the
-        // seed is an integer, and a subframe shares its frame's seed.
-        let seed = t.floor() as isize;
-        debug!("Frame {t} sets the sampler frame seed to {seed} (over crust:frame)");
-        settings = settings.with_frame(seed);
-    }
+    let index = open_index_stage(path, path_str)?;
+    let StageSettings {
+        settings,
+        domes_seen_by_camera,
+        wanted_camera,
+        subdiv,
+    } = resolve_settings(&index, path, path_str, options, requested_camera)?;
     let chunks = stream_roots(&index);
     let subtrees: std::collections::HashSet<String> = if subdiv.adaptive.is_some() {
         subtree_roots(&index)
@@ -650,75 +628,17 @@ pub(crate) fn load_scene(
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
         settings,
-        stage_path: path,
         index: Some(index),
-        assets,
     };
 
     let traverse_start = Instant::now();
-    if chunks.is_empty() {
-        // Small or flat stage: one pass, exactly as before.
-        debug!(
-            "Single-stage import (fewer than {MIN_STREAM_CHUNKS} subtrees, or \
-             CRUST_STREAM_IMPORT=0)"
-        );
-        let stage = open_stage(path, path_str, None)?;
-        if ctx.caches.meshes.subdiv.adaptive.is_some() {
-            count_placements(&stage, &mut ctx.caches);
-        }
-        traverse_into(
-            &stage,
-            prim_at(&stage, sdf::Path::abs_root()),
-            GMat4::IDENTITY,
-            &mut ctx,
-        );
-        release_stage(stage, options.skip_stage_teardown);
-    } else {
-        debug!("Streaming import over {} subtrees", chunks.len());
-        for (n, chunk) in chunks.iter().enumerate() {
-            // Per chunk rather than per prim: this is the loop whose memory
-            // high-water mark the streaming import exists to bound, so the
-            // running totals are what say whether it is doing its job.
-            let chunk_start = Instant::now();
-            debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
-            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
-            if ctx.caches.meshes.subdiv.adaptive.is_some() {
-                count_placements(&stage, &mut ctx.caches);
-            }
-            // Traverse from the root, not from `chunk`: a mask keeps the
-            // masked path's *ancestors* populated, so starting at the
-            // root picks up their transforms exactly as a full traversal
-            // would, while everything outside the chunk stays absent.
-            traverse_into(
-                &stage,
-                prim_at(&stage, sdf::Path::abs_root()),
-                GMat4::IDENTITY,
-                &mut ctx,
-            );
-            // Always dropped, the last chunk included: that is the memory
-            // bound streaming exists for, and a streamed import's peak often
-            // comes *after* the traversal — at the top-level BVH commit, on
-            // the island — where a kept stage would stack on top of it.
-            release_stage(stage, false);
-            // Separate this stage's prototypes from the next stage's —
-            // see ImportCaches::epoch. Deliberately not a clear: the
-            // mesh cache keys materials by Arc address, so nothing may
-            // be freed while it is live.
-            ctx.caches.epoch += 1;
-            ctx.caches.materials.epoch = ctx.caches.epoch;
-            debug!(
-                "Chunk {}/{} done in {:?} — running totals: {} geometries, {} light(s), \
-                 {} volume region(s), {} mesh placement(s) pending",
-                n + 1,
-                chunks.len(),
-                chunk_start.elapsed(),
-                ctx.world.count(),
-                ctx.lights.count(),
-                ctx.volumes.len(),
-                ctx.pending_meshes.len()
-            );
-        }
-    }
+    traverse_stages(
+        &mut ctx,
+        path,
+        path_str,
+        &chunks,
+        options.skip_stage_teardown,
+    )?;
 
     // The traverse also builds each mesh's and prototype's kernel scene,
     // so its own BVH work is inside this figure; the separate "Commit
@@ -738,6 +658,199 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
+    let camera = choose_camera(&mut ctx)?;
+    if let Some(subdivision) = finish_world(&mut ctx, domes_seen_by_camera, &camera) {
+        stats.subdivision = subdivision;
+    }
+
+    let commit_start = Instant::now();
+    let committed = ctx.world.commit();
+    let commit_elapsed = commit_start.elapsed();
+    debug!("Top-level acceleration structure committed in {commit_elapsed:?}");
+    let commit_mem = MemorySample::now();
+
+    record_stats(
+        &mut stats,
+        PhaseTimes {
+            import_start,
+            open: (open_elapsed, open_mem),
+            traverse: (traverse_elapsed, traverse_mem),
+            assets: asset_time,
+            commit: (commit_elapsed, commit_mem),
+        },
+        &committed,
+        &ctx.lights,
+        ctx.volumes.len(),
+        &settings,
+    );
+
+    let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
+    scene.stats = stats;
+    Ok(scene)
+}
+
+/// Opens the stage without payloads: enough to read render settings and see
+/// the stage's shape, but none of the geometry. On a production scene the
+/// payloads *are* the cost — composing the whole Moana island costs openusd
+/// 75.74 GiB, where this costs a fraction of that.
+fn open_index_stage(path: &Path, path_str: &str) -> Result<Stage, crate::Error> {
+    let open_start = Instant::now();
+    let index = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(path_str)
+        .map_err(|e| crate::Error::UsdOpen {
+            path: path.to_path_buf(),
+            source: e.into(),
+        })?;
+    debug!(
+        "Opened index stage (payloads unloaded) for {} in {:?}",
+        path.display(),
+        open_start.elapsed()
+    );
+    Ok(index)
+}
+
+/// What the index stage decides before the traversal starts.
+struct StageSettings {
+    settings: RenderSettings,
+    /// `domeLightCameraVisibility`.
+    domes_seen_by_camera: bool,
+    wanted_camera: Option<CameraChoice>,
+    subdiv: SubdivPolicy,
+}
+
+/// Reads the render settings, the camera to render through and the load's
+/// subdivision policy from the index stage.
+fn resolve_settings(
+    index: &Stage,
+    path: &Path,
+    path_str: &str,
+    options: &crate::UsdImportOptions,
+    requested_camera: Option<sdf::Path>,
+) -> Result<StageSettings, crate::Error> {
+    let time = options.frame;
+    if let Some(t) = time {
+        check_time_range(index, t);
+    }
+    // Render settings come first — the camera importer needs the aspect ratio.
+    let mut settings = import_render_settings(index);
+    let domes_seen_by_camera = dome_light_camera_visibility(index);
+    // Geometry, not tracer, settings: every mesh whose scheme is not `none`
+    // is refined to this one level, so it must be known before the traversal.
+    let subdiv_level = resolve_subdiv_level(
+        options.subdivision_level,
+        render_settings_subdiv_level(index),
+    );
+    debug!("Subdivision level {subdiv_level} for every mesh whose subdivisionScheme is not none");
+    // Which camera to render through: the host's explicit choice, else the
+    // stage's own `RenderSettings.camera`. Decided here, on the index stage,
+    // because the traversal needs it before it meets any camera.
+    let wanted_camera = match requested_camera {
+        Some(p) => Some(CameraChoice::Requested(p)),
+        None => render_settings_camera(index).map(CameraChoice::Settings),
+    };
+    if let Some(choice) = &wanted_camera {
+        debug!("Rendering through {choice}");
+    }
+    let subdiv = subdiv_policy(
+        index,
+        path,
+        path_str,
+        options,
+        subdiv_level,
+        wanted_camera.as_ref(),
+        &settings,
+    )?;
+    if let Some(t) = time {
+        // The sampler's frame seed follows the frame being rendered, so an
+        // image sequence gets independent noise per frame instead of one
+        // pattern swimming over moving geometry. Integer part only: the
+        // seed is an integer, and a subframe shares its frame's seed.
+        let seed = t.floor() as isize;
+        debug!("Frame {t} sets the sampler frame seed to {seed} (over crust:frame)");
+        settings = settings.with_frame(seed);
+    }
+    Ok(StageSettings {
+        settings,
+        domes_seen_by_camera,
+        wanted_camera,
+        subdiv,
+    })
+}
+
+/// Walks the stage into `ctx`: in one pass when `chunks` is empty (a small or
+/// flat stage, or `CRUST_STREAM_IMPORT=0`), else one stage masked to each
+/// chunk at a time.
+fn traverse_stages(
+    ctx: &mut ImportCtx,
+    path: &Path,
+    path_str: &str,
+    chunks: &[sdf::Path],
+    skip_stage_teardown: bool,
+) -> Result<(), crate::Error> {
+    if chunks.is_empty() {
+        debug!(
+            "Single-stage import (fewer than {MIN_STREAM_CHUNKS} subtrees, or \
+             CRUST_STREAM_IMPORT=0)"
+        );
+    } else {
+        debug!("Streaming import over {} subtrees", chunks.len());
+    }
+    // `None` is the single pass over the whole stage.
+    let passes = chunks
+        .iter()
+        .map(Some)
+        .chain(chunks.is_empty().then_some(None));
+    for (n, chunk) in passes.enumerate() {
+        // Per chunk rather than per prim: this is the loop whose memory
+        // high-water mark the streaming import exists to bound, so the
+        // running totals are what say whether it is doing its job.
+        let chunk_start = Instant::now();
+        if let Some(chunk) = chunk {
+            debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
+        }
+        let stage = open_stage(path, path_str, chunk.cloned())?;
+        if ctx.caches.meshes.subdiv.adaptive.is_some() {
+            count_placements(&stage, &mut ctx.caches);
+        }
+        // Traverse from the root, not from `chunk`: a mask keeps the
+        // masked path's *ancestors* populated, so starting at the
+        // root picks up their transforms exactly as a full traversal
+        // would, while everything outside the chunk stays absent.
+        traverse_into(
+            &stage,
+            prim_at(&stage, sdf::Path::abs_root()),
+            GMat4::IDENTITY,
+            ctx,
+        );
+        // A streamed chunk's stage is always dropped, the last one included:
+        // that is the memory bound streaming exists for, and a streamed
+        // import's peak often comes *after* the traversal — at the
+        // top-level BVH commit, on the island — where a kept stage would
+        // stack on top of it. Only a single-stage import may keep it.
+        release_stage(stage, chunk.is_none() && skip_stage_teardown);
+        if chunk.is_some() {
+            ctx.caches.next_epoch();
+            debug!(
+                "Chunk {}/{} done in {:?} — running totals: {} geometries, {} light(s), \
+                 {} volume region(s), {} mesh placement(s) pending",
+                n + 1,
+                chunks.len(),
+                chunk_start.elapsed(),
+                ctx.world.count(),
+                ctx.lights.count(),
+                ctx.volumes.len(),
+                ctx.pending_meshes.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The camera the traversal settled on: the named one, else the first met
+/// (with a warning when `RenderSettings.camera` named a missing one), else
+/// the fallback scene's. A camera the host requested must exist.
+fn choose_camera(ctx: &mut ImportCtx) -> Result<Camera, crate::Error> {
     let camera = match (
         ctx.camera.take(),
         ctx.wanted_camera.take(),
@@ -753,7 +866,7 @@ pub(crate) fn load_scene(
         (None, Some(CameraChoice::Settings(p)), Some((c, first))) => {
             warn!(
                 "RenderSettings.camera targets {p}, which is not a camera on this stage — \
-                 rendering through {first} instead"
+                     rendering through {first} instead"
             );
             c
         }
@@ -762,7 +875,19 @@ pub(crate) fn load_scene(
             crate::world::get_settings().0
         }
     };
+    Ok(camera)
+}
 
+/// What waits for the last chunk: light links judged against every receiver,
+/// the index stage dropped, dome visibility applied, and the deferred mesh
+/// placements baked or instanced — all before the top-level commit, which
+/// freezes geometry masks and consumes the geometry table. Returns the
+/// adaptive-subdivision counters, read against the render `camera`.
+fn finish_world(
+    ctx: &mut ImportCtx,
+    domes_seen_by_camera: bool,
+    camera: &Camera,
+) -> Option<SubdivisionCounters> {
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
     // before `commit`, which is what consumes the geometry table.
@@ -784,16 +909,19 @@ pub(crate) fn load_scene(
              <0.01): interior {interior:?}, stitched {stitched:?}"
         );
     }
-    if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
+    let subdivision = ctx.caches.meshes.subdiv.adaptive.map(|rate| {
         // The two reads of one camera must agree, or every level was chosen
-        // for a viewpoint the render does not use.
+        // for a viewpoint the render does not use. Both go through
+        // `camera::camera_frame`, but `screen_projection` may have read the
+        // camera on the index stage or a stage masked to it, and the render
+        // camera comes from the traversal's stage.
         debug_assert!(
             (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
             "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
             rate.eye,
             camera.origin()
         );
-        stats.subdivision = SubdivisionCounters {
+        SubdivisionCounters {
             adaptive: Some((rate.target, rate.max)),
             levels: ctx.caches.meshes.subdiv.levels.clone(),
             shared_meshes: ctx.caches.meshes.subdiv.shared_meshes,
@@ -801,26 +929,49 @@ pub(crate) fn load_scene(
             per_face_meshes: ctx.caches.meshes.subdiv.per_face_meshes,
             per_face_fallbacks: ctx.caches.meshes.subdiv.per_face_fallbacks,
             rate_bins: ctx.caches.meshes.subdiv.rate_bins.clone(),
-        };
-    }
+        }
+    });
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
+    subdivision
+}
 
-    let commit_start = Instant::now();
-    let committed = ctx.world.commit();
-    let commit_elapsed = commit_start.elapsed();
-    debug!("Top-level acceleration structure committed in {commit_elapsed:?}");
-    let commit_mem = MemorySample::now();
+/// Each import phase's duration and the memory sampled where it ended.
+struct PhaseTimes {
+    import_start: Instant,
+    open: (Duration, MemorySample),
+    traverse: (Duration, MemorySample),
+    /// Host asset decoding, taken out of the traversal's figure.
+    assets: Duration,
+    commit: (Duration, MemorySample),
+}
 
+/// Records the import's phases and the scene and image counters in `stats`.
+fn record_stats(
+    stats: &mut RenderStats,
+    phases: PhaseTimes,
+    committed: &World,
+    lights: &LightList,
+    volumes: usize,
+    settings: &RenderSettings,
+) {
+    let (open_elapsed, open_mem) = phases.open;
+    let (traverse_elapsed, traverse_mem) = phases.traverse;
+    let (commit_elapsed, commit_mem) = phases.commit;
     // Memory is sampled where each phase actually ended, not here — the
     // phases are all recorded together, so `record`'s sample-now would
     // give every one of them the same figures.
-    stats.record_at("Parse USD stage", 0, import_start.elapsed(), commit_mem);
+    stats.record_at(
+        "Parse USD stage",
+        0,
+        phases.import_start.elapsed(),
+        commit_mem,
+    );
     stats.record_at("Open stage", 1, open_elapsed, open_mem);
     stats.record_at("Traverse prims", 1, traverse_elapsed, traverse_mem);
-    if !asset_time.is_zero() {
-        stats.record_at("Load assets", 1, asset_time, traverse_mem);
+    if !phases.assets.is_zero() {
+        stats.record_at("Load assets", 1, phases.assets, traverse_mem);
     }
     stats.record_at(
         "Commit acceleration structure",
@@ -834,8 +985,8 @@ pub(crate) fn load_scene(
         top_level: committed.primitive_breakdown().into(),
         unique: committed.unique_primitive_breakdown().into(),
         footprint: committed.memory_footprint(),
-        lights: ctx.lights.count(),
-        volumes: ctx.volumes.len(),
+        lights: lights.count(),
+        volumes,
     };
     let (w, h) = settings.get_dimensions();
     stats.image = ImageCounters {
@@ -844,10 +995,6 @@ pub(crate) fn load_scene(
         samples_per_pixel: settings.samples_per_pixel(),
         max_depth: settings.max_depth(),
     };
-
-    let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
-    scene.stats = stats;
-    Ok(scene)
 }
 
 /// How this load refines subdivision surfaces: one `subdiv_level` for every
@@ -974,7 +1121,7 @@ struct ImportCaches<'a> {
     /// geometry in each stage. Bumping the epoch between stages keeps
     /// those apart.
     ///
-    /// It bumps rather than clearing because [`MeshKey`](mesh::MeshKey) identifies a
+    /// It bumps rather than clearing because the mesh cache's `MeshKey` identifies a
     /// material by its `Arc` *address*: dropping the parts would free
     /// material `Arc`s whose addresses a later allocation could reuse,
     /// and a stale mesh-cache entry would then match the wrong material.
@@ -1000,9 +1147,21 @@ struct ImportCaches<'a> {
     ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
     /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
     light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
+    /// Resolved path → a `DomeLight`'s decoded environment map. A stage rarely
+    /// has two domes on one file, but a decode is the most expensive load
+    /// there is, so it is never done twice.
+    environments: HashMap<std::path::PathBuf, Option<Arc<crate::EnvironmentMap>>>,
 }
 
 impl ImportCaches<'_> {
+    /// Moves on to the next stage's prototypes — see
+    /// [`epoch`](Self::epoch). Deliberately not a clear: the mesh cache keys
+    /// materials by `Arc` address, so nothing may be freed while it is live.
+    fn next_epoch(&mut self) {
+        self.epoch += 1;
+        self.materials.epoch = self.epoch;
+    }
+
     /// The top-level subtree `path` lies in, as [`subtree_roots`] partitions the
     /// stage; empty above every subtree.
     fn subtree_of(&self, path: &sdf::Path) -> String {
@@ -1022,6 +1181,31 @@ impl ImportCaches<'_> {
         let key = (self.subtree_of(prim), proto_path.to_string());
         self.placements.get(&key).copied().unwrap_or(0)
     }
+
+    /// One host decode through `assets`, memoized in the map `cache` selects:
+    /// keyed by `key` (a resolved path, plus whatever else changes the
+    /// decode), and remembering a failure too, so a file that would not load
+    /// is not retried per material or light. The decode's time is billed to
+    /// [`asset_time`](Self::asset_time). `report` runs after each actual
+    /// decode — never on a cache hit — with what it returned, which is where
+    /// a load's log line belongs.
+    fn load_cached<K: Eq + Hash, V: Clone>(
+        &mut self,
+        cache: fn(&mut Self) -> &mut HashMap<K, Option<V>>,
+        key: K,
+        load: impl FnOnce(&dyn AssetLoader, &K) -> Option<V>,
+        report: impl FnOnce(&K, Option<&V>),
+    ) -> Option<V> {
+        if let Some(hit) = cache(self).get(&key) {
+            return hit.clone();
+        }
+        let started = Instant::now();
+        let loaded = load(self.assets, &key);
+        self.asset_time += started.elapsed();
+        report(&key, loaded.as_ref());
+        cache(self).insert(key, loaded.clone());
+        loaded
+    }
 }
 
 impl<'a> ImportCaches<'a> {
@@ -1039,6 +1223,7 @@ impl<'a> ImportCaches<'a> {
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
             light_textures: HashMap::new(),
+            environments: HashMap::new(),
         }
     }
 }
@@ -1055,12 +1240,7 @@ impl<'a> ImportCaches<'a> {
 /// with a `GEO_PROXY` scope (`purpose = "proxy"`, bound only for `preview`)
 /// next to its `GEO`, and the proxies drew as grey duplicates of 1 505 meshes.
 fn non_render_purpose(prim: &Prim) -> Option<&'static str> {
-    let value = prim
-        .attribute("purpose")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    match value.as_str()? {
+    match value_at(&prim.attribute("purpose"))?.as_str()? {
         "proxy" => Some("proxy"),
         "guide" => Some("guide"),
         _ => None,

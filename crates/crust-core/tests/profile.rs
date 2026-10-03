@@ -17,7 +17,12 @@ fn renderer() -> Renderer {
 }
 
 fn render(r: &Renderer, tiled: bool) -> (Buffer, RayStats) {
-    r.render_with_stats(tiled, &|_, _| {})
+    let order = if tiled {
+        crust_core::RenderOrder::Tiles
+    } else {
+        crust_core::RenderOrder::Scanlines
+    };
+    r.render_with(order, None)
 }
 
 fn same_image(a: &Buffer, b: &Buffer) -> bool {
