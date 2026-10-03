@@ -70,13 +70,31 @@ because its stored levels were reduced in the file's encoding.
   and the `.ptx` carries mip levels
 - **THEN** the texture is preloaded and `--stats` names the reason
 
+### Requirement: Ptex requests carry a colour space
+
+Every Ptex request SHALL carry a colour space, as UV texture requests do. A Ptex file
+read as a displacement map SHALL be decoded raw, with no transfer curve. A Ptex file read
+as a colour map SHALL keep the gamma-2.2 decode. The preloaded and streamed paths SHALL
+agree bit for bit on 8-bit data in either colour space.
+
+#### Scenario: An 8-bit displacement Ptex
+
+- **WHEN** a `u8` `.ptx` holding the value 128 is read as displacement
+- **THEN** the lookup returns 128/255, not (128/255)^2.2
+
+#### Scenario: The island's colour Ptex
+
+- **WHEN** a material's `inputs:surfaceMap` Ptex is rendered before and after this change
+- **THEN** the images are bit-identical
+
 ### Requirement: Known gaps
 
 The following SHALL be documented as unsupported: anisotropic filtering,
 filtering across Ptex face boundaries, texture alpha, `UsdTransform2d`, UV sets
-other than `st` and its fallbacks, and a per-texture colour space for Ptex: `half` /
-`float` samples keep their full range, but every `.ptx` is decoded by gamma 2.2, so
-linear Ptex data is mis-decoded. Tangents on instanced geometry narrow to prototype
+other than `st` and its fallbacks, and an authored colour space for Ptex colour maps:
+`half` / `float` samples keep their full range, but every `.ptx` read as colour is
+decoded by gamma 2.2, so linear colour Ptex data is mis-decoded. Ptex read as
+displacement is decoded raw. Tangents on instanced geometry narrow to prototype
 parts placed through an instancer's group and to motion-blurred instances (normal
 maps fall back to the geometric normal there); UV charts on subdivided meshes are no
 longer a gap.
