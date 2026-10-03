@@ -13,8 +13,8 @@ const AP1_LUMA_COEFFS: Val = Val::vec3(0.2722287, 0.6740818, 0.0536895);
 
 /// Turns named `.mtlx` nodes into a topologically ordered [`Program`].
 pub struct Compiler<'a> {
-    pub doc: &'a Doc,
-    pub program: Program,
+    pub(crate) doc: &'a Doc,
+    pub(crate) program: Program,
     /// Slot already emitted for a `(graph, node, output, shift)` key, so a
     /// node feeding five others is evaluated once. The output name matters:
     /// `artistic_ior` emits a different slot for `ior` than for `extinction`.
@@ -37,7 +37,7 @@ pub struct Compiler<'a> {
     loader: crate::TextureLoader<'a>,
     /// Node categories met that this compiler has no operator for, for one
     /// summary warning instead of one per occurrence.
-    pub unsupported: std::collections::BTreeSet<String>,
+    pub(crate) unsupported: std::collections::BTreeSet<String>,
 }
 
 impl<'a> Compiler<'a> {
@@ -52,6 +52,16 @@ impl<'a> Compiler<'a> {
             loader,
             unsupported: Default::default(),
         }
+    }
+
+    /// The program compiled so far.
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    /// Node categories met that this compiler has no operator for.
+    pub fn unsupported(&self) -> &std::collections::BTreeSet<String> {
+        &self.unsupported
     }
 
     pub fn emit(&mut self, op: Op) -> u32 {

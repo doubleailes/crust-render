@@ -125,13 +125,13 @@ fn eval(case: &Case) -> Val {
     let mut c = Compiler::new(&doc, &loader);
     let slot = c.compile_named("", "n", case.output);
     assert!(
-        c.unsupported.is_empty(),
+        c.unsupported().is_empty(),
         "line {}: {} compiled as unsupported",
         case.line,
         case.nodedef
     );
     let mut slots = Vec::new();
-    c.program.eval(&ctx, &mut slots);
+    c.program().eval(&ctx, &mut slots);
     slots[slot as usize]
 }
 

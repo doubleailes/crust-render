@@ -153,12 +153,12 @@ fn constants_are_folded_hoisted_and_pruned() {
     let mut c = crust_mtlx::Compiler::new(&doc, &loader);
     let out = c.compile_named("", "out", None);
     c.compile_named("", "orphan", None);
-    let (opt, remap) = c.program.optimize(&[out]);
+    let (opt, remap) = c.program().optimize(&[out]);
     assert_eq!(opt.consts, vec![Val::float(5.0)]);
     // texcoord, extract, multiply — the adds, literals and sine are gone.
     assert_eq!(opt.ops.len(), 3);
     let ctx = shading_points()[7];
-    let r = eval(&c.program, &ctx)[out as usize];
+    let r = eval(c.program(), &ctx)[out as usize];
     let o = eval(&opt, &ctx)[remap[out as usize].unwrap() as usize];
     assert_eq!(bits(r), bits(o));
 }
