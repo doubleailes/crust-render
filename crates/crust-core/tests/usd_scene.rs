@@ -1540,9 +1540,9 @@ fn loads_subdivision_usda() {
     // The textured dome kept its chart through refinement: the top face is
     // charted onto the unit square, so its middle reads about (0.5, 0.5).
     let top = cast(textured, 0.0).rec;
-    assert!(top.has_uv, "the refined mesh dropped its UVs");
+    assert!(top.uv.is_some(), "the refined mesh dropped its UVs");
     assert!(
-        (top.uv.0 - 0.5).abs() < 0.05 && (top.uv.1 - 0.5).abs() < 0.05,
+        (top.uv.unwrap().0 - 0.5).abs() < 0.05 && (top.uv.unwrap().1 - 0.5).abs() < 0.05,
         "top-face middle reads {:?}",
         top.uv
     );
@@ -1637,9 +1637,8 @@ fn probe_hit() -> (crust_core::HitRecord, crust_core::Ray) {
         t: 1.0,
         front_face: true,
         face: None,
-        uv: (0.5, 0.5),
+        uv: Some((0.5, 0.5)),
         tangent: Vec3A::X,
-        has_uv: true,
         // Point-sample: this probe reports what the graph evaluates to at a
         // named (u, v), not what a filtered render would show there.
         uv_width: 0.0,
@@ -1809,7 +1808,7 @@ fn face_varying_st_reaches_the_shading_point() {
     let probe = |x: f32, y: f32| -> Option<(f32, f32)> {
         let r = Ray::new(Vec3A::new(x, y, 5.0), Vec3A::new(0.0, 0.0, -1.0)).with_mask(MASK_CAMERA);
         let hit = scene.world.intersect(&r, 0.001, f32::INFINITY)?;
-        hit.rec.has_uv.then_some(hit.rec.uv)
+        hit.rec.uv
     };
 
     let a = probe(-1.1, 1.0).expect("left quad carries no UV");
@@ -1909,11 +1908,9 @@ def Xform "W" {{
             .world
             .intersect(&r, 0.001, f32::INFINITY)
             .unwrap_or_else(|| panic!("no hit at x = {x}"));
-        assert!(
-            hit.rec.has_uv,
-            "no chart reached the shading point at x = {x}"
-        );
-        hit.rec.uv
+        hit.rec
+            .uv
+            .unwrap_or_else(|| panic!("no chart reached the shading point at x = {x}"))
     };
 
     // 1. Different charts: each prim must report the coordinates it authored.
@@ -1995,7 +1992,7 @@ fn untextured_geometry_carries_no_uv_table() {
         .intersect(&r, 0.001, f32::INFINITY)
         .expect("no hit in the cornell box");
     assert!(
-        !hit.rec.has_uv,
+        hit.rec.uv.is_none(),
         "an untextured mesh built a UV table it will never read"
     );
 }
@@ -2891,11 +2888,11 @@ def Xform "W"
         .world
         .intersect(&r, 0.001, f32::INFINITY)
         .expect("hits the quad");
-    assert!(hit.rec.has_uv, "the perfuv chart was not read");
+    assert!(hit.rec.uv.is_some(), "the perfuv chart was not read");
     assert!(
-        (hit.rec.uv.0 - 1.5).abs() < 0.01,
+        (hit.rec.uv.unwrap().0 - 1.5).abs() < 0.01,
         "u = {}, expected ~1.5 from primvars:perfuv",
-        hit.rec.uv.0
+        hit.rec.uv.unwrap().0
     );
 }
 

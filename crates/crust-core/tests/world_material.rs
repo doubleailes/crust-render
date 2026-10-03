@@ -83,7 +83,7 @@ fn intersect_resolves_the_hit_material_and_geometry() {
     assert!(hit.rec.normal.abs_diff_eq(-Vec3A::Z, 1e-5));
     assert!(hit.rec.front_face);
     assert_eq!(hit.rec.face, None, "no face table was installed");
-    assert!(!hit.rec.has_uv);
+    assert!(hit.rec.uv.is_none());
     assert_eq!(hit.rec.tangent, Vec3A::ZERO);
     assert!(
         world
@@ -535,9 +535,9 @@ fn world_hits_carry_uv_and_tangent_from_the_uv_map() {
         let hit = world
             .intersect(&Ray::new(Vec3A::new(x, y, -1.0), Vec3A::Z), 1e-3, 10.0)
             .unwrap();
-        assert!(hit.rec.has_uv);
+        assert!(hit.rec.uv.is_some());
         assert!(
-            approx(hit.rec.uv.0, x, 1e-4) && approx(hit.rec.uv.1, y, 1e-4),
+            approx(hit.rec.uv.unwrap().0, x, 1e-4) && approx(hit.rec.uv.unwrap().1, y, 1e-4),
             "{:?}",
             hit.rec.uv
         );
@@ -558,15 +558,15 @@ fn a_geometry_may_carry_both_side_tables() {
         .intersect(&Ray::new(Vec3A::new(0.6, 0.2, -1.0), Vec3A::Z), 1e-3, 10.0)
         .unwrap();
     assert_eq!(hit.rec.face.map(|f| f.id), Some(0));
-    assert!(hit.rec.has_uv);
+    assert!(hit.rec.uv.is_some());
     assert!(approx(
         hit.rec.face.expect("a face hit").uv.0,
-        hit.rec.uv.0,
+        hit.rec.uv.unwrap().0,
         1e-5
     ));
     assert!(approx(
         hit.rec.face.expect("a face hit").uv.1,
-        hit.rec.uv.1,
+        hit.rec.uv.unwrap().1,
         1e-5
     ));
 }
@@ -1356,7 +1356,7 @@ fn instanced_meshes_get_tangents_through_their_placement() {
     let hit = world
         .intersect(&Ray::new(Vec3A::new(4.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
         .expect("the placed quad is hit");
-    assert!(hit.rec.has_uv);
+    assert!(hit.rec.uv.is_some());
     assert!(
         hit.rec.tangent.abs_diff_eq(Vec3A::Y, 1e-5),
         "{}",
@@ -1404,7 +1404,7 @@ fn forwarded_placements_sharing_a_slot_get_no_tangent() {
             .intersect(&Ray::new(origin, Vec3A::Z), 1e-3, 10.0)
             .expect("the placed quad is hit");
         assert_eq!(hit.geom_id, slot, "hits report the forwarded slot");
-        assert!(hit.rec.has_uv, "the slot's chart still resolves");
+        assert!(hit.rec.uv.is_some(), "the slot's chart still resolves");
         assert_eq!(hit.rec.tangent, Vec3A::ZERO, "no frame without a placement");
     }
 }
@@ -1434,6 +1434,6 @@ fn motion_blurred_instances_get_no_tangent() {
     let hit = world
         .intersect(&Ray::new(Vec3A::new(5.5, 0.5, -1.0), Vec3A::Z), 1e-3, 10.0)
         .expect("the moving quad is hit at time 0");
-    assert!(hit.rec.has_uv);
+    assert!(hit.rec.uv.is_some());
     assert_eq!(hit.rec.tangent, Vec3A::ZERO);
 }

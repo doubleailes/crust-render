@@ -63,8 +63,7 @@ fn hit() -> HitRecord {
             id: 3,
             uv: (0.3, 0.7),
         }),
-        uv: (0.4, 0.6),
-        has_uv: true,
+        uv: Some((0.4, 0.6)),
         ..HitRecord::default()
     }
 }

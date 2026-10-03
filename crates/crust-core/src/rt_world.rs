@@ -766,15 +766,15 @@ impl World {
             m.resolve(h.prim_id, h.u, h.v, tables.swapped)
                 .map(|(id, u, v)| crate::hittable::FaceHit { id, uv: (u, v) })
         });
-        let (uv, tangent, has_uv) = match &tables.uv {
+        let (uv, tangent) = match &tables.uv {
             Some(m) => {
                 let verts = self.world_vertices(h.geom_id, h.prim_id, tables);
                 match m.resolve(h.prim_id, h.u, h.v, tables.swapped, verts) {
-                    Some((uv, tangent)) => (uv, tangent, true),
-                    None => ((0.0, 0.0), Vec3A::ZERO, false),
+                    Some((uv, tangent)) => (Some(uv), tangent),
+                    None => (None, Vec3A::ZERO),
                 }
             }
-            None => ((0.0, 0.0), Vec3A::ZERO, false),
+            None => (None, Vec3A::ZERO),
         };
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*
@@ -809,7 +809,6 @@ impl World {
                 face,
                 uv,
                 tangent,
-                has_uv,
                 uv_width,
                 face_width,
             },

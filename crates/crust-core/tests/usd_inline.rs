@@ -1967,8 +1967,8 @@ fn a_subdivided_mesh_keeps_its_uv_chart() {
         for (x, y) in [(1.0, 1.0), (0.5, 1.5), (1.7, 0.3), (0.1, 0.1)] {
             let r = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
             let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
-            assert!(hit.rec.has_uv, "{what}: no chart at ({x}, {y})");
-            let (u, v) = hit.rec.uv;
+            assert!(hit.rec.uv.is_some(), "{what}: no chart at ({x}, {y})");
+            let (u, v) = hit.rec.uv.unwrap();
             assert!(
                 (u - x / 2.0).abs() < 1e-4 && (v - y / 2.0).abs() < 1e-4,
                 "{what}: ({x}, {y}) reads ({u}, {v})"
@@ -2029,8 +2029,7 @@ fn every_face_varying_rule_is_read() {
         );
         let r = Ray::new(Vec3A::new(1.001, 1.001, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
         let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
-        assert!(hit.rec.has_uv, "{rule}: no chart");
-        hit.rec.uv
+        hit.rec.uv.unwrap_or_else(|| panic!("{rule}: no chart"))
     };
     let rules = [
         "none",
