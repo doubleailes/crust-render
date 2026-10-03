@@ -1345,3 +1345,143 @@ fn scatter_importance_finite() {
         }
     }
 }
+
+#[test]
+fn every_lobe_has_an_event() {
+    use crate::lpe::{LobeLabel, Scatter};
+    let m = OpenPBR {
+        specular_roughness: 0.0,
+        coat_roughness: 0.4,
+        ..OpenPBR::default()
+    };
+    let events: Vec<_> = Lobe::ALL
+        .iter()
+        .map(|l| {
+            let e = l.event(&m);
+            (e.transmit, e.scatter, e.label)
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (false, Scatter::Diffuse, LobeLabel::Diffuse),
+            (false, Scatter::Singular, LobeLabel::Specular),
+            (false, Scatter::Glossy, LobeLabel::Coat),
+            (false, Scatter::Glossy, LobeLabel::Sheen),
+            (true, Scatter::Singular, LobeLabel::Transmission),
+        ]
+    );
+}
+
+#[test]
+fn the_lobe_split_sums_to_eval_within_rounding() {
+    use crate::lpe::LobeSplit;
+    let materials = [
+        OpenPBR::default(),
+        OpenPBR::diffuse(Vec3A::new(0.8, 0.3, 0.2)),
+        OpenPBR {
+            base_metalness: 1.0,
+            coat_weight: 1.0,
+            coat_roughness: 0.1,
+            fuzz_weight: 0.5,
+            ..OpenPBR::default()
+        },
+        OpenPBR {
+            transmission_weight: 1.0,
+            specular_roughness: 0.2,
+            ..OpenPBR::default()
+        },
+    ];
+    let mut split = LobeSplit::default();
+    let mut rec = HitRecord::new();
+    rec.normal = Vec3A::Z;
+    rec.front_face = true;
+    let r_in = Ray::new(
+        Vec3A::new(0.3, -0.2, 1.0),
+        Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+    );
+    for (i, m) in materials.iter().enumerate() {
+        for k in 0..64 {
+            let phi = k as f32 * 0.37;
+            let z = 1.0 - 2.0 * ((k as f32 + 0.5) / 64.0);
+            let s = (1.0 - z * z).sqrt();
+            let wi = Vec3A::new(s * phi.cos(), s * phi.sin(), z);
+            let Some((value, _)) = m.eval(&r_in, &rec, wi) else {
+                continue;
+            };
+            assert!(m.eval_lobes_resolved(&r_in, &rec, wi, &mut split));
+            let total = split.total();
+            let tol = 4.0 * f32::EPSILON * value.max_element().abs().max(1e-30);
+            assert!(
+                (total - value).abs().max_element() <= tol,
+                "material {i}, direction {k}: {total} vs {value}"
+            );
+        }
+        let a = m.albedo();
+        assert!(a.min_element() >= 0.0 && a.max_element() <= 1.0);
+    }
+    // A diffuse material's albedo is its colour.
+    let d = OpenPBR::diffuse(Vec3A::new(0.8, 0.3, 0.2)).albedo();
+    assert!(
+        (d - Vec3A::new(0.8, 0.3, 0.2)).abs().max_element() < 0.05,
+        "{d}"
+    );
+}
+
+#[test]
+fn scatter_split_draws_the_same_direction() {
+    use crate::lpe::LobeSplit;
+    let materials = [
+        OpenPBR {
+            coat_weight: 1.0,
+            coat_roughness: 0.0,
+            specular_roughness: 0.3,
+            fuzz_weight: 0.3,
+            ..OpenPBR::default()
+        },
+        OpenPBR {
+            transmission_weight: 1.0,
+            specular_roughness: 0.1,
+            ..OpenPBR::default()
+        },
+    ];
+    let mut rec = HitRecord::new();
+    rec.normal = Vec3A::Z;
+    rec.front_face = true;
+    let r_in = Ray::new(
+        Vec3A::new(0.3, -0.2, 1.0),
+        Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+    );
+    let mut split = LobeSplit::default();
+    for m in &materials {
+        let mut sampler = s();
+        for _ in 0..256 {
+            let dom = sampler.next();
+            let plain = m.scatter_resolved(&r_in, &rec, dom);
+            let with = m.scatter_split(&r_in, &rec, dom, &mut split);
+            let (Some(plain), Some(with)) = (plain, with) else {
+                continue;
+            };
+            assert_eq!(
+                plain.ray.direction().to_array().map(f32::to_bits),
+                with.ray.direction().to_array().map(f32::to_bits)
+            );
+            assert_eq!(
+                plain.value.to_array().map(f32::to_bits),
+                with.value.to_array().map(f32::to_bits)
+            );
+            if plain.delta {
+                continue;
+            }
+            // The shares sum to the value even where a zero-roughness lobe
+            // makes it a needle: evaluated at the direction drawn.
+            let total = split.total();
+            let tol = 4.0 * f32::EPSILON * plain.value.max_element().abs().max(1e-30);
+            assert!(
+                (total - plain.value).abs().max_element() <= tol,
+                "{total} vs {}",
+                plain.value
+            );
+        }
+    }
+}

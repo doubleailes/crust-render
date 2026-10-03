@@ -144,6 +144,15 @@ pub trait Material: Send + Sync {
         None
     }
 
+    /// The albedo the `albedo` AOV reports at `rec`, for a material the
+    /// integrator queries directly (one that resolves to no `OpenPBR` and no
+    /// MaterialX closure). `None`, the default, is reported as 1 — OIDN's
+    /// documented fallback for a surface with no albedo.
+    fn albedo(&self, rec: &HitRecord) -> Option<Vec3A> {
+        let _ = rec;
+        None
+    }
+
     /// Builds the continuation ray for an externally chosen direction `wi`
     /// (e.g. drawn from the guiding field). Materials that tag rays with an
     /// interior medium on transmission must do the same here, so a guided
@@ -414,6 +423,89 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// [`ShadingPoint::eval`], split by lobe — see [`crate::lpe::LobeSplit`].
+    /// `false` where `eval` answers `None`. A material queried directly
+    /// (no `OpenPBR`, no closure) is one diffuse lobe.
+    pub(crate) fn eval_lobes(
+        &self,
+        r_in: &Ray,
+        wi: Vec3A,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> bool {
+        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+        match &self.bsdf {
+            Resolved::Material(m) => {
+                out.clear();
+                match m.eval(r_in, &self.rec, wi) {
+                    Some((value, _)) => {
+                        out.push(
+                            LobeEvent::reflect(Scatter::Diffuse, LobeLabel::Diffuse),
+                            value,
+                        );
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Resolved::Plain(m) => m.eval_lobes_resolved(r_in, &self.rec, wi, out),
+            Resolved::OpenPBR(m) => m.params().eval_lobes_resolved(r_in, &self.rec, wi, out),
+            Resolved::Closure(c) => c.eval_lobes(wi, out),
+        }
+    }
+
+    /// [`ShadingPoint::scatter_importance`], also splitting a continuous
+    /// sample's value by lobe into `out` (empty for a delta sample), at
+    /// exactly the direction sampled — so the shares sum to `value`.
+    pub(crate) fn scatter_split(
+        &self,
+        r_in: &Ray,
+        sampler: PathSampler,
+        out: &mut crate::lpe::LobeSplit,
+    ) -> Option<ScatterSample> {
+        match &self.bsdf {
+            Resolved::Plain(m) => m.scatter_split(r_in, &self.rec, sampler, out),
+            Resolved::OpenPBR(m) => m.params().scatter_split(r_in, &self.rec, sampler, out),
+            Resolved::Closure(c) => c.scatter_split(r_in, &self.rec, sampler, out),
+            Resolved::Material(m) => {
+                let sample = m.scatter_importance(r_in, &self.rec, sampler)?;
+                out.clear();
+                if !sample.delta {
+                    out.push(
+                        crate::lpe::LobeEvent::reflect(
+                            crate::lpe::Scatter::Diffuse,
+                            crate::lpe::LobeLabel::Diffuse,
+                        ),
+                        sample.value,
+                    );
+                }
+                Some(sample)
+            }
+        }
+    }
+
+    /// The event of a delta sample this shading point produced.
+    pub(crate) fn delta_event(&self, sample: &ScatterSample) -> crate::lpe::LobeEvent {
+        use crate::lpe::{LobeEvent, LobeLabel, Scatter};
+        match &self.bsdf {
+            Resolved::Closure(c) => c.delta_event(sample),
+            Resolved::Plain(m) => m.delta_event(),
+            Resolved::OpenPBR(m) => m.params().delta_event(),
+            Resolved::Material(_) => {
+                LobeEvent::transmit(Scatter::Singular, LobeLabel::Transmission)
+            }
+        }
+    }
+
+    /// The albedo the `albedo` AOV reports here, in [0, 1].
+    pub(crate) fn albedo(&self) -> Vec3A {
+        match &self.bsdf {
+            Resolved::Material(m) => m.albedo(&self.rec).unwrap_or(Vec3A::ONE),
+            Resolved::Plain(m) => m.albedo(),
+            Resolved::OpenPBR(m) => m.params().albedo(),
+            Resolved::Closure(c) => c.albedo(),
+        }
+    }
+
     /// The shading normal at this hit — after bump and normal mapping, the
     /// one every query here shades with. For the AOVs only.
     pub(crate) fn normal(&self) -> Vec3A {
@@ -440,6 +532,11 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// [`Material::eval`] at this hit.
+    ///
+    /// Forced inline: a four-arm dispatch called at every NEE connection,
+    /// which LLVM stopped inlining once the AOV routing gave it more callers
+    /// (+0.5% of cornellbox's instructions as a call).
+    #[inline(always)]
     pub fn eval(&self, r_in: &Ray, wi: Vec3A) -> Option<(Vec3A, f32)> {
         match &self.bsdf {
             Resolved::Material(m) => m.eval(r_in, &self.rec, wi),

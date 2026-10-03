@@ -90,39 +90,39 @@
 
 ## 5. Lobe taxonomy (`material/`)
 
-- [ ] 5.1 Give every OpenPBR `Lobe` and every `closure::Lobe` variant an
+- [x] 5.1 Give every OpenPBR `Lobe` and every `closure::Lobe` variant an
       event (`R`/`T` × `D`/`G`/`S`/`s`) and a label (D10). Write an exhaustive
       `match` test so that a new lobe cannot be added unlabelled. A lobe at
       zero roughness and delta samples are `S`.
-- [ ] 5.2 Add per-lobe evaluation that returns `eval_all`'s summands (and
+- [x] 5.2 Add per-lobe evaluation that returns `eval_all`'s summands (and
       the NEE equivalents) without changing `eval_all`'s result. Pin that
       `Σ f_j == eval_all` bitwise where the sum order matches, and within
       1 ulp elsewhere.
-- [ ] 5.3 Add `Material::albedo()` (D12), with a default of 1 and a `DEBUG`
+- [x] 5.3 Add `Material::albedo()` (D12), with a default of 1 and a `DEBUG`
       count of materials that use it. Add the first-non-delta-hit `albedo`
       AOV.
 
 ## 6. LPE engine (`crust-core/src/lpe/`)
 
-- [ ] 6.1 Write the parser for the OSL grammar subset (D10). Refused tokens
+- [x] 6.1 Write the parser for the OSL grammar subset (D10). Refused tokens
       give a `WARN` with the column.
-- [ ] 6.2 Build Thompson NFA → one combined DFA for all LPE vars, with
+- [x] 6.2 Build Thompson NFA → one combined DFA for all LPE vars, with
       per-state accepting bitmasks and a `u16` state. Fold labels to symbol
       indices at import. Cap at 64 LPE vars.
-- [ ] 6.3 Tests on the parser and DFA, against the OSL wiki's examples and
+- [x] 6.3 Tests on the parser and DFA, against the OSL wiki's examples and
       the canonical list in `design.md`.
 
 ## 7. Routing (`tracer/path.rs`)
 
-- [ ] 7.1 During the forward walk, record per-vertex DFA state(s), per-lobe
+- [x] 7.1 During the forward walk, record per-vertex DFA state(s), per-lobe
       NEE shares, per-lobe bounce factors, and the `L`/`O` class of each
       emission. Do this only in the `AOV` instantiation.
-- [ ] 7.2 Run the masked backward gather per (AOV, reachable state) (D11),
+- [x] 7.2 Run the masked backward gather per (AOV, reachable state) (D11),
       with the "lobes agree" fast path. Reuse the beauty's vertex-0 clamp
       factor (D9).
-- [ ] 7.3 Read `crust:light:lpeTag` on every light kind, with the fallback
+- [x] 7.3 Read `crust:light:lpeTag` on every light kind, with the fallback
       attributes from D13 once they are verified.
-- [ ] 7.4 Tests:
+- [x] 7.4 Tests:
       - `C.*[LO]` bit-identical to the beauty;
       - the partition from the spec sums to the beauty;
       - with `--indirect-clamp`, the partition still sums;
@@ -131,10 +131,10 @@
       - light groups;
       - NEE-only versus BSDF-only (`--strategy light|bsdf`) agree per AOV in
         expectation.
-- [ ] 7.5 Add `samples/aovs_lpe.usda` with the compositing set (direct and
+- [x] 7.5 Add `samples/aovs_lpe.usda` with the compositing set (direct and
       indirect diffuse and glossy, transmission, emission, volume) and two
       light groups.
-- [ ] 7.6 Record the cost per added LPE var (callgrind, cornellbox) and
+- [x] 7.6 Record the cost per added LPE var (callgrind, cornellbox) and
       `bench_ab.sh` on the scene set in the `aovs` design record.
 
 ## Phase 3: identity

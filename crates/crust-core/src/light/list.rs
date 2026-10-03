@@ -131,6 +131,10 @@ pub struct LightList {
     pub(super) cache: Option<std::sync::Arc<crate::light_cache::LightCache>>,
     /// Light and shadow linking, when any light authors a link.
     pub(super) links: Option<Box<LightLinks>>,
+    /// Per light, its light-path-expression tag (`crust:light:lpeTag`): the
+    /// label its `L` events carry, so `<L.'key'>` selects it. Kept in step
+    /// with `lights` by `add_masked` and `remove`.
+    pub(super) lpe_tags: Vec<Option<Box<str>>>,
 }
 
 impl Default for LightList {
@@ -154,6 +158,7 @@ impl LightList {
             backdrops: Vec::new(),
             cache: None,
             links: None,
+            lpe_tags: Vec::new(),
         }
     }
 
@@ -179,6 +184,7 @@ impl LightList {
             self.infinite_masks.push(escape_mask);
         }
         self.lights.push(light);
+        self.lpe_tags.push(None);
         self.pmf.clear();
         self.cdf.clear();
         self.cache = None;
@@ -198,6 +204,7 @@ impl LightList {
     pub fn remove(&mut self, index: usize) -> (LightKind, RayMask) {
         debug_assert!(self.links.is_none(), "links are set after the last removal");
         let light = self.lights.remove(index);
+        self.lpe_tags.remove(index);
         self.by_geom.retain(|_, i| *i != index);
         for i in self.by_geom.values_mut() {
             if *i > index {
@@ -218,6 +225,24 @@ impl LightList {
         self.cdf.clear();
         self.cache = None;
         (light, mask)
+    }
+
+    /// Sets light `index`'s light-path-expression tag — see
+    /// [`LightList::lpe_tag`]. An empty tag is no tag.
+    pub fn set_lpe_tag(&mut self, index: usize, tag: Option<&str>) {
+        self.lpe_tags[index] = tag.filter(|t| !t.is_empty()).map(Into::into);
+    }
+
+    /// Light `index`'s light-path-expression tag: the custom label of the
+    /// `L` events it ends, which a light group `<L.'tag'>` selects.
+    pub fn lpe_tag(&self, index: usize) -> Option<&str> {
+        self.lpe_tags.get(index).and_then(|t| t.as_deref())
+    }
+
+    /// The light-list entry whose geometry is `geom_id`, if any — whether a
+    /// hit on emissive geometry is a light (`L`) or not (`O`).
+    pub fn index_of_geom(&self, geom_id: u32) -> Option<usize> {
+        self.by_geom.get(&geom_id).copied()
     }
 
     /// Builds the selection over the current lights (see [`LightSelection`]).

@@ -316,7 +316,7 @@ fn unsupported_products_and_vars_are_refused() {
     }
     def RenderVar "lpe"
     {
-        uniform string sourceName = "C<RD>L"
+        uniform string sourceName = "C<RD>?L"
         uniform token sourceType = "lpe"
     }
     def RenderVar "primvar"
@@ -572,4 +572,75 @@ def Scope "Render"
     assert_eq!(scene.aovs.products.len(), 1);
     assert_eq!(scene.aovs.products[0].name, "p.exr");
     assert_eq!(scene.settings.get_dimensions(), (48, 32));
+}
+
+#[test]
+fn light_path_expressions_and_albedo_are_accepted() {
+    let scene = load(
+        "lpe_vars",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/diffuse>, </Render/prefixed>, </Render/rgba>,
+                           </Render/scalar>, </Render/albedo>]
+    }
+    def RenderVar "diffuse"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>[LO]"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "prefixed"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "lpe:C.*<L.'key'>"
+        uniform string sourceType = "lpe"
+    }
+    def RenderVar "rgba"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "C<RG>.*L"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "scalar"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "C<RD>L"
+        uniform token sourceType = "lpe"
+    }
+    def RenderVar "albedo"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "albedo"
+    }
+"#,
+    );
+    let vars = &scene.aovs.products[0].vars;
+    let got: Vec<_> = vars
+        .iter()
+        .map(|v| {
+            (
+                v.name.as_str(),
+                v.source,
+                v.expression.as_deref(),
+                v.components,
+            )
+        })
+        .collect();
+    // A light path expression is colour: a float var for one is refused.
+    assert_eq!(
+        got,
+        [
+            ("diffuse", AovSource::Lpe, Some("C<RD>[LO]"), 3),
+            ("prefixed", AovSource::Lpe, Some("C.*<L.'key'>"), 3),
+            ("rgba", AovSource::Lpe, Some("C<RG>.*L"), 4),
+            ("albedo", AovSource::Albedo, None, 3),
+        ]
+    );
+    assert!(vars[2].with_alpha());
 }

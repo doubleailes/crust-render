@@ -23,6 +23,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
         precision: Precision::Float,
         accumulation: source.default_accumulation(),
         clear: source.default_clear(),
+        expression: None,
     }
 }
 

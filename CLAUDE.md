@@ -123,6 +123,10 @@ without the other (full list: `docs/architecture.md` § Invariants):
   the same density — structural now: both come from the one
   `LightShape::solid_angle_sampler(from)`. A non-finite density is refused on both
   sides (`PdfSolidAngle::new` → `None`), never replaced by a finite stand-in.
+- Light path expression AOVs reuse the beauty's own recurrence, so their pairs are the
+  beauty's: `eval_all` ↔ `eval_split`, `scatter_resolved` ↔ `scatter_split` (one
+  `scatter_with`), `escaped_emission` ↔ `escaped_split`. `C.*[LO]` is pinned bitwise to the
+  beauty, and the zero-AOV render to its instruction count (`docs/architecture.md`).
 - Bit-identity pairs, each pinned by a bitwise test: `Tri4` packets ↔ scalar triangles;
   JIT ↔ interpreter; streamed ↔ preloaded `u8` textures; tiles ↔ scanlines (a render
   mode is scheduling only); `reduce_half` ↔ `reduce_half_linear` (they share `axis_taps`).
