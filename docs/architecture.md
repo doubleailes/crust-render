@@ -276,8 +276,8 @@ Still open, roughly in order of payoff:
 2. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
    `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
    way the importer now does. The largest source files left are
-   `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
-   (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
+   `stats.rs` (1 360), `materialx.rs` (1 430) and `usd_import/mesh.rs`
+   (1 410); none is urgent.
 3. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
