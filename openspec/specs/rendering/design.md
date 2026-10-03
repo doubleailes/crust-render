@@ -212,7 +212,7 @@ consumed as ordinary dependencies:
    See "Adaptive sampling" below for the rounds and the traps.
 6. The CLI writes the linear EXR to the `-o` path and a tone-mapped sRGB PNG next to it
    (same path, `.png` extension) — e.g. `-o renders/foo.exr` produces `renders/foo.exr`
-   and `renders/foo.png`. Tone mapping and PNG encoding live in `main.rs`; the engine
+   and `renders/foo.png`. Tone mapping and PNG encoding live in `crust-render/src/output.rs`; the engine
    crate only produces the `Buffer`.
 
 ## Adaptive sampling

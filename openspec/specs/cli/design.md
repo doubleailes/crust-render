@@ -293,7 +293,7 @@ conversion (Hinnant's, era-shifted to March so leap days land at the end of a 40
 cycle) rather than taking `chrono` or `time`, neither of which is in the graph and
 either of which would be the largest dependency in this binary for the sake of naming a
 file. The format is fixed-width and zero-padded so lexical order is chronological;
-`utc_stamp_*` in `main.rs` pins that, plus the 2000-vs-2100 leap rule.
+`utc_stamp_*` in `crust-render/src/logging.rs` pins that, plus the 2000-vs-2100 leap rule.
 
 Fourth, **the `--stats` report is a log event too, on a target `-l` cannot silence.**
 It used to go straight to stdout on the grounds that it is a report to read rather

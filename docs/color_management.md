@@ -285,11 +285,12 @@ unenforced, and is exactly how the `UsdPreviewSurface` gap below arose.
 ## The output side
 
 The engine produces a linear `Buffer`. The CLI writes it two ways
-(`crust-render/src/main.rs`, the one place that still touches pixels):
+(`crust-render/src/main.rs` and `output.rs`, the one place that still touches
+pixels):
 
 - **`.exr`** — the linear values, unmodified. This is the render output.
 - **`.png`** — tone-mapped: clamp to `[0,1]`, then encode with the piecewise
-  sRGB OETF (`tone_map` in `main.rs`). A preview, not a deliverable.
+  sRGB OETF (`tone_map` in `crust-render/src/output.rs`). A preview, not a deliverable.
 
 `tone_map` is the *inverse* of the LDR-image decode above, using the standard
 piecewise curve in the forward direction. Comparing renders numerically should

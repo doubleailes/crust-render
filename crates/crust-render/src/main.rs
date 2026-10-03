@@ -4,424 +4,46 @@
 //! counting allocator) and `crust-jit` (calling generated code).
 #![forbid(unsafe_code)]
 
+mod cli;
+mod logging;
+mod output;
+#[cfg(feature = "traversal-stats")]
+mod traversal_report;
+
 use clap::Parser;
 use crust_assets::FileAssets;
-use crust_core::Buffer;
-use crust_core::LightSelection;
-use crust_core::PixelFilter;
-use crust_core::Renderer;
-use crust_core::SamplingStrategy;
-use crust_core::Scene;
-use crust_core::{get_settings, simple_scene};
-use exr::prelude::*;
+use crust_core::{RenderSettings, Renderer, Scene, get_settings, simple_scene};
+use exr::prelude::write_rgb_file;
 use indicatif::ProgressBar;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
-use tracing::{Level, debug, error, info, warn};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-#[derive(clap::ValueEnum, Clone, Debug, Copy)]
-enum LoggerLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
-    Trace,
-}
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// Input scene path — .usda / .usdc / .usdz.
-    /// When absent, falls back to a hard-coded procedural scene.
-    #[arg(short, long)]
-    input: Option<String>,
-    /// Output image path. The linear EXR is written here and a tone-mapped
-    /// sRGB PNG next to it (same path with a .png extension).
-    #[arg(short, long, default_value = "output.exr")]
-    output: String,
-    /// Verbose level
-    #[arg(short, long, default_value = "info")]
-    level: LoggerLevel,
-    /// Also write the log to a file named for the time the run started
-    /// (`crust-render-<UTC timestamp>.log`). Bare, it writes into the
-    /// current directory; given a directory, it writes there and creates it
-    /// if needed. The file receives the same events as the terminal, so
-    /// `-l debug --log-file` is how a full record of a render is kept.
-    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
-    log_file: Option<std::path::PathBuf>,
-    /// Render by scanlines — a row is the work unit, rows in parallel, each
-    /// written into the image in place — instead of the default 16x16 tiles.
-    /// The image is bit-identical; kept as the A/B and for a progress bar in
-    /// rows.
-    #[arg(long, default_value_t = false)]
-    scanline: bool,
-    /// Tiles ("bucket" order) are the default now; accepted so existing
-    /// command lines keep working, and ignored.
-    #[arg(short, long, default_value_t = false, hide = true)]
-    bucket: bool,
-    /// Samples per pixel. Overrides the scene / default value when set.
-    #[arg(short, long)]
-    samples: Option<u32>,
-    /// USD time code (frame) to render. Every animated attribute resolves
-    /// its time samples here; unanimated ones read their default. Fractional
-    /// values render a subframe. Also sets the sampler's frame seed,
-    /// overriding the scene's `crust:frame`. When absent, attributes read
-    /// their default (non-time-sampled) value.
-    #[arg(short, long, allow_negative_numbers = true, value_parser = parse_frame)]
-    frame: Option<f64>,
-    /// Camera to render through, as an absolute USD prim path (e.g.
-    /// `/root/camera01/renderCam`). Without it the stage's
-    /// `RenderSettings.camera` is used, else the first camera found. A path
-    /// that is not a camera on the stage stops the render.
-    #[arg(long, value_name = "PRIM_PATH")]
-    camera: Option<String>,
-    /// Subdivision refinement level for every mesh whose `subdivisionScheme`
-    /// is not `none` (unauthored means USD's fallback, `catmullClark`).
-    /// Overrides the scene's `crust:subdivisionLevel` render setting
-    /// (default 0: each cage shaded with smooth normals, unrefined). Clamped to 6.
-    #[arg(long, value_name = "N")]
-    subdiv_level: Option<u32>,
-    /// Adaptive subdivision: refine each subdivision mesh only until its mean
-    /// cage edge, at its nearest distance to the render camera, is at most
-    /// this many pixels long. Overrides the scene's
-    /// `crust:subdivisionEdgeLength`. `--subdiv-level` then caps the level
-    /// (default 3). Needs `--camera` or the stage's `RenderSettings.camera`.
-    #[arg(long, value_name = "PX", allow_negative_numbers = true, value_parser = parse_edge_length)]
-    subdiv_edge_length: Option<f32>,
-    /// How light sampling and BSDF sampling combine. Overrides the scene's
-    /// `crust:samplingStrategy` when set; `light` and `bsdf` render one
-    /// strategy alone to visualize what MIS balances between.
-    #[arg(long, value_parser = choices(SamplingStrategy::CHOICES))]
-    strategy: Option<SamplingStrategy>,
-    /// How NEE picks the light it samples at each vertex. Overrides the
-    /// scene's `crust:lightSelection` when set.
-    #[arg(long, value_parser = choices(LightSelection::CHOICES))]
-    light_selection: Option<LightSelection>,
-    /// Pixel reconstruction filter. Overrides the scene's
-    /// `crust:pixelFilter` when set.
-    #[arg(long, value_parser = choices(PixelFilter::CHOICES))]
-    filter: Option<PixelFilter>,
-    /// Pixel filter radius in pixels, measured from the pixel center
-    /// (each filter has its own default: box 0.5, triangle 1, gaussian /
-    /// blackman 1.5, mitchell 2). Overrides `crust:pixelFilterRadius`.
-    #[arg(long, value_parser = parse_radius)]
-    filter_radius: Option<f32>,
-    /// Firefly clamp: cap each sample's indirect light at this value in its
-    /// largest channel (linear, hue kept). Biased, and 0 turns it off.
-    /// Overrides the scene's `crust:indirectClamp`.
-    #[arg(long, value_parser = parse_clamp)]
-    indirect_clamp: Option<f32>,
-    /// Print render statistics and a per-phase profile (parse, build,
-    /// render, output) when the render finishes.
-    #[arg(long, default_value_t = false)]
-    stats: bool,
-    /// Also time the render section by section (Trace, EvalBsdfs, Texture,
-    /// SurfaceLighting, ...) and add Guerilla-style profiles of it to the
-    /// `--stats` report, which it implies. Costs render time (the report
-    /// prints its own estimate), so it is separate from `--stats`, whose
-    /// Render phase must stay comparable between runs.
-    #[arg(long, default_value_t = false)]
-    profile: bool,
-    /// Convert UV textures to a tiled, mip-mapped `.tx` beside the original
-    /// (same path, extension `.tx`) on first use, when the `.tx` is missing or
-    /// older than its source. A `.tx` beside a texture is always streamed when
-    /// present; this only creates the missing ones.
-    #[arg(long, default_value_t = false)]
-    auto_tx: bool,
-}
-
-/// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
-/// `nan`, `inf` and `infinity`, none of which is a time code; crust-core
-/// refuses them too, but rejecting them here reports it as a usage error
-/// before any scene is opened.
-fn parse_frame(s: &str) -> std::result::Result<f64, String> {
-    let frame: f64 = s.parse().map_err(|e| format!("{e}"))?;
-    if frame.is_finite() {
-        Ok(frame)
-    } else {
-        Err(format!("{s} is not a finite time code"))
-    }
-}
-
-/// `--filter-radius`'s parser: a finite, positive radius in pixels. The
-/// engine would clamp anything else to its minimum radius without a word;
-/// refusing it here reports the typo as a usage error instead.
-fn parse_radius(s: &str) -> std::result::Result<f32, String> {
-    let r: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    if r.is_finite() && r > 0.0 {
-        Ok(r)
-    } else {
-        Err(format!("{s} is not a positive, finite radius"))
-    }
-}
-
-/// `--subdiv-edge-length`'s parser: a finite, positive length in pixels.
-fn parse_edge_length(s: &str) -> std::result::Result<f32, String> {
-    let l: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    if l.is_finite() && l > 0.0 {
-        Ok(l)
-    } else {
-        Err(format!("{s} is not a positive, finite length in pixels"))
-    }
-}
-
-/// `--indirect-clamp`'s parser: a finite, non-negative limit, `0` turning
-/// the clamp off. The engine reads anything else as off too, silently;
-/// refusing it here says so.
-fn parse_clamp(s: &str) -> std::result::Result<f32, String> {
-    let c: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    if c.is_finite() && c >= 0.0 {
-        Ok(c)
-    } else {
-        Err(format!(
-            "{s} is not a finite, non-negative limit (0 turns the clamp off)"
-        ))
-    }
-}
-
-/// A clap parser for one of the engine's named settings: the possible values
-/// and their `--help` lines come from the enum's own table (`CHOICES`), and
-/// the value from its `FromStr`, so the CLI holds no second spelling.
-fn choices<T>(
-    table: &'static [(T, &'static str, &'static str)],
-) -> impl clap::builder::TypedValueParser<Value = T>
-where
-    T: std::str::FromStr<Err = crust_core::names::UnknownName> + Clone + Send + Sync + 'static,
-{
-    use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
-    PossibleValuesParser::new(
-        table
-            .iter()
-            .map(|&(_, name, help)| PossibleValue::new(name).help(help)),
-    )
-    .try_map(|s| s.parse::<T>())
-}
-
-/// Target the `--stats` report is emitted under.
-///
-/// It exists so the report can be exempted from `-l`: `--stats` is an
-/// explicit request for the report, and honouring it only at `-l info` or
-/// below would mean `--stats -l warn` silently produced nothing. The filter
-/// in `main` admits this target at any level and applies `-l` to everything
-/// else, which is what keeps the report a log event — reaching `--log-file`
-/// like any other — without letting the log level decide whether it appears.
-const STATS_TARGET: &str = "crust_render::stats";
-
-/// Whether an event at `level` on `target` survives a `-l max` filter.
-///
-/// Named rather than inlined into the closure so it can be tested: the whole
-/// point of it is the one case that is easy to regress into silence —
-/// [`STATS_TARGET`] passing at a level that rejects everything else.
-fn event_enabled(target: &str, level: &Level, max: Level) -> bool {
-    target == STATS_TARGET || effective_level(target, level) <= max
-}
-
-/// The level an event is filtered at, which for a few dependencies is not
-/// the level it was emitted at.
-///
-/// `cranelift_jit` logs the whole IR of every function it defines at INFO —
-/// one multi-hundred-line dump per MaterialX program, so a default render's
-/// INFO output grew with the number of materials, against the rule that INFO
-/// lines do not scale with the scene. `tracing` cannot rewrite an event's
-/// level, so it is *filtered* as DEBUG (shown from `-l debug` on) while still
-/// printing its own `INFO` stamp. WARN and ERROR from cranelift are untouched.
-fn effective_level(target: &str, level: &Level) -> Level {
-    if *level == Level::INFO && target.starts_with("cranelift") {
-        Level::DEBUG
-    } else {
-        *level
-    }
-}
-
-fn get_logger_level(level: LoggerLevel) -> Level {
-    match level {
-        LoggerLevel::Debug => Level::DEBUG,
-        LoggerLevel::Info => Level::INFO,
-        LoggerLevel::Warn => Level::WARN,
-        LoggerLevel::Error => Level::ERROR,
-        LoggerLevel::Trace => Level::TRACE,
-    }
-}
-
-/// Compress a linear f32 into [0,1] and encode it as an sRGB byte, through
-/// the same transfer function the texture decoders invert.
-fn tone_map(linear: f32) -> u8 {
-    let srgb = crust_assets::linear_to_srgb(linear.clamp(0.0, 1.0));
-    (srgb * 255.0 + 0.5).floor() as u8
-}
-
-/// Tone-map the render buffer to an sRGB PNG at `path`.
-fn write_png(
-    buffer: &Buffer,
-    width: usize,
-    height: usize,
-    path: &Path,
-) -> std::result::Result<(), image::ImageError> {
-    let mut img = image::RgbaImage::new(width as u32, height as u32);
-    for y in 0..height {
-        for x in 0..width {
-            let (r, g, b) = buffer.get_rgb(x, y);
-            img.put_pixel(
-                x as u32,
-                y as u32,
-                image::Rgba([tone_map(r), tone_map(g), tone_map(b), 255]),
-            );
-        }
-    }
-    img.save(path)
-}
-
-/// A filename-safe UTC timestamp, `YYYYMMDDTHHMMSSZ`.
-///
-/// Hand-rolled rather than pulled from `chrono` or `time`: neither is in the
-/// dependency graph, and adding one to name a file would be the largest
-/// dependency in this binary. `tracing-subscriber` formats its own line
-/// timestamps the same way and for the same reason, so the `Z` suffix here
-/// matches what the log lines themselves carry.
-///
-/// The civil-from-days conversion is Howard Hinnant's, shifting the era to
-/// start on 0000-03-01 so a leap day lands at the end of a 400-year cycle and
-/// the month arithmetic needs no table. Valid for any date this can be handed.
-fn utc_stamp(t: std::time::SystemTime) -> String {
-    let secs = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        // A clock before 1970 is not worth a failure path; it only names a file.
-        .unwrap_or(0);
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let (hour, min, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-
-    // Days since 1970-01-01 -> civil date.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    // `mp` counts from March; roll it back to a calendar month, and with it
-    // the year, which only advances once January is reached.
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = era * 400 + yoe + i64::from(month <= 2);
-
-    format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z")
-}
-
-/// Opens the run's log file, creating any missing directories in `dir`.
-///
-/// A failure fails the run rather than warning: nothing has been rendered yet
-/// when this runs, so stopping costs no work, and a `--log-file` that quietly
-/// produced no file would be discovered only after the render it was meant to
-/// record. The error is the message to print.
-fn open_log_file(dir: &Path) -> std::result::Result<std::fs::File, String> {
-    let path = dir.join(format!("crust-render-{}.log", utc_stamp(SystemTime::now())));
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        return Err(format!(
-            "could not create log directory {}: {e}",
-            parent.display()
-        ));
-    }
-    let f = std::fs::File::create(&path)
-        .map_err(|e| format!("could not create log file {}: {e}", path.display()))?;
-    // Said on stderr rather than through `tracing`: the subscriber this file
-    // belongs to does not exist yet.
-    eprintln!("Logging to {}", path.display());
-    Ok(f)
-}
+use cli::Cli;
+use logging::{STATS_TARGET, event_enabled, get_logger_level, open_log_file};
+use output::write_png;
 
 /// Every failure returns through here rather than `std::process::exit`, so
 /// the stack unwinds normally and every destructor runs on the way out.
 fn main() -> ExitCode {
-    // CLI
     let cli = Cli::parse();
-    // Add tracing. Two layers rather than one writer teed into both, because
-    // ANSI is a per-layer setting: a single writer would either colour the
-    // file with escape codes or strip the colour from the terminal. The
-    // registry that composes them costs no new dependency — `sharded-slab`
-    // and `thread_local` are already in the graph via the `fmt` feature.
-    //
-    // The file is written unbuffered, deliberately: the subscriber that owns
-    // it is the process-global one, which is never dropped, so a `BufWriter`
-    // would never be flushed and would lose exactly the last lines — the ones
-    // explaining why a run stopped. A log at these volumes is not worth a
-    // flush guard.
-    let log_file = match cli.log_file.as_deref().map(open_log_file).transpose() {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let level = get_logger_level(cli.level);
-    tracing_subscriber::registry()
-        // `-l` for everything except the `--stats` report, which the user
-        // asked for by flag and which therefore is not the log level's to
-        // suppress. See `STATS_TARGET`.
-        .with(filter_fn(move |meta| {
-            event_enabled(meta.target(), meta.level(), level)
-        }))
-        .with(fmt::layer())
-        .with(log_file.map(|f| fmt::layer().with_ansi(false).with_writer(Mutex::new(f))))
-        .init();
-    let input = cli.input;
-    let output = cli.output;
+    if let Err(e) = init_logging(&cli) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
-    let load_start = Instant::now();
-    let scene: Scene = if let Some(t) = input {
-        let input_path = std::path::Path::new(&t);
-        debug!("Loading USD scene from {}", input_path.display());
-        let options = crust_core::UsdImportOptions {
-            frame: cli.frame,
-            camera: cli.camera.clone(),
-            subdivision_level: cli.subdiv_level,
-            subdivision_edge_length: cli.subdiv_edge_length,
-            // The process renders once and exits, so freeing the composed
-            // stage is pure delay before the render (45 s on ALab).
-            skip_stage_teardown: true,
-        };
-        match Scene::from_usd_with_options(input_path, &assets, &options) {
-            Ok(scene) => scene,
-            Err(e) => {
-                error!("Failed to load USD scene: {}", e);
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        debug!("No -i/--input given: building the procedural fallback scene");
-        if let Some(frame) = cli.frame {
-            warn!(
-                "--frame {frame} has no effect without -i/--input: the procedural scene is static"
-            );
-        }
-        if let Some(camera) = &cli.camera {
-            warn!("--camera {camera} has no effect without -i/--input");
-        }
-        let (world, lights) = simple_scene();
-        let (camera, settings) = get_settings();
-        Scene::new(camera, world, lights, settings)
+    let Some(scene) = load_scene(&cli, &assets) else {
+        return ExitCode::FAILURE;
     };
-    debug!("Scene built in {:?}", load_start.elapsed());
-    // One line however many textures were converted — the per-file lines are
-    // DEBUG, since their count grows with the stage.
-    let (converted, failed, secs) = assets.tx_report();
-    if converted + failed > 0 {
-        info!("--auto-tx: converted {converted} texture tile(s) to .tx in {secs:.1}s");
-        if failed > 0 {
-            warn!("--auto-tx: {failed} tile(s) failed to convert; their textures were preloaded");
-        }
-    }
     let camera = scene.camera;
     let world = scene.world;
     let lights = scene.lights;
@@ -429,36 +51,7 @@ fn main() -> ExitCode {
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
-    let mut settings = match cli.samples {
-        Some(spp) => {
-            debug!("--samples {spp} overrides the scene's crust:samplesPerPixel");
-            scene.settings.with_samples_per_pixel(spp)
-        }
-        None => scene.settings,
-    };
-    if let Some(strategy) = cli.strategy {
-        debug!("--strategy {strategy} overrides the scene's crust:samplingStrategy");
-        settings = settings.with_sampling_strategy(strategy);
-    }
-    if let Some(selection) = cli.light_selection {
-        debug!("--light-selection {selection} overrides the scene's crust:lightSelection");
-        settings = settings.with_light_selection(selection);
-    }
-    // --filter replaces the scene's filter (at the filter's default radius);
-    // --filter-radius then resizes whichever filter is in effect, so it also
-    // works alone to widen the scene-authored one.
-    if let Some(filter) = cli.filter {
-        debug!("--filter {filter} overrides the scene's crust:pixelFilter");
-        settings = settings.with_pixel_filter(filter);
-    }
-    if let Some(radius) = cli.filter_radius {
-        debug!("--filter-radius {radius} overrides the filter's own radius");
-        settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
-    }
-    if let Some(limit) = cli.indirect_clamp {
-        debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
-        settings = settings.with_indirect_clamp(limit);
-    }
+    let settings = apply_overrides(&cli, scene.settings);
     // A BVH can only cull primitives whose bounds are small against the
     // whole scene. Report the ratio so a scene whose instance boxes all
     // span everything -- where no split can help -- is visible.
@@ -479,11 +72,7 @@ fn main() -> ExitCode {
     // report describes the render that actually ran.
     stats.image = (&settings).into();
     crust_core::profile::set_enabled(cli.profile);
-    // Timer
     let start = Instant::now();
-    // World
-
-    // Camera
     let (img_width, img_height) = settings.get_dimensions();
     let renderer = Renderer::new(camera, world, lights, settings).with_volumes(volumes);
     info!(
@@ -523,7 +112,6 @@ fn main() -> ExitCode {
     };
     let (buffer, ray_stats) = renderer.render_with_stats(!cli.scanline, &progress);
     bar.finish();
-    // Close Timer
     let duration: Duration = start.elapsed();
     stats.record("Render", 0, duration);
     stats.rays = ray_stats;
@@ -537,130 +125,23 @@ fn main() -> ExitCode {
         stats.profile = crust_core::profile::take();
     }
     info!("Render finished in {duration:?}");
-    // Write the linear EXR, then the tone-mapped sRGB PNG next to it.
     let output_start = Instant::now();
-    debug!(
-        "Writing {}x{} linear EXR to {}",
-        img_width, img_height, output
-    );
-    match write_rgb_file(&output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
-        Ok(_) => info!("Image written to: {:?}", output),
-        Err(e) => {
-            error!("Error writing image: {}", e);
-            return ExitCode::FAILURE;
-        }
-    }
-    let png_path = Path::new(&output).with_extension("png");
-    debug!("Tone mapping to sRGB PNG at {}", png_path.display());
-    match write_png(&buffer, img_width, img_height, &png_path) {
-        Ok(_) => info!("Image written to: {:?}", png_path),
-        Err(e) => {
-            error!("Error writing PNG: {}", e);
-            return ExitCode::FAILURE;
-        }
+    if let Err(code) = write_images(&cli.output, &buffer, img_width, img_height) {
+        return code;
     }
     let output_elapsed = output_start.elapsed();
     stats.record("Write output", 0, output_elapsed);
     debug!("Output written in {output_elapsed:?}");
 
-    // Traversal counts, when built with the diagnostic feature. Printed
-    // separately from RenderStats because they come from the kernel and
-    // only exist in a feature-on build.
-    #[cfg(feature = "traversal-stats")]
     if cli.stats || cli.profile {
-        // Accumulated into one string and emitted as a single event, for the
-        // reason the report below is: a `println!` per row would leave these
-        // lines out of `--log-file`, and one event per row would stamp each
-        // of them with a timestamp the table has no column for.
-        use crust_core::rt::traversal_stats as ts;
-        use std::fmt::Write as _;
-        let rays = ray_stats.camera_rays.max(1) as f64;
-        let per = |n: u64| n as f64 / rays;
-        let rule = "-".repeat(84);
-        let mut out = String::new();
-        // Infallible: `write!` into a String only fails if the formatter
-        // does, and none of these arguments can.
-        let _ = write!(out, "\n{rule}\nBVH Traversal (per camera ray)\n{rule}");
-        for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
-            let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
-            if q == 0 {
-                continue;
-            }
-            let _ = write!(
-                out,
-                "\n  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
-                per(q),
-                per(nodes),
-                per(leaves),
-                per(packets),
-                per(scalars),
-            );
-        }
-        // Which top-level instances the descents went into. A top level that
-        // culls well spreads them thinly; one that does not concentrates them
-        // on whatever geometry every ray's path overlaps. The importer's
-        // DEBUG lines give each instancer's `geom ids a..b` range, which is
-        // how an id here is traced back to a prim.
-        let descents = ts::top_level_descents();
-        let total: u64 = descents.iter().map(|d| d.1).sum();
-        if total > 0 {
-            let mut acc = 0u64;
-            let mut marks = vec![];
-            for (i, d) in descents.iter().enumerate() {
-                acc += d.1;
-                for f in [0.5, 0.9, 0.99] {
-                    if (acc as f64) >= f * total as f64 && !marks.iter().any(|&(g, _)| g == f) {
-                        marks.push((f, i + 1));
-                    }
-                }
-            }
-            let _ = write!(
-                out,
-                "\n  top-level instances entered: {} of them, {:.1} descents per camera ray \
-                 (closest-hit and shadow rays; the rows above count closest-hit only)",
-                descents.len(),
-                per(total)
-            );
-            for (f, n) in marks {
-                let _ = write!(
-                    out,
-                    "\n    {:.0}% of descents go to {n} instances",
-                    f * 100.0
-                );
-            }
-            let top: Vec<_> = descents.iter().take(40).collect();
-            let ids: std::collections::HashSet<u32> = top.iter().map(|d| d.0).collect();
-            let info: std::collections::HashMap<u32, _> = renderer
-                .world
-                .describe_instances(&ids)
-                .into_iter()
-                .map(|(id, b, n, shared)| (id, (b, n, shared)))
-                .collect();
-            let _ = write!(
-                out,
-                "\n  {:>9} {:>7} {:>9} {:>8} {:>9}  bounds",
-                "geom_id", "share", "per ray", "prims", "shared by"
-            );
-            for &&(id, n) in &top {
-                let (b, prims, shared) = info[&id];
-                let _ = write!(
-                    out,
-                    "\n  {id:>9} {:>6.2}% {:>9.2} {prims:>8} {shared:>9}  [{:.0} {:.0} {:.0}]..[{:.0} {:.0} {:.0}]",
-                    100.0 * n as f64 / total as f64,
-                    per(n),
-                    b.minimum.x,
-                    b.minimum.y,
-                    b.minimum.z,
-                    b.maximum.x,
-                    b.maximum.y,
-                    b.maximum.z,
-                );
-            }
-        }
-        info!(target: STATS_TARGET, "{out}");
-    }
-
-    if cli.stats || cli.profile {
+        // Traversal counts, when built with the diagnostic feature, ahead of
+        // the report: they come from the kernel, not from `RenderStats`.
+        #[cfg(feature = "traversal-stats")]
+        info!(
+            target: STATS_TARGET,
+            "{}",
+            traversal_report::traversal_report(ray_stats.camera_rays, &renderer.world)
+        );
         // Through `tracing` rather than `println!`, so the report reaches
         // every sink the run configured — `--log-file` above all, which is
         // where a record of a render is least useful without its profile.
@@ -676,413 +157,148 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Installs the global subscriber: the terminal, plus `--log-file` when
+/// given. The error is the message to print.
+///
+/// Two layers rather than one writer teed into both, because ANSI is a
+/// per-layer setting: a single writer would either colour the file with
+/// escape codes or strip the colour from the terminal. The registry that
+/// composes them costs no new dependency — `sharded-slab` and `thread_local`
+/// are already in the graph via the `fmt` feature.
+///
+/// The file is written unbuffered, deliberately: the subscriber that owns it
+/// is the process-global one, which is never dropped, so a `BufWriter` would
+/// never be flushed and would lose exactly the last lines — the ones
+/// explaining why a run stopped. A log at these volumes is not worth a flush
+/// guard.
+fn init_logging(cli: &Cli) -> Result<(), String> {
+    let log_file = cli.log_file.as_deref().map(open_log_file).transpose()?;
+    let level = get_logger_level(cli.level);
+    tracing_subscriber::registry()
+        // `-l` for everything except the `--stats` report, which the user
+        // asked for by flag and which therefore is not the log level's to
+        // suppress. See `STATS_TARGET`.
+        .with(filter_fn(move |meta| {
+            event_enabled(meta.target(), meta.level(), level)
+        }))
+        .with(fmt::layer())
+        .with(log_file.map(|f| fmt::layer().with_ansi(false).with_writer(Mutex::new(f))))
+        .init();
+    Ok(())
+}
 
-    /// `SystemTime` at a given Unix second, for pinning `utc_stamp` against
-    /// dates whose answers are known independently.
-    fn at(unix_secs: u64) -> SystemTime {
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs)
-    }
-
-    #[test]
-    fn utc_stamp_names_known_instants() {
-        assert_eq!(utc_stamp(at(0)), "19700101T000000Z");
-        assert_eq!(utc_stamp(at(1_774_267_884)), "20260323T121124Z");
-        // Last second of a year, and the first of the next.
-        assert_eq!(utc_stamp(at(1_767_225_599)), "20251231T235959Z");
-        assert_eq!(utc_stamp(at(1_767_225_600)), "20260101T000000Z");
-    }
-
-    #[test]
-    fn utc_stamp_handles_leap_years() {
-        // 2024 is a leap year: Feb 29 exists.
-        assert_eq!(utc_stamp(at(1_709_164_800)), "20240229T000000Z");
-        // 2000 is a leap year (divisible by 400) — the case a naive
-        // "divisible by 4, except by 100" rule gets wrong.
-        assert_eq!(utc_stamp(at(951_782_400)), "20000229T000000Z");
-        // 1900 was NOT a leap year, but it predates the epoch, so check the
-        // other end of the same rule: 2100 is not one either, and March 1
-        // must follow February 28.
-        assert_eq!(utc_stamp(at(4_107_456_000)), "21000228T000000Z");
-        assert_eq!(utc_stamp(at(4_107_542_400)), "21000301T000000Z");
-    }
-
-    #[test]
-    fn utc_stamp_is_filename_safe_and_sorts_chronologically() {
-        let mut prev = utc_stamp(at(0));
-        for day in 1..4000u64 {
-            // Every 37 days, so the walk crosses month and year boundaries
-            // at varied offsets rather than landing on the same day each time.
-            let t = utc_stamp(at(day * 37 * 86_400 + 3661));
-            assert!(
-                t.chars().all(|c| c.is_ascii_alphanumeric()),
-                "{t} is not filename-safe"
-            );
-            assert_eq!(t.len(), 16, "{t} is not a fixed-width stamp");
-            // Fixed width and zero-padded, so lexical order is chronological
-            // — which is the whole reason for this format over a locale one.
-            assert!(t > prev, "{t} does not sort after {prev}");
-            prev = t;
-        }
-    }
-
-    #[test]
-    fn log_file_flag_is_optional_and_takes_an_optional_directory() {
-        // Absent: no file.
-        let c = Cli::try_parse_from(["crust-render"]).unwrap();
-        assert_eq!(c.log_file, None);
-        // Bare: the current directory.
-        let c = Cli::try_parse_from(["crust-render", "--log-file"]).unwrap();
-        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        // With a directory.
-        let c = Cli::try_parse_from(["crust-render", "--log-file", "renders/logs"]).unwrap();
-        assert_eq!(
-            c.log_file.as_deref(),
-            Some(std::path::Path::new("renders/logs"))
-        );
-        // Bare, followed by another flag: the flag must not be eaten as the
-        // directory, which is what `num_args = 0..=1` is there to guarantee.
-        let c = Cli::try_parse_from(["crust-render", "--log-file", "--bucket"]).unwrap();
-        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        assert!(c.bucket);
-    }
-
-    #[test]
-    fn the_stats_report_survives_every_log_level() {
-        // `--stats` is an explicit request, so no `-l` may suppress it —
-        // including the quietest, which is the regression this guards.
-        for max in [
-            Level::ERROR,
-            Level::WARN,
-            Level::INFO,
-            Level::DEBUG,
-            Level::TRACE,
-        ] {
-            assert!(
-                event_enabled(STATS_TARGET, &Level::INFO, max),
-                "the stats report was filtered out at -l {max}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_other_target_still_obeys_the_level() {
-        // The exemption is for one target, not a hole in the filter.
-        assert!(!event_enabled("crust_render", &Level::INFO, Level::ERROR));
-        assert!(!event_enabled(
-            "crust_core::scene::usd_import",
-            &Level::DEBUG,
-            Level::INFO
-        ));
-        assert!(event_enabled("crust_render", &Level::ERROR, Level::ERROR));
-        assert!(event_enabled(
-            "crust_core::tracer",
-            &Level::DEBUG,
-            Level::DEBUG
-        ));
-        assert!(event_enabled("crust_assets", &Level::WARN, Level::INFO));
-        // A near-miss on the target name is not the stats target.
-        assert!(!event_enabled("stats", &Level::INFO, Level::ERROR));
-        // Cranelift's INFO IR dumps are filtered as DEBUG, and only those.
-        let jit = "cranelift_jit::backend";
-        assert!(!event_enabled(jit, &Level::INFO, Level::INFO));
-        assert!(event_enabled(jit, &Level::INFO, Level::DEBUG));
-        assert!(event_enabled(jit, &Level::WARN, Level::INFO));
-        assert!(event_enabled("crust_render", &Level::INFO, Level::INFO));
-        assert!(!event_enabled(
-            "crust_render::stats_extra",
-            &Level::INFO,
-            Level::ERROR
-        ));
-    }
-
-    #[test]
-    fn tone_map_anchors_black_and_white() {
-        assert_eq!(tone_map(0.0), 0);
-        assert_eq!(tone_map(1.0), 255);
-        // Out-of-range input clamps rather than wrapping.
-        assert_eq!(tone_map(-3.0), 0);
-        assert_eq!(tone_map(50.0), 255);
-        assert_eq!(tone_map(f32::INFINITY), 255);
-    }
-
-    #[test]
-    fn tone_map_applies_the_srgb_curve() {
-        // Linear 0.5 is display 188; linear 0.214 is display ~128.
-        assert_eq!(tone_map(0.5), 188);
-        assert!((tone_map(0.214) as i32 - 128).abs() <= 1);
-        // The linear toe: 0.001 linear → 12.92 · 0.001 · 255 ≈ 3.3 → 3.
-        assert_eq!(tone_map(0.001), 3);
-    }
-
-    #[test]
-    fn tone_map_is_monotone() {
-        let mut prev = 0u8;
-        for i in 0..=1000 {
-            let v = tone_map(i as f32 / 1000.0);
-            assert!(v >= prev, "not monotone at {i}");
-            prev = v;
-        }
-    }
-
-    /// The CLI parses straight into the engine's enums, through their own
-    /// name tables: every name the engine knows is a CLI value, and parses to
-    /// the value the engine means by it.
-    #[test]
-    fn cli_names_are_the_engine_names() {
-        let parse = |flag: &str, value: &str| {
-            Cli::try_parse_from(["crust-render", flag, value]).expect("a known name")
+/// The scene `-i` names, or the procedural fallback without one. `None`
+/// once the failure has been logged.
+fn load_scene(cli: &Cli, assets: &FileAssets) -> Option<Scene> {
+    let load_start = Instant::now();
+    let scene: Scene = if let Some(t) = &cli.input {
+        let input_path = std::path::Path::new(t);
+        debug!("Loading USD scene from {}", input_path.display());
+        let options = crust_core::UsdImportOptions {
+            frame: cli.frame,
+            camera: cli.camera.clone(),
+            subdivision_level: cli.subdiv_level,
+            subdivision_edge_length: cli.subdiv_edge_length,
+            // The process renders once and exits, so freeing the composed
+            // stage is pure delay before the render (45 s on ALab).
+            skip_stage_teardown: true,
         };
-        for &(value, name, _) in SamplingStrategy::CHOICES {
-            assert_eq!(parse("--strategy", name).strategy, Some(value));
+        match Scene::from_usd_with_options(input_path, assets, &options) {
+            Ok(scene) => scene,
+            Err(e) => {
+                error!("Failed to load USD scene: {}", e);
+                return None;
+            }
         }
-        for &(value, name, _) in LightSelection::CHOICES {
-            assert_eq!(
-                parse("--light-selection", name).light_selection,
-                Some(value)
+    } else {
+        debug!("No -i/--input given: building the procedural fallback scene");
+        if let Some(frame) = cli.frame {
+            warn!(
+                "--frame {frame} has no effect without -i/--input: the procedural scene is static"
             );
         }
-        for &(value, name, _) in PixelFilter::CHOICES {
-            assert_eq!(parse("--filter", name).filter, Some(value));
+        if let Some(camera) = &cli.camera {
+            warn!("--camera {camera} has no effect without -i/--input");
         }
-        assert_eq!(
-            parse("--strategy", "power").strategy,
-            Some(SamplingStrategy::PowerMis)
-        );
-        assert_eq!(
-            parse("--light-selection", "uniform").light_selection,
-            Some(LightSelection::Uniform)
-        );
-        let cli = Cli::try_parse_from(["crust-render"]).unwrap();
-        assert!(cli.light_selection.is_none());
-    }
-
-    #[test]
-    fn cli_indirect_clamp_defaults_to_ten_and_zero_disables() {
-        let cli = Cli::try_parse_from(["crust-render", "--indirect-clamp", "10"]).unwrap();
-        assert_eq!(cli.indirect_clamp, Some(10.0));
-        assert!(
-            Cli::try_parse_from(["crust-render"])
-                .unwrap()
-                .indirect_clamp
-                .is_none()
-        );
-        let (_, base) = crust_core::get_settings();
-        assert_eq!(
-            base.indirect_clamp(),
-            Some(crust_core::DEFAULT_INDIRECT_CLAMP),
-            "on by default"
-        );
-        assert_eq!(crust_core::DEFAULT_INDIRECT_CLAMP, 10.0);
-        assert_eq!(base.with_indirect_clamp(10.0).indirect_clamp(), Some(10.0));
-        assert_eq!(base.with_indirect_clamp(0.0).indirect_clamp(), None);
-        assert_eq!(base.with_indirect_clamp(-3.0).indirect_clamp(), None);
-        assert_eq!(base.with_indirect_clamp(f32::NAN).indirect_clamp(), None);
-    }
-
-    #[test]
-    fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
-        let filter = |name: &str| {
-            Cli::try_parse_from(["crust-render", "--filter", name])
-                .unwrap()
-                .filter
-        };
-        assert_eq!(filter("box"), Some(PixelFilter::BoxFilter { radius: 0.5 }));
-        assert_eq!(
-            filter("triangle"),
-            Some(PixelFilter::Triangle { radius: 1.0 })
-        );
-        assert_eq!(
-            filter("gaussian"),
-            Some(PixelFilter::Gaussian { radius: 1.5 })
-        );
-        assert_eq!(
-            filter("blackman"),
-            Some(PixelFilter::Blackman { radius: 1.5 })
-        );
-        assert_eq!(
-            filter("mitchell"),
-            Some(PixelFilter::Mitchell { radius: 2.0 })
-        );
-    }
-
-    #[test]
-    fn log_levels_map_one_to_one() {
-        assert_eq!(get_logger_level(LoggerLevel::Trace), Level::TRACE);
-        assert_eq!(get_logger_level(LoggerLevel::Debug), Level::DEBUG);
-        assert_eq!(get_logger_level(LoggerLevel::Info), Level::INFO);
-        assert_eq!(get_logger_level(LoggerLevel::Warn), Level::WARN);
-        assert_eq!(get_logger_level(LoggerLevel::Error), Level::ERROR);
-    }
-
-    #[test]
-    fn write_png_flips_rows_and_tone_maps() {
-        let (w, h) = (3usize, 2usize);
-        let mut buffer = Buffer::new(w, h);
-        buffer.set_pixel(0, 0, crust_core::Vec3A::new(1.0, 0.0, 0.0)); // scene bottom-left
-        buffer.set_pixel(2, 1, crust_core::Vec3A::new(0.0, 0.5, 0.0)); // scene top-right
-        let dir = std::env::temp_dir().join("crust_render_png_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("out.png");
-        write_png(&buffer, w, h, &path).expect("png written");
-        let img = image::open(&path).expect("readable").to_rgba8();
-        assert_eq!((img.width(), img.height()), (3, 2));
-        // Image row 0 is the top: the scene's y = 1 row.
-        assert_eq!(img.get_pixel(2, 0).0, [0, 188, 0, 255]);
-        assert_eq!(img.get_pixel(0, 1).0, [255, 0, 0, 255]);
-        assert_eq!(img.get_pixel(1, 1).0, [0, 0, 0, 255]);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn cli_parses_its_flags() {
-        let cli = Cli::try_parse_from([
-            "crust-render",
-            "-i",
-            "scene.usda",
-            "-o",
-            "out.exr",
-            "--bucket",
-            "-s",
-            "12",
-            "--strategy",
-            "balance",
-            "--filter",
-            "mitchell",
-            "--filter-radius",
-            "1.75",
-            "--stats",
-            "--profile",
-            "-l",
-            "debug",
-            "--frame",
-            "1012.5",
-        ])
-        .expect("valid flags");
-        assert_eq!(cli.frame, Some(1012.5));
-        assert_eq!(cli.input.as_deref(), Some("scene.usda"));
-        assert_eq!(cli.output, "out.exr");
-        assert!(cli.bucket, "the old flag still parses");
-        assert!(!cli.scanline);
-        assert_eq!(cli.samples, Some(12));
-        assert_eq!(cli.strategy, Some(SamplingStrategy::BalanceMis));
-        assert!(matches!(cli.filter, Some(PixelFilter::Mitchell { .. })));
-        assert_eq!(cli.filter_radius, Some(1.75));
-        assert!(cli.stats);
-        assert!(cli.profile);
-        assert!(matches!(cli.level, LoggerLevel::Debug));
-        let scan = Cli::try_parse_from(["crust-render", "--scanline"]).expect("valid flags");
-        assert!(scan.scanline);
-    }
-
-    #[test]
-    fn cli_defaults_when_nothing_is_given() {
-        let cli = Cli::try_parse_from(["crust-render"]).expect("no flags is valid");
-        assert!(cli.input.is_none());
-        assert_eq!(cli.output, "output.exr");
-        assert!(!cli.scanline, "tiles are the default");
-        assert!(cli.samples.is_none());
-        assert!(cli.strategy.is_none());
-        assert!(cli.filter.is_none());
-        assert!(cli.filter_radius.is_none());
-        assert!(cli.frame.is_none());
-        assert!(
-            cli.subdiv_level.is_none(),
-            "the scene's level unless overridden"
-        );
-        assert!(!cli.stats);
-        assert!(!cli.profile);
-        assert!(matches!(cli.level, LoggerLevel::Info));
-    }
-
-    #[test]
-    fn cli_subdiv_level_overrides_the_scene() {
-        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "0"]).expect("valid");
-        assert_eq!(cli.subdiv_level, Some(0));
-        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "3"]).expect("valid");
-        assert_eq!(cli.subdiv_level, Some(3));
-        assert!(
-            Cli::try_parse_from(["crust-render", "--subdiv-level", "-1"]).is_err(),
-            "a level is a count"
-        );
-    }
-
-    #[test]
-    fn cli_subdiv_edge_length_is_a_positive_pixel_length() {
-        let cli =
-            Cli::try_parse_from(["crust-render", "--subdiv-edge-length", "2"]).expect("valid");
-        assert_eq!(cli.subdiv_edge_length, Some(2.0));
-        assert!(
-            Cli::try_parse_from(["crust-render"])
-                .unwrap()
-                .subdiv_edge_length
-                .is_none()
-        );
-        for bad in ["0", "-1", "inf", "NaN", "fast"] {
-            let Err(err) = Cli::try_parse_from(["crust-render", "--subdiv-edge-length", bad])
-            else {
-                panic!("{bad} parsed as an edge length");
-            };
-            let err = err.to_string();
-            assert!(err.contains("--subdiv-edge-length"), "{bad}: {err}");
+        let (world, lights) = simple_scene();
+        let (camera, settings) = get_settings();
+        Scene::new(camera, world, lights, settings)
+    };
+    debug!("Scene built in {:?}", load_start.elapsed());
+    // One line however many textures were converted — the per-file lines are
+    // DEBUG, since their count grows with the stage.
+    let (converted, failed, secs) = assets.tx_report();
+    if converted + failed > 0 {
+        info!("--auto-tx: converted {converted} texture tile(s) to .tx in {secs:.1}s");
+        if failed > 0 {
+            warn!("--auto-tx: {failed} tile(s) failed to convert; their textures were preloaded");
         }
     }
+    Some(scene)
+}
 
-    #[test]
-    fn cli_accepts_a_negative_frame() {
-        // Shots routinely start before 0 (handles, pre-roll), and clap
-        // would otherwise read `-5` as an unknown short flag.
-        let cli = Cli::try_parse_from(["crust-render", "-f", "-5"]).expect("negative frame");
-        assert_eq!(cli.frame, Some(-5.0));
-    }
-
-    #[test]
-    fn cli_rejects_a_non_finite_frame() {
-        for bad in ["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"] {
-            assert!(
-                Cli::try_parse_from(["crust-render", "--frame", bad]).is_err(),
-                "--frame {bad} must be rejected"
-            );
+/// The scene's settings with every command-line override applied.
+fn apply_overrides(cli: &Cli, scene_settings: RenderSettings) -> RenderSettings {
+    let mut settings = match cli.samples {
+        Some(spp) => {
+            debug!("--samples {spp} overrides the scene's crust:samplesPerPixel");
+            scene_settings.with_samples_per_pixel(spp)
         }
-        assert!(Cli::try_parse_from(["crust-render", "--frame", "twelve"]).is_err());
+        None => scene_settings,
+    };
+    if let Some(strategy) = cli.strategy {
+        debug!("--strategy {strategy} overrides the scene's crust:samplingStrategy");
+        settings = settings.with_sampling_strategy(strategy);
     }
+    if let Some(selection) = cli.light_selection {
+        debug!("--light-selection {selection} overrides the scene's crust:lightSelection");
+        settings = settings.with_light_selection(selection);
+    }
+    // --filter replaces the scene's filter (at the filter's default radius);
+    // --filter-radius then resizes whichever filter is in effect, so it also
+    // works alone to widen the scene-authored one.
+    if let Some(filter) = cli.filter {
+        debug!("--filter {filter} overrides the scene's crust:pixelFilter");
+        settings = settings.with_pixel_filter(filter);
+    }
+    if let Some(radius) = cli.filter_radius {
+        debug!("--filter-radius {radius} overrides the filter's own radius");
+        settings = settings.with_pixel_filter(settings.pixel_filter().with_radius(radius));
+    }
+    if let Some(limit) = cli.indirect_clamp {
+        debug!("--indirect-clamp {limit} overrides the scene's crust:indirectClamp");
+        settings = settings.with_indirect_clamp(limit);
+    }
+    settings
+}
 
-    #[test]
-    fn cli_rejects_a_radius_or_clamp_that_is_no_number_the_engine_uses() {
-        for bad in ["-1", "nan", "inf", "0"] {
-            assert!(
-                Cli::try_parse_from(["crust-render", "--filter-radius", bad]).is_err(),
-                "--filter-radius {bad}"
-            );
+/// Writes the linear EXR at `output`, then the tone-mapped sRGB PNG next to
+/// it. The error is the exit code, once the failure has been logged.
+fn write_images(
+    output: &str,
+    buffer: &crust_core::Buffer,
+    img_width: usize,
+    img_height: usize,
+) -> Result<(), ExitCode> {
+    debug!(
+        "Writing {}x{} linear EXR to {}",
+        img_width, img_height, output
+    );
+    match write_rgb_file(output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
+        Ok(_) => info!("Image written to: {:?}", output),
+        Err(e) => {
+            error!("Error writing image: {}", e);
+            return Err(ExitCode::FAILURE);
         }
-        for bad in ["-1", "nan", "inf"] {
-            assert!(
-                Cli::try_parse_from(["crust-render", "--indirect-clamp", bad]).is_err(),
-                "--indirect-clamp {bad}"
-            );
+    }
+    let png_path = Path::new(output).with_extension("png");
+    debug!("Tone mapping to sRGB PNG at {}", png_path.display());
+    match write_png(buffer, img_width, img_height, &png_path) {
+        Ok(_) => info!("Image written to: {:?}", png_path),
+        Err(e) => {
+            error!("Error writing PNG: {}", e);
+            return Err(ExitCode::FAILURE);
         }
-        let ok = Cli::try_parse_from([
-            "crust-render",
-            "--indirect-clamp",
-            "0",
-            "--filter-radius",
-            "1.5",
-        ])
-        .unwrap();
-        assert_eq!(
-            (ok.indirect_clamp, ok.filter_radius),
-            (Some(0.0), Some(1.5))
-        );
     }
-
-    #[test]
-    fn cli_rejects_unknown_enum_values() {
-        assert!(Cli::try_parse_from(["crust-render", "--strategy", "random"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "--filter", "lanczos"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "--light-selection", "bvh"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "-l", "loud"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "-s", "many"]).is_err());
-    }
+    Ok(())
 }
