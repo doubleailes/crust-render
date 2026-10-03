@@ -30,25 +30,11 @@
 mod fixtures;
 
 use crust_rt::{CommitOptions, Geometry, PacketLayout, Scene, SceneBuilder};
-use fixtures::{instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere};
+use fixtures::{in_cube, instance_scene, ray_batch, sphere_grid_scene, triangle_scene, uv_sphere};
 use glam::{Affine3A, Vec3A};
+use openqmc::pcg::Rng;
 use std::sync::Arc;
 use std::time::Instant;
-
-/// A tiny deterministic generator for the large scenes (the same LCG as
-/// [`ray_batch`], seeded differently).
-struct Lcg(u32);
-
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (self.0 >> 8) as f32 / (1u32 << 24) as f32
-    }
-
-    fn in_cube(&mut self, half: f32) -> Vec3A {
-        Vec3A::new(self.next() - 0.5, self.next() - 0.5, self.next() - 0.5) * (2.0 * half)
-    }
-}
 
 /// Half-extent of the large scenes' cube.
 const LARGE_HALF: f32 = 50.0;
@@ -61,13 +47,13 @@ fn soup_scene(n: usize) -> Scene {
     let side = 2.0 * LARGE_HALF;
     let area = 8.0 * side * side / n as f32;
     let edge = (2.0 * area).sqrt();
-    let mut rng = Lcg(0x9E37_79B9);
+    let mut rng = Rng::new(0x9E37_79B9);
     let mut vertices = Vec::with_capacity(3 * n);
     let mut indices = Vec::with_capacity(n);
     for i in 0..n {
-        let c = rng.in_cube(LARGE_HALF);
+        let c = in_cube(&mut rng, LARGE_HALF);
         for _ in 0..3 {
-            vertices.push(c + rng.in_cube(0.5 * edge));
+            vertices.push(c + in_cube(&mut rng, 0.5 * edge));
         }
         let b = 3 * i as u32;
         indices.push([b, b + 1, b + 2]);
@@ -96,15 +82,15 @@ fn instance_field_scene(count: usize) -> Scene {
     let side = 2.0 * LARGE_HALF;
     // Cross-section pi r^2 per instance: mean free path V / (count pi r^2).
     let radius = (4.0 * side * side / (count as f32 * std::f32::consts::PI)).sqrt();
-    let mut rng = Lcg(0x85EB_CA6B);
+    let mut rng = Rng::new(0x85EB_CA6B);
     let mut b = SceneBuilder::new();
     for i in 0..count {
-        let axis = (rng.in_cube(1.0) + Vec3A::splat(1e-3)).normalize();
-        let scale = radius * (0.5 + rng.next());
+        let axis = (in_cube(&mut rng, 1.0) + Vec3A::splat(1e-3)).normalize();
+        let scale = radius * (0.5 + rng.next_f32());
         let transform = Affine3A::from_scale_rotation_translation(
             glam::Vec3::splat(scale),
-            glam::Quat::from_axis_angle(axis.into(), rng.next() * std::f32::consts::TAU),
-            rng.in_cube(LARGE_HALF).into(),
+            glam::Quat::from_axis_angle(axis.into(), rng.next_f32() * std::f32::consts::TAU),
+            in_cube(&mut rng, LARGE_HALF).into(),
         );
         b.attach(Geometry::Instance {
             scene: Arc::clone(&protos[i % protos.len()]),

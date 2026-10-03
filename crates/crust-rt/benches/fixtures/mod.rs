@@ -12,6 +12,7 @@
 
 use crust_rt::{Geometry, Ray, Scene, SceneBuilder};
 use glam::{Affine3A, Vec3A};
+use openqmc::pcg::Rng;
 use std::sync::Arc;
 
 /// A UV sphere mesh with `2 * segs * rings` triangles.
@@ -113,19 +114,25 @@ pub fn instance_scene(commit: impl Fn(SceneBuilder) -> Scene) -> Scene {
     commit(b)
 }
 
+/// A uniformly random point in the axis-aligned cube of half-extent `half`
+/// centred on the origin.
+pub fn in_cube(rng: &mut Rng, half: f32) -> Vec3A {
+    Vec3A::new(
+        rng.next_f32() - 0.5,
+        rng.next_f32() - 0.5,
+        rng.next_f32() - 0.5,
+    ) * (2.0 * half)
+}
+
 /// A deterministic fan of rays aimed through the scene's bounds — a mix of
-/// hits and misses, and of coherent and divergent directions. Seeded by a
-/// small LCG so the batch is identical run to run.
+/// hits and misses, and of coherent and divergent directions. Seeded, so
+/// the batch is identical run to run.
 pub fn ray_batch(count: usize, extent: f32) -> Vec<Ray> {
-    let mut state = 0x2545_F491u32;
-    let mut next = || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (state >> 8) as f32 / (1u32 << 24) as f32
-    };
+    let mut rng = Rng::new(0x2545_F491);
     (0..count)
         .map(|_| {
-            let origin = Vec3A::new(next() - 0.5, next() - 0.5, next() - 0.5) * (4.0 * extent);
-            let target = Vec3A::new(next() - 0.5, next() - 0.5, next() - 0.5) * extent;
+            let origin = in_cube(&mut rng, 2.0 * extent);
+            let target = in_cube(&mut rng, 0.5 * extent);
             Ray::new(origin, (target - origin).normalize())
         })
         .collect()
