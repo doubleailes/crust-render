@@ -24,6 +24,7 @@ fn var(name: &str, source: AovSource) -> AovVar {
         accumulation: source.default_accumulation(),
         clear: source.default_clear(),
         expression: None,
+        raw: false,
     }
 }
 

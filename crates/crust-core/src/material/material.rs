@@ -496,6 +496,19 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// The colour of this surface's diffuse reflection lobes, which the raw
+    /// light AOVs divide by and `diffuse_albedo` reports. Zero for a
+    /// material queried directly (no `OpenPBR`, no closure): crust cannot
+    /// tell its diffuse part.
+    pub(crate) fn diffuse_filter(&self) -> Vec3A {
+        match &self.bsdf {
+            Resolved::Material(_) => Vec3A::ZERO,
+            Resolved::Plain(m) => m.diffuse_filter(),
+            Resolved::OpenPBR(m) => m.params().diffuse_filter(),
+            Resolved::Closure(c) => c.diffuse_filter(),
+        }
+    }
+
     /// The albedo the `albedo` AOV reports here, in [0, 1].
     pub(crate) fn albedo(&self) -> Vec3A {
         match &self.bsdf {

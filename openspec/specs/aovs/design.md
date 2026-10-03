@@ -1004,6 +1004,34 @@ cornellbox +0.1% / −0.4%, veach_mis +0.1% / −0.2%, materialx_showcase
 is the one that does pay something real: the closure walk's coat detection
 runs at every vertex, beauty or not.
 
+## Raw light (`add-raw-lighting-aovs`)
+
+V-Ray-style raw light: `rawLight` / `rawGI` / `rawTotalLight`, and
+`crust:aov:raw` on any expression whose every path starts with a diffuse
+reflection, divided per camera sample by the first hit's diffuse colour,
+which `diffuse_albedo` reports. The change's `design.md` has the reasoning;
+the points to keep here:
+
+- **Per sample, not per pixel.** The film divides each sample's routed value
+  by that sample's filter (`SampleExtras::diffuse_filter`), so `raw ×
+  filter` is the light per sample. Per pixel it is exact only where the
+  colour is constant; at edges `mean(a·b) ≠ mean(a)·mean(b)`, as for V-Ray.
+- **The filter** is the colour factor of `eval_split`'s diffuse share,
+  `ρ · (1 − F̄) · base_atten · dark` (OpenPBR) or Σ `color × weight` over
+  `Diffuse` leaves (closures). The coat's directional passage and EON's
+  shape stay in the light; EON's multiple scattering leaves raw light a
+  faint dependence on the colour (the per-sample identity is exact anyway).
+  Several diffuse lobes divide by the sum of their filters, never each by
+  its own (that would count the light once per lobe).
+- **Below 1e-4** (`aov::RAW_FILTER_FLOOR`) a channel's raw value is 0.
+- **Only diffuse starts.** `Lpe::starts_with_diffuse_reflection` decides
+  on the language: a bare `'diffuse'` label is refused, since it also
+  matches events crust never labels so.
+- **A raw and a plain slot of one expression share its DFA bit**; nothing
+  is routed twice. The filter is computed only when a raw or
+  `diffuse_albedo` AOV asks for it.
+- `diffuse_albedo` stopped being an alias of `albedo`.
+
 ## Known gaps
 
 - Every Non-Goal above, which is warned when authored, not silent.

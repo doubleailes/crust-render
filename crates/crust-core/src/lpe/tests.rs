@@ -191,3 +191,32 @@ fn oversized_input_is_refused_not_panicked() {
     assert!(lpe.label("key").is_some());
     assert!(lpe.label("rim").is_none());
 }
+
+#[test]
+fn diffuse_starts_are_recognised_in_any_spelling() {
+    for expr in [
+        "C<RD>[LO]",
+        "C<RD>.*<L.'key'>",
+        "C<RD'diffuse'>.*L",
+        "C(<RD>|<RD'diffuse'>)L",
+        "C<RD>.+[LO]",
+    ] {
+        let lpe = Lpe::compile(&[expr]).unwrap();
+        assert!(lpe.starts_with_diffuse_reflection(0), "{expr}");
+    }
+    for expr in [
+        "C.*[LO]",
+        "C<RG>L",
+        "C[LO]",
+        "C<.D>L",
+        "C'diffuse'.*L",
+        "C<RD>L|CL",
+    ] {
+        let lpe = Lpe::compile(&[expr]).unwrap();
+        assert!(!lpe.starts_with_diffuse_reflection(0), "{expr}");
+    }
+    // Per expression, in a shared DFA.
+    let lpe = Lpe::compile(&["C.*[LO]", "C<RD>[LO]"]).unwrap();
+    assert!(!lpe.starts_with_diffuse_reflection(0));
+    assert!(lpe.starts_with_diffuse_reflection(1));
+}

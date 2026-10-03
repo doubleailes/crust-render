@@ -475,6 +475,8 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
     let source_type = custom_token(&prim, "sourceType").unwrap_or_else(|| "raw".to_owned());
     let source_name = custom_token(&prim, "sourceName").unwrap_or_default();
     let mut expression = None;
+    let mut raw = false;
+    let raw_authored = custom_bool(&prim, "crust:aov:raw") == Some(true);
     let source = match source_type.as_str() {
         "raw" => {
             let lookup = if source_name.is_empty() {
@@ -482,18 +484,32 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             } else {
                 &source_name
             };
-            match AovSource::from_raw(lookup) {
-                Some(s) => s,
-                None if AovSource::is_planned(lookup) => {
-                    warn!("{path}: source {lookup:?} is not supported yet; no channel written");
-                    return None;
-                }
-                None => {
-                    warn!(
-                        "{path}: unknown raw source {lookup:?}; no channel written (crust's \
+            if raw_authored {
+                warn!(
+                    "{path}: crust:aov:raw applies to light path expressions \
+                     (sourceType \"lpe\"); ignored on {lookup:?}"
+                );
+            }
+            if let Some(expr) = crate::aov::raw_light_expression(lookup) {
+                // `rawLight` …: a fixed expression, divided by the diffuse
+                // filter. It starts with a diffuse reflection by construction.
+                expression = Some(expr.to_owned());
+                raw = true;
+                AovSource::Lpe
+            } else {
+                match AovSource::from_raw(lookup) {
+                    Some(s) => s,
+                    None if AovSource::is_planned(lookup) => {
+                        warn!("{path}: source {lookup:?} is not supported yet; no channel written");
+                        return None;
+                    }
+                    None => {
+                        warn!(
+                            "{path}: unknown raw source {lookup:?}; no channel written (crust's \
                          AOV names are listed in the user documentation, usd/aovs)"
-                    );
-                    return None;
+                        );
+                        return None;
+                    }
                 }
             }
         }
@@ -502,6 +518,22 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
             if let Err(e) = crate::lpe::validate(expr) {
                 warn!("{path}: light path expression {expr:?}: {e}; no channel written");
                 return None;
+            }
+            if raw_authored {
+                // Raw light divides by the diffuse colour of the camera's
+                // first hit, which only means something when every path the
+                // expression accepts starts by reflecting off it diffusely.
+                let starts = crate::lpe::Lpe::compile(&[expr])
+                    .is_ok_and(|l| l.starts_with_diffuse_reflection(0));
+                if !starts {
+                    warn!(
+                        "{path}: crust:aov:raw needs an expression whose every path starts \
+                         with a diffuse reflection (C<RD>…); {expr:?} does not, so no channel \
+                         written"
+                    );
+                    return None;
+                }
+                raw = true;
             }
             expression = Some(expr.to_owned());
             AovSource::Lpe
@@ -566,6 +598,7 @@ fn resolve_var(stage: &Stage, path: &sdf::Path) -> Option<AovVar> {
         accumulation,
         clear,
         expression,
+        raw,
     })
 }
 

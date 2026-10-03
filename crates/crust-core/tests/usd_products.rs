@@ -694,3 +694,107 @@ fn an_expression_too_complex_to_compile_is_refused_at_import() {
         .collect();
     assert_eq!(names, ["ok", "also_ok"]);
 }
+
+#[test]
+fn raw_light_sources_and_the_diffuse_filter_resolve() {
+    let scene = load(
+        "raw_light",
+        r#"
+    def RenderSettings "settings"
+    {
+        rel products = [</Render/p>]
+    }
+    def RenderProduct "p"
+    {
+        token productName = "p.exr"
+        rel orderedVars = [</Render/rawLight>, </Render/RawGI>, </Render/RawTotalLighting>,
+                           </Render/filter>, </Render/vray_filter>, </Render/albedo>,
+                           </Render/key_raw>, </Render/not_diffuse>, </Render/bare_label>,
+                           </Render/raw_on_depth>]
+    }
+    def RenderVar "rawLight"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "rawLight"
+    }
+    def RenderVar "RawGI"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "RawGI"
+    }
+    def RenderVar "RawTotalLighting"
+    {
+        uniform token dataType = "color4f"
+        uniform string sourceName = "RawTotalLighting"
+    }
+    def RenderVar "filter"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "diffuse_albedo"
+    }
+    def RenderVar "vray_filter"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "DiffuseFilter"
+    }
+    def RenderVar "albedo"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "albedo"
+    }
+    def RenderVar "key_raw"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C<RD>.*<L.'key'>"
+        uniform token sourceType = "lpe"
+        bool crust:aov:raw = 1
+    }
+    def RenderVar "not_diffuse"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C.*[LO]"
+        uniform token sourceType = "lpe"
+        bool crust:aov:raw = 1
+    }
+    def RenderVar "bare_label"
+    {
+        uniform token dataType = "color3f"
+        uniform string sourceName = "C'diffuse'.*L"
+        uniform token sourceType = "lpe"
+        bool crust:aov:raw = 1
+    }
+    def RenderVar "raw_on_depth"
+    {
+        uniform token dataType = "float"
+        uniform string sourceName = "depth"
+        bool crust:aov:raw = 1
+    }
+"#,
+    );
+    let got: Vec<_> = scene.aovs.products[0]
+        .vars
+        .iter()
+        .map(|v| (v.name.as_str(), v.source, v.expression.as_deref(), v.raw))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("rawLight", AovSource::Lpe, Some("C<RD>[LO]"), true),
+            ("RawGI", AovSource::Lpe, Some("C<RD>.+[LO]"), true),
+            (
+                "RawTotalLighting",
+                AovSource::Lpe,
+                Some("C<RD>.*[LO]"),
+                true
+            ),
+            ("filter", AovSource::DiffuseFilter, None, false),
+            ("vray_filter", AovSource::DiffuseFilter, None, false),
+            ("albedo", AovSource::Albedo, None, false),
+            ("key_raw", AovSource::Lpe, Some("C<RD>.*<L.'key'>"), true),
+            // Refused: `not_diffuse` and `bare_label` do not start with a
+            // diffuse reflection. `crust:aov:raw` on `depth` is ignored.
+            ("raw_on_depth", AovSource::Depth, None, false),
+        ]
+    );
+    assert!(scene.aovs.products[0].vars[2].with_alpha());
+}

@@ -51,6 +51,9 @@ pub(crate) struct RouteCtx {
     straight: u16,
     /// Whether the albedo is wanted.
     pub(crate) albedo: bool,
+    /// Whether the first hit's diffuse filter is wanted (raw light AOVs,
+    /// `diffuse_albedo`).
+    pub(crate) diffuse_filter: bool,
 }
 
 impl RouteCtx {
@@ -61,7 +64,12 @@ impl RouteCtx {
     /// this does not fail for an imported scene. A request built by hand
     /// that does not compile is warned about, and its expressions route
     /// nothing.
-    pub(crate) fn new(expressions: &[String], tags: &[Option<&str>], albedo: bool) -> RouteCtx {
+    pub(crate) fn new(
+        expressions: &[String],
+        tags: &[Option<&str>],
+        albedo: bool,
+        diffuse_filter: bool,
+    ) -> RouteCtx {
         let lpe = if expressions.is_empty() {
             None
         } else {
@@ -100,6 +108,7 @@ impl RouteCtx {
             light,
             lpe,
             albedo,
+            diffuse_filter,
         }
     }
 
@@ -191,6 +200,9 @@ pub(crate) struct Route {
     /// The albedo of the first non-delta hit, through the delta chain
     /// before it.
     pub(crate) albedo: Vec3A,
+    /// The diffuse filter of the camera ray's first hit, or 0 off a surface:
+    /// what raw light AOVs divide by and `diffuse_albedo` reports.
+    pub(crate) diffuse_filter: Vec3A,
     albedo_chain: Vec3A,
     albedo_done: bool,
     // Gather scratch: states and radiance per vertex.
@@ -209,6 +221,7 @@ impl Route {
         self.escaped = false;
         self.r1 = Vec3A::ZERO;
         self.albedo = Vec3A::ONE;
+        self.diffuse_filter = Vec3A::ZERO;
         self.albedo_chain = Vec3A::ONE;
         self.albedo_done = false;
     }

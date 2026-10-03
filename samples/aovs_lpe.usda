@@ -200,6 +200,9 @@ def Scope "Render"
                 </Render/Products/Vars/coat>,
                 </Render/Products/Vars/albedo>,
                 </Render/Products/Vars/N>,
+                </Render/Products/Vars/rawLight>,
+                </Render/Products/Vars/rawGI>,
+                </Render/Products/Vars/diffuse_albedo>,
             ]
         }
 
@@ -294,6 +297,23 @@ def Scope "Render"
             {
                 uniform token dataType = "normal3f"
                 uniform string sourceName = "N"
+            }
+            # Raw light: diffuse light without the surface colour, so that
+            # rawLight × diffuse_albedo = diffuse_direct per sample.
+            def RenderVar "rawLight"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "RawLighting"
+            }
+            def RenderVar "rawGI"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "rawGI"
+            }
+            def RenderVar "diffuse_albedo"
+            {
+                uniform token dataType = "color3f"
+                uniform string sourceName = "DiffuseFilter"
             }
         }
     }

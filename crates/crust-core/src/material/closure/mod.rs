@@ -654,6 +654,20 @@ impl ResolvedClosure {
         }
     }
 
+    /// The diffuse colour the raw light AOVs divide by: the sum of the
+    /// diffuse leaves' colour times their weight in the tree (which already
+    /// carries the layering above them). Translucent and subsurface leaves
+    /// transmit; they are not diffuse reflection.
+    pub fn diffuse_filter(&self) -> Vec3A {
+        self.leaves[..self.len]
+            .iter()
+            .filter_map(|leaf| match leaf.lobe {
+                Lobe::Diffuse { color, .. } => Some(leaf.weight * color),
+                _ => None,
+            })
+            .fold(Vec3A::ZERO, |a, x| a + x)
+    }
+
     /// The albedo for denoising: each leaf's tint times its weight in the
     /// tree — a reflecting interface's tint at normal incidence — clamped to
     /// [0, 1].

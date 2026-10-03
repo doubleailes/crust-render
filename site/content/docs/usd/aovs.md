@@ -172,7 +172,11 @@ case-sensitive.
 | `primvars:st` | `st`, `uv`, `UV` | `texCoord2f` | filtered | The first hit's texture coordinates. |
 | `sampleCount` | `__sampleCount` | `float` / `int` | per pixel | Samples the pixel took: shows where adaptive sampling stopped early. |
 | `variance` | `crust:variance` | `float` | per pixel | Variance of the pixel's luminance mean: the quantity adaptive sampling stops on. |
-| `albedo` | `diffuse_albedo`, `DiffuseAlbedoSD` | `color3f` | filtered | The surface colour at the first hit that is not a perfect mirror or clear glass, for denoisers. See [Albedo](#albedo). |
+| `albedo` | `DiffuseAlbedoSD` | `color3f` | filtered | The surface colour at the first hit that is not a perfect mirror or clear glass, for denoisers. See [Albedo](#albedo). |
+| `diffuse_albedo` | `DiffuseFilter`, `diffuseFilter` | `color3f` | filtered | The diffuse colour of the surface the camera ray hits: what [raw light](#raw-light) is divided by. 0 off a surface and on surfaces with no diffuse part (mirrors, metals, clear glass). |
+| `rawLight` | `RawLighting`, `rawLighting` | `color3f` / `color4f` | filtered | Direct diffuse light without the surface's colour. See [Raw light](#raw-light). |
+| `rawGI` | `RawGI` | `color3f` / `color4f` | filtered | Indirect diffuse light without the surface's colour. |
+| `rawTotalLight` | `RawTotalLighting` | `color3f` / `color4f` | filtered | Both. |
 
 Any other name is skipped with a warning, and no channel is written for it. Crust Render
 never writes a black channel that looks valid.
@@ -364,6 +368,57 @@ escapes reports what the glass in front of the sky let through, or 1 with no gla
 
 A volume scatter before any surface reports 1. Materials crust can't describe as lobes
 report 1 too.
+
+## Raw light
+
+Raw light is the light a diffuse surface received, with the surface's own colour
+removed: V-Ray's `RawLighting`. A compositor relights or recolours a surface with
+it, since `lighting = raw light × diffuse colour`:
+
+| raw | is | times `diffuse_albedo` gives |
+|-----|----|------------------------------|
+| `rawLight` | `C<RD>[LO]`, raw | direct diffuse light |
+| `rawGI` | `C<RD>.+[LO]`, raw | indirect diffuse light |
+| `rawTotalLight` | `C<RD>.*[LO]`, raw | all diffuse light |
+
+The division happens **per camera sample**, before the pixel average. Dividing the
+finished pixels in a compositor instead goes wrong wherever a pixel mixes two colours
+(a texture's detail, an object's edge), because the average of a product is not the
+product of the averages.
+
+- Per sample, `raw × diffuse_albedo` is the diffuse light exactly.
+- Per pixel it is exact wherever the colour is the same across the pixel. At a
+  texture or object edge it is close but not exact: V-Ray's raw passes behave the
+  same. So is a surface seen through a volume: some samples scatter in the haze
+  first and see no diffuse colour, so the pixel's colour is diluted while its raw
+  light is not.
+- Where the diffuse colour is black (below 1e-4 in a channel), raw light is 0 there
+  rather than light divided by almost nothing.
+- A surface with no diffuse part (a mirror, a metal, clear glass), the sky, and a
+  diffuse surface seen through glass or a mirror have no raw light: raw light is
+  about the surface the camera sees first.
+
+Any light path expression whose every path starts with a diffuse reflection can be
+made raw with `crust:aov:raw`, for example one light group's diffuse light:
+
+```usda
+def RenderVar "key_raw"
+{
+    uniform token dataType = "color3f"
+    uniform string sourceName = "C<RD>.*<L.'key'>"
+    uniform token sourceType = "lpe"
+    bool crust:aov:raw = 1
+}
+```
+
+An expression that can start with anything else (`C.*[LO]`, `C<RG>L`, or a bare
+label like `C'diffuse'.*L`, which matches any event type) is refused with a warning;
+write `<RD'diffuse'>` for the label.
+
+{% alert(icon="⚠️") %}
+`diffuse_albedo` used to be another name for `albedo`. It is now the diffuse colour
+alone, at the first surface; `albedo` is unchanged.
+{% end %}
 
 ## The EXR files
 

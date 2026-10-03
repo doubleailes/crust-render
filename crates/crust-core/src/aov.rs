@@ -52,6 +52,9 @@ pub enum AovSource {
     Lpe,
     /// The albedo at the first non-delta hit, for denoisers.
     Albedo,
+    /// The colour of the diffuse lobes of the surface the camera ray hits —
+    /// what the raw light AOVs divide by.
+    DiffuseFilter,
 }
 
 /// `(name, source)` for every canonical name and alias a `raw` var may ask
@@ -98,9 +101,33 @@ const RAW_NAMES: &[(&str, AovSource)] = &[
     ("variance", AovSource::Variance),
     ("crust:variance", AovSource::Variance),
     ("albedo", AovSource::Albedo),
-    ("diffuse_albedo", AovSource::Albedo),
     ("DiffuseAlbedoSD", AovSource::Albedo),
+    ("diffuse_albedo", AovSource::DiffuseFilter),
+    ("DiffuseFilter", AovSource::DiffuseFilter),
+    ("diffuseFilter", AovSource::DiffuseFilter),
 ];
+
+/// The raw light sources: a name, and the light path expression whose
+/// paths it divides by the diffuse filter. V-Ray's names are aliases.
+const RAW_LIGHT: &[(&str, &str)] = &[
+    ("rawLight", "C<RD>[LO]"),
+    ("RawLighting", "C<RD>[LO]"),
+    ("rawLighting", "C<RD>[LO]"),
+    ("rawGI", "C<RD>.+[LO]"),
+    ("RawGI", "C<RD>.+[LO]"),
+    ("rawTotalLight", "C<RD>.*[LO]"),
+    ("RawTotalLighting", "C<RD>.*[LO]"),
+];
+
+/// The expression a raw light source (`rawLight` …) stands for, if `name` is
+/// one: its paths, divided per sample by the diffuse filter.
+pub fn raw_light_expression(name: &str) -> Option<&'static str> {
+    RAW_LIGHT.iter().find(|(n, _)| *n == name).map(|(_, e)| *e)
+}
+
+/// Below this, a diffuse filter channel counts as black: a raw sample's
+/// channel is 0 there rather than light divided by almost nothing.
+pub const RAW_FILTER_FLOOR: f32 = 1e-4;
 
 /// Names a later phase of the AOV work will define, refused today with a
 /// reason that says so rather than "unknown".
@@ -162,6 +189,7 @@ impl AovSource {
             AovSource::Variance => "variance",
             AovSource::Lpe => "lpe",
             AovSource::Albedo => "albedo",
+            AovSource::DiffuseFilter => "diffuse_albedo",
         }
     }
 
@@ -175,7 +203,8 @@ impl AovSource {
             | AovSource::Normal
             | AovSource::Neye
             | AovSource::Lpe
-            | AovSource::Albedo => 3,
+            | AovSource::Albedo
+            | AovSource::DiffuseFilter => 3,
             AovSource::St => 2,
             AovSource::Alpha
             | AovSource::Depth
@@ -187,7 +216,9 @@ impl AovSource {
 
     pub fn channel_kind(self) -> ChannelKind {
         match self {
-            AovSource::Color | AovSource::Lpe | AovSource::Albedo => ChannelKind::Color,
+            AovSource::Color | AovSource::Lpe | AovSource::Albedo | AovSource::DiffuseFilter => {
+                ChannelKind::Color
+            }
             AovSource::P | AovSource::Peye | AovSource::Normal | AovSource::Neye => {
                 ChannelKind::Vector
             }
@@ -282,6 +313,10 @@ pub struct AovVar {
     /// The light path expression of an [`AovSource::Lpe`] var, without any
     /// `lpe:` prefix; `None` for every other source.
     pub expression: Option<String>,
+    /// A raw light AOV: an [`AovSource::Lpe`] var whose value is divided,
+    /// per camera sample, by that sample's diffuse filter (`rawLight` …, or
+    /// `crust:aov:raw`). Its expression starts with a diffuse reflection.
+    pub raw: bool,
 }
 
 impl AovVar {
@@ -303,6 +338,7 @@ impl AovVar {
             accumulation: self.accumulation,
             clear_bits: self.clear.to_bits(),
             lpe,
+            raw: self.raw,
         })
     }
 }
@@ -362,6 +398,9 @@ pub(crate) struct SlotKey {
     /// For an [`AovSource::Lpe`] slot, the expression's index in
     /// [`AovLayout::lpes`] — its bit in the compiled DFA.
     lpe: u16,
+    /// A raw light slot: the expression's value over the diffuse filter. The
+    /// raw and plain slots of one expression share its DFA bit.
+    raw: bool,
 }
 
 impl SlotKey {
@@ -391,6 +430,9 @@ pub(crate) struct AovLayout {
     pub(crate) lpes: Vec<String>,
     /// Whether a var asks for the albedo.
     pub(crate) albedo: bool,
+    /// Whether a var needs the diffuse filter of the camera ray's first
+    /// hit: a raw light AOV, or `diffuse_albedo`.
+    pub(crate) diffuse_filter: bool,
     /// The compiled expressions and event symbols, built by the renderer
     /// (it needs the lights' tags) when `lpes` or `albedo` ask for routing.
     pub(crate) route: Option<std::sync::Arc<crate::tracer::RouteCtx>>,
@@ -423,6 +465,9 @@ impl AovLayout {
             }
         }
         layout.albedo = request.vars().any(|v| v.source == AovSource::Albedo);
+        layout.diffuse_filter = request
+            .vars()
+            .any(|v| v.raw || v.source == AovSource::DiffuseFilter);
         layout.sample_count = request.vars().any(|v| v.source == AovSource::SampleCount);
         layout.variance = request.vars().any(|v| v.source == AovSource::Variance);
         layout
@@ -435,6 +480,7 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
     accumulation: Accumulation::Filtered,
     clear_bits: 0,
     lpe: NO_LPE,
+    raw: false,
 };
 
 /// What one camera sample carries for the AOVs besides its first hit: the
@@ -444,6 +490,8 @@ const ALPHA_OF_BEAUTY: SlotKey = SlotKey {
 pub(crate) struct SampleExtras<'a> {
     pub(crate) lpe: &'a [Vec3A],
     pub(crate) albedo: Vec3A,
+    /// The diffuse filter of the camera ray's first hit (0 off a surface).
+    pub(crate) diffuse_filter: Vec3A,
 }
 
 /// What the camera ray met at the path's first vertex, recorded by the
@@ -499,8 +547,17 @@ fn sample_value(
     *out = [clear; 3];
     let put3 = |out: &mut [f32; 3], v: Vec3A| *out = [v.x, v.y, v.z];
     match (key.source, hit) {
+        (AovSource::Lpe, _) if key.raw => {
+            // Raw light: this sample's light over this sample's diffuse
+            // colour, channel by channel, 0 where the colour is black.
+            let v = extras.lpe[key.lpe as usize];
+            let f = extras.diffuse_filter;
+            let raw = |v: f32, f: f32| if f >= RAW_FILTER_FLOOR { v / f } else { 0.0 };
+            *out = [raw(v.x, f.x), raw(v.y, f.y), raw(v.z, f.z)];
+        }
         (AovSource::Lpe, _) => put3(out, extras.lpe[key.lpe as usize]),
         (AovSource::Albedo, _) => put3(out, extras.albedo),
+        (AovSource::DiffuseFilter, _) => put3(out, extras.diffuse_filter),
         (AovSource::Alpha, FirstHit::Surface { .. }) => out[0] = 1.0,
         (AovSource::Alpha, _) => out[0] = 0.0,
         (AovSource::Depth, FirstHit::Surface { p, .. } | FirstHit::Volume { p }) => {
@@ -956,6 +1013,7 @@ mod tests {
     const NONE: SampleExtras<'static> = SampleExtras {
         lpe: &[],
         albedo: Vec3A::ZERO,
+        diffuse_filter: Vec3A::ZERO,
     };
 
     fn var(source: AovSource, accumulation: Accumulation) -> AovVar {
@@ -969,6 +1027,7 @@ mod tests {
             accumulation,
             clear: source.default_clear(),
             expression: None,
+            raw: false,
         }
     }
 
