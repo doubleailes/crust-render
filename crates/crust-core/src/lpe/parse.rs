@@ -92,6 +92,30 @@ pub(super) enum Ast {
 /// copies of its operand, so it must stay small.
 const MAX_REPEAT: u32 = 32;
 
+/// The most event copies an expression may expand to once its bounds are
+/// unrolled. Bounds nest — `(((.{32}){32}){32}){32}` is a million copies —
+/// so each bound being small is not enough.
+const MAX_EXPANSION: u64 = 4096;
+
+/// How many event copies `ast` expands to in the automaton: a bounded
+/// repeat copies its operand once per allowed repetition (plus one for the
+/// star of an open bound). `None` on overflow.
+fn expansion(ast: &Ast) -> Option<u64> {
+    match ast {
+        Ast::Event(_) => Some(1),
+        Ast::Concat(v) | Ast::Alt(v) => v
+            .iter()
+            .try_fold(0u64, |acc, a| acc.checked_add(expansion(a)?)),
+        Ast::Repeat { node, min, max } => {
+            let copies = match max {
+                Some(m) => (*m).max(*min) as u64,
+                None => *min as u64 + 1,
+            };
+            expansion(node)?.checked_mul(copies.max(1))
+        }
+    }
+}
+
 pub(super) fn parse(expr: &str) -> Result<Ast, ParseError> {
     let chars: Vec<char> = expr.chars().collect();
     let mut p = Parser { chars, pos: 0 };
@@ -103,6 +127,12 @@ pub(super) fn parse(expr: &str) -> Result<Ast, ParseError> {
     p.skip_ws();
     if let Some(c) = p.peek() {
         return Err(p.err(format!("unexpected {c:?}")));
+    }
+    if expansion(&ast).is_none_or(|n| n > MAX_EXPANSION) {
+        return Err(ParseError {
+            column: 1,
+            message: format!("its repetitions expand to more than {MAX_EXPANSION} events"),
+        });
     }
     Ok(ast)
 }

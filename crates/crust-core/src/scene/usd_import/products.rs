@@ -128,6 +128,8 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
     // A var shared by several products is resolved, and warned about, once.
     let mut vars: HashMap<sdf::Path, Option<AovVar>> = HashMap::new();
     let mut lpes: Vec<String> = Vec::new();
+    // Expressions refused once, so a var shared by products warns once.
+    let mut refused: Vec<String> = Vec::new();
 
     for product_path in targets {
         let Some(product) = RenderProduct::get(stage, product_path.clone())
@@ -189,17 +191,21 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
                 .or_insert_with(|| resolve_var(stage, &var_path))
                 .clone();
             // One DFA holds every expression of the render, each accepting
-            // as one bit of a u64.
+            // as one bit of a u64 and all sharing a bounded number of
+            // states: an expression is accepted only if the render's set
+            // still compiles with it, so the renderer's compile cannot fail.
             if let Some(v) = &var
                 && let Some(e) = &v.expression
                 && !lpes.contains(e)
             {
-                if lpes.len() == crate::lpe::MAX_EXPRESSIONS {
-                    warn!(
-                        "{var_path}: more than {} distinct light path expressions in one \
-                         render; no channel written",
-                        crate::lpe::MAX_EXPRESSIONS
-                    );
+                if refused.contains(e) {
+                    continue;
+                }
+                let mut set: Vec<&str> = lpes.iter().map(String::as_str).collect();
+                set.push(e);
+                if let Err(err) = crate::lpe::Lpe::compile(&set) {
+                    warn!("{var_path}: light path expression {e:?} refused: {err}");
+                    refused.push(e.clone());
                     continue;
                 }
                 lpes.push(e.clone());

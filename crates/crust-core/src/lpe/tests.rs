@@ -9,7 +9,7 @@ const COAT: LabelId = LobeLabel::Coat as LabelId;
 const TRANS: LabelId = LobeLabel::Transmission as LabelId;
 
 fn one(expr: &str) -> Lpe {
-    Lpe::compile(&[expr], &[]).unwrap_or_else(|(_, e)| panic!("{expr}: {e}"))
+    Lpe::compile(&[expr]).unwrap_or_else(|e| panic!("{expr}: {e}"))
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn labels_and_negated_sets() {
 
 #[test]
 fn light_groups() {
-    let lpe = Lpe::compile(&["C.*<L.'key'>", "C.*<L.'fill'>"], &["key", "fill"]).unwrap();
+    let lpe = Lpe::compile(&["C.*<L.'key'>", "C.*<L.'fill'>"]).unwrap();
     let key = lpe.label("key").unwrap();
     let fill = lpe.label("fill").unwrap();
     let path = |tag| [(C, N, 0), (R, D, DIFF), (L, N, tag)];
@@ -119,7 +119,7 @@ fn bounded_repeats() {
 #[test]
 fn one_dfa_holds_every_expression() {
     let exprs = ["C<RD>[LO]", "C<RD>.+[LO]", "C<RG>[LO]", "C.*[LO]"];
-    let lpe = Lpe::compile(&exprs, &[]).unwrap();
+    let lpe = Lpe::compile(&exprs).unwrap();
     assert_eq!(lpe.len(), 4);
     let direct = [(C, N, 0), (R, D, DIFF), (L, N, 0)];
     let mask: Vec<bool> = (0..4).map(|i| lpe.matches(&direct, i)).collect();
@@ -158,4 +158,36 @@ fn refused_syntax_names_its_column() {
     }
     assert!(validate("C<RD>L").is_ok());
     assert_eq!(strip_prefix("lpe:C<RD>L"), "C<RD>L");
+}
+
+#[test]
+fn oversized_input_is_refused_not_panicked() {
+    // More expressions than the accept masks have bits.
+    let many: Vec<String> = (0..=MAX_EXPRESSIONS)
+        .map(|i| format!("C<RD>{{{}}}L", i % 4))
+        .collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert_eq!(
+        Lpe::compile(&refs).unwrap_err(),
+        CompileError::TooManyExpressions(MAX_EXPRESSIONS + 1)
+    );
+
+    // `.*x.{n}`: a small expression whose DFA needs about 2^(n+1) states.
+    assert_eq!(
+        Lpe::compile(&["C.*<RD>.{16}[LO]"]).unwrap_err(),
+        CompileError::TooComplex
+    );
+    // The same shape at a size that fits still compiles.
+    assert!(Lpe::compile(&["C.*<RD>.{4}[LO]"]).is_ok());
+
+    // Nested bounds multiply: each is within its limit, the whole is not.
+    let err = validate("C(((.{32}){32}){32}){32}L").unwrap_err();
+    assert!(err.message.contains("expand"), "{err}");
+    assert!(validate("C(.{4}){4}L").is_ok());
+
+    // Labels no expression names stay out of the alphabet: a light tagged
+    // anything else reads as untagged.
+    let lpe = Lpe::compile(&["C.*<L.'key'>"]).unwrap();
+    assert!(lpe.label("key").is_some());
+    assert!(lpe.label("rim").is_none());
 }
