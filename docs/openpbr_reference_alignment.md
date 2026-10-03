@@ -147,6 +147,32 @@ it produces. MaterialX's `layer` node is single-scattering (`base·(1 − F) +
 top`) and models no bounce series, so imposing Δ on a promoted coat would
 darken a substrate the source material never darkened.
 
+## AOV outputs: the diffuse filter
+
+`lobes::diffuse_filter` (behind the `diffuse_albedo` AOV and the raw light AOVs,
+`openspec/specs/aovs/`) reports the diffuse lobe's colour, without lighting:
+`ρ · (1 − F̄) · base_atten · Δ`. It is the colour factor of `eval_split`'s
+diffuse share, the part of the lobe that does not depend on direction.
+**Neither reference has such an output.** MaterialX and Adobe evaluate the BSDF;
+neither exports "the diffuse colour" as a separate quantity. The term is
+crust's, after V-Ray's `DiffuseFilter`. Each factor maps onto the references as
+follows:
+
+| factor | crust | MaterialX nodegraph | Adobe |
+|--------|-------|---------------------|-------|
+| `ρ` | `mix(base_color, subsurface_color, subsurface_weight) · base_weight · (1 − base_metalness) · (1 − transmission_weight)`, the EON albedo `eval_diffuse` uses | `base_color · base_weight` into the diffuse BSDF's colour, with metalness, transmission and subsurface applied as `mix` weights over it | the diffuse lobe's albedo, under the same presence weights |
+| `1 − F̄` | the flat energy split of the base specular (`f0_from_ior(specular_ior)`) | the specular `layer`'s throughput, `1 − E_spec(μ_v)`: **directional** | the directional specular energy complement: **directional** |
+| `base_atten` | `1 − fuzz_weight` (the scalar fuzz layering, see "Fuzz" below) | the fuzz `layer`'s throughput: **directional** | the sheen layer's throughput: **directional** |
+| `Δ` | `coat_darkening`, the spec's `(1 − K̄)/(1 − K̄·E_base)` faded by `coat_weight · coat_darkening` | none: MaterialX's `layer` is single-scattering, and the importer sets `coat_darkening = 0` | the same Δ (see "Coat passage model" above) |
+| coat passage | **left out**: it depends on the view and light directions, so it belongs to the light, not the colour | the coat `layer`'s throughput | the coat passage |
+
+Where both references are directional, crust's filter uses crust's own
+view-independent factor. The filter is therefore exactly what crust's
+`eval_split` multiplies, so `raw × filter` reproduces crust's lighting. It is
+not a reference quantity. Closing the `(1 − F_avg)` gap below would make the
+filter's second factor directional too; it would then move into the light,
+like the coat passage.
+
 ## Remaining gaps vs. the Adobe reference
 
 Known, deliberate, and recorded here so nobody rediscovers them:
