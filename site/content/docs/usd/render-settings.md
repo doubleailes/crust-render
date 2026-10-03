@@ -205,7 +205,8 @@ Turns path guiding on.
 
 `int`, default **4**, minimum 1.
 
-The number of training passes before the final render.
+The number of training passes before the final render. Training passes aren't
+thrown away: each one is averaged into the image in proportion to its samples.
 
 ### crust:guidingProb
 

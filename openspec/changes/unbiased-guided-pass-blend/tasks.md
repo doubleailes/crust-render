@@ -48,14 +48,14 @@
       `--indirect-clamp 0`. Verify the new blend is not clearly worse (within the
       seed-to-seed spread). If it is, stop and revisit design.md's "Weight each pass
       by its sample budget" before going on.
-- [ ] 3.2 Use the 3.1 numbers to re-measure the "guiding cuts the error by about 20%"
+- [x] 3.2 Use the 3.1 numbers to re-measure the "guiding cuts the error by about 20%"
       claim (guided vs unguided at equal spp). Update it in
       `site/content/docs/architecture/design-choices.md` and in the design record.
       Verify `zola build` in `site/` (Zola 0.21) succeeds.
 
 ## 4. Documentation
 
-- [ ] 4.1 Update `openspec/specs/rendering/design.md`:
+- [x] 4.1 Update `openspec/specs/rendering/design.md`:
       - the path-guiding paragraph: budget weights, why inverse estimated variance
         was biased, and the measurement from 2.5;
       - in the `ΔEff` paragraph, the reference image is now budget-weighted;
@@ -63,17 +63,17 @@
         unreliable under heavy tails (the caustic scene measured `ΔEff` 0.51 and fell
         back to an unguided final pass).
       Verify the record no longer says "weighted by inverse variance" anywhere.
-- [ ] 4.2 Add one sentence to `site/content/docs/usd/render-settings.md` § Path guiding:
+- [x] 4.2 Add one sentence to `site/content/docs/usd/render-settings.md` § Path guiding:
       training passes are kept and averaged into the image in proportion to their
       samples. Verify `zola build` succeeds.
 
 ## 5. Integration checks
 
-- [ ] 5.1 Run the CI gates: `cargo fmt --all -- --check`,
+- [x] 5.1 Run the CI gates: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`. Verify all pass.
-- [ ] 5.2 Run `scripts/check_images.sh check <dir>` against goldens recorded with
+- [x] 5.2 Run `scripts/check_images.sh check <dir>` against goldens recorded with
       `bin_before`. Verify there are zero differences: unguided images must be
       untouched.
-- [ ] 5.3 Run `openspec validate unbiased-guided-pass-blend --strict` and verify it
+- [x] 5.3 Run `openspec validate unbiased-guided-pass-blend --strict` and verify it
       passes.

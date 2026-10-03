@@ -32,9 +32,11 @@ Constraints:
 
 **Non-Goals:**
 
-- Making `ΔEff` robust to heavy tails. It decides whether the final pass is guided
-  (a performance choice). It never biases the image once the blend is fixed, so it is
-  recorded as a known gap.
+- Making `ΔEff` robust to heavy tails. It decides whether the final pass is guided.
+  Once the blend is fixed it never biases the image, but a wrong "on" costs noise,
+  not just speed (see Risks). It is recorded as a known gap.
+- Guiding narrow lobes less. That is the fix for the noise below, and it is a
+  separate change.
 - Changing the training schedule, the guide probability, or which vertices are guided.
   The exploration measured removing the training cap and guiding primary vertices;
   neither gave a consistent gain.
@@ -105,8 +107,19 @@ the fix lands, at a resolution and spp that keep it to seconds in release.
   `cornellbox_guided.usda` relMSE against a high-spp reference, old blend against new,
   over 4 seeds. If the new blend is clearly worse there, revisit before landing.
 - **[Risk] The "about 20% less error" figure in the user docs was measured with the
-  biased blend.** → Re-measure it and update `site/` and the design record with the
-  new number.
+  biased blend.** → Re-measured (task 3.2). The claim doesn't hold: at equal time an
+  unguided render has about half the error. Corrected in `site/`, `README.md` and the
+  design record.
+- **[Measured] `caustic_guided.usda` gets unbiased but noisier.** With the biased
+  reference gone, `ΔEff` reads 1.26–1.30 instead of 0.00–0.32 and keeps the final
+  pass guided. Guiding at the glass's narrow lobe is about 6× noisier there (shadow
+  relMSE 2.56 against 0.49 before and 0.42 unguided). This is not a bug in the
+  sampler: at the glass vertices 36% of guide samples contribute nothing, and BSDF
+  samples carry twice their weight where the guide density is near zero. Switching
+  guiding off at the glass alone gives 0.41, and `crust:guidingProb` 0.1 gives 0.41.
+  → Accepted for this change: a noisy unbiased image can be fixed by turning
+  guiding off, a silently dark caustic can't. Documented as a limitation. A
+  follow-up change stops guiding narrow lobes.
 - **[Trade-off] Guided images change.** Expected. Unguided renders and the
   `check_images.sh` goldens are untouched, since the blend only runs with
   `crust:pathGuiding`.
