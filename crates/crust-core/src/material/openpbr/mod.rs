@@ -628,6 +628,11 @@ impl OpenPBR {
     pub(crate) fn albedo(&self) -> Vec3A {
         lobes::albedo(self)
     }
+
+    /// The diffuse lobe's colour — see `lobes::diffuse_filter`.
+    pub(crate) fn diffuse_filter(&self) -> Vec3A {
+        lobes::diffuse_filter(self)
+    }
 }
 
 impl Material for OpenPBR {

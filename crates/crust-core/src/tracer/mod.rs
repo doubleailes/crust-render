@@ -222,13 +222,14 @@ impl Renderer {
             return (buffer, AovFilm::empty(w, h), rays);
         }
         let mut layout = AovLayout::new(request);
-        if !layout.lpes.is_empty() || layout.albedo {
+        if !layout.lpes.is_empty() || layout.albedo || layout.diffuse_filter {
             // One DFA for every expression of the render, over the lights'
             // tags; shared read-only by every worker.
             let tags: Vec<Option<&str>> = (0..self.lights.count())
                 .map(|i| self.lights.lpe_tag(i))
                 .collect();
-            let ctx = route::RouteCtx::new(&layout.lpes, &tags, layout.albedo);
+            let ctx =
+                route::RouteCtx::new(&layout.lpes, &tags, layout.albedo, layout.diffuse_filter);
             debug!(
                 "AOVs: {} light path expression(s){}, albedo {}",
                 layout.lpes.len(),
@@ -939,6 +940,7 @@ impl Renderer {
                 let extras = SampleExtras {
                     lpe: &scratch.route.out,
                     albedo: scratch.route.albedo,
+                    diffuse_filter: scratch.route.diffuse_filter,
                 };
                 planes.add(&scratch.first, &extras, fx, fy, wx * wy);
             }

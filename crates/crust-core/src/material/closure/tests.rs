@@ -835,3 +835,36 @@ fn a_reflecting_interface_over_another_is_the_coat() {
         "{a}"
     );
 }
+
+#[test]
+fn the_diffuse_filter_sums_diffuse_leaves_only() {
+    // Two half-weight diffuse leaves of one colour: the colour, once.
+    let halves = doc(r#"
+      <oren_nayar_diffuse_bsdf name="a" type="BSDF">
+        <input name="color" type="color3" value="0.6, 0.3, 0.2" />
+      </oren_nayar_diffuse_bsdf>
+      <oren_nayar_diffuse_bsdf name="b" type="BSDF">
+        <input name="color" type="color3" value="0.6, 0.3, 0.2" />
+      </oren_nayar_diffuse_bsdf>
+      <mix name="x" type="BSDF">
+        <input name="fg" type="BSDF" nodename="a" />
+        <input name="bg" type="BSDF" nodename="b" />
+        <input name="mix" type="float" value="0.5" />
+      </mix>"#);
+    let f = resolved(&halves, "x", 0.3, true).diffuse_filter();
+    assert!(
+        (f - Vec3A::new(0.6, 0.3, 0.2)).abs().max_element() < 1e-6,
+        "{f}"
+    );
+
+    // Translucent and subsurface leaves transmit: no diffuse reflection.
+    for (name, leaf) in LEAVES {
+        let c = resolved(&doc(leaf), "x", 0.3, true);
+        let f = c.diffuse_filter();
+        let diffuse = c
+            .leaves()
+            .iter()
+            .any(|l| matches!(l.lobe, Lobe::Diffuse { .. }));
+        assert_eq!(f != Vec3A::ZERO, diffuse, "{name}: {f}");
+    }
+}

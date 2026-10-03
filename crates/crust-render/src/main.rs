@@ -1400,6 +1400,7 @@ mod products {
                 accumulation: Accumulation::Filtered,
                 clear: source.default_clear(),
                 expression: None,
+                raw: false,
             }
         }
 

@@ -7,8 +7,8 @@
 use crust_core::rt::Geometry;
 use crust_core::{
     Accumulation, AovFilm, AovProduct, AovRequest, AovSource, AovVar, AreaLight, Buffer, Camera,
-    DomeLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, Precision, RenderSettings,
-    Renderer, SamplingStrategy, SphereShape, Vec3A, WorldBuilder,
+    DomeLight, Emissive, LightList, MASK_INDIRECT, MASK_SHADOW, OpenPBR, PixelFilter, Precision,
+    RenderSettings, Renderer, SamplingStrategy, SphereShape, Vec3A, WorldBuilder,
 };
 use std::sync::Arc;
 
@@ -26,6 +26,7 @@ fn lpe(expr: &str) -> AovVar {
         accumulation: Accumulation::Filtered,
         clear: 0.0,
         expression: Some(expr.to_owned()),
+        raw: false,
     }
 }
 
@@ -40,6 +41,7 @@ fn raw(name: &str, source: AovSource) -> AovVar {
         accumulation: source.default_accumulation(),
         clear: source.default_clear(),
         expression: None,
+        raw: false,
     }
 }
 
@@ -73,6 +75,7 @@ struct Opts {
     /// Where the wall (the near side of a radius-100 sphere) is centred.
     wall_center: Vec3A,
     guiding: bool,
+    filter: PixelFilter,
 }
 
 impl Default for Opts {
@@ -96,6 +99,7 @@ impl Default for Opts {
             wall: true,
             wall_center: Vec3A::new(-104.0, 0.0, -105.0),
             guiding: false,
+            filter: PixelFilter::default(),
         }
     }
 }
@@ -180,7 +184,8 @@ fn scene(o: &Opts) -> Renderer {
     let settings = RenderSettings::new(o.spp, o.depth, W, H, o.spp, 0.0, 0)
         .with_indirect_clamp(o.clamp)
         .with_sampling_strategy(o.strategy)
-        .with_guiding(o.guiding, 1, 0.5);
+        .with_guiding(o.guiding, 1, 0.5)
+        .with_pixel_filter(o.filter);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 
@@ -450,4 +455,132 @@ fn albedo_is_the_first_non_delta_surface_through_glass() {
     for c in &a {
         assert!(c.iter().all(|x| (0.0..=1.0).contains(x)));
     }
+}
+
+fn raw_lpe(expr: &str) -> AovVar {
+    AovVar {
+        raw: true,
+        name: format!("raw {expr}"),
+        ..lpe(expr)
+    }
+}
+
+fn diffuse_filter_var() -> AovVar {
+    AovVar {
+        prim_path: "/Render/Vars/diffuse_albedo".into(),
+        name: "diffuse_albedo".into(),
+        channel_prefix: None,
+        source: AovSource::DiffuseFilter,
+        components: 3,
+        precision: Precision::Float,
+        accumulation: Accumulation::Filtered,
+        clear: 0.0,
+        expression: None,
+        raw: false,
+    }
+}
+
+/// Per camera sample, raw light times the diffuse filter is the light. At
+/// one sample per pixel through a box filter a pixel *is* a sample, so the
+/// identity holds in every pixel — at edges, through the clamp, everywhere
+/// the filter is not black.
+#[test]
+fn raw_light_times_the_filter_is_the_light_per_sample() {
+    for clamp in [0.0, 1.0] {
+        let o = Opts {
+            spp: 1,
+            clamp,
+            filter: PixelFilter::BoxFilter { radius: 0.5 },
+            ..Opts::default()
+        };
+        let lit = lpe("C<RD>[LO]");
+        let rawv = raw_lpe("C<RD>[LO]");
+        let filter = diffuse_filter_var();
+        let (beauty, film) = render(&o, &[lit.clone(), rawv.clone(), filter.clone()]);
+        let (l, r, f) = (
+            film.var_channels(&beauty, &lit),
+            film.var_channels(&beauty, &rawv),
+            film.var_channels(&beauty, &filter),
+        );
+        let mut checked = 0;
+        for c in 0..3 {
+            for q in 0..W * H {
+                if f[c][q] < crust_core::aov::RAW_FILTER_FLOOR {
+                    assert_eq!(r[c][q], 0.0, "raw where the filter is black");
+                    continue;
+                }
+                let back = r[c][q] * f[c][q];
+                assert!(
+                    (back - l[c][q]).abs() <= 1e-5 * l[c][q].abs().max(1e-3),
+                    "clamp {clamp}: {back} vs {}",
+                    l[c][q]
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "{checked}");
+    }
+}
+
+/// Raw light is the light without the surface's colour: two balls of very
+/// different colours, lit alike, have the same raw light (to EON's faint
+/// nonlinearity in the colour), and very different lighting.
+#[test]
+fn raw_light_does_not_carry_the_surface_colour() {
+    let at = |c: Vec3A| {
+        let o = Opts {
+            spp: 64,
+            ball: OpenPBR::diffuse(c),
+            glass: false,
+            glow: false,
+            dome: false,
+            wall: false,
+            ..Opts::default()
+        };
+        let vars = [lpe("C<RD>[LO]"), raw_lpe("C<RD>[LO]")];
+        let (b, f) = render(&o, &vars);
+        (
+            mean(&f.var_channels(&b, &vars[0])[0]),
+            mean(&f.var_channels(&b, &vars[1])[0]),
+        )
+    };
+    let (lit_red, raw_red) = at(Vec3A::new(0.8, 0.2, 0.2));
+    let (lit_green, raw_green) = at(Vec3A::new(0.2, 0.8, 0.2));
+    assert!(lit_red > 3.0 * lit_green, "{lit_red} vs {lit_green}");
+    assert!(
+        (raw_red - raw_green).abs() <= 0.05 * raw_red,
+        "raw {raw_red} vs {raw_green}"
+    );
+}
+
+/// Adding raw and filter AOVs changes neither the beauty nor any other AOV,
+/// and raw light is 0 wherever no diffuse surface was seen.
+#[test]
+fn raw_aovs_disturb_nothing_and_are_zero_off_diffuse_surfaces() {
+    let o = Opts::default();
+    let lit = lpe("C<RD>[LO]");
+    let (b0, f0) = render(&o, std::slice::from_ref(&lit));
+    let filter = diffuse_filter_var();
+    let vars = [
+        lit.clone(),
+        raw_lpe("C<RD>[LO]"),
+        raw_lpe("C<RD>.+[LO]"),
+        filter.clone(),
+    ];
+    let (b1, f1) = render(&o, &vars);
+    assert!(bits(&beauty_planes(&f0, &b0)) == bits(&beauty_planes(&f1, &b1)));
+    assert!(bits(&f0.var_channels(&b0, &lit)) == bits(&f1.var_channels(&b1, &lit)));
+    let f = f1.var_channels(&b1, &filter);
+    for v in &vars[1..3] {
+        let r = f1.var_channels(&b1, v);
+        for c in 0..3 {
+            for q in 0..W * H {
+                if f[c][q] == 0.0 {
+                    assert_eq!(r[c][q], 0.0, "{}: raw off a diffuse surface", v.name);
+                }
+            }
+        }
+    }
+    // The glass ball and the sky are in frame: some pixels have no filter.
+    assert!(f[1].contains(&0.0));
 }

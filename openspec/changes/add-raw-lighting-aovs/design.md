@@ -106,7 +106,10 @@ with scatter `D` (any label) must lead to a state from which `i` cannot
 accept (`Lpe::live_mask` has no bit `i`). The camera's direct emission
 counts too: `L` or `O` straight after `C` must not accept `i`. This is a
 property of the language, so it covers every spelling:
-`C<RD>.*<L.'key'>`, `C'diffuse'.*L`, `C(<RD>|<RD'diffuse'>)L`.
+`C<RD>.*<L.'key'>`, `C<RD'diffuse'>.*L`, `C(<RD>|<RD'diffuse'>)L`. A bare
+label is refused: `C'diffuse'.*L` is `<..'diffuse'>`, which also matches a
+transmission or an emission carrying that label. Crust never emits one, but
+the check judges the language, not crust's lobes. Write `<RD'diffuse'>`.
 
 The importer compiles the expression, refuses the var with one `WARN` when
 the check fails, and accepts it otherwise. `rawLight` / `rawGI` /

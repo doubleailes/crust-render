@@ -608,6 +608,21 @@ pub(super) fn eval_split(
     }
 }
 
+/// The diffuse lobe's colour — what the raw light AOVs divide its light by:
+/// the factors of [`eval_split`]'s diffuse share that describe the surface,
+/// `ρ · (1 − F̄) · base_atten · dark`, without the ones that depend on
+/// direction (the EON shape, the coat's passage), which are part of the
+/// light. Zero where the material has no diffuse lobe.
+pub(super) fn diffuse_filter(m: &OpenPBR) -> Vec3A {
+    let presence = m.base_weight * (1.0 - m.base_metalness) * (1.0 - m.transmission_weight);
+    if presence <= 0.0 {
+        return Vec3A::ZERO;
+    }
+    let rho = m.base_color.lerp(m.subsurface_color, m.subsurface_weight) * presence;
+    let base_atten = (1.0 - m.fuzz_weight).clamp(0.0, 1.0);
+    rho * (1.0 - f0_from_ior(m.specular_ior)) * base_atten * coat_darkening(m)
+}
+
 /// The surface's albedo for denoising (OIDN's feature): every lobe's tint
 /// times its layer weight, with no directional integral — a noise-free
 /// colour that follows the textures. Clamped to [0, 1].

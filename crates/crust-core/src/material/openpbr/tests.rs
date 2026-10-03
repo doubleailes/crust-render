@@ -1485,3 +1485,32 @@ fn scatter_split_draws_the_same_direction() {
         }
     }
 }
+
+#[test]
+fn the_diffuse_filter_is_the_colour_with_its_layer_weights() {
+    let c = Vec3A::new(0.8, 0.4, 0.1);
+    let f = 1.0 - f0_from_ior(OpenPBR::diffuse(c).specular_ior);
+    let plain = OpenPBR::diffuse(c).diffuse_filter();
+    assert!((plain - c * f).abs().max_element() < 1e-6, "{plain}");
+
+    // A coat dims it by its (colour-dependent, view-independent) darkening,
+    // never by its directional passage, which belongs to the light.
+    let coated = OpenPBR {
+        coat_weight: 1.0,
+        ..OpenPBR::diffuse(c)
+    };
+    let expected = c * f * coat_darkening(&coated);
+    assert!((coated.diffuse_filter() - expected).abs().max_element() < 1e-6);
+
+    // No diffuse lobe, no filter.
+    let glass = OpenPBR {
+        transmission_weight: 1.0,
+        ..OpenPBR::default()
+    };
+    assert_eq!(glass.diffuse_filter(), Vec3A::ZERO);
+    let metal = OpenPBR {
+        base_metalness: 1.0,
+        ..OpenPBR::default()
+    };
+    assert_eq!(metal.diffuse_filter(), Vec3A::ZERO);
+}

@@ -895,6 +895,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     };
     let routing = route_ctx.filter(|c| c.routes());
     let albedo_on = route_ctx.is_some_and(|c| c.albedo);
+    let diffuse_filter_on = route_ctx.is_some_and(|c| c.diffuse_filter);
     let route = &mut scratch.route;
     if AOV {
         route.begin();
@@ -1291,6 +1292,10 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             let _p = profile::scope_if::<PROFILE>(Section::EvalBsdfs);
             ShadingPoint::new(mat, &ray, &rec, cos_o)
         };
+        if diffuse_filter_on && records.is_empty() {
+            // The first hit's diffuse colour: the raw light AOVs' divisor.
+            route.diffuse_filter = sp.diffuse_filter();
+        }
         if AOV && records.is_empty() {
             *first = FirstHit::Surface {
                 p: rec.p,

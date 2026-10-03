@@ -225,6 +225,38 @@ impl Lpe {
         self.live[state as usize] != 0
     }
 
+    /// Whether expression `i` accepts only paths whose first event after
+    /// the camera is a diffuse reflection (`R` with scatter `D`, any label):
+    /// from the state after `C`, every other event — emission included —
+    /// leads to a state from which `i` can no longer accept. A property of
+    /// the language, so every spelling of it agrees (`C<RD>…`,
+    /// `C'diffuse'…` …).
+    pub fn starts_with_diffuse_reflection(&self, i: usize) -> bool {
+        let bit = 1u64 << i;
+        if self.accepts(self.start) & bit != 0 {
+            return false;
+        }
+        let labels = self.labels.len() as LabelId;
+        EventType::ALL.iter().all(|&ty| {
+            [
+                Scatter::Diffuse,
+                Scatter::Glossy,
+                Scatter::Singular,
+                Scatter::Straight,
+                Scatter::None,
+            ]
+            .iter()
+            .all(|&sc| {
+                if ty == EventType::Reflect && sc == Scatter::Diffuse {
+                    return true;
+                }
+                (0..labels).all(|l| {
+                    self.live_mask(self.step(self.start, self.symbol(ty, sc, l))) & bit == 0
+                })
+            })
+        })
+    }
+
     /// The expressions that can still accept from `state`.
     #[inline]
     pub fn live_mask(&self, state: u16) -> u64 {
