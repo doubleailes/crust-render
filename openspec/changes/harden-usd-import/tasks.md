@@ -5,8 +5,8 @@
 
 ## 2. Malformed topology is refused per prim
 
-- [ ] 2.1 In `usd_import/mesh.rs` `mesh_source`, reject a negative `faceVertexCounts` entry before routing. Log one `WARN` naming the prim and the first bad face, and return `None`. Verify: the new test in 2.5 loads, and the other prims on its stage still import.
-- [ ] 2.2 Make `triangulate` cast-free: `usize::try_from` per count and `checked_add` on the offset, returning `None` on failure. Fix the misplaced doc comment so it sits on `fn triangulate`, not `type Triangulated`. Verify: a unit test in `mesh.rs` calling `triangulate(&[3, -1], …)` returns `None` without panicking.
+- [ ] 2.1 In `usd_import/mesh/source.rs` `mesh_source`, reject a negative `faceVertexCounts` entry before routing. Log one `WARN` naming the prim and the first bad face, and return `None`. Verify: the new test in 2.5 loads, and the other prims on its stage still import.
+- [ ] 2.2 Make `triangulate` cast-free: `usize::try_from` per count and `checked_add` on the offset, returning `None` on failure. Fix the misplaced doc comment so it sits on `fn triangulate`, not `type Triangulated`. Verify: a unit test in `mesh/tests.rs` calling `triangulate(&[3, -1], …)` returns `None` without panicking.
 - [ ] 2.3 In `collect_proto_parts`, log the same `debug!` the top-level path logs when `mesh_source` returns `None`. Change both messages to say "skipped" without guessing the cause, since the `WARN` from 2.1 names it. Verify: `cargo test -p crust-core` passes.
 - [ ] 2.4 In `usd_import/shapes.rs` `curve_segments`, refuse a negative `curveVertexCounts` entry with one `WARN` and return `None`, and map an authored empty `widths` to `[1.0]`. In `usd_import/volume.rs`, use a `checked_mul` chain for `nx * ny * nz` that falls through to the existing mismatch `WARN`. Verify: the tests in 2.5.
 - [ ] 2.5 Add inline-stage tests in `crates/crust-core/tests/usd_inline.rs`, one per spec scenario under "Malformed topology is refused per prim":

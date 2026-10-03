@@ -77,7 +77,7 @@ process. A code audit (2026-10-03) found four places where it does not hold:
 ## Impact
 
 - **`crates/crust-core/src/scene/usd_import/`:**
-  - `mesh.rs`: topology check before triangulation and subdivision.
+  - `mesh/`: topology check before triangulation and subdivision.
   - `shapes.rs`: curve counts and widths.
   - `volume.rs`: `checked_mul` on the grid dimensions.
   - `settings.rs`: validated integer settings.

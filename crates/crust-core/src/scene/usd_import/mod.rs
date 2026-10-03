@@ -1003,7 +1003,7 @@ struct ImportCaches<'a> {
     /// geometry in each stage. Bumping the epoch between stages keeps
     /// those apart.
     ///
-    /// It bumps rather than clearing because [`MeshKey`](mesh::MeshKey) identifies a
+    /// It bumps rather than clearing because the mesh cache's `MeshKey` identifies a
     /// material by its `Arc` *address*: dropping the parts would free
     /// material `Arc`s whose addresses a later allocation could reuse,
     /// and a stale mesh-cache entry would then match the wrong material.
