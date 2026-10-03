@@ -39,7 +39,7 @@
 use crate::camera::Camera;
 use crate::light::{Light, LightList};
 use crate::material::ShadingPoint;
-use crate::ray::{MASK_INDIRECT, Ray};
+use crate::ray::{MASK_INDIRECT, Ray, TRACE_T_MIN};
 use crate::rt_world::World;
 use crate::{PathSampler, Vec3A};
 use rayon::prelude::*;
@@ -198,7 +198,7 @@ pub(crate) fn train(
                 }
                 let mut ray = camera.get_ray(u, v, [cam[2], cam[3]], 0.0);
                 for depth in 0..=TRAIN_BOUNCES {
-                    let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) else {
+                    let Some(hit) = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY) else {
                         break;
                     };
                     let vertex = root.new_domain(1 + depth as i32);
@@ -244,7 +244,7 @@ pub(crate) fn train(
                                 // the share the card lets through.
                                 let t_max = crate::tracer::shadow_t_max(ls.distance);
                                 let mut through = 1.0;
-                                if world.occluded(&shadow, 0.001, t_max) {
+                                if world.occluded(&shadow, TRACE_T_MIN, t_max) {
                                     through = if world.has_cutouts() {
                                         crate::tracer::cutout_through(
                                             world,

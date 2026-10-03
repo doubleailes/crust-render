@@ -17,6 +17,7 @@ use crate::medium::hg_phase;
 use crate::ray::{MASK_ALL, Ray, RayMask};
 use glam::{Mat4, Vec3, Vec3A};
 use openqmc::pcg::Rng;
+use utils::exp3;
 
 /// Spatial density in local box coordinates, normalized to `[0, 1]^3`.
 /// Values are dimensionless multipliers on the region's coefficients.
@@ -543,7 +544,7 @@ impl Volumes {
             let mut tr = Vec3A::ONE;
             for &(i, a, b) in &spans {
                 let e = self.regions[i].sigma_t_at_density(1.0) * (b - a);
-                tr *= Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp());
+                tr *= exp3(-e);
             }
             return tr;
         }

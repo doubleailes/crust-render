@@ -5,15 +5,15 @@
 //! `escaped_emission`); change both or neither.
 
 use glam::Vec3A;
-use utils::luminance;
+use utils::{exp3, luminance};
 
 use crate::guiding::SampleData;
 use crate::hittable::HitRecord;
 use crate::material::{Material, ScatterSample, ShadingPoint};
-use crate::medium::sample_henyey_greenstein;
+use crate::medium::{Medium, sample_henyey_greenstein};
 use crate::pdf::PdfSolidAngle;
 use crate::profile::Section;
-use crate::ray::{Ray, RayMask};
+use crate::ray::{Ray, RayMask, TRACE_T_MIN};
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
@@ -53,6 +53,68 @@ const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
 /// throughput but never drops below the floor, so weights stay bounded.
 const RR_START_BOUNCE: usize = 3;
 const RR_MIN_PROB: f32 = 0.05;
+
+/// Russian roulette on a vertex's continuation, once the path carries at
+/// least [`RR_START_BOUNCE`] vertices (`vertex` is this one's index): survive
+/// with a probability tracking the throughput `beta`, and on survival divide
+/// it out of both `beta` and the vertex's continuation `factor`. A killed
+/// path zeroes `factor` and returns `false`; the vertex's own gathers stand.
+#[inline(always)]
+fn roulette(
+    beta: &mut Vec3A,
+    factor: &mut Vec3A,
+    vertex: usize,
+    v: PathSampler,
+    stats: &mut RayStats,
+) -> bool {
+    if vertex < RR_START_BOUNCE {
+        return true;
+    }
+    stats.rr_tested += 1;
+    let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
+    if p_survive < 1.0 {
+        if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
+            stats.rr_killed += 1;
+            *factor = Vec3A::ZERO;
+            return false;
+        }
+        *factor /= p_survive;
+        *beta /= p_survive;
+    }
+    true
+}
+
+/// The chromatic correction `e^{(σ̄−σₜ)·t}` per channel that a scattering
+/// medium owes over a free flight of length `t` sampled at its majorant
+/// `sigma_bar` (the max-channel extinction): the distance sampling already
+/// paid `e^{−σ̄·t}`, so only the per-channel difference remains — exactly
+/// ONE for a gray medium.
+#[inline(always)]
+fn chromatic_correction(m: &Medium, sigma_bar: f32, t: f32) -> Vec3A {
+    exp3((Vec3A::splat(sigma_bar) - (m.sigma_a + m.sigma_s)) * t)
+}
+
+/// The ray a phase-function scatter at `p` (a volume region's, or the
+/// carried medium's) leaves along `dir`: in the same carried medium —
+/// scattering in fog inside a glass interior must keep attenuating in the
+/// glass — at the path's shutter time, as an indirect ray. A phase function
+/// scatters over the whole sphere, so the cone saturates here exactly as a
+/// diffuse bounce does; only the width it reached on the way in carries
+/// forward.
+#[inline(always)]
+fn phase_scattered(ray: &Ray, p: Vec3A, dir: Vec3A) -> Ray {
+    let cone = ray.cone().scattered(
+        ray.cone().width_at((p - ray.origin()).length()),
+        crate::RayCone::MAX_SPREAD,
+    );
+    match ray.medium() {
+        Some(m) => Ray::new_in_medium(p, dir, *m),
+        None => Ray::new(p, dir),
+    }
+    .with_time(ray.time())
+    .with_mask(crate::ray::MASK_INDIRECT)
+    .with_cone(cone)
+}
 
 pub fn ray_color(
     r: &Ray,
@@ -458,7 +520,7 @@ fn shadow_transmittance<const PROFILE: bool>(
     // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    if world.occluded(shadow_ray, 0.001, shadow_t_max(distance)) {
+    if world.occluded(shadow_ray, TRACE_T_MIN, shadow_t_max(distance)) {
         // Blocked — unless only cutouts block it, which the any-hit query
         // cannot tell apart. An open segment crosses no cutout either, so it
         // keeps the fast answer.
@@ -472,7 +534,7 @@ fn shadow_transmittance<const PROFILE: bool>(
         return Vec3A::ONE;
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
+    volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -487,7 +549,7 @@ const MAX_CUTOUT_CROSSINGS: usize = 256;
 ///
 /// Stepping past a hit moves the origin rather than raising `t_min`, as the
 /// subsurface walk's rays do: every `World::intersect` asks for
-/// `(0.001, ∞)`, LLVM propagates those two constants into the kernel, and a
+/// `(TRACE_T_MIN, ∞)`, LLVM propagates those two constants into the kernel, and a
 /// caller asking for other bounds costs every ray in every scene. The
 /// origin goes to [`resume_before`] the hit, not onto it.
 fn restarted(ray: &Ray, t: f32) -> Ray {
@@ -502,20 +564,20 @@ fn restarted(ray: &Ray, t: f32) -> Ray {
 }
 
 /// Where to restart a segment that passes a hit at `t` (see [`restarted`]):
-/// short of it by the tracer's 0.001, less a relative step, so the restarted
-/// ray's `(0.001, ∞)` begins just *past* the hit. Restarted on the hit
+/// short of it by [`TRACE_T_MIN`], less a relative step, so the restarted
+/// ray's `(TRACE_T_MIN, ∞)` begins just *past* the hit. Restarted on the hit
 /// itself, the offset stepped over any surface within 0.001 behind it — a
 /// decal or card layered over opaque geometry leaked light through
 /// (`a_surface_just_behind_a_cutout_is_not_skipped`). The step is relative,
 /// so a far hit is not met again through rounding.
 #[inline]
 fn resume_before(t: f32) -> f32 {
-    t - 0.001 + t.abs().max(1.0) * 1e-5
+    t - TRACE_T_MIN + t.abs().max(1.0) * 1e-5
 }
 
 /// Where a shadow ray toward a light sample `distance` away stops: short of
 /// the light's own surface, which is in the shadow mask (lights occlude each
-/// other). The tracer's 0.001, or a relative step once that falls below the
+/// other). [`TRACE_T_MIN`] (0.001), or a relative step once that falls below the
 /// rounding of `distance` — at 3·10⁵ (the Moana island's sun quad) an `f32`
 /// ulp is 0.03, `distance − 0.001 == distance`, and the ray met the light it
 /// was aimed at most of the time. The step is 1e-6 ≈ 8 ulps: 4 was measured
@@ -528,7 +590,7 @@ fn resume_before(t: f32) -> f32 {
 /// and keeps `distance − 0.001`, which reaches the light at any distance.
 #[inline]
 pub(crate) fn shadow_t_max(distance: f32) -> f32 {
-    (distance - 0.001).min(distance * (1.0 - 1e-6))
+    (distance - TRACE_T_MIN).min(distance * (1.0 - 1e-6))
 }
 
 /// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
@@ -557,10 +619,10 @@ fn cutout_shadow(
         return Vec3A::splat(through);
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    through * volumes.transmittance(ray, 0.001, distance - 0.001, &mut rng)
+    through * volumes.transmittance(ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
 }
 
-/// The fraction of the segment `(0.001, t_max)` of `ray` that cutouts let
+/// The fraction of the segment `(TRACE_T_MIN, t_max)` of `ray` that cutouts let
 /// through: `Π (1 − opacity)` over every hit, or 0 at the first hit on a
 /// material without a cutout. It follows at most [`MAX_CUTOUT_CROSSINGS`]
 /// cutouts and then asks once more, where any hit blocks — the same bound
@@ -574,7 +636,7 @@ pub(crate) fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut R
     let mut kept = 1.0;
     for crossing in 0..=MAX_CUTOUT_CROSSINGS {
         stats.cutout_rays += 1;
-        let hit = world.intersect(&segment, 0.001, f32::INFINITY);
+        let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
         let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
             return kept;
         };
@@ -649,7 +711,7 @@ fn pass_cutouts<'w>(
         stats.cutout_rays += 1;
         let t = resume_before(h.rec.t);
         *hit = world
-            .intersect(&restarted(ray, t), 0.001, f32::INFINITY)
+            .intersect(&restarted(ray, t), TRACE_T_MIN, f32::INFINITY)
             .map(|mut next| {
                 next.rec.t += t;
                 next
@@ -791,7 +853,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 stats.closest_hit += 1;
                 let mut hit = {
                     let _p = profile::scope_if::<PROFILE>(Section::Trace);
-                    world.intersect(&ray, 0.001, f32::INFINITY)
+                    world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
                 };
                 if world.has_cutouts() {
                     pass_cutouts(world, &ray, &mut hit, v, stats);
@@ -805,7 +867,8 @@ pub(super) fn trace_path<const PROFILE: bool>(
                         }
                         if !volumes.is_empty() {
                             let mut rng = v.new_domain(K_VOLUME).rng();
-                            emitted *= volumes.transmittance(&ray, 0.001, hit.rec.t, &mut rng);
+                            emitted *=
+                                volumes.transmittance(&ray, TRACE_T_MIN, hit.rec.t, &mut rng);
                         }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
@@ -823,7 +886,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         } else {
             stats.closest_hit += 1;
             let _p = profile::scope_if::<PROFILE>(Section::Trace);
-            world.intersect(&ray, 0.001, f32::INFINITY)
+            world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
         };
         // Patched in place, on the cold side only: an `if` that yields the
         // hit from either arm copies all of it at every vertex (+0.8% of
@@ -861,7 +924,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         } else {
             let _p = profile::scope_if::<PROFILE>(Section::Volume);
             let mut rng = v.new_domain(K_VOLUME).rng();
-            volumes.sample_interaction(&ray, 0.001, t_lim, &mut rng)
+            volumes.sample_interaction(&ray, TRACE_T_MIN, t_lim, &mut rng)
         };
 
         let (vol_tr, vol_emit) = match event {
@@ -909,22 +972,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                     train: None,
                 };
                 beta *= weight;
-                let mut survived = true;
-                if records.len() >= RR_START_BOUNCE {
-                    stats.rr_tested += 1;
-                    let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                    if p_survive < 1.0 {
-                        if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                            survived = false;
-                            stats.rr_killed += 1;
-                            vrec.factor = Vec3A::ZERO;
-                        } else {
-                            vrec.factor /= p_survive;
-                            beta /= p_survive;
-                        }
-                    }
-                }
-                if !survived {
+                if !roulette(&mut beta, &mut vrec.factor, records.len(), v, stats) {
                     stats.vertices += 1;
                     records.push(vrec);
                     break;
@@ -936,22 +984,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 });
                 stats.vertices += 1;
                 records.push(vrec);
-                // Preserve the carried medium: scattering in fog inside a
-                // glass interior must keep attenuating in the glass.
-                // A phase function scatters over the whole sphere, so the
-                // cone saturates here exactly as a diffuse bounce does; only
-                // the width it reached on the way in carries forward.
-                let cone = ray.cone().scattered(
-                    ray.cone().width_at((p - ray.origin()).length()),
-                    crate::RayCone::MAX_SPREAD,
-                );
-                ray = match ray.medium() {
-                    Some(m) => Ray::new_in_medium(p, dir, *m),
-                    None => Ray::new(p, dir),
-                }
-                .with_time(ray.time())
-                .with_mask(crate::ray::MASK_INDIRECT)
-                .with_cone(cone);
+                ray = phase_scattered(&ray, p, dir);
                 remaining -= 1;
                 continue;
             }
@@ -980,8 +1013,8 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // medium this is exactly the single-scattering albedo — the
             // old code's `factor = albedo` with an extra Beer-Lambert on
             // top double-counted extinction.
-            let e = (Vec3A::splat(sigma_bar) - (medium.sigma_a + medium.sigma_s)) * t_med;
-            let factor = medium.sigma_s / sigma_bar * Vec3A::new(e.x.exp(), e.y.exp(), e.z.exp());
+            let factor =
+                medium.sigma_s / sigma_bar * chromatic_correction(&medium, sigma_bar, t_med);
             // Subsurface vertices run no NEE (their shadow rays are
             // blocked by the enclosing surface), so `prev = None` keeps
             // the next hit's emission at full weight — the pairing that
@@ -997,36 +1030,15 @@ pub(super) fn trace_path<const PROFILE: bool>(
                 train: None,
             };
             beta *= vol_tr * factor;
-            let mut survived = true;
-            if records.len() >= RR_START_BOUNCE {
-                stats.rr_tested += 1;
-                let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                if p_survive < 1.0 {
-                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                        survived = false;
-                        stats.rr_killed += 1;
-                        vrec.factor = Vec3A::ZERO;
-                    } else {
-                        vrec.factor /= p_survive;
-                        beta /= p_survive;
-                    }
-                }
-            }
-            if !survived {
+            if !roulette(&mut beta, &mut vrec.factor, records.len(), v, stats) {
                 stats.vertices += 1;
                 records.push(vrec);
                 break;
             }
             stats.vertices += 1;
             records.push(vrec);
-            let cone = ray.cone().scattered(
-                ray.cone().width_at((pos - ray.origin()).length()),
-                crate::RayCone::MAX_SPREAD,
-            );
-            ray = Ray::new_in_medium(pos, dir, medium)
-                .with_time(ray.time())
-                .with_mask(crate::ray::MASK_INDIRECT)
-                .with_cone(cone);
+            // Still inside `medium`: the ray it scattered in carries it.
+            ray = phase_scattered(&ray, pos, dir);
             remaining -= 1;
             prev = None;
             continue;
@@ -1062,8 +1074,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
         let med_arrival = match ray.medium() {
             Some(m) if m.is_scattering() => {
                 let sigma_bar = m.sigma_t_max().max(1e-4);
-                let e = (Vec3A::splat(sigma_bar) - (m.sigma_a + m.sigma_s)) * rec.t;
-                Vec3A::new(e.x.exp(), e.y.exp(), e.z.exp())
+                chromatic_correction(m, sigma_bar, rec.t)
             }
             Some(m) => m.transmittance(rec.t),
             None => Vec3A::ONE,
@@ -1250,22 +1261,7 @@ pub(super) fn trace_path<const PROFILE: bool>(
             // tracking the throughput, dividing it out on survival. Applies
             // to the whole continuation (bounce-hit emission included).
             beta *= atten * factor;
-            let mut survived = true;
-            if records.len() >= RR_START_BOUNCE {
-                stats.rr_tested += 1;
-                let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                if p_survive < 1.0 {
-                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                        survived = false;
-                        stats.rr_killed += 1;
-                    } else {
-                        factor /= p_survive;
-                        beta /= p_survive;
-                    }
-                }
-            }
-
-            if survived {
+            if roulette(&mut beta, &mut factor, records.len(), v, stats) {
                 // Training samples cover continuous surface bounces only —
                 // the guide can never produce a delta direction. The
                 // radiance is filled in by the backward gather.
