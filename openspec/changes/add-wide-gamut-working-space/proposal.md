@@ -32,7 +32,7 @@ can carry a change of primaries without giving up byte storage.
 - **Outputs record the working space**: `colorInteropID` on every product, and
   `chromaticities` off Rec.709 (the single beauty EXR included). A `lin_rec709`
   beauty keeps its header and pixels.
-- **CLI**: `--ocio-config`, `--working-space`, `--display`, `--view` (the PNG
+- **CLI**: `--ocio-config` (falling back to `$OCIO`), `--working-space`, `--display`, `--view` (the PNG
   preview through any OCIO display / view, e.g. an ACES output transform).
 - **Primaries from the config**: the working space's luminance weights drive
   every heuristic; blackbody is computed straight into it; it is identified

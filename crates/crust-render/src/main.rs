@@ -138,8 +138,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     auto_tx: bool,
     /// The OpenColorIO config every colour is managed with: a `.ocio` file,
-    /// an `.ocioz` archive or an `ocio://` builtin URI. Defaults to the
-    /// builtin ACES CG config (cg-config-v4.0.0_aces-v2.0_ocio-v2.5). It must
+    /// an `.ocioz` archive or an `ocio://` builtin URI. Defaults to `$OCIO`
+    /// when that is set, else to the builtin ACES CG config
+    /// (cg-config-v4.0.0_aces-v2.0_ocio-v2.5). It must
     /// define `raw`, `lin_rec709`, `srgb_texture`, `g22_rec709` and
     /// `g18_rec709`, as names or aliases; every ACES config does.
     #[arg(long, value_name = "CONFIG")]
@@ -502,11 +503,19 @@ fn main() -> ExitCode {
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
-    if let Some(config) = &cli.ocio_config
-        && let Err(e) = crust_core::color::use_config(config)
-    {
-        error!("{e}");
-        return ExitCode::FAILURE;
+    // `--ocio-config`, else `$OCIO` as every OCIO application reads it, else
+    // the builtin config.
+    let ocio = match (&cli.ocio_config, &crust_core::config().ocio) {
+        (Some(flag), _) => Some((flag, "--ocio-config")),
+        (None, Some(env)) => Some((env, "$OCIO")),
+        (None, None) => None,
+    };
+    if let Some((config, from)) = ocio {
+        debug!("OCIO config {config} (from {from})");
+        if let Err(e) = crust_core::color::use_config(config) {
+            error!("{from}: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
