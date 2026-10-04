@@ -150,7 +150,9 @@ The `Buffer` is in the working space, and the outputs say so:
   looked up by that ID (`color::chromaticities`), and so does the single
   beauty EXR written without products. An EXR without `chromaticities` *is*
   Rec.709 by the format's definition, which is why a `lin_rec709` beauty is
-  still byte-identical to the one `write_rgb_file` wrote.
+  still the file `write_rgb_file` wrote: the same header and pixels. (Not the
+  same bytes run to run: `exr` compresses blocks in parallel and writes them in
+  completion order, before and after this change alike.)
 - **PNG** — encoded through the config's display / view
   (`color::encode_preview`): `sRGB - Display` / `Un-tone-mapped` by default,
   a clamp to `[0, 1]` and the display's curve, so the preview is the EXR

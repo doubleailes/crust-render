@@ -31,7 +31,7 @@ can carry a change of primaries without giving up byte storage.
   primaries than the working space's was read raw; it is now converted.
 - **Outputs record the working space**: `colorInteropID` on every product, and
   `chromaticities` off Rec.709 (the single beauty EXR included). A `lin_rec709`
-  beauty stays byte-identical.
+  beauty keeps its header and pixels.
 - **CLI**: `--ocio-config`, `--working-space`, `--display`, `--view` (the PNG
   preview through any OCIO display / view, e.g. an ACES output transform).
 
