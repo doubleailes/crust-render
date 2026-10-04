@@ -902,9 +902,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.12.5"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 
 [[package]]
 name = "lz4_flex"
@@ -1137,8 +1137,9 @@ dependencies = [
 
 [[package]]
 name = "ptex-rust"
-version = "0.1.0"
-source = "git+https://github.com/doubleailes/ptex-rs?rev=884007d872a014a1d7056564ae718e589d35e65f#884007d872a014a1d7056564ae718e589d35e65f"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "096e33ca25172648f7ac51267472223c2c7f74aa6dd79fe2050efef8850116bb"
 dependencies = [
  "flate2",
  "lru",
