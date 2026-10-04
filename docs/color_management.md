@@ -41,7 +41,7 @@ display-encoded, so the host must have decoded them already.
 ## OpenColorIO and the working space
 
 Every transfer curve, every gamut conversion and every colour-space name comes
-from one OpenColorIO config, through [`ocio`](https://github.com/doubleailes/ocio-rs)
+from one OpenColorIO config, through [`ocio`](https://crates.io/crates/ocio)
 — a pure-Rust port of OpenColorIO, with no `unsafe` — in `crust-core/src/color.rs`:
 
 - **The config** is the builtin ACES CG config, named by its full version

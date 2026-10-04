@@ -1089,7 +1089,8 @@ dependencies = [
 [[package]]
 name = "ocio"
 version = "0.1.0"
-source = "git+https://github.com/doubleailes/ocio-rs?rev=c083676e0eae9c5a31e0da2346dae01d050dda7a#c083676e0eae9c5a31e0da2346dae01d050dda7a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4461a82b957f46304800debc4e996432c028b5c780019875e657585fc03e794"
 dependencies = [
  "half",
  "md5",
