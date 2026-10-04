@@ -87,8 +87,8 @@ pub use light::{
     SolidAngleSampling, SphereShape, UnitShape, projected_cone_solid_angle,
 };
 pub use lux::{
-    IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_rgb, distant_illuminance,
-    distant_size_factor,
+    IesProfile, IesShaping, LightTexture, RectTexture, Shaping, blackbody_in, blackbody_rgb,
+    distant_illuminance, distant_size_factor,
 };
 pub use material::*;
 pub use medium::Medium;
@@ -107,5 +107,6 @@ pub use tracer::{
     DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE, DEFAULT_INDIRECT_CLAMP, ProgressCallback, RenderSettings,
     Renderer, SamplingStrategy, ray_color,
 };
+pub use utils::Luma;
 pub use volume::{DensityField, PhaseMix, VolumeEvent, VolumeRegion, Volumes};
 pub use world::{get_settings, simple_scene};

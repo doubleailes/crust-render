@@ -62,6 +62,9 @@ pub struct MtlxMaterial {
     presence: Option<Presence>,
     /// Name of the material node, for diagnostics.
     pub name: String,
+    /// The working colour space's luminance weights, which lobe selection
+    /// weighs each leaf by ([`load_in`]).
+    luma: utils::Luma,
 }
 
 /// What [`Material::opacity`] runs: the opacity's own slice of the program.
@@ -232,7 +235,7 @@ impl MtlxMaterial {
 
     fn resolved(&self, r_in: &Ray, rec: &HitRecord) -> PooledClosure {
         self.with_slots(r_in, rec, |s| {
-            PooledClosure::resolve(&self.closures, s, r_in, rec)
+            PooledClosure::resolve(&self.closures, s, r_in, rec, self.luma)
         })
     }
 
@@ -246,7 +249,7 @@ impl MtlxMaterial {
         let cos = rec.normal.dot(-r_in.direction().normalize()).max(0.0);
         let opacity = self.opacity(r_in, rec);
         self.with_slots(r_in, rec, |s| Probe {
-            closure: ResolvedClosure::resolve(&self.closures, s, r_in, rec),
+            closure: ResolvedClosure::resolve(&self.closures, s, r_in, rec, self.luma),
             emission: self.emission(s, cos),
             opacity,
         })
@@ -340,7 +343,7 @@ impl Material for MtlxMaterial {
             };
             Resolution::closure(
                 emitted,
-                PooledClosure::resolve(&self.closures, s, r_in, rec),
+                PooledClosure::resolve(&self.closures, s, r_in, rec, self.luma),
                 *rec,
             )
         }))
@@ -423,10 +426,25 @@ fn jit_enabled() -> bool {
 ///
 /// A tree with more leaves than [`MAX_LEAVES`] is refused rather than shaded
 /// with some of its leaves silently missing.
+///
+/// Selects lobes by Rec.709 luminance; [`load_in`] takes the working space's.
 pub fn load(
     path: &std::path::Path,
     material_node: Option<&str>,
     host: &Host<'_>,
+) -> Result<Loaded, MtlxError> {
+    load_in(path, material_node, host, utils::Luma::REC709)
+}
+
+/// [`load`] for a material whose colours are in a working space with
+/// luminance weights `luma` ([`crate::color::luma`]), which lobe selection
+/// weighs its leaves by. Only a sampling heuristic: any weights give the same
+/// expected image.
+pub fn load_in(
+    path: &std::path::Path,
+    material_node: Option<&str>,
+    host: &Host<'_>,
+    luma: utils::Luma,
 ) -> Result<Loaded, MtlxError> {
     let mut c = crust_mtlx::compile(path, material_node, host)?;
     let leaves = c.closures.leaf_count();
@@ -492,6 +510,7 @@ pub fn load(
         closures: c.closures,
         presence,
         name: c.root_name,
+        luma,
     };
     let summary = format!("{material:?}");
     Ok(Loaded {

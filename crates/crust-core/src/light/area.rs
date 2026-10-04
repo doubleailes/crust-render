@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use glam::Vec3A;
-use utils::luminance;
 
 use crate::material::Emissive;
 use crate::pdf::{InvPdfArea, PdfSolidAngle};
@@ -221,7 +220,7 @@ impl Light for AreaLight {
     /// drawn from the shape's own area sampler, each weighted by the
     /// reciprocal of its density — exact for a flat light, whose normal is
     /// the same everywhere, and a close quadrature for a curved one.
-    fn power(&self) -> Option<f32> {
+    fn power(&self, luma: utils::Luma) -> Option<f32> {
         const GRID: usize = 16;
         let points: Vec<(Vec3A, f32)> = (0..GRID * GRID)
             .map(|k| {
@@ -238,8 +237,6 @@ impl Light for AreaLight {
                 .sum::<f32>()
                 / points.len() as f32
         };
-        Some(luminance(
-            self.material.flux(self.shape.area(), projected_area),
-        ))
+        Some(luma.of(self.material.flux(self.shape.area(), projected_area)))
     }
 }

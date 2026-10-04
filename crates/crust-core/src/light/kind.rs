@@ -83,7 +83,7 @@ impl Light for LightKind {
     }
 
     #[inline(always)]
-    fn power(&self) -> Option<f32> {
-        dispatch!(self, l => l.power())
+    fn power(&self, luma: utils::Luma) -> Option<f32> {
+        dispatch!(self, l => l.power(luma))
     }
 }

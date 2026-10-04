@@ -5,7 +5,6 @@
 //! `escaped_emission`); change both or neither.
 
 use glam::Vec3A;
-use utils::luminance;
 
 use crate::aov::FirstHit;
 use crate::guiding::SampleData;
@@ -1640,7 +1639,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             train_out.push(SampleData {
                 pos: t.pos,
                 dir: t.dir,
-                radiance: (luminance(radiance + vrec.next_emit) * t.cos).min(TRAIN_RADIANCE_CLAMP),
+                radiance: (lights.luma().of(radiance + vrec.next_emit) * t.cos)
+                    .min(TRAIN_RADIANCE_CLAMP),
             });
         }
         // With a single record the continuation is only `terminal`: the

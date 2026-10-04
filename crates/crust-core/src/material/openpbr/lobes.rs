@@ -4,7 +4,6 @@
 use std::f32::consts::PI;
 
 use glam::Vec3A;
-use utils::luminance;
 
 use crate::lpe::{LobeEvent, LobeLabel, LobeSplit, Scatter, microfacet_scatter};
 use crate::material::brdf::*;
@@ -88,9 +87,9 @@ impl LobePmf {
     pub(super) fn from_params(m: &OpenPBR) -> Self {
         let f0_diel = f0_from_ior(m.specular_ior);
         let f0_coat = f0_from_ior(m.coat_ior);
-        let base_luma = luminance(m.base_color).max(0.02);
-        let spec_luma = luminance(m.specular_color).max(0.02);
-        let fuzz_luma = luminance(m.fuzz_color).max(0.02);
+        let base_luma = m.luma.of(m.base_color).max(0.02);
+        let spec_luma = m.luma.of(m.specular_color).max(0.02);
+        let fuzz_luma = m.luma.of(m.fuzz_color).max(0.02);
 
         // Metal reflectivity is base_color · base_weight, covered by
         // base_metalness. No `specular_weight` here, matching `eval_specular`:
@@ -98,7 +97,7 @@ impl LobePmf {
         // `specular_weight` is legitimately 0 and weighting by it would leave
         // the specular lobe essentially unsampled while `eval_all` still
         // returned its full energy — fireflies on every metal.
-        let w_metal = m.base_metalness * luminance(m.base_color * m.base_weight).max(0.02);
+        let w_metal = m.base_metalness * m.luma.of(m.base_color * m.base_weight).max(0.02);
         let w_diel_spec = (1.0 - m.base_metalness) * m.specular_weight * spec_luma * f0_diel;
         let w_specular = (w_metal + w_diel_spec).max(1e-4);
 
@@ -134,7 +133,7 @@ impl LobePmf {
 
         // Transmission: dominant when weight is high. When enabled it
         // steals energy from the dielectric-specular / diffuse pathway.
-        let trans_luma = luminance(m.transmission_color).max(0.02);
+        let trans_luma = m.luma.of(m.transmission_color).max(0.02);
         let w_transmission = if m.transmission_weight > 0.0 {
             ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4)
         } else {

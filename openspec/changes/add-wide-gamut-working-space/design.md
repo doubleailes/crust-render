@@ -45,6 +45,29 @@ would break the beauty's byte-identity. Primaries are looked up by ASWF interop
 ID (fixed by their standards), not derived through the config's reference
 space, whose chromatic adaptation would report D65 for ACES's white.
 
-**D7 — Luminance heuristics stay Rec.709.** `utils::luminance` is on the hot
-path; threading the working space's weights there is a separate change. The
-image stays unbiased. Recorded as a known gap.
+**D7 — Luminance weights are the working space's, carried by value.** Every
+heuristic that weighs a colour by one number — light power, the light cache,
+guiding training, environment importance, lobe selection, adaptive sampling,
+the `variance` AOV — uses the `Y` row of the working space's RGB → XYZ matrix
+(`color::luma`), as Typhoon does. Cycles instead avoids luminance in its
+heuristics (average / max); crust keeps luminance, which the `variance` AOV
+and adaptive stopping are defined in. The weights travel with the scene
+(`LightList::luma`, `OpenPBR::luma`, `MtlxMaterial`), never in a global, for
+D1's reason. `lin_rec709` keeps `Luma::REC709`, multiplied in the old order,
+so a default render is bit-identical.
+
+**D8 — XYZ comes from the config's scene-referred XYZ space.** The
+`cie_xyz_d65_interchange` role names the *display*-referred one in the ACES
+configs, so `color::to_xyz` converts into `cie_xyz_d65_scene`, or into
+`aces_interchange` plus the standard AP0 → XYZ-D65 matrix (Cycles'
+fallback). Blackbody goes from the locus's XYZ straight into the working
+space through it (Typhoon), and the working space is identified by comparing
+it with each standard's Bradford-adapted matrix to 1e-4 (Cycles), so a config
+without interop IDs still writes `lin_ap1_scene`.
+
+**D9 — `UsdColorSpaceAPI` inheritance, without its fallback.** A colour's
+space is resolved as `ComputeColorSpaceName` does — attribute metadatum, then
+`colorSpace:name` on the prim and its ancestors — but with nothing authored the
+value is taken as already in the working space (D2), not as USD's
+`lin_rec709_scene`. Neither Typhoon nor Hydra resolves the inheritance for
+material inputs.

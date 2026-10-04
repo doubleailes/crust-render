@@ -135,6 +135,8 @@ pub struct LightList {
     /// label its `L` events carry, so `<L.'key'>` selects it. Kept in step
     /// with `lights` by `add_masked` and `remove`.
     pub(super) lpe_tags: Vec<Option<Box<str>>>,
+    /// The working colour space's luminance weights ([`LightList::luma`]).
+    pub(super) luma: utils::Luma,
 }
 
 impl Default for LightList {
@@ -159,7 +161,28 @@ impl LightList {
             cache: None,
             links: None,
             lpe_tags: Vec::new(),
+            luma: utils::Luma::REC709,
         }
+    }
+
+    /// The luminance weights of the working colour space the scene's colours
+    /// are in ([`crate::color::luma`]): what every heuristic that weighs a
+    /// colour by one number uses — light power here, and from here the
+    /// learned light cache, guiding's training signal and the renderer's
+    /// adaptive-sampling and `variance` statistics. Rec.709's until
+    /// [`LightList::set_luma`].
+    pub fn luma(&self) -> utils::Luma {
+        self.luma
+    }
+
+    /// Sets [`LightList::luma`]. The selection falls back to uniform until
+    /// the next [`LightList::select_by`], as after [`LightList::add`], since a
+    /// power table weighed by the old weights would describe the wrong one.
+    pub fn set_luma(&mut self, luma: utils::Luma) {
+        self.luma = luma;
+        self.pmf.clear();
+        self.cdf.clear();
+        self.cache = None;
     }
 
     /// Adds a light source. The selection falls back to uniform until the
@@ -273,7 +296,7 @@ impl LightList {
             .lights
             .iter()
             .map(|l| {
-                l.power().map(|p| {
+                l.power(self.luma).map(|p| {
                     let p = p as f64;
                     if p.is_finite() && p > 0.0 { p } else { 0.0 }
                 })

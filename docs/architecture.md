@@ -48,7 +48,7 @@ graph TD
 | `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG | decoding anything |
-| `utils` | stateless math: warps, `power_heuristic`, `luminance`, `align_to_normal` | everything |
+| `utils` | stateless math: warps, `power_heuristic`, `luminance` / `Luma`, `align_to_normal` | everything |
 
 Two properties of this graph are deliberate and worth keeping:
 
@@ -164,9 +164,13 @@ other. The pairs:
   per masked stage.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`. Every curve is the OCIO config's
-  (`crust-core/src/color.rs`), and the hard-coded Rec.709 weights of the hot
-  `utils::luminance` must equal the config's luma coefficients
-  (`utils_luminance_uses_the_config_luma_coefficients`).
+  (`crust-core/src/color.rs`). Every heuristic weighs a colour by the working
+  space's luminance weights (`utils::Luma`, from `color::luma`), carried by
+  value with the scene — `LightList::luma`, `OpenPBR::luma`, MaterialX
+  `load_in`, `EnvironmentMap::new_in` — never a global; `Luma::REC709` must
+  equal the config's luma coefficients
+  (`utils_luminance_uses_the_config_luma_coefficients`) so a `lin_rec709`
+  render is bit-identical.
 - **AOVs observe; they never steer.** `trace_path::<_, AOV>` and
   `advance_pixel::<_, AOV>` must return the same radiance and take the same
   draws with `AOV` on and off (`the_beauty_is_bit_identical_with_and_without_aovs`),

@@ -2642,8 +2642,18 @@ fn a_blackbody_tint_is_brought_to_the_working_space() {
         )
     };
     let scene = load_with_settings("blackbody_acescg", body, &settings("acescg"));
-    let bb = crust_core::blackbody_rgb(4000.0);
-    let want = crust_core::color::convert(bb, crust_core::color::Space::LIN_REC709, acescg());
+    let want = crust_core::blackbody_in(4000.0, acescg());
+    // Unit luminance in ACEScg, and the same light as the Rec.709 colour.
+    assert!((crust_core::color::luma(acescg()).of(want) - 1.0).abs() < 1e-5);
+    let rec709 = crust_core::color::convert(
+        crust_core::blackbody_rgb(4000.0),
+        crust_core::color::Space::LIN_REC709,
+        acescg(),
+    );
+    assert!(
+        (want - rec709).abs().max_element() < 1e-2,
+        "{want} vs {rec709}"
+    );
     assert!(
         emitted(&scene, 0).abs_diff_eq(want, 1e-5),
         "{} vs {want}",
@@ -2708,5 +2718,61 @@ fn preview_surface_colours_follow_their_color_space_metadata() {
         albedo(&tagged).abs_diff_eq(want, 1e-5),
         "{} vs {want}",
         albedo(&tagged)
+    );
+    // Lights and materials weigh colours by ACEScg's luminance, not Rec.709's.
+    let luma = crust_core::color::luma(acescg());
+    assert_ne!(luma, crust_core::Luma::REC709);
+    assert_eq!(plain.lights.luma(), luma);
+    let hit = plain
+        .world
+        .intersect(
+            &Ray::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::NEG_Z),
+            1e-3,
+            1e4,
+        )
+        .expect("hits the ball");
+    assert_eq!(hit.mat.as_openpbr().expect("OpenPBR").luma, luma);
+}
+
+#[test]
+fn a_prims_color_space_is_inherited_by_its_descendants_colours() {
+    let scene = load_with_settings(
+        "color_space_api",
+        r#"
+    def Scope "Rec709Rig" (
+        prepend apiSchemas = ["ColorSpaceAPI"]
+    )
+    {
+        uniform token colorSpace:name = "lin_rec709_scene"
+        def Xform "Inner"
+        {
+            def SphereLight "Inherits"
+            {
+                color3f inputs:color = (1, 0.5, 0.25)
+            }
+            def SphereLight "Overrides"
+            {
+                color3f inputs:color = (1, 0.5, 0.25) (
+                    colorSpace = "lin_ap1_scene"
+                )
+            }
+        }
+    }"#,
+        "def Scope \"Render\" { def RenderSettings \"settings\" { uniform token \
+         renderingColorSpace = \"acescg\" } }",
+    );
+    let authored = Vec3A::new(1.0, 0.5, 0.25);
+    let inherited =
+        crust_core::color::convert(authored, crust_core::color::Space::LIN_REC709, acescg());
+    let mut got = [emitted(&scene, 0), emitted(&scene, 1)];
+    if !got[0].abs_diff_eq(authored, 1e-6) {
+        got.swap(0, 1);
+    }
+    // The attribute's own metadatum wins (here: the working space itself).
+    assert!(got[0].abs_diff_eq(authored, 1e-6), "{got:?}");
+    // Two prims up, the scope's colorSpace:name applies.
+    assert!(
+        got[1].abs_diff_eq(inherited, 1e-5),
+        "{got:?} vs {inherited}"
     );
 }

@@ -138,6 +138,11 @@ pub struct OpenPBR {
     /// The interior medium, built on first use. Not a parameter: leave it at
     /// its default (`..OpenPBR::default()`). See [`InteriorCache`].
     pub interior: InteriorCache,
+    /// The working colour space's luminance weights, which lobe selection
+    /// weighs colours by ([`crate::color::luma`]). Rec.709's by default; the
+    /// importer sets the stage's. Only a sampling heuristic: any weights give
+    /// the same expected image.
+    pub luma: utils::Luma,
 }
 
 /// [`OpenPBR`]'s interior medium, computed the first time a ray refracts
@@ -209,6 +214,7 @@ impl Default for OpenPBR {
             geometry_thin_walled: false,
             base_color_ptex: None,
             interior: InteriorCache::default(),
+            luma: utils::Luma::REC709,
         }
     }
 }

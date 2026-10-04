@@ -79,9 +79,9 @@ fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
         // The blackbody leaves the Rec.709 gamut below ~1900 K; clamp the
         // product, not the factor, so a negative channel cannot flip sign
         // against a negative `color`.
-        // `blackbody_rgb` is linear Rec.709; the tint it scales by is a
-        // colour like any other, so it is brought to the working space.
-        let tint = crate::color::convert(crate::blackbody_rgb(kelvin), Space::LIN_REC709, working);
+        // Straight from the locus into the working space, normalised to
+        // unit luminance there.
+        let tint = crate::lux::blackbody_in(kelvin, working);
         emission = (emission * tint).max(Vec3A::ZERO);
     }
 

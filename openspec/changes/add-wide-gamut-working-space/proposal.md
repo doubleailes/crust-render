@@ -34,6 +34,11 @@ can carry a change of primaries without giving up byte storage.
   beauty keeps its header and pixels.
 - **CLI**: `--ocio-config`, `--working-space`, `--display`, `--view` (the PNG
   preview through any OCIO display / view, e.g. an ACES output transform).
+- **Primaries from the config**: the working space's luminance weights drive
+  every heuristic; blackbody is computed straight into it; it is identified
+  by its RGB → XYZ matrix when the config gives no interop ID.
+- **`UsdColorSpaceAPI`**: a colour's space is inherited from its prim and
+  ancestors' `colorSpace:name`.
 
 ## Capabilities
 

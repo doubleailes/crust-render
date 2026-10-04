@@ -39,6 +39,7 @@ pub(super) fn preview_surface_material(
         None => OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)),
     };
     base.base_color_ptex = material_ptex(stage, mat_path, caches);
+    base.luma = caches.luma;
     let Some(ps) = ps else {
         return Arc::new(base);
     };

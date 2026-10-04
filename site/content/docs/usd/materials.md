@@ -297,15 +297,28 @@ apply, and converted into the working space. A Ptex displacement map isn't decod
 ### Constant colours
 
 A constant colour — UsdPreviewSurface `diffuseColor` and `emissiveColor`, the
-`crust:openpbr` colours, a light's `inputs:color` — is taken as already in the working
-space, unless its attribute carries `colorSpace` metadata, in which case it's converted
-from that space:
+`crust:openpbr` colours, a light's `inputs:color` — is converted from the colour space
+`UsdColorSpaceAPI` gives it: its attribute's `colorSpace` metadata, else the
+`colorSpace:name` of its prim, else of the nearest ancestor that authors one. With none of
+those it's taken as already in the working space.
 
 ```usda
+def Scope "Looks" (
+    prepend apiSchemas = ["ColorSpaceAPI"]
+)
+{
+    uniform token colorSpace:name = "lin_rec709_scene"   # every colour below
+
+    def Material "Red" { ... }
+}
+
 color3f inputs:diffuseColor = (0.8, 0.2, 0.1) (
-    colorSpace = "srgb_texture"
+    colorSpace = "srgb_texture"                          # this one only
 )
 ```
+
+A texture file's own colour space (`inputs:file`, a light's `texture:file`) is resolved
+the same way.
 
 A MaterialX `color3` or `color4` value is converted from its colour space (the input's,
 its node's, its node graph's or the document's) when it has one. `PxrDisneyBsdf`

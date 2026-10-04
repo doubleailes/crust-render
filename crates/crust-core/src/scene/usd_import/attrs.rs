@@ -217,18 +217,43 @@ pub(super) fn custom_color(prim: &Prim, name: &str, working: Space) -> Option<Ve
     custom_color3(prim, name).map(|c| in_working(&prim.attribute(name), c, working))
 }
 
-/// The colour space an attribute's `colorSpace` metadatum names, through the
-/// OCIO config. `None` when it names none; a name the config does not know
-/// is refused with a warning, and is `None` too.
+/// The colour space an attribute's value is authored in, as
+/// `UsdColorSpaceAPI::ComputeColorSpaceName` resolves it: the attribute's own
+/// `colorSpace` metadatum, else the `colorSpace:name` of its prim, else of the
+/// nearest ancestor that authors one — through the OCIO config. `None` when
+/// nothing names one (the value is then already in the working space; USD's
+/// own fallback, `lin_rec709_scene`, is deliberately not applied — see
+/// `docs/color_management.md`). A name the config does not know is refused
+/// with a warning, and is `None` too.
 pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
-    let name = match attr.get_metadata::<sdf::Value>("colorSpace").ok()?? {
-        sdf::Value::Token(t) => t.as_str().to_owned(),
-        sdf::Value::String(s) => s,
-        _ => return None,
+    let token = |v: sdf::Value| match v {
+        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
+        sdf::Value::String(s) => Some(s),
+        _ => None,
     };
-    if name.is_empty() {
-        return None;
-    }
+    let own = attr
+        .get_metadata::<sdf::Value>("colorSpace")
+        .ok()
+        .flatten()
+        .and_then(token);
+    let name = own.filter(|n| !n.is_empty()).or_else(|| {
+        let stage = attr.stage();
+        let mut path = Some(attr.path().prim_path());
+        while let Some(p) = path.filter(|p| !p.is_abs_root()) {
+            let named = super::prim_at(stage, p.clone())
+                .attribute("colorSpace:name")
+                .get_at::<sdf::Value>(eval_time())
+                .ok()
+                .flatten()
+                .and_then(token)
+                .filter(|n| !n.is_empty());
+            if named.is_some() {
+                return named;
+            }
+            path = p.parent();
+        }
+        None
+    })?;
     let space = Space::named(&name);
     if space.is_none() {
         warn!(
