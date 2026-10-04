@@ -17,6 +17,7 @@ use openusd_schemas::shade::{
 use tracing::{debug, warn};
 
 use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
+use crate::texture::ResolvedColorSpace;
 
 use super::attrs::custom_f32;
 use super::preview::{preview_displacement, preview_surface_material};
@@ -643,8 +644,11 @@ fn disney_to_openpbr(
     // `inputs:baseColor` reaches the BSDF through a `PxrColorCorrect` with
     // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
     // decodes it to linear. Do the same, or every surface renders washed out.
+    // `g22_rec709` — the plain power law, not the piecewise sRGB curve: it is
+    // what that node applies, and matching the island's reference render
+    // matters more here than matching the standard.
     if let Some(rgb) = c("inputs:baseColor") {
-        o.base_color = srgb_to_linear(rgb);
+        o.base_color = ResolvedColorSpace::Gamma22.decode_rgb(rgb);
     }
     if let Some(v) = f("inputs:metallic") {
         o.base_metalness = v;
@@ -983,20 +987,6 @@ pub(super) fn attribute_asset_path(
         return Some(layer_dir.join(authored));
     }
     asset_value_path(&value, stage_path)
-}
-
-/// sRGB transfer function, decoding a display-referred colour to linear.
-///
-/// The plain 2.2 power law rather than the piecewise sRGB curve: it is what
-/// the `PxrColorCorrect` gamma node in the island's materials actually
-/// applies, and matching the reference render matters more here than matching
-/// the standard.
-fn srgb_to_linear(c: Vec3A) -> Vec3A {
-    Vec3A::new(
-        c.x.max(0.0).powf(2.2),
-        c.y.max(0.0).powf(2.2),
-        c.z.max(0.0).powf(2.2),
-    )
 }
 
 fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {

@@ -6,8 +6,6 @@ use std::path::Path;
 
 use crust_core::ResolvedColorSpace;
 
-use crate::TransferCurve;
-
 use crate::error::AssetError;
 
 use super::tile::Tile;
@@ -98,11 +96,7 @@ pub(super) fn decode_exr_tile(
     if sw == 0 || sh == 0 {
         return Err(AssetError::unusable(path, "zero-sized image"));
     }
-    if space != ResolvedColorSpace::Raw {
-        for c in &mut src {
-            *c = space.to_linear(*c);
-        }
-    }
+    space.decode_slice(&mut src);
     let max_edge = max_edge.get();
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {

@@ -1,7 +1,7 @@
 //! Lat-long environment maps and light textures: OpenEXR, Radiance `.hdr`,
 //! and LDR images, all decoded to linear float RGB by [`read_rgb_image`].
 
-use crust_core::{EnvironmentMap, Vec3A};
+use crust_core::{EnvironmentMap, ResolvedColorSpace, Vec3A};
 use exr::prelude::*;
 use std::path::Path;
 use tracing::warn;
@@ -178,10 +178,15 @@ fn decode_image_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Ve
             .as_deref(),
         Some("hdr")
     );
-    let to_linear = |c: f32| if is_hdr { c } else { crate::srgb_to_linear(c) };
-    let pixels = rgb
-        .pixels()
-        .map(|p| Vec3A::new(to_linear(p[0]), to_linear(p[1]), to_linear(p[2])))
+    let mut samples = rgb.into_raw();
+    if !is_hdr {
+        ResolvedColorSpace::Srgb.decode_slice(&mut samples);
+    }
+    let pixels = samples
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&p| Vec3A::from_array(p))
         .collect();
     Ok((w, h, pixels))
 }
@@ -271,7 +276,7 @@ mod tests {
             .expect("write png");
         let (_, _, px) = read_rgb_image(&png_path).expect("png decodes");
         assert!((px[0].x - 1.0).abs() < 1e-6);
-        let mid = crate::srgb_to_linear(128.0 / 255.0);
+        let mid = ResolvedColorSpace::Srgb.decode(128.0 / 255.0);
         assert!(
             (px[0].y - mid).abs() < 1e-6 && mid < 0.25,
             "sRGB-decoded: {}",

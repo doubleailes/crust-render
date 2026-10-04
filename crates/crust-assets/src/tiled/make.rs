@@ -13,8 +13,6 @@
 
 use crust_core::{ColorSpace, ResolvedColorSpace};
 
-use crate::TransferCurve;
-
 use crate::error::AssetError;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -131,13 +129,11 @@ pub fn make_tx(
     let kind = if exr {
         // EXR has no transfer curve, so the decode happens once, here, and
         // the space is recorded as the one the file is to be bound with.
-        let linear: Vec<f32> = match &source {
-            Source::Floats(v) => v.iter().map(|&s| space.to_linear(s)).collect(),
-            Source::Bytes(v) => v
-                .iter()
-                .map(|&b| space.to_linear(b as f32 / 255.0))
-                .collect(),
+        let mut linear: Vec<f32> = match &source {
+            Source::Floats(v) => v.clone(),
+            Source::Bytes(v) => v.iter().map(|&b| b as f32 / 255.0).collect(),
         };
+        space.decode_slice(&mut linear);
         super::write_tx_exr(dst, &linear, w, h, space).map_err(AssetError::io(dst))?;
         "half, exr"
     } else {

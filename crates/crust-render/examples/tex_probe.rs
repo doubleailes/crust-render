@@ -12,6 +12,7 @@
 //! ```
 
 use crust_assets::read_channel;
+use crust_core::ResolvedColorSpace;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -288,7 +289,7 @@ fn probe_image(path: &str, box_: Option<(u32, u32, u32, u32)>) {
             for c in 0..3 {
                 let v = p[c] as f64 / 255.0;
                 sum[c] += v;
-                lin += srgb_to_linear(v);
+                lin += ResolvedColorSpace::Srgb.decode(v as f32) as f64;
             }
             count += 1;
         }
@@ -310,12 +311,4 @@ fn probe_image(path: &str, box_: Option<(u32, u32, u32, u32)>) {
         (sum[0] + sum[1] + sum[2]) / (3.0 * n)
     );
     println!("mean linear = {:.4}", lin / (3.0 * n));
-}
-
-fn srgb_to_linear(c: f64) -> f64 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }

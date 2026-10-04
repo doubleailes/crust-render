@@ -35,20 +35,64 @@ in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
+## OpenColorIO supplies every curve
+
+Every transfer curve and every colour-space name comes from one OpenColorIO
+config, through [`ocio`](https://github.com/doubleailes/ocio-rs) — a pure-Rust
+port of OpenColorIO, with no `unsafe` — in `crust-core/src/color.rs`:
+
+- **The config** is the builtin ACES CG config, named by its full version
+  (`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`, `color::CONFIG_URI`) so an
+  `ocio` bump that ships a newer one cannot move a render on its own.
+- **The working space** is `lin_rec709` (`color::WORKING_SPACE`). A decode is
+  the OCIO processor from the authored space to it; an encode is the inverse.
+- **Names resolve through the config's aliases**, case-insensitively, so a
+  MaterialX `colorspace` may name a space by any of them —
+  `Utility - sRGB - Texture`, `srgb_rec709_scene`, `g22_rec709_tx` — and still
+  get the same curve (`ResolvedColorSpace::from_ocio_name`). `srgb`, which
+  older documents use and the config does not list, is kept as a spelling of
+  `srgb_texture`.
+- **Byte-stored textures never run a processor per texel.** They meet the
+  curve through two tables built once per open from the processor: the
+  256-entry decode table and the 255 code steps that re-encode a mip level
+  (`TransferCurve` in `crust-assets/src/lib.rs`). Everything else converts in
+  batches (`decode_slice`), which costs about what the `powf` it replaced did.
+
+Two choices are crust's, not the config's:
+
+- **Only four spaces bind a texture**: `srgb_texture`, `g22_rec709`,
+  `g18_rec709` and `raw` (`ResolvedColorSpace`). Each is a per-channel curve
+  on Rec.709 primaries, which is what a one-byte-per-channel texture decoded
+  through a table can express. A name the config knows on *other* primaries
+  (`acescg`, `g22_ap1`, `adobergb`, …) still binds raw, as it did before OCIO
+  resolved the names: converting its gamut needs texels stored after the
+  conversion, not a per-channel table.
+- **Encoded values below zero decode to zero.** The config's power-law spaces
+  pass negatives through (`style: pass_thru`); crust has always clamped them,
+  since a display-encoded value below black means nothing and an albedo must
+  not go negative. Raw data is never clamped — a height may be negative.
+
 ## Three transfer curves, deliberately
 
-There are three decode curves in the codebase, and they are not
-interchangeable:
+There are three decode curves in use, and they are not interchangeable:
 
-| Curve | Formula | Where |
-| --- | --- | --- |
-| **Piecewise sRGB EOTF** | `c ≤ 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4` | LDR environment images (`crust-assets/src/environment.rs`, `srgb_to_linear`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex` under `ColorSpace::Gamma22`, shared by both Ptex backends); UV textures tagged `g22_rec709` |
-| **Flat gamma 1.8** | `c^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/lib.rs`, `TransferCurve::to_linear_table`) |
+| Curve | OCIO space | Formula | Where |
+| --- | --- | --- | --- |
+| **Piecewise sRGB EOTF** | `srgb_texture` | `c ≤ 0.03929 ? c/12.923 : ((c+0.055)/1.055)^2.4` | LDR environment images and `RectLight` textures (`crust-assets/src/environment.rs`, `decode_image_pixels`); UV textures tagged `srgb_texture` |
+| **Flat gamma 2.2** | `g22_rec709` | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice` / `decode_ptex_rgb` under `ColorSpace::Gamma22`, shared by both Ptex backends); UV textures tagged `g22_rec709` |
+| **Flat gamma 1.8** | `g18_rec709` | `max(c,0)^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/lib.rs`, `TransferCurve::to_linear_table`) |
+
+OCIO's sRGB toe differs from IEC 61966-2-1's rounded constants: it derives the
+break point and slope from the exponent and offset so the two segments meet
+exactly (break 0.03929, slope 1/12.9232, against the standard's 0.04045 and
+1/12.92). The largest difference at any 8-bit code is 7.5e-7. The power laws
+are bit-identical to `powf`. `crust-core/src/color.rs` pins both, against
+formulas written out in the test rather than against OCIO itself.
 
 MaterialX names `srgb_texture`, `g22_rec709` and `g18_rec709` as three
-*separate* colour spaces, and [`ColorSpace::from_mtlx`][cs] maps them onto
-three separate decodes accordingly. Folding the two power laws into the sRGB
+*separate* colour spaces (so does the OCIO config), and
+[`ColorSpace::from_mtlx`][cs] maps them onto three separate decodes
+accordingly. Folding the two power laws into the sRGB
 branch — which this code did until it was caught — is wrong in the shadows for
 2.2 (the table below) and wrong across the whole range for 1.8, whose
 exponent is not 2.4-ish at all. The primaries in those two names are Rec.709,
@@ -66,7 +110,7 @@ networks run Ptex colour through a `PxrColorCorrect` gamma-1/2.2 node, and its
 GL path declares `sourceColorSpace = "sRGB"`; reproducing the reference render
 matters more there than conforming to the sRGB standard. Both decisions carry
 that reasoning in a comment at the call site (`usd_import/materials.rs`, `disney_to_openpbr`;
-`crust-assets/src/ptex_texture.rs`, `PtexColor::open_with`).
+`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice`).
 
 How much does the distinction matter? Across most of the range, very little —
 maximum absolute difference over `[0,1]` is 0.0085, and at 0.5 the two give
@@ -171,8 +215,8 @@ swatch, so there is no display encoding to undo. Same reasoning as
 
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` (`decode_ptex`), requested `Gamma22` by `usd_import/materials.rs` (`material_ptex`) | flat 2.2 | ✅ intentional (island convention) |
-| Ptex `.ptx` displacement texels (`PxrDisplace` → `PxrPtexture`, `PxrBlend` multiply) | `usd_import/materials.rs` (`pxr_displacement`) requests `Raw` → `crust-assets/src/ptex_texture.rs` / `ptex_stream.rs` (`decode_ptex`) | none (identity; no clamp, so a float height may be negative) | ✅ correct — a height is data, and `PxrPtexture.linearize` defaults to 0 |
+| Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` (`decode_ptex_slice`), requested `Gamma22` by `usd_import/materials.rs` (`material_ptex`) | flat 2.2 | ✅ intentional (island convention) |
+| Ptex `.ptx` displacement texels (`PxrDisplace` → `PxrPtexture`, `PxrBlend` multiply) | `usd_import/materials.rs` (`pxr_displacement`) requests `Raw` → `crust-assets/src/ptex_texture.rs` / `ptex_stream.rs` (`decode_ptex_slice` / `decode_ptex_rgb`) | none (identity; no clamp, so a float height may be negative) | ✅ correct — a height is data, and `PxrPtexture.linearize` defaults to 0 |
 | UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`TransferCurve::to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |
@@ -183,7 +227,7 @@ swatch, so there is no display encoding to undo. Same reasoning as
 | `UsdUVTexture` feeding `UsdPreviewSurface.inputs:displacement`, `auto` or unauthored | `usd_import/preview.rs` (`preview_displacement` → `preview_uv_input` with `data`) | none (requested `Raw`) | ✅ a height is data, so the 8-bit-RGB-is-sRGB rule does not apply; an explicit `sRGB` still wins |
 | Preloaded `.exr` UV texture | `crust-assets/src/uv_texture/` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
 | MaterialX emission `image`, untagged | `crust-assets/src/uv_texture/` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
-| LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` | piecewise sRGB | ✅ correct per format |
+| LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` (`decode_image_pixels`) | piecewise sRGB | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
 | LDR `RectLight` `texture:file` (PNG/JPG/…) | `crust-assets/src/lib.rs` (`load_light_texture` → `read_rgb_image`) | piecewise sRGB | ✅ same decoder as an LDR env image |
@@ -262,13 +306,17 @@ re-encoded it gives 0.5 linear, which stores as `188/255`. Pinned by
 
 UV mip levels are stored back as `u8` in the file's own encoding rather than
 as linear `f32`, so the lookup's `u8`-indexed decode table is unchanged and the
-pyramid costs a third of the base rather than four times it. The re-encode uses
-`linear_to_srgb` or the matching inverse power law, chosen by
-[`TransferCurve::encode_fn`][enc] — matched on the `ResolvedColorSpace`
-variant rather than on `gamma()`, so adding a colour space is a compile error
-there instead of a silent fall-through to `Raw`. Every curve takes a
-`ResolvedColorSpace`, which has no `Auto`: `ColorSpace::resolve_auto` is the
-only way from the requested space to one a decoder can apply.
+pyramid costs a third of the base rather than four times it. The re-encode is
+a table too: [`TransferCurve::code_steps`][enc] holds, for each byte, the
+linear value at which the next one begins — OCIO's decode of `(k + 0.5)/255` —
+and `quantize` bisects it. Rounding the inverse curve's output to the nearest
+byte picks the same code wherever it is not on a half-code boundary, and the
+curve never runs per texel (`quantize_is_the_rounded_encode`). The OCIO name of
+each space comes from `ResolvedColorSpace::ocio_name`, matched on the variant,
+so adding a colour space is a compile error there instead of a silent
+fall-through to `Raw`. Every curve takes a `ResolvedColorSpace`, which has no
+`Auto`: `ColorSpace::resolve_auto` is the only way from the requested space to
+one a decoder can apply.
 
 [enc]: ../crates/crust-assets/src/lib.rs
 
@@ -290,11 +338,14 @@ The engine produces a linear `Buffer`. The CLI writes it two ways
 (`crust-render/src/main.rs`, the one place that still touches pixels):
 
 - **`.exr`** — the linear values, unmodified. This is the render output.
-- **`.png`** — tone-mapped: clamp to `[0,1]`, then encode with the piecewise
-  sRGB OETF (`tone_map` in `main.rs`). A preview, not a deliverable.
+- **`.png`** — tone-mapped: clamp to `[0,1]`, then encode through the OCIO
+  config's `sRGB - Display` with the `Un-tone-mapped` view
+  (`color::encode_preview`, called from `tone_map` in `main.rs`) — the
+  piecewise sRGB curve and nothing else. A preview, not a deliverable.
 
-`tone_map` is the *inverse* of the LDR-image decode above, using the standard
-piecewise curve in the forward direction. Comparing renders numerically should
+`tone_map` is the *inverse* of the LDR-image decode above: the same curve in
+the forward direction (to within a matrix round trip through the config's
+reference spaces; no 8-bit code differs from `lin_rec709 → srgb_texture`). Comparing renders numerically should
 always use the EXR (`examples/exr_diff`), never the PNG, since the PNG has both
 clamped and re-encoded.
 
@@ -329,16 +380,20 @@ of any convention.
 **2. The abstraction covers assets only, so USD attributes enforce nothing.**
 `ColorSpace` (`crust-core/src/texture.rs`) does exist, and every UV texture
 crossing the `AssetLoader` seam names its space — that is what makes
-`srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. USD
-*attribute* reads are not covered: their curves remain independent inline
-implementations (`usd_import/materials.rs` `disney_to_openpbr`, `crust-assets`
-`PtexColor::open_with`) that happen to agree, and nothing forces a newly added
-colour attribute to state its source space; the default behaviour of adding
-one is to get gap #1 again, silently.
+`srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. Since the
+move to OpenColorIO there is also only one implementation of each curve
+(`crust-core/src/color.rs`), which USD attribute reads call too
+(`disney_to_openpbr` decodes through `ResolvedColorSpace::Gamma22`). But
+nothing forces a newly added colour attribute to state its source space; the
+default behaviour of adding one is to get gap #1 again, silently.
 
 **3. Per-attribute colour-space authoring is unsupported.** A USD attribute
 carrying an explicit `colorSpace` metadatum is ignored; the curve is chosen by
-shader family, not by what the asset declares.
+shader family, not by what the asset declares. The OCIO config already knows
+USD's names (`lin_rec709_scene`, `srgb_rec709_scene`, `lin_ap1_scene`, … are
+aliases in it), so what is missing is reading the metadatum, and — for a
+space on other primaries — a gamut conversion for constant colours, which
+unlike a texture's needs no change to storage.
 
 **4. A MaterialX document's `colorspace` is not applied to literal colours.**
 The compiler honours `colorspace` only where it crosses into a texture decode

@@ -4,9 +4,9 @@
 
 use crust_assets::{
     DEFAULT_MAX_EDGE, DEFAULT_MAX_LOG2, FileAssets, PtexColor, UvTexture, load_exr_environment,
-    load_image_environment, max_log2_from_env, read_channel, srgb_to_linear,
+    load_image_environment, max_log2_from_env, read_channel,
 };
-use crust_core::{AssetLoader, ColorSpace, Texture2D, Vec3A};
+use crust_core::{AssetLoader, ColorSpace, ResolvedColorSpace, Texture2D, Vec3A};
 use std::path::PathBuf;
 
 fn samples() -> PathBuf {
@@ -28,6 +28,12 @@ fn scratch(name: &str) -> PathBuf {
 // sRGB
 // ---------------------------------------------------------------------------
 
+/// The sRGB decode every LDR asset goes through: OCIO's `srgb_texture` to
+/// `lin_rec709`.
+fn srgb_to_linear(c: f32) -> f32 {
+    ResolvedColorSpace::Srgb.decode(c)
+}
+
 #[test]
 fn srgb_to_linear_is_anchored_and_monotonic() {
     assert_eq!(srgb_to_linear(0.0), 0.0);
@@ -45,8 +51,11 @@ fn srgb_to_linear_matches_the_reference_points() {
     // 0.5 display ≈ 0.214 linear; 188/255 ≈ 0.5 linear.
     assert!((srgb_to_linear(0.5) - 0.2140).abs() < 1e-3);
     assert!((srgb_to_linear(188.0 / 255.0) - 0.5).abs() < 0.01);
-    // The linear toe: below the knee it is a plain division.
-    assert!((srgb_to_linear(0.02) - 0.02 / 12.92).abs() < 1e-7);
+    // The linear toe: below the knee it is a plain division. OCIO derives the
+    // toe from the exponent and offset so the two segments meet exactly,
+    // which makes its slope 1/12.9232 rather than IEC 61966-2-1's rounded
+    // 1/12.92 — 3e-7 apart at 0.02.
+    assert!((srgb_to_linear(0.02) - 0.02 / 12.92).abs() < 1e-6);
 }
 
 #[test]

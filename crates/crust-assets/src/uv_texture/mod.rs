@@ -232,9 +232,9 @@ impl UvTexture {
 
         let to_linear = space.to_linear_table();
         if mip {
-            let encode = space.encode_fn();
+            let steps = space.code_steps();
             for t in &mut tiles {
-                t.build_pyramid(&to_linear, encode);
+                t.build_pyramid(&to_linear, &steps);
             }
         }
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);

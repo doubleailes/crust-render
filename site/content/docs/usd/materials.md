@@ -264,6 +264,28 @@ seam.
 `CRUST_DISPLACE=0` turns displacement off for an A/B; see
 [environment variables](@/docs/reference/environment-variables.md#crust-displace).
 
+## Texture colour spaces
+
+Textures are decoded to linear light once, when they load. The curve comes from the
+`colorspace` attribute on a MaterialX `image`'s `file` input (one on the document or a
+node graph isn't inherited) and from the `sourceColorSpace` of a `UsdUVTexture`:
+
+| authored | decoded with |
+| --- | --- |
+| `srgb_texture` (or `srgb`) | the piecewise sRGB curve |
+| `g22_rec709` | a pure 2.2 power law |
+| `g18_rec709` | a pure 1.8 power law |
+| MaterialX: any other name, or none | nothing: the values are used as stored |
+| `UsdUVTexture`: `sRGB` / `raw` | the sRGB curve / nothing |
+| `UsdUVTexture`: `auto` or unauthored | the sRGB curve for an 8-bit RGB or RGBA image, nothing otherwise |
+
+MaterialX names are looked up in OpenColorIO's ACES CG config, so any alias it lists for
+these spaces works too, in any case: `Utility - sRGB - Texture`, `srgb_tx`,
+`srgb_rec709_scene`, `g22_rec709_tx`, `Gamma 1.8 Rec.709 - Texture`, and so on. A space on
+other primaries, such as `acescg` or `g22_ap1`, is read as stored: Crust Render doesn't
+convert texture gamuts. Colour Ptex is decoded with the 2.2 power law, and a Ptex
+displacement map isn't decoded.
+
 ## .tx files
 
 A `.tx` is a tiled, mip-mapped texture file. When one exists beside a UV texture (same

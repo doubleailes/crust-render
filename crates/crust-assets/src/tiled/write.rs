@@ -72,7 +72,7 @@ pub fn write_tx(
     }
 
     let to_linear = space.to_linear_table();
-    let encode = space.encode_fn();
+    let steps = space.code_steps();
 
     // Every level materialised up front rather than streamed. The pyramid is
     // 4/3 of the source, which for anything a `.tx` is worth writing for is
@@ -85,7 +85,7 @@ pub fn write_tx(
     } {
         let (pixels, w, h) = {
             let (p, w, h) = levels.last().expect("level 0 always exists");
-            reduce_half(p, *w, *h, &to_linear, encode)
+            reduce_half(p, *w, *h, &to_linear, &steps)
         };
         levels.push((pixels, w, h));
     }
@@ -107,15 +107,11 @@ pub(crate) fn mip_space_tag(space: ResolvedColorSpace) -> String {
     format!("crust:mipspace={}", space_name(space))
 }
 
-/// The stable spelling of a colour space in a `.tx`. Matched on the variant so
-/// a new one is a compile error here rather than a silently unlabelled file.
+/// The stable spelling of a colour space in a `.tx`: its OCIO name, which
+/// [`ResolvedColorSpace::ocio_name`] matches on the variant, so a new space is
+/// a compile error there rather than a silently unlabelled file here.
 pub(crate) fn space_name(space: ResolvedColorSpace) -> &'static str {
-    match space {
-        ResolvedColorSpace::Srgb => "srgb_texture",
-        ResolvedColorSpace::Gamma22 => "g22_rec709",
-        ResolvedColorSpace::Gamma18 => "g18_rec709",
-        ResolvedColorSpace::Raw => "raw",
-    }
+    space.ocio_name()
 }
 
 /// One mip level as one IFD: every tile's compressed bytes, then the tags that

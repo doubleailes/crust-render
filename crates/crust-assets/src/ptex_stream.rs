@@ -34,7 +34,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crate::ptex_texture::decode_ptex;
+use crate::ptex_texture::decode_ptex_rgb;
 use crate::read_channel;
 use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
@@ -673,22 +673,23 @@ impl PtexStream {
             // caller's bug, and this runs inside the integrator.
             return self.fallback;
         };
-        let mut out = Vec3A::ZERO;
-        for ch in 0..3 {
-            // A single-channel (displacement-style) file feeds channel 0 to
-            // all three, so it reads as greyscale rather than red — the same
-            // rule the preloading path applies.
-            let c = if ch < self.n_chan { ch } else { 0 };
-            out[ch] = match &self.lut {
-                Some(t) => t[src[c] as usize],
-                None => decode_sample(
-                    read_channel(&src[c * dsize..], self.dt),
-                    self.scale,
-                    self.space,
-                ),
-            };
+        // A single-channel (displacement-style) file feeds channel 0 to all
+        // three, so it reads as greyscale rather than red — the same rule the
+        // preloading path applies.
+        let c = |ch: usize| if ch < self.n_chan { ch } else { 0 };
+        match &self.lut {
+            Some(t) => Vec3A::new(
+                t[src[c(0)] as usize],
+                t[src[c(1)] as usize],
+                t[src[c(2)] as usize],
+            ),
+            // One decode per texel, all three channels together: the curve
+            // is an OCIO processor, whose per-call cost is per pixel.
+            None => {
+                let raw = |ch: usize| read_channel(&src[c(ch) * dsize..], self.dt);
+                decode_ptex_rgb(Vec3A::new(raw(0), raw(1), raw(2)) * self.scale, self.space)
+            }
         }
-        out
     }
 
     /// Bilinear lookup within one level of one face.
@@ -758,13 +759,11 @@ impl MipSource for StreamFace<'_> {
     }
 }
 
-/// One raw sample, scaled and decoded as `space` (see [`decode_ptex`]).
-///
-/// Written once, called from the streaming decode and from the table that
-/// memoises it, so the two cannot drift.
-#[inline]
+/// One raw sample, scaled and decoded as `space` (see
+/// [`crate::ptex_texture::decode_ptex_slice`]): an entry of the `u8` table.
+/// The per-texel decode scales and decodes the same way, three at a time.
 fn decode_sample(raw: f32, scale: f32, space: ColorSpace) -> f32 {
-    decode_ptex(raw * scale, space)
+    decode_ptex_rgb(Vec3A::splat(raw * scale), space).x
 }
 
 impl PtexTexture for PtexStream {

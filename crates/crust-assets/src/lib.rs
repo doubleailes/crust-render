@@ -60,62 +60,12 @@ use std::path::Path;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
-/// The piecewise sRGB EOTF: display-encoded `[0, 1]` to linear.
+/// The tables a resolved colour space's curve is applied through.
 ///
-/// One definition, used by both the LDR environment decoder and the UV
-/// texture's lookup table, so the two cannot drift apart. `f32` throughout,
-/// which is what both callers computed before it was shared — the results
-/// are bit-identical.
-#[inline]
-pub fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// The inverse of [`srgb_to_linear`]: linear `[0, 1]` back to display-encoded.
-///
-/// Needed only to re-encode a mip level after averaging its parents in linear
-/// light. Levels are stored `u8` like the file they came from, so the
-/// averaging has to round-trip through the transfer function — and doing the
-/// averaging in linear is the whole point, since summing display-encoded
-/// values is not summing light.
-#[inline]
-pub fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// The transfer curves of a resolved colour space, as its methods.
-///
-/// They were free functions taking a `ColorSpace`, which left each one to
-/// answer for `Auto` (as raw) and let a caller hand them a space nobody had
-/// resolved. On [`ResolvedColorSpace`] there is no `Auto` to answer for, and
-/// the curves are found where the space is.
+/// The curves themselves are OCIO's ([`crust_core::color`]); a texture stored
+/// as bytes meets them only through these two tables, built once per open, so
+/// no texel lookup and no mip reduction runs an OCIO processor.
 pub trait TransferCurve: Copy {
-    /// One encoded sample as linear light.
-    ///
-    /// The scalar form of [`TransferCurve::to_linear_table`], for callers that
-    /// have samples rather than bytes — the `.tx` converter, which must
-    /// linearise a display-encoded source *once* before writing it to a float
-    /// file that has no transfer curve of its own. Defined here so no caller
-    /// can invent a second sRGB curve.
-    fn to_linear(self, encoded: f32) -> f32;
-
-    /// The curve that re-encodes a linear value back to this space — the
-    /// inverse of [`TransferCurve::to_linear_table`], used only when
-    /// averaging a mip level.
-    ///
-    /// A function rather than a table because the input is a continuous
-    /// average, not one of 256 stored values; it runs once per texel of
-    /// levels 1 and up, which is a third of the base and only at load.
-    fn encode_fn(self) -> fn(f32) -> f32;
-
     /// The 256-entry decode table.
     ///
     /// The files are 8-bit, so every possible stored value is one of 256 —
@@ -129,37 +79,46 @@ pub trait TransferCurve: Copy {
     /// to 19x at 0.01 — `docs/color_management.md` tabulates it). Collapsing
     /// them into one curve is wrong in the shadows for 2.2 and wrong
     /// everywhere for 1.8.
-    fn to_linear_table(self) -> [f32; 256] {
-        let mut table = [0.0f32; 256];
-        for (i, v) in table.iter_mut().enumerate() {
-            *v = self.to_linear(i as f32 / 255.0);
-        }
-        table
-    }
+    fn to_linear_table(self) -> [f32; 256];
+
+    /// The linear value at which each stored byte begins: entry `k` is the
+    /// decode of `(k + 0.5) / 255`, the boundary between bytes `k` and
+    /// `k + 1`.
+    ///
+    /// The re-encode of a mip level, as a table. Rounding `encode(mean)` to
+    /// the nearest byte picks the `k` whose interval holds it, and since the
+    /// curve is monotone that is the number of boundaries at or below `mean`
+    /// — [`quantize`] — found by bisection rather than by running the
+    /// inverse curve on every texel of every coarser level.
+    fn code_steps(self) -> [f32; 255];
 }
 
 impl TransferCurve for ResolvedColorSpace {
-    #[inline]
-    fn to_linear(self, encoded: f32) -> f32 {
-        match self {
-            ResolvedColorSpace::Srgb => srgb_to_linear(encoded),
-            ResolvedColorSpace::Gamma22 => encoded.max(0.0).powf(2.2),
-            ResolvedColorSpace::Gamma18 => encoded.max(0.0).powf(1.8),
-            ResolvedColorSpace::Raw => encoded,
+    fn to_linear_table(self) -> [f32; 256] {
+        let mut table = [0.0f32; 256];
+        for (i, v) in table.iter_mut().enumerate() {
+            *v = i as f32 / 255.0;
         }
+        self.decode_slice(&mut table);
+        table
     }
 
-    fn encode_fn(self) -> fn(f32) -> f32 {
-        // Matched on the variant rather than on `gamma()`, so a new colour
-        // space is a compile error here instead of silently taking the `Raw`
-        // arm and storing linear values in a display-encoded table.
-        match self {
-            ResolvedColorSpace::Srgb => linear_to_srgb,
-            ResolvedColorSpace::Gamma22 => |c: f32| c.max(0.0).powf(1.0 / 2.2),
-            ResolvedColorSpace::Gamma18 => |c: f32| c.max(0.0).powf(1.0 / 1.8),
-            ResolvedColorSpace::Raw => |c: f32| c,
+    fn code_steps(self) -> [f32; 255] {
+        let mut steps = [0.0f32; 255];
+        for (k, v) in steps.iter_mut().enumerate() {
+            *v = (k as f32 + 0.5) / 255.0;
         }
+        self.decode_slice(&mut steps);
+        steps
     }
+}
+
+/// A linear value as the nearest stored byte, given its space's
+/// [`TransferCurve::code_steps`]. Below the first boundary (or NaN) is 0, past
+/// the last is 255.
+#[inline]
+pub(crate) fn quantize(steps: &[f32; 255], linear: f32) -> u8 {
+    steps.partition_point(|&s| s <= linear) as u8
 }
 
 /// The host side of `crust_core::AssetLoader`, reading from the filesystem.

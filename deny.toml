@@ -32,6 +32,11 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# Boost (BSL-1.0) is permissive, but allowed only where it is needed: the
+# hash `ocio` builds its processor cache keys with.
+exceptions = [
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
 
 [bans]
 # Duplicates are all upstream-driven today (bitflags, hashbrown,
@@ -45,8 +50,10 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The one git dependency, OpenSubdiv-rs, pinned by release tag and resolved to
-# a commit in Cargo.lock.
+# The git dependencies, each resolved to a commit in Cargo.lock: OpenSubdiv-rs,
+# pinned by release tag, and ocio-rs, pinned by commit until it tags a release
+# (doubleailes/ocio-rs#2).
 allow-git = [
     "https://github.com/doubleailes/OpenSubdiv-rs",
+    "https://github.com/doubleailes/ocio-rs",
 ]
