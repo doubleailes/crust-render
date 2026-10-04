@@ -522,10 +522,14 @@
     strand black (mutation-checked).
 
     **Cost, measured** (callgrind at `-s 2`, before → after the change):
-    - `cornellbox`, which has no curves: 4 207 630 659 → 4 223 960 163 instructions
-      (+0.39%). Of that, +0.34% is the kernel's hit records growing to carry the
-      tangent (intersection-kernel record), and +0.05% is the NEE shadow ray asking
-      `passes_out_of_curves`.
+    - `cornellbox`, which has no curves: 4 207 630 659 → 4 225 099 773 instructions
+      (+0.42%). Of that, +0.34% is the kernel's hit records growing to carry the
+      tangent (intersection-kernel record), +0.05% is the NEE shadow ray asking
+      `passes_out_of_curves`, and +0.03% is the mixed-fibre check (`mixes_hair`).
+      The mixed vertex's second shadow ray and split live in a cold, out-of-line
+      `mixed_hair_shadow`. Written as a second closure around the shadow query,
+      it cost +0.8% (+23 M in a closure no longer inlined), even though no
+      vertex here is mixed.
     - `curves`: 58 028 309 → 58 201 388 (+0.30%).
     - `scripts/bench_ab.sh -n 7`: `cornellbox` 6.561 / 6.884 s → 6.693 / 6.982 s,
       min / mean (+2.0% / +1.4%), inside the run-to-run spread. `curves` renders in

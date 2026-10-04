@@ -541,6 +541,52 @@ fn escaped_split(
     }
 }
 
+/// A mixed fibre vertex's NEE toward the tube's far side: `tr_pass` is the
+/// transmittance the ray passing out of curve tubes found; this traces the
+/// other one (`ray`, which does not pass) and weights each share by its own.
+struct MixedHairNee {
+    /// `f_fibres · tr_pass + f_others · tr_wall`.
+    shaded: Vec3A,
+    tr_pass: Vec3A,
+    tr_wall: Vec3A,
+    /// Bit `i` set when `eval_lobes` share `i` is a fibre's.
+    hair_leaves: u8,
+}
+
+impl MixedHairNee {
+    /// The transmittance `eval_lobes` share `i` sees.
+    fn tr(&self, i: usize) -> Vec3A {
+        if self.hair_leaves & (1 << i) != 0 {
+            self.tr_pass
+        } else {
+            self.tr_wall
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn mixed_hair_shadow<const PROFILE: bool>(
+    sp: &ShadingPoint,
+    world: &World,
+    volumes: &Volumes,
+    ray: Ray,
+    distance: f32,
+    tr_pass: Vec3A,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> MixedHairNee {
+    let tr_wall = shadow_transmittance::<PROFILE>(world, volumes, &ray, distance, vertex, stats);
+    let (hair, other, hair_leaves) = sp.eval_hair_split(ray.direction());
+    MixedHairNee {
+        shaded: hair * tr_pass + other * tr_wall,
+        tr_pass,
+        tr_wall,
+        hair_leaves,
+    }
+}
+
 /// NEE shadow test used at surface and volume vertices alike: ZERO when a
 /// surface occludes the segment, otherwise the volumetric transmittance
 /// through every region it crosses (stochastic for heterogeneous regions,
@@ -1382,28 +1428,20 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // bit-identical: a skipped test's contribution would be exactly
             // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
             // which nothing else reads.
-            let mut shadow = |pass: bool| {
+            let mut visibility = || {
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
                     .with_mask(lights.shadow_mask(light_index))
-                    .with_curve_exits_ignored(pass);
-                shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, ls.distance, v, stats)
-            };
-            // Toward a light inside the tube's side, a fibre sharing the
-            // closure with a transmitting leaf needs both answers: the
-            // fibre's light passes out of its own strand, the other leaf's
-            // meets the far wall. Each share then takes its own
-            // transmittance, and the shadow ray is traced twice — at such
-            // vertices only, and only on that side.
-            let mixed = sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0;
-            let mut visibility = || {
-                if mixed {
-                    let (pass, wall) = (shadow(true), shadow(false));
-                    (pass != Vec3A::ZERO || wall != Vec3A::ZERO).then_some((pass, wall))
-                } else {
-                    let tr = shadow(sp.passes_out_of_curves());
-                    (tr != Vec3A::ZERO).then_some((tr, tr))
-                }
+                    .with_curve_exits_ignored(sp.passes_out_of_curves());
+                let tr = shadow_transmittance::<PROFILE>(
+                    world,
+                    volumes,
+                    &shadow_ray,
+                    ls.distance,
+                    v,
+                    stats,
+                );
+                (tr != Vec3A::ZERO).then_some(tr)
             };
             let connection = if ls.radiance == Vec3A::ZERO {
                 None
@@ -1412,17 +1450,28 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
                     .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
             };
-            if let Some((brdf_value, brdf_pdf, (tr_hair, tr_other))) = connection {
-                // Where they differ, the fibres' share and the others' each
-                // through their own transmittance, folded into the value (and
-                // the transmittance left at one); elsewhere the expression is
-                // the one it always was, so nothing else moves by an ulp.
-                let (shaded, hair_leaves, shadow_tr) = if mixed {
-                    let (hair, other, leaves) = sp.eval_hair_split(light_dir_unit);
-                    (hair * tr_hair + other * tr_other, leaves, Vec3A::ONE)
-                } else {
-                    (brdf_value, 0, tr_other)
-                };
+            if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
+                // Toward a light on the tube's far side, a fibre sharing the
+                // closure with a transmitting leaf needs a second answer: the
+                // ray above passed out of the strand (the fibre's light); the
+                // other leaf's meets the far wall. A ray that passes sees a
+                // subset of the hits one that does not sees, so the connection
+                // already stands or falls with it. Rare, so out of line — the
+                // common path stays the expression it always was.
+                let mixed = (sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0).then(|| {
+                    mixed_hair_shadow::<PROFILE>(
+                        &sp,
+                        world,
+                        volumes,
+                        Ray::new(rec.p, light_dir_unit)
+                            .with_time(ray.time())
+                            .with_mask(lights.shadow_mask(light_index)),
+                        ls.distance,
+                        shadow_tr,
+                        v,
+                        stats,
+                    )
+                });
                 let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
                 // The competing strategy for this MIS weight is the
                 // bounce sampler, whose density toward the light is the
@@ -1449,7 +1498,10 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 // continuous transmission lobe can see a light behind the
                 // ray-facing normal). Applying it again here is what used
                 // to make this an integral of `brdf · cos²`.
-                nee += ls.radiance * shaded * shadow_tr * weight / light_pdf.get();
+                nee += match &mixed {
+                    None => ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get(),
+                    Some(m) => ls.radiance * m.shaded * weight / light_pdf.get(),
+                };
                 if let Some(ctx) = routing {
                     // Each lobe's share, in the beauty's own expression. A
                     // walk's exit is part of the walk's event: no event here.
@@ -1458,13 +1510,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     route.nee(
                         ctx.light(light_index),
                         split.iter().enumerate().map(|(i, (e, f))| {
-                            let tr = if !mixed {
-                                shadow_tr
-                            } else if hair_leaves & (1 << i) != 0 {
-                                tr_hair
-                            } else {
-                                tr_other
-                            };
+                            let tr = mixed.as_ref().map_or(shadow_tr, |m| m.tr(i));
                             (
                                 if exiting { NO_EVENT } else { ctx.lobe(e) },
                                 ls.radiance * f * tr * weight / light_pdf,
