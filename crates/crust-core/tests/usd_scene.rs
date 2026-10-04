@@ -390,6 +390,36 @@ fn loads_curves_usda() {
 /// authored `crust:rayMask` wins outright. Shadow and indirect rays see
 /// every light either way — occlusion and the bounce side of MIS depend
 /// on that.
+/// A curve hit's shading tangent is the strand's own direction: the cubic
+/// "Tuft" strand's Bézier derivative at the point hit, not an arbitrary
+/// frame around the normal.
+#[test]
+fn curve_hits_shade_along_the_strand() {
+    let scene = Scene::from_usd(&sample("curves.usda")).expect("failed to open curves.usda");
+    // The first Tuft strand's control points, and its midpoint (u = 0.5).
+    let cp = [
+        Vec3A::new(-0.6, 0.0, 0.0),
+        Vec3A::new(-0.7, 0.6, 0.1),
+        Vec3A::new(-0.4, 1.2, -0.1),
+        Vec3A::new(-0.8, 1.7, 0.0),
+    ];
+    let mid = (cp[0] + cp[3]) * 0.125 + (cp[1] + cp[2]) * 0.375;
+    let ray = Ray::new(mid + Vec3A::Z * 5.0, -Vec3A::Z);
+    let hit = scene
+        .world
+        .intersect(&ray, 0.001, f32::INFINITY)
+        .expect("the ray aims at the strand's midpoint");
+    assert!((hit.rec.t - 5.0).abs() < 0.1, "t = {}", hit.rec.t);
+    let derivative = ((cp[1] - cp[0]) + (cp[2] - cp[1]) * 2.0 + (cp[3] - cp[2])) * 0.75;
+    let along = hit.rec.tangent.dot(derivative.normalize());
+    assert!(
+        along > 0.995,
+        "tangent {:?}, strand {derivative:?}",
+        hit.rec.tangent
+    );
+    assert!((hit.rec.tangent.length() - 1.0).abs() < 1e-5);
+}
+
 #[test]
 fn light_geometry_camera_visibility() {
     let scene = Scene::from_usd(&sample("light_visibility.usda"))

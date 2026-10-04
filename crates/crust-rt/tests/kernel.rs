@@ -1673,3 +1673,305 @@ fn auto_layout_gathers() {
     let fp = b.commit().memory_footprint();
     assert!(fp.packets > 0 && fp.packets_indexed == 0);
 }
+
+// ---------------------------------------------------------------------------
+// Curve span parameter, tangent, and passing out of tubes
+// ---------------------------------------------------------------------------
+
+/// A quarter circle of radius 1 about the origin in the xy plane, from
+/// (1, 0, 0) to (0, 1, 0), as the classic 4-point Bézier approximation.
+fn quarter_circle() -> [Vec3A; 4] {
+    let k = 0.552_284_8;
+    [
+        Vec3A::new(1.0, 0.0, 0.0),
+        Vec3A::new(1.0, k, 0.0),
+        Vec3A::new(k, 1.0, 0.0),
+        Vec3A::new(0.0, 1.0, 0.0),
+    ]
+}
+
+fn bezier_at(cp: &[Vec3A; 4], u: f32) -> Vec3A {
+    let s = 1.0 - u;
+    cp[0] * (s * s * s)
+        + cp[1] * (3.0 * s * s * u)
+        + cp[2] * (3.0 * s * u * u)
+        + cp[3] * (u * u * u)
+}
+
+fn bezier_derivative(cp: &[Vec3A; 4], u: f32) -> Vec3A {
+    let s = 1.0 - u;
+    ((cp[1] - cp[0]) * (s * s) + (cp[2] - cp[1]) * (2.0 * u * s) + (cp[3] - cp[2]) * (u * u)) * 3.0
+}
+
+#[test]
+fn a_linear_curve_hit_reports_where_along_it_and_its_direction() {
+    let mut b = SceneBuilder::new();
+    b.attach(segment(Vec3A::ZERO, Vec3A::new(0.0, 2.0, 0.0), 0.1, 0.1));
+    let scene = b.commit();
+    let hit = scene
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.5, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
+    assert!((hit.u - 0.25).abs() < 1e-5, "u = {}", hit.u);
+    assert!(
+        hit.dpdu.normalize().abs_diff_eq(Vec3A::Y, 1e-6),
+        "{:?}",
+        hit.dpdu
+    );
+    // The caps report the ends.
+    let top = scene
+        .intersect(&Ray::new(Vec3A::new(0.0, 5.0, 0.0), -Vec3A::Y), 1e-3, 100.0)
+        .unwrap();
+    assert_eq!(top.u, 1.0);
+    let bottom = scene
+        .intersect(&Ray::new(Vec3A::new(0.0, -5.0, 0.0), Vec3A::Y), 1e-3, 100.0)
+        .unwrap();
+    assert_eq!(bottom.u, 0.0);
+}
+
+#[test]
+fn every_other_hit_has_no_tangent() {
+    let mut b = SceneBuilder::new();
+    b.attach(sphere(Vec3A::ZERO, 1.0));
+    let scene = b.commit();
+    let hit = scene
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
+    assert_eq!(hit.dpdu, Vec3A::ZERO);
+}
+
+#[test]
+fn a_bent_cubic_span_reports_its_own_tangent_not_the_chord() {
+    let cp = quarter_circle();
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::CubicCurves {
+        segments: vec![CubicCurveSegment {
+            cp,
+            r0: 0.02,
+            r1: 0.02,
+        }],
+    });
+    let scene = b.commit();
+    let mut checked = 0;
+    for i in 1..20 {
+        // Aim at points along the curve, from the camera side.
+        let target = bezier_at(&cp, i as f32 / 20.0);
+        let ray = Ray::new(target - Vec3A::Z * 5.0, Vec3A::Z);
+        let hit = scene.intersect(&ray, 1e-3, 100.0).expect("on the curve");
+        let want = bezier_derivative(&cp, hit.u).normalize();
+        assert!(
+            hit.dpdu.normalize().abs_diff_eq(want, 1e-6),
+            "u = {}: {:?} vs {want:?}",
+            hit.u,
+            hit.dpdu
+        );
+        // The parameter is where the curve is, within the flatness
+        // tolerance (5% of the width) of the true curve.
+        assert!(
+            bezier_at(&cp, hit.u).distance(target) < 0.01,
+            "u = {}",
+            hit.u
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 19);
+    // At the midpoint the chord runs along (-1, 1, 0); the curve does not.
+    let mid = scene
+        .intersect(
+            &Ray::new(bezier_at(&cp, 0.5) - Vec3A::Z * 5.0, Vec3A::Z),
+            1e-3,
+            100.0,
+        )
+        .unwrap();
+    let chord = (cp[3] - cp[0]).normalize();
+    assert!(mid.dpdu.normalize().dot(chord) > 0.99);
+    let early = scene
+        .intersect(
+            &Ray::new(bezier_at(&cp, 0.1) - Vec3A::Z * 5.0, Vec3A::Z),
+            1e-3,
+            100.0,
+        )
+        .unwrap();
+    assert!(early.dpdu.normalize().dot(chord) < 0.9, "{:?}", early.dpdu);
+}
+
+/// One linear strand along +x, under `transform`.
+fn placed_strand(geometry: Geometry) -> Scene {
+    let mut b = SceneBuilder::new();
+    b.attach(geometry);
+    b.commit()
+}
+
+fn strand_scene() -> Arc<Scene> {
+    let mut b = SceneBuilder::new();
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.1,
+        0.1,
+    ));
+    Arc::new(b.commit())
+}
+
+#[test]
+fn an_instanced_curve_reports_its_world_tangent() {
+    // Rotated a quarter turn about z: the strand runs along +y.
+    let rot = Affine3A::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let scene = placed_strand(instance(strand_scene(), rot));
+    let hit = scene
+        .intersect(&Ray::new(Vec3A::new(0.0, 0.3, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
+    assert!(
+        hit.dpdu.normalize().abs_diff_eq(Vec3A::Y, 1e-5),
+        "{:?}",
+        hit.dpdu
+    );
+    // A non-uniform scale maps the tangent by the matrix, not by its
+    // inverse transpose: the strand stays along x, three times as long.
+    let squash = Affine3A::from_scale(Vec3::new(3.0, 0.5, 1.0));
+    let scene = placed_strand(instance(strand_scene(), squash));
+    let hit = scene
+        .intersect(&Ray::new(Vec3A::new(1.0, 0.0, -5.0), Vec3A::Z), 1e-3, 100.0)
+        .unwrap();
+    assert!(
+        hit.dpdu.abs_diff_eq(Vec3A::new(6.0, 0.0, 0.0), 1e-4),
+        "{:?}",
+        hit.dpdu
+    );
+}
+
+#[test]
+fn a_forwarded_and_nested_curve_reports_its_world_tangent() {
+    // A prototype of parts placed under an Offset label, itself instanced
+    // and rotated: the tangent composes through both levels.
+    let mut parts = SceneBuilder::new();
+    parts.attach_labelled(
+        instance(strand_scene(), Affine3A::IDENTITY),
+        MASK_ALL,
+        crust_rt::InstanceHitId::As(0),
+    );
+    let parts = Arc::new(parts.commit());
+    let mut b = SceneBuilder::new();
+    b.attach_labelled(
+        instance(
+            parts,
+            Affine3A::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        ),
+        MASK_ALL,
+        crust_rt::InstanceHitId::Offset(7),
+    );
+    let scene = b.commit();
+    // Rotated about y, +x goes to -z: the strand lies along z, so look at it
+    // along x.
+    let hit = scene
+        .intersect(&Ray::new(Vec3A::new(-5.0, 0.0, 0.4), Vec3A::X), 1e-3, 100.0)
+        .unwrap();
+    assert_eq!(hit.geom_id, 7);
+    assert!(
+        hit.dpdu.normalize().abs_diff_eq(-Vec3A::Z, 1e-5),
+        "{:?}",
+        hit.dpdu
+    );
+}
+
+#[test]
+fn a_moving_curve_reports_its_tangent_at_the_ray_time() {
+    // Turns from along x (time 0) to along y (time 1).
+    let scene = placed_strand(Geometry::Instance {
+        scene: strand_scene(),
+        transform: Affine3A::IDENTITY,
+        transform_end: Some(Box::new(Affine3A::from_rotation_z(
+            std::f32::consts::FRAC_PI_2,
+        ))),
+    });
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, -5.0), Vec3A::Z).with_time(0.5);
+    let hit = scene.intersect(&ray, 1e-3, 100.0).unwrap();
+    // Halfway, the interpolated matrix maps x to (0.5, 0.5, 0).
+    let want = Vec3A::new(1.0, 1.0, 0.0).normalize();
+    assert!(
+        hit.dpdu.normalize().abs_diff_eq(want, 1e-5),
+        "{:?}",
+        hit.dpdu
+    );
+}
+
+#[test]
+fn a_ray_ignoring_curve_exits_passes_out_of_a_tube() {
+    let mut b = SceneBuilder::new();
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.5,
+        0.5,
+    ));
+    // A second tube further along the ray.
+    b.attach(segment(
+        Vec3A::new(-1.0, 0.0, 3.0),
+        Vec3A::new(1.0, 0.0, 3.0),
+        0.5,
+        0.5,
+    ));
+    let scene = b.commit();
+    // From the axis of the first tube, heading +z.
+    let plain = Ray::new(Vec3A::ZERO, Vec3A::Z);
+    let passing = plain.with_curve_exits_ignored(true);
+    let exit = scene.intersect(&plain, 1e-3, 100.0).unwrap();
+    assert!((exit.t - 0.5).abs() < 1e-4 && !exit.front_face);
+    let next = scene.intersect(&passing, 1e-3, 100.0).unwrap();
+    assert!((next.t - 2.5).abs() < 1e-4, "t = {}", next.t);
+    assert!(next.front_face);
+    assert!(!scene.occluded(&passing, 1e-3, 2.0));
+    assert!(scene.occluded(&passing, 1e-3, 3.0));
+    assert!(scene.occluded(&plain, 1e-3, 2.0));
+}
+
+#[test]
+fn passing_out_of_tubes_holds_through_a_mirrored_instance_and_spares_other_geometry() {
+    let mut inner = SceneBuilder::new();
+    inner.attach(segment(
+        Vec3A::new(-1.0, 0.0, 0.0),
+        Vec3A::new(1.0, 0.0, 0.0),
+        0.5,
+        0.5,
+    ));
+    let mirrored = Affine3A::from_scale(Vec3::new(1.0, 1.0, -1.0));
+    let mut b = SceneBuilder::new();
+    b.attach(instance(Arc::new(inner.commit()), mirrored));
+    // A sphere around everything: its exit must still be reported.
+    b.attach(sphere(Vec3A::ZERO, 4.0));
+    let scene = b.commit();
+    for d in [Vec3A::Z, -Vec3A::Z, Vec3A::Y] {
+        let ray = Ray::new(Vec3A::ZERO, d).with_curve_exits_ignored(true);
+        let hit = scene.intersect(&ray, 1e-3, 100.0).unwrap();
+        assert!((hit.t - 4.0).abs() < 1e-4, "{d:?}: t = {}", hit.t);
+        assert!(!hit.front_face);
+    }
+}
+
+#[test]
+fn a_cubic_tube_is_passed_out_of_too() {
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::CubicCurves {
+        segments: vec![CubicCurveSegment {
+            cp: quarter_circle(),
+            r0: 0.1,
+            r1: 0.1,
+        }],
+    });
+    let scene = b.commit();
+    let on_axis = bezier_at(&quarter_circle(), 0.5);
+    let plain = Ray::new(on_axis, Vec3A::Z);
+    assert!(scene.intersect(&plain, 1e-3, 100.0).is_some());
+    assert!(
+        scene
+            .intersect(&plain.with_curve_exits_ignored(true), 1e-3, 100.0)
+            .is_none()
+    );
+    // Entered from outside, it is still hit.
+    let outside = Ray::new(on_axis - Vec3A::Z * 5.0, Vec3A::Z).with_curve_exits_ignored(true);
+    assert!(scene.intersect(&outside, 1e-3, 100.0).unwrap().front_face);
+}
+
+#[test]
+fn passing_out_of_tubes_does_not_grow_the_ray() {
+    assert_eq!(std::mem::size_of::<Ray>(), 48);
+}

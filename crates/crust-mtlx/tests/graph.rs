@@ -102,6 +102,11 @@ fn leaf_params(l: &Bsdf, slots: &[Val]) -> (&'static str, Vec3A, f32) {
             color, roughness, ..
         } => (v(*color).rgb(), v(*roughness).x()),
         Bsdf::Subsurface { color, .. } | Bsdf::Translucent { color } => (v(*color).rgb(), 0.0),
+        Bsdf::Hair {
+            tint_r,
+            roughness_r,
+            ..
+        } => (v(*tint_r).rgb(), v(*roughness_r).x()),
     };
     (l.category(), color, rough)
 }
@@ -2105,4 +2110,100 @@ fn no_displacementshader_is_no_displacement() {
     let c = compile(&path, None, &Host::new(&decline)).unwrap();
     assert!(c.displacement.is_none());
     assert!(c.closures.reported.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Hair
+// ---------------------------------------------------------------------------
+
+/// A bare `chiang_hair_bsdf` is a supported leaf whose unauthored inputs are
+/// the nodedef's defaults, and whose fibre direction is the host's tangent.
+#[test]
+fn a_bare_chiang_hair_bsdf_is_a_leaf_with_the_nodedef_defaults() {
+    let doc = r#"<materialx>
+        <chiang_hair_bsdf name="h" type="BSDF" />
+    </materialx>"#;
+    assert!(unsupported_of(doc, "h").is_empty());
+    let (cl, slots) = closures_of(doc, "h");
+    let Some(Closure::Leaf(leaf)) = cl.root.map(|r| &cl.nodes[r as usize]) else {
+        panic!("one leaf");
+    };
+    assert_eq!(leaf.bsdf.category(), "chiang_hair_bsdf");
+    assert!(
+        leaf.tangent.is_none(),
+        "curve_direction unconnected: the host's"
+    );
+    let Bsdf::Hair {
+        tint_r,
+        tint_tt,
+        tint_trt,
+        ior,
+        roughness_r,
+        roughness_tt,
+        roughness_trt,
+        cuticle_angle,
+        absorption,
+    } = leaf.bsdf
+    else {
+        panic!("a hair leaf");
+    };
+    let v = |s: u32| slots[s as usize];
+    for tint in [tint_r, tint_tt, tint_trt] {
+        assert_eq!(v(tint).rgb(), Vec3A::ONE);
+    }
+    assert_eq!(v(ior).x(), 1.55);
+    assert_eq!(v(roughness_r).v[..2], [0.1, 0.1]);
+    assert_eq!(v(roughness_tt).v[..2], [0.05, 0.05]);
+    assert_eq!(v(roughness_trt).v[..2], [0.2, 0.2]);
+    assert_eq!(v(cuticle_angle).x(), 0.5);
+    assert_eq!(v(absorption).rgb(), Vec3A::ZERO);
+}
+
+/// An authored `curve_direction` becomes the leaf's tangent, and the helper
+/// nodes feed the leaf like any pattern node.
+#[test]
+fn a_hair_leaf_reads_its_helpers_and_curve_direction() {
+    let doc = r#"<materialx>
+        <chiang_hair_roughness name="r" type="multioutput">
+            <input name="longitudinal" type="float" value="0.3" />
+            <input name="azimuthal" type="float" value="0.5" />
+        </chiang_hair_roughness>
+        <chiang_hair_absorption_from_color name="a" type="vector3">
+            <input name="color" type="color3" value="0.6, 0.4, 0.2" />
+        </chiang_hair_absorption_from_color>
+        <chiang_hair_bsdf name="h" type="BSDF">
+            <input name="roughness_R" type="vector2" nodename="r" output="roughness_R" />
+            <input name="roughness_TT" type="vector2" nodename="r" output="roughness_TT" />
+            <input name="roughness_TRT" type="vector2" nodename="r" output="roughness_TRT" />
+            <input name="absorption_coefficient" type="vector3" nodename="a" />
+            <input name="curve_direction" type="vector3" value="0, 1, 0" />
+        </chiang_hair_bsdf>
+    </materialx>"#;
+    assert!(unsupported_of(doc, "h").is_empty());
+    let (cl, slots) = closures_of(doc, "h");
+    let Some(Closure::Leaf(leaf)) = cl.root.map(|r| &cl.nodes[r as usize]) else {
+        panic!("one leaf");
+    };
+    let v = |s: u32| slots[s as usize];
+    assert_eq!(v(leaf.tangent.expect("authored")).rgb(), Vec3A::Y);
+    let Bsdf::Hair {
+        roughness_r,
+        roughness_tt,
+        roughness_trt,
+        absorption,
+        ..
+    } = leaf.bsdf
+    else {
+        panic!("a hair leaf");
+    };
+    let (r, tt, trt) = (v(roughness_r), v(roughness_tt), v(roughness_trt));
+    // TT's variance is a quarter of R's and TRT's four times; all three share
+    // R's azimuthal scale.
+    assert!((tt.x() - r.x() * 0.25).abs() < 1e-7 && (trt.x() - r.x() * 4.0).abs() < 1e-6);
+    assert_eq!((tt.v[1], trt.v[1]), (r.v[1], r.v[1]));
+    let sigma = v(absorption).rgb();
+    assert!(
+        sigma.z > sigma.y && sigma.y > sigma.x && sigma.x > 0.0,
+        "{sigma:?}"
+    );
 }

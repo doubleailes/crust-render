@@ -5,6 +5,10 @@
 //! update not carried over — would make every document that leaves an input
 //! unauthored shade with the wrong value, and render plausibly.
 
+use crust_mtlx::hair::{
+    CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
+    DEON_HAIR_ABSORPTION_FROM_MELANIN,
+};
 use crust_mtlx::surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 use crust_mtlx::value::parse_literal;
 use std::path::Path;
@@ -75,6 +79,23 @@ fn nodedef_tables_match_materialx() {
         GLTF_PBR,
         "ND_gltf_pbr_surfaceshader.mtlx",
         "ND_gltf_pbr_surfaceshader",
+    );
+}
+
+#[test]
+fn hair_nodedef_tables_match_materialx() {
+    let file = "ND_chiang_hair.mtlx";
+    check(CHIANG_HAIR_BSDF, file, "ND_chiang_hair_bsdf");
+    check(CHIANG_HAIR_ROUGHNESS, file, "ND_chiang_hair_roughness");
+    check(
+        CHIANG_HAIR_ABSORPTION_FROM_COLOR,
+        file,
+        "ND_chiang_hair_absorption_from_color",
+    );
+    check(
+        DEON_HAIR_ABSORPTION_FROM_MELANIN,
+        file,
+        "ND_deon_hair_absorption_from_melanin",
     );
 }
 

@@ -595,6 +595,7 @@ fn restarted(ray: &Ray, t: f32) -> Ray {
     Ray::new(ray.at(t), ray.direction())
         .with_time(ray.time())
         .with_mask(ray.mask())
+        .with_curve_exits_ignored(ray.rt().ignore_curve_exits)
         .with_cone(crate::RayCone {
             width: cone.width_at(t * ray.direction().length()),
             spread: cone.spread,
@@ -1374,7 +1375,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             let mut visibility = || {
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
-                    .with_mask(lights.shadow_mask(light_index));
+                    .with_mask(lights.shadow_mask(light_index))
+                    .with_curve_exits_ignored(sp.passes_out_of_curves());
                 let tr = shadow_transmittance::<PROFILE>(
                     world,
                     volumes,

@@ -13,10 +13,17 @@ use std::sync::Arc;
 /// *geometric outward* normal (not yet oriented against the ray) — the
 /// public API flips it and derives `front_face` at the query edge, so
 /// instance transforms can map it without bookkeeping.
+///
+/// `dpdu` is a curve's (unnormalised) direction at the hit, which instances
+/// map by their local-to-world linear part; zero for every other primitive.
+/// A `Vec3A`, though it grows the record from 48 to 64 bytes: stored as
+/// `[f32; 3]` to keep 48, the unaligned stores and compares cost traversal
+/// three times what the copies they save do.
 #[derive(Clone, Copy)]
 pub(crate) struct PrimHit {
     pub t: f32,
     pub outward: Vec3A,
+    pub dpdu: Vec3A,
     pub u: f32,
     pub v: f32,
     pub geom_id: u32,
@@ -153,6 +160,7 @@ pub(crate) fn triangle_hit_from_barycentric(
     Some(PrimHit {
         t,
         outward,
+        dpdu: Vec3A::ZERO,
         u,
         v,
         geom_id: rec.geom_id,
@@ -195,6 +203,7 @@ impl Prim for SpherePrim {
         Some(PrimHit {
             t: root,
             outward: (ray.at(root) - self.center) / self.radius,
+            dpdu: Vec3A::ZERO,
             u: 0.0,
             v: 0.0,
             geom_id: self.geom_id,
@@ -245,6 +254,7 @@ impl Prim for DiskPrim {
         Some(PrimHit {
             t,
             outward: self.normal,
+            dpdu: Vec3A::ZERO,
             u: 0.0,
             v: 0.0,
             geom_id: self.geom_id,
@@ -313,6 +323,7 @@ impl Prim for CylinderPrim {
             return Some(PrimHit {
                 t,
                 outward: (rel - s * self.axis) / self.radius,
+                dpdu: Vec3A::ZERO,
                 u: 0.0,
                 v: 0.0,
                 geom_id: self.geom_id,
@@ -355,19 +366,13 @@ impl Prim for CurvePrim {
         if masked_out(ray, self.mask) {
             return None;
         }
-        let (t, outward) = rounded_cone_intersect(
-            ray,
-            Vec3A::from_array(self.p0),
-            Vec3A::from_array(self.p1),
-            self.r0,
-            self.r1,
-            t_min,
-            t_max,
-        )?;
+        let (p0, p1) = (Vec3A::from_array(self.p0), Vec3A::from_array(self.p1));
+        let h = rounded_cone_intersect(ray, p0, p1, self.r0, self.r1, t_min, t_max)?;
         Some(PrimHit {
-            t,
-            outward,
-            u: 0.0,
+            t: h.t,
+            outward: h.normal,
+            dpdu: p1 - p0,
+            u: h.u,
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: self.prim_id,
@@ -412,12 +417,12 @@ impl Prim for CubicCurvePrim {
         if masked_out(ray, self.mask) {
             return None;
         }
-        let (t, outward) =
-            crate::curve::cubic_curve_intersect(ray, &self.cp, self.r0, self.r1, t_min, t_max)?;
+        let h = crate::curve::cubic_curve_intersect(ray, &self.cp, self.r0, self.r1, t_min, t_max)?;
         Some(PrimHit {
-            t,
-            outward,
-            u: 0.0,
+            t: h.t,
+            outward: h.normal,
+            dpdu: crate::curve::bezier_tangent(&self.cp, h.u),
+            u: h.u,
             v: 0.0,
             geom_id: self.geom_id,
             prim_id: self.prim_id,
@@ -560,6 +565,7 @@ impl InstancePrim {
             dir: w2l.transform_vector3a(ray.dir),
             time: ray.time,
             mask: ray.mask,
+            ignore_curve_exits: ray.ignore_curve_exits,
         }
     }
 }
@@ -585,6 +591,12 @@ impl InstancePrim {
         crate::bvh::stats::leave_instance();
         let mut hit = inner?;
         hit.outward = (normal_mat * hit.outward).normalize();
+        // Only curves carry a direction; a triangle or sphere hit skips the
+        // inverse. The normal matrix is the inverse's transpose, so the
+        // tangent's map is recovered from it rather than stored.
+        if hit.dpdu != Vec3A::ZERO {
+            hit.dpdu = normal_mat.transpose().inverse() * hit.dpdu;
+        }
         // The hit is attributed to the *instance's* geometry id — the
         // application maps materials per top-level geometry — unless the
         // instance forwards the inner id under an offset (a prototype of

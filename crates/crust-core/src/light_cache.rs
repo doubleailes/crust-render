@@ -238,7 +238,8 @@ pub(crate) fn train(
                                 }
                                 let shadow = Ray::new(p, ls.direction)
                                     .with_time(ray.time())
-                                    .with_mask(lights.shadow_mask(k));
+                                    .with_mask(lights.shadow_mask(k))
+                                    .with_curve_exits_ignored(sp.passes_out_of_curves());
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.

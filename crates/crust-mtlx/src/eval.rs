@@ -1342,6 +1342,13 @@ impl<'a> Compiler<'a> {
                     extinction: output == Some("extinction"),
                 })
             }
+            "chiang_hair_roughness" => self.compile_chiang_hair_roughness(node, output),
+            "chiang_hair_absorption_from_color" => {
+                self.compile_chiang_hair_absorption_from_color(node)
+            }
+            "deon_hair_absorption_from_melanin" => {
+                self.compile_deon_hair_absorption_from_melanin(node)
+            }
             "colorcorrect" => self.compile_colorcorrect(node),
             "heighttonormal" => {
                 let scale = self.input_or(node, "scale", Val::ONE);

@@ -113,3 +113,4 @@ Crust Render reads these standard `UsdGeom` attributes without any `crust:` attr
 | `visibility`, `purpose` | a prim with `visibility = "invisible"` is skipped with its whole subtree. Prims with purpose `guide` or `proxy` are skipped. |
 | `primvars:st` | UV coordinates for UV and UDIM textures |
 | `PointInstancer` and native instancing | prototypes are stored once and placed per instance |
+| `BasisCurves` | round tubes of the authored `widths`: `linear`, or `cubic` with a `bezier`, `bspline` or `catmullRom` basis. Per-vertex widths follow the basis; per-curve and constant widths are read too. A hit on a curve shades along the strand, so a [hair material](@/docs/usd/materials.md#hair) sees its direction at every placement. `normals` (ribbons) and `wrap` (periodic curves) are not read: every curve is a round, open tube. |

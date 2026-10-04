@@ -113,7 +113,9 @@ second tree — dropping it took instance descents from 3.85 to 0.13 per camera
 ray on `samples/cornellbox.usda`.
 `UsdGeomBasisCurves` import as **round curve segments** (sphere-swept cones;
 cubic bezier/bspline/catmullRom spans stay cubic and are subdivided per ray) — see
-`samples/curves.usda`. Two per-prim extras:
+`samples/curves.usda`. A curve hit carries the strand's direction through every
+instance, which is what MaterialX hair (`samples/hair.usda`) shades along. Two
+per-prim extras:
 
 - `crust:motion:translate = (x, y, z)` — **transform motion blur**: the prim
   streaks through that world-space translation over the shutter
@@ -175,6 +177,13 @@ crate (no renderer dependency, just an XML parser and `glam`):
   roughness, IOR, Fresnel and normal, so a glaze over a glaze, a varnish over
   metal or a normal-mapped coat over a smooth base all keep every interface,
   and a MaterialX glass refracts;
+- **hair**: `chiang_hair_bsdf` is Chiang et al. 2016's fibre model as pbrt-v3
+  implements it (R, TT, TRT and TRRT+ lobes, cuticle tilt, absorption inside
+  the fibre, importance-sampled and energy-conserving), with MaterialX's
+  parameters and its three helpers — `chiang_hair_roughness`,
+  `chiang_hair_absorption_from_color`, `deon_hair_absorption_from_melanin` —
+  pinned against MaterialX's GLSL. On a curve it shades along the strand, and
+  a strand never shadows its own transmitted light: see `samples/hair.usda`;
 - the surface nodes — `open_pbr_surface`, `standard_surface`, `gltf_pbr` — are
   expanded **node for node** into the trees of their MaterialX 1.39
   nodegraphs, unauthored inputs taking the nodedefs' defaults — opacity

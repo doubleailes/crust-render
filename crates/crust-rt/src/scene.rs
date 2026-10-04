@@ -227,10 +227,17 @@ pub enum Geometry {
 /// *instance's* id in the queried scene and `prim_id` the primitive index
 /// within the instanced scene — the application maps per top-level
 /// geometry.
+///
+/// A curve hit also reports where along the curve it lies — `u` in `[0, 1]`
+/// across its segment or cubic span — and `dpdu`, the curve's direction
+/// there, unnormalised, in the queried scene's space (carried through every
+/// instance by its local-to-world linear part, at the ray's time). Every
+/// other hit's `dpdu` is zero.
 #[derive(Clone, Copy, Debug)]
 pub struct RayHit {
     pub t: f32,
     pub normal: Vec3A,
+    pub dpdu: Vec3A,
     pub front_face: bool,
     pub u: f32,
     pub v: f32,
@@ -681,6 +688,7 @@ impl Scene {
             } else {
                 -hit.outward
             },
+            dpdu: hit.dpdu,
             front_face,
             u: hit.u,
             v: hit.v,

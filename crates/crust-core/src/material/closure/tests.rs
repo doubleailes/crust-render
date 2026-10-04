@@ -139,6 +139,13 @@ const LEAVES: &[(&str, &str)] = &[
         "translucent",
         r#"<translucent_bsdf name="x" type="BSDF" />"#,
     ),
+    (
+        "hair",
+        r#"<chiang_hair_bsdf name="x" type="BSDF">
+             <input name="absorption_coefficient" type="vector3" value="0.1, 0.2, 0.4" />
+             <input name="cuticle_angle" type="float" value="0.52" />
+           </chiang_hair_bsdf>"#,
+    ),
 ];
 
 #[test]
@@ -879,4 +886,85 @@ fn the_diffuse_filter_sums_diffuse_leaves_only() {
             .any(|l| matches!(l.lobe, Lobe::Diffuse { .. }));
         assert_eq!(f != Vec3A::ZERO, diffuse, "{name}: {f}");
     }
+}
+
+/// A fibre beside a diffuse: the mixture's density, the fibre's over the
+/// whole sphere and the diffuse's over the hemisphere, integrates to one.
+#[test]
+fn a_hair_mixture_pdf_integrates_to_one() {
+    let body = doc(r#"
+      <oren_nayar_diffuse_bsdf name="d" type="BSDF" />
+      <chiang_hair_bsdf name="h" type="BSDF">
+        <input name="roughness_R" type="vector2" value="0.3, 0.4" />
+        <input name="roughness_TT" type="vector2" value="0.1, 0.4" />
+        <input name="roughness_TRT" type="vector2" value="0.9, 0.4" />
+      </chiang_hair_bsdf>
+      <mix name="x" type="BSDF">
+        <input name="fg" type="BSDF" nodename="h" />
+        <input name="bg" type="BSDF" nodename="d" />
+        <input name="mix" type="float" value="0.25" />
+      </mix>"#);
+    let c = resolved(&body, "x", 0.5, true);
+    assert_eq!(c.leaves().len(), 2);
+    let n = 400_000;
+    let mut sum = 0.0f64;
+    for i in 0..n {
+        let u = (i as f32 + 0.5) / n as f32;
+        let z = 1.0 - 2.0 * u;
+        let phi = 2.0 * PI * ((i as f32 * 0.618_034) % 1.0);
+        let s = (1.0 - z * z).max(0.0).sqrt();
+        let wi = Vec3A::new(s * phi.cos(), s * phi.sin(), z);
+        // Below the floor `eval` applies, so the lower hemisphere counts
+        // only the fibre's own density.
+        let (_, p) = c.eval_pdf(wi);
+        sum += p as f64;
+    }
+    let integral = sum / n as f64 * 4.0 * std::f64::consts::PI;
+    assert!((integral - 1.0).abs() < 0.03, "∫pdf = {integral}");
+}
+
+/// A fibre's continuation ray passes out of curve tubes; any other closure's
+/// does not.
+#[test]
+fn a_hair_vertex_passes_out_of_curves() {
+    let hair = LEAVES.iter().find(|(n, _)| *n == "hair").unwrap().1;
+    let c = resolved(&doc(hair), "x", 0.4, true);
+    assert!(c.passes_out_of_curves());
+    let (r, rec) = (arriving(0.4), hit(true));
+    let mut s = S(0);
+    let mut seen = 0;
+    for _ in 0..64 {
+        if let Some(x) = c.scatter(&r, &rec, s.next()) {
+            assert!(x.ray.rt().ignore_curve_exits);
+            seen += 1;
+        }
+    }
+    assert!(seen > 32);
+    for (name, body) in LEAVES.iter().filter(|(n, _)| *n != "hair") {
+        let c = resolved(&doc(body), "x", 0.4, true);
+        assert!(!c.passes_out_of_curves(), "{name}");
+        if let Some(x) = c.scatter(&r, &rec, S(0).next()) {
+            assert!(!x.ray.rt().ignore_curve_exits, "{name}");
+        }
+    }
+}
+
+/// A fibre's sample on the far side of its normal is a transmission, on the
+/// near side a reflection, both glossy.
+#[test]
+fn a_hair_leaf_is_classified_by_hemisphere() {
+    use crate::lpe::{LobeLabel, Scatter};
+    let hair = LEAVES.iter().find(|(n, _)| *n == "hair").unwrap().1;
+    let c = resolved(&doc(hair), "x", 0.4, true);
+    let leaf = &c.leaves()[0];
+    let (near, far) = (leaf.event(false), leaf.event(true));
+    assert_eq!(
+        (near.label, near.scatter),
+        (LobeLabel::Specular, Scatter::Glossy)
+    );
+    assert_eq!(
+        (far.label, far.scatter),
+        (LobeLabel::Transmission, Scatter::Glossy)
+    );
+    assert!(!near.transmit && far.transmit);
 }

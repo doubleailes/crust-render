@@ -2776,3 +2776,44 @@ fn a_prims_color_space_is_inherited_by_its_descendants_colours() {
         "{got:?} vs {inherited}"
     );
 }
+
+/// Curves placed by a `PointInstancer` shade along each placement's own
+/// strand: the tangent comes through the instance chain from the kernel, so
+/// a forwarded prototype id (which names no placement) does not lose it.
+#[test]
+fn instanced_curves_shade_along_each_placement() {
+    let scene = load(
+        "instanced_curves",
+        r#"
+    def PointInstancer "Fur"
+    {
+        rel prototypes = [</World/Fur/Protos/Strand>]
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(-2, 0, 0), (2, 0, 0)]
+        quath[] orientations = [(1, 0, 0, 0), (0.70710677, 0, 0, 0.70710677)]
+        def Scope "Protos"
+        {
+            def BasisCurves "Strand"
+            {
+                uniform token type = "linear"
+                int[] curveVertexCounts = [2]
+                point3f[] points = [(-0.5, 0, 0), (0.5, 0, 0)]
+                float[] widths = [0.1] (interpolation = "constant")
+            }
+        }
+    }
+"#,
+    );
+    let tangent_at = |x: f32, y: f32| {
+        let ray = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z);
+        scene
+            .world
+            .intersect(&ray, 0.001, f32::INFINITY)
+            .unwrap_or_else(|| panic!("a strand at ({x}, {y})"))
+            .rec
+            .tangent
+    };
+    // Unrotated: along +x. A quarter turn about z: along +y.
+    assert!(tangent_at(-2.2, 0.0).abs_diff_eq(Vec3A::X, 1e-4));
+    assert!(tangent_at(2.0, 0.2).abs_diff_eq(Vec3A::Y, 1e-4));
+}

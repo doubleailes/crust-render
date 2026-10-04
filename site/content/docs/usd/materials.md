@@ -24,7 +24,7 @@ Crust Render picks the material's surface shader by its `info:id`:
 | `info:id = "crust:openpbr"` | Crust's own shader: every OpenPBR parameter, one to one. [See below](#the-crust-openpbr-shader). |
 | `info:id = "UsdPreviewSurface"` | mapped onto OpenPBR, with `UsdUVTexture` and Ptex texture inputs |
 | `info:id = "PxrDisneyBsdf"` | mapped onto OpenPBR (as authored by the Moana Island) |
-| a reference into a `.mtlx` file | read as a MaterialX graph: standalone BSDF nodes, `open_pbr_surface`, `standard_surface`, `gltf_pbr`, image and UDIM textures, normal maps |
+| a reference into a `.mtlx` file | read as a MaterialX graph: standalone BSDF nodes, `open_pbr_surface`, `standard_surface`, `gltf_pbr`, image and UDIM textures, normal maps, [hair](#hair) |
 
 A material Crust Render can't read logs a warning and renders as grey diffuse. Look for
 these warnings when a surface comes out grey.
@@ -167,6 +167,68 @@ so use a UsdLux light for a scene's main light sources.
 |-------|------|---------|---------|
 | `inputs:geometryOpacity` | `float` | 1.0 | 0 = fully cut out |
 | `inputs:geometryThinWalled` | `bool` | false | treat the surface as an infinitely thin sheet (leaves, paper) rather than the boundary of a solid |
+
+## Hair
+
+Hair and fur are `BasisCurves` prims shaded with MaterialX's `chiang_hair_bsdf`: the fibre
+model of Chiang et al. (2016), as pbrt-v3 implements it. It scatters light the way a
+strand does: a primary highlight (R), a secondary coloured highlight shifted along the
+strand (TRT), a glow when the hair is lit from behind (TT), and the light that bounces
+around inside the fibre several times. Bind it like any MaterialX material:
+
+```xml
+<materialx version="1.39">
+  <chiang_hair_roughness name="rough" type="multioutput">
+    <input name="longitudinal" type="float" value="0.3" />
+    <input name="azimuthal" type="float" value="0.5" />
+  </chiang_hair_roughness>
+  <deon_hair_absorption_from_melanin name="melanin" type="vector3">
+    <input name="melanin_concentration" type="float" value="0.6" />
+    <input name="melanin_redness" type="float" value="0.3" />
+  </deon_hair_absorption_from_melanin>
+  <chiang_hair_bsdf name="hair" type="BSDF">
+    <input name="roughness_R" type="vector2" nodename="rough" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" nodename="melanin" />
+  </chiang_hair_bsdf>
+  <surface name="hair_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="hair" />
+  </surface>
+  <surfacematerial name="brown_hair" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="hair_surface" />
+  </surfacematerial>
+</materialx>
+```
+
+| input | meaning |
+|-------|---------|
+| `tint_R`, `tint_TT`, `tint_TRT` | a colour multiplying that lobe. The longer paths inside the fibre take `tint_TRT`. |
+| `ior` | the fibre's index of refraction. Default 1.55. |
+| `roughness_R`, `roughness_TT`, `roughness_TRT` | a `vector2` per lobe: longitudinal variance and azimuthal scale, each clamped to [0.001, 1]. Connect them to `chiang_hair_roughness` rather than authoring them. |
+| `cuticle_angle` | the tilt of the fibre's scales, in [0, 1]: 0.5 is none, and the range maps to −90° to +90°. Real hair is about 2°, so about 0.51. |
+| `absorption_coefficient` | how strongly the fibre absorbs, per unit radius, per channel. Connect it to one of the absorption helpers. |
+| `curve_direction` | the strand's direction. Unconnected, it is the curve's own direction at the hit, which is what you want. |
+
+The three helper nodes turn artist parameters into those inputs:
+
+| node | outputs |
+|------|---------|
+| `chiang_hair_roughness` | `roughness_R`, `roughness_TT` and `roughness_TRT` from a `longitudinal` and an `azimuthal` roughness in [0, 1] |
+| `chiang_hair_absorption_from_color` | the `absorption` that makes a dense groom read as `color`, for a given `azimuthal_roughness` |
+| `deon_hair_absorption_from_melanin` | the `absorption` of natural hair from a `melanin_concentration` and a `melanin_redness` |
+
+`samples/hair.usda` renders one tuft per way of reaching the node. Light reaching a strand
+through the strand itself is already part of the model, so a strand never shadows its
+own transmitted light. It still shadows everything else, other strands included.
+
+Author grooms in centimetres (`metersPerUnit = 0.01`, the USD default). Crust Render
+starts every ray 0.001 units away from the surface it leaves; in a groom authored in
+metres that is 1 mm, wider than a hair, and neighbouring strands then stop lighting and
+shadowing each other. See [limitations](@/docs/architecture/limitations.md#materials-and-textures).
+
+The node also works on a mesh, such as a hair card. There, `curve_direction` defaults to
+the mesh's UV tangent, so the card needs UVs whose `u` runs along the hair.
 
 ## Displacement
 

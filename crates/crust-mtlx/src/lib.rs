@@ -44,6 +44,7 @@
 
 pub mod bsdf;
 pub mod eval;
+pub mod hair;
 pub mod parse;
 pub mod surface;
 mod texture;

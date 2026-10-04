@@ -69,7 +69,12 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
 - The fibre direction is correct on every curve placement: top-level,
   instanced, `PointInstancer`-forwarded, and motion-blurred.
 - Scenes without curves stay bit-identical and pay no measurable cost.
-  Scenes with curves but no hair leaf stay bit-identical.
+- Curves shaded by OpenPBR, `UsdPreviewSurface` or `Emissive` stay
+  bit-identical: those models ignore the tangent.
+- A MaterialX closure on a curve gains a meaningful frame instead of
+  `tangent_frame(n)`'s arbitrary one. Its isotropic lobes change only their
+  sample pattern. Its anisotropic ones now stretch along the strand, which is
+  the point.
 
 **Non-Goals:**
 
@@ -158,8 +163,9 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
   - Alternative: a new keyed `K_HAIR` sub-domain in `tracer/path.rs`.
     Rejected, because it threads one extra draw through every lobe signature
     for one leaf kind.
-- **The pdf** is pbrt's `Pdf`: the same p-mixture, `Mp · Np` per lobe, divided
-  by `|l.z|`.
+- **The pdf** is pbrt's `Pdf`: the same p-mixture, `Mp · Np` per lobe, per
+  solid angle. It carries no cosine, so unlike `f` it is not divided by
+  `|l.z|`.
 - **Continuous samples.** The samples are `LobeSample::Continuous`, with a ray
   cone spread of `√v` of the chosen lobe, capped at `MAX_SPREAD`.
 - **The `transmits` flag stays off.** A hair leaf does not set the closure's
@@ -244,7 +250,10 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
   - a continuation ray, when the closure at its vertex holds a live hair leaf
     (`ResolvedClosure::ray`);
   - a shadow ray toward a sampled light from such a vertex (the NEE in
-    `tracer/path.rs`, through a `ShadingPoint` query).
+    `tracer/path.rs`, through a `ShadingPoint` query);
+  - the learned light cache's training shadow rays from such a vertex, so its
+    guide agrees with the integrator;
+  - a ray restarted past a cutout, which keeps the flag of the ray it continues.
 - **Why it is correct:**
   - Chiang's model already integrates the light's whole path through the fibre
     from the entry point. The far wall belongs to the same event.
@@ -291,8 +300,9 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
 - `PooledClosure` gains a `hair: bool`, set in `walk()` when a hair leaf is
   pushed. It drives D5's flag.
 - An OpenPBR, `UsdPreviewSurface` or `Emissive` vertex never sets it.
-- Their rays and shadow rays are built exactly as today, so their images stay
-  bit-identical. `scripts/check_images.sh` pins this on the sample set.
+- Their rays and shadow rays are built exactly as today.
+- No sample scene puts a MaterialX material on a curve, so
+  `scripts/check_images.sh` must report every sample scene bit-identical.
 
 ## Risks / Trade-offs
 

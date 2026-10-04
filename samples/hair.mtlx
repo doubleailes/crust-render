@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<!--
+  MaterialX hair: `chiang_hair_bsdf` (crates/crust-core/src/material/closure/
+  hair.rs, Chiang et al. 2016 as pbrt-v3 implements it) and its three helper
+  nodes.
+
+  One material per way a document reaches the leaf:
+
+    mtlx_hair_bare      — the leaf alone, every input a constant: a warm
+                          absorption, and the cuticle tilted 2 degrees
+                          (0.5 + 2/180).
+    mtlx_hair_roughness — roughness from `chiang_hair_roughness` (artist
+                          longitudinal 0.3, azimuthal 0.5).
+    mtlx_hair_color     — absorption from `chiang_hair_absorption_from_color`,
+                          the colour a dense groom should read as.
+    mtlx_hair_melanin   — absorption from `deon_hair_absorption_from_melanin`:
+                          a light brown.
+    mtlx_hair_mix       — the bare leaf mixed with a diffuse at 0.25: a
+                          fibre beside any other leaf in one closure tree.
+    mtlx_hair_clear     — no absorption, white tints: a fibre that loses no
+                          energy, for the furnace and the backlit glow.
+    mtlx_diffuse_twin   — a white diffuse, the clear fibre's twin: what the
+                          strands rendered as before hair had a model.
+
+  Texture-free on purpose, so tests and `examples/mtlx_shade` can pin exact
+  numbers.
+-->
+<materialx version="1.39">
+
+  <!-- The leaf alone, constant inputs. -->
+  <chiang_hair_bsdf name="bare_bsdf" type="BSDF">
+    <input name="absorption_coefficient" type="vector3" value="0.2, 0.6, 1.2" />
+    <input name="cuticle_angle" type="float" value="0.511111" />
+  </chiang_hair_bsdf>
+  <surface name="bare_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="bare_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_bare" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="bare_surface" />
+  </surfacematerial>
+
+  <!-- Roughness from artist parameters. -->
+  <chiang_hair_roughness name="rough" type="multioutput">
+    <input name="longitudinal" type="float" value="0.3" />
+    <input name="azimuthal" type="float" value="0.5" />
+  </chiang_hair_roughness>
+  <chiang_hair_bsdf name="roughness_bsdf" type="BSDF">
+    <input name="roughness_R" type="vector2" nodename="rough" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" value="0.2, 0.6, 1.2" />
+  </chiang_hair_bsdf>
+  <surface name="roughness_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="roughness_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_roughness" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="roughness_surface" />
+  </surfacematerial>
+
+  <!-- Absorption from the colour a dense groom should read as. -->
+  <chiang_hair_roughness name="rough_color" type="multioutput">
+    <input name="longitudinal" type="float" value="0.25" />
+    <input name="azimuthal" type="float" value="0.3" />
+  </chiang_hair_roughness>
+  <chiang_hair_absorption_from_color name="from_color" type="vector3">
+    <input name="color" type="color3" value="0.6, 0.4, 0.2" />
+    <input name="azimuthal_roughness" type="float" value="0.3" />
+  </chiang_hair_absorption_from_color>
+  <chiang_hair_bsdf name="color_bsdf" type="BSDF">
+    <input name="roughness_R" type="vector2" nodename="rough_color" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough_color" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough_color" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" nodename="from_color" />
+  </chiang_hair_bsdf>
+  <surface name="color_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="color_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_color" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="color_surface" />
+  </surfacematerial>
+
+  <!-- Absorption from melanin: a light brown. -->
+  <deon_hair_absorption_from_melanin name="melanin" type="vector3">
+    <input name="melanin_concentration" type="float" value="0.6" />
+    <input name="melanin_redness" type="float" value="0.3" />
+  </deon_hair_absorption_from_melanin>
+  <chiang_hair_bsdf name="melanin_bsdf" type="BSDF">
+    <input name="roughness_R" type="vector2" nodename="rough" output="roughness_R" />
+    <input name="roughness_TT" type="vector2" nodename="rough" output="roughness_TT" />
+    <input name="roughness_TRT" type="vector2" nodename="rough" output="roughness_TRT" />
+    <input name="absorption_coefficient" type="vector3" nodename="melanin" />
+  </chiang_hair_bsdf>
+  <surface name="melanin_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="melanin_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_melanin" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="melanin_surface" />
+  </surfacematerial>
+
+  <!-- The fibre beside another leaf: a quarter hair, three quarters diffuse. -->
+  <oren_nayar_diffuse_bsdf name="mix_diffuse" type="BSDF">
+    <input name="color" type="color3" value="0.5, 0.35, 0.2" />
+  </oren_nayar_diffuse_bsdf>
+  <mix name="mix_bsdf" type="BSDF">
+    <input name="fg" type="BSDF" nodename="bare_bsdf" />
+    <input name="bg" type="BSDF" nodename="mix_diffuse" />
+    <input name="mix" type="float" value="0.25" />
+  </mix>
+  <surface name="mix_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="mix_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_mix" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="mix_surface" />
+  </surfacematerial>
+
+  <!-- A clear fibre: no absorption, white tints. -->
+  <chiang_hair_bsdf name="clear_bsdf" type="BSDF" />
+  <surface name="clear_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="clear_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_clear" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="clear_surface" />
+  </surfacematerial>
+
+  <!-- The clear fibre's diffuse twin. -->
+  <oren_nayar_diffuse_bsdf name="twin_bsdf" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+  </oren_nayar_diffuse_bsdf>
+  <surface name="twin_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="twin_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_diffuse_twin" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="twin_surface" />
+  </surfacematerial>
+
+</materialx>
