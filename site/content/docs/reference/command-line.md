@@ -321,6 +321,11 @@ The scene-linear colour space to render in, by any name or alias of the OCIO con
 when neither names one, is `lin_rec709`. A space that isn't scene-linear, or that the
 config doesn't define, is an error.
 
+The default is `lin_rec709` whatever the config: it is not taken from the config's
+`scene_linear` role, so a render doesn't change when the config does. That role is ACEScg
+in the builtin config and in the ACES studio configs; to render in it, name it here or in
+`renderingColorSpace`.
+
 ```bash
 crust-render -i scene.usda --working-space acescg -o beauty.exr
 ```
