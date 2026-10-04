@@ -36,9 +36,12 @@ its look into crust.
 - **A curve hit reports its strand direction.** Rays that hit a `BasisCurves`
   prim get the curve's tangent as the shading tangent, which is what
   `chiang_hair_bsdf`'s `curve_direction` (`Tworld`) defaults to. The position
-  across the strand is derived from the tube's normal, as MaterialX does. For
-  every other material on a curve, the tangent replaces an unspecified one, and
-  the images they render do not change.
+  across the strand is derived from the tube's normal, as MaterialX does.
+  OpenPBR, `UsdPreviewSurface` and `Emissive` ignore the tangent, so curves
+  with those materials render bit-identically. A MaterialX leaf on a curve now
+  builds its frame around the strand, where before the frame was arbitrary.
+  Its image is the same up to sample noise, and an anisotropic highlight now
+  runs along the strand.
 - **A strand does not shadow or block its own scattered light.** A
   `chiang_hair_bsdf` hit already accounts for the light's path through the
   fibre. So a ray leaving that hit toward the light, or continuing through the
@@ -79,9 +82,11 @@ those.
     already compute, and the tangent. Instances carry the tangent through. A ray
     flag skips curve exit hits. A curve hit's `t` and normal stay bitwise
     unchanged.
-- **Images:** scenes without `chiang_hair_bsdf` stay bit-identical. Curve hits
-  gain a tangent, but no existing material reads it on a curve. The hit record
-  grows by one vector. On `cornellbox`, which has instances but no curves, the
+- **Images:** scenes without curves stay bit-identical, and so do curves
+  shaded by OpenPBR, `UsdPreviewSurface` or `Emissive`. Every sample scene
+  falls in one of those two groups. MaterialX on curves changes only its
+  sample pattern, plus the direction of any anisotropy. The hit record grows by
+  one vector. On `cornellbox`, which has instances but no curves, the
   budget is +0.3% instructions, measured with callgrind.
 - **AOVs:** in light path expressions, a hair leaf is classified by hemisphere,
   like every other leaf: glossy `specular` reflection on the viewer's side, and

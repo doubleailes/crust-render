@@ -559,6 +559,17 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// Whether rays leaving this hit — its shadow rays too — pass out of
+    /// curve tubes: a fibre's do, its model already accounting for light's
+    /// path through its own strand. Only a MaterialX closure has fibres.
+    #[inline]
+    pub fn passes_out_of_curves(&self) -> bool {
+        match &self.bsdf {
+            Resolved::Closure(c) => c.passes_out_of_curves(),
+            _ => false,
+        }
+    }
+
     /// The random walk a sample with [`ScatterSample::subsurface`] set enters
     /// toward `dir`: `None` for any other sample.
     pub fn subsurface_entry(

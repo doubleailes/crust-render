@@ -406,6 +406,91 @@
       is its own `--profile` section (`Subsurface`, opened only when a walk
       runs: cornellbox +0.0002%); without one it hid in `MainLoop`'s local
       time, 34% of the fixture's thread time.
+  - **`chiang_hair_bsdf` is pbrt-v3's `HairBSDF` with MaterialX's parameters**
+    (`closure/hair.rs`, `Lobe::Hair`). The leaf frame is the fibre's:
+    - `x` is the tangent: `curve_direction`, else the hit's. On a curve, the
+      kernel reports the strand's direction through every instance (see the
+      intersection-kernel record).
+    - `z` is the tube's ray-facing normal.
+    - γo is derived from ωo's projection into the normal plane, against `n`,
+      as genglsl derives it. There is no `h` input: on a round tube the normal
+      already says where on the circle the ray landed. On a tapered cone, γo is
+      off by the taper's slope.
+
+    Everything that depends only on ωo is computed once in `prepare`: the
+    tilted θo per lobe, the tinted `A_p`, the lobe pmf, γo, γt and φo. `eval`
+    and `sample` pay only for ωi.
+
+    `eval_lobe` returns pbrt's `Σ M_p·A_p·N_p / |cos θ|` against `|wi.z|`, which
+    the closure's shared `·|l.z|` cancels. The pdf is pbrt's mixture
+    `Σ pdf_p·M_p·N_p`, per solid angle, with no cosine. Both are zero where
+    `|wi.z| < 1e-7` (measure zero; otherwise `inf · 0`). `M_p` and its sampling
+    run in f64: at `v = 0.001`, which the roughness clamp reaches, the
+    exponent is a difference of thousands.
+
+    `sample` needs four numbers and the closure hands each leaf three. The
+    fourth comes from pbrt-v3's `DemuxFloat` of the scalar, which splits it
+    into lobe choice and azimuth.
+
+    The directional albedo `Σ_p tint_p·A_p` is exact, because `M_p` and `N_p`
+    are normalised. It is the leaf's selection weight, its `albedo` AOV, and,
+    as the top of a `layer`, what it does not pass on. A fibre as a layer's top
+    is an odd authoring choice, but this keeps the layer contract with no
+    special case.
+
+    Light path expressions classify it by hemisphere, like every leaf: glossy
+    `specular` on ωo's side and glossy `transmission` beyond. A per-lobe
+    (R / TT / TRT) split would need several `LobeSplit`s per leaf.
+
+    **Deviations from genglsl (`mx_chiang_hair_bsdf.glsl`, MaterialX 1.39.5),
+    on purpose:**
+    - no `1/π` on the response;
+    - TRRT+'s `N_p` is `1/(2π)`, not genglsl's `1.0 / 2.0 * M_PI` (= π/2);
+    - importance sampling, which genglsl has none of.
+
+    With either genglsl constant, the white furnace fails (pinned by
+    `a_clear_fibre_conserves_energy`; mutation-checked). OSL's
+    `chiang_hair_bsdf` is a renderer-side closure, so there is no OSL value to
+    match.
+
+    **What is genglsl's, read where MaterialX defines nothing:**
+    - **The roughness clamp.** `(v, s)` are clamped to [0.001, 1]. That caps
+      artist roughness at about β_m 0.62 and β_n 0.68, which pbrt has no cap
+      for.
+    - **The cuticle sign.** genglsl tilts θi by `(2 − 3p)·α` with
+      `α = cuticle_angle·π − π/2`. That is pbrt's tilt of θo with α negated, so
+      pbrt's formulas run on `−α`. `the_cuticle_tilt_moves_r_and_trt_opposite_ways`
+      pins R's peak at `−θo − 2α` and TRT's at `−θo + 4α`.
+
+    **The helpers** (`chiang_hair_roughness`, `chiang_hair_absorption_from_color`,
+    `deon_hair_absorption_from_melanin`; `crust-mtlx/src/hair.rs`) compile
+    from existing ops, so the JIT runs them unchanged; `crust-jit`'s fixture
+    test pins it bitwise on `samples/hair.mtlx`. MaterialX's genosl versions
+    are placeholders (`vector(1.0)`, zeros), so the OSL oracle cannot pin
+    them. `scripts/hair_reference.py` transcribes genglsl in float64 into
+    `tests/data/hair_helpers.txt`, at the oracle's format and tolerance.
+
+    **A fibre vertex's rays pass out of curve tubes.** The model already
+    integrates light's path through the fibre from the entry point, so the
+    tube's far wall belongs to that same event. `ResolvedClosure::hair` is set
+    when a live hair leaf is pushed, and makes the vertex's rays carry
+    `crust_rt::Ray::ignore_curve_exits`:
+    - the continuation ray (`ray()`, so guided directions too);
+    - the NEE shadow ray (`ShadingPoint::passes_out_of_curves`);
+    - the learned light cache's training shadow rays, so a backlight behind a
+      strand is learned as reachable;
+    - and through cutout restarts.
+
+    A ray starting outside a tube must enter it before it can leave it, so
+    only the strand the ray started in is hidden; a fibre still shadows
+    everything else as an opaque tube. On a strand in a white furnace, a clear
+    fibre returns 1.00 at every offset across it (`tests/hair.rs`). The furnace
+    cannot see the rule: a lossless fibre scattering twice still returns
+    everything. What the rule changes is a light *behind* the strand, which its
+    far wall otherwise hides. `a_backlit_strand_glows_where_a_diffuse_one_is_dark`
+    runs that test once under `LightOnly` and once under `BsdfOnly`, so each run
+    pins one of the two rays. With either ray's flag removed, its run renders the
+    strand black (mutation-checked).
   - **Throughput tables are ported, not regenerated.** The dielectric throughput
     is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
     (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),
@@ -723,6 +808,22 @@
   native `crust:openpbr` / `UsdPreviewSurface` subsurface still renders as the
   tinted diffuse (`docs/openpbr_reference_alignment.md`): the walk is wired to
   the MaterialX leaf only.
+- **Hair: metre-scale grooms lose strand-to-strand light.** The tracer's
+  absolute `t_min = 0.001` exceeds a real hair's ~7e-5 m diameter in a stage
+  authored in metres, so strands closer than 1 mm do not shadow or scatter into
+  each other. In centimetres (the USD default), it is 10 µm. A scale-aware
+  epsilon is its own change.
+- **Hair: a ray can re-enter its own strand at a joint.** Where two segments of
+  a strand overlap, a ray leaving through one cone body can *enter* the
+  neighbour's cap sphere while still inside the union. That is an entry, which
+  the exit rule keeps. If it ever shows, the fix is to also skip entries on the
+  hit's own `geom_id` within a radius.
+- **Hair: far-field only, one fibre at a time.** There is no dual scattering or
+  other multiple-scattering approximation, so a dense groom converges by
+  tracing bounces, and there is no near-field azimuthal term for a tube wider
+  than the pixel. Ribbons (`BasisCurves` `normals`) are not read, and curve
+  primvars do not reach materials, so a per-strand colour cannot be authored
+  yet.
 - **Not applied.** glTF `occlusion` is reported, not implemented: a path
   tracer computes its own. Dispersion is ignored where MaterialX's own graphs
   ignore it, and reported.

@@ -91,6 +91,9 @@ fn the_jit_matches_the_interpreter_on_the_fixtures() {
     // (coat-broadened roughness, the modulated IOR, the darkening, the
     // `ifgreater` selects) is plain program ops, so it JITs like any graph.
     check_file(&repo().join("samples/materialx_surfaces.mtlx"));
+    // The hair helpers are composed from existing ops, so their programs
+    // JIT like any graph and must match bit for bit.
+    check_file(&repo().join("samples/hair.mtlx"));
 }
 
 #[test]

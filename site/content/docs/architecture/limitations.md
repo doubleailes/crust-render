@@ -61,6 +61,14 @@ render.
   tinted diffuse. MaterialX's `subsurface_bsdf` uses a true random walk.
 - **`crust:openpbr` and MaterialX's `open_pbr_surface` don't match exactly.** The two
   implementations of OpenPBR still differ in places.
+- **Hair in a groom authored in metres loses strand-to-strand light.** Every ray starts
+  0.001 units off the surface it leaves, which is 1 mm in metres: wider than a hair, so
+  strands that close neither shadow nor light each other. Author grooms in centimetres.
+- **Hair roughness is capped.** `chiang_hair_bsdf` clamps its roughness inputs at 1, as
+  MaterialX's reference implementation does, so hair cannot be rougher than an artist
+  roughness of about 0.6.
+- **Curves are round, open tubes.** `BasisCurves` `normals` (ribbons) and `wrap`
+  (periodic curves) are not read, and curve primvars don't reach materials.
 - **MaterialX limits.** A closure tree that collapses to more than eight lobes is refused.
   Only the `uniform_edf` and `generalized_schlick_edf` emission nodes are supported. Zeltner
   sheen is evaluated as Imageworks sheen.

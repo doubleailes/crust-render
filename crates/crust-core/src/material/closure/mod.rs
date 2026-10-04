@@ -26,6 +26,7 @@
 //! Typhoon uses by default.
 
 mod bsdl_tables;
+pub mod hair;
 pub mod mx;
 
 use glam::Vec3A;
@@ -144,6 +145,9 @@ pub enum Lobe {
         ior: f32,
         alpha: f32,
     },
+    /// `chiang_hair_bsdf`: a fibre, over the whole sphere, prepared for this
+    /// vertex's ωo ([`hair::Hair`]).
+    Hair(hair::Hair),
 }
 
 /// One leaf at a vertex: its lobe, the weight the tree gives it there, its
@@ -176,6 +180,15 @@ impl Prepared {
             }
             Lobe::Sheen { .. } => LobeEvent::reflect(Scatter::Glossy, LobeLabel::Sheen),
             Lobe::Subsurface { .. } => LobeEvent::transmit(Scatter::Diffuse, LobeLabel::Subsurface),
+            // A fibre by hemisphere, like every other leaf: R and most of TRT
+            // come back toward the viewer, TT and TRRT+ go on through.
+            Lobe::Hair(_) => {
+                if transmitted {
+                    LobeEvent::transmit(Scatter::Glossy, LobeLabel::Transmission)
+                } else {
+                    LobeEvent::reflect(Scatter::Glossy, LobeLabel::Specular)
+                }
+            }
             Lobe::Specular {
                 ax,
                 ay,
@@ -248,6 +261,7 @@ impl Prepared {
                 format!("sheen color {} roughness {roughness:.3}", c(color))
             }
             Lobe::Translucent { color } => format!("translucent color {}", c(color)),
+            Lobe::Hair(h) => format!("hair albedo {}", c(h.albedo())),
             Lobe::Subsurface {
                 color,
                 radius,
@@ -288,6 +302,9 @@ pub struct ResolvedClosure {
     medium: Option<Medium>,
     /// Whether any leaf transmits.
     transmits: bool,
+    /// Whether any leaf is a fibre: its rays pass out of curve tubes
+    /// ([`crust_rt::Ray::ignore_curve_exits`]).
+    hair: bool,
 }
 
 thread_local! {
@@ -456,6 +473,7 @@ impl ResolvedClosure {
             select_total: 0.0,
             medium: None,
             transmits: false,
+            hair: false,
         }
     }
 
@@ -476,6 +494,7 @@ impl ResolvedClosure {
         self.select_total = 0.0;
         self.medium = None;
         self.transmits = false;
+        self.hair = false;
         let walk = Walk {
             slots,
             rec,
@@ -514,6 +533,13 @@ impl ResolvedClosure {
         self.transmits
     }
 
+    /// Whether any leaf is a fibre, so the vertex's rays — the continuation
+    /// and every shadow ray — pass out of curve tubes: the fibre model
+    /// already accounts for light's path through its own strand.
+    pub fn passes_out_of_curves(&self) -> bool {
+        self.hair
+    }
+
     /// Walks the subtree `id` reached with `weight`, pushing its leaves, and
     /// returns its throughput toward ωo.
     fn walk(
@@ -539,6 +565,9 @@ impl ResolvedClosure {
                     }
                     if matches!(p.lobe, Lobe::Translucent { .. }) {
                         self.transmits = true;
+                    }
+                    if matches!(p.lobe, Lobe::Hair(_)) {
+                        self.hair = true;
                     }
                     self.leaves[self.len] = p;
                     self.len += 1;
@@ -697,6 +726,7 @@ impl ResolvedClosure {
                 | Lobe::Sheen { color, .. }
                 | Lobe::Translucent { color }
                 | Lobe::Subsurface { color, .. } => color,
+                Lobe::Hair(h) => h.albedo(),
                 Lobe::Specular {
                     fresnel,
                     tint,
@@ -804,11 +834,12 @@ impl ResolvedClosure {
             if rec.front_face
                 && let Some(m) = self.medium
             {
-                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, m);
+                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, m)
+                    .with_curve_exits_ignored(self.hair);
             }
-            return Ray::new(rec.p + wi * 1e-4, wi);
+            return Ray::new(rec.p + wi * 1e-4, wi).with_curve_exits_ignored(self.hair);
         }
-        Ray::new(rec.p, wi)
+        Ray::new(rec.p, wi).with_curve_exits_ignored(self.hair)
     }
 
     /// The walk leaf `index` enters toward `dir` — see
@@ -944,6 +975,45 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                 }
             };
             (lobe, w.luma.of(color).max(0.02), None)
+        }
+        Bsdf::Hair {
+            tint_r,
+            tint_tt,
+            tint_trt,
+            ior,
+            roughness_r,
+            roughness_tt,
+            roughness_trt,
+            cuticle_angle,
+            absorption,
+        } => {
+            // A `vector2` (variance, scale); a `float` broadcasts.
+            let pair = |i: u32| {
+                let r = s(i);
+                if r.arity >= 2 {
+                    (r.v[0], r.v[1])
+                } else {
+                    (r.x(), r.x())
+                }
+            };
+            let hair = hair::Hair::new(
+                &hair::HairParams {
+                    tint: [rgb(*tint_r), rgb(*tint_tt), rgb(*tint_trt)],
+                    ior: s(*ior).x(),
+                    roughness: [
+                        pair(*roughness_r),
+                        pair(*roughness_tt),
+                        pair(*roughness_trt),
+                    ],
+                    cuticle_angle: s(*cuticle_angle).x(),
+                    absorption: rgb(*absorption),
+                },
+                v.normalize_or_zero(),
+                |c| w.luma.of(c),
+            );
+            let albedo = hair.albedo();
+            // Over a base, a fibre passes on what it does not scatter.
+            (Lobe::Hair(hair), w.luma.of(albedo).max(0.02), Some(albedo))
         }
         Bsdf::Translucent { color } => {
             let color = rgb(*color);
@@ -1196,6 +1266,7 @@ fn eval_lobe(lobe: &Lobe, v: Vec3A, l: Vec3A) -> (Vec3A, f32) {
         // Light reaches a walk only through its entry, never toward a
         // direction: no value and no continuous density.
         Lobe::Subsurface { .. } => (Vec3A::ZERO, 0.0),
+        Lobe::Hair(ref h) => h.eval(l),
         Lobe::Sheen { color, roughness } => {
             if l.z <= 0.0 {
                 return (Vec3A::ZERO, 0.0);
@@ -1309,6 +1380,10 @@ fn sample_lobe(lobe: &Lobe, v: Vec3A, uv: [f32; 2], u: f32) -> Option<LobeSample
                 spread: crate::RayCone::MAX_SPREAD,
             })
         }
+        Lobe::Hair(ref h) => h.sample(uv, u).map(|dir| LobeSample::Continuous {
+            dir,
+            spread: h.spread().min(crate::RayCone::MAX_SPREAD),
+        }),
         Lobe::Subsurface { ior, alpha, .. } => {
             subsurface_entry(v, ior, alpha, uv).map(|dir| LobeSample::Subsurface { dir })
         }

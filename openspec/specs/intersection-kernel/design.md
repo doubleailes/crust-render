@@ -175,6 +175,47 @@
   the measurements, and why `std::simd` is not used by default (nightly-only; the
   opt-in `bvh8` experiment below is the one place it is).
 
+## Curve hits: span parameter, tangent, and passing out of tubes
+
+Added for MaterialX hair (`add-chiang-hair-bsdf`; the materials record has the fibre
+model).
+
+- **A curve hit reports where along the curve it is (`u`) and the curve's direction
+  (`dpdu`).** Both were already computed by the intersectors and then thrown away.
+  - On a rounded cone, `u` is where the hit's normal line meets the axis: `y / d2` on
+    the body (the orthogonal projection on a cylinder, within the taper's slope of it
+    on a cone), and 0 or 1 on a cap.
+  - Through the cubic subdivision, `u` is the winning piece's `u0 + s·(u1 − u0)`,
+    within the 5%-of-width flatness tolerance of the true curve.
+  - `dpdu` is `p1 − p0` for a linear segment. For a cubic span it is the Bézier
+    derivative at `u` (the chord where the derivative vanishes), so it does not facet
+    at subdivision joints.
+  - Every other primitive reports a zero `dpdu`.
+- **Instances map `dpdu` by their local-to-world linear part.** That is the inverse of
+  the normal matrix's transpose, recomputed only when `dpdu` is non-zero. It works at
+  every level and at the ray's time, so a `PointInstancer`-forwarded or motion-blurred
+  strand keeps its direction, which `crust-core`'s `VertexSource` could not have given
+  it. Embree likewise reports `u` for curves.
+- **`Ray::ignore_curve_exits`** makes curve primitives reject a hit where
+  `dir · outward > 0`. The test is in object space; `dot(M d, M⁻ᵀ n) = d · n`, so it
+  holds through every transform, mirrors included.
+  - The flag lives in the ray's padding (still 48 bytes, pinned).
+  - It does not touch any other primitive.
+  - It does not move any other hit.
+- **Cost, measured.** Callgrind on `cornellbox` at `-s 2`, which has no curves, rose
+  +0.34% (4 207 630 659 → 4 221 798 566 instructions). That is above the change's
+  +0.3% budget, and there is no instance-transform cost to move, since the excess is
+  not there. It comes from the hit records growing 48 → 64 bytes, copied on every
+  closer candidate (BVH traversal +5.1 M) and into `World::intersect` (+6.3 M, after
+  skipping the normalisation for a zero `dpdu` cut it from +20 M).
+- **Packing `dpdu` as `[f32; 3]` to keep `PrimHit` at 48 bytes was tried and is worse.**
+  Traversal rose +16 M, and the total to +0.67%: the unaligned stores and three-way
+  compares cost more than the copies they save. `a_primitive_hit_is_64_bytes` pins the
+  size, so any further growth is a measured decision.
+- **`t`, the normal and the ids are computed exactly as before.**
+  `scripts/test_simd_matrix.sh -p crust-rt` passes under every codegen, and every
+  sample scene renders bit-identically.
+
 ## Known gaps: geometry and acceleration
 
 - **Geometry/acceleration caveats.** Motion blur is transform-only and lerps the *matrix*
@@ -183,7 +224,8 @@
   kept as cubic primitives (converted to Bézier control points) and adaptively
   subdivided per ray query into rounded cones (`crust_rt::curve::cubic_curve_intersect`),
   so they are not stored as polylines; widths lerp across a span in parameter; the
-  rounded-cone can report an interior sphere surface for rays *starting inside* the hull (irrelevant for opaque hair). Mesh-BVH sharing needs identical
+  rounded-cone can report an interior sphere surface for rays *starting inside* the hull
+  (a ray with `ignore_curve_exits` skips it: it is an exit). Mesh-BVH sharing needs identical
   points/topology *and* material binding. Emissive curves/instances are not light-list
   entries (BSDF-sampled only, like emissive volumes).
   Baking single-placement meshes (above) leaves *resident* memory unchanged — the same

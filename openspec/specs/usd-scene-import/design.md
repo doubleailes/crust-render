@@ -395,6 +395,14 @@ Schema mapping:
   Only a Bézier span ends on its end control points — B-spline and Catmull-Rom spans
   once read the widths of control points they never pass through, so a tapered strand
   under those bases was thicker or thinner than authored at every joint.
+  A curve hit shades with the strand's direction as its tangent: the kernel reports
+  `dpdu` through every placement (intersection-kernel record), and `World::intersect`
+  takes it, normalised, wherever the geometry has no UV map. OpenPBR,
+  `UsdPreviewSurface` and `Emissive` ignore the tangent, so curves with those materials
+  render as before. A MaterialX closure's frame on a curve is now the strand's instead of
+  `tangent_frame(n)`'s arbitrary one: an isotropic lobe changes only its sample pattern,
+  and an anisotropic one stretches along the strand. `normals` (ribbons), `wrap` and
+  curve primvars are not read.
 - **Instancing** — both USD mechanisms reduce to the same thing, and share one code path
   (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
   place it by transform. A prototype becomes a `Vec<ProtoPart>` — one part per bound leaf

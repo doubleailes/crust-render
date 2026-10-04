@@ -109,6 +109,16 @@ impl Ray {
         self
     }
 
+    /// Same ray, passing out of curve tubes unseen or not
+    /// ([`crust_rt::Ray::ignore_curve_exits`]): what a ray leaving a fibre
+    /// vertex does, since the fibre model already accounts for light's path
+    /// through its own strand.
+    #[must_use = "returns a new ray; the original is unchanged"]
+    pub fn with_curve_exits_ignored(mut self, ignore: bool) -> Ray {
+        self.rt.ignore_curve_exits = ignore;
+        self
+    }
+
     /// Same ray with the texture-filtering footprint replaced.
     ///
     /// Materials build scattered rays with no path context, so — like the

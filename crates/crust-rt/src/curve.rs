@@ -5,12 +5,29 @@ use crate::aabb::AABB;
 use crate::ray::Ray;
 use glam::Vec3A;
 
+/// A curve hit: the ray parameter, the outward normal, and where along the
+/// curve the hit lies — `u` in `[0, 1]` from the segment's (or span's)
+/// first end to its last.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurveHit {
+    pub t: f32,
+    pub normal: Vec3A,
+    pub u: f32,
+}
+
 /// Nearest boundary hit of the rounded cone (sphere-swept segment) in
-/// `[t_min, t_max]`, as `(t, outward_normal)`. The solid is the union of
-/// the two cap spheres and the tangent cone body between them; taking the
-/// minimum valid `t` over all three surfaces yields the hull entry point
-/// for rays starting outside (rays starting *inside* may report an
-/// interior sphere surface — irrelevant for opaque hair).
+/// `[t_min, t_max]`. The solid is the union of the two cap spheres and the
+/// tangent cone body between them; taking the minimum valid `t` over all
+/// three surfaces yields the hull entry point for rays starting outside
+/// (rays starting *inside* may report an interior sphere surface).
+///
+/// The hit's `u` is where its normal line meets the axis: `y / d2` on the
+/// body, 0 or 1 on a cap — the orthogonal projection on a cylinder, and
+/// within the taper's slope of it on a cone.
+///
+/// A ray with [`Ray::ignore_curve_exits`] set skips every surface it leaves
+/// the solid through (`dir · normal > 0`), so a ray spawned on or inside
+/// the tube passes out of it unseen; entries are kept.
 ///
 /// Following Quilez's rounded-cone intersector, evaluated with a
 /// normalized direction and rescaled back to the caller's parameter.
@@ -22,7 +39,7 @@ pub(crate) fn rounded_cone_intersect(
     r1: f32,
     t_min: f32,
     t_max: f32,
-) -> Option<(f32, Vec3A)> {
+) -> Option<CurveHit> {
     let r0 = r0.max(1e-6);
     let r1 = r1.max(1e-6);
     let len = ray.dir.length();
@@ -47,10 +64,15 @@ pub(crate) fn rounded_cone_intersect(
     let m6 = ob.dot(rd);
     let m7 = ob.dot(ob);
 
-    let mut best: Option<(f32, Vec3A)> = None;
-    let mut consider = |t: f32, n: Vec3A| {
-        if t >= n_min && t <= n_max && best.is_none_or(|(bt, _)| t < bt) {
-            best = Some((t, n));
+    let ignore_exits = ray.ignore_curve_exits;
+    let mut best: Option<(f32, Vec3A, f32)> = None;
+    let mut consider = |t: f32, n: Vec3A, u: f32| {
+        if t >= n_min
+            && t <= n_max
+            && best.is_none_or(|(bt, _, _)| t < bt)
+            && !(ignore_exits && n.dot(rd) > 0.0)
+        {
+            best = Some((t, n, u));
         }
     };
 
@@ -67,7 +89,7 @@ pub(crate) fn rounded_cone_intersect(
             for t in [(-k1 - sq) / k2, (-k1 + sq) / k2] {
                 let y = m1 - r0 * rr + t * m2;
                 if y > 0.0 && y < d2 {
-                    consider(t, (d2 * (oa + t * rd) - ba * y).normalize());
+                    consider(t, (d2 * (oa + t * rd) - ba * y).normalize(), y / d2);
                 }
             }
         }
@@ -78,18 +100,22 @@ pub(crate) fn rounded_cone_intersect(
     if h0 >= 0.0 {
         let sq = h0.sqrt();
         for t in [-m3 - sq, -m3 + sq] {
-            consider(t, (oa + t * rd) / r0);
+            consider(t, (oa + t * rd) / r0, 0.0);
         }
     }
     let h1 = m6 * m6 - m7 + r1 * r1;
     if h1 >= 0.0 {
         let sq = h1.sqrt();
         for t in [-m6 - sq, -m6 + sq] {
-            consider(t, (ob + t * rd) / r1);
+            consider(t, (ob + t * rd) / r1, 1.0);
         }
     }
 
-    best.map(|(t, n)| (t / len, n))
+    best.map(|(t, normal, u)| CurveHit {
+        t: t / len,
+        normal,
+        u,
+    })
 }
 
 /// Recursion depth ceiling — matches pbrt's `Curve::IntersectRay`; a
@@ -137,6 +163,19 @@ fn flatness_depth(cp: &[Vec3A; 4], max_width: f32) -> u32 {
     (r0.floor().max(0.0) as u32).min(MAX_RECURSION_DEPTH)
 }
 
+/// The (unnormalised) derivative of a cubic Bézier span at `u`: the curve's
+/// direction there. Where it vanishes — coincident control points at an
+/// end — the chord stands in, so a degenerate span still has a direction.
+pub(crate) fn bezier_tangent(cp: &[Vec3A; 4], u: f32) -> Vec3A {
+    let s = 1.0 - u;
+    let d = (cp[1] - cp[0]) * (s * s) + (cp[2] - cp[1]) * (2.0 * u * s) + (cp[3] - cp[2]) * (u * u);
+    if d.length_squared() > 1e-30 {
+        d * 3.0
+    } else {
+        cp[3] - cp[0]
+    }
+}
+
 /// Axis-aligned bounds of a Bézier span (the convex hull of its control
 /// points — a cubic Bézier never leaves it), padded by the wider of the
 /// two endpoint radii.
@@ -146,8 +185,10 @@ fn bezier_bounds(cp: &[Vec3A; 4], radius: f32) -> AABB {
     AABB::new(min, max)
 }
 
-/// Nearest hit of a cubic curve span in `[t_min, t_max]`, as
-/// `(t, outward_normal)`. `cp` are the span's Bézier control points and
+/// Nearest hit of a cubic curve span in `[t_min, t_max]`, with `u` the span
+/// parameter of the hit (the winning piece's `u0 + s·(u1 − u0)`, exact
+/// along the piece's chord and within the flatness tolerance of the
+/// curve). `cp` are the span's Bézier control points and
 /// `r0`/`r1` the radii at its two ends (linearly interpolated in between,
 /// matching USD's curve width semantics).
 ///
@@ -167,7 +208,7 @@ pub(crate) fn cubic_curve_intersect(
     r1: f32,
     t_min: f32,
     t_max: f32,
-) -> Option<(f32, Vec3A)> {
+) -> Option<CurveHit> {
     let depth = flatness_depth(cp, 2.0 * r0.max(r1));
     subdivide_and_intersect(ray, cp, 0.0, 1.0, r0, r1, depth, t_min, t_max)
 }
@@ -183,7 +224,7 @@ fn subdivide_and_intersect(
     depth: u32,
     t_min: f32,
     t_max: f32,
-) -> Option<(f32, Vec3A)> {
+) -> Option<CurveHit> {
     let radius_at = |u: f32| r0_full + (r1_full - r0_full) * u;
 
     if depth == 0 {
@@ -195,7 +236,11 @@ fn subdivide_and_intersect(
             radius_at(u1),
             t_min,
             t_max,
-        );
+        )
+        .map(|h| CurveHit {
+            u: u0 + h.u * (u1 - u0),
+            ..h
+        });
     }
 
     let split = subdivide_bezier(cp);
@@ -205,9 +250,9 @@ fn subdivide_and_intersect(
         ([split[3], split[4], split[5], split[6]], u_mid, u1),
     ];
 
-    let mut best: Option<(f32, Vec3A)> = None;
+    let mut best: Option<CurveHit> = None;
     for (sub_cp, su0, su1) in halves {
-        let cur_t_max = best.map_or(t_max, |(t, _)| t);
+        let cur_t_max = best.map_or(t_max, |h| h.t);
         let radius = radius_at(su0).max(radius_at(su1));
         let bounds = bezier_bounds(&sub_cp, radius);
         if !bounds.hit(ray, t_min, cur_t_max) {
@@ -236,6 +281,7 @@ mod tests {
 
     fn hit(o: Vec3A, d: Vec3A, p0: Vec3A, p1: Vec3A, r0: f32, r1: f32) -> Option<(f32, Vec3A)> {
         rounded_cone_intersect(&Ray::new(o, d), p0, p1, r0, r1, 0.001, f32::INFINITY)
+            .map(|h| (h.t, h.normal))
     }
 
     #[test]
@@ -326,6 +372,7 @@ mod cubic_curve_tests {
 
     fn cubic_hit(o: Vec3A, d: Vec3A, cp: &[Vec3A; 4], r0: f32, r1: f32) -> Option<(f32, Vec3A)> {
         cubic_curve_intersect(&Ray::new(o, d), cp, r0, r1, 0.001, f32::INFINITY)
+            .map(|h| (h.t, h.normal))
     }
 
     #[test]
@@ -365,8 +412,8 @@ mod cubic_curve_tests {
         let cubic = cubic_hit(o, d, &cp, 0.5, 0.5).expect("cubic hit");
         let cone = rounded_cone_intersect(&Ray::new(o, d), p0, p3, 0.5, 0.5, 0.001, f32::INFINITY)
             .expect("cone hit");
-        assert!((cubic.0 - cone.0).abs() < 1e-4);
-        assert!(cubic.1.abs_diff_eq(cone.1, 1e-4));
+        assert!((cubic.0 - cone.t).abs() < 1e-4);
+        assert!(cubic.1.abs_diff_eq(cone.normal, 1e-4));
     }
 
     #[test]

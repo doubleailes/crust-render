@@ -226,6 +226,12 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("materialx_subsurface.mtlx", "mtlx_openpbr_skin"),
         ("materialx_subsurface.mtlx", "mtlx_standard_marble"),
         ("materialx_subsurface.mtlx", "mtlx_bare_jade"),
+        ("hair.mtlx", "mtlx_hair_bare"),
+        ("hair.mtlx", "mtlx_hair_roughness"),
+        ("hair.mtlx", "mtlx_hair_color"),
+        ("hair.mtlx", "mtlx_hair_melanin"),
+        ("hair.mtlx", "mtlx_hair_mix"),
+        ("hair.mtlx", "mtlx_hair_clear"),
     ] {
         let loaded = materialx::load(
             &sample(file),

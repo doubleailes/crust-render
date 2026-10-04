@@ -774,7 +774,12 @@ impl World {
                     None => ((0.0, 0.0), Vec3A::ZERO, false),
                 }
             }
-            None => ((0.0, 0.0), Vec3A::ZERO, false),
+            // No UV map: a curve's direction, which the kernel carries to
+            // world space through every placement (zero for anything else) —
+            // the strand a fibre BSDF shades along. Tested before normalising:
+            // nearly every hit has none, and the square root is not free.
+            None if h.dpdu == Vec3A::ZERO => ((0.0, 0.0), Vec3A::ZERO, false),
+            None => ((0.0, 0.0), h.dpdu.normalize_or_zero(), false),
         };
         // The ray's texture footprint, converted into each parameterisation
         // the shader might index. Zero unless the ray carries a cone *and*

@@ -30,9 +30,15 @@ else the hit's tangent.
 
 - **WHEN** many samples are drawn from a `chiang_hair_bsdf` at a fixed outgoing
   direction
-- **THEN** each sample's weight `f·|cos|/pdf` equals the leaf's tints times its
-  attenuation, and the histogram of sampled directions matches the reported
-  pdf over the whole sphere
+- **THEN** the histogram of sampled directions matches the reported pdf over
+  the whole sphere, and the importance-sampled estimate of any smooth integral
+  of `f·|cos|` matches its quadrature
+
+#### Scenario: A clear fibre's samples all weigh one
+
+- **WHEN** a `chiang_hair_bsdf` with zero absorption and white tints is sampled
+- **THEN** every sample's weight `f·|cos|/pdf` is 1, because its lobe
+  attenuations sum to one and the lobe choice follows them
 
 #### Scenario: Absorption colours the hair
 
@@ -79,8 +85,8 @@ Rays leaving any other vertex SHALL be unchanged.
 #### Scenario: Glass curves still refract
 
 - **WHEN** a curve carries a transmissive `dielectric_bsdf` and no hair leaf
-- **THEN** its refracted rays meet the tube's far wall, and the image is
-  bit-identical to the one rendered before this change
+- **THEN** its refracted rays meet the tube's far wall from inside, exactly as
+  a ray that does not pass out of curve tubes does
 
 ### Requirement: MaterialX hair helper nodes evaluate as MaterialX's GLSL reference
 

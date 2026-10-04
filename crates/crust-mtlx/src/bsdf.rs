@@ -150,6 +150,20 @@ pub enum Bsdf {
     Translucent {
         color: Slot,
     },
+    /// `chiang_hair_bsdf`: a fibre, scattering over the whole sphere. Each
+    /// roughness is a `vector2` of (longitudinal variance, azimuthal scale),
+    /// what `chiang_hair_roughness` outputs.
+    Hair {
+        tint_r: Slot,
+        tint_tt: Slot,
+        tint_trt: Slot,
+        ior: Slot,
+        roughness_r: Slot,
+        roughness_tt: Slot,
+        roughness_trt: Slot,
+        cuticle_angle: Slot,
+        absorption: Slot,
+    },
 }
 
 impl Bsdf {
@@ -167,6 +181,7 @@ impl Bsdf {
             Bsdf::Sheen { .. } => "sheen_bsdf",
             Bsdf::Subsurface { .. } => "subsurface_bsdf",
             Bsdf::Translucent { .. } => "translucent_bsdf",
+            Bsdf::Hair { .. } => "chiang_hair_bsdf",
         }
     }
 
@@ -252,6 +267,31 @@ impl Bsdf {
                 f(anisotropy);
             }
             Bsdf::Translucent { color } => f(color),
+            Bsdf::Hair {
+                tint_r,
+                tint_tt,
+                tint_trt,
+                ior,
+                roughness_r,
+                roughness_tt,
+                roughness_trt,
+                cuticle_angle,
+                absorption,
+            } => {
+                for slot in [
+                    tint_r,
+                    tint_tt,
+                    tint_trt,
+                    ior,
+                    roughness_r,
+                    roughness_tt,
+                    roughness_trt,
+                    cuticle_angle,
+                    absorption,
+                ] {
+                    f(slot);
+                }
+            }
         }
     }
 }
@@ -769,7 +809,7 @@ fn bsdf_tree(
 /// Builds a leaf, or `None` for a BSDF node there is no leaf for (reported)
 /// or one that can never contribute (a literal `weight = 0`).
 fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
-    const KNOWN: [&str; 9] = [
+    const KNOWN: [&str; 10] = [
         "oren_nayar_diffuse_bsdf",
         "diffuse_bsdf",
         "burley_diffuse_bsdf",
@@ -779,6 +819,7 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
         "sheen_bsdf",
         "subsurface_bsdf",
         "translucent_bsdf",
+        "chiang_hair_bsdf",
     ];
     if !KNOWN.contains(&node.category.as_str()) {
         c.unsupported.insert(node.category.clone());
@@ -789,7 +830,13 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
     }
     let weight = c.input_or(node, "weight", Val::ONE);
     let normal = c.optional_input(node, "normal");
-    let tangent = c.optional_input(node, "tangent");
+    // A fibre's direction is its `curve_direction`; unconnected, the host's
+    // tangent (`Tworld`), which on a curve is the strand.
+    let tangent = if node.category == "chiang_hair_bsdf" {
+        c.optional_input(node, "curve_direction")
+    } else {
+        c.optional_input(node, "tangent")
+    };
     let alpha = Val::vec2(0.05, 0.05);
     let bsdf = match node.category.as_str() {
         "oren_nayar_diffuse_bsdf" | "diffuse_bsdf" => {
@@ -853,6 +900,24 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
             radius: c.input_or(node, "radius", Val::ONE),
             anisotropy: c.input_or(node, "anisotropy", Val::ZERO),
         },
+        "chiang_hair_bsdf" => {
+            let t = crate::hair::CHIANG_HAIR_BSDF;
+            let mut input = |name: &str| {
+                let default = crate::hair::default_of(t, name);
+                c.input_or(node, name, default)
+            };
+            Bsdf::Hair {
+                tint_r: input("tint_R"),
+                tint_tt: input("tint_TT"),
+                tint_trt: input("tint_TRT"),
+                ior: input("ior"),
+                roughness_r: input("roughness_R"),
+                roughness_tt: input("roughness_TT"),
+                roughness_trt: input("roughness_TRT"),
+                cuticle_angle: input("cuticle_angle"),
+                absorption: input("absorption_coefficient"),
+            }
+        }
         _ => Bsdf::Translucent {
             color: c.input_or(node, "color", Val::ONE),
         },

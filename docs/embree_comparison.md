@@ -237,7 +237,12 @@ in and A/B against the native BVH.
 > 6. SBVH spatial splits with exact triangle clipping (`clipped_aabb`).
 > 7. Ray masks (`crust:rayMask`), transform motion blur
 >    (`crust:motion:translate` + shutter time on rays), and round curve
->    primitives (`UsdGeomBasisCurves` → sphere-swept cones).
+>    primitives (`UsdGeomBasisCurves` → sphere-swept cones). A curve hit reports
+>    its span parameter `u` and its tangent (`RayHit::dpdu`, carried through
+>    instances), as Embree's curve hits report `u` — what a fibre BSDF shades
+>    along — and a ray can skip the hits where it leaves a tube
+>    (`Ray::ignore_curve_exits`), where Embree would need an intersection-filter
+>    callback.
 >
 > The original recommendation text is kept below as the design rationale.
 

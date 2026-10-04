@@ -438,6 +438,14 @@ fn instances_and_cubic_spans_are_96_bytes_inline() {
     assert_eq!(std::mem::size_of::<crate::prim::CubicCurvePrim>(), 96);
 }
 
+/// A primitive hit is copied on every closer candidate during traversal.
+/// The curve tangent grew it from 48 to 64 bytes (+0.34% instructions on
+/// `cornellbox`, which has no curves); anything more must be measured.
+#[test]
+fn a_primitive_hit_is_64_bytes() {
+    assert_eq!(std::mem::size_of::<crate::prim::PrimHit>(), 64);
+}
+
 /// The `bvh8` node: six `f32x8`s and eight child indices, four cache lines.
 #[test]
 #[cfg(feature = "bvh8")]

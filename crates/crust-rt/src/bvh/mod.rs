@@ -564,6 +564,7 @@ impl Bvh {
                 PrimHit {
                     t,
                     outward,
+                    dpdu: Vec3A::ZERO,
                     u,
                     v,
                     geom_id: rec.geom_id,
