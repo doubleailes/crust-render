@@ -75,8 +75,8 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
 
 - **Ribbon curves.** Authored `normals` are still ignored, and every strand is
   a round tube.
-- **The other `BasisCurves` import gaps.** `wrap`, `varying` widths, and
-  bspline / catmullRom span radii are separate fixes.
+- **The other `BasisCurves` import gaps.** `wrap` and `varying` widths are
+  separate fixes.
 - **Curve primvars reaching materials.** `geompropvalue` on curves is out of
   scope. A per-strand colour needs it, and it is the natural follow-up.
 - **Production hair speed-ups.** No dual-scattering or other multiple-scattering
