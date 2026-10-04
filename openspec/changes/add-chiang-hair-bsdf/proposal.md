@@ -27,8 +27,8 @@ its look into crust.
   `cuticle_angle` remapped from [0, 1] to [−π/2, π/2], and
   `absorption_coefficient`. It scatters over the whole sphere of directions, not
   a hemisphere. It combines with other leaves through the usual `mix`, `add`
-  and `multiply` combinators. Today such a document is refused as an unknown
-  node.
+  and `multiply` combinators. Today the leaf is dropped, with a warning that
+  names the node as having no operator.
 - **The three helper nodes become pattern nodes**, matching MaterialX's GLSL
   implementations: `chiang_hair_roughness`, `chiang_hair_absorption_from_color`
   and `deon_hair_absorption_from_melanin`. They work in the interpreter and in
@@ -61,9 +61,12 @@ those.
   scattering contract (sphere-wide, energy-conserving, sampling consistent with
   evaluation). The three hair helper nodes join the pattern nodes evaluated as
   the MaterialX reference.
-- `usd-scene-import`: a `BasisCurves` hit carries the strand direction as its
-  shading tangent, and a hair hit's continuation and shadow rays pass through
-  their own strand.
+- `intersection-kernel`: a curve hit reports its span parameter and its
+  tangent, carried through instances like the normal. A ray can ask to ignore
+  the hits where it leaves a curve's tube.
+- `usd-scene-import`: a new requirement that `BasisCurves` import as round
+  curves shaded along their strand. Today curves are only described in the
+  design record.
 
 ## Impact
 
@@ -73,12 +76,16 @@ those.
   - `crates/crust-core`: the hair lobe's eval, sample and pdf; frame
     construction on curve hits; the self-hit rule for rays leaving a hair hit.
   - `crates/crust-rt`: the curve intersectors return the span parameter they
-    already compute. A curve hit's `t` and normal stay bitwise unchanged.
+    already compute, and the tangent. Instances carry the tangent through. A ray
+    flag skips curve exit hits. A curve hit's `t` and normal stay bitwise
+    unchanged.
 - **Images:** scenes without `chiang_hair_bsdf` stay bit-identical. Curve hits
-  gain a tangent, but no existing material reads it on a curve. The
-  instruction cost on `cornellbox`, which has no curves, is expected to be zero.
-- **AOVs:** the hair leaf's R and TRT lobes route to specular reflection, and
-  its TT and TRRT+ lobes to specular transmission, in light path expressions.
+  gain a tangent, but no existing material reads it on a curve. The hit record
+  grows by one vector. On `cornellbox`, which has instances but no curves, the
+  budget is +0.3% instructions, measured with callgrind.
+- **AOVs:** in light path expressions, a hair leaf is classified by hemisphere,
+  like every other leaf: glossy `specular` reflection on the viewer's side, and
+  glossy `transmission` on the far side. There is no new label.
 - **Docs:** the materials page of the user documentation (`site/`), the
   materials and usd-scene-import design records, and a new known gap for what
   is approximated (for example, near-field azimuthal scattering on a tube that
