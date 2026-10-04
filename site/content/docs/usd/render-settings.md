@@ -73,6 +73,9 @@ The scene-linear colour space Crust Render renders in, by any name or alias of t
 [OCIO config](@/docs/reference/command-line.md#ocio-config): `acescg` (or `lin_ap1_scene`,
 `ACEScg`), `lin_rec2020`, `lin_rec709` (the default), and so on.
 [`--working-space`](@/docs/reference/command-line.md#working-space) overrides it.
+The default is `lin_rec709` whatever the config: it is not taken from the config's
+`scene_linear` role (ACEScg in the builtin config), so a render doesn't change when the
+config does.
 
 Every colour that names its colour space — a texture's, a MaterialX `colorspace`, a
 `colorSpace` metadatum — is converted into the working space when the scene loads. A

@@ -55,7 +55,11 @@ from one OpenColorIO config, through [`ocio`](https://crates.io/crates/ocio)
 - **The working space** is the scene-linear space light transport happens in:
   `lin_rec709` unless `RenderSettings.renderingColorSpace` or the host
   (`--working-space`, `UsdImportOptions::working_space`) names another —
-  ACEScg, linear Rec.2020, … It is not a global: every texture request
+  ACEScg, linear Rec.2020, … The default is `lin_rec709` whatever the config:
+  the config's `scene_linear` role (ACEScg in the builtin config and the ACES
+  studio configs) is never read, so swapping configs (`$OCIO`) cannot change
+  a render's working space, and a default render stays bit-identical to the
+  pre-OCIO one. It is not a global: every texture request
   (`ColorSpace`) carries the working space it converts *to*, the importer
   holds it in `ImportCaches::working`, and the `Scene` reports it
   (`Scene::working_space`) for the outputs.
