@@ -281,6 +281,13 @@ impl LobeSplit {
         }
     }
 
+    /// Share `i` multiplied by `k(i)`, for every share.
+    pub fn scale_each(&mut self, k: impl Fn(usize) -> f32) {
+        for (i, v) in self.values[..self.len].iter_mut().enumerate() {
+            *v *= k(i);
+        }
+    }
+
     /// The shares' sum, in order.
     pub fn total(&self) -> glam::Vec3A {
         self.values[..self.len]

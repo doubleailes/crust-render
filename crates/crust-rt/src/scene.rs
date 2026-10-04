@@ -557,7 +557,9 @@ impl SceneBuilder {
                     }));
                 }
                 Geometry::RoundCurves { segments } => {
-                    for (prim_id, s) in segments.into_iter().enumerate() {
+                    let joints =
+                        curve_joints(segments.iter().map(|s| (s.p0, s.p1, s.r0.min(s.r1))));
+                    for (prim_id, (s, joints)) in segments.into_iter().zip(joints).enumerate() {
                         input.push_node(PrimNode::Curve(CurvePrim {
                             p0: s.p0.to_array(),
                             p1: s.p1.to_array(),
@@ -566,11 +568,14 @@ impl SceneBuilder {
                             geom_id,
                             prim_id: prim_id as u32,
                             mask,
+                            joints,
                         }));
                     }
                 }
                 Geometry::CubicCurves { segments } => {
-                    for (prim_id, s) in segments.into_iter().enumerate() {
+                    let joints =
+                        curve_joints(segments.iter().map(|s| (s.cp[0], s.cp[3], s.r0.min(s.r1))));
+                    for (prim_id, (s, joints)) in segments.into_iter().zip(joints).enumerate() {
                         input.push_cubic(CubicCurvePrim {
                             cp: s.cp,
                             r0: s.r0,
@@ -578,6 +583,7 @@ impl SceneBuilder {
                             geom_id,
                             prim_id: prim_id as u32,
                             mask,
+                            joints,
                         });
                     }
                 }
@@ -854,6 +860,32 @@ impl Scene {
     pub(crate) fn intersect_outward(&self, ray: &Ray, t_min: f32, t_max: f32) -> Option<PrimHit> {
         self.bvh.hit(ray, t_min, t_max)
     }
+}
+
+/// Which ends of each segment of a curve batch continue into its neighbour
+/// in the batch: segment `i`'s end and segment `i + 1`'s start, where they
+/// meet. A strand is attached as consecutive segments (or spans), and a cap
+/// where two of them meet is buried in the next one's body except on the
+/// outside of a bend, so a ray passing out of tubes must not meet it. Where
+/// they meet is decided within float rounding of the coordinates (a B-spline
+/// converted to Bézier form shares its span ends only to the last ulps) and
+/// a thousandth of the radius: two strands whose ends merely touch are not
+/// one strand to any visible degree.
+fn curve_joints(ends: impl Iterator<Item = (Vec3A, Vec3A, f32)>) -> Vec<u8> {
+    let ends: Vec<_> = ends.collect();
+    let meet = |a: Vec3A, b: Vec3A, r: f32| {
+        let scale = a.abs().max(b.abs()).max_element();
+        (a - b).abs().max_element() <= 4.0 * f32::EPSILON * scale + 1e-3 * r
+    };
+    let mut joints = vec![0u8; ends.len()];
+    for i in 1..ends.len() {
+        let ((_, prev_end, r0), (start, _, r1)) = (ends[i - 1], ends[i]);
+        if meet(prev_end, start, r0.min(r1)) {
+            joints[i - 1] |= crate::curve::JOINED_END;
+            joints[i] |= crate::curve::JOINED_START;
+        }
+    }
+    joints
 }
 
 #[cfg(test)]

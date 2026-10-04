@@ -968,3 +968,105 @@ fn a_hair_leaf_is_classified_by_hemisphere() {
     );
     assert!(!near.transmit && far.transmit);
 }
+
+/// A fibre beside a transmitting leaf: a continuation ray into the tube
+/// carries one of the two shares — the fibre's passing out of the strand,
+/// the other's meeting its far wall — picked in proportion to them and
+/// scaled by the inverse probability. Each sample's value is the chosen
+/// share over its probability, the split sums to it bit for bit, both
+/// choices happen, and a ray out of the tube or a non-mixed fibre is left as
+/// it was.
+#[test]
+fn a_mixed_fibre_vertex_splits_its_continuation_by_share() {
+    use crate::lpe::LobeSplit;
+    let body = doc(r#"
+      <chiang_hair_bsdf name="h" type="BSDF" />
+      <translucent_bsdf name="t" type="BSDF" />
+      <mix name="x" type="BSDF">
+        <input name="fg" type="BSDF" nodename="h" />
+        <input name="bg" type="BSDF" nodename="t" />
+        <input name="mix" type="float" value="0.5" />
+      </mix>"#);
+    let c = resolved(&body, "x", 0.4, true);
+    assert!(c.passes_out_of_curves() && c.mixes_hair());
+    assert_eq!(c.hair_leaves(), 0b01);
+    let (r, rec) = (arriving(0.4), hit(true));
+    let mut s = S(0);
+    let mut split = LobeSplit::default();
+    let (mut passed, mut walled) = (0, 0);
+    for _ in 0..512 {
+        let Some(x) = c.scatter_split(&r, &rec, s.next(), &mut split) else {
+            continue;
+        };
+        let wi = x.ray.direction().normalize();
+        let total = split.total();
+        assert_eq!(
+            [total.x.to_bits(), total.y.to_bits(), total.z.to_bits()],
+            [
+                x.value.x.to_bits(),
+                x.value.y.to_bits(),
+                x.value.z.to_bits()
+            ],
+        );
+        if rec.normal.dot(wi) >= 0.0 {
+            // Out of the tube the flag changes nothing; the value is eval's.
+            let (v, _) = c.eval_pdf(wi);
+            assert_eq!(x.value, v);
+            continue;
+        }
+        let (hair, other) = c.eval_hair_split(wi);
+        let (h, o) = (hair.element_sum(), other.element_sum());
+        if x.ray.rt().ignore_curve_exits {
+            passed += 1;
+            let want = hair * ((h + o) / h);
+            assert!((x.value - want).abs().max_element() <= 1e-5 * want.max_element());
+        } else {
+            walled += 1;
+            let want = other * ((h + o) / o);
+            assert!((x.value - want).abs().max_element() <= 1e-5 * want.max_element());
+        }
+    }
+    assert!(
+        passed > 20 && walled > 20,
+        "passed {passed}, walled {walled}"
+    );
+
+    // A fibre on its own: every ray passes, its value is eval's.
+    let hair = LEAVES.iter().find(|(n, _)| *n == "hair").unwrap().1;
+    let c = resolved(&doc(hair), "x", 0.4, true);
+    assert!(!c.mixes_hair());
+    for _ in 0..64 {
+        if let Some(x) = c.scatter(&r, &rec, s.next()) {
+            assert!(x.ray.rt().ignore_curve_exits);
+            assert_eq!(x.value, c.eval_pdf(x.ray.direction().normalize()).0);
+        }
+    }
+}
+
+/// Which neighbours make a fibre vertex mixed: a leaf that can send light
+/// into the tube (a refracting dielectric, a translucent), not one that only
+/// reflects.
+#[test]
+fn only_a_transmitting_neighbour_mixes_a_fibre_vertex() {
+    let with = |neighbour: &str| {
+        let body = doc(&format!(
+            r#"
+      <chiang_hair_bsdf name="h" type="BSDF" />
+      {neighbour}
+      <mix name="x" type="BSDF">
+        <input name="fg" type="BSDF" nodename="h" />
+        <input name="bg" type="BSDF" nodename="n" />
+        <input name="mix" type="float" value="0.5" />
+      </mix>"#
+        ));
+        resolved(&body, "x", 0.4, true).mixes_hair()
+    };
+    assert!(with(
+        r#"<dielectric_bsdf name="n" type="BSDF">
+             <input name="scatter_mode" type="string" value="RT" />
+           </dielectric_bsdf>"#
+    ));
+    assert!(with(r#"<translucent_bsdf name="n" type="BSDF" />"#));
+    assert!(!with(r#"<dielectric_bsdf name="n" type="BSDF" />"#));
+    assert!(!with(r#"<oren_nayar_diffuse_bsdf name="n" type="BSDF" />"#));
+}

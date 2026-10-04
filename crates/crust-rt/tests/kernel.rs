@@ -1975,3 +1975,142 @@ fn a_cubic_tube_is_passed_out_of_too() {
 fn passing_out_of_tubes_does_not_grow_the_ray() {
     assert_eq!(std::mem::size_of::<Ray>(), 48);
 }
+
+/// A ray passing out of tubes that starts on a tube's surface within a
+/// radius of its end and crosses the fibre meets the half of the end cap
+/// buried in the body — an *entry* by its normal, but inside the strand.
+/// Only the cap's part outside the body is the strand's boundary.
+#[test]
+fn a_passing_ray_ignores_the_cap_buried_in_its_own_body() {
+    for (r0, r1) in [(0.5, 0.5), (0.5, 0.35)] {
+        let mut b = SceneBuilder::new();
+        b.attach(segment(
+            Vec3A::new(-1.0, 0.0, 0.0),
+            Vec3A::new(1.0, 0.0, 0.0),
+            r0,
+            r1,
+        ));
+        let scene = b.commit();
+        // On the surface (below the axis), 0.2 from the end, heading across.
+        let r_at = r0 + (r1 - r0) * 0.9;
+        let ray = Ray::new(Vec3A::new(0.8, 0.0, -r_at), Vec3A::Z);
+        assert!(
+            scene.intersect(&ray, 1e-3, 100.0).is_some(),
+            "a plain ray meets the strand's own surfaces"
+        );
+        let passing = ray.with_curve_exits_ignored(true);
+        assert!(
+            scene.intersect(&passing, 1e-3, 100.0).is_none(),
+            "radii ({r0}, {r1})"
+        );
+        assert!(!scene.occluded(&passing, 1e-3, 100.0));
+    }
+}
+
+/// Two segments of one strand meeting at the origin: a ray passing out of
+/// tubes from the first one's surface near the joint does not stop on the
+/// second one's cap, which is buried in the first one's body.
+#[test]
+fn a_passing_ray_ignores_the_cap_at_its_strands_joint() {
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::RoundCurves {
+        segments: vec![
+            CurveSegment {
+                p0: Vec3A::new(-1.0, 0.0, 0.0),
+                p1: Vec3A::ZERO,
+                r0: 0.5,
+                r1: 0.5,
+            },
+            CurveSegment {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::new(1.0, 0.0, 0.0),
+                r0: 0.5,
+                r1: 0.5,
+            },
+        ],
+    });
+    let scene = b.commit();
+    for x in [-0.2f32, 0.2] {
+        let passing = Ray::new(Vec3A::new(x, 0.0, -0.5), Vec3A::Z).with_curve_exits_ignored(true);
+        assert!(
+            scene.intersect(&passing, 1e-3, 100.0).is_none(),
+            "from x = {x}"
+        );
+        assert!(!scene.occluded(&passing, 1e-3, 100.0), "from x = {x}");
+    }
+}
+
+/// The same inside a cubic span: a subdivision piece's end is a joint with
+/// the next piece.
+#[test]
+fn a_passing_ray_ignores_the_caps_between_subdivision_pieces() {
+    let cp = quarter_circle();
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::CubicCurves {
+        segments: vec![CubicCurveSegment {
+            cp,
+            r0: 0.1,
+            r1: 0.1,
+        }],
+    });
+    let scene = b.commit();
+    // u = 0.5 is a piece end at every subdivision depth past 0.
+    let joint = bezier_at(&cp, 0.5);
+    let along = bezier_derivative(&cp, 0.5).normalize();
+    for offset in [-0.05f32, 0.05] {
+        let start = joint + along * offset - Vec3A::Z * 0.0999;
+        let passing = Ray::new(start, Vec3A::Z).with_curve_exits_ignored(true);
+        assert!(
+            scene.intersect(&passing, 1e-3, 100.0).is_none(),
+            "offset {offset}"
+        );
+    }
+}
+
+/// Skipping joint caps is only for rays starting there: a ray passing out of
+/// tubes that comes from elsewhere still meets a strand at every joint —
+/// through the wedge outside a sharp bend, which only the cap covers, too.
+#[test]
+fn a_passing_ray_from_elsewhere_meets_a_strand_at_its_joints() {
+    let cp = quarter_circle();
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::CubicCurves {
+        segments: vec![CubicCurveSegment {
+            cp,
+            r0: 0.1,
+            r1: 0.1,
+        }],
+    });
+    let scene = b.commit();
+    for k in 1..16 {
+        let target = bezier_at(&cp, k as f32 / 16.0);
+        let ray = Ray::new(target - Vec3A::Z * 5.0, Vec3A::Z).with_curve_exits_ignored(true);
+        let hit = scene.intersect(&ray, 1e-3, 100.0).expect("the strand");
+        assert!(hit.front_face, "u = {}", k as f32 / 16.0);
+    }
+    // A right-angle bend at the origin: (0, 0.15) is outside both bodies,
+    // inside only the joint's cap.
+    let mut b = SceneBuilder::new();
+    b.attach(Geometry::RoundCurves {
+        segments: vec![
+            CurveSegment {
+                p0: Vec3A::new(-1.0, -1.0, 0.0),
+                p1: Vec3A::ZERO,
+                r0: 0.2,
+                r1: 0.2,
+            },
+            CurveSegment {
+                p0: Vec3A::ZERO,
+                p1: Vec3A::new(1.0, -1.0, 0.0),
+                r0: 0.2,
+                r1: 0.2,
+            },
+        ],
+    });
+    let bend = b.commit();
+    let wedge = Ray::new(Vec3A::new(0.0, 0.15, -5.0), Vec3A::Z).with_curve_exits_ignored(true);
+    assert!(
+        bend.intersect(&wedge, 1e-3, 100.0)
+            .is_some_and(|h| h.front_face)
+    );
+}

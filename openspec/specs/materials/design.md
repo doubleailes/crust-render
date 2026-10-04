@@ -470,7 +470,7 @@
     them. `scripts/hair_reference.py` transcribes genglsl in float64 into
     `tests/data/hair_helpers.txt`, at the oracle's format and tolerance.
 
-    **A fibre vertex's rays pass out of curve tubes.** The model already
+    **A fibre's light passes out of curve tubes.** The model already
     integrates light's path through the fibre from the entry point, so the
     tube's far wall belongs to that same event. `ResolvedClosure::hair` is set
     when a live hair leaf is pushed, and makes the vertex's rays carry
@@ -480,6 +480,35 @@
     - the learned light cache's training shadow rays, so a backlight behind a
       strand is learned as reachable;
     - and through cutout restarts.
+
+    **Only the fibre's light, where a fibre shares the vertex with a
+    transmitting leaf** (`mixes_hair`: a refracting dielectric or a
+    translucent beside it). That leaf's light going into the tube must meet
+    the far wall as it would on its own, so one closure-wide flag is wrong
+    there (Qodo's review of #207).
+    - **Continuation.** One ray cannot carry both answers, so
+      `scatter_choosing` picks the fibres' share or the others' in proportion
+      to their values toward the sampled direction, using the leaf pick's
+      residual as its uniform number (no new draw). The value is that share
+      over its probability: an unbiased one-sample estimate of the sum.
+      `scatter_split` scales the chosen leaves' shares by the same factor and
+      zeroes the others', so the split still sums to the value bit for bit.
+      Out of the tube the flag changes nothing, so the value is `eval`'s
+      there.
+    - **NEE.** Toward a light on the tube's far side, the shadow ray is traced
+      twice, once passing and once not. The fibres' share takes the first
+      transmittance and the others' the second. Light path expressions route
+      each leaf with its own transmittance (`hair_leaves` marks the fibres).
+    - **Guiding** is off at such a vertex, on both MIS sides: a guided
+      direction carries the whole value on one ray, with nothing to split.
+    - **The light cache** keeps one flag (the fibre's), being a guide only.
+    - **A delta lobe is never a fibre's**, so a delta sample's ray never
+      passes.
+    - **Pinned** by `a_mixed_fibre_vertex_splits_its_continuation_by_share`
+      and by `only_the_fibres_light_passes_out_of_a_mixed_strand`. That test
+      checks a backlit half-fibre, half-translucent strand against half the
+      clear fibre's glow: exact under light sampling, within noise under BSDF
+      sampling. With the old closure-wide flag it fails under both.
 
     A ray starting outside a tube must enter it before it can leave it, so
     only the strand the ray started in is hidden; a fibre still shadows
@@ -828,11 +857,13 @@
   authored in metres, so strands closer than 1 mm do not shadow or scatter into
   each other. In centimetres (the USD default), it is 10 µm. A scale-aware
   epsilon is its own change.
-- **Hair: a ray can re-enter its own strand at a joint.** Where two segments of
-  a strand overlap, a ray leaving through one cone body can *enter* the
-  neighbour's cap sphere while still inside the union. That is an entry, which
-  the exit rule keeps. If it ever shows, the fix is to also skip entries on the
-  hit's own `geom_id` within a radius.
+- **Hair: a ray can still meet its own strand on the inside of a sharp bend.**
+  The buried half of an end cap, and a joint's cap for a ray starting at that
+  joint, are skipped (intersection-kernel record). Where two segments' *bodies*
+  overlap on the inside of a bend, though, a ray crossing the strand can enter
+  the neighbour's body while still inside the strand. Within a cubic span the
+  subdivision keeps pieces nearly straight, so this is a sliver. A linear
+  curve with sharp corners is where it would show.
 - **Hair: far-field only, one fibre at a time.** There is no dual scattering or
   other multiple-scattering approximation, so a dense groom converges by
   tracing bounces, and there is no near-field azimuthal term for a tube wider

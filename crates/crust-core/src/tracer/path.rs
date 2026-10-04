@@ -1328,7 +1328,17 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // Guide secondary bounces only: primary vertices vary per pixel far
         // below the guiding field's spatial resolution, so guiding them adds
         // parallax-mismatch variance instead of removing any.
-        let guiding_here = if prev.is_some() { guiding } else { None };
+        //
+        // Nor where a fibre shares the closure with a transmitting leaf: a
+        // guided direction would carry both shares on one ray, and only one
+        // of them passes out of the strand (`ResolvedClosure::scatter_choosing`
+        // splits them; the guide branch has no split). Off for both MIS
+        // sides alike, as the decision is the vertex's.
+        let guiding_here = if prev.is_some() && !sp.mixes_hair() {
+            guiding
+        } else {
+            None
+        };
 
         // === 1. Direct Lighting via Light Sampling ===
         // The light strategy is "pick one light with the light list's
@@ -1372,20 +1382,28 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // bit-identical: a skipped test's contribution would be exactly
             // zero, and the shadow ray's own draws come from `K_NEE_SHADOW`,
             // which nothing else reads.
-            let mut visibility = || {
+            let mut shadow = |pass: bool| {
                 let shadow_ray = Ray::new(rec.p, light_dir_unit)
                     .with_time(ray.time())
                     .with_mask(lights.shadow_mask(light_index))
-                    .with_curve_exits_ignored(sp.passes_out_of_curves());
-                let tr = shadow_transmittance::<PROFILE>(
-                    world,
-                    volumes,
-                    &shadow_ray,
-                    ls.distance,
-                    v,
-                    stats,
-                );
-                (tr != Vec3A::ZERO).then_some(tr)
+                    .with_curve_exits_ignored(pass);
+                shadow_transmittance::<PROFILE>(world, volumes, &shadow_ray, ls.distance, v, stats)
+            };
+            // Toward a light inside the tube's side, a fibre sharing the
+            // closure with a transmitting leaf needs both answers: the
+            // fibre's light passes out of its own strand, the other leaf's
+            // meets the far wall. Each share then takes its own
+            // transmittance, and the shadow ray is traced twice — at such
+            // vertices only, and only on that side.
+            let mixed = sp.mixes_hair() && rec.normal.dot(light_dir_unit) < 0.0;
+            let mut visibility = || {
+                if mixed {
+                    let (pass, wall) = (shadow(true), shadow(false));
+                    (pass != Vec3A::ZERO || wall != Vec3A::ZERO).then_some((pass, wall))
+                } else {
+                    let tr = shadow(sp.passes_out_of_curves());
+                    (tr != Vec3A::ZERO).then_some((tr, tr))
+                }
             };
             let connection = if ls.radiance == Vec3A::ZERO {
                 None
@@ -1394,7 +1412,17 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     .filter(|(f, _)| ls.radiance * *f != Vec3A::ZERO)
                     .and_then(|(f, pdf)| visibility().map(|tr| (f, pdf, tr)))
             };
-            if let Some((brdf_value, brdf_pdf, shadow_tr)) = connection {
+            if let Some((brdf_value, brdf_pdf, (tr_hair, tr_other))) = connection {
+                // Where they differ, the fibres' share and the others' each
+                // through their own transmittance, folded into the value (and
+                // the transmittance left at one); elsewhere the expression is
+                // the one it always was, so nothing else moves by an ulp.
+                let (shaded, hair_leaves, shadow_tr) = if mixed {
+                    let (hair, other, leaves) = sp.eval_hair_split(light_dir_unit);
+                    (hair * tr_hair + other * tr_other, leaves, Vec3A::ONE)
+                } else {
+                    (brdf_value, 0, tr_other)
+                };
                 let light_pdf = lights.density(ls.pdf, pmf).max(1e-6);
                 // The competing strategy for this MIS weight is the
                 // bounce sampler, whose density toward the light is the
@@ -1421,7 +1449,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 // continuous transmission lobe can see a light behind the
                 // ray-facing normal). Applying it again here is what used
                 // to make this an integral of `brdf · cos²`.
-                nee += ls.radiance * brdf_value * shadow_tr * weight / light_pdf.get();
+                nee += ls.radiance * shaded * shadow_tr * weight / light_pdf.get();
                 if let Some(ctx) = routing {
                     // Each lobe's share, in the beauty's own expression. A
                     // walk's exit is part of the walk's event: no event here.
@@ -1429,10 +1457,17 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     let light_pdf = light_pdf.get();
                     route.nee(
                         ctx.light(light_index),
-                        split.iter().map(|(e, f)| {
+                        split.iter().enumerate().map(|(i, (e, f))| {
+                            let tr = if !mixed {
+                                shadow_tr
+                            } else if hair_leaves & (1 << i) != 0 {
+                                tr_hair
+                            } else {
+                                tr_other
+                            };
                             (
                                 if exiting { NO_EVENT } else { ctx.lobe(e) },
-                                ls.radiance * f * shadow_tr * weight / light_pdf,
+                                ls.radiance * f * tr * weight / light_pdf,
                             )
                         }),
                     );

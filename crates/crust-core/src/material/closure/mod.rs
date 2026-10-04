@@ -305,6 +305,8 @@ pub struct ResolvedClosure {
     /// Whether any leaf is a fibre: its rays pass out of curve tubes
     /// ([`crust_rt::Ray::ignore_curve_exits`]).
     hair: bool,
+    /// Bit `i` set when leaf `i` is a fibre.
+    hair_leaves: u8,
 }
 
 thread_local! {
@@ -474,6 +476,7 @@ impl ResolvedClosure {
             medium: None,
             transmits: false,
             hair: false,
+            hair_leaves: 0,
         }
     }
 
@@ -495,6 +498,7 @@ impl ResolvedClosure {
         self.medium = None;
         self.transmits = false;
         self.hair = false;
+        self.hair_leaves = 0;
         let walk = Walk {
             slots,
             rec,
@@ -535,9 +539,43 @@ impl ResolvedClosure {
 
     /// Whether any leaf is a fibre, so the vertex's rays — the continuation
     /// and every shadow ray — pass out of curve tubes: the fibre model
-    /// already accounts for light's path through its own strand.
+    /// already accounts for light's path through its own strand. Where a
+    /// fibre shares the vertex with a transmitting leaf
+    /// ([`ResolvedClosure::mixes_hair`]), only the fibre's light passes.
     pub fn passes_out_of_curves(&self) -> bool {
         self.hair
+    }
+
+    /// Whether a fibre shares this vertex with a leaf that transmits (a
+    /// refracting or translucent one). Light going into the tube then needs
+    /// two answers to "is the way clear": the fibre's passes out of its own
+    /// strand, the other leaf's meets the tube's far wall, as it would on
+    /// its own.
+    pub fn mixes_hair(&self) -> bool {
+        self.hair && self.transmits
+    }
+
+    /// Bit `i` set when leaf `i` (in [`ResolvedClosure::eval_lobes`]'s order)
+    /// is a fibre.
+    pub fn hair_leaves(&self) -> u8 {
+        self.hair_leaves
+    }
+
+    /// `eval`'s value toward `wi`, split into the fibres' share and the other
+    /// leaves', each summed in leaf order.
+    pub fn eval_hair_split(&self, wi: Vec3A) -> (Vec3A, Vec3A) {
+        let wi = wi.normalize();
+        let (mut hair, mut other) = (Vec3A::ZERO, Vec3A::ZERO);
+        for (i, leaf) in self.leaves[..self.len].iter().enumerate() {
+            let l = leaf.frame.to_local(wi);
+            let term = leaf.weight * eval_lobe(&leaf.lobe, leaf.v, l).0 * l.z.abs();
+            if self.hair_leaves & (1 << i) != 0 {
+                hair += term;
+            } else {
+                other += term;
+            }
+        }
+        (hair, other)
     }
 
     /// Walks the subtree `id` reached with `weight`, pushing its leaves, and
@@ -568,6 +606,7 @@ impl ResolvedClosure {
                     }
                     if matches!(p.lobe, Lobe::Hair(_)) {
                         self.hair = true;
+                        self.hair_leaves |= 1 << self.len;
                     }
                     self.leaves[self.len] = p;
                     self.len += 1;
@@ -683,9 +722,12 @@ impl ResolvedClosure {
         out: &mut crate::lpe::LobeSplit,
     ) -> Option<ScatterSample> {
         out.clear();
-        let sample = self.scatter(r_in, rec, sampler)?;
+        let (sample, choice) = self.scatter_choosing(r_in, rec, sampler)?;
         if !sample.delta {
             self.eval_lobes_at(sample.ray.direction(), out);
+            if let Some(c) = choice {
+                out.scale_each(|i| c.scale(self.hair_leaves & (1 << i) != 0));
+            }
         }
         Some(sample)
     }
@@ -757,10 +799,27 @@ impl ResolvedClosure {
     /// [`crate::Material::scatter_importance`].
     pub fn scatter(
         &self,
-        _r_in: &Ray,
+        r_in: &Ray,
         rec: &HitRecord,
         sampler: PathSampler,
     ) -> Option<ScatterSample> {
+        self.scatter_choosing(r_in, rec, sampler).map(|(s, _)| s)
+    }
+
+    /// [`ResolvedClosure::scatter`], and — where a fibre shares the vertex
+    /// with a transmitting leaf and the sample goes into the tube — which of
+    /// the two the continuation ray carries. One ray cannot both pass out of
+    /// the strand (the fibre's light) and meet its far wall (the other
+    /// leaf's), so it carries one, picked in proportion to the two shares of
+    /// the value toward the sampled direction, and the value is that share
+    /// over its probability: unbiased, as a one-sample estimate of the sum
+    /// of the two.
+    fn scatter_choosing(
+        &self,
+        _r_in: &Ray,
+        rec: &HitRecord,
+        sampler: PathSampler,
+    ) -> Option<(ScatterSample, Option<Choice>)> {
         if self.len == 0 {
             return None;
         }
@@ -769,16 +828,21 @@ impl ResolvedClosure {
         let s = sampler.draw_sample_f32::<4>();
         let mut u = s[0] * self.select_total.max(0.0);
         let mut pick = self.len - 1;
+        // Where in its own slice of `s[0]` the pick landed: a fresh uniform
+        // number, for the choice a mixed fibre vertex makes.
+        let mut residual = 0.5;
         if self.select_total > 0.0 {
             for (i, l) in self.leaves[..self.len].iter().enumerate() {
                 if u < l.select {
                     pick = i;
+                    residual = u / l.select;
                     break;
                 }
                 u -= l.select;
             }
         } else {
             pick = ((s[0] * self.len as f32) as usize).min(self.len - 1);
+            residual = (s[0] * self.len as f32).fract();
         }
         let leaf = &self.leaves[pick];
         match sample_lobe(&leaf.lobe, leaf.v, [s[1], s[2]], s[3])? {
@@ -791,55 +855,99 @@ impl ResolvedClosure {
                     return None;
                 }
                 let p = self.p(pick).max(1e-4);
-                Some(ScatterSample {
-                    ray: Ray::new(rec.p + world * 1e-4, world),
-                    value: leaf.weight / p,
-                    pdf: 1.0,
-                    delta: true,
-                    spread: crate::RayCone::MAX_SPREAD,
-                    subsurface: Some(pick as u8),
-                })
+                Some((
+                    ScatterSample {
+                        ray: Ray::new(rec.p + world * 1e-4, world),
+                        value: leaf.weight / p,
+                        pdf: 1.0,
+                        delta: true,
+                        spread: crate::RayCone::MAX_SPREAD,
+                        subsurface: Some(pick as u8),
+                    },
+                    None,
+                ))
             }
+            // A delta lobe is never a fibre's: its ray meets the tube as any
+            // non-fibre ray does.
             LobeSample::Delta { dir, value } => {
                 let world = leaf.frame.to_world(dir);
                 let p = self.p(pick).max(1e-4);
-                Some(ScatterSample {
-                    ray: self.ray(rec, world),
-                    value: leaf.weight * value / p,
-                    pdf: 1.0,
-                    delta: true,
-                    spread: 0.0,
-                    subsurface: None,
-                })
+                Some((
+                    ScatterSample {
+                        ray: self.ray(rec, world, false),
+                        value: leaf.weight * value / p,
+                        pdf: 1.0,
+                        delta: true,
+                        spread: 0.0,
+                        subsurface: None,
+                    },
+                    None,
+                ))
             }
             LobeSample::Continuous { dir, spread } => {
                 let world = leaf.frame.to_world(dir).normalize();
                 let (value, pdf) = self.eval_pdf(world);
-                Some(ScatterSample {
-                    ray: self.ray(rec, world),
-                    value,
-                    pdf: pdf.max(1e-4),
-                    delta: false,
-                    spread,
-                    subsurface: None,
-                })
+                let (value, pass, choice) = if self.mixes_hair() && rec.normal.dot(world) < 0.0 {
+                    let c = self.choose(world, residual);
+                    (c.value, c.hair, Some(c))
+                } else {
+                    (value, self.hair, None)
+                };
+                Some((
+                    ScatterSample {
+                        ray: self.ray(rec, world, pass),
+                        value,
+                        pdf: pdf.max(1e-4),
+                        delta: false,
+                        spread,
+                        subsurface: None,
+                    },
+                    choice,
+                ))
             }
         }
     }
 
+    /// Which share a mixed fibre vertex's continuation carries toward `wi`
+    /// (see [`ResolvedClosure::scatter_choosing`]), `u` uniform in [0, 1).
+    fn choose(&self, wi: Vec3A, u: f32) -> Choice {
+        let (hair, other) = self.eval_hair_split(wi);
+        let (h, o) = (hair.element_sum().max(0.0), other.element_sum().max(0.0));
+        let p_hair = if h + o > 0.0 { h / (h + o) } else { 0.5 };
+        let hair = u < p_hair;
+        let c = Choice {
+            hair,
+            inv_p: if hair {
+                1.0 / p_hair
+            } else {
+                1.0 / (1.0 - p_hair)
+            },
+            value: Vec3A::ZERO,
+        };
+        // Summed as `eval_lobes` splits it, each chosen share scaled, so the
+        // split `scatter_split` reports adds up to this value bit for bit.
+        let mut value = Vec3A::ZERO;
+        for (i, leaf) in self.leaves[..self.len].iter().enumerate() {
+            let l = leaf.frame.to_local(wi);
+            let term = leaf.weight * eval_lobe(&leaf.lobe, leaf.v, l).0 * l.z.abs();
+            value += term * c.scale(self.hair_leaves & (1 << i) != 0);
+        }
+        Choice { value, ..c }
+    }
+
     /// The continuation ray toward `wi`: offset through the surface, and
     /// carrying the interior medium, when it refracts into a thick surface.
-    fn ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
+    /// `pass` makes it pass out of curve tubes: it carries a fibre's light.
+    fn ray(&self, rec: &HitRecord, wi: Vec3A, pass: bool) -> Ray {
         if self.transmits && rec.normal.dot(wi) < 0.0 {
             if rec.front_face
                 && let Some(m) = self.medium
             {
-                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, m)
-                    .with_curve_exits_ignored(self.hair);
+                return Ray::new_in_medium(rec.p + wi * 1e-4, wi, m).with_curve_exits_ignored(pass);
             }
-            return Ray::new(rec.p + wi * 1e-4, wi).with_curve_exits_ignored(self.hair);
+            return Ray::new(rec.p + wi * 1e-4, wi).with_curve_exits_ignored(pass);
         }
-        Ray::new(rec.p, wi).with_curve_exits_ignored(self.hair)
+        Ray::new(rec.p, wi).with_curve_exits_ignored(pass)
     }
 
     /// The walk leaf `index` enters toward `dir` — see
@@ -863,7 +971,31 @@ impl ResolvedClosure {
 
     /// [`crate::Material::make_ray`].
     pub fn make_ray(&self, rec: &HitRecord, wi: Vec3A) -> Ray {
-        self.ray(rec, wi)
+        // A guided direction carries the whole value: a mixed fibre vertex
+        // is not guided (the tracer turns the guide off there), so this is
+        // all-fibre or no fibre.
+        self.ray(rec, wi, self.hair)
+    }
+}
+
+/// The share a mixed fibre vertex's continuation ray carries: the fibres'
+/// (`hair`) or the other leaves', with the inverse of its probability and the
+/// value it scales to.
+#[derive(Clone, Copy, Debug)]
+struct Choice {
+    hair: bool,
+    inv_p: f32,
+    value: Vec3A,
+}
+
+impl Choice {
+    /// The factor on a leaf's share: the chosen side's `1/p`, else 0.
+    fn scale(&self, leaf_is_hair: bool) -> f32 {
+        if leaf_is_hair == self.hair {
+            self.inv_p
+        } else {
+            0.0
+        }
     }
 }
 
