@@ -389,7 +389,12 @@ Schema mapping:
   directly, `cubic` (bezier | bspline | catmullRom) as one `CubicCurveSegment` per span,
   converted to Bézier control points and subdivided per ray query by the kernel's cubic
   intersector rather than flattened; widths
-  (USD diameters) resolve per-vertex / per-curve / constant by array length.
+  (USD diameters) resolve per-vertex / per-curve / constant by array length. A span's
+  radius is linear between its two ends; per-vertex widths are evaluated there through
+  the curve's basis, as USD's `vertex` interpolation specifies (`span_end_values`).
+  Only a Bézier span ends on its end control points — B-spline and Catmull-Rom spans
+  once read the widths of control points they never pass through, so a tapered strand
+  under those bases was thicker or thinner than authored at every joint.
 - **Instancing** — both USD mechanisms reduce to the same thing, and share one code path
   (`collect_proto_parts` → `attach_proto_parts`): build a prototype's geometry *once*, then
   place it by transform. A prototype becomes a `Vec<ProtoPart>` — one part per bound leaf

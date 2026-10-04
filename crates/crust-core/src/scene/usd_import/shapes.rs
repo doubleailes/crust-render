@@ -145,6 +145,23 @@ fn basis_to_bezier(m: &[[f32; 4]; 4], cp: &[Vec3A; 4]) -> [Vec3A; 4] {
     [p0, p1, p2, p3]
 }
 
+/// The values a span's four per-vertex scalars take at its two ends, `t = 0`
+/// and `t = 1`, under basis `m` — USD's `vertex` interpolation of a cubic
+/// primvar runs through the curve's basis, like its points. A Bézier span
+/// starts and ends on its first and last control points, so it reads `w[0]`
+/// and `w[3]` exactly (the weights are `[1, 0, 0, 0]` and `[0, 0, 0, 1]`),
+/// but a B-spline span starts at `(w0 + 4w1 + w2) / 6` and a Catmull-Rom one
+/// at `w1`: neither passes through its end control points.
+///
+/// At `t = 0` only the constant row of `m` remains; at `t = 1` every row
+/// contributes, so the weight of control point `c` is its column's sum.
+fn span_end_values(m: &[[f32; 4]; 4], w: [f32; 4]) -> (f32, f32) {
+    let at = |weights: [f32; 4]| -> f32 { (0..4).map(|c| weights[c] * w[c]).sum() };
+    let start = m[3];
+    let end = std::array::from_fn(|c| m[0][c] + m[1][c] + m[2][c] + m[3][c]);
+    (at(start), at(end))
+}
+
 /// Import a `UsdGeomBasisCurves` batch as round (sphere-swept) curves:
 /// `linear` curves directly as [`CurveSegment`]s, `cubic` curves (bezier /
 /// bspline / catmullRom) as one [`CubicCurveSegment`] per span — its
@@ -264,7 +281,9 @@ pub(super) fn curve_segments(
             // Cubic: one CubicCurveSegment per span. Span k uses control
             // points [k·vstep .. k·vstep+3], converted to Bézier form;
             // widths interpolate linearly over the curve parameter
-            // between the span's end control points.
+            // between the widths at the span's two ends. Per-vertex widths
+            // are evaluated there through the basis (`span_end_values`):
+            // only a Bézier span ends on its end control points.
             if cnt < 4 {
                 offset += cnt;
                 continue;
@@ -273,7 +292,13 @@ pub(super) fn curve_segments(
             for s in 0..n_spans {
                 let base = s * vstep;
                 let ctrl = [cp[base], cp[base + 1], cp[base + 2], cp[base + 3]];
-                let (r0, r1) = (radius(base), radius(base + 3));
+                let (r0, r1) = if widths.len() == n_points {
+                    let w = std::array::from_fn(|c| width_of(offset + base + c, curve_idx));
+                    let (w0, w1) = span_end_values(basis, w);
+                    (0.5 * w0.max(1e-6), 0.5 * w1.max(1e-6))
+                } else {
+                    (radius(base), radius(base + 3))
+                };
                 cubic_segments.push(CubicCurveSegment {
                     cp: basis_to_bezier(basis, &ctrl),
                     r0,
@@ -352,6 +377,27 @@ mod curve_basis_tests {
         for i in 0..4 {
             assert!(out[i].abs_diff_eq(cp[i], 1e-5), "index {i}: {out:?}");
         }
+    }
+
+    /// A span's end widths are the basis evaluated at its ends, not its end
+    /// control points' widths, and a Bézier span's are those exactly — so
+    /// every Bézier groom imports bit-identically to before.
+    #[test]
+    fn span_end_widths_follow_the_basis() {
+        let w = [0.12, 0.10, 0.06, 0.03];
+        assert_eq!(span_end_values(&BEZIER_M, w), (w[0], w[3]));
+
+        // Evaluate the basis on the widths as a curve (x carries the width).
+        let as_curve = w.map(|x| Vec3A::new(x, 0.0, 0.0));
+        for basis in [&BSPLINE_M, &CATMULL_ROM_M] {
+            let (w0, w1) = span_end_values(basis, w);
+            assert!((w0 - eval_cubic(basis, &as_curve, 0.0).x).abs() < 1e-7);
+            assert!((w1 - eval_cubic(basis, &as_curve, 1.0).x).abs() < 1e-7);
+        }
+        let (w0, w1) = span_end_values(&BSPLINE_M, w);
+        assert!((w0 - (w[0] + 4.0 * w[1] + w[2]) / 6.0).abs() < 1e-7, "{w0}");
+        assert!((w1 - (w[1] + 4.0 * w[2] + w[3]) / 6.0).abs() < 1e-7, "{w1}");
+        assert_eq!(span_end_values(&CATMULL_ROM_M, w), (w[1], w[2]));
     }
 
     #[test]
