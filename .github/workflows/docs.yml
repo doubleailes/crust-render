@@ -45,7 +45,7 @@ jobs:
         with:
           submodules: true
       - name: Build
-        uses: shalzz/zola-deploy-action@90cd842959b82e0c012601be18ae249d6cdb1669 # v0.21.0
+        uses: shalzz/zola-deploy-action@1be083648a1db2853ce4970e381740c0e2fd06de # v0.23.6
         env:
           BUILD_DIR: site
           BUILD_ONLY: true
@@ -61,7 +61,7 @@ jobs:
         with:
           submodules: true
       - name: Build and publish to gh-pages
-        uses: shalzz/zola-deploy-action@90cd842959b82e0c012601be18ae249d6cdb1669 # v0.21.0
+        uses: shalzz/zola-deploy-action@1be083648a1db2853ce4970e381740c0e2fd06de # v0.23.6
         env:
           BUILD_DIR: site
           PAGES_BRANCH: gh-pages
