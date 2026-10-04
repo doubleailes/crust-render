@@ -1,4 +1,5 @@
-//! Every `CRUST_*` environment switch, parsed once into one typed [`Config`].
+//! Every `CRUST_*` environment switch, parsed once into one typed [`Config`],
+//! and the one standard variable crust honours, `OCIO`.
 //!
 //! Each switch exists to A/B an optimization against the behaviour it
 //! replaced (`docs/architecture.md` § Environment switches, whose table is
@@ -8,6 +9,12 @@
 //! `CRUST_TEX_MAX` not at all. Now there is one boolean grammar
 //! ([`env_flag`]), one number grammar ([`env_parse`]), and one warning per
 //! bad value per process.
+//!
+//! `OCIO` is not a switch: it is OpenColorIO's own variable naming the config
+//! every OCIO application uses, read here so the environment is still read in
+//! one place. Only the CLI obeys it, as the fallback for `--ocio-config`; the
+//! library keeps its builtin config unless a host installs another, so a
+//! test's colours never depend on the shell it runs in.
 //!
 //! The process-wide value is [`config()`], read from the environment on first
 //! use. Code that wants a different setting — a test comparing both sides of
@@ -129,8 +136,8 @@ impl std::fmt::Display for PtexMipSpace {
     }
 }
 
-/// The `CRUST_*` switches in effect. [`Config::default`] is every switch
-/// unset; [`config()`] is the process's environment.
+/// The `CRUST_*` switches (and `OCIO`) in effect. [`Config::default`] is
+/// every switch unset; [`config()`] is the process's environment.
 ///
 /// Booleans name the optimization, so `true` is the new behaviour and `false`
 /// the one it replaced — except `ptex_stream`, which is off by default.
@@ -205,6 +212,10 @@ pub struct Config {
     /// `CRUST_PTEX_STREAM_MIPSPACE`: which mip chain a streamed `.ptx` may
     /// read.
     pub ptex_mip_space: PtexMipSpace,
+    /// `OCIO`: the OpenColorIO config to use when the host names none — a
+    /// path or an `ocio://` URI, `None` when unset or empty. Not validated
+    /// here: loading it is the host's, which reports a bad one as an error.
+    pub ocio: Option<String>,
 }
 
 /// Default `.tx` tile cache and Ptex streaming budgets, in MiB: OIIO's own
@@ -245,6 +256,7 @@ impl Default for Config {
             ptex_cache_mb: NonZeroUsize::new(DEFAULT_CACHE_MB).unwrap(),
             ptex_stream_min_mb: DEFAULT_PTEX_STREAM_MIN_MB,
             ptex_mip_space: PtexMipSpace::Linear,
+            ocio: None,
         }
     }
 }
@@ -318,6 +330,8 @@ impl Config {
                 d.ptex_mip_space,
                 "`linear` or `file`",
             ),
+            // OCIO's own convention: an empty `OCIO` is no config.
+            ocio: lookup("OCIO").filter(|v| !v.is_empty()),
         }
     }
 }
@@ -501,5 +515,13 @@ mod tests {
         for m in [PtexMipSpace::Linear, PtexMipSpace::File] {
             assert_eq!(m.to_string().parse::<PtexMipSpace>(), Ok(m));
         }
+    }
+
+    #[test]
+    fn ocio_names_a_config_unless_empty() {
+        assert_eq!(with(&[]).ocio, None);
+        assert_eq!(with(&[("OCIO", "")]).ocio, None);
+        let c = with(&[("OCIO", "/studio/config.ocio")]);
+        assert_eq!(c.ocio.as_deref(), Some("/studio/config.ocio"));
     }
 }

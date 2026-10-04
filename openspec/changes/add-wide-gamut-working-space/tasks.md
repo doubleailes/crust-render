@@ -29,6 +29,7 @@
 ## 4. Output and CLI
 
 - [x] 4.1 `--ocio-config`, `--working-space`, `--display`, `--view`.
+- [x] 4.1a `$OCIO` as the fallback for `--ocio-config` (`Config::ocio`).
 - [x] 4.2 EXR `colorInteropID` / `chromaticities`; preview through display/view.
 - [x] 4.3 Default renders unchanged: EXR header and pixels, PNG bytes, on all
       33 samples at 16 spp against the previous commit.

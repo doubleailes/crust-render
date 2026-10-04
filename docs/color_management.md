@@ -48,7 +48,8 @@ from one OpenColorIO config, through [`ocio`](https://crates.io/crates/ocio)
   (`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`, `color::DEFAULT_CONFIG`) so an
   `ocio` bump that ships a newer one cannot move a render on its own. The host
   may install another before the first colour is converted (`--ocio-config`,
-  `color::use_config`); it must define `raw`, `lin_rec709`, `srgb_texture`,
+  else `$OCIO` — read into `Config::ocio` and obeyed by the CLI only, so a
+  library test never depends on the shell — through `color::use_config`); it must define `raw`, `lin_rec709`, `srgb_texture`,
   `g22_rec709` and `g18_rec709` (the five well-known `Space`s), which every
   ACES config does as aliases.
 - **The working space** is the scene-linear space light transport happens in:

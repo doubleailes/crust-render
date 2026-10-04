@@ -9,7 +9,7 @@ sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'The <code>CRUST_*</code> variables switch optimizations off and tune memory budgets. A normal render needs none of them.'
+lead = 'The <code>CRUST_*</code> variables switch optimizations off and tune memory budgets. A normal render needs none of them. <code>OCIO</code> names the colour config, as in every OpenColorIO application.'
 toc = true
 top = false
 +++
@@ -88,6 +88,7 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_PTEX_CACHE_MB`](#crust-ptex-cache-mb) | 1024 | Ptex |
 | [`CRUST_PTEX_STREAM_MIN_MB`](#crust-ptex-stream-min-mb) | 8 | Ptex |
 | [`CRUST_PTEX_STREAM_MIPSPACE`](#crust-ptex-stream-mipspace) | `linear` | Ptex |
+| [`OCIO`](#ocio) | builtin ACES CG config | colour |
 | [`RAYON_NUM_THREADS`](#rayon-num-threads) | all cores | threads |
 
 ## USD import
@@ -317,6 +318,19 @@ CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust-render -i island.usda
 ```
 
 ## Other variables
+
+### OCIO
+
+OpenColorIO's own variable: the config every colour is managed with, as a `.ocio` file,
+an `.ocioz` archive or an `ocio://` builtin URI. Crust Render uses it when
+[`--ocio-config`](@/docs/reference/command-line.md#ocio-config) is not given, which takes
+precedence. Unset or empty, the builtin ACES CG config is used. A config that can't be
+loaded, or lacks a space Crust Render needs, stops the render with an error naming
+`$OCIO`.
+
+```bash
+OCIO=/studio/config.ocio crust-render -i scene.usda --working-space acescg
+```
 
 ### RAYON_NUM_THREADS
 

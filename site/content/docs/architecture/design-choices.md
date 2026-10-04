@@ -203,7 +203,8 @@ than fits. Production renderers stream behind a bounded cache, so memory tracks 
 time, and the colour space each input is assumed to be in is documented. The conversions
 are OpenColorIO's: every transfer curve, gamut conversion and colour-space name comes from
 one OCIO config (the builtin ACES CG config unless
-[`--ocio-config`](@/docs/reference/command-line.md#ocio-config) names another), read by a
+[`--ocio-config`](@/docs/reference/command-line.md#ocio-config) or the
+[`OCIO`](@/docs/reference/environment-variables.md#ocio) variable names another), read by a
 pure-Rust port of OpenColorIO. Crust Render renders in a scene-linear working space —
 `lin_rec709` by default, ACEScg or another wide gamut when
 [`renderingColorSpace`](@/docs/usd/render-settings.md#renderingcolorspace) asks — and a

@@ -242,6 +242,11 @@ probe that needs another setting builds a `Config` and passes it
 | `CRUST_PTEX_STREAM_MIN_MB` | 8 | `crust-assets/ptex_stream.rs` | files smaller than this preload even when streaming |
 | `CRUST_PTEX_STREAM_MIPSPACE` | `linear` | `crust-assets/ptex_stream.rs` | `file`: accept the file's own mip chain (otherwise a mipmapped `.ptx` preloads) |
 
+`OCIO` is read by the same parser but is not a switch: it is OpenColorIO's
+standard variable naming the config, `Config::ocio`, and only the CLI obeys
+it, as the fallback for `--ocio-config` (the library keeps the builtin config
+unless a host installs one, so no test depends on the shell's `OCIO`).
+
 Adding a switch: give it a field on `Config`, a line here and a section in the user
 documentation (`site/content/docs/reference/environment-variables.md`), and make the
 "off" side the behaviour it replaced so the switch is an honest A/B.

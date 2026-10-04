@@ -49,7 +49,7 @@ attributes.
 | [`--filter`](#filter) | name | scene / `triangle` | `crust:pixelFilter` |
 | [`--filter-radius`](#filter-radius) | pixels | per filter | `crust:pixelFilterRadius` |
 | [`--indirect-clamp`](#indirect-clamp) | number | scene / 10 | `crust:indirectClamp` |
-| [`--ocio-config`](#ocio-config) | config | builtin ACES CG config | — |
+| [`--ocio-config`](#ocio-config) | config | `$OCIO` / builtin ACES CG config | — |
 | [`--working-space`](#working-space) | colour space | scene / `lin_rec709` | `renderingColorSpace` |
 | [`--display`](#display) | display | `sRGB - Display` | — |
 | [`--view`](#view) | view | `Un-tone-mapped` | — |
@@ -298,10 +298,18 @@ converted from where.
 `--ocio-config <CONFIG>`
 
 The OCIO config to use: a `.ocio` file, an `.ocioz` archive, or a builtin URI such as
-`ocio://studio-config-latest`. The default is the builtin ACES CG config
-`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`. The config must define `raw`, `lin_rec709`,
+`ocio://studio-config-latest`. Without the flag, the config named by the
+[`OCIO`](@/docs/reference/environment-variables.md#ocio) environment variable is used, as
+in every OpenColorIO application; when that is unset or empty too, the builtin ACES CG
+config `ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`. The config must define `raw`, `lin_rec709`,
 `srgb_texture`, `g22_rec709` and `g18_rec709`, as names or aliases; every ACES CG and
-studio config does. A config that can't be loaded, or lacks one of them, is an error.
+studio config does. A config that can't be loaded, or lacks one of them, is an error,
+whether the flag or `OCIO` named it.
+
+```bash
+crust-render -i scene.usda --ocio-config /studio/config.ocio --working-space acescg
+OCIO=/studio/config.ocio crust-render -i scene.usda --working-space acescg
+```
 
 ### working-space
 
