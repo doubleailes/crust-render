@@ -12,11 +12,6 @@ all-features = false
 unsound = "all"
 unmaintained = "all"
 ignore = [
-    # `lru` 0.12.5, reached only through `ptex-rust` (git, our own fork). The
-    # fix is a bump to lru >= 0.18.2 in that repository, then a new `rev` in
-    # the workspace Cargo.toml. Remove both entries with that bump.
-    { id = "RUSTSEC-2026-0002", reason = "lru via ptex-rust; fixed by bumping lru in doubleailes/ptex-rs" },
-    { id = "RUSTSEC-2026-0253", reason = "lru via ptex-rust; fixed by bumping lru in doubleailes/ptex-rs" },
     # `paste` is unmaintained, not vulnerable; it is a build-time proc macro
     # reached through `exr` -> `pulp`, and nothing here can replace it.
     { id = "RUSTSEC-2024-0436", reason = "build-time proc macro via exr -> pulp; unmaintained, no known vulnerability" },
@@ -50,9 +45,8 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The two git dependencies: ptex-rs pinned by `rev`, OpenSubdiv-rs by release
-# tag, both resolved to a commit in Cargo.lock.
+# The one git dependency, OpenSubdiv-rs, pinned by release tag and resolved to
+# a commit in Cargo.lock.
 allow-git = [
-    "https://github.com/doubleailes/ptex-rs",
     "https://github.com/doubleailes/OpenSubdiv-rs",
 ]
