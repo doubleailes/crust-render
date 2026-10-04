@@ -29,7 +29,7 @@ Every product EXR SHALL carry `colorInteropID` set to the working space's ASWF
 Color Interop ID. When the working space is not linear Rec.709, every EXR —
 products and the single beauty — SHALL also carry the space's
 `chromaticities` where its interop ID has standard primaries. In linear
-Rec.709 the single beauty EXR SHALL stay byte-identical to the output before
+Rec.709 the single beauty EXR SHALL keep the header and pixels of the output before
 AOV support.
 
 #### Scenario: An ACEScg render

@@ -356,7 +356,7 @@ fn write_png(
 
 /// The render of a stage without RenderProducts: the beauty as an RGB EXR at
 /// `output`, then the tone-mapped PNG next to it. What `write_rgb_file` writes
-/// — in `lin_rec709` this output is byte-identical to the one before AOVs —
+/// — in `lin_rec709` this output has the header and pixels it had before AOVs —
 /// plus, in any other working space, the chromaticities and `colorInteropID`
 /// that say which.
 fn write_beauty(
