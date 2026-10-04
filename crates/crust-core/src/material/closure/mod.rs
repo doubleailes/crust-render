@@ -315,13 +315,19 @@ pub struct PooledClosure(Option<Box<ResolvedClosure>>);
 
 impl PooledClosure {
     /// [`ResolvedClosure::resolve`] into a recycled box.
-    pub fn resolve(closures: &Closures, slots: &[Val], r_in: &Ray, rec: &HitRecord) -> Self {
+    pub fn resolve(
+        closures: &Closures,
+        slots: &[Val],
+        r_in: &Ray,
+        rec: &HitRecord,
+        luma: utils::Luma,
+    ) -> Self {
         let mut b = POOL
             .try_with(|p| p.borrow_mut().pop())
             .ok()
             .flatten()
             .unwrap_or_else(|| Box::new(ResolvedClosure::empty()));
-        b.resolve_into(closures, slots, r_in, rec);
+        b.resolve_into(closures, slots, r_in, rec, luma);
         PooledClosure(Some(b))
     }
 }
@@ -365,6 +371,8 @@ struct Walk<'a> {
     rec: &'a HitRecord,
     v_world: Vec3A,
     thin_walled: bool,
+    /// The working space's luminance weights, for lobe selection.
+    luma: utils::Luma,
 }
 
 /// The interface a subsurface leaf is entered through: the nearest
@@ -427,15 +435,17 @@ fn interface_of(cl: &Closures, id: NodeId, slots: &[Val]) -> Option<Interface> {
 impl ResolvedClosure {
     /// Collapses `closures` at a vertex: `slots` is the evaluated program,
     /// `rec` the hit (its normal the ray-facing shading normal), `r_in` the
-    /// arriving ray.
+    /// arriving ray, `luma` the working space's luminance weights, which
+    /// leaves are selected by.
     pub fn resolve(
         closures: &Closures,
         slots: &[Val],
         r_in: &Ray,
         rec: &HitRecord,
+        luma: utils::Luma,
     ) -> ResolvedClosure {
         let mut out = ResolvedClosure::empty();
-        out.resolve_into(closures, slots, r_in, rec);
+        out.resolve_into(closures, slots, r_in, rec, luma);
         out
     }
 
@@ -451,7 +461,14 @@ impl ResolvedClosure {
 
     /// [`ResolvedClosure::resolve`] into `self`, overwriting whatever it
     /// held; leaves past the new length are left stale, never read.
-    fn resolve_into(&mut self, closures: &Closures, slots: &[Val], r_in: &Ray, rec: &HitRecord) {
+    fn resolve_into(
+        &mut self,
+        closures: &Closures,
+        slots: &[Val],
+        r_in: &Ray,
+        rec: &HitRecord,
+        luma: utils::Luma,
+    ) {
         let thin_walled = closures
             .thin_walled
             .is_some_and(|s| slots[s as usize].x() > 0.5);
@@ -464,6 +481,7 @@ impl ResolvedClosure {
             rec,
             v_world: -r_in.direction().normalize(),
             thin_walled,
+            luma,
         };
         if let Some(root) = closures.root {
             self.walk(closures, root, Vec3A::ONE, DEFAULT_INTERFACE, &walk);
@@ -513,7 +531,7 @@ impl ResolvedClosure {
                 let weight = weight * own;
                 if weight.max_element() > 0.0 && self.len < MAX_LEAVES {
                     p.weight = weight;
-                    p.select *= luminance(weight);
+                    p.select *= w.luma.of(weight);
                     if let Lobe::Specular { mode, .. } = p.lobe
                         && mode.transmits()
                     {
@@ -818,10 +836,6 @@ impl ResolvedClosure {
     }
 }
 
-fn luminance(c: Vec3A) -> f32 {
-    utils::luminance(c)
-}
-
 /// Finite and non-negative, per channel.
 fn sanitize(v: Vec3A) -> Vec3A {
     let f = |x: f32| if x.is_finite() { x.max(0.0) } else { 0.0 };
@@ -889,7 +903,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     color,
                     roughness: r,
                 },
-                luminance(albedo).max(0.02),
+                w.luma.of(albedo).max(0.02),
                 None,
             )
         }
@@ -929,13 +943,13 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     roughness: 0.0,
                 }
             };
-            (lobe, luminance(color).max(0.02), None)
+            (lobe, w.luma.of(color).max(0.02), None)
         }
         Bsdf::Translucent { color } => {
             let color = rgb(*color);
             (
                 Lobe::Translucent { color },
-                luminance(color).max(0.02),
+                w.luma.of(color).max(0.02),
                 None,
             )
         }
@@ -950,7 +964,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     color,
                     roughness: r,
                 },
-                (luminance(color) * e).max(0.02),
+                (w.luma.of(color) * e).max(0.02),
                 Some(Vec3A::splat(e)),
             )
         }
@@ -987,11 +1001,11 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             } else {
                 Vec3A::splat(1.0 - dielectric_refl_filter(nv, avg.sqrt(), ior))
             };
-            let e = luminance(e_r);
+            let e = w.luma.of(e_r);
             let select = match mode {
                 ScatterMode::R => e,
-                ScatterMode::T => (1.0 - e) * luminance(tint),
-                ScatterMode::RT => e + (1.0 - e) * luminance(tint),
+                ScatterMode::T => (1.0 - e) * w.luma.of(tint),
+                ScatterMode::RT => e + (1.0 - e) * w.luma.of(tint),
             };
             (
                 Lobe::Specular {
@@ -1034,7 +1048,7 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
                     eta: 1.0,
                     thin_walled: false,
                 },
-                luminance(e).max(0.02),
+                w.luma.of(e).max(0.02),
                 // MaterialX: a conductor is opaque.
                 None,
             )

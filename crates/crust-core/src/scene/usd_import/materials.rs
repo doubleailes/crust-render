@@ -537,7 +537,7 @@ fn resolve_material_uncached(
     let shader_id = shader_info_id(shader);
     debug!("Material {mat_path}: surface shader id = {shader_id:?}");
     match shader_id.as_deref() {
-        Some("crust:openpbr") => decode_crust_openpbr(shader, caches.working),
+        Some("crust:openpbr") => decode_crust_openpbr(shader, caches.working, caches.luma),
         Some("UsdPreviewSurface") => {
             // The preview surface may still be the Ptex-driven one — the Moana
             // island wires its `diffuseColor` to a Ptex node — so consult the
@@ -639,7 +639,10 @@ fn disney_to_openpbr(
     let f = |n: &str| custom_f32(&prim, n);
     let c = |n: &str| custom_vec3(&prim, n);
 
-    let mut o = OpenPBR::default();
+    let mut o = OpenPBR {
+        luma: caches.luma,
+        ..OpenPBR::default()
+    };
 
     // `inputs:baseColor` reaches the BSDF through a `PxrColorCorrect` with
     // gamma 1/2.2, i.e. the authored value is display-encoded and the shader
@@ -784,7 +787,7 @@ fn load_mtlx_material(
         .to_path_buf();
     // `RefCell` because the loader closure is called from inside the compiler
     // while `caches` would otherwise be mutably borrowed by the outer call.
-    let working = caches.working;
+    let (working, luma) = (caches.working, caches.luma);
     let cell = std::cell::RefCell::new(&mut *caches);
     let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
         let mut c = cell.borrow_mut();
@@ -813,7 +816,7 @@ fn load_mtlx_material(
     // reported at 178% of the parse phase that contains it.
     let started = Instant::now();
     let before = cell.borrow().asset_time;
-    let loaded = crate::materialx::load(file, (!node.is_empty()).then_some(node), &host);
+    let loaded = crate::materialx::load_in(file, (!node.is_empty()).then_some(node), &host, luma);
     let nested = cell.borrow().asset_time - before;
     // `cell` is not used past this point, which ends its borrow of `caches`.
     caches.asset_time += started.elapsed().saturating_sub(nested);
@@ -1020,8 +1023,11 @@ fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input
 /// name is camelCase mirror of the Rust snake_case, e.g. `base_color` →
 /// `inputs:baseColor`, `subsurface_radius_scale` → `inputs:subsurfaceRadiusScale`.
-fn decode_crust_openpbr(shader: &Shader, working: Space) -> Arc<dyn Material> {
-    let mut o = OpenPBR::default();
+fn decode_crust_openpbr(shader: &Shader, working: Space, luma: utils::Luma) -> Arc<dyn Material> {
+    let mut o = OpenPBR {
+        luma,
+        ..OpenPBR::default()
+    };
 
     let f = |n: &str, d: f32| shader_input_f32(shader, n).unwrap_or(d);
     // Every colour is authored in the working space unless its `colorSpace`

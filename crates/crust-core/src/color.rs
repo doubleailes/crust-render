@@ -252,24 +252,228 @@ impl Space {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Primaries: XYZ, luminance weights, identification
+// ---------------------------------------------------------------------------
+
+const D65: [f64; 2] = [0.3127, 0.3290];
+const ACES_WHITE: [f64; 2] = [0.32168, 0.33767];
+
+/// The ASWF Color Interop spaces whose primaries their standards fix:
+/// `(interop ID, red / green / blue xy, white xy)`.
+/// An interop ID with its primaries' and white's xy.
+type Standard = (&'static str, [[f64; 2]; 3], [f64; 2]);
+
+const STANDARDS: [Standard; 6] = [
+    (
+        "lin_rec709_scene",
+        [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
+        D65,
+    ),
+    (
+        "lin_ap1_scene",
+        [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044]],
+        ACES_WHITE,
+    ),
+    (
+        "lin_ap0_scene",
+        [[0.7347, 0.2653], [0.0, 1.0], [0.0001, -0.077]],
+        ACES_WHITE,
+    ),
+    (
+        "lin_rec2020_scene",
+        [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]],
+        D65,
+    ),
+    (
+        "lin_p3d65_scene",
+        [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060]],
+        D65,
+    ),
+    (
+        "lin_adobergb_scene",
+        [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06]],
+        D65,
+    ),
+];
+
+type M3 = [[f64; 3]; 3];
+
+fn mul3(a: &M3, b: &M3) -> M3 {
+    let mut m = [[0.0; 3]; 3];
+    for (r, row) in m.iter_mut().enumerate() {
+        for (c, v) in row.iter_mut().enumerate() {
+            *v = (0..3).map(|k| a[r][k] * b[k][c]).sum();
+        }
+    }
+    m
+}
+
+fn apply3(m: &M3, v: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|r| m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2])
+}
+
+fn invert3(m: &M3) -> M3 {
+    let [[a, b, c], [d, e, f], [g, h, i]] = *m;
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    [
+        [
+            (e * i - f * h) / det,
+            (c * h - b * i) / det,
+            (b * f - c * e) / det,
+        ],
+        [
+            (f * g - d * i) / det,
+            (a * i - c * g) / det,
+            (c * d - a * f) / det,
+        ],
+        [
+            (d * h - e * g) / det,
+            (b * g - a * h) / det,
+            (a * e - b * d) / det,
+        ],
+    ]
+}
+
+/// The XYZ of a chromaticity at `Y = 1`.
+fn xy_to_xyz([x, y]: [f64; 2]) -> [f64; 3] {
+    [x / y, 1.0, (1.0 - x - y) / y]
+}
+
+/// The normalised primary matrix: RGB → XYZ for `primaries` and `white`.
+fn npm(primaries: &[[f64; 2]; 3], white: [f64; 2]) -> M3 {
+    let p = primaries.map(xy_to_xyz);
+    let pm = [0, 1, 2].map(|r| [p[0][r], p[1][r], p[2][r]]);
+    let s = apply3(&invert3(&pm), xy_to_xyz(white));
+    [0, 1, 2].map(|r| [pm[r][0] * s[0], pm[r][1] * s[1], pm[r][2] * s[2]])
+}
+
+/// The Bradford chromatic adaptation from white `from` to white `to`, the one
+/// the ACES configs use between ACES's white and D65.
+fn bradford(from: [f64; 2], to: [f64; 2]) -> M3 {
+    const B: M3 = [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ];
+    let (s, d) = (apply3(&B, xy_to_xyz(from)), apply3(&B, xy_to_xyz(to)));
+    let scale = [
+        [d[0] / s[0], 0.0, 0.0],
+        [0.0, d[1] / s[1], 0.0],
+        [0.0, 0.0, d[2] / s[2]],
+    ];
+    mul3(&invert3(&B), &mul3(&scale, &B))
+}
+
+/// A standard's RGB → XYZ, adapted to D65 as the configs' scene-referred XYZ
+/// space is.
+fn standard_to_xyz_d65(primaries: &[[f64; 2]; 3], white: [f64; 2]) -> M3 {
+    let m = npm(primaries, white);
+    if white == D65 {
+        m
+    } else {
+        mul3(&bradford(white, D65), &m)
+    }
+}
+
+fn mat3a(m: &M3) -> Mat3A {
+    let col = |c: usize| Vec3A::new(m[0][c] as f32, m[1][c] as f32, m[2][c] as f32);
+    Mat3A::from_cols(col(0), col(1), col(2))
+}
+
+/// A scene-linear space's RGB → CIE XYZ matrix, adapted to D65 — what the
+/// config's scene-referred XYZ space (`cie_xyz_d65_scene`) holds, and what
+/// Cycles and Typhoon derive their luminance and XYZ conversions from.
+///
+/// Read from the config: the space's conversion into its XYZ space, or,
+/// for a config with no such space, into its `aces_interchange` role
+/// followed by the standard AP0 → XYZ-D65 matrix (Cycles' fallback). `None`
+/// for a space that is not linear, or a config with neither.
+pub fn to_xyz(space: Space) -> Option<Mat3A> {
+    let linear = |c: &Conversion| {
+        c.curve
+            .is_none()
+            .then(|| c.gamut.unwrap_or(Mat3A::IDENTITY))
+    };
+    if let Some(xyz) = ["cie_xyz_d65_scene", "lin_ciexyzd65_scene"]
+        .into_iter()
+        .find_map(Space::named)
+    {
+        return linear(&conversion(space, xyz));
+    }
+    let aces = Space::named(config().role_color_space("aces_interchange"))?;
+    let to_aces = linear(&conversion(space, aces))?;
+    let (_, ap0, white) = STANDARDS[2];
+    Some(mat3a(&standard_to_xyz_d65(&ap0, white)) * to_aces)
+}
+
+/// CIE XYZ (D65-adapted) as linear light in `working`: the inverse of
+/// [`to_xyz`]; `None` when that is.
+pub fn from_xyz(xyz: Vec3A, working: Space) -> Option<Vec3A> {
+    Some(to_xyz(working)?.inverse() * xyz)
+}
+
+/// The luminance weights of `working`: the `Y` row of its RGB → XYZ matrix,
+/// so a colour's luminance is the same light whatever space holds it.
+///
+/// Every heuristic that weighs a colour by one number uses them — light and
+/// lobe selection, environment importance, guiding, adaptive sampling, the
+/// `variance` AOV — so in ACEScg they weigh AP1 colours by AP1's luminance
+/// rather than Rec.709's. `lin_rec709` keeps `utils::Luma::REC709`, the
+/// config's own luma coefficients, which the matrix's row equals to four
+/// digits: so the default render is bit-identical to what it was. A space
+/// with no XYZ matrix gets Rec.709's too, with a warning.
+pub fn luma(working: Space) -> utils::Luma {
+    // A data request carries no working space; its colours, if any, are the
+    // default's.
+    if working == Space::LIN_REC709 || working.is_data() {
+        return utils::Luma::REC709;
+    }
+    match to_xyz(working) {
+        Some(m) => utils::Luma(m.row(1)),
+        None => {
+            warn!(
+                "no RGB -> XYZ matrix for `{}` in the OCIO config; weighing colours by Rec.709 \
+                 luminance",
+                working.name()
+            );
+            utils::Luma::REC709
+        }
+    }
+}
+
+/// The ASWF Color Interop ID of a scene-linear space: the config's
+/// `interop_id` when it gives one, else the standard whose primaries and
+/// white the space's RGB → XYZ matrix matches to 1e-4 — the fingerprint
+/// Cycles takes, so a studio config that names `ACEScg` without an interop
+/// ID still writes `lin_ap1_scene`.
+pub fn interop_id(space: Space) -> Option<String> {
+    if let Some(id) = space.interop_id() {
+        return Some(id);
+    }
+    fingerprint(to_xyz(space)?).map(str::to_string)
+}
+
+/// The standard whose D65-adapted RGB → XYZ matrix `m` is, to 1e-4.
+fn fingerprint(m: Mat3A) -> Option<&'static str> {
+    STANDARDS.iter().find_map(|(id, primaries, white)| {
+        let reference = mat3a(&standard_to_xyz_d65(primaries, *white));
+        let close = (0..3).all(|c| (m.col(c) - reference.col(c)).abs().max_element() < 1e-4);
+        close.then_some(*id)
+    })
+}
+
 /// The CIE xy chromaticities of a scene-linear space's red, green and blue
 /// primaries and its white point — `[r, g, b, w]` — for an output that
-/// records them (an EXR's `chromaticities`). Looked up by the space's
-/// [`interop_id`](Space::interop_id), the ASWF Color Interop names whose
-/// primaries are fixed by their standards; `None` for any other space, whose
-/// file then carries its `colorInteropID` alone, or none.
+/// records them (an EXR's `chromaticities`): those of the standard its
+/// [`interop_id`] names, as the standard states them (ACES's own white, not
+/// the D65 the config adapts it to). `None` for any other space, whose file
+/// then carries no `chromaticities`.
 pub fn chromaticities(space: Space) -> Option<[[f32; 2]; 4]> {
-    const D65: [f32; 2] = [0.3127, 0.3290];
-    const ACES: [f32; 2] = [0.32168, 0.33767];
-    Some(match space.interop_id()?.as_str() {
-        "lin_rec709_scene" => [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], D65],
-        "lin_ap1_scene" => [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044], ACES],
-        "lin_ap0_scene" => [[0.7347, 0.2653], [0.0, 1.0], [0.0001, -0.077], ACES],
-        "lin_rec2020_scene" => [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], D65],
-        "lin_p3d65_scene" => [[0.680, 0.320], [0.265, 0.690], [0.150, 0.060], D65],
-        "lin_adobergb_scene" => [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06], D65],
-        _ => return None,
-    })
+    let id = interop_id(space)?;
+    let (_, p, w) = STANDARDS.iter().find(|(s, _, _)| *s == id)?;
+    let f = |[x, y]: [f64; 2]| [x as f32, y as f32];
+    Some([f(p[0]), f(p[1]), f(p[2]), f(*w)])
 }
 
 /// The working space a name selects: a space the config knows that is scene
@@ -517,12 +721,14 @@ impl ColorSpace {
         }
     }
 
-    /// Values authored in `source`, wanted in `working`. A data source, or
-    /// one equal to the working space, converts nothing and is [`RAW`].
+    /// Values authored in `source`, wanted in `working`. A data source is
+    /// [`RAW`], which carries no working space; one equal to the working
+    /// space converts nothing but keeps it, since an environment map needs
+    /// the working space's luminance weights whatever its pixels are in.
     ///
     /// [`RAW`]: ColorSpace::RAW
     pub fn new(source: Space, working: Space) -> ColorSpace {
-        if source.is_data() || source == working {
+        if source.is_data() {
             ColorSpace::RAW
         } else {
             ColorSpace {
@@ -665,7 +871,7 @@ impl ResolvedColorSpace {
     /// Values authored in `source`, wanted in `working`; normalised as
     /// [`ColorSpace::new`] is.
     pub fn new(source: Space, working: Space) -> ResolvedColorSpace {
-        if source.is_data() || source == working {
+        if source.is_data() {
             ResolvedColorSpace::RAW
         } else {
             ResolvedColorSpace { source, working }
@@ -682,7 +888,7 @@ impl ResolvedColorSpace {
         self.working
     }
 
-    /// Whether nothing is converted.
+    /// Whether the values are data, never converted.
     pub fn is_raw(self) -> bool {
         self == ResolvedColorSpace::RAW
     }
@@ -832,6 +1038,55 @@ mod tests {
         assert_eq!(ap1[3], [0.32168, 0.33767]);
         assert!(chromaticities(working_space("lin_rec2020").unwrap()).is_some());
         assert_eq!(chromaticities(Space::RAW), None);
+    }
+
+    #[test]
+    fn every_standard_working_space_is_recognised_by_its_matrix() {
+        // The fingerprint must find each standard from the config's own
+        // matrix, so a config without interop IDs still names them.
+        for (name, id) in [
+            ("lin_rec709", "lin_rec709_scene"),
+            ("acescg", "lin_ap1_scene"),
+            ("aces2065_1", "lin_ap0_scene"),
+            ("lin_rec2020", "lin_rec2020_scene"),
+            ("lin_p3d65", "lin_p3d65_scene"),
+            ("lin_adobergb", "lin_adobergb_scene"),
+        ] {
+            let m = to_xyz(Space::named(name).unwrap()).expect(name);
+            assert_eq!(fingerprint(m), Some(id), "{name}");
+        }
+        // A space on no standard's primaries matches none.
+        assert_eq!(
+            fingerprint(Mat3A::from_diagonal(glam::Vec3::new(0.9, 1.0, 1.1))),
+            None
+        );
+        // Not linear: no matrix.
+        assert_eq!(to_xyz(Space::SRGB_TEXTURE), None);
+    }
+
+    #[test]
+    fn luminance_weights_are_the_working_spaces_y_row() {
+        assert_eq!(luma(Space::LIN_REC709), utils::Luma::REC709);
+        let ap1 = luma(acescg()).0;
+        // ACEScg's luminance, D65-adapted as the ACES configs adapt it.
+        assert!((ap1.element_sum() - 1.0).abs() < 1e-4, "{ap1}");
+        let want = Vec3A::new(0.2722, 0.6741, 0.0537);
+        assert!((ap1 - want).abs().max_element() < 5e-3, "{ap1}");
+        // A colour's luminance does not depend on the space holding it.
+        let c = Vec3A::new(0.8, 0.3, 0.1);
+        let in_aces = convert(c, Space::LIN_REC709, acescg());
+        let (a, b) = (utils::Luma::REC709.of(c), luma(acescg()).of(in_aces));
+        assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+    }
+
+    #[test]
+    fn xyz_round_trips_through_any_working_space() {
+        let xyz = Vec3A::new(0.4, 0.35, 0.2);
+        for w in [Space::LIN_REC709, acescg()] {
+            let rgb = from_xyz(xyz, w).unwrap();
+            let back = to_xyz(w).unwrap() * rgb;
+            assert!((back - xyz).abs().max_element() < 1e-5, "{back}");
+        }
     }
 
     #[test]
@@ -986,11 +1241,16 @@ mod tests {
         ] {
             assert_eq!(mtlx(Some(s), rec709), ColorSpace::SRGB, "{s}");
         }
-        // Absent, data, and the working space itself convert nothing.
-        for s in [None, Some("raw"), Some("lin_rec709")] {
+        // Absent and data are raw; the working space itself converts
+        // nothing but keeps its working space.
+        for s in [None, Some("raw")] {
             assert_eq!(mtlx(s, rec709), ColorSpace::RAW, "{s:?}");
         }
-        assert_eq!(mtlx(Some("acescg"), aces), ColorSpace::RAW);
+        for (s, w) in [("lin_rec709", rec709), ("acescg", aces)] {
+            let r = mtlx(Some(s), w).resolved().unwrap();
+            assert!(r.conversion().is_identity(), "{s}");
+            assert_eq!(r.working(), w, "{s}");
+        }
         // Another gamut is converted now, rather than read raw.
         let ap1 = mtlx(Some("g22_ap1"), rec709).resolved().unwrap();
         assert!(!ap1.is_raw());

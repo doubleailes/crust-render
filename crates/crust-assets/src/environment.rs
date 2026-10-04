@@ -52,7 +52,7 @@ pub(crate) fn try_load_environment(
     space: ColorSpace,
 ) -> std::result::Result<EnvironmentMap, AssetError> {
     let (w, h, pixels) = decode_pixels(path, exr, space)?;
-    EnvironmentMap::new(w, h, pixels)
+    EnvironmentMap::new_in(w, h, pixels, crust_core::color::luma(space.working()))
         .ok_or_else(|| AssetError::unusable(path, "not a usable environment map (empty)"))
 }
 

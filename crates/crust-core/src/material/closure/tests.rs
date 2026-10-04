@@ -55,7 +55,13 @@ fn arriving(theta: f32) -> Ray {
 
 fn resolved(doc: &str, root: &str, theta: f32, front: bool) -> ResolvedClosure {
     let (cl, slots) = tree(doc, root);
-    ResolvedClosure::resolve(&cl, &slots, &arriving(theta), &hit(front))
+    ResolvedClosure::resolve(
+        &cl,
+        &slots,
+        &arriving(theta),
+        &hit(front),
+        utils::Luma::REC709,
+    )
 }
 
 /// `E[value / pdf]` over `n` BSDF samples: the directional albedo.
@@ -723,9 +729,15 @@ fn a_recycled_closure_answers_like_a_fresh_one() {
     let (r, rec) = (arriving(0.3), hit(true));
     let (c2, s2) = tree(&two, "s");
     let (c1, s1) = tree(&one, "s");
-    drop(PooledClosure::resolve(&c2, &s2, &r, &rec));
-    let reused = PooledClosure::resolve(&c1, &s1, &r, &rec);
-    let fresh = ResolvedClosure::resolve(&c1, &s1, &r, &rec);
+    drop(PooledClosure::resolve(
+        &c2,
+        &s2,
+        &r,
+        &rec,
+        utils::Luma::REC709,
+    ));
+    let reused = PooledClosure::resolve(&c1, &s1, &r, &rec, utils::Luma::REC709);
+    let fresh = ResolvedClosure::resolve(&c1, &s1, &r, &rec, utils::Luma::REC709);
     assert_eq!(reused.leaves().len(), 1);
     let wi = Vec3A::new(0.2, 0.1, 0.9).normalize();
     assert_eq!(reused.eval(&r, &rec, wi), fresh.eval(&r, &rec, wi));

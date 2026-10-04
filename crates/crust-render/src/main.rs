@@ -374,10 +374,8 @@ fn write_beauty(
     let mut image = Image::from_channels((img_width, img_height), channels);
     if let Some(chromaticities) = color.exr_chromaticities() {
         image.attributes.chromaticities = Some(chromaticities);
-        if let Some(id) = color
-            .working
-            .interop_id()
-            .and_then(|id| Text::new_or_none(&id))
+        if let Some(id) =
+            crust_core::color::interop_id(color.working).and_then(|id| Text::new_or_none(&id))
         {
             image.layer_data.attributes.other.insert(
                 Text::from("colorInteropID"),
@@ -1453,7 +1451,7 @@ mod products {
         film: &AovFilm,
         color: &super::OutputColor,
     ) -> io::Result<Vec<String>> {
-        let interop = color.working.interop_id();
+        let interop = crust_core::color::interop_id(color.working);
         let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
         let (width, height) = film.dimensions();
         let mut channels = Vec::new();

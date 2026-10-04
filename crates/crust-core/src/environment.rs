@@ -16,7 +16,6 @@
 //!   camera looks down, at the centre of the image.
 
 use glam::Vec3A;
-use utils::luminance;
 
 /// A piecewise-constant 1D distribution over `[0, 1)`, sampled by inverting
 /// its CDF. The building block of the 2D environment distribution: one of
@@ -109,9 +108,22 @@ pub struct EnvironmentMap {
 }
 
 impl EnvironmentMap {
-    /// Builds a map from row-major RGB pixels, row 0 at the +Y pole.
-    /// Returns `None` for an empty or mis-sized buffer.
+    /// Builds a map from row-major RGB pixels, row 0 at the +Y pole, in
+    /// linear Rec.709: [`EnvironmentMap::new_in`] with Rec.709's luminance
+    /// weights. Returns `None` for an empty or mis-sized buffer.
     pub fn new(width: usize, height: usize, pixels: Vec<Vec3A>) -> Option<Self> {
+        Self::new_in(width, height, pixels, utils::Luma::REC709)
+    }
+
+    /// Builds a map from row-major RGB pixels in a working space whose
+    /// luminance weights are `luma` ([`crate::color::luma`]): its importance
+    /// follows each texel's luminance in that space.
+    pub fn new_in(
+        width: usize,
+        height: usize,
+        pixels: Vec<Vec3A>,
+        luma: utils::Luma,
+    ) -> Option<Self> {
         if width == 0 || height == 0 || pixels.len() != width * height {
             return None;
         }
@@ -122,7 +134,7 @@ impl EnvironmentMap {
             let theta = (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
             let sin_theta = theta.sin();
             let row: Vec<f32> = (0..width)
-                .map(|x| luminance(pixels[y * width + x]).max(0.0) * sin_theta)
+                .map(|x| luma.of(pixels[y * width + x]).max(0.0) * sin_theta)
                 .collect();
             let d = Distribution1D::new(row);
             row_weights.push(d.integral);

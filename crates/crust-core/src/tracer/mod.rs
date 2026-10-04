@@ -1,7 +1,6 @@
 use glam::Vec3A;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
-use utils::luminance;
 
 use crate::aov::{AovFilm, AovLayout, AovRequest, CameraFrame, SampleExtras, UnitAov};
 use crate::buffer::Buffer;
@@ -378,7 +377,12 @@ impl Renderer {
                 // training passes — our stand-in for the paper's denoised
                 // accumulated image, and crucially the *same* image for both
                 // sides of the ratio.
-                let ref_lum = blend_luminance(&passes, self.settings.width, self.settings.height);
+                let ref_lum = blend_luminance(
+                    &passes,
+                    self.settings.width,
+                    self.settings.height,
+                    self.lights.luma(),
+                );
                 let mrse_pt = mean_relative_error(var_pt, &ref_lum);
                 let mrse_pg = mean_relative_error(var_pg, &ref_lum);
                 if mrse_pt.is_finite() && mrse_pg.is_finite() && mrse_pt > 0.0 && mrse_pg > 0.0 {
@@ -946,7 +950,7 @@ impl Renderer {
             }
             state.sum += color;
             state.weight_sum += wx * wy;
-            let lum = luminance(color) as f64;
+            let lum = self.lights.luma().of(color) as f64;
             state.lum_sum += lum;
             state.lum_sq += lum * lum;
         }
@@ -1188,7 +1192,12 @@ fn blend_weights(passes: &[(Buffer, f64)]) -> (Vec<f64>, f64) {
 /// Un-weightable passes (non-finite or zero variance) contribute nothing;
 /// if no pass is weightable the result is black and the floor in
 /// `mean_relative_error` takes over.
-fn blend_luminance(passes: &[(Buffer, f64)], width: usize, height: usize) -> Vec<f64> {
+fn blend_luminance(
+    passes: &[(Buffer, f64)],
+    width: usize,
+    height: usize,
+    luma: utils::Luma,
+) -> Vec<f64> {
     let weights: Vec<f64> = passes
         .iter()
         .map(|(_, var)| {
@@ -1207,7 +1216,7 @@ fn blend_luminance(passes: &[(Buffer, f64)], width: usize, height: usize) -> Vec
             for ((pass, _), w) in passes.iter().zip(&weights) {
                 c += pass.get_pixel(x, y) * (*w / total) as f32;
             }
-            out[y * width + x] = luminance(c) as f64;
+            out[y * width + x] = luma.of(c) as f64;
         }
     }
     out

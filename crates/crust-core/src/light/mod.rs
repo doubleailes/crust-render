@@ -118,7 +118,10 @@ pub trait Light: Send + Sync {
     /// because in the sun's shadows the dome is the only light. So power
     /// selection gives lights at infinity a fixed share instead, as pbrt-v4's
     /// BVH sampler and Karma do.
-    fn power(&self) -> Option<f32>;
+    ///
+    /// The flux is a colour, weighed into one number by `luma`, the working
+    /// space's luminance weights ([`LightList::luma`]).
+    fn power(&self, luma: utils::Luma) -> Option<f32>;
 }
 
 #[cfg(test)]

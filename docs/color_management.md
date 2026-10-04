@@ -75,11 +75,11 @@ and other OCIO renderers do. The places a value names its space:
 | Source | Named by |
 | --- | --- |
 | MaterialX `color3` / `color4` literal, and an `image` with a colour output | the effective `colorspace`: input, else node, else node graph, else document (crust-mtlx, `Doc::colorspace_of`); a data image (`float`, `vector*`) is never converted |
-| USD colour attribute (light `inputs:color`, `focusTint`, preview `diffuseColor` / `emissiveColor`, `crust:openpbr` colours, `crust:volume:*`) | the attribute's `colorSpace` metadatum (`usd_import/attrs.rs`, `in_working`) |
-| `UsdUVTexture` | `colorSpace` on `inputs:file`, else `sourceColorSpace` (`sRGB` → `srgb_texture`, `auto` → the format rule) |
-| Dome / `RectLight` image | `colorSpace` on `texture:file`, else `auto`: an 8-bit image is `srgb_texture`, a float one already in the working space |
+| USD colour attribute (light `inputs:color`, `focusTint`, preview `diffuseColor` / `emissiveColor`, `crust:openpbr` colours, `crust:volume:*`) | as `UsdColorSpaceAPI::ComputeColorSpaceName` resolves it: the attribute's `colorSpace` metadatum, else `colorSpace:name` on its prim, else on the nearest ancestor that authors one (`usd_import/attrs.rs`, `attr_color_space` / `in_working`) |
+| `UsdUVTexture` | `inputs:file`'s colour space resolved as above, else `sourceColorSpace` (`sRGB` → `srgb_texture`, `auto` → the format rule) |
+| Dome / `RectLight` image | `texture:file`'s colour space resolved as above, else `auto`: an 8-bit image is `srgb_texture`, a float one already in the working space |
 | `PxrDisneyBsdf.baseColor`, colour Ptex | `g22_rec709`, the island convention (below), unless metadata says otherwise |
-| Colour temperature | the blackbody is computed in `lin_rec709` and converted |
+| Colour temperature | the Planckian locus's XYZ, straight into the working space (`lux::blackbody_in`) |
 
 A `lin_rec709` render of a scene that names nothing but sRGB textures is
 therefore exactly what it was before the working space existed: every
@@ -128,6 +128,36 @@ the mip re-encode is a table too: the 255 code steps (`TransferCurve`, in
 `crust-assets/src/lib.rs`). Everything else converts in batches
 (`decode_rgb_slice`), which costs about what the `powf` it replaced did.
 
+### Primaries: XYZ and luminance
+
+`color::to_xyz` is a scene-linear space's RGB → CIE XYZ matrix, adapted to
+D65, read from the config: the space's conversion into its scene-referred XYZ
+space (`cie_xyz_d65_scene`), or, without one, into `aces_interchange` and the
+standard AP0 → XYZ-D65 (Cycles' fallback). The config's
+`cie_xyz_d65_interchange` role is not used: in the ACES configs it names the
+*display*-referred XYZ space. Three things come from it:
+
+- **Luminance weights** (`color::luma`, a `utils::Luma`): its `Y` row. Every
+  heuristic that weighs a colour by one number uses the working space's —
+  light power (`LightList::luma`, `Light::power`), the learned light cache,
+  guiding's training signal, environment importance
+  (`EnvironmentMap::new_in`), lobe selection (`OpenPBR::luma`, MaterialX
+  `load_in`), and the renderer's adaptive-sampling, guiding-blend and
+  `variance` statistics. They travel by value with the scene, not in a
+  global. `lin_rec709` keeps `Luma::REC709`, the config's own luma
+  coefficients (0.2126, 0.7152, 0.0722; pinned by
+  `utils_luminance_uses_the_config_luma_coefficients`), which `Luma::of`
+  multiplies in the order the old constant expression did — so a default
+  render is bit-identical. In ACEScg the weights are (0.2722, 0.6741, 0.0537)
+  to four digits, and a colour's luminance is the same whichever space holds
+  it (`luminance_weights_are_the_working_spaces_y_row`). The grey fallback
+  material keeps Rec.709's, which weigh a grey the same.
+- **Blackbody** (`lux::blackbody_in`): the Planckian locus's XYZ through the
+  inverse matrix, normalised to unit luminance in the working space — as
+  Typhoon does it, so a low temperature is not clipped at Rec.709's gamut on
+  its way to ACEScg. `lin_rec709` is `blackbody_rgb`, bit for bit.
+- **Identification** (`color::interop_id`): the fingerprint above.
+
 ### crust's two clamps
 
 - **Encoded values below zero decode to zero** before a curve. The config's
@@ -146,9 +176,13 @@ The `Buffer` is in the working space, and the outputs say so:
 
 - **EXR** — every RenderProduct carries `colorInteropID`, the working space's
   ASWF Color Interop ID (`lin_rec709_scene`, `lin_ap1_scene`, …;
-  `color::Space::interop_id`). Off Rec.709 it also carries `chromaticities`,
-  looked up by that ID (`color::chromaticities`), and so does the single
-  beauty EXR written without products. An EXR without `chromaticities` *is*
+  `color::interop_id`): the config's when it gives one, else the standard
+  whose primaries the space's RGB → XYZ matrix matches to 1e-4 (the
+  fingerprint Cycles takes), so a studio config without interop IDs still
+  says `lin_ap1_scene` for ACEScg. Off Rec.709 the file also carries
+  `chromaticities`, the standard's own (ACES's white, not the adapted D65;
+  `color::chromaticities`), and so does the single beauty EXR written without
+  products. An EXR without `chromaticities` *is*
   Rec.709 by the format's definition, which is why a `lin_rec709` beauty is
   still the file `write_rgb_file` wrote: the same header and pixels. (Not the
   same bytes run to run: `exr` compresses blocks in parallel and writes them in
@@ -268,7 +302,7 @@ clamp, correctly.
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
 | `inputs:color` (all lux types[^2]) | `usd_import/lights.rs`, `lux_params`, via `attrs::in_working` | **none** unless `colorSpace` metadata names a space | ✅ correct — see below |
-| colour temperature | `usd_import/lights.rs`, `lux_params` | `blackbody_rgb` (linear Rec.709) → working | ✅ |
+| colour temperature | `usd_import/lights.rs`, `lux_params` → `lux::blackbody_in` | XYZ → working through the config's XYZ matrix, unit luminance there (`lin_rec709`: `blackbody_rgb`, bit for bit) | ✅ |
 | `inputs:shaping:focusTint` | `usd_import/lights.rs`, `lux_shaping`, via `attrs::custom_color` | as `inputs:color` | ✅ |
 
 [^2]: `UsdLuxDistantLight`, `UsdLuxDomeLight`, `UsdLuxSphereLight`,
@@ -487,30 +521,20 @@ newly added colour attribute read through `custom_color3` gets no conversion
 and no compile error. The `RawColor3` newtype of
 `openspec/changes/add-material-color-management/` would make it one.
 
-**3. `UsdColorSpaceAPI` is not read.** An attribute's own `colorSpace`
-metadatum is honoured; a colour space *applied to a prim* (`colorSpace:name`)
-and inherited by its descendants' attributes is not. Reading it means walking
-the prim's ancestors per colour attribute, once, at import.
+**3. USD's own fallback colour space is not applied.** With nothing authored
+on the attribute, its prim or any ancestor, `ComputeColorSpaceName` answers
+`lin_rec709_scene`; crust takes such a value as already in the working space
+instead (the rule above, and Typhoon's and Karma's reading). The two agree in
+the default `lin_rec709`, and differ only for unauthored colours rendered in
+another space.
 
-**4. Sampling heuristics weigh colours as Rec.709 luminance in every working
-space.** `utils::luminance` hard-codes Rec.709 luma for the hot path (pinned to
-the default config's luma coefficients). Light and lobe selection, Russian
-roulette's companions, the guiding training signal, adaptive sampling and the
-`variance` AOV all use it. In another working space the image stays unbiased —
-every pdf pairs with its own estimate — but noise is distributed by the wrong
-weights, and the `variance` AOV is a Rec.709-weighted statistic of
-working-space colours. Making the weights the working space's means threading
-them through every call site, or a per-render global on the hot path; neither
-is done. `blackbody_rgb`'s own normalisation (`REC709_LUMA`) is computed before
-the conversion and is unaffected.
-
-**5. A conversion that is not a curve and a matrix is refused.** A space whose
+**4. A conversion that is not a curve and a matrix is refused.** A space whose
 optimised OCIO processor contains a 3D LUT, or a matrix before its curve, is
 used as stored, with one warning per pair. Every texture space of the ACES
 configs has the supported shape; a custom config with LUT-based input
 transforms does not.
 
-**6. A `.tx` is matched to its binding by source space name.** A `.tx`
+**5. A `.tx` is matched to its binding by source space name.** A `.tx`
 converted under `raw` and one converted under `lin_rec709` hold identical
 levels — neither has a curve — but their `crust:mipspace` markers differ, so
 binding one under the other's space declines streaming and preloads instead.

@@ -76,11 +76,9 @@ render.
   configs is a transfer curve followed by a change of primaries, and Crust Render
   converts exactly those. A conversion of any other shape, such as one through a 3D LUT,
   is refused with a warning, and the values are used as stored.
-- **`UsdColorSpaceAPI` isn't read.** A `colorSpace` metadatum on the attribute itself is
-  honoured, but a colour space applied to a prim and inherited by its descendants isn't.
-- **Sampling heuristics weigh colours as Rec.709 luminance** in every working space:
-  light and lobe selection, adaptive sampling and the `variance` AOV. In another working
-  space the image is still unbiased, but noise may be spread a little differently.
+- **A colour that names no colour space is taken as already in the working space**, even
+  where `UsdColorSpaceAPI` would fall back to `lin_rec709_scene`. The two agree in the
+  default working space.
 - **Colour Ptex is always decoded by gamma 2.2.** There is no way to declare a colour
   `.ptx` linear, so linear colour Ptex data renders too dark. Ptex read as a displacement
   map is read raw.

@@ -259,7 +259,7 @@ pub(crate) fn train(
                                         continue;
                                     }
                                 }
-                                let e = through * utils::luminance(c) / ls.pdf.get();
+                                let e = through * lights.luma().of(c) / ls.pdf.get();
                                 if e.is_finite() {
                                     sum += e;
                                 }

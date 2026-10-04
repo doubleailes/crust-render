@@ -33,6 +33,19 @@
 - [x] 4.3 Default renders unchanged: EXR header and pixels, PNG bytes, on all
       33 samples at 16 spp against the previous commit.
 
-## 5. Docs
+## 5. Primaries (after the Cycles / Typhoon review)
+
+- [x] 5.1 `color::to_xyz` from the config's scene-referred XYZ space, with the
+      `aces_interchange` + AP0 fallback.
+- [x] 5.2 Working-space luminance weights (`utils::Luma`) through light power,
+      the light cache, guiding, environment importance, OpenPBR and MaterialX
+      lobe selection, adaptive sampling and the `variance` AOV.
+- [x] 5.3 Blackbody from XYZ into the working space (`lux::blackbody_in`).
+- [x] 5.4 Interop ID by matrix fingerprint; chromaticities from it.
+- [x] 5.5 `UsdColorSpaceAPI` inheritance for colour attributes and texture
+      files.
+- [x] 5.6 Default renders still bit-identical.
+
+## 6. Docs
 
 - [x] 5.1 `docs/color_management.md`, `docs/architecture.md`, site pages.

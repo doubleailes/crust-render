@@ -5,12 +5,38 @@ pub fn degrees_to_radians(degrees: f32) -> f32 {
     degrees * PI / 180.0
 }
 
-/// Rec. 709 luminance of a linear RGB value — the scalar the renderer uses
-/// wherever a colour has to become one weight: guiding flux, light power,
-/// environment-map importance, adaptive-sampling variance, lobe selection.
+/// Rec. 709 luminance of a linear RGB value: [`Luma::REC709`].
 #[inline]
 pub fn luminance(c: Vec3A) -> f32 {
-    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+    Luma::REC709.of(c)
+}
+
+/// The luminance weights of a working colour space — the `Y` row of its
+/// RGB → XYZ matrix — and so the scalar the renderer uses wherever a colour
+/// has to become one weight: guiding flux, light power, environment-map
+/// importance, adaptive-sampling variance, lobe selection. Carried by value
+/// to each of those rather than read from a global, since two scenes in one
+/// process may render in different spaces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Luma(pub Vec3A);
+
+impl Luma {
+    /// Linear Rec.709's, as its standard rounds them.
+    pub const REC709: Luma = Luma(Vec3A::new(0.2126, 0.7152, 0.0722));
+
+    /// The luminance of `c`. The same three products and two sums, in the same
+    /// order, as the Rec.709 constant expression this replaced, so a
+    /// `lin_rec709` render is bit-identical.
+    #[inline]
+    pub fn of(self, c: Vec3A) -> f32 {
+        self.0.x * c.x + self.0.y * c.y + self.0.z * c.z
+    }
+}
+
+impl Default for Luma {
+    fn default() -> Luma {
+        Luma::REC709
+    }
 }
 
 /// Veach's balance heuristic: `w_a = pdf_a / (pdf_a + pdf_b)`.

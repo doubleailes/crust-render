@@ -656,7 +656,11 @@ pub(crate) fn load_scene(
 
     let mut ctx = ImportCtx {
         world: WorldBuilder::new(),
-        lights: LightList::new(),
+        lights: {
+            let mut lights = LightList::new();
+            lights.set_luma(crate::color::luma(working));
+            lights
+        },
         volumes: Vec::new(),
         camera: None,
         wanted_camera,
@@ -1034,6 +1038,9 @@ struct ImportCaches<'a> {
     /// The working colour space every texture and authored colour is
     /// converted into ([`crate::color`]).
     pub(super) working: crate::color::Space,
+    /// Its luminance weights, which every material's lobe selection weighs
+    /// colours by ([`crate::color::luma`]).
+    pub(super) luma: utils::Luma,
 }
 
 impl ImportCaches<'_> {
@@ -1079,6 +1086,7 @@ impl<'a> ImportCaches<'a> {
             ies: HashMap::new(),
             light_textures: HashMap::new(),
             working,
+            luma: crate::color::luma(working),
         }
     }
 }

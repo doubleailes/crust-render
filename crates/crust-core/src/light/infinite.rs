@@ -138,7 +138,7 @@ impl Light for DistantLight {
     }
 
     /// At infinity: no finite power (see [`Light::power`]).
-    fn power(&self) -> Option<f32> {
+    fn power(&self, _luma: utils::Luma) -> Option<f32> {
         None
     }
 }
@@ -265,7 +265,7 @@ impl Light for DomeLight {
     }
 
     /// At infinity: no finite power (see [`Light::power`]).
-    fn power(&self) -> Option<f32> {
+    fn power(&self, _luma: utils::Luma) -> Option<f32> {
         None
     }
 }

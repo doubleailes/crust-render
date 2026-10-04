@@ -1150,14 +1150,19 @@ fn light_power_is_the_flux_it_emits() {
     let pi = std::f32::consts::PI;
     let rel = |a: Option<f32>, b: f32| (a.expect("finite light") - b).abs() / b;
     // A 1 × 2 rect, one-sided.
-    assert!(rel(rect_light(3.0, None, 0).power(), pi * 2.0 * 3.0) < 1e-5);
+    assert!(
+        rel(
+            rect_light(3.0, None, 0).power(crust_core::Luma::REC709),
+            pi * 2.0 * 3.0
+        ) < 1e-5
+    );
     // A unit-radius sphere: `sphere_light` is a plain (two-sided) emitter.
     let s = sphere_light(Vec3A::ZERO, 1.0, Vec3A::splat(2.0), 0);
-    assert!(rel(s.power(), 2.0 * pi * 4.0 * pi * 2.0) < 1e-5);
+    assert!(rel(s.power(crust_core::Luma::REC709), 2.0 * pi * 4.0 * pi * 2.0) < 1e-5);
     let sun = DistantLight::new(-Vec3A::Y, Vec3A::splat(5.0), 0.53);
-    assert_eq!(sun.power(), None);
+    assert_eq!(sun.power(crust_core::Luma::REC709), None);
     let dome = DomeLight::new(Vec3A::splat(0.5), None, Mat3A::IDENTITY);
-    assert_eq!(dome.power(), None);
+    assert_eq!(dome.power(crust_core::Luma::REC709), None);
 }
 
 /// A shaped light's flux is the cone it emits into: `π A L sin² θ` for a hard
@@ -1172,7 +1177,7 @@ fn shaped_light_power_is_the_cone_it_emits_into() {
         shaping.cone_angle_deg = cone;
         let light = rect_light(1.0, Some(shaping), 0);
         let exact = pi * 2.0 * cone.to_radians().sin().powi(2);
-        let got = light.power().unwrap();
+        let got = light.power(crust_core::Luma::REC709).unwrap();
         assert!(
             (got - exact).abs() <= 0.01 * exact,
             "{cone}° cone: power {got} vs {exact}"
@@ -1197,7 +1202,7 @@ fn textured_light_power_uses_the_mean_texel() {
         0,
     );
     let expected = std::f32::consts::PI * 2.0 * 2.0; // mean texel 2
-    assert!((light.power().unwrap() - expected).abs() < 1e-4 * expected);
+    assert!((light.power(crust_core::Luma::REC709).unwrap() - expected).abs() < 1e-4 * expected);
 }
 
 /// Power selection gives lights at infinity their uniform share, splits the

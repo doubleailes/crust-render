@@ -46,6 +46,43 @@ use std::sync::Arc;
 /// blue goes slightly negative, exactly as in the reference. The importer
 /// clamps the final emission instead.
 pub fn blackbody_rgb(kelvin: f32) -> Vec3A {
+    let xyz = planckian_xyz(kelvin);
+    let rgb = xyz_to_rec709(xyz);
+    let luma = REC709_LUMA[0] * rgb[0] + REC709_LUMA[1] * rgb[1] + REC709_LUMA[2] * rgb[2];
+    Vec3A::new(
+        (rgb[0] / luma) as f32,
+        (rgb[1] / luma) as f32,
+        (rgb[2] / luma) as f32,
+    )
+}
+
+/// [`blackbody_rgb`] in any working space, normalised to unit luminance
+/// there: computed from the locus's XYZ straight into `working` through the
+/// OCIO config's XYZ matrix ([`crate::color::from_xyz`]), the way Typhoon
+/// does it, rather than through Rec.709 and a gamut conversion — which would
+/// clip a low temperature at Rec.709's gamut before ACEScg could hold it.
+///
+/// `lin_rec709` is [`blackbody_rgb`] itself, bit for bit. A space the config
+/// gives no XYZ matrix falls back to the Rec.709 colour, converted.
+pub fn blackbody_in(kelvin: f32, working: crate::color::Space) -> Vec3A {
+    if working == crate::color::Space::LIN_REC709 {
+        return blackbody_rgb(kelvin);
+    }
+    let [x, y, z] = planckian_xyz(kelvin);
+    let xyz = Vec3A::new(x as f32, y as f32, z as f32);
+    let rgb = crate::color::from_xyz(xyz, working).unwrap_or_else(|| {
+        crate::color::convert(
+            blackbody_rgb(kelvin),
+            crate::color::Space::LIN_REC709,
+            working,
+        )
+    });
+    rgb / crate::color::luma(working).of(rgb)
+}
+
+/// The Planckian locus at `kelvin` (clamped to 1000–15000 K) as CIE XYZ at
+/// `Y = 1`: Krystek's (u, v) approximation.
+fn planckian_xyz(kelvin: f32) -> [f64; 3] {
     let t = kelvin.clamp(1000.0, 15000.0) as f64;
     // Krystek's coefficients, as nanocolor carries them.
     let u = (0.860117757 + 1.54118254e-4 * t + 1.2864121e-7 * t * t)
@@ -56,14 +93,7 @@ pub fn blackbody_rgb(kelvin: f32) -> Vec3A {
     let v_prime = 1.5 * v;
     let d = 6.0 * u - 16.0 * v_prime + 12.0;
     let (x, y) = (9.0 * u / d, 4.0 * v_prime / d);
-    let xyz = [x / y, 1.0, (1.0 - x - y) / y];
-    let rgb = xyz_to_rec709(xyz);
-    let luma = REC709_LUMA[0] * rgb[0] + REC709_LUMA[1] * rgb[1] + REC709_LUMA[2] * rgb[2];
-    Vec3A::new(
-        (rgb[0] / luma) as f32,
-        (rgb[1] / luma) as f32,
-        (rgb[2] / luma) as f32,
-    )
+    [x / y, 1.0, (1.0 - x - y) / y]
 }
 
 /// Rec.709 luminance weights (the `Y` row of the RGB → XYZ matrix).
