@@ -1030,6 +1030,8 @@ struct FakeAssets {
     /// space is recorded because getting it wrong is silent: a normal map read
     /// through the sRGB curve is still a plausible-looking normal map.
     textures: std::sync::Mutex<Vec<(PathBuf, crust_core::ColorSpace)>>,
+    /// The colour space each environment was asked for, in request order.
+    environments: std::sync::Mutex<Vec<crust_core::ColorSpace>>,
 }
 
 impl Default for FakeAssets {
@@ -1037,6 +1039,7 @@ impl Default for FakeAssets {
         FakeAssets {
             requested: std::sync::Mutex::new(Vec::new()),
             textures: std::sync::Mutex::new(Vec::new()),
+            environments: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -1045,9 +1048,10 @@ impl crust_core::AssetLoader for FakeAssets {
     fn load_environment(
         &self,
         path: &std::path::Path,
-        _space: crust_core::ColorSpace,
+        space: crust_core::ColorSpace,
     ) -> Option<crust_core::EnvironmentMap> {
         self.requested.lock().unwrap().push(path.to_path_buf());
+        self.environments.lock().unwrap().push(space);
         crust_core::EnvironmentMap::new(
             2,
             1,
@@ -2239,6 +2243,163 @@ fn preview_textures_reach_the_host_with_their_source_color_space() {
         .filter(|&g| scene.world.material(g).uses_uv())
         .count();
     assert_eq!(textured, 4, "expected four textured preview surfaces");
+}
+
+/// A scope's `colorSpace:name` describes its *colour values*, not how an image
+/// file is encoded: a colour texture's decode comes from its own `colorSpace`
+/// metadatum or `sourceColorSpace` alone. And a texture that is not a colour
+/// is never moved to other primaries, whatever the file, the scope or the
+/// working space says: a change of primaries would mix a normal map's
+/// channels. It decodes by `sourceColorSpace`'s curve alone, as before colour
+/// management.
+#[test]
+fn a_scopes_color_space_does_not_reach_texture_files() {
+    use crust_core::ColorSpace;
+    use crust_core::color::{Space, working_space};
+
+    let dir = std::env::temp_dir().join("crust_scope_color_space");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let texture = |name: &str, file: &str, extra: &str, out: &str| {
+        format!(
+            r#"
+        def Shader "{name}"
+        {{
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @{file}@ {extra}
+            {out}
+        }}"#
+        )
+    };
+    let srgb = "\n            token inputs:sourceColorSpace = \"sRGB\"";
+    let rec2020 = "(colorSpace = \"lin_rec2020\")";
+    let stage = format!(
+        r#"#usda 1.0
+(
+    defaultPrim = "W"
+)
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        uniform token renderingColorSpace = "acescg"
+    }}
+}}
+def Xform "W" (
+    prepend apiSchemas = ["ColorSpaceAPI"]
+)
+{{
+    uniform token colorSpace:name = "acescg"
+    def Material "M"
+    {{
+        token outputs:surface.connect = </W/M/S.outputs:surface>
+        token outputs:displacement.connect = </W/M/S.outputs:displacement>
+        def Shader "S"
+        {{
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </W/M/Albedo.outputs:rgb>
+            color3f inputs:emissiveColor.connect = </W/M/Glow.outputs:rgb>
+            float inputs:roughness.connect = </W/M/Rough.outputs:r>
+            normal3f inputs:normal.connect = </W/M/Normal.outputs:rgb>
+            float inputs:metallic.connect = </W/M/Metal.outputs:r>
+            float inputs:displacement.connect = </W/M/Height.outputs:r>
+            token outputs:surface
+            token outputs:displacement
+        }}{}{}{}{}{}{}
+    }}
+    def Mesh "Quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {{
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </W/M>
+    }}
+}}
+"#,
+        texture("Albedo", "albedo.png", srgb, "vector3f outputs:rgb"),
+        texture("Glow", "glow.exr", rec2020, "vector3f outputs:rgb"),
+        texture("Rough", "rough.png", srgb, "float outputs:r"),
+        texture("Normal", "normal.png", rec2020, "vector3f outputs:rgb"),
+        texture("Metal", "metal.png", "", "float outputs:r"),
+        texture("Height", "height.png", rec2020, "float outputs:r"),
+    );
+    let path = dir.join("scope_color_space.usda");
+    std::fs::write(&path, stage).expect("write stage");
+
+    let assets = FakeAssets::default();
+    Scene::from_usd_with_assets(&path, &assets).expect("stage opens");
+    let mut got: Vec<(String, ColorSpace)> = assets
+        .textures
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, s)| (p.file_name().unwrap().to_string_lossy().into_owned(), *s))
+        .collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    got.dedup();
+    let acescg = working_space("acescg").unwrap();
+    let rec2020 = Space::named("lin_rec2020").unwrap();
+    assert_eq!(
+        got,
+        vec![
+            // Colours: the sRGB albedo decodes into ACEScg rather than being
+            // read as linear ACEScg; the file's own metadatum still wins.
+            (
+                "albedo.png".to_owned(),
+                ColorSpace::new(Space::SRGB_TEXTURE, acescg)
+            ),
+            ("glow.exr".to_owned(), ColorSpace::new(rec2020, acescg)),
+            // Displacement: `auto` is raw, the file's metadatum ignored.
+            ("height.png".to_owned(), ColorSpace::RAW),
+            // Values: `sourceColorSpace` alone, on Rec.709 primaries.
+            ("metal.png".to_owned(), ColorSpace::AUTO),
+            ("normal.png".to_owned(), ColorSpace::AUTO),
+            ("rough.png".to_owned(), ColorSpace::SRGB),
+        ]
+    );
+}
+
+/// A dome texture tagged `raw` is radiance used as stored — already in the
+/// working space — not data: it keeps the working space, whose luminance
+/// weights its importance sampling needs.
+#[test]
+fn a_raw_dome_texture_keeps_the_working_space() {
+    use crust_core::ColorSpace;
+    use crust_core::color::working_space;
+
+    let dir = std::env::temp_dir().join("crust_raw_dome");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let stage = r#"#usda 1.0
+(
+    defaultPrim = "W"
+)
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        uniform token renderingColorSpace = "acescg"
+    }
+}
+def Xform "W"
+{
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @sky.exr@ (colorSpace = "raw")
+    }
+}
+"#;
+    let path = dir.join("raw_dome.usda");
+    std::fs::write(&path, stage).expect("write stage");
+
+    let assets = FakeAssets::default();
+    Scene::from_usd_with_assets(&path, &assets).expect("stage opens");
+    let acescg = working_space("acescg").unwrap();
+    assert_eq!(
+        *assets.environments.lock().unwrap(),
+        vec![ColorSpace::new(acescg, acescg)]
+    );
+    assert_eq!(ColorSpace::new(acescg, acescg).working(), acescg);
 }
 
 /// A texture that does not load reads the UsdUVTexture's own `fallback`, and

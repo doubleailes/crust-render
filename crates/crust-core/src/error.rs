@@ -32,11 +32,17 @@ pub enum Error {
         available: Vec<String>,
     },
     /// The host's working colour space
-    /// ([`UsdImportOptions::working_space`](crate::UsdImportOptions::working_space))
-    /// is not a scene-linear space of the OCIO config; carries the reason.
-    /// An error rather than a fallback, like a bad camera: rendering in a
-    /// space other than the one asked for would mislabel every pixel.
+    /// ([`UsdImportOptions::working_space`](crate::UsdImportOptions::working_space),
+    /// [`color::working_space`](crate::color::working_space)) is not a
+    /// scene-linear space of the OCIO config; carries the reason. An error
+    /// rather than a fallback, like a bad camera: rendering in a space other
+    /// than the one asked for would mislabel every pixel.
     InvalidWorkingSpace(String),
+    /// The OCIO config a host asked for
+    /// ([`color::use_config`](crate::color::use_config)) cannot be used: it
+    /// does not load, lacks a space crust needs, or another config is
+    /// already in use. Carries the reason.
+    InvalidOcioConfig(String),
 }
 
 impl fmt::Display for Error {
@@ -60,7 +66,7 @@ impl fmt::Display for Error {
                     "invalid camera path '{path}': expected an absolute prim path such as /root/cam"
                 )
             }
-            Error::InvalidWorkingSpace(why) => write!(f, "{why}"),
+            Error::InvalidWorkingSpace(why) | Error::InvalidOcioConfig(why) => write!(f, "{why}"),
             Error::CameraNotFound { path, available } => {
                 write!(f, "no UsdGeomCamera at {path} on this stage")?;
                 if available.is_empty() {

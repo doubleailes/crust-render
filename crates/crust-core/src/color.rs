@@ -99,22 +99,22 @@ fn load(source: &str) -> Result<ocio::Config, String> {
 /// conversions already handed out refer to the config they came from. Asking
 /// again for the config already in use is not an error; asking for another
 /// is.
-pub fn use_config(source: &str) -> Result<(), String> {
+pub fn use_config(source: &str) -> Result<(), crate::Error> {
     let in_use = |installed: &Installed| {
         if installed.source == source {
             Ok(())
         } else {
-            Err(format!(
+            Err(crate::Error::InvalidOcioConfig(format!(
                 "OCIO config {} is already in use; {source} must be installed before the \
                  first colour is converted",
                 installed.source
-            ))
+            )))
         }
     };
     if let Some(installed) = CONFIG.get() {
         return in_use(installed);
     }
-    let config = load(source)?;
+    let config = load(source).map_err(crate::Error::InvalidOcioConfig)?;
     in_use(CONFIG.get_or_init(|| Installed {
         source: source.to_string(),
         config,
@@ -478,18 +478,18 @@ pub fn chromaticities(space: Space) -> Option<[[f32; 2]; 4]> {
 
 /// The working space a name selects: a space the config knows that is scene
 /// linear. Anything else is refused with the reason.
-pub fn working_space(name: &str) -> Result<Space, String> {
+pub fn working_space(name: &str) -> Result<Space, crate::Error> {
     let space = Space::named(name).ok_or_else(|| {
-        format!(
+        crate::Error::InvalidWorkingSpace(format!(
             "working colour space `{name}` is not defined by the OCIO config {}",
             config_source()
-        )
+        ))
     })?;
     if space.is_data() || !space.is_scene_linear() {
-        return Err(format!(
+        return Err(crate::Error::InvalidWorkingSpace(format!(
             "working colour space `{name}` ({}) is not scene-linear",
             space.name()
-        ));
+        )));
     }
     Ok(space)
 }
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn a_working_space_must_be_scene_linear() {
-        assert_eq!(working_space("lin_rec709"), Ok(Space::LIN_REC709));
+        assert_eq!(working_space("lin_rec709").unwrap(), Space::LIN_REC709);
         assert!(working_space("acescg").is_ok());
         assert!(working_space("lin_rec2020").is_ok());
         assert!(working_space("srgb_texture").is_err());

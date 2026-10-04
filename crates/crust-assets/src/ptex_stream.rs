@@ -34,7 +34,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crate::ptex_texture::{decode_ptex_rgb, ptex_space};
+use crate::ptex_texture::ptex_space;
 use crate::read_channel;
 use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
@@ -346,6 +346,11 @@ pub struct PtexStream {
     /// The change of primaries a table-decoded texel takes into the working
     /// space; `None` on the working primaries.
     gamut: Option<crust_core::Mat3A>,
+    /// The whole conversion a texel of any other sample type takes, resolved
+    /// once here rather than per tap — a lookup in the process-wide
+    /// conversion cache is a lock and a hash per texel. `None` when it is the
+    /// identity (raw data, a displacement map), which then costs nothing.
+    conversion: Option<std::sync::Arc<crust_core::color::Conversion>>,
     /// The resolution ceiling, when one was asked for.
     ///
     /// `None` — the default — is the whole point: streaming has no reason to
@@ -462,6 +467,7 @@ impl PtexStream {
             triangle: reader.mesh_type() == ptex::MeshType::Triangle,
             lut,
             gamut: ptex_space(space).gamut(),
+            conversion: Some(ptex_space(space).conversion()).filter(|c| !c.is_identity()),
             cap,
             mip,
             micro_max,
@@ -694,7 +700,11 @@ impl PtexStream {
             // is an OCIO processor, whose per-call cost is per pixel.
             None => {
                 let raw = |ch: usize| read_channel(&src[c(ch) * dsize..], self.dt);
-                decode_ptex_rgb(Vec3A::new(raw(0), raw(1), raw(2)) * self.scale, self.space)
+                let v = Vec3A::new(raw(0), raw(1), raw(2)) * self.scale;
+                match &self.conversion {
+                    Some(conversion) => conversion.convert(v),
+                    None => v,
+                }
             }
         }
     }

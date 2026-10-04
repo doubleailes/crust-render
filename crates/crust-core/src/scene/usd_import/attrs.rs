@@ -226,17 +226,7 @@ pub(super) fn custom_color(prim: &Prim, name: &str, working: Space) -> Option<Ve
 /// `docs/color_management.md`). A name the config does not know is refused
 /// with a warning, and is `None` too.
 pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
-    let token = |v: sdf::Value| match v {
-        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
-        sdf::Value::String(s) => Some(s),
-        _ => None,
-    };
-    let own = attr
-        .get_metadata::<sdf::Value>("colorSpace")
-        .ok()
-        .flatten()
-        .and_then(token);
-    let name = own.filter(|n| !n.is_empty()).or_else(|| {
+    let name = own_color_space_name(attr).or_else(|| {
         let stage = attr.stage();
         let mut path = Some(attr.path().prim_path());
         while let Some(p) = path.filter(|p| !p.is_abs_root()) {
@@ -245,7 +235,7 @@ pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> 
                 .get_at::<sdf::Value>(eval_time())
                 .ok()
                 .flatten()
-                .and_then(token)
+                .and_then(token_text)
                 .filter(|n| !n.is_empty());
             if named.is_some() {
                 return named;
@@ -254,7 +244,41 @@ pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> 
         }
         None
     })?;
-    let space = Space::named(&name);
+    named_space(attr, &name)
+}
+
+/// The colour space an attribute's *own* `colorSpace` metadatum names,
+/// ignoring any `colorSpace:name` on its prim or ancestors — for a value
+/// whose encoding is a convention of the attribute rather than of the scene:
+/// a texture file (whose decode `sourceColorSpace` or the file itself
+/// decides) or a display-encoded colour such as PxrDisneyBsdf's `baseColor`.
+/// A scope's `colorSpace:name = "acescg"` says its *linear colour values* are
+/// ACEScg; applied to an sRGB albedo file it would read it as linear, and to
+/// a displacement map it would mix its channels.
+pub(super) fn attr_own_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
+    let name = own_color_space_name(attr)?;
+    named_space(attr, &name)
+}
+
+fn token_text(v: sdf::Value) -> Option<String> {
+    match v {
+        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
+        sdf::Value::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn own_color_space_name(attr: &openusd::usd::Attribute) -> Option<String> {
+    attr.get_metadata::<sdf::Value>("colorSpace")
+        .ok()
+        .flatten()
+        .and_then(token_text)
+        .filter(|n| !n.is_empty())
+}
+
+/// `name` through the OCIO config, warning when it does not know it.
+fn named_space(attr: &openusd::usd::Attribute, name: &str) -> Option<Space> {
+    let space = Space::named(name);
     if space.is_none() {
         warn!(
             "{}: colorSpace `{name}` is not defined by the OCIO config — the value is used as \

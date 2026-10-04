@@ -553,9 +553,7 @@ pub(crate) fn load_scene(
     // A working space the host names is refused here, before the stage is
     // opened, like a bad camera path.
     let host_working = match &options.working_space {
-        Some(name) => {
-            Some(crate::color::working_space(name).map_err(crate::Error::InvalidWorkingSpace)?)
-        }
+        Some(name) => Some(crate::color::working_space(name)?),
         None => None,
     };
     let _time_scope = EvalTimeScope::enter(time);
