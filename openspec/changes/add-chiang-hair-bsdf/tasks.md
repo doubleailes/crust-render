@@ -181,7 +181,7 @@
 
 ## 6. Integration
 
-- [ ] 6.1 Run CI locally:
+- [x] 6.1 Run CI locally:
   - `cargo fmt --all -- --check`;
   - `cargo clippy --workspace --all-targets -- -D warnings`;
   - `cargo test --workspace --no-fail-fast`;
