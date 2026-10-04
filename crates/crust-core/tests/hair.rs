@@ -240,6 +240,7 @@ fn every_hair_fixture_is_bounded_in_a_white_furnace() {
             "mtlx_hair_color",
             "mtlx_hair_melanin",
             "mtlx_hair_mix",
+            "mtlx_hair_translucent_mix",
         ] {
             let mean = strand_furnace(fixture(name).material, h);
             assert!(
@@ -285,4 +286,33 @@ fn a_mixed_fibre_keeps_both_leaves() {
     assert_eq!(leaves[0].weight, Vec3A::splat(0.25));
     assert_eq!(leaves[1].weight, Vec3A::splat(0.75));
     assert!(probe.closure.passes_out_of_curves());
+}
+
+/// A fibre beside a transmitting leaf: only the fibre's light passes out of
+/// the strand. Lit from straight behind, the translucent half's light meets
+/// the tube's far wall — on its own it would be dark at one bounce — so the
+/// mix shows the fibre's half of the clear fibre's glow, under either
+/// sampling strategy, and not the full glow passing everything would give.
+#[test]
+fn only_the_fibres_light_passes_out_of_a_mixed_strand() {
+    let ray = Ray::new(Vec3A::new(0.0, 0.0, 5.0), -Vec3A::Z);
+    let mut hair = backlit_strand("mixed_hair_ref", "mtlx_hair_clear");
+    let mut mixed = backlit_strand("mixed_hair", "mtlx_hair_translucent_mix");
+    // Light sampling sees the same light samples through the same fibre:
+    // the half is exact. Passing the translucent half's light too would add
+    // its share of the backlight, 0.11 here (1.5% of the glow).
+    let full = radiance_by(&mut hair, &ray, 1, 4096, SamplingStrategy::LightOnly);
+    let half = radiance_by(&mut mixed, &ray, 1, 4096, SamplingStrategy::LightOnly);
+    assert!(
+        (half - full * 0.5).abs().max_element() < 1e-3 * full.x,
+        "light sampling: mixed {half:?} vs clear fibre {full:?}"
+    );
+    // BSDF sampling picks a share per sample: the half within noise (0.01
+    // here), well short of the translucent's 0.09 had it passed.
+    let full = radiance_by(&mut hair, &ray, 1, 16384, SamplingStrategy::BsdfOnly);
+    let half = radiance_by(&mut mixed, &ray, 1, 16384, SamplingStrategy::BsdfOnly);
+    assert!(
+        (half - full * 0.5).abs().max_element() < 0.04,
+        "BSDF sampling: mixed {half:?} vs clear fibre {full:?}"
+    );
 }

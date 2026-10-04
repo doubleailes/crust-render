@@ -232,6 +232,7 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("hair.mtlx", "mtlx_hair_melanin"),
         ("hair.mtlx", "mtlx_hair_mix"),
         ("hair.mtlx", "mtlx_hair_clear"),
+        ("hair.mtlx", "mtlx_hair_translucent_mix"),
     ] {
         let loaded = materialx::load(
             &sample(file),

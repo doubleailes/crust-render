@@ -359,6 +359,10 @@ pub(crate) struct CurvePrim {
     pub geom_id: u32,
     pub prim_id: u32,
     pub mask: RayMask,
+    /// Which ends continue into the neighbouring segment of the same strand
+    /// (`curve::JOINED_START` / `JOINED_END`): their caps are not the
+    /// strand's boundary to a ray passing out of tubes. In the padding.
+    pub joints: u8,
 }
 
 impl Prim for CurvePrim {
@@ -367,7 +371,7 @@ impl Prim for CurvePrim {
             return None;
         }
         let (p0, p1) = (Vec3A::from_array(self.p0), Vec3A::from_array(self.p1));
-        let h = rounded_cone_intersect(ray, p0, p1, self.r0, self.r1, t_min, t_max)?;
+        let h = rounded_cone_intersect(ray, p0, p1, self.r0, self.r1, t_min, t_max, self.joints)?;
         Some(PrimHit {
             t: h.t,
             outward: h.normal,
@@ -410,6 +414,9 @@ pub(crate) struct CubicCurvePrim {
     pub geom_id: u32,
     pub prim_id: u32,
     pub mask: RayMask,
+    /// Which ends continue into the neighbouring span, as for
+    /// [`CurvePrim::joints`]. In the padding.
+    pub joints: u8,
 }
 
 impl Prim for CubicCurvePrim {
@@ -417,7 +424,15 @@ impl Prim for CubicCurvePrim {
         if masked_out(ray, self.mask) {
             return None;
         }
-        let h = crate::curve::cubic_curve_intersect(ray, &self.cp, self.r0, self.r1, t_min, t_max)?;
+        let h = crate::curve::cubic_curve_intersect(
+            ray,
+            &self.cp,
+            self.r0,
+            self.r1,
+            t_min,
+            t_max,
+            self.joints,
+        )?;
         Some(PrimHit {
             t: h.t,
             outward: h.normal,

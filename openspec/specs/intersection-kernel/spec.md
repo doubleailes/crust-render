@@ -222,10 +222,11 @@ barycentrics, ids, reported normal, and occlusion.
 ### Requirement: A ray can pass out of curve tubes
 
 A ray SHALL be able to ask the kernel to ignore every hit at which it leaves a
-curve's tube, that is, where its direction points away from the tube's outward
-normal. It SHALL keep every hit at which it enters a tube, and every hit on
-another kind of geometry. The test SHALL hold through every instance transform,
-mirrored ones included, for `intersect` and `occluded` alike.
+curve's tube (its direction pointing away from the outward normal), and every
+surface inside the tube: the part of an end cap buried in the body, and a
+joint's cap for a ray starting at that joint. It SHALL keep every other entry,
+and every hit on other geometry, through every instance transform, for
+`intersect` and `occluded` alike.
 
 #### Scenario: A ray starting inside a tube leaves it unseen
 
@@ -242,6 +243,21 @@ mirrored ones included, for `intersect` and `occluded` alike.
 
 - **WHEN** a ray does not ask to pass out of curve tubes
 - **THEN** it reports exit hits exactly as before
+
+#### Scenario: Crossing a strand near its end or a joint
+
+- **WHEN** a ray that asks to pass out of curve tubes starts on a strand's
+  surface within a radius of a segment's end, of a joint between segments, or
+  of a joint between a cubic span's subdivision pieces, and crosses the strand
+- **THEN** it does not stop on the end cap's half inside the body, nor on the
+  joint's cap
+
+#### Scenario: Joints stay closed to rays from elsewhere
+
+- **WHEN** a ray that asks to pass out of curve tubes comes from elsewhere and
+  meets a strand at a joint, including through the wedge outside a sharp bend
+  that only the joint's cap covers
+- **THEN** it reports the strand's entry hit
 
 ### Requirement: Known gaps
 

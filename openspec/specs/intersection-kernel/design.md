@@ -199,6 +199,29 @@ model).
 - **`Ray::ignore_curve_exits`** makes curve primitives reject a hit where
   `dir · outward > 0`. The test is in object space; `dot(M d, M⁻ᵀ n) = d · n`, so it
   holds through every transform, mirrors included.
+- **Only the solid's boundary, for such a ray.** A rounded cone's cap sphere
+  is half buried in its body, and that half faces back into the tube. A ray
+  crossing the strand within a radius of an end *enters* it, an entry by its
+  normal but inside the strand (Qodo's review of #207, with the worked case
+  of a 0.5-radius segment crossed from 0.2 short of its end). The fix has two
+  parts, both only for passing rays:
+  - **Buried cap halves.** A cap root is kept only beyond the tangency circle
+    (`y ≤ 0` for the first cap, `y ≥ d2` for the second, the body's own `y`).
+    When one sphere swallows the other, only the larger one counts.
+  - **Joint caps.** A cap where the strand continues is also buried in the
+    neighbour's body, except in the wedge outside a bend. It is skipped for a
+    ray starting within two radii of the joint, which is on the strand there,
+    and kept, true-boundary part only, for any other ray. Skipping it outright
+    opens a crack: a ray from elsewhere through the joint plane, or through
+    the wedge, met nothing.
+  - **Where joints come from.** Joints within a cubic span are its
+    subdivision pieces' ends (`u0 > 0`, `u1 < 1`). Joints between segments or
+    spans are found at commit: consecutive members of a batch whose end and
+    start meet within float rounding plus a thousandth of the radius
+    (`curve_joints`), stored in the prims' padding (`CurvePrim` stays 48
+    bytes, `CubicCurvePrim` 96).
+  - **Not passing rays.** A ray that does not pass sees every root as before,
+    so nothing else moves by an ulp.
   - The flag lives in the ray's padding (still 48 bytes, pinned).
   - It does not touch any other primitive.
   - It does not move any other hit.
@@ -225,7 +248,8 @@ model).
   subdivided per ray query into rounded cones (`crust_rt::curve::cubic_curve_intersect`),
   so they are not stored as polylines; widths lerp across a span in parameter; the
   rounded-cone can report an interior sphere surface for rays *starting inside* the hull
-  (a ray with `ignore_curve_exits` skips it: it is an exit). Mesh-BVH sharing needs identical
+  (a ray with `ignore_curve_exits` skips it: half of it is an exit, and the other half is
+  inside the body, which only the solid's-boundary rule above excludes). Mesh-BVH sharing needs identical
   points/topology *and* material binding. Emissive curves/instances are not light-list
   entries (BSDF-sampled only, like emissive volumes).
   Baking single-placement meshes (above) leaves *resident* memory unchanged — the same

@@ -220,7 +220,11 @@ The three helper nodes turn artist parameters into those inputs:
 
 `samples/hair.usda` renders one tuft per way of reaching the node. Light reaching a strand
 through the strand itself is already part of the model, so a strand never shadows its
-own transmitted light. It still shadows everything else, other strands included.
+own transmitted light. It still shadows everything else, other strands included. If the
+hair node is mixed with a BSDF that transmits, such as a refracting `dielectric_bsdf` or
+a `translucent_bsdf`, only the hair's share of the light passes through the strand. The
+other BSDF's light meets the far side of the tube, as it would without the hair. Path
+guiding is off where such a mix is hit.
 
 Author grooms in centimetres (`metersPerUnit = 0.01`, the USD default). Crust Render
 starts every ray 0.001 units away from the surface it leaves; in a groom authored in

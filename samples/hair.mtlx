@@ -21,6 +21,11 @@
                           energy, for the furnace and the backlit glow.
     mtlx_diffuse_twin   — a white diffuse, the clear fibre's twin: what the
                           strands rendered as before hair had a model.
+    mtlx_hair_translucent_mix
+                        — the clear fibre mixed half and half with a white
+                          translucent: a fibre beside a transmitting leaf,
+                          whose light must not pass out of the strand as the
+                          fibre's does.
 
   Texture-free on purpose, so tests and `examples/mtlx_shade` can pin exact
   numbers.
@@ -131,6 +136,22 @@
   </surface>
   <surfacematerial name="mtlx_diffuse_twin" type="material">
     <input name="surfaceshader" type="surfaceshader" nodename="twin_surface" />
+  </surfacematerial>
+
+  <!-- Half fibre, half translucent: two kinds of transmission at one hit. -->
+  <translucent_bsdf name="mix_translucent" type="BSDF">
+    <input name="color" type="color3" value="1, 1, 1" />
+  </translucent_bsdf>
+  <mix name="translucent_mix_bsdf" type="BSDF">
+    <input name="fg" type="BSDF" nodename="clear_bsdf" />
+    <input name="bg" type="BSDF" nodename="mix_translucent" />
+    <input name="mix" type="float" value="0.5" />
+  </mix>
+  <surface name="translucent_mix_surface" type="surfaceshader">
+    <input name="bsdf" type="BSDF" nodename="translucent_mix_bsdf" />
+  </surface>
+  <surfacematerial name="mtlx_hair_translucent_mix" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="translucent_mix_surface" />
   </surfacematerial>
 
 </materialx>

@@ -485,10 +485,11 @@ else the hit's tangent.
 
 ### Requirement: A hair vertex's rays pass out of its own strand
 
-A continuation ray, or a shadow ray toward a sampled light, that leaves a
-vertex whose closure holds a live `chiang_hair_bsdf` SHALL NOT be stopped where
-it leaves a curve's tube. Where it enters a tube, it SHALL be stopped as before.
-Rays leaving any other vertex SHALL be unchanged.
+A continuation ray or a shadow ray that carries a live `chiang_hair_bsdf`
+leaf's light SHALL NOT be stopped where it leaves a curve's tube; where it
+enters one, it SHALL be stopped as before. Light any other leaf at the same
+vertex scatters SHALL meet the tube as it would without the fibre, and rays
+leaving any vertex without a fibre SHALL be unchanged.
 
 #### Scenario: Light reaches a strand through the strand
 
@@ -508,6 +509,14 @@ Rays leaving any other vertex SHALL be unchanged.
 - **WHEN** a curve carries a transmissive `dielectric_bsdf` and no hair leaf
 - **THEN** its refracted rays meet the tube's far wall from inside, exactly as
   a ray that does not pass out of curve tubes does
+
+#### Scenario: Only the fibre's light passes out of a mixed strand
+
+- **WHEN** a strand mixes a clear `chiang_hair_bsdf` half and half with a
+  white `translucent_bsdf` and is lit from straight behind
+- **THEN** with one bounce it shows half the clear fibre's glow, under light
+  sampling and under BSDF sampling alike: the translucent half's light meets
+  the tube's far wall rather than passing out of the strand
 
 ### Requirement: MaterialX pattern nodes evaluate as the MaterialX reference
 

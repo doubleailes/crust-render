@@ -570,6 +570,31 @@ impl<'a> ShadingPoint<'a> {
         }
     }
 
+    /// Whether a fibre shares this hit with a transmitting leaf, so light
+    /// going into the tube must be split by who scatters it — see
+    /// [`crate::closure::ResolvedClosure::mixes_hair`].
+    #[inline]
+    pub fn mixes_hair(&self) -> bool {
+        match &self.bsdf {
+            Resolved::Closure(c) => c.mixes_hair(),
+            _ => false,
+        }
+    }
+
+    /// [`ShadingPoint::eval`]'s value toward `wi`, as the fibres' share and
+    /// the other leaves', and which [`ShadingPoint::eval_lobes`] shares are
+    /// fibres' (bit `i` for share `i`). Every share is the others' outside a
+    /// closure.
+    pub(crate) fn eval_hair_split(&self, wi: Vec3A) -> (Vec3A, Vec3A, u8) {
+        match &self.bsdf {
+            Resolved::Closure(c) => {
+                let (hair, other) = c.eval_hair_split(wi);
+                (hair, other, c.hair_leaves())
+            }
+            _ => (Vec3A::ZERO, Vec3A::ZERO, 0),
+        }
+    }
+
     /// The random walk a sample with [`ScatterSample::subsurface`] set enters
     /// toward `dir`: `None` for any other sample.
     pub fn subsurface_entry(
