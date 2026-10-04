@@ -32,7 +32,7 @@ use crate::hittable::HitRecord;
 use crate::material::closure::{MAX_LEAVES, PooledClosure, ResolvedClosure};
 use crate::material::{Material, Resolution, ScatterSample};
 use crate::ray::Ray;
-use crust_mtlx::{Closures, Program, ShadeCtx, TextureLoader, Val};
+use crust_mtlx::{Closures, Host, Program, ShadeCtx, Val};
 use glam::Vec3A;
 
 pub use crust_mtlx::MtlxError;
@@ -416,17 +416,19 @@ fn jit_enabled() -> bool {
 /// path, `</MaterialX/Materials/surfacematerial_teapot_ceramic>`. When it is
 /// `None` the first `surfacematerial` in the document is used.
 ///
-/// `load_texture` resolves an `image` node's `file` — relative to the `.mtlx`
-/// itself, which is how MaterialX anchors asset paths — into a sampler.
+/// `host.load_texture` resolves an `image` node's `file` — relative to the
+/// `.mtlx` itself, which is how MaterialX anchors asset paths — into a
+/// sampler, and `host.convert_color` brings a literal colour with a
+/// `colorspace` into the working space.
 ///
 /// A tree with more leaves than [`MAX_LEAVES`] is refused rather than shaded
 /// with some of its leaves silently missing.
 pub fn load(
     path: &std::path::Path,
     material_node: Option<&str>,
-    load_texture: TextureLoader<'_>,
+    host: &Host<'_>,
 ) -> Result<Loaded, MtlxError> {
-    let mut c = crust_mtlx::compile(path, material_node, load_texture)?;
+    let mut c = crust_mtlx::compile(path, material_node, host)?;
     let leaves = c.closures.leaf_count();
     if leaves > MAX_LEAVES {
         return Err(MtlxError::Unsupported(format!(

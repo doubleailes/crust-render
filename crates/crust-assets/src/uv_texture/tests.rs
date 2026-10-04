@@ -43,7 +43,7 @@ fn a_udim_set_loads_and_addresses_by_tile() {
     write_tile(&dir.join("a.1002.png"), [20, 0, 0]);
     write_tile(&dir.join("a.1011.png"), [30, 0, 0]);
 
-    let tex = UvTexture::open(&dir.join("a.<UDIM>.png"), ColorSpace::Raw)
+    let tex = UvTexture::open(&dir.join("a.<UDIM>.png"), ColorSpace::RAW)
         .expect("a <UDIM> set must load the tiles that exist");
     assert_eq!(tex.tile_count(), 3, "only the tiles on disk are decoded");
     assert_eq!(sampled(&tex, 0.5, 0.5), [10, 0, 0]);
@@ -63,7 +63,7 @@ fn a_uvtile_set_loads_and_addresses_by_the_same_tile() {
     write_tile(&dir.join("a.u2_v1.png"), [20, 0, 0]);
     write_tile(&dir.join("a.u1_v2.png"), [30, 0, 0]);
 
-    let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::Raw)
+    let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::RAW)
         .expect("a <UVTILE> set must load like a <UDIM> one");
     assert_eq!(tex.tile_count(), 3);
     // Identical coordinates to the <UDIM> test above: the two tokens
@@ -78,7 +78,7 @@ fn a_uvtile_set_loads_and_addresses_by_the_same_tile() {
 fn a_missing_tile_reads_black_rather_than_a_neighbour() {
     let dir = scratch("holes");
     write_tile(&dir.join("a.u1_v1.png"), [10, 20, 30]);
-    let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&dir.join("a.<UVTILE>.png"), ColorSpace::RAW).expect("loads");
 
     // A hole inside the grid, and coordinates off the grid entirely.
     // Both are black, so a mis-scaled chart looks wrong instead of
@@ -96,15 +96,15 @@ fn a_missing_tile_reads_black_rather_than_a_neighbour() {
 #[test]
 fn an_empty_tile_set_declines_instead_of_loading_the_literal_name() {
     let dir = scratch("empty");
-    assert!(UvTexture::open(&dir.join("gone.<UDIM>.png"), ColorSpace::Raw).is_none());
-    assert!(UvTexture::open(&dir.join("gone.<UVTILE>.png"), ColorSpace::Raw).is_none());
+    assert!(UvTexture::open(&dir.join("gone.<UDIM>.png"), ColorSpace::RAW).is_none());
+    assert!(UvTexture::open(&dir.join("gone.<UVTILE>.png"), ColorSpace::RAW).is_none());
 }
 
 #[test]
 fn a_single_image_wraps_instead_of_tiling() {
     let dir = scratch("single");
     write_tile(&dir.join("flat.png"), [7, 8, 9]);
-    let tex = UvTexture::open(&dir.join("flat.png"), ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&dir.join("flat.png"), ColorSpace::RAW).expect("loads");
     // MaterialX's default address mode is `periodic`, so a coordinate
     // outside the unit square wraps back rather than reading black.
     assert_eq!(sampled(&tex, 0.5, 0.5), [7, 8, 9]);
@@ -132,15 +132,15 @@ fn at(space: ResolvedColorSpace, encoded: u8) -> f32 {
 fn gamma_tables_are_pure_power_laws() {
     for encoded in [0u8, 3, 13, 26, 128, 255] {
         let c = encoded as f32 / 255.0;
-        assert!((at(ResolvedColorSpace::Gamma22, encoded) - c.powf(2.2)).abs() < 1e-7);
-        assert!((at(ResolvedColorSpace::Gamma18, encoded) - c.powf(1.8)).abs() < 1e-7);
+        assert!((at(ResolvedColorSpace::GAMMA22, encoded) - c.powf(2.2)).abs() < 1e-7);
+        assert!((at(ResolvedColorSpace::GAMMA18, encoded) - c.powf(1.8)).abs() < 1e-7);
     }
     // Both curves are anchored: black stays black, white stays white, so
     // a fully-lit albedo keeps its exposure whichever tag it carries.
     for space in [
-        ResolvedColorSpace::Gamma22,
-        ResolvedColorSpace::Gamma18,
-        ResolvedColorSpace::Srgb,
+        ResolvedColorSpace::GAMMA22,
+        ResolvedColorSpace::GAMMA18,
+        ResolvedColorSpace::SRGB,
     ] {
         assert_eq!(at(space, 0), 0.0);
         assert!((at(space, 255) - 1.0).abs() < 1e-6);
@@ -153,15 +153,15 @@ fn gamma_22_is_not_the_srgb_curve_in_the_shadows() {
     // piecewise sRGB curve, whose linear toe lifts near-black by an order
     // of magnitude — an albedo of 0.01 encoded reads 19x too bright.
     let (srgb, g22) = (
-        at(ResolvedColorSpace::Srgb, 3),
-        at(ResolvedColorSpace::Gamma22, 3),
+        at(ResolvedColorSpace::SRGB, 3),
+        at(ResolvedColorSpace::GAMMA22, 3),
     );
     assert!(srgb > g22 * 10.0, "srgb {srgb} vs gamma22 {g22}");
     // And converges in the midtones, which is why the bug is invisible
     // on a look-dev turntable and only shows up in dark albedo.
     let (srgb, g22) = (
-        at(ResolvedColorSpace::Srgb, 128),
-        at(ResolvedColorSpace::Gamma22, 128),
+        at(ResolvedColorSpace::SRGB, 128),
+        at(ResolvedColorSpace::GAMMA22, 128),
     );
     assert!((srgb - g22).abs() < 0.005, "srgb {srgb} vs gamma22 {g22}");
 }
@@ -172,12 +172,12 @@ fn gamma_18_is_brighter_than_both_across_the_range() {
     // strictly inside [0,1] — the error is not confined to the toe.
     for encoded in [13u8, 64, 128, 200] {
         let (g18, g22) = (
-            at(ResolvedColorSpace::Gamma18, encoded),
-            at(ResolvedColorSpace::Gamma22, encoded),
+            at(ResolvedColorSpace::GAMMA18, encoded),
+            at(ResolvedColorSpace::GAMMA22, encoded),
         );
         assert!(g18 > g22, "at {encoded}: g18 {g18} !> g22 {g22}");
         assert!(
-            g18 > at(ResolvedColorSpace::Srgb, encoded),
+            g18 > at(ResolvedColorSpace::SRGB, encoded),
             "at {encoded}: g18 {g18}"
         );
     }
@@ -186,7 +186,7 @@ fn gamma_18_is_brighter_than_both_across_the_range() {
 #[test]
 fn raw_is_the_identity() {
     for encoded in [0u8, 1, 77, 255] {
-        assert_eq!(at(ResolvedColorSpace::Raw, encoded), encoded as f32 / 255.0);
+        assert_eq!(at(ResolvedColorSpace::RAW, encoded), encoded as f32 / 255.0);
     }
 }
 
@@ -203,13 +203,13 @@ fn reds(level: &[u8]) -> Vec<u8> {
 /// Reduces one row under `Raw`, where the decode table and the code steps are
 /// the identity and a level is its own u8 values back.
 fn reduce_row(values: &[u8]) -> Vec<u8> {
-    let table = ResolvedColorSpace::Raw.to_linear_table();
+    let table = ResolvedColorSpace::RAW.to_linear_table();
     let (out, w, h) = reduce_half(
         &grey(values),
         values.len(),
         1,
         &table,
-        &ResolvedColorSpace::Raw.code_steps(),
+        &ResolvedColorSpace::RAW.code_steps(),
     );
     assert_eq!((w, h), (values.len().div_ceil(2), 1));
     reds(&out)
@@ -272,9 +272,9 @@ fn an_odd_level_preserves_the_mean() {
 fn an_even_axis_reduces_exactly_as_it_did() {
     let (sw, sh) = (8usize, 6usize);
     let src: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 7 % 251) as u8).collect();
-    let table = ResolvedColorSpace::Srgb.to_linear_table();
-    let encode = |l: f32| ResolvedColorSpace::Srgb.encode(l);
-    let (got, w, h) = reduce_half(&src, sw, sh, &table, &ResolvedColorSpace::Srgb.code_steps());
+    let table = ResolvedColorSpace::SRGB.to_linear_table();
+    let encode = |l: f32| encode(ResolvedColorSpace::SRGB, l);
+    let (got, w, h) = reduce_half(&src, sw, sh, &table, &ResolvedColorSpace::SRGB.code_steps());
     assert_eq!((w, h), (4, 3));
     for y in 0..h {
         for x in 0..w {
@@ -309,8 +309,8 @@ fn the_two_reducers_agree_on_an_odd_level() {
         &bytes,
         sw,
         sh,
-        &ResolvedColorSpace::Raw.to_linear_table(),
-        &ResolvedColorSpace::Raw.code_steps(),
+        &ResolvedColorSpace::RAW.to_linear_table(),
+        &ResolvedColorSpace::RAW.code_steps(),
     );
     let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh);
     assert_eq!((w, h), (lw, lh), "the two disagree on level size");
@@ -373,11 +373,11 @@ fn an_exr_preloads_at_full_float_precision_and_range() {
             (4.0, 1.5, 0.25)
         }
     });
-    let tex = UvTexture::open_with(&p, ColorSpace::Auto, false).expect("loads");
+    let tex = UvTexture::open_with(&p, ColorSpace::AUTO, false).expect("loads");
     assert!(tex.is_float());
     assert_eq!(
         tex.color_space(),
-        ResolvedColorSpace::Raw,
+        ResolvedColorSpace::RAW,
         "auto on a float file is raw"
     );
     assert_eq!(tex.bytes(), 2 * 3 * 4);
@@ -391,8 +391,8 @@ fn an_explicit_curve_on_an_exr_is_applied_once_at_load() {
     let dir = scratch("exr_srgb");
     let p = dir.join("enc.exr");
     write_exr(&p, 1, 1, |_, _| (0.5, 0.5, 0.5));
-    let tex = UvTexture::open_with(&p, ColorSpace::Srgb, false).expect("loads");
-    let want = ResolvedColorSpace::Srgb.decode(0.5);
+    let tex = UvTexture::open_with(&p, ColorSpace::SRGB, false).expect("loads");
+    let want = ResolvedColorSpace::SRGB.decode_curve(0.5);
     assert!((tex.eval(0.5, 0.5, 0.0)[0] - want).abs() < 1e-6);
 }
 
@@ -401,7 +401,7 @@ fn an_exr_udim_set_addresses_by_tile() {
     let dir = scratch("exr_udim");
     write_exr(&dir.join("a.1001.exr"), 1, 1, |_, _| (1.0, 0.0, 0.0));
     write_exr(&dir.join("a.1002.exr"), 1, 1, |_, _| (0.0, 2.0, 0.0));
-    let tex = UvTexture::open(&dir.join("a.<UDIM>.exr"), ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&dir.join("a.<UDIM>.exr"), ColorSpace::RAW).expect("loads");
     assert_eq!(tex.tile_count(), 2);
     assert_eq!(tex.eval(0.5, 0.5, 0.0)[..3], [1.0, 0.0, 0.0]);
     assert_eq!(tex.eval(1.5, 0.5, 0.0)[..3], [0.0, 2.0, 0.0]);
@@ -418,7 +418,7 @@ fn an_exr_pyramid_preserves_the_mean_on_an_odd_axis() {
     let p = dir.join("row.exr");
     let src = [2.5f32, 2.0, 1.5, 1.0, 0.5];
     write_exr(&p, 5, 1, |x, _| (src[x], src[x], src[x]));
-    let tex = UvTexture::open_with(&p, ColorSpace::Raw, true).expect("loads");
+    let tex = UvTexture::open_with(&p, ColorSpace::RAW, true).expect("loads");
     let Storage::F32(tiles) = &tex.storage else {
         panic!("an EXR is f32");
     };
@@ -445,14 +445,15 @@ fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
         .save(&grey)
         .expect("write png");
 
-    let t = UvTexture::open(&rgb, ColorSpace::Auto).expect("loads");
-    assert_eq!(t.color_space(), ResolvedColorSpace::Srgb);
+    let t = UvTexture::open(&rgb, ColorSpace::AUTO).expect("loads");
+    assert_eq!(t.color_space(), ResolvedColorSpace::SRGB);
     assert!(
-        (t.eval(0.5, 0.5, 0.0)[0] - ResolvedColorSpace::Srgb.decode(128.0 / 255.0)).abs() < 1e-6
+        (t.eval(0.5, 0.5, 0.0)[0] - ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0)).abs()
+            < 1e-6
     );
 
-    let t = UvTexture::open(&grey, ColorSpace::Auto).expect("loads");
-    assert_eq!(t.color_space(), ResolvedColorSpace::Raw);
+    let t = UvTexture::open(&grey, ColorSpace::AUTO).expect("loads");
+    assert_eq!(t.color_space(), ResolvedColorSpace::RAW);
     assert_eq!(t.eval(0.5, 0.5, 0.0)[0], 128.0 / 255.0);
 }
 
@@ -488,7 +489,7 @@ fn a_single_prefixed_channel_exr_replicates_into_rgb() {
     let dir = scratch("exr_mono");
     let p = dir.join("rough.1001.exr");
     write_exr_channels(&p, 2, 1, &[("rgb.R", vec![0.25, 0.75])]);
-    let tex = UvTexture::open(&dir.join("rough.<UDIM>.exr"), ColorSpace::Auto).expect("loads");
+    let tex = UvTexture::open(&dir.join("rough.<UDIM>.exr"), ColorSpace::AUTO).expect("loads");
     assert_eq!(tex.eval(0.25, 0.5, 0.0), [0.25, 0.25, 0.25, 1.0]);
     assert_eq!(tex.eval(0.75, 0.5, 0.0), [0.75, 0.75, 0.75, 1.0]);
 }
@@ -507,7 +508,7 @@ fn prefixed_rgb_channels_are_matched_by_base_name() {
             ("rgb.R", vec![0.1]),
         ],
     );
-    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&p, ColorSpace::RAW).expect("loads");
     assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
 }
 
@@ -528,17 +529,36 @@ fn channel_base_names_match_case_insensitively() {
             ("rgb.r", vec![0.1]),
         ],
     );
-    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&p, ColorSpace::RAW).expect("loads");
     assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
+}
+
+/// The inverse curves a mip level used to re-encode through, written out:
+/// the reference `quantize` must reproduce.
+fn encode(space: ResolvedColorSpace, l: f32) -> f32 {
+    let l = l.max(0.0);
+    match space {
+        ResolvedColorSpace::SRGB if l <= 0.003_130_8 => l * 12.92,
+        ResolvedColorSpace::SRGB => 1.055 * l.powf(1.0 / 2.4) - 0.055,
+        ResolvedColorSpace::GAMMA22 => l.powf(1.0 / 2.2),
+        ResolvedColorSpace::GAMMA18 => l.powf(1.0 / 1.8),
+        _ => l,
+    }
 }
 
 /// `quantize` over `code_steps` is the re-encode a mip level used to run per
 /// texel — round `encode(mean)` to the nearest byte — as a table. The two
-/// may disagree only where `encode(mean)` sits on a half-code boundary, to
-/// within the round trip of OCIO's forward and inverse curves.
+/// may disagree only where `encode(mean)` sits on a half-code boundary: by
+/// float rounding, and for sRGB by OCIO's toe, which is derived for
+/// continuity rather than rounded to IEC 61966-2-1's constants.
 #[test]
 fn quantize_is_the_rounded_encode() {
-    for space in ResolvedColorSpace::ALL {
+    for space in [
+        ResolvedColorSpace::SRGB,
+        ResolvedColorSpace::GAMMA22,
+        ResolvedColorSpace::GAMMA18,
+        ResolvedColorSpace::RAW,
+    ] {
         let steps = space.code_steps();
         assert!(
             steps.windows(2).all(|w| w[0] < w[1]),
@@ -546,10 +566,10 @@ fn quantize_is_the_rounded_encode() {
         );
         for i in 0..=12_000 {
             let mean = i as f32 / 10_000.0;
-            let scaled = space.encode(mean) * 255.0;
+            let scaled = encode(space, mean) * 255.0;
             let rounded = (scaled + 0.5).clamp(0.0, 255.0) as u8;
             let got = crate::quantize(&steps, mean);
-            let on_boundary = (scaled - scaled.floor() - 0.5).abs() < 1e-3;
+            let on_boundary = (scaled - scaled.floor() - 0.5).abs() < 5e-3;
             assert!(
                 got == rounded || on_boundary,
                 "{space:?} mean {mean}: {got} vs {rounded}"

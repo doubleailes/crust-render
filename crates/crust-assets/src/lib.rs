@@ -99,7 +99,7 @@ impl TransferCurve for ResolvedColorSpace {
         for (i, v) in table.iter_mut().enumerate() {
             *v = i as f32 / 255.0;
         }
-        self.decode_slice(&mut table);
+        self.decode_curve_slice(&mut table);
         table
     }
 
@@ -108,8 +108,24 @@ impl TransferCurve for ResolvedColorSpace {
         for (k, v) in steps.iter_mut().enumerate() {
             *v = (k as f32 + 0.5) / 255.0;
         }
-        self.decode_slice(&mut steps);
+        self.decode_curve_slice(&mut steps);
         steps
+    }
+}
+
+/// A filtered RGBA lookup brought to the working space: the change of
+/// primaries a texture stored on its own primaries applies after filtering
+/// ([`crust_core::color::apply_gamut`]); alpha is untouched. One function for
+/// the preloaded and the streamed sampler, so the two stay bit-identical.
+#[inline]
+pub(crate) fn to_working(gamut: Option<&crust_core::Mat3A>, rgba: [f32; 4]) -> [f32; 4] {
+    match gamut {
+        None => rgba,
+        Some(_) => {
+            let [r, g, b, a] = rgba;
+            let c = crust_core::color::apply_gamut(gamut, crust_core::Vec3A::new(r, g, b));
+            [c.x, c.y, c.z, a]
+        }
     }
 }
 
@@ -699,14 +715,14 @@ impl FileAssets {
 }
 
 impl AssetLoader for FileAssets {
-    fn load_environment(&self, path: &Path) -> Option<EnvironmentMap> {
+    fn load_environment(&self, path: &Path, space: ColorSpace) -> Option<EnvironmentMap> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
         let started = Instant::now();
-        match environment::try_load_environment(path, ext == "exr") {
+        match environment::try_load_environment(path, ext == "exr", space) {
             Ok(map) => {
                 debug!(
                     "Loaded environment {} ({}x{}) in {:?}",
@@ -796,9 +812,13 @@ impl AssetLoader for FileAssets {
         Some(std::sync::Arc::new(loaded))
     }
 
-    fn load_light_texture(&self, path: &Path) -> Option<std::sync::Arc<LightTexture>> {
+    fn load_light_texture(
+        &self,
+        path: &Path,
+        space: ColorSpace,
+    ) -> Option<std::sync::Arc<LightTexture>> {
         let started = Instant::now();
-        let loaded = environment::try_read_rgb_image(path).and_then(|(w, h, px)| {
+        let loaded = environment::try_read_rgb_image(path, space).and_then(|(w, h, px)| {
             LightTexture::new(w, h, px)
                 .ok_or_else(|| AssetError::unusable(path, "not a usable light texture (empty)"))
         });

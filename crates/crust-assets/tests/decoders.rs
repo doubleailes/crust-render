@@ -31,7 +31,7 @@ fn scratch(name: &str) -> PathBuf {
 /// The sRGB decode every LDR asset goes through: OCIO's `srgb_texture` to
 /// `lin_rec709`.
 fn srgb_to_linear(c: f32) -> f32 {
-    ResolvedColorSpace::Srgb.decode(c)
+    ResolvedColorSpace::SRGB.decode_curve(c)
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn the_sample_sky_exr_decodes() {
 #[test]
 fn file_assets_dispatches_on_extension() {
     let map = FileAssets::new()
-        .load_environment(&samples().join("sky_env.exr"))
+        .load_environment(&samples().join("sky_env.exr"), ColorSpace::AUTO)
         .expect("exr through the trait");
     assert_eq!(map.width(), 2 * map.height());
 }
@@ -102,18 +102,22 @@ fn missing_files_decline_rather_than_panic() {
     let ghost = samples().join("does_not_exist.exr");
     assert!(load_exr_environment(&ghost).is_none());
     assert!(load_image_environment(&samples().join("does_not_exist.png")).is_none());
-    assert!(FileAssets::new().load_environment(&ghost).is_none());
+    assert!(
+        FileAssets::new()
+            .load_environment(&ghost, ColorSpace::AUTO)
+            .is_none()
+    );
     assert!(
         FileAssets::new()
             .load_ptex(
                 &samples().join("does_not_exist.ptx"),
-                crust_core::ColorSpace::Gamma22
+                crust_core::ColorSpace::GAMMA22
             )
             .is_none()
     );
     assert!(
         FileAssets::new()
-            .load_texture(&samples().join("does_not_exist.png"), ColorSpace::Raw)
+            .load_texture(&samples().join("does_not_exist.png"), ColorSpace::RAW)
             .is_none()
     );
     assert!(PtexColor::open(&samples().join("does_not_exist.ptx")).is_err());
@@ -125,7 +129,7 @@ fn a_non_image_file_declines() {
     let path = dir.join("not_an_image.png");
     std::fs::write(&path, b"this is not a PNG").unwrap();
     assert!(load_image_environment(&path).is_none());
-    assert!(UvTexture::open(&path, ColorSpace::Raw).is_none());
+    assert!(UvTexture::open(&path, ColorSpace::RAW).is_none());
     let _ = std::fs::remove_file(&path);
 }
 
@@ -170,7 +174,7 @@ fn hdr_values_survive_the_exr_path_unclamped() {
 
 #[test]
 fn a_single_sample_png_loads_as_one_tile() {
-    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw)
+    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::RAW)
         .expect("mtlx_mask.png loads");
     assert_eq!(tex.tile_count(), 1);
     let (w, h) = tex.tile_size();
@@ -207,7 +211,7 @@ fn a_single_sample_png_loads_as_one_tile() {
 fn a_sample_udim_set_loads_both_tiles() {
     let tex = UvTexture::open(
         &samples().join("textures/mtlx_base.<UDIM>.png"),
-        ColorSpace::Srgb,
+        ColorSpace::SRGB,
     )
     .expect("the <UDIM> set loads");
     assert_eq!(tex.tile_count(), 2, "1001 and 1002 are on disk");
@@ -224,7 +228,7 @@ fn a_sample_udim_set_loads_both_tiles() {
 fn the_normal_map_set_loads_raw() {
     let tex = UvTexture::open(
         &samples().join("textures/mtlx_normal.<UDIM>.png"),
-        ColorSpace::Raw,
+        ColorSpace::RAW,
     )
     .expect("normal set loads");
     assert_eq!(tex.tile_count(), 2);
@@ -236,9 +240,9 @@ fn the_normal_map_set_loads_raw() {
 #[test]
 fn colour_space_changes_the_decoded_value() {
     let path = samples().join("textures/mtlx_base.<UDIM>.png");
-    let raw = UvTexture::open(&path, ColorSpace::Raw).unwrap();
-    let srgb = UvTexture::open(&path, ColorSpace::Srgb).unwrap();
-    let g22 = UvTexture::open(&path, ColorSpace::Gamma22).unwrap();
+    let raw = UvTexture::open(&path, ColorSpace::RAW).unwrap();
+    let srgb = UvTexture::open(&path, ColorSpace::SRGB).unwrap();
+    let g22 = UvTexture::open(&path, ColorSpace::GAMMA22).unwrap();
     // Sample at a texel centre so bilinear filtering does not blend
     // neighbours (a blend of encoded values is not the encoding of a
     // blend).
@@ -270,7 +274,7 @@ fn colour_space_changes_the_decoded_value() {
 #[test]
 fn file_assets_hands_back_a_texture2d() {
     let tex: std::sync::Arc<dyn Texture2D> = FileAssets::new()
-        .load_texture(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw)
+        .load_texture(&samples().join("textures/mtlx_mask.png"), ColorSpace::RAW)
         .expect("through the trait");
     let px = tex.eval(0.25, 0.25, 0.0);
     assert!(px.iter().all(|c| c.is_finite()));
@@ -287,7 +291,7 @@ fn a_written_gradient_is_sampled_at_the_right_place() {
         *p = image::Rgb([v, 0, 255 - v]);
     }
     img.save(&path).unwrap();
-    let tex = UvTexture::open(&path, ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&path, ColorSpace::RAW).expect("loads");
     let left = tex.eval(0.02, 0.5, 0.0);
     let right = tex.eval(0.98, 0.5, 0.0);
     assert!(left[0] < 0.1 && left[2] > 0.9, "left is blue: {left:?}");
@@ -303,20 +307,20 @@ fn a_written_gradient_is_sampled_at_the_right_place() {
 
 #[test]
 fn alpha_channel_reads_one_for_rgb_files() {
-    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw).unwrap();
+    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::RAW).unwrap();
     assert_eq!(tex.eval(0.5, 0.5, 0.0)[3], 1.0);
 }
 
 #[test]
 fn non_finite_coordinates_do_not_panic() {
-    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::Raw).unwrap();
+    let tex = UvTexture::open(&samples().join("textures/mtlx_mask.png"), ColorSpace::RAW).unwrap();
     for (u, v) in [(f32::NAN, 0.5), (0.5, f32::INFINITY), (-1e30, 1e30)] {
         let px = tex.eval(u, v, 0.0);
         assert_eq!(px.len(), 4);
     }
     let set = UvTexture::open(
         &samples().join("textures/mtlx_base.<UDIM>.png"),
-        ColorSpace::Raw,
+        ColorSpace::RAW,
     )
     .unwrap();
     let _ = set.eval(f32::NAN, f32::NAN, 0.0);
@@ -387,7 +391,7 @@ fn a_wide_footprint_converges_to_the_mean_and_a_zero_one_does_not() {
     let _ = std::fs::remove_dir_all(&dir);
     let p = dir.join("checker.png");
     write_checker(&p, 64);
-    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("checker loads");
+    let tex = UvTexture::open(&p, ColorSpace::RAW).expect("checker loads");
     assert!(tex.level_count() > 1, "a pyramid was built");
 
     // A footprint covering the whole tile reads the 1x1 level, which is the
@@ -414,8 +418,8 @@ fn a_zero_footprint_is_exactly_what_the_unmipped_texture_returns() {
     let p = dir.join("checker.png");
     write_checker(&p, 32);
 
-    let mipped = UvTexture::open_with(&p, ColorSpace::Srgb, true).expect("loads");
-    let flat = UvTexture::open_with(&p, ColorSpace::Srgb, false).expect("loads");
+    let mipped = UvTexture::open_with(&p, ColorSpace::SRGB, true).expect("loads");
+    let flat = UvTexture::open_with(&p, ColorSpace::SRGB, false).expect("loads");
 
     assert_eq!(flat.level_count(), 1);
     assert!(mipped.level_count() > 1);
@@ -441,7 +445,7 @@ fn levels_average_in_linear_light_not_in_the_file_encoding() {
     let _ = std::fs::remove_dir_all(&dir);
     let p = dir.join("checker.png");
     write_checker(&p, 16);
-    let tex = UvTexture::open(&p, ColorSpace::Srgb).expect("loads");
+    let tex = UvTexture::open(&p, ColorSpace::SRGB).expect("loads");
     let coarse = tex.eval(0.5, 0.5, 4.0);
     assert!(
         (coarse[0] - 0.5).abs() < 0.02,
@@ -465,7 +469,7 @@ fn an_odd_level_halves_by_div_ceil_so_every_level_spans_the_whole_tile() {
     })
     .save(&p)
     .expect("write png");
-    let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+    let tex = UvTexture::open(&p, ColorSpace::RAW).expect("loads");
     // 25 -> 13 -> 7 -> 4 -> 2 -> 1 is six levels; 9 reaches 1 sooner and pins.
     assert_eq!(tex.level_count(), 6);
     // Every level still spans the whole tile: u = 0.01 lands in the light
@@ -526,7 +530,7 @@ fn an_odd_level_keeps_the_tile_mean_wherever_the_energy_sits() {
         })
         .save(&p)
         .expect("write png");
-        let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
+        let tex = UvTexture::open(&p, ColorSpace::RAW).expect("loads");
         let got = tex.eval(0.5, 0.5, 64.0)[0];
         assert!(
             (got - 1.0 / 25.0).abs() < 0.01,

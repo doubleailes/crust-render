@@ -19,7 +19,7 @@ impl S {
 fn tree(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let d = Doc::parse(doc).expect("document parses");
     let loader = |_: &str, _: Option<&str>| None;
-    let mut c = Compiler::new(&d, &loader);
+    let mut c = Compiler::new(&d, &crust_mtlx::Host::new(&loader));
     let node = d.find("", root).expect("root").clone();
     let mut out = Closures::default();
     flatten(&mut c, &node, &mut out);

@@ -39,10 +39,9 @@ pub struct Input {
     pub name: String,
     pub type_name: String,
     pub source: Source,
-    /// The `colorspace` attribute, verbatim. Only meaningful on an `image`'s
-    /// `file` input, where it decides whether the texels are display-encoded.
-    /// Handed to the texture loader as a string: mapping the spellings onto a
-    /// colour-space enum is the host's business (crust-core's `ColorSpace`).
+    /// The input's own `colorspace` attribute, verbatim — the innermost of
+    /// the four scopes [`Doc::colorspace_of`] resolves. Kept as a string:
+    /// what a spelling means is the host's business (its OCIO config).
     pub colorspace: Option<String>,
     /// The raw `value` attribute text, kept because not every MaterialX value
     /// is a number: `filename` and `string` inputs carry asset paths and
@@ -65,6 +64,9 @@ pub struct Node {
     /// The node's `version` attribute, when authored: which version of its
     /// nodedef it instantiates.
     pub version: Option<String>,
+    /// The node's own `colorspace` attribute: the default for every input
+    /// of the node that does not declare one (see [`Doc::colorspace_of`]).
+    pub colorspace: Option<String>,
 }
 
 impl Node {
@@ -78,6 +80,12 @@ impl Node {
 /// A parsed `.mtlx` document.
 pub struct Doc {
     pub nodes: Vec<Node>,
+    /// The root `<materialx>` element's `colorspace`: the outermost default
+    /// of [`Doc::colorspace_of`].
+    pub colorspace: Option<String>,
+    /// Each `<nodegraph>`'s own `colorspace`, by graph name, for the graphs
+    /// that declare one.
+    graph_colorspaces: HashMap<String, String>,
     /// `(graph, name) → index`, where `graph` is empty at document scope.
     index: HashMap<(String, String), usize>,
     /// `(graph, output name) → the connection it forwards to`, from a
@@ -148,6 +156,8 @@ impl Doc {
         let dom = roxmltree::Document::parse(&text).map_err(MtlxError::Xml)?;
         let mut doc = Doc {
             nodes: Vec::new(),
+            colorspace: colorspace_attr(dom.root_element()),
+            graph_colorspaces: HashMap::new(),
             index: HashMap::new(),
             graph_outputs: HashMap::new(),
         };
@@ -157,6 +167,9 @@ impl Doc {
                 "nodedef" | "implementation" | "typedef" | "look" | "variantset" => {}
                 "nodegraph" => {
                     let g = child.attribute("name").unwrap_or_default().to_string();
+                    if let Some(cs) = colorspace_attr(child) {
+                        doc.graph_colorspaces.insert(g.clone(), cs);
+                    }
                     for inner in child.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "output" {
                             // A graph output is a rename, not a node: record
@@ -233,6 +246,31 @@ impl Doc {
         })
     }
 
+    /// The colour space `input` of `node` is authored in, by MaterialX's
+    /// scoping: the input's own `colorspace`, else its node's, else its
+    /// enclosing nodegraph's, else the document's — the first scope that
+    /// declares one, as MaterialX's `getActiveColorSpace` walks its parents.
+    /// `None` when none does, or when the nearest declaration is empty (an
+    /// explicit `colorspace=""` stops the inheritance, as it does there);
+    /// the compiler reads `None` as "already in the working space".
+    ///
+    /// Answered whatever the input's type. Only `color3` / `color4` values —
+    /// and the `file` of an image whose output is one — are colour-managed;
+    /// deciding that is the caller's half (see
+    /// [`crate::value::is_color_type`]).
+    pub fn colorspace_of<'a>(&'a self, node: &'a Node, input: &'a Input) -> Option<&'a str> {
+        input
+            .colorspace
+            .as_deref()
+            .or(node.colorspace.as_deref())
+            .or_else(|| {
+                let g = node.graph.as_deref()?;
+                self.graph_colorspaces.get(g).map(String::as_str)
+            })
+            .or(self.colorspace.as_deref())
+            .filter(|cs| !cs.is_empty())
+    }
+
     /// Every node of a given category, in document order.
     pub fn by_category<'a>(&'a self, category: &'a str) -> impl Iterator<Item = &'a Node> + 'a {
         self.nodes.iter().filter(move |n| n.category == category)
@@ -299,7 +337,7 @@ fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
             name,
             type_name: itype,
             source,
-            colorspace: i.attribute("colorspace").map(str::to_string),
+            colorspace: colorspace_attr(i),
             text,
         });
     }
@@ -310,7 +348,14 @@ fn parse_node(el: roxmltree::Node<'_, '_>, graph: Option<String>) -> Node {
         inputs,
         graph,
         version: el.attribute("version").map(str::to_string),
+        colorspace: colorspace_attr(el),
     }
+}
+
+/// An element's `colorspace` attribute, verbatim — an empty one included,
+/// which [`Doc::colorspace_of`] reads as a declaration of "no conversion".
+fn colorspace_attr(el: roxmltree::Node<'_, '_>) -> Option<String> {
+    el.attribute("colorspace").map(str::to_string)
 }
 
 #[cfg(test)]

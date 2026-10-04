@@ -289,7 +289,7 @@ fn probe_image(path: &str, box_: Option<(u32, u32, u32, u32)>) {
             for c in 0..3 {
                 let v = p[c] as f64 / 255.0;
                 sum[c] += v;
-                lin += ResolvedColorSpace::Srgb.decode(v as f32) as f64;
+                lin += ResolvedColorSpace::SRGB.decode_curve(v as f32) as f64;
             }
             count += 1;
         }

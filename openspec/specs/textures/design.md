@@ -637,9 +637,10 @@ way out — no pyramid, so nothing to get wrong, exact and uncapped. See
   the oracle. Both backends decode `uint8`, `uint16`, `half` and `float` Ptex
   samples at full range (no clip above 1.0). Every Ptex request carries a
   `ColorSpace` (`AssetLoader::load_ptex(path, space)`), applied per request by
-  both backends through one `decode_ptex`: a displacement map asks for `Raw` and
-  is read with no curve and no clamp, while every **colour** `.ptx` still asks for
-  `Gamma22` — there is no authored colour space for colour Ptex, so a linear HDR
+  both backends through one `decode_ptex_slice` / `decode_ptex_rgb`: a displacement
+  map asks for `RAW` and is read with no curve and no clamp, while every **colour**
+  `.ptx` still asks for `g22_rec709` (converted into the working space) — there is
+  no authored colour space for colour Ptex, so a linear HDR
   colour `.ptx` is decoded as though it were display-encoded. The import cache is
   keyed on `(resolved path, space)`, so a file read both ways is opened twice. The
   streamed `u8` LUT fast path covers 8-bit files in either space. Filtering across

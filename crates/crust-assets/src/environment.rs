@@ -1,7 +1,7 @@
 //! Lat-long environment maps and light textures: OpenEXR, Radiance `.hdr`,
 //! and LDR images, all decoded to linear float RGB by [`read_rgb_image`].
 
-use crust_core::{EnvironmentMap, ResolvedColorSpace, Vec3A};
+use crust_core::{ColorSpace, EnvironmentMap, Vec3A};
 use exr::prelude::*;
 use std::path::Path;
 use tracing::warn;
@@ -17,58 +17,87 @@ use crate::error::AssetError;
 /// UV-texture path: that one narrows to 8 bits when preloading, and a
 /// light's texture is exactly where the range above 1.0 matters.
 ///
-/// A failure is logged as a warning; [`try_read_rgb_image`] returns it.
+/// Decoded as [`ColorSpace::AUTO`] into `lin_rec709`; the asset loader passes
+/// the request the importer made. A failure is logged as a warning;
+/// [`try_read_rgb_image`] returns it.
 pub fn read_rgb_image(path: &Path) -> Option<(usize, usize, Vec<Vec3A>)> {
-    try_read_rgb_image(path).map_err(|e| warn!("{e}")).ok()
+    try_read_rgb_image(path, ColorSpace::AUTO)
+        .map_err(|e| warn!("{e}"))
+        .ok()
 }
 
-/// [`read_rgb_image`], with the reason it failed.
+/// [`read_rgb_image`] in `space`, with the reason it failed.
 pub(crate) fn try_read_rgb_image(
     path: &Path,
+    space: ColorSpace,
 ) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
     let is_exr = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("exr"));
-    if is_exr {
-        decode_exr_pixels(path)
-    } else {
-        decode_image_pixels(path)
-    }
+    decode_pixels(path, is_exr, space)
 }
 
 pub fn load_exr_environment(path: &Path) -> Option<EnvironmentMap> {
-    try_load_environment(path, true)
+    try_load_environment(path, true, ColorSpace::AUTO)
         .map_err(|e| warn!("{e}"))
         .ok()
 }
 
-/// An environment map from an EXR (`exr`) or any other image, with the reason
-/// it could not be built.
+/// An environment map from an EXR (`exr`) or any other image, decoded from
+/// `space`, with the reason it could not be built.
 pub(crate) fn try_load_environment(
     path: &Path,
     exr: bool,
+    space: ColorSpace,
 ) -> std::result::Result<EnvironmentMap, AssetError> {
-    let (w, h, pixels) = if exr {
-        decode_exr_pixels(path)?
-    } else {
-        decode_image_pixels(path)?
-    };
+    let (w, h, pixels) = decode_pixels(path, exr, space)?;
     EnvironmentMap::new(w, h, pixels)
         .ok_or_else(|| AssetError::unusable(path, "not a usable environment map (empty)"))
 }
 
-fn decode_exr_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
+/// An image's pixels as linear light in `space`'s working space.
+///
+/// One conversion for every format: `auto` resolves as for a UV texture — an
+/// integer image is sRGB, a float one (EXR, Radiance `.hdr`) is used as
+/// stored, i.e. taken as already in the working space — and a named space is
+/// converted from whatever the file holds.
+fn decode_pixels(
+    path: &Path,
+    exr: bool,
+    space: ColorSpace,
+) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
+    let (w, h, mut samples, integer) = if exr {
+        let (w, h, px) = decode_exr_pixels(path)?;
+        (w, h, px, false)
+    } else {
+        decode_image_pixels(path)?
+    };
+    space
+        .resolve_auto(integer, 3)
+        .decode_rgb_slice(&mut samples);
+    let pixels = samples
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&p| Vec3A::from_array(p))
+        .collect();
+    Ok((w, h, pixels))
+}
+
+/// An EXR's first RGBA layer as interleaved RGB, as stored.
+fn decode_exr_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<f32>), AssetError> {
     let image = read_first_rgba_layer_from_file(
         path,
         |resolution, _| {
             let (w, h) = (resolution.width(), resolution.height());
-            (w, h, vec![Vec3A::ZERO; w * h])
+            (w, h, vec![0.0f32; w * h * 3])
         },
-        |(w, _h, pixels): &mut (usize, usize, Vec<Vec3A>),
+        |(w, _h, pixels): &mut (usize, usize, Vec<f32>),
          pos,
          (r, g, b, _a): (f32, f32, f32, f32)| {
-            pixels[pos.y() * *w + pos.x()] = Vec3A::new(r, g, b);
+            let o = (pos.y() * *w + pos.x()) * 3;
+            pixels[o..o + 3].copy_from_slice(&[r, g, b]);
         },
     )
     .map_err(AssetError::exr(path))?;
@@ -157,20 +186,27 @@ pub(crate) fn try_read_exr_rgb(
 }
 
 pub fn load_image_environment(path: &Path) -> Option<EnvironmentMap> {
-    try_load_environment(path, false)
+    try_load_environment(path, false, ColorSpace::AUTO)
         .map_err(|e| warn!("{e}"))
         .ok()
 }
 
-fn decode_image_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Vec3A>), AssetError> {
+/// A non-EXR image as interleaved RGB, as stored but scaled to `0..1` for an
+/// integer format, and whether it was one — `(width, height, samples,
+/// integer)`.
+///
+/// `to_rgb32f` keeps HDR values as authored, but rescales integer formats to
+/// 0..1 *without* removing their transfer curve, so whether a curve is still
+/// on the samples is a property of the format, and [`decode_pixels`] decides
+/// it from the flag returned here.
+fn decode_image_pixels(
+    path: &Path,
+) -> std::result::Result<(usize, usize, Vec<f32>, bool), AssetError> {
     // Without `image`'s default 512MiB decode limit, which a production-scale
     // panorama (e.g. a 16k HDRI) exceeds.
     let decoded = crate::image_file::decode(path)?;
     let rgb = decoded.to_rgb32f();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
-    // `to_rgb32f` keeps HDR values as authored, but rescales integer
-    // formats to 0..1 *without* removing their sRGB transfer curve. Undo it
-    // for those, so an LDR sky lights the scene in linear light.
     let is_hdr = matches!(
         path.extension()
             .and_then(|e| e.to_str())
@@ -178,17 +214,7 @@ fn decode_image_pixels(path: &Path) -> std::result::Result<(usize, usize, Vec<Ve
             .as_deref(),
         Some("hdr")
     );
-    let mut samples = rgb.into_raw();
-    if !is_hdr {
-        ResolvedColorSpace::Srgb.decode_slice(&mut samples);
-    }
-    let pixels = samples
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|&p| Vec3A::from_array(p))
-        .collect();
-    Ok((w, h, pixels))
+    Ok((w, h, rgb.into_raw(), !is_hdr))
 }
 
 #[cfg(test)]
@@ -276,7 +302,7 @@ mod tests {
             .expect("write png");
         let (_, _, px) = read_rgb_image(&png_path).expect("png decodes");
         assert!((px[0].x - 1.0).abs() < 1e-6);
-        let mid = ResolvedColorSpace::Srgb.decode(128.0 / 255.0);
+        let mid = crust_core::ResolvedColorSpace::SRGB.decode_curve(128.0 / 255.0);
         assert!(
             (px[0].y - mid).abs() < 1e-6 && mid < 0.25,
             "sRGB-decoded: {}",

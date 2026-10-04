@@ -4,10 +4,11 @@ use glam::{Mat4 as GMat4, Vec3A};
 use openusd::usd::Prim;
 use tracing::{debug, warn};
 
+use crate::color::Space;
 use crate::volume::{DensityField, VolumeRegion};
 
 use super::attrs::{
-    custom_color3, custom_f32, custom_f32_array, custom_i32, custom_i32_array, custom_token,
+    custom_color, custom_f32, custom_f32_array, custom_i32, custom_i32_array, custom_token,
 };
 
 /// Import a `crust:volume:*` prim as a `VolumeRegion`. The local box is
@@ -15,7 +16,12 @@ use super::attrs::{
 /// `Cube`'s convention; USD's default cube size is 2) and the unit cube
 /// `[-0.5, 0.5]^3` otherwise; placement, orientation and scale come from
 /// the composed prim transform.
-pub(super) fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<VolumeRegion>) {
+pub(super) fn emit_volume(
+    prim: &Prim,
+    world_xf: GMat4,
+    volumes: &mut Vec<VolumeRegion>,
+    working: Space,
+) {
     let ty = custom_token(prim, "crust:volume:type").expect("checked by dispatch");
 
     let field = match ty.as_str() {
@@ -72,9 +78,11 @@ pub(super) fn emit_volume(prim: &Prim, world_xf: GMat4, volumes: &mut Vec<Volume
         }
     };
 
-    let sigma_s = custom_color3(prim, "crust:volume:sigmaS").unwrap_or(Vec3A::splat(0.5));
-    let sigma_a = custom_color3(prim, "crust:volume:sigmaA").unwrap_or(Vec3A::ZERO);
-    let emission = custom_color3(prim, "crust:volume:emission").unwrap_or(Vec3A::ZERO);
+    // Per-channel coefficients, so they are colours in the working space
+    // like any other: converted only when `colorSpace` names another.
+    let sigma_s = custom_color(prim, "crust:volume:sigmaS", working).unwrap_or(Vec3A::splat(0.5));
+    let sigma_a = custom_color(prim, "crust:volume:sigmaA", working).unwrap_or(Vec3A::ZERO);
+    let emission = custom_color(prim, "crust:volume:emission", working).unwrap_or(Vec3A::ZERO);
     let g = custom_f32(prim, "crust:volume:anisotropy").unwrap_or(0.0);
     let density_scale = custom_f32(prim, "crust:volume:densityScale").unwrap_or(1.0);
     let half = custom_f32(prim, "size").map_or(0.5, |s| s * 0.5);

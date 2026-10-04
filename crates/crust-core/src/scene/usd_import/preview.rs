@@ -11,9 +11,11 @@ use openusd_schemas::shade::{
 };
 use tracing::{debug, warn};
 
+use crate::color::Space;
 use crate::material::{Displacement, DisplacementValue, Material, OpenPBR};
 
 use super::ImportCaches;
+use super::attrs::{attr_color_space, in_working};
 use super::materials::{attribute_asset_path, load_uv_texture, material_ptex, shader_info_id};
 use super::time::eval_time;
 
@@ -33,7 +35,7 @@ pub(super) fn preview_surface_material(
 
     let ps = shade::read_preview_surface(stage, mat_path).ok().flatten();
     let mut base = match &ps {
-        Some(ps) => preview_surface_openpbr(ps),
+        Some(ps) => preview_surface_openpbr(ps, shader, caches.working),
         None => OpenPBR::diffuse(Vec3A::new(0.5, 0.5, 0.5)),
     };
     base.base_color_ptex = material_ptex(stage, mat_path, caches);
@@ -216,9 +218,23 @@ fn preview_uv_input(
         );
         return None;
     };
-    let space = match crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref()) {
-        crate::ColorSpace::Auto if data => crate::ColorSpace::Raw,
-        space => space,
+    // The file's own `colorSpace` metadatum, when authored, names its space
+    // outright and wins over `sourceColorSpace`, the older and coarser
+    // UsdUVTexture mechanism; data stays data whatever either says.
+    let file_space = tex
+        .input(tk::TEX_FILE)
+        .value_producing_attributes(ProducerFilter::Any)
+        .ok()
+        .and_then(|p| p.into_iter().next())
+        .and_then(|a| attr_color_space(a.attribute()));
+    let source = token(tk::TEX_SOURCE_COLOR_SPACE);
+    let space = match (
+        file_space,
+        crate::ColorSpace::from_usd(source.as_deref(), caches.working),
+    ) {
+        (Some(space), _) => crate::ColorSpace::new(space, caches.working),
+        (None, s) if data && s.resolved().is_none() => crate::ColorSpace::RAW,
+        (None, s) => s,
     };
 
     // Which chart the texture reads. crust carries one per mesh (see
@@ -393,11 +409,15 @@ fn sdf_float4(v: &sdf::Value) -> Option<[f32; 4]> {
 /// A `UsdPreviewSurface`'s constant inputs as an [`OpenPBR`]. A
 /// texture-connected input leaves its field at the default here;
 /// [`preview_surface_material`] is what drives it.
-fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
+///
+/// The two colours are in the working space unless their `colorSpace`
+/// metadatum names another ([`in_working`]).
+fn preview_surface_openpbr(ps: &ReadPreviewSurface, shader: &Shader, working: Space) -> OpenPBR {
     let mut o = OpenPBR::default();
+    let color = |name: &str, rgb: Vec3A| in_working(&shader.attribute(name), rgb, working);
 
     if let Some(rgb) = ps.diffuse_color.value() {
-        o.base_color = Vec3A::new(rgb[0], rgb[1], rgb[2]);
+        o.base_color = color("inputs:diffuseColor", Vec3A::new(rgb[0], rgb[1], rgb[2]));
     }
     if let Some(m) = ps.metallic.value() {
         o.base_metalness = *m;
@@ -415,7 +435,7 @@ fn preview_surface_openpbr(ps: &ReadPreviewSurface) -> OpenPBR {
         }
     }
     if let Some(rgb) = ps.emissive_color.value() {
-        o.emission_color = Vec3A::new(rgb[0], rgb[1], rgb[2]);
+        o.emission_color = color("inputs:emissiveColor", Vec3A::new(rgb[0], rgb[1], rgb[2]));
         let max = rgb[0].max(rgb[1]).max(rgb[2]);
         if max > 0.0 {
             o.emission_luminance = 1.0;

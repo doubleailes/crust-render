@@ -96,7 +96,9 @@ pub(super) fn decode_exr_tile(
     if sw == 0 || sh == 0 {
         return Err(AssetError::unusable(path, "zero-sized image"));
     }
-    space.decode_slice(&mut src);
+    // Curve and primaries both, once: a preloaded float tile is stored in
+    // the working space, so its lookup needs no matrix.
+    space.decode_rgb_slice(&mut src);
     let max_edge = max_edge.get();
     let factor = (sw.div_ceil(max_edge)).max(sh.div_ceil(max_edge)).max(1);
     if factor == 1 {

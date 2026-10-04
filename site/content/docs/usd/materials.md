@@ -266,25 +266,50 @@ seam.
 
 ## Texture colour spaces
 
-Textures are decoded to linear light once, when they load. The curve comes from the
-`colorspace` attribute on a MaterialX `image`'s `file` input (one on the document or a
-node graph isn't inherited) and from the `sourceColorSpace` of a `UsdUVTexture`:
+Textures are converted to linear light in the
+[working colour space](@/docs/usd/render-settings.md#renderingcolorspace) once, when they
+load. The colour space a texture is authored in comes from:
 
-| authored | decoded with |
+- the `colorspace` of a MaterialX `image` with a `color3` or `color4` output: the `file`
+  input's own, else its node's, else its node graph's, else the document's (the root
+  `<materialx colorspace="...">`). An image of any other type, such as a `float` roughness
+  or a `vector3` normal map, is data and is never converted.
+- the `colorSpace` metadata on a `UsdUVTexture`'s `inputs:file`, when authored; otherwise
+  its `sourceColorSpace`.
+
+| authored | converted from |
 | --- | --- |
-| `srgb_texture` (or `srgb`) | the piecewise sRGB curve |
-| `g22_rec709` | a pure 2.2 power law |
-| `g18_rec709` | a pure 1.8 power law |
-| MaterialX: any other name, or none | nothing: the values are used as stored |
-| `UsdUVTexture`: `sRGB` / `raw` | the sRGB curve / nothing |
-| `UsdUVTexture`: `auto` or unauthored | the sRGB curve for an 8-bit RGB or RGBA image, nothing otherwise |
+| any colour space the [OCIO config](@/docs/reference/command-line.md#ocio-config) defines, by any name or alias: `srgb_texture`, `g22_rec709`, `acescg`, `g22_ap1`, `lin_rec2020`, `Utility - sRGB - Texture`, … | that space: its transfer curve, then its primaries into the working space's |
+| `srgb` (older MaterialX documents) | `srgb_texture` |
+| MaterialX: no colour space, or `raw` | nothing: the values are taken as already in the working space |
+| `UsdUVTexture`: `sRGB` / `raw` | `srgb_texture` / nothing |
+| `UsdUVTexture`: `auto` or unauthored | `srgb_texture` for an 8-bit RGB or RGBA image, nothing otherwise |
 
-MaterialX names are looked up in OpenColorIO's ACES CG config, so any alias it lists for
-these spaces works too, in any case: `Utility - sRGB - Texture`, `srgb_tx`,
-`srgb_rec709_scene`, `g22_rec709_tx`, `Gamma 1.8 Rec.709 - Texture`, and so on. A space on
-other primaries, such as `acescg` or `g22_ap1`, is read as stored: Crust Render doesn't
-convert texture gamuts. Colour Ptex is decoded with the 2.2 power law, and a Ptex
-displacement map isn't decoded.
+So an sRGB albedo map rendered in ACEScg has its curve removed and its Rec.709 primaries
+converted to ACEScg's, and an `acescg` texture rendered in the default `lin_rec709` is
+converted the other way. Names are matched without regard to case. A colour that falls
+outside the working space's gamut has its negative components set to zero. A name the
+config doesn't know is refused with a warning, and the texture is used as stored.
+
+Colour Ptex is decoded as `g22_rec709`, the 2.2 power law the Moana island's networks
+apply, and converted into the working space. A Ptex displacement map isn't decoded.
+
+### Constant colours
+
+A constant colour — UsdPreviewSurface `diffuseColor` and `emissiveColor`, the
+`crust:openpbr` colours, a light's `inputs:color` — is taken as already in the working
+space, unless its attribute carries `colorSpace` metadata, in which case it's converted
+from that space:
+
+```usda
+color3f inputs:diffuseColor = (0.8, 0.2, 0.1) (
+    colorSpace = "srgb_texture"
+)
+```
+
+A MaterialX `color3` or `color4` value is converted from its colour space (the input's,
+its node's, its node graph's or the document's) when it has one. `PxrDisneyBsdf`
+`baseColor` is decoded as `g22_rec709` unless its `colorSpace` metadata says otherwise.
 
 ## .tx files
 

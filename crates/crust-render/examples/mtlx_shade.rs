@@ -81,12 +81,26 @@ fn main() {
     // confidently.
     let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
     let assets = FileAssets::new();
+    // In `lin_rec709`, the default working space, exactly as the importer
+    // loads textures and converts literal colours.
+    let working = crust_core::color::Space::LIN_REC709;
     let loader = |asset: &str, space: Option<&str>| -> Option<crust_core::TextureRef> {
-        let tex = assets.load_texture(&dir.join(asset), ColorSpace::from_mtlx(space))?;
+        let tex = assets.load_texture(&dir.join(asset), ColorSpace::from_mtlx(space, working))?;
         Some(crust_core::TextureRef(tex))
     };
+    let convert = |space: &str, rgb: [f32; 3]| -> [f32; 3] {
+        ColorSpace::from_mtlx(Some(space), working)
+            .resolved()
+            .map_or(rgb, |s| {
+                s.decode_rgb(crust_core::Vec3A::from_array(rgb)).to_array()
+            })
+    };
+    let host = crust_core::mtlx::Host {
+        load_texture: &loader,
+        convert_color: &convert,
+    };
 
-    let loaded = match materialx::load(file, node.as_deref(), &loader) {
+    let loaded = match materialx::load(file, node.as_deref(), &host) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("cannot load {}: {e}", file.display());

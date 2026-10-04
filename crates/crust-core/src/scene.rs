@@ -27,6 +27,11 @@ pub struct Scene {
     /// [`AovRequest`](crate::AovRequest). Empty when the stage authors none,
     /// which means "write the single beauty image".
     pub aovs: crate::AovRequest,
+    /// The colour space every pixel is in: the working space the stage was
+    /// imported into ([`crate::color`]). An output that records its colour
+    /// space (an EXR's chromaticities and `colorInteropID`) or encodes for a
+    /// display (the preview PNG) reads it here.
+    pub working_space: crate::color::Space,
 }
 
 impl Scene {
@@ -39,6 +44,7 @@ impl Scene {
             volumes: Vec::new(),
             stats: RenderStats::new(),
             aovs: crate::AovRequest::default(),
+            working_space: crate::color::Space::LIN_REC709,
         }
     }
 
@@ -179,6 +185,13 @@ pub struct UsdImportOptions {
     /// in the returned [`Scene`] borrows from the stage, and the image is the
     /// same either way.
     pub skip_stage_teardown: bool,
+    /// The working colour space to render in (the CLI's `--working-space`),
+    /// as any name or alias of the OCIO config — `acescg`, `lin_rec2020`, … —
+    /// over the stage's `RenderSettings.renderingColorSpace` and the default,
+    /// `lin_rec709`. Must be scene-linear
+    /// ([`Error::InvalidWorkingSpace`](crate::Error::InvalidWorkingSpace)
+    /// otherwise). See [`crate::color`].
+    pub working_space: Option<String>,
 }
 
 /// How the engine asks its host to decode an image.
@@ -192,7 +205,17 @@ pub trait AssetLoader: Send + Sync {
     /// against the USD layer's directory. `None` — for an unreadable file,
     /// an unsupported format, or a host that does not decode at all — is
     /// not an error: the caller falls back.
-    fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap>;
+    ///
+    /// `space` is the file's colour space and the working space to bring it
+    /// to: usually `auto` (an 8-bit image is sRGB, a float one is already in
+    /// the working space), or what the texture attribute's `colorSpace`
+    /// metadatum names. The map comes back as linear light in the working
+    /// space.
+    fn load_environment(
+        &self,
+        path: &std::path::Path,
+        space: crate::ColorSpace,
+    ) -> Option<EnvironmentMap>;
 
     /// Opens a UV-addressed texture and returns something that can sample it.
     ///
@@ -235,8 +258,8 @@ pub trait AssetLoader: Send + Sync {
     ///
     /// `space` says how to decode the stored samples, exactly as for
     /// [`Self::load_texture`]: a colour map is display-encoded
-    /// ([`crate::ColorSpace::Gamma22`], the island's convention) while a
-    /// displacement map is data ([`crate::ColorSpace::Raw`]). The file does
+    /// ([`crate::ColorSpace::GAMMA22`], the island's convention) while a
+    /// displacement map is data ([`crate::ColorSpace::RAW`]). The file does
     /// not say which it is, and decoding a height map by 2.2 would bend every
     /// offset toward zero.
     ///
@@ -260,10 +283,14 @@ pub trait AssetLoader: Send + Sync {
     /// linear float RGB — the decode [`Self::load_environment`] does, without
     /// the lat-long importance sampling. `None` means the light emits its
     /// uniform colour.
+    ///
+    /// `space` is as for [`Self::load_environment`].
     fn load_light_texture(
         &self,
         path: &std::path::Path,
+        space: crate::ColorSpace,
     ) -> Option<std::sync::Arc<crate::LightTexture>> {
+        let _ = space;
         tracing::warn!(
             "Asset loader does not decode light textures: {} ignored — the light \
              emits its uniform colour.",
@@ -292,7 +319,11 @@ pub trait AssetLoader: Send + Sync {
 pub struct NoAssets;
 
 impl AssetLoader for NoAssets {
-    fn load_environment(&self, path: &std::path::Path) -> Option<EnvironmentMap> {
+    fn load_environment(
+        &self,
+        path: &std::path::Path,
+        _space: crate::ColorSpace,
+    ) -> Option<EnvironmentMap> {
         tracing::warn!(
             "No asset loader: environment map {} ignored — the dome falls back \
              to its uniform colour. Use Scene::from_usd_with_assets to supply one.",

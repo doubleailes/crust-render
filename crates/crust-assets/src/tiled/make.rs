@@ -133,7 +133,10 @@ pub fn make_tx(
             Source::Floats(v) => v.clone(),
             Source::Bytes(v) => v.iter().map(|&b| b as f32 / 255.0).collect(),
         };
-        space.decode_slice(&mut linear);
+        // The curve only: the samples stay on their own primaries, like a
+        // TIFF-backed `.tx`'s, and a lookup applies the change of primaries
+        // into whichever working space the file is bound in.
+        space.decode_curve_slice(&mut linear);
         super::write_tx_exr(dst, &linear, w, h, space).map_err(AssetError::io(dst))?;
         "half, exr"
     } else {
@@ -253,12 +256,12 @@ mod tests {
             .save(&src)
             .expect("png");
         let made =
-            make_tx_atomic(&src, ColorSpace::Auto, TxFormat::FromSampleType).expect("converts");
+            make_tx_atomic(&src, ColorSpace::AUTO, TxFormat::FromSampleType).expect("converts");
         assert_eq!(made.dst, dir.join("a.tx"));
         assert_eq!(made.kind, "8-bit, tiff");
         assert_eq!(
             made.space,
-            ResolvedColorSpace::Srgb,
+            ResolvedColorSpace::SRGB,
             "auto on 8-bit RGB is sRGB"
         );
         let names: Vec<_> = std::fs::read_dir(&dir)
@@ -274,7 +277,7 @@ mod tests {
         let dir = scratch("failed");
         let src = dir.join("broken.png");
         std::fs::write(&src, b"not a png").unwrap();
-        assert!(make_tx_atomic(&src, ColorSpace::Raw, TxFormat::FromSampleType).is_err());
+        assert!(make_tx_atomic(&src, ColorSpace::RAW, TxFormat::FromSampleType).is_err());
         let names: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(names.len(), 1, "only the source remains");
     }
@@ -284,14 +287,14 @@ mod tests {
         let dir = scratch("exr_backing");
         let src = dir.join("rough.exr");
         exr::prelude::write_rgb_file(&src, 4, 4, |_, _| (0.02f32, 0.5f32, 0.9f32)).expect("exr");
-        let by_type = make_tx_atomic(&src, ColorSpace::Auto, TxFormat::FromSampleType).expect("ok");
+        let by_type = make_tx_atomic(&src, ColorSpace::AUTO, TxFormat::FromSampleType).expect("ok");
         assert_eq!(by_type.kind, "half, exr");
-        assert_eq!(by_type.space, ResolvedColorSpace::Raw);
+        assert_eq!(by_type.space, ResolvedColorSpace::RAW);
         // `maketx`'s own default would have narrowed it to 8 bits.
         let by_range = make_tx(
             &src,
             &dir.join("r.tx"),
-            ColorSpace::Raw,
+            ColorSpace::RAW,
             TxFormat::FromRange,
         )
         .expect("ok");
@@ -304,7 +307,7 @@ mod tests {
         for name in ["face.ptx", "face.PTEX"] {
             let src = dir.join(name);
             std::fs::write(&src, b"Ptex").unwrap();
-            let err = make_tx_atomic(&src, ColorSpace::Raw, TxFormat::FromSampleType)
+            let err = make_tx_atomic(&src, ColorSpace::RAW, TxFormat::FromSampleType)
                 .expect_err("ptex must not convert");
             assert!(err.to_string().contains("Ptex"), "{err}");
             assert!(!tx_sibling(&src).exists());

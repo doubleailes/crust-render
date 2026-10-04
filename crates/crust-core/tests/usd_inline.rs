@@ -1398,7 +1398,11 @@ fn shaping_api_fallback_cone_only_applies_when_the_api_is() {
 fn ies_profile_shapes_the_light() {
     struct Ies;
     impl crust_core::AssetLoader for Ies {
-        fn load_environment(&self, _: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+        fn load_environment(
+            &self,
+            _: &std::path::Path,
+            _: crust_core::ColorSpace,
+        ) -> Option<crust_core::EnvironmentMap> {
             None
         }
         fn load_ies(
@@ -2151,12 +2155,17 @@ fn loading_the_same_stage_twice_is_identical() {
 fn rect_light_texture_maps_onto_the_light() {
     struct Card;
     impl crust_core::AssetLoader for Card {
-        fn load_environment(&self, _: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+        fn load_environment(
+            &self,
+            _: &std::path::Path,
+            _: crust_core::ColorSpace,
+        ) -> Option<crust_core::EnvironmentMap> {
             None
         }
         fn load_light_texture(
             &self,
             path: &std::path::Path,
+            _: crust_core::ColorSpace,
         ) -> Option<std::sync::Arc<crust_core::LightTexture>> {
             assert!(path.ends_with("card.exr"), "{}", path.display());
             // top-left, top-right / bottom-left, bottom-right — HDR on purpose.
@@ -2513,4 +2522,191 @@ def Scope "Render"
 "#,
     );
     assert_eq!(scene.settings.min_samples_per_pixel(), 32);
+}
+
+// ---------------------------------------------------------------------------
+// Working colour space
+// ---------------------------------------------------------------------------
+
+fn acescg() -> crust_core::color::Space {
+    crust_core::color::working_space("acescg").expect("the builtin config defines ACEScg")
+}
+
+/// Two sphere lights over `/Render/settings` asking for `space`: one whose
+/// colour names no space, one whose colour says it is linear Rec.709.
+fn lights_in(name: &str, space: &str) -> Scene {
+    load_with_settings(
+        name,
+        r#"
+    def SphereLight "Plain"
+    {
+        color3f inputs:color = (1, 0.5, 0.25)
+    }
+    def SphereLight "Tagged"
+    {
+        color3f inputs:color = (1, 0.5, 0.25) (
+            colorSpace = "lin_rec709"
+        )
+    }"#,
+        &format!(
+            r#"
+def Scope "Render"
+{{
+    def RenderSettings "settings"
+    {{
+        uniform token renderingColorSpace = "{space}"
+    }}
+}}
+"#
+        ),
+    )
+}
+
+fn emitted(scene: &Scene, i: usize) -> Vec3A {
+    let from = Vec3A::new(0.0, -3.0, 0.0);
+    let light = &scene.lights.lights()[i];
+    (0..64)
+        .filter_map(|k| {
+            let (u, v) = ((k % 8) as f32 + 0.5, (k / 8) as f32 + 0.5);
+            light.sample_li(from, u / 8.0, v / 8.0)
+        })
+        .map(|s| s.radiance)
+        .find(|r| r.max_element() > 0.0)
+        .unwrap_or(Vec3A::ZERO)
+}
+
+#[test]
+fn rendering_color_space_selects_the_working_space() {
+    let scene = lights_in("working_acescg", "acescg");
+    assert_eq!(scene.working_space, acescg());
+    let authored = Vec3A::new(1.0, 0.5, 0.25);
+    let want = crust_core::color::convert(authored, crust_core::color::Space::LIN_REC709, acescg());
+    assert!((want - authored).abs().max_element() > 0.05);
+    // The light list need not keep the stage's order, so the two are matched
+    // by value: the one naming no space is already in the working space, as
+    // UsdLux says; the one naming `lin_rec709` is converted from it.
+    let mut got = [emitted(&scene, 0), emitted(&scene, 1)];
+    if !got[0].abs_diff_eq(authored, 1e-6) {
+        got.swap(0, 1);
+    }
+    assert!(got[0].abs_diff_eq(authored, 1e-6), "{got:?}");
+    assert!(got[1].abs_diff_eq(want, 1e-5), "{got:?} vs {want}");
+}
+
+#[test]
+fn the_default_working_space_converts_nothing_on_its_own_primaries() {
+    let scene = lights_in("working_default", "lin_rec709_scene");
+    assert_eq!(scene.working_space, crust_core::color::Space::LIN_REC709);
+    let authored = Vec3A::new(1.0, 0.5, 0.25);
+    assert_eq!(emitted(&scene, 0), authored);
+    assert_eq!(emitted(&scene, 1), authored, "lin_rec709 into itself");
+}
+
+#[test]
+fn a_rendering_color_space_that_is_not_scene_linear_is_refused() {
+    let scene = lights_in("working_srgb", "srgb_texture");
+    assert_eq!(scene.working_space, crust_core::color::Space::LIN_REC709);
+}
+
+#[test]
+fn the_host_working_space_wins_and_a_bad_one_is_an_error() {
+    let path = write_stage(
+        "working_host",
+        "#usda 1.0\n(\n    defaultPrim = \"World\"\n)\ndef Xform \"World\" {}\n",
+    );
+    let options = |space: &str| UsdImportOptions {
+        working_space: Some(space.to_owned()),
+        ..Default::default()
+    };
+    let scene = Scene::from_usd_with_options(&path, &NoAssets, &options("lin_rec2020")).unwrap();
+    assert_eq!(scene.working_space.label(), "Linear Rec.2020");
+    let err = Scene::from_usd_with_options(&path, &NoAssets, &options("srgb_texture"));
+    assert!(matches!(
+        err,
+        Err(crust_core::Error::InvalidWorkingSpace(_))
+    ));
+}
+
+#[test]
+fn a_blackbody_tint_is_brought_to_the_working_space() {
+    let body = r#"
+    def SphereLight "S"
+    {
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 4000
+    }"#;
+    let settings = |space: &str| {
+        format!(
+            "def Scope \"Render\" {{ def RenderSettings \"settings\" {{ uniform token \
+             renderingColorSpace = \"{space}\" }} }}"
+        )
+    };
+    let scene = load_with_settings("blackbody_acescg", body, &settings("acescg"));
+    let bb = crust_core::blackbody_rgb(4000.0);
+    let want = crust_core::color::convert(bb, crust_core::color::Space::LIN_REC709, acescg());
+    assert!(
+        emitted(&scene, 0).abs_diff_eq(want, 1e-5),
+        "{} vs {want}",
+        emitted(&scene, 0)
+    );
+}
+
+#[test]
+fn preview_surface_colours_follow_their_color_space_metadata() {
+    let surface = |name: &str, metadata: &str| {
+        load_with_settings(
+            name,
+            &format!(
+                r#"
+    def Sphere "Ball" ( prepend apiSchemas = ["MaterialBindingAPI"] )
+    {{
+        rel material:binding = </World/Looks/M>
+    }}
+    def Scope "Looks"
+    {{
+        def Material "M"
+        {{
+            token outputs:surface.connect = </World/Looks/M/S.outputs:surface>
+            def Shader "S"
+            {{
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.2, 0.4, 0.6) {metadata}
+                token outputs:surface
+            }}
+        }}
+    }}"#
+            ),
+            "def Scope \"Render\" { def RenderSettings \"settings\" { uniform token \
+             renderingColorSpace = \"acescg\" } }",
+        )
+    };
+    let plain = surface("preview_plain", "");
+    let tagged = surface("preview_tagged", "( colorSpace = \"srgb_texture\" )");
+    let albedo = |scene: &Scene| {
+        let hit = scene
+            .world
+            .intersect(
+                &Ray::new(Vec3A::new(0.0, 0.0, 5.0), Vec3A::NEG_Z),
+                1e-3,
+                1e4,
+            )
+            .expect("hits the ball");
+        hit.mat
+            .as_openpbr()
+            .expect("a constant preview surface is plain OpenPBR")
+            .base_color
+    };
+    let authored = Vec3A::new(0.2, 0.4, 0.6);
+    let want =
+        crust_core::color::convert(authored, crust_core::color::Space::SRGB_TEXTURE, acescg());
+    assert!(
+        albedo(&plain).abs_diff_eq(authored, 1e-6),
+        "{}",
+        albedo(&plain)
+    );
+    assert!(
+        albedo(&tagged).abs_diff_eq(want, 1e-5),
+        "{} vs {want}",
+        albedo(&tagged)
+    );
 }

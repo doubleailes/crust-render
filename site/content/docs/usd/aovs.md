@@ -423,11 +423,13 @@ alone, at the first surface; `albedo` is unchanged.
 ## The EXR files
 
 Each product is one single-part, scanline, ZIP-compressed EXR. The header carries
-`software = crust-render <version>` and `colorInteropID = lin_rec709_scene`, the ASWF
-Color Interop tag for crust's rendering space, which applies to the colour channels.
-
-An authored `renderingColorSpace` other than linear Rec.709 is refused with a warning:
-crust renders in one colour space.
+`software = crust-render <version>` and `colorInteropID`, the ASWF Color Interop ID of the
+[working colour space](@/docs/usd/render-settings.md#renderingcolorspace) the colour
+channels are in: `lin_rec709_scene` by default, `lin_ap1_scene` when rendering in ACEScg.
+In any working space other than linear Rec.709, the header also carries the space's
+`chromaticities`, so any EXR reader knows the primaries. (An EXR without `chromaticities`
+is Rec.709 by the format's definition.) The single beauty EXR written without products
+carries the same two attributes in a non-Rec.709 working space, and none in `lin_rec709`.
 
 ## Guarantees
 

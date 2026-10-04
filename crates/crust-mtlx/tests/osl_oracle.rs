@@ -11,7 +11,7 @@
 //! ones are listed in [`deviation`] with the reason, and nothing else may
 //! differ.
 
-use crust_mtlx::{Compiler, Doc, ShadeCtx, TextureRef, Val};
+use crust_mtlx::{Compiler, Doc, Host, ShadeCtx, TextureRef, Val};
 use glam::Vec3A;
 use std::collections::BTreeMap;
 
@@ -122,7 +122,7 @@ fn eval(case: &Case) -> Val {
 
     let doc = Doc::parse(&xml).unwrap_or_else(|e| panic!("line {}: {e:?}", case.line));
     let loader = decline;
-    let mut c = Compiler::new(&doc, &loader);
+    let mut c = Compiler::new(&doc, &Host::new(&loader));
     let slot = c.compile_named("", "n", case.output);
     assert!(
         c.unsupported.is_empty(),

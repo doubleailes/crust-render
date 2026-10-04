@@ -627,6 +627,12 @@ fn shader(c: &mut Compiler<'_>, node: &Node, depth: usize, out: &mut Closures) {
 
 /// Whether `input` is authored away from `default`: connected, or a literal
 /// that differs.
+///
+/// Compares the literal *as authored*, before any colour conversion: the
+/// question is what the author asked for, and the nodedef default it is
+/// compared with is unconverted too. An opacity authored as `1, 1, 1` in
+/// sRGB is opaque, not an opacity a rounding away from one. Where the answer
+/// is "authored", the caller compiles the input — converted.
 pub(crate) fn authored_away(c: &Compiler<'_>, node: &Node, input: &str, default: Val) -> bool {
     let _ = c;
     match node.input(input).map(|i| &i.source) {
@@ -647,23 +653,20 @@ pub(crate) fn authored_away(c: &Compiler<'_>, node: &Node, input: &str, default:
 /// quantity even when it happens to evaluate to zero, and pruning on it would
 /// make the tree depend on the shading point. Every lane, not just lane 0: a
 /// `multiply` weight may be a `color3`, and `(0, 0.4, 0.4)` is not a pruned
-/// branch.
-fn literal_zero(node: &Node, input: &str) -> bool {
-    node.input(input).is_some_and(|i| match &i.source {
-        Source::Value(v) => {
-            let lanes = (v.arity as usize).clamp(1, 4);
-            v.v[..lanes].iter().all(|&c| c == 0.0)
-        }
-        _ => false,
+/// branch. The value tested is the program's — a colour after conversion to
+/// the working space — so the pruned branch is one whose weight the program
+/// would have computed as zero, whatever the host's conversion does to black.
+fn literal_zero(c: &Compiler<'_>, node: &Node, input: &str) -> bool {
+    c.literal_of(node, input).is_some_and(|v| {
+        let lanes = (v.arity as usize).clamp(1, 4);
+        v.v[..lanes].iter().all(|&x| x == 0.0)
     })
 }
 
-/// The literal scalar `input` is authored as, if it is one.
-fn literal_scalar(node: &Node, input: &str) -> Option<f32> {
-    match &node.input(input)?.source {
-        Source::Value(v) => Some(v.x()),
-        _ => None,
-    }
+/// The literal scalar `input` is authored as, if it is one — as the program
+/// holds it (see [`literal_zero`]).
+fn literal_scalar(c: &Compiler<'_>, node: &Node, input: &str) -> Option<f32> {
+    c.literal_of(node, input).map(|v| v.x())
 }
 
 /// Builds the BSDF tree under `node`, `None` for a branch that contributes
@@ -711,7 +714,7 @@ fn bsdf_tree(
             }
         }
         "mix" => {
-            let m = literal_scalar(node, "mix").or(if node.input("mix").is_none() {
+            let m = literal_scalar(c, node, "mix").or(if node.input("mix").is_none() {
                 Some(0.0)
             } else {
                 None
@@ -752,7 +755,7 @@ fn bsdf_tree(
                 None => (closure_input(c, node, "in2", ClosureType::Bsdf), "in1"),
             };
             let n = bsdf?;
-            if literal_zero(node, scalar) {
+            if literal_zero(c, node, scalar) {
                 return None;
             }
             let input = bsdf_tree(c, &n, depth + 1, out)?;
@@ -781,7 +784,7 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
         c.unsupported.insert(node.category.clone());
         return None;
     }
-    if literal_zero(node, "weight") {
+    if literal_zero(c, node, "weight") {
         return None;
     }
     let weight = c.input_or(node, "weight", Val::ONE);
@@ -790,7 +793,8 @@ fn leaf(c: &mut Compiler<'_>, node: &Node, out: &mut Closures) -> Option<Leaf> {
     let alpha = Val::vec2(0.05, 0.05);
     let bsdf = match node.category.as_str() {
         "oren_nayar_diffuse_bsdf" | "diffuse_bsdf" => {
-            let compensated = literal_scalar(node, "energy_compensation").is_some_and(|v| v != 0.0);
+            let compensated =
+                literal_scalar(c, node, "energy_compensation").is_some_and(|v| v != 0.0);
             Bsdf::Diffuse {
                 model: if compensated {
                     DiffuseModel::Eon
@@ -869,7 +873,7 @@ fn text<'n>(node: &'n Node, input: &str) -> Option<&'n str> {
 /// A leaf's MaterialX 1.39 thin film, `None` when its thickness is a literal
 /// zero (the default).
 fn thin_film(c: &mut Compiler<'_>, node: &Node) -> Option<ThinFilm> {
-    if node.input("thinfilm_thickness").is_none() || literal_zero(node, "thinfilm_thickness") {
+    if node.input("thinfilm_thickness").is_none() || literal_zero(c, node, "thinfilm_thickness") {
         return None;
     }
     Some(ThinFilm {
@@ -954,7 +958,7 @@ pub(crate) fn edf_walk(
             // reaches the weight slot too: `Mul` promotes arity, so the
             // scalar operand's three channels survive — read it as RGB.
             if let Some(n) = edf
-                && !literal_zero(node, scalar)
+                && !literal_zero(c, node, scalar)
             {
                 let s = c.input_or(node, scalar, Val::ONE);
                 let w = c.emit(Op::Binary {
@@ -990,7 +994,7 @@ pub(crate) fn edf_walk(
             // A literal black EDF is a dummy branch; dropping it keeps the
             // emission list *empty* for a graph that only looks emissive —
             // what the consumer's "evaluate nothing" fast path keys on.
-            if literal_zero(node, "color") {
+            if literal_zero(c, node, "color") {
                 return;
             }
             let color = c.input_or(node, "color", Val::ONE);
@@ -1049,13 +1053,14 @@ fn is_closure_type(type_name: &str, closure: ClosureType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Host;
     use crate::eval::ShadeCtx;
     use crate::parse::Doc;
 
     fn build(text: &str, root: &str) -> (Vec<Val>, Closures) {
         let doc = Doc::parse(text).unwrap();
         let loader = |_: &str, _: Option<&str>| None;
-        let mut c = Compiler::new(&doc, &loader);
+        let mut c = Compiler::new(&doc, &Host::new(&loader));
         let node = doc.find("", root).unwrap().clone();
         let mut out = Closures::default();
         flatten(&mut c, &node, &mut out);

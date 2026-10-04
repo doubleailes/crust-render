@@ -21,8 +21,23 @@
 //!   ([`surface`]).
 //!
 //! [`compile`] runs all three for one material node. The crate decodes *no
-//! pixels*: an `image` node's file is handed to the caller's
-//! [`TextureLoader`], which returns a [`Texture`] sampler or declines.
+//! pixels* and knows no colour space: both are the [`Host`]'s. An `image`
+//! node's file is handed to its [`TextureLoader`], which returns a
+//! [`Texture`] sampler or declines, and every authored colour literal goes
+//! through its [`ColorConverter`] once, at compile time.
+//!
+//! **Colour spaces** follow the MaterialX specification. A `colorspace`
+//! attribute may sit on the document, a nodegraph, a node or an input, and an
+//! input's *effective* space is the nearest of those ([`Doc::colorspace_of`]).
+//! It applies only to colour: an authored `color3` / `color4` literal is
+//! converted from its effective space into the host's working space (RGB
+//! only, alpha untouched), and an `image` / `tiledimage` whose output is a
+//! colour hands its `file`'s effective space to the loader. A `float` or
+//! `vector*` value — a roughness map, a normal map, a literal direction — is
+//! never managed, and a non-colour image's file is passed with `None`, which
+//! tells the host it is data. Nodedef defaults (unauthored inputs) are taken
+//! as already in the working space, as is a colour no scope declares a space
+//! for.
 //! `forbid(unsafe_code)`: no `unsafe` here, and `roxmltree` was chosen over a
 //! streaming parser partly to keep it that way.
 #![forbid(unsafe_code)]
@@ -46,9 +61,48 @@ pub use texture::{Texture, TextureRef};
 pub use value::Val;
 
 /// Resolves an `image` node's `file` input — as authored, relative to the
-/// document — plus its `colorspace` attribute, into a sampler. `None` declines
-/// the texture and the node falls back to its `default` input.
+/// document — into a sampler. The second argument is the colour space the
+/// texels are in: the `file` input's effective `colorspace` when the image
+/// outputs a `color3` / `color4`, and `None` for a non-colour image (data,
+/// never converted) or a colour one no scope declares a space for. `None`
+/// from the loader declines the texture, and the node falls back to its
+/// `default` input.
 pub type TextureLoader<'a> = &'a dyn Fn(&str, Option<&str>) -> Option<TextureRef>;
+
+/// Converts an RGB value authored in the named colour space into the
+/// renderer's working space. Called at compile time, once per authored
+/// `color3` / `color4` literal that has an effective colour space (and per
+/// authored colour `default` of an image); never per shading point.
+///
+/// The pruning that drops a literal-zero weight tests the *converted* value,
+/// so a conversion that does not keep black at black (a log encoding) is
+/// still exact; one that does — any matrix, any transfer function through
+/// zero — prunes exactly what the authored zero would have.
+pub type ColorConverter<'a> = &'a dyn Fn(&str, [f32; 3]) -> [f32; 3];
+
+/// What the compiler asks of the renderer: textures and colour conversion.
+#[derive(Clone, Copy)]
+pub struct Host<'a> {
+    pub load_texture: TextureLoader<'a>,
+    pub convert_color: ColorConverter<'a>,
+}
+
+impl<'a> Host<'a> {
+    /// A host with `load_texture` whose working space *is* every authored
+    /// space: literals pass through untouched, bit for bit. What a caller
+    /// with no colour management (a test, a benchmark) wants.
+    pub fn new(load_texture: TextureLoader<'a>) -> Host<'a> {
+        Host {
+            load_texture,
+            convert_color: &identity_color,
+        }
+    }
+}
+
+/// The [`ColorConverter`] that converts nothing.
+pub fn identity_color(_: &str, rgb: [f32; 3]) -> [f32; 3] {
+    rgb
+}
 
 /// One material node, compiled.
 pub struct Compiled {
@@ -178,11 +232,12 @@ fn displacement(
 ///
 /// `material_node` is the `name` of the `surfacematerial` (or `surface`) node
 /// to start from. When `None`, the first `surfacematerial` in the document is
-/// used, which is what a single-material document means.
+/// used, which is what a single-material document means. Textures and colour
+/// conversion go through `host`.
 pub fn compile(
     path: &std::path::Path,
     material_node: Option<&str>,
-    load_texture: TextureLoader<'_>,
+    host: &Host<'_>,
 ) -> Result<Compiled, MtlxError> {
     let doc = Doc::open(path)?;
     let root = match material_node {
@@ -198,7 +253,7 @@ pub fn compile(
             .ok_or_else(|| MtlxError::NoSuchMaterial("<any surfacematerial>".into()))?,
     };
 
-    let mut c = Compiler::new(&doc, load_texture);
+    let mut c = Compiler::new(&doc, host);
     let mut closures = Closures::default();
     flatten(&mut c, &root, &mut closures);
     let displacement = displacement(&mut c, &root, &mut closures.reported);

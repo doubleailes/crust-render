@@ -7,7 +7,7 @@
 //! procedural texture standing in for every `image` node so the texture
 //! paths are exercised rather than folded away as declined fallbacks.
 
-use crust_mtlx::{Compiled, Doc, Program, ShadeCtx, Texture, TextureRef, Val, compile};
+use crust_mtlx::{Compiled, Doc, Host, Program, ShadeCtx, Texture, TextureRef, Val, compile};
 use glam::Vec3A;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,8 +75,8 @@ fn check(path: &Path) -> usize {
         path.display()
     );
     for name in &names {
-        let reference: Compiled = compile(path, Some(name), &procedural).unwrap();
-        let mut optimized: Compiled = compile(path, Some(name), &procedural).unwrap();
+        let reference: Compiled = compile(path, Some(name), &Host::new(&procedural)).unwrap();
+        let mut optimized: Compiled = compile(path, Some(name), &Host::new(&procedural)).unwrap();
         optimized.optimize();
         assert!(
             optimized.program.ops.len() <= reference.program.ops.len(),
@@ -150,7 +150,7 @@ fn constants_are_folded_hoisted_and_pruned() {
       </materialx>"#;
     let doc = Doc::parse(doc).unwrap();
     let loader = procedural;
-    let mut c = crust_mtlx::Compiler::new(&doc, &loader);
+    let mut c = crust_mtlx::Compiler::new(&doc, &Host::new(&loader));
     let out = c.compile_named("", "out", None);
     c.compile_named("", "orphan", None);
     let (opt, remap) = c.program.optimize(&[out]);
@@ -194,5 +194,5 @@ fn a_malformed_program_is_returned_unchanged_rather_than_panicking() {
 
 fn compile_basic() -> Compiled {
     let path = repo().join("samples/materialx_basic.mtlx");
-    compile(&path, None, &procedural).unwrap()
+    compile(&path, None, &Host::new(&procedural)).unwrap()
 }

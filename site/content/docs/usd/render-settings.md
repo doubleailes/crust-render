@@ -63,6 +63,27 @@ Crust Render also reads these standard `UsdRenderSettings` attributes:
 | `int2 resolution` | `(640, 360)` | image width and height in pixels. The first render product's own `resolution` overrides it. |
 | `rel camera` | first camera on the stage | the camera to render through. The first render product's own `camera` overrides it, and [`--camera`](@/docs/reference/command-line.md#camera) overrides both. |
 | `rel products` | none | the `RenderProduct`s to write: output files and the AOVs in each. See [Render products and AOVs](@/docs/usd/aovs.md). Without products, the render writes one RGB EXR at [`-o`](@/docs/reference/command-line.md#output). |
+| `token renderingColorSpace` | `lin_rec709` | the working colour space. See [below](#renderingcolorspace). |
+
+### renderingColorSpace
+
+`uniform token renderingColorSpace = "acescg"`
+
+The scene-linear colour space Crust Render renders in, by any name or alias of the
+[OCIO config](@/docs/reference/command-line.md#ocio-config): `acescg` (or `lin_ap1_scene`,
+`ACEScg`), `lin_rec2020`, `lin_rec709` (the default), and so on.
+[`--working-space`](@/docs/reference/command-line.md#working-space) overrides it.
+
+Every colour that names its colour space — a texture's, a MaterialX `colorspace`, a
+`colorSpace` metadatum — is converted into the working space when the scene loads. A
+colour that names none is taken as already in it (see
+[Texture colour spaces](@/docs/usd/materials.md#texture-colour-spaces)). Light transport
+then happens in that space's primaries: a wider gamut such as ACEScg keeps saturated
+colours that Rec.709 can't hold. The EXRs are written in the working space and say so in
+their header (see [The EXR files](@/docs/usd/aovs.md#the-exr-files)).
+
+A space that isn't scene-linear, such as `srgb_texture`, or one the config doesn't define,
+is refused with a warning, and the render uses `lin_rec709`.
 
 ## Sampling
 

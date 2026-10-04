@@ -1042,7 +1042,11 @@ impl Default for FakeAssets {
 }
 
 impl crust_core::AssetLoader for FakeAssets {
-    fn load_environment(&self, path: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+    fn load_environment(
+        &self,
+        path: &std::path::Path,
+        _space: crust_core::ColorSpace,
+    ) -> Option<crust_core::EnvironmentMap> {
         self.requested.lock().unwrap().push(path.to_path_buf());
         crust_core::EnvironmentMap::new(
             2,
@@ -1253,7 +1257,11 @@ impl crust_core::PtexTexture for ConstTexture {
 }
 
 impl crust_core::AssetLoader for SlowPtexAssets {
-    fn load_environment(&self, _path: &std::path::Path) -> Option<crust_core::EnvironmentMap> {
+    fn load_environment(
+        &self,
+        _path: &std::path::Path,
+        _space: crust_core::ColorSpace,
+    ) -> Option<crust_core::EnvironmentMap> {
         None
     }
 
@@ -1664,7 +1672,7 @@ fn a_materialx_lacquer_keeps_each_interface_as_its_own_leaf() {
     let loaded = materialx::load(
         &sample("materialx_basic.mtlx"),
         Some("mtlx_lacquer"),
-        &decline,
+        &crust_core::mtlx::Host::new(&decline),
     )
     .expect("mtlx_lacquer compiles");
     assert!(loaded.unsupported.is_empty(), "{:?}", loaded.unsupported);
@@ -1710,7 +1718,7 @@ fn a_materialx_layer_attenuates_its_base_by_the_tops_throughput_only() {
     let loaded = materialx::load(
         &sample("materialx_basic.mtlx"),
         Some("mtlx_lacquer"),
-        &decline,
+        &crust_core::mtlx::Host::new(&decline),
     )
     .expect("mtlx_lacquer compiles");
     let (rec, r) = probe_hit();
@@ -1784,7 +1792,7 @@ fn materialx_textures_reach_the_host_with_their_udim_token() {
     // toward zero.
     let srgb: Vec<&str> = requested
         .iter()
-        .filter(|(_, s)| *s == crust_core::ColorSpace::Srgb)
+        .filter(|(_, s)| *s == crust_core::ColorSpace::SRGB)
         .map(|(p, _)| p.file_name().unwrap().to_str().unwrap())
         .collect();
     assert_eq!(
@@ -2213,12 +2221,12 @@ fn preview_textures_reach_the_host_with_their_source_color_space() {
     assert_eq!(
         got,
         vec![
-            ("mtlx_base.<UDIM>.png".to_owned(), ColorSpace::Srgb),
-            ("mtlx_mask.png".to_owned(), ColorSpace::Raw),
-            ("mtlx_normal.<UDIM>.png".to_owned(), ColorSpace::Raw),
+            ("mtlx_base.<UDIM>.png".to_owned(), ColorSpace::SRGB),
+            ("mtlx_mask.png".to_owned(), ColorSpace::RAW),
+            ("mtlx_normal.<UDIM>.png".to_owned(), ColorSpace::RAW),
             // Unauthored and `"auto"` alike.
-            ("usdpreview_albedo.exr".to_owned(), ColorSpace::Auto),
-            ("usdpreview_rough.png".to_owned(), ColorSpace::Auto),
+            ("usdpreview_albedo.exr".to_owned(), ColorSpace::AUTO),
+            ("usdpreview_rough.png".to_owned(), ColorSpace::AUTO),
         ]
     );
     for (path, _) in assets.textures.lock().unwrap().iter() {

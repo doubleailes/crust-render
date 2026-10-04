@@ -78,7 +78,7 @@ pub fn commit_options() -> crust_rt::CommitOptions {
 pub use environment::EnvironmentMap;
 pub use error::Error;
 pub use filter::{FilterSampler, PixelFilter};
-pub use glam::{Mat4, Vec3A};
+pub use glam::{Mat3A, Mat4, Vec3A};
 pub use guiding::{GuidingConfig, GuidingField, SampleData};
 pub use hittable::{FaceHit, HitRecord};
 pub use light::{

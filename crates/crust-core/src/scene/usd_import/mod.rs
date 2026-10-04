@@ -89,7 +89,8 @@ use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use products::import_render_products;
 use settings::{
     CameraChoice, check_time_range, dome_light_camera_visibility, import_render_settings,
-    render_settings_camera, render_settings_subdiv_edge_length, render_settings_subdiv_level,
+    render_settings_camera, render_settings_color_space, render_settings_subdiv_edge_length,
+    render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
 use time::{EvalTimeScope, eval_time};
@@ -371,7 +372,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
             // instancer; they are drawn through it, never on their own.
             continue;
         } else if custom_token(&prim, "crust:volume:type").is_some() {
-            emit_volume(&prim, this_world, &mut ctx.volumes);
+            emit_volume(&prim, this_world, &mut ctx.volumes, ctx.caches.working);
         } else if let Ok(Some(mesh)) = UsdMesh::get(stage, prim.path().clone()) {
             let mat = resolve_bound(stage, &prim, &mut ctx.caches);
             emit_mesh(
@@ -400,17 +401,15 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         } else if let Ok(Some(light)) = CylinderLight::get(stage, prim.path().clone()) {
             emit_cylinder_light(stage, ctx, &prim, &light, this_world);
         } else if let Ok(Some(light)) = UsdDistantLight::get(stage, prim.path().clone()) {
-            emit_distant_light(&mut ctx.lights, &prim, &light, this_world);
-        } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
-            emit_dome_light(
+            emit_distant_light(
                 &mut ctx.lights,
                 &prim,
                 &light,
                 this_world,
-                ctx.stage_path,
-                ctx.assets,
-                &mut ctx.caches.asset_time,
+                ctx.caches.working,
             );
+        } else if let Ok(Some(light)) = DomeLight::get(stage, prim.path().clone()) {
+            emit_dome_light(ctx, &prim, &light, this_world);
         }
         ctx.links.saw(
             prim.path(),
@@ -551,6 +550,14 @@ pub(crate) fn load_scene(
         ),
         None => None,
     };
+    // A working space the host names is refused here, before the stage is
+    // opened, like a bad camera path.
+    let host_working = match &options.working_space {
+        Some(name) => {
+            Some(crate::color::working_space(name).map_err(crate::Error::InvalidWorkingSpace)?)
+        }
+        None => None,
+    };
     let _time_scope = EvalTimeScope::enter(time);
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
@@ -588,6 +595,10 @@ pub(crate) fn load_scene(
         settings = settings.with_resolution(w, h);
     }
     let domes_seen_by_camera = dome_light_camera_visibility(&index);
+    // The working colour space, before any colour is read: every texture
+    // request and authored colour is converted into it.
+    let working = host_working.unwrap_or_else(|| render_settings_color_space(&index));
+    debug!("Rendering in {} ({})", working.label(), working.name());
     // Geometry, not tracer, settings: every mesh whose scheme is not `none`
     // is refined to this one level, so it must be known before the traversal.
     let subdiv_level = resolve_subdiv_level(
@@ -657,7 +668,7 @@ pub(crate) fn load_scene(
         // baked flat into the parent BVH when it is placed exactly once.
         caches: ImportCaches {
             subtrees,
-            ..ImportCaches::new(assets, path, subdiv)
+            ..ImportCaches::new(assets, path, subdiv, working)
         },
         pending_meshes: Vec::new(),
         links: LightLinks::default(),
@@ -865,6 +876,7 @@ pub(crate) fn load_scene(
     let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;
     scene.aovs = products.request;
+    scene.working_space = working;
     Ok(scene)
 }
 
@@ -1017,7 +1029,11 @@ struct ImportCaches<'a> {
     /// A light rig commonly points dozens of fixtures at one profile.
     ies: HashMap<std::path::PathBuf, Option<Arc<crate::IesProfile>>>,
     /// Resolved path → a `RectLight`'s decoded colour map, for the same reason.
-    light_textures: HashMap<std::path::PathBuf, Option<Arc<crate::LightTexture>>>,
+    light_textures:
+        HashMap<(std::path::PathBuf, crate::ColorSpace), Option<Arc<crate::LightTexture>>>,
+    /// The working colour space every texture and authored colour is
+    /// converted into ([`crate::color`]).
+    pub(super) working: crate::color::Space,
 }
 
 impl ImportCaches<'_> {
@@ -1043,7 +1059,12 @@ impl ImportCaches<'_> {
 }
 
 impl<'a> ImportCaches<'a> {
-    fn new(assets: &'a dyn AssetLoader, stage_path: &'a Path, subdiv: SubdivPolicy) -> Self {
+    fn new(
+        assets: &'a dyn AssetLoader,
+        stage_path: &'a Path,
+        subdiv: SubdivPolicy,
+        working: crate::color::Space,
+    ) -> Self {
         ImportCaches {
             materials: MaterialCache::default(),
             meshes: MeshArena::new(subdiv),
@@ -1057,6 +1078,7 @@ impl<'a> ImportCaches<'a> {
             asset_time: Duration::ZERO,
             ies: HashMap::new(),
             light_textures: HashMap::new(),
+            working,
         }
     }
 }
