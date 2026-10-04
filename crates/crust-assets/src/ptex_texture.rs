@@ -148,11 +148,11 @@ impl PtexColor {
     /// Decodes as colour (gamma 2.2), what every Ptex read before displacement
     /// was; [`PtexColor::open_in`] takes the space explicitly.
     pub fn open_with(path: &Path, mip: bool, max_log2: i8) -> Result<Self, AssetError> {
-        PtexColor::open_in(path, ColorSpace::Gamma22, mip, max_log2)
+        PtexColor::open_in(path, ColorSpace::GAMMA22, mip, max_log2)
     }
 
     /// [`PtexColor::open_with`], decoding the stored samples as `space` —
-    /// [`ColorSpace::Raw`] for a displacement map, whose values are data.
+    /// [`ColorSpace::RAW`] for a displacement map, whose values are data.
     pub fn open_in(
         path: &Path,
         space: ColorSpace,
@@ -482,17 +482,18 @@ fn reduce_triangle(
 /// Ptex colour is display-encoded: the island's shading network runs it
 /// through a gamma-1/2.2 node (`PxrColorCorrect`) and the GL path declares
 /// `sourceColorSpace = "sRGB"`. Both mean decode by 2.2 — which is what a
-/// colour request asks for ([`ColorSpace::Gamma22`]). A displacement map is
-/// data and asks for [`ColorSpace::Raw`]: no curve and no clamp, since a
+/// colour request asks for ([`ColorSpace::GAMMA22`]). A displacement map is
+/// data and asks for [`ColorSpace::RAW`]: no curve and no clamp, since a
 /// `half` / `float` height may be negative. One function for both backends,
 /// so the preloaded and streamed paths cannot drift. The curve is OCIO's
 /// ([`ResolvedColorSpace::decode_slice`]), which clamps below black for every
 /// space but raw.
 pub(crate) fn decode_ptex_slice(values: &mut [f32], space: ColorSpace) {
-    ptex_space(space).decode_slice(values);
+    ptex_space(space).decode_rgb_slice(values);
 }
 
-/// [`decode_ptex_slice`] for one texel.
+/// [`decode_ptex_slice`] for one texel: the curve, then the change of
+/// primaries into the working space.
 #[inline]
 pub(crate) fn decode_ptex_rgb(v: Vec3A, space: ColorSpace) -> Vec3A {
     ptex_space(space).decode_rgb(v)
@@ -500,8 +501,8 @@ pub(crate) fn decode_ptex_rgb(v: Vec3A, space: ColorSpace) -> Vec3A {
 
 /// The space a Ptex request decodes from: `Auto` has no file format to
 /// resolve against, so it means raw, as everywhere it goes unresolved.
-fn ptex_space(space: ColorSpace) -> ResolvedColorSpace {
-    space.resolved().unwrap_or(ResolvedColorSpace::Raw)
+pub(crate) fn ptex_space(space: ColorSpace) -> ResolvedColorSpace {
+    space.resolved().unwrap_or(ResolvedColorSpace::RAW)
 }
 
 /// Reads one channel of Ptex data as an unnormalized float.

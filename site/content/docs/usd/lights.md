@@ -29,6 +29,13 @@ Crust Render reads these UsdLux light types with their standard `inputs:intensit
 | `DistantLight` | `inputs:angle` |
 | `DomeLight` | `inputs:texture:file`, a lat-long environment map (`inputs:texture:format` unauthored, `latlong` or `automatic`) |
 
+`inputs:color` and `inputs:shaping:focusTint` are in the
+[working colour space](@/docs/usd/render-settings.md#renderingcolorspace), as UsdLux
+specifies, unless their attribute carries `colorSpace` metadata. A colour temperature's
+tint is converted into the working space. An image file is decoded from the colour space
+its attribute's `colorSpace` metadata names. Without that metadata, an 8-bit image is
+sRGB and a float image (EXR, `.hdr`) is taken as already in the working space.
+
 Area lights also read `ShapingAPI`: the cone (`inputs:shaping:cone:angle`,
 `inputs:shaping:cone:softness`), focus (`inputs:shaping:focus`,
 `inputs:shaping:focusTint`) and IES profiles (`inputs:shaping:ies:file`,

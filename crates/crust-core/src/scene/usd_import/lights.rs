@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
@@ -14,6 +14,7 @@ use openusd_schemas::lux::{
 };
 use tracing::{debug, warn};
 
+use crate::color::Space;
 use crate::light::{
     AffineShape, AreaLight, AreaShape, DistantLight as CoreDistantLight,
     DomeLight as CoreDomeLight, LightList, LightShape, RectShape, SphereShape, UnitShape,
@@ -21,11 +22,10 @@ use crate::light::{
 use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
 use crate::rt_world::WorldBuilder;
-use crate::scene::AssetLoader;
 
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, custom_bool, custom_color3, custom_f32, custom_token,
-    infinite_light_escape_mask, light_ray_mask,
+    attr_bool, attr_color_space, attr_color3f, attr_f32, custom_bool, custom_color, custom_f32,
+    custom_token, in_working, infinite_light_escape_mask, light_ray_mask,
 };
 use super::materials::asset_value_path;
 use super::time::eval_time;
@@ -45,7 +45,7 @@ struct LuxParams {
 /// cannot honour, since each makes the image differ from what was authored:
 /// `diffuse` / `specular` are per-lobe multipliers, and crust's light
 /// transport does not split a light's contribution by lobe.
-fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
+fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
     // A non-finite value would reach both MIS halves as NaN radiance, so it
     // falls back to the schema default like the shaping inputs do.
     let finite = |name: &str, v: Option<f32>, fallback: f32| match v {
@@ -70,15 +70,19 @@ fn lux_params(prim: &Prim, light: &impl UsdLight) -> LuxParams {
         }
         c => c.unwrap_or([1.0; 3]),
     };
+    let color = in_working(&light.color_attr(), Vec3A::from_array(color), working);
     let gain = intensity * 2f32.powf(exposure);
-    let mut emission = Vec3A::new(color[0] * gain, color[1] * gain, color[2] * gain);
+    let mut emission = color * gain;
 
     if attr_bool(&light.enable_color_temperature_attr()).unwrap_or(false) {
         let kelvin = attr_f32(&light.color_temperature_attr()).unwrap_or(6500.0);
         // The blackbody leaves the Rec.709 gamut below ~1900 K; clamp the
         // product, not the factor, so a negative channel cannot flip sign
         // against a negative `color`.
-        emission = (emission * crate::blackbody_rgb(kelvin)).max(Vec3A::ZERO);
+        // `blackbody_rgb` is linear Rec.709; the tint it scales by is a
+        // colour like any other, so it is brought to the working space.
+        let tint = crate::color::convert(crate::blackbody_rgb(kelvin), Space::LIN_REC709, working);
+        emission = (emission * tint).max(Vec3A::ZERO);
     }
 
     for (name, attr) in [
@@ -144,7 +148,7 @@ fn lux_shaping(
     // The schema's fallback is black, not white ("The default tint is
     // black", usdLux/schema.usda): unauthored, focus darkens off-axis
     // emission rather than leaving it neutral, exactly as in hdEmbree.
-    shaping.focus_tint = match custom_color3(prim, "inputs:shaping:focusTint") {
+    shaping.focus_tint = match custom_color(prim, "inputs:shaping:focusTint", caches.working) {
         Some(c) if !c.is_finite() => {
             warn!(
                 "{}: inputs:shaping:focusTint = {c} is not finite — using its fallback",
@@ -393,7 +397,7 @@ pub(super) fn emit_sphere_light(
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let params = lux_params(prim, light);
+    let params = lux_params(prim, light, ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -418,7 +422,7 @@ pub(super) fn emit_disk_light(
     world_xf: GMat4,
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
-    let params = lux_params(prim, light);
+    let params = lux_params(prim, light, ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -446,7 +450,7 @@ pub(super) fn emit_cylinder_light(
 ) {
     let radius = attr_f32(&light.radius_attr()).unwrap_or(0.5);
     let length = attr_f32(&light.length_attr()).unwrap_or(1.0);
-    let params = lux_params(prim, light);
+    let params = lux_params(prim, light, ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     emit_round_light(
         &mut ctx.world,
@@ -461,6 +465,16 @@ pub(super) fn emit_cylinder_light(
     );
 }
 
+/// The colour space a light's image file is decoded from: the space its
+/// `colorSpace` metadatum names, else `auto` — sRGB for an 8-bit image, the
+/// working space for a float one.
+fn texture_color_space(file: &openusd::usd::Attribute, working: Space) -> crate::ColorSpace {
+    match attr_color_space(file) {
+        Some(space) => crate::ColorSpace::new(space, working),
+        None => crate::ColorSpace::AUTO.into_working(working),
+    }
+}
+
 /// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
 /// resolved path: a rig commonly reuses one card texture on many lights.
 fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crate::LightTexture>> {
@@ -470,11 +484,14 @@ fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crat
         .ok()
         .flatten()?;
     let path = asset_value_path(&value, caches.stage_path)?;
-    if let Some(cached) = caches.light_textures.get(&path) {
+    let space = texture_color_space(&prim.attribute("inputs:texture:file"), caches.working);
+    let key = (path, space);
+    if let Some(cached) = caches.light_textures.get(&key) {
         return cached.clone();
     }
+    let path = &key.0;
     let started = Instant::now();
-    let loaded = caches.assets.load_light_texture(&path);
+    let loaded = caches.assets.load_light_texture(path, space);
     caches.asset_time += started.elapsed();
     match &loaded {
         Some(t) => debug!(
@@ -491,7 +508,7 @@ fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crat
             path.display()
         ),
     }
-    caches.light_textures.insert(path, loaded.clone());
+    caches.light_textures.insert(key, loaded.clone());
     loaded
 }
 
@@ -516,7 +533,7 @@ pub(super) fn emit_rect_light(
         );
         return;
     }
-    let params = lux_params(prim, light);
+    let params = lux_params(prim, light, ctx.caches.working);
     let shaping = lux_shaping(stage, prim, linear_part(world_xf), &mut ctx.caches);
     let texture = rect_light_texture(prim, &mut ctx.caches);
 
@@ -625,6 +642,7 @@ pub(super) fn emit_distant_light(
     prim: &Prim,
     light: &UsdDistantLight,
     world_xf: GMat4,
+    working: Space,
 ) {
     let direction = world_xf.transform_vector3(Vec3::NEG_Z);
     if direction.length_squared() < 1e-12 {
@@ -632,7 +650,7 @@ pub(super) fn emit_distant_light(
         return;
     }
     let angle = attr_f32(&light.angle_attr()).unwrap_or(0.53).max(0.0);
-    let params = lux_params(prim, light);
+    let params = lux_params(prim, light, working);
     let direction = Vec3A::new(direction.x, direction.y, direction.z);
 
     // Everything becomes the illuminance the *authored* cone delivers to a
@@ -679,18 +697,18 @@ pub(super) fn emit_distant_light(
 /// anything else warn and fall back to the uniform colour rather than
 /// silently mapping the image wrongly. The prim's rotation orients the sky.
 pub(super) fn emit_dome_light(
-    lights: &mut LightList,
+    ctx: &mut ImportCtx,
     prim: &Prim,
     light: &DomeLight,
     world_xf: GMat4,
-    stage_path: &Path,
-    assets: &dyn AssetLoader,
+) {
+    let (lights, stage_path, assets) = (&mut ctx.lights, ctx.stage_path, ctx.assets);
+    let working = ctx.caches.working;
     // Accumulates time spent in the host's decoder, so the report can
     // separate "decoding a 14k HDRI" from the rest of the traversal.
-    asset_time: &mut Duration,
-) {
+    let asset_time = &mut ctx.caches.asset_time;
     // `normalize` does not apply to a dome (its sizeFactor is 1).
-    let tint = lux_params(prim, light).emission;
+    let tint = lux_params(prim, light, working).emission;
 
     let format = light
         .texture_format_attr()
@@ -707,7 +725,8 @@ pub(super) fn emit_dome_light(
             // images a dome light normally carries that means latlong.
             None | Some("latlong") | Some("automatic") => {
                 let started = Instant::now();
-                let loaded = assets.load_environment(&texture);
+                let space = texture_color_space(&light.texture_file_attr(), working);
+                let loaded = assets.load_environment(&texture, space);
                 *asset_time += started.elapsed();
                 if loaded.is_none() {
                     warn!(

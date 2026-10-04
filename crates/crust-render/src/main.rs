@@ -137,6 +137,28 @@ struct Cli {
     /// present; this only creates the missing ones.
     #[arg(long, default_value_t = false)]
     auto_tx: bool,
+    /// The OpenColorIO config every colour is managed with: a `.ocio` file,
+    /// an `.ocioz` archive or an `ocio://` builtin URI. Defaults to the
+    /// builtin ACES CG config (cg-config-v4.0.0_aces-v2.0_ocio-v2.5). It must
+    /// define `raw`, `lin_rec709`, `srgb_texture`, `g22_rec709` and
+    /// `g18_rec709`, as names or aliases; every ACES config does.
+    #[arg(long, value_name = "CONFIG")]
+    ocio_config: Option<String>,
+    /// The scene-linear colour space to render in, by any name or alias of
+    /// the OCIO config — `acescg`, `lin_rec2020`, `lin_rec709`, … Overrides
+    /// the stage's `RenderSettings.renderingColorSpace`; `lin_rec709` when
+    /// neither names one.
+    #[arg(long, value_name = "SPACE")]
+    working_space: Option<String>,
+    /// The OCIO display the PNG preview is encoded for.
+    #[arg(long, value_name = "DISPLAY", default_value = crust_core::color::PREVIEW_DISPLAY)]
+    display: String,
+    /// The OCIO view the PNG preview is encoded with. The default,
+    /// `Un-tone-mapped`, clamps to [0, 1] and applies the display's curve;
+    /// `"ACES 2.0 - SDR 100 nits (Rec.709)"` applies the ACES output
+    /// transform instead. The EXR is never affected.
+    #[arg(long, value_name = "VIEW", default_value = crust_core::color::PREVIEW_VIEW)]
+    view: String,
 }
 
 /// `--frame`'s parser: an `f64` that is also finite. `f64::from_str` accepts
@@ -252,22 +274,69 @@ fn get_logger_level(level: LoggerLevel) -> Level {
     }
 }
 
-/// Compress linear RGB into [0,1] and encode it as sRGB bytes, through OCIO's
-/// sRGB display and un-tone-mapped view ([`crust_core::color::encode_preview`]):
-/// the same piecewise curve the texture decoders invert.
-fn tone_map(rgb: &mut [f32]) -> Vec<u8> {
-    crust_core::color::encode_preview(rgb);
+/// How the outputs describe and encode the working space's pixels: the space
+/// itself, for the EXRs' colour metadata, and the OCIO display / view the
+/// preview PNG is encoded through.
+struct OutputColor {
+    working: crust_core::color::Space,
+    display: String,
+    view: String,
+}
+
+impl OutputColor {
+    /// `--display` / `--view` for a render in `working`, refused when the
+    /// config cannot make that preview — before the render, not after it.
+    fn new(
+        working: crust_core::color::Space,
+        display: &str,
+        view: &str,
+    ) -> std::result::Result<Self, String> {
+        let color = OutputColor {
+            working,
+            display: display.to_owned(),
+            view: view.to_owned(),
+        };
+        crust_core::color::encode_preview(&mut [0.0; 3], working, display, view)?;
+        Ok(color)
+    }
+
+    /// The EXR header attributes for these pixels: the working space's ASWF
+    /// Color Interop ID, and its chromaticities — set only off Rec.709,
+    /// whose primaries are what an EXR without the attribute means, so a
+    /// `lin_rec709` file is what it always was.
+    fn exr_chromaticities(&self) -> Option<exr::meta::attribute::Chromaticities> {
+        if self.working == crust_core::color::Space::LIN_REC709 {
+            return None;
+        }
+        let [r, g, b, w] = crust_core::color::chromaticities(self.working)?;
+        Some(exr::meta::attribute::Chromaticities {
+            red: Vec2(r[0], r[1]),
+            green: Vec2(g[0], g[1]),
+            blue: Vec2(b[0], b[1]),
+            white: Vec2(w[0], w[1]),
+        })
+    }
+}
+
+/// Encode linear working-space RGB as 8-bit preview bytes through the OCIO
+/// display / view ([`crust_core::color::encode_preview`]). The default view
+/// clamps to [0, 1] and applies the display's curve: for sRGB, the same
+/// piecewise curve the texture decoders invert.
+fn tone_map(rgb: &mut [f32], color: &OutputColor) -> Vec<u8> {
+    crust_core::color::encode_preview(rgb, color.working, &color.display, &color.view)
+        .expect("checked by OutputColor::new");
     rgb.iter()
-        .map(|&c| (c * 255.0 + 0.5).floor() as u8)
+        .map(|&c| (c.clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u8)
         .collect()
 }
 
-/// Tone-map the render buffer to an sRGB PNG at `path`.
+/// Tone-map the render buffer to an 8-bit PNG at `path`.
 fn write_png(
     buffer: &Buffer,
     width: usize,
     height: usize,
     path: &Path,
+    color: &OutputColor,
 ) -> std::result::Result<(), image::ImageError> {
     let mut rgb = Vec::with_capacity(width * height * 3);
     for y in 0..height {
@@ -276,7 +345,7 @@ fn write_png(
             rgb.extend_from_slice(&[r, g, b]);
         }
     }
-    let bytes = tone_map(&mut rgb);
+    let bytes = tone_map(&mut rgb, color);
     let mut img = image::RgbaImage::new(width as u32, height as u32);
     for (i, &[r, g, b]) in bytes.as_chunks::<3>().0.iter().enumerate() {
         let (x, y) = (i % width, i / width);
@@ -286,19 +355,37 @@ fn write_png(
 }
 
 /// The render of a stage without RenderProducts: the beauty as an RGB EXR at
-/// `output`, then the tone-mapped sRGB PNG next to it. `write_rgb_file`, as
-/// it always was — this output is byte-identical to the one before AOVs.
+/// `output`, then the tone-mapped PNG next to it. What `write_rgb_file` writes
+/// — in `lin_rec709` this output is byte-identical to the one before AOVs —
+/// plus, in any other working space, the chromaticities and `colorInteropID`
+/// that say which.
 fn write_beauty(
     buffer: &Buffer,
     img_width: usize,
     img_height: usize,
     output: &str,
+    color: &OutputColor,
 ) -> std::result::Result<(), ExitCode> {
     debug!(
         "Writing {}x{} linear EXR to {}",
         img_width, img_height, output
     );
-    match write_rgb_file(output, img_width, img_height, |x, y| buffer.get_rgb(x, y)) {
+    let channels = SpecificChannels::rgb(|Vec2(x, y)| buffer.get_rgb(x, y));
+    let mut image = Image::from_channels((img_width, img_height), channels);
+    if let Some(chromaticities) = color.exr_chromaticities() {
+        image.attributes.chromaticities = Some(chromaticities);
+        if let Some(id) = color
+            .working
+            .interop_id()
+            .and_then(|id| Text::new_or_none(&id))
+        {
+            image.layer_data.attributes.other.insert(
+                Text::from("colorInteropID"),
+                exr::meta::attribute::AttributeValue::Text(id),
+            );
+        }
+    }
+    match image.write().to_file(output) {
         Ok(_) => info!("Image written to: {:?}", output),
         Err(e) => {
             error!("Error writing image: {}", e);
@@ -307,7 +394,7 @@ fn write_beauty(
     }
     let png_path = Path::new(output).with_extension("png");
     debug!("Tone mapping to sRGB PNG at {}", png_path.display());
-    match write_png(buffer, img_width, img_height, &png_path) {
+    match write_png(buffer, img_width, img_height, &png_path, color) {
         Ok(_) => info!("Image written to: {:?}", png_path),
         Err(e) => {
             error!("Error writing PNG: {}", e);
@@ -417,6 +504,12 @@ fn main() -> ExitCode {
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
     // last ray has been traced.
+    if let Some(config) = &cli.ocio_config
+        && let Err(e) = crust_core::color::use_config(config)
+    {
+        error!("{e}");
+        return ExitCode::FAILURE;
+    }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
     let scene: Scene = if let Some(t) = input {
@@ -430,6 +523,7 @@ fn main() -> ExitCode {
             // The process renders once and exits, so freeing the composed
             // stage is pure delay before the render (45 s on ALab).
             skip_stage_teardown: true,
+            working_space: cli.working_space.clone(),
         };
         match Scene::from_usd_with_options(input_path, &assets, &options) {
             Ok(scene) => scene,
@@ -448,11 +542,24 @@ fn main() -> ExitCode {
         if let Some(camera) = &cli.camera {
             warn!("--camera {camera} has no effect without -i/--input");
         }
+        if let Some(space) = &cli.working_space {
+            warn!(
+                "--working-space {space} has no effect without -i/--input: the procedural \
+                 scene renders in lin_rec709"
+            );
+        }
         let (world, lights) = simple_scene();
         let (camera, settings) = get_settings();
         Scene::new(camera, world, lights, settings)
     };
     debug!("Scene built in {:?}", load_start.elapsed());
+    let output_color = match OutputColor::new(scene.working_space, &cli.display, &cli.view) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // One line however many textures were converted — the per-file lines are
     // DEBUG, since their count grows with the stage.
     let (converted, failed, secs) = assets.tx_report();
@@ -621,7 +728,7 @@ fn main() -> ExitCode {
         let mut written = Vec::new();
         for product in &aovs.products {
             let path = Path::new(&product.name);
-            match products::write_product(path, product, &buffer, film) {
+            match products::write_product(path, product, &buffer, film, &output_color) {
                 Ok(channels) => {
                     debug!("{}: {}", path.display(), channels.join(" "));
                     written.push(format!("{} ({} channels)", path.display(), channels.len()));
@@ -636,7 +743,7 @@ fn main() -> ExitCode {
         let first = &aovs.products[0];
         if first.beauty().is_some() {
             let png_path = Path::new(&first.name).with_extension("png");
-            match write_png(&buffer, img_width, img_height, &png_path) {
+            match write_png(&buffer, img_width, img_height, &png_path, &output_color) {
                 Ok(_) => info!("Image written to: {:?}", png_path),
                 Err(e) => {
                     error!("Error writing PNG: {}", e);
@@ -651,6 +758,7 @@ fn main() -> ExitCode {
         img_width,
         img_height,
         output.as_deref().unwrap_or("output.exr"),
+        &output_color,
     ) {
         return code;
     }
@@ -893,9 +1001,32 @@ mod tests {
         ));
     }
 
+    /// The default outputs: `lin_rec709`, previewed un-tone-mapped on sRGB.
+    pub(crate) fn rec709() -> OutputColor {
+        let w = crust_core::color::Space::LIN_REC709;
+        OutputColor::new(
+            w,
+            crust_core::color::PREVIEW_DISPLAY,
+            crust_core::color::PREVIEW_VIEW,
+        )
+        .expect("the default preview")
+    }
+
     /// One channel through [`tone_map`].
     fn tone_map1(linear: f32) -> u8 {
-        tone_map(&mut [linear; 3])[0]
+        tone_map(&mut [linear; 3], &rec709())[0]
+    }
+
+    #[test]
+    fn a_preview_the_config_cannot_make_is_refused_before_the_render() {
+        let w = crust_core::color::Space::LIN_REC709;
+        assert!(OutputColor::new(w, "sRGB - Display", "no such view").is_err());
+        assert!(OutputColor::new(w, "no such display", "Un-tone-mapped").is_err());
+        let aces = crust_core::color::working_space("acescg").unwrap();
+        let view = "ACES 2.0 - SDR 100 nits (Rec.709)";
+        let c = OutputColor::new(aces, "sRGB - Display", view).expect("an ACES view");
+        assert!(c.exr_chromaticities().is_some());
+        assert!(rec709().exr_chromaticities().is_none());
     }
 
     #[test]
@@ -1026,7 +1157,7 @@ mod tests {
         let dir = std::env::temp_dir().join("crust_render_png_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.png");
-        write_png(&buffer, w, h, &path).expect("png written");
+        write_png(&buffer, w, h, &path, &rec709()).expect("png written");
         let img = image::open(&path).expect("readable").to_rgba8();
         assert_eq!((img.width(), img.height()), (3, 2));
         // Image row 0 is the top: the scene's y = 1 row.
@@ -1214,9 +1345,9 @@ mod products {
     use std::path::Path;
     use tracing::warn;
 
-    /// The colour space crust renders in, as the ASWF Color Interop ID the
-    /// colour channels are tagged with (`docs/color_management.md`).
-    const COLOR_INTEROP_ID: &str = "lin_rec709_scene";
+    /// The Color Interop ID for a working space without one in the config.
+    /// The file still says what it can: its chromaticities, when known.
+    const UNKNOWN_INTEROP_ID: &str = "unknown";
 
     /// The channel names `var` writes, one per plane `AovFilm::var_channels`
     /// returns. `bare` makes the layer prefix empty — the product's beauty.
@@ -1311,12 +1442,19 @@ mod products {
 
     /// Writes `product` to `path`, creating its parent directories. Returns the
     /// channel names written, in file (alphabetical) order.
+    ///
+    /// The colour channels are tagged with the working space's ASWF Color
+    /// Interop ID (`colorInteropID`, `docs/color_management.md`) and, off
+    /// Rec.709, its chromaticities.
     pub fn write_product(
         path: &Path,
         product: &AovProduct,
         beauty: &Buffer,
         film: &AovFilm,
+        color: &super::OutputColor,
     ) -> io::Result<Vec<String>> {
+        let interop = color.working.interop_id();
+        let interop = interop.as_deref().unwrap_or(UNKNOWN_INTEROP_ID);
         let (width, height) = film.dimensions();
         let mut channels = Vec::new();
         for (var, names) in product_channels(product) {
@@ -1348,7 +1486,7 @@ mod products {
             software_name: Text::new_or_none(concat!("crust-render ", env!("CARGO_PKG_VERSION"))),
             ..LayerAttributes::default()
         };
-        let mut text = vec![("colorInteropID", COLOR_INTEROP_ID)];
+        let mut text = vec![("colorInteropID", interop)];
         for (key, value) in &product.attributes {
             match key.as_str() {
                 // Standard attributes `exr` exposes as typed fields.
@@ -1357,7 +1495,7 @@ mod products {
                 // Describes the pixels crust wrote, so only crust may set it.
                 "colorInteropID" => warn!(
                     "{}: driver:parameters colorInteropID = {value:?} is not copied: the colour \
-                     channels are {COLOR_INTEROP_ID}",
+                     channels are {interop}",
                     product.prim_path
                 ),
                 k if exr::meta::header::standard_names::ALL.contains(&k.as_bytes()) => {
@@ -1386,7 +1524,9 @@ mod products {
             },
             channels,
         );
-        Image::from_layer(layer)
+        let mut image = Image::from_layer(layer);
+        image.attributes.chromaticities = color.exr_chromaticities();
+        image
             .write()
             .to_file(path)
             .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
@@ -1493,7 +1633,8 @@ mod products {
             // A beauty-only product comes out of an empty film; the parent
             // directories do not exist yet.
             let p = product(vec![var("beauty", AovSource::Color)]);
-            let written = write_product(&path, &p, &beauty, &film).expect("written");
+            let rec709 = crate::tests::rec709();
+            let written = write_product(&path, &p, &beauty, &film, &rec709).expect("written");
             assert_eq!(written, ["B", "G", "R"]);
             let image = read()
                 .no_deep_data()
@@ -1508,7 +1649,7 @@ mod products {
             assert_eq!(layer.encoding.compression, Compression::ZIP16);
             assert_eq!(
                 layer.attributes.other.get(&Text::from("colorInteropID")),
-                Some(&AttributeValue::Text(Text::from(COLOR_INTEROP_ID)))
+                Some(&AttributeValue::Text(Text::from("lin_rec709_scene")))
             );
             assert_eq!(
                 layer.attributes.other.get(&Text::from("artist")),
@@ -1519,7 +1660,7 @@ mod products {
             // pixels are linear Rec.709 whatever the product says.
             assert_eq!(
                 layer.attributes.other.get(&Text::from("colorInteropID")),
-                Some(&AttributeValue::Text(Text::from(COLOR_INTEROP_ID)))
+                Some(&AttributeValue::Text(Text::from("lin_rec709_scene")))
             );
             // Top-down rows: the buffer's top row (y = h - 1) is the file's first.
             let r = &layer.channel_data.list[2];

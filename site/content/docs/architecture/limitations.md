@@ -72,9 +72,15 @@ render.
   [`CRUST_PTEX_STREAM_MIPSPACE=file`](@/docs/reference/environment-variables.md#crust-ptex-stream-mipspace)
   accepts the file's own, slightly darker, levels. Displacement Ptex is read raw, so its
   stored levels are already correct and it streams.
-- **Texture gamuts aren't converted.** A texture whose colour space has other primaries
-  than Rec.709, such as `acescg` or `g22_ap1`, is read as stored. See
-  [texture colour spaces](@/docs/usd/materials.md#texture-colour-spaces).
+- **Colour-space conversions are a curve and a matrix.** Every texture space in the ACES
+  configs is a transfer curve followed by a change of primaries, and Crust Render
+  converts exactly those. A conversion of any other shape, such as one through a 3D LUT,
+  is refused with a warning, and the values are used as stored.
+- **`UsdColorSpaceAPI` isn't read.** A `colorSpace` metadatum on the attribute itself is
+  honoured, but a colour space applied to a prim and inherited by its descendants isn't.
+- **Sampling heuristics weigh colours as Rec.709 luminance** in every working space:
+  light and lobe selection, adaptive sampling and the `variance` AOV. In another working
+  space the image is still unbiased, but noise may be spread a little differently.
 - **Colour Ptex is always decoded by gamma 2.2.** There is no way to declare a colour
   `.ptx` linear, so linear colour Ptex data renders too dark. Ptex read as a displacement
   map is read raw.

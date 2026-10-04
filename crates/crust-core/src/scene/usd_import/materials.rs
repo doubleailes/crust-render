@@ -16,10 +16,10 @@ use openusd_schemas::shade::{
 };
 use tracing::{debug, warn};
 
+use crate::color::Space;
 use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
-use crate::texture::ResolvedColorSpace;
 
-use super::attrs::custom_f32;
+use super::attrs::{attr_color_space, custom_f32, in_working};
 use super::preview::{preview_displacement, preview_surface_material};
 use super::time::eval_time;
 use super::{ImportCaches, prim_at};
@@ -413,7 +413,7 @@ fn pxr_displacement(
             .find_map(|a| attribute_asset_path(a.attribute(), caches.stage_path))?;
         maps.push(crate::PtexRef(load_ptex(
             &file,
-            crate::ColorSpace::Raw,
+            crate::ColorSpace::RAW,
             caches,
         )?));
     }
@@ -537,7 +537,7 @@ fn resolve_material_uncached(
     let shader_id = shader_info_id(shader);
     debug!("Material {mat_path}: surface shader id = {shader_id:?}");
     match shader_id.as_deref() {
-        Some("crust:openpbr") => decode_crust_openpbr(shader),
+        Some("crust:openpbr") => decode_crust_openpbr(shader, caches.working),
         Some("UsdPreviewSurface") => {
             // The preview surface may still be the Ptex-driven one — the Moana
             // island wires its `diffuseColor` to a Ptex node — so consult the
@@ -646,9 +646,12 @@ fn disney_to_openpbr(
     // decodes it to linear. Do the same, or every surface renders washed out.
     // `g22_rec709` — the plain power law, not the piecewise sRGB curve: it is
     // what that node applies, and matching the island's reference render
-    // matters more here than matching the standard.
+    // matters more here than matching the standard. A `colorSpace` metadatum
+    // on the input names another space instead.
     if let Some(rgb) = c("inputs:baseColor") {
-        o.base_color = ResolvedColorSpace::Gamma22.decode_rgb(rgb);
+        let source =
+            attr_color_space(&prim.attribute("inputs:baseColor")).unwrap_or(Space::G22_REC709);
+        o.base_color = crate::color::convert(rgb, source, caches.working);
     }
     if let Some(v) = f("inputs:metallic") {
         o.base_metalness = v;
@@ -781,15 +784,27 @@ fn load_mtlx_material(
         .to_path_buf();
     // `RefCell` because the loader closure is called from inside the compiler
     // while `caches` would otherwise be mutably borrowed by the outer call.
+    let working = caches.working;
     let cell = std::cell::RefCell::new(&mut *caches);
     let loader = |asset: &str, space: Option<&str>| -> Option<crate::TextureRef> {
         let mut c = cell.borrow_mut();
         load_uv_texture(
             &dir.join(asset),
-            crate::ColorSpace::from_mtlx(space),
+            crate::ColorSpace::from_mtlx(space, working),
             &mut c,
         )
         .map(crate::TextureRef)
+    };
+    // A literal colour with an effective `colorspace` is converted into the
+    // working space once, at compile time; one with none is already in it.
+    let convert = |space: &str, rgb: [f32; 3]| -> [f32; 3] {
+        crate::ColorSpace::from_mtlx(Some(space), working)
+            .resolved()
+            .map_or(rgb, |s| s.decode_rgb(Vec3A::from_array(rgb)).to_array())
+    };
+    let host = crust_mtlx::Host {
+        load_texture: &loader,
+        convert_color: &convert,
     };
     // Billed as (total) minus (what the texture loads already billed): the
     // loader closure runs *inside* this call and adds its own decode time to
@@ -798,7 +813,7 @@ fn load_mtlx_material(
     // reported at 178% of the parse phase that contains it.
     let started = Instant::now();
     let before = cell.borrow().asset_time;
-    let loaded = crate::materialx::load(file, (!node.is_empty()).then_some(node), &loader);
+    let loaded = crate::materialx::load(file, (!node.is_empty()).then_some(node), &host);
     let nested = cell.borrow().asset_time - before;
     // `cell` is not used past this point, which ends its borrow of `caches`.
     caches.asset_time += started.elapsed().saturating_sub(nested);
@@ -891,7 +906,8 @@ pub(super) fn material_ptex(
         .flatten()?;
     let path = asset_value_path(&value, caches.stage_path)?;
 
-    load_ptex(&path, crate::ColorSpace::Gamma22, caches).map(crate::PtexRef)
+    let space = crate::ColorSpace::new(Space::G22_REC709, caches.working);
+    load_ptex(&path, space, caches).map(crate::PtexRef)
 }
 
 /// Opens a Ptex file through the host, once per `(resolved path, space)`.
@@ -1004,11 +1020,17 @@ fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input
 /// name is camelCase mirror of the Rust snake_case, e.g. `base_color` →
 /// `inputs:baseColor`, `subsurface_radius_scale` → `inputs:subsurfaceRadiusScale`.
-fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
+fn decode_crust_openpbr(shader: &Shader, working: Space) -> Arc<dyn Material> {
     let mut o = OpenPBR::default();
 
     let f = |n: &str, d: f32| shader_input_f32(shader, n).unwrap_or(d);
-    let c = |n: &str, d: Vec3A| shader_input_vec3(shader, n).unwrap_or(d);
+    // Every colour is authored in the working space unless its `colorSpace`
+    // metadatum names another (`in_working`); `v` reads a vector that is not
+    // a colour and is never converted.
+    let c = |n: &str, d: Vec3A| {
+        shader_input_vec3(shader, n).map_or(d, |v| in_working(&shader.attribute(n), v, working))
+    };
+    let v = |n: &str, d: Vec3A| shader_input_vec3(shader, n).unwrap_or(d);
     let b = |n: &str, d: bool| shader_input_bool(shader, n).unwrap_or(d);
 
     // Base
@@ -1049,7 +1071,7 @@ fn decode_crust_openpbr(shader: &Shader) -> Arc<dyn Material> {
     o.subsurface_weight = f("inputs:subsurfaceWeight", o.subsurface_weight);
     o.subsurface_color = c("inputs:subsurfaceColor", o.subsurface_color);
     o.subsurface_radius = f("inputs:subsurfaceRadius", o.subsurface_radius);
-    o.subsurface_radius_scale = c("inputs:subsurfaceRadiusScale", o.subsurface_radius_scale);
+    o.subsurface_radius_scale = v("inputs:subsurfaceRadiusScale", o.subsurface_radius_scale);
     o.subsurface_scatter_anisotropy = f(
         "inputs:subsurfaceScatterAnisotropy",
         o.subsurface_scatter_anisotropy,

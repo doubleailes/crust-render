@@ -4,7 +4,7 @@
 //! sample document.
 
 use crust_mtlx::{
-    BinOp, Bsdf, Closure, Closures, Compiler, Doc, MtlxError, Op, Program, ShadeCtx, Source,
+    BinOp, Bsdf, Closure, Closures, Compiler, Doc, Host, MtlxError, Op, Program, ShadeCtx, Source,
     Texture, TextureRef, Val, compile, flatten, reflectivity_from_ior,
 };
 use glam::Vec3A;
@@ -34,7 +34,7 @@ fn ctx() -> ShadeCtx {
 /// shading context.
 fn run_with(doc: &str, name: &str, ctx: &ShadeCtx, loader: crust_mtlx::TextureLoader<'_>) -> Val {
     let d = Doc::parse(doc).expect("document parses");
-    let mut c = Compiler::new(&d, loader);
+    let mut c = Compiler::new(&d, &Host::new(loader));
     let slot = c.compile_named("", name, None);
     let mut slots = Vec::new();
     c.program.eval(ctx, &mut slots);
@@ -75,7 +75,7 @@ fn binary(category: &str, ty: &str, a: &str, b: &str) -> String {
 /// `ctx`.
 fn closures_of(doc: &str, root: &str) -> (Closures, Vec<Val>) {
     let d = Doc::parse(doc).unwrap();
-    let mut c = Compiler::new(&d, &decline);
+    let mut c = Compiler::new(&d, &Host::new(&decline));
     let root = d.find("", root).expect("root node").clone();
     let mut out = Closures::default();
     flatten(&mut c, &root, &mut out);
@@ -166,7 +166,7 @@ fn leaf_categories(cl: &Closures) -> Vec<&'static str> {
 /// Node categories the compiler had nothing for, for the EDF tests.
 fn unsupported_of(doc: &str, root: &str) -> Vec<String> {
     let d = Doc::parse(doc).unwrap();
-    let mut c = Compiler::new(&d, &decline);
+    let mut c = Compiler::new(&d, &Host::new(&decline));
     let root = d.find("", root).expect("root node").clone();
     let mut out = Closures::default();
     flatten(&mut c, &root, &mut out);
@@ -308,9 +308,13 @@ fn compile_reports_a_missing_material_node() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("empty.mtlx");
     std::fs::write(&path, "<materialx></materialx>").unwrap();
-    let err = compile(&path, None, &decline).err().expect("no material");
+    let err = compile(&path, None, &Host::new(&decline))
+        .err()
+        .expect("no material");
     assert!(matches!(err, MtlxError::NoSuchMaterial(_)), "{err}");
-    let err = compile(&path, Some("nope"), &decline).err().unwrap();
+    let err = compile(&path, Some("nope"), &Host::new(&decline))
+        .err()
+        .unwrap();
     match err {
         MtlxError::NoSuchMaterial(n) => assert_eq!(n, "nope"),
         other => panic!("{other}"),
@@ -866,7 +870,7 @@ fn shared_upstream_nodes_are_compiled_once() {
            </materialx>"#,
     )
     .unwrap();
-    let mut c = Compiler::new(&d, &decline);
+    let mut c = Compiler::new(&d, &Host::new(&decline));
     let slot = c.compile_named("", "a", None);
     let consts = c
         .program
@@ -892,7 +896,7 @@ fn unsupported_categories_degrade_to_a_constant_and_are_recorded() {
            </materialx>"#,
     )
     .unwrap();
-    let mut c = Compiler::new(&d, &decline);
+    let mut c = Compiler::new(&d, &Host::new(&decline));
     let slot = c.compile_named("", "a", None);
     assert!(c.unsupported.contains("frobnicate"));
     assert_eq!(c.unsupported.len(), 1);
@@ -1007,7 +1011,7 @@ fn a_loaded_image_is_sampled_and_counted() {
     assert!(approx(v.v[0], 0.6) && approx(v.v[1], 0.7) && approx(v.v[2], 0.8));
 
     let d = Doc::parse(doc).unwrap();
-    let mut c = Compiler::new(&d, &loader);
+    let mut c = Compiler::new(&d, &Host::new(&loader));
     c.compile_named("", "n", None);
     let textured = c
         .program
@@ -1531,7 +1535,7 @@ fn a_leaf_authoring_a_normal_records_it() {
            </materialx>"#,
     )
     .unwrap();
-    let mut c = Compiler::new(&d, &decline);
+    let mut c = Compiler::new(&d, &Host::new(&decline));
     let leaf = |cl: &Closures| match &cl.nodes[cl.root.unwrap() as usize] {
         Closure::Leaf(l) => l.normal,
         _ => panic!("a bare leaf"),
@@ -1559,7 +1563,7 @@ fn sample_document_parses_with_its_bare_udim_tokens() {
 
 #[test]
 fn sample_ceramic_compiles_to_a_layered_diffuse_and_dielectric() {
-    let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &decline).expect("compiles");
+    let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &Host::new(&decline)).expect("compiles");
     assert_eq!(c.root_name, "mtlx_ceramic");
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     assert_eq!(c.textures, 0, "every texture was declined");
@@ -1574,7 +1578,7 @@ fn sample_ceramic_compiles_to_a_layered_diffuse_and_dielectric() {
 fn sample_lacquer_keeps_both_dielectrics_as_their_own_leaves() {
     // Two specular interfaces, each a leaf with its own roughness: the clear
     // varnish over the satin dielectric over the diffuse. Nothing is pooled.
-    let c = compile(&sample_mtlx(), Some("mtlx_lacquer"), &decline).expect("compiles");
+    let c = compile(&sample_mtlx(), Some("mtlx_lacquer"), &Host::new(&decline)).expect("compiles");
     assert_eq!(c.root_name, "mtlx_lacquer");
     assert!(c.unsupported.is_empty(), "{:?}", c.unsupported);
     assert_eq!(c.textures, 0, "the lacquer is texture-free by design");
@@ -1591,7 +1595,7 @@ fn sample_lacquer_keeps_both_dielectrics_as_their_own_leaves() {
 
 #[test]
 fn sample_metal_compiles_with_mask_driven_weights() {
-    let c = compile(&sample_mtlx(), Some("mtlx_metal"), &decline).expect("compiles");
+    let c = compile(&sample_mtlx(), Some("mtlx_metal"), &Host::new(&decline)).expect("compiles");
     assert_eq!(c.root_name, "mtlx_metal");
     assert!(c.unsupported.is_empty());
     let mut slots = Vec::new();
@@ -1631,7 +1635,7 @@ fn sample_metal_compiles_with_mask_driven_weights() {
 
 #[test]
 fn sample_first_material_is_used_when_none_is_named() {
-    let c = compile(&sample_mtlx(), None, &decline).expect("compiles");
+    let c = compile(&sample_mtlx(), None, &Host::new(&decline)).expect("compiles");
     assert_eq!(
         c.root_name, "mtlx_ceramic",
         "document order picks the first surfacematerial"
@@ -1648,7 +1652,7 @@ fn sample_textures_are_requested_with_their_colorspace() {
             .push((file.to_string(), cs.map(str::to_string)));
         Some(TextureRef(Arc::new(Flat([0.5, 0.5, 1.0, 1.0]))))
     };
-    let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &loader).expect("compiles");
+    let c = compile(&sample_mtlx(), Some("mtlx_ceramic"), &Host::new(&loader)).expect("compiles");
     assert_eq!(c.textures, 2, "albedo and normal map");
     let asked = asked.lock().unwrap();
     assert!(
@@ -2026,7 +2030,7 @@ fn compile_displaced(name: &str, displacement: &str) -> crust_mtlx::Compiled {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.mtlx"));
     std::fs::write(&path, doc).unwrap();
-    compile(&path, None, &decline).expect("compiles")
+    compile(&path, None, &Host::new(&decline)).expect("compiles")
 }
 
 #[test]
@@ -2098,7 +2102,7 @@ fn no_displacementshader_is_no_displacement() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("none.mtlx");
     std::fs::write(&path, doc).unwrap();
-    let c = compile(&path, None, &decline).unwrap();
+    let c = compile(&path, None, &Host::new(&decline)).unwrap();
     assert!(c.displacement.is_none());
     assert!(c.closures.reported.is_empty());
 }

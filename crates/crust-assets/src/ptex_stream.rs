@@ -34,7 +34,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crate::ptex_texture::decode_ptex_rgb;
+use crate::ptex_texture::{decode_ptex_rgb, ptex_space};
 use crate::read_channel;
 use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
@@ -343,6 +343,9 @@ pub struct PtexStream {
     /// merely close — which is what lets the streamed and preloaded texel
     /// values be compared for equality instead of within a tolerance.
     lut: Option<Box<[f32; 256]>>,
+    /// The change of primaries a table-decoded texel takes into the working
+    /// space; `None` on the working primaries.
+    gamut: Option<crust_core::Mat3A>,
     /// The resolution ceiling, when one was asked for.
     ///
     /// `None` — the default — is the whole point: streaming has no reason to
@@ -379,7 +382,7 @@ impl PtexStream {
 
     /// [`PtexStream::open`] with the budget and caps of `config`.
     pub fn open_config(path: &Path, config: &crust_core::Config) -> Result<Self, AssetError> {
-        PtexStream::open_config_in(path, ColorSpace::Gamma22, config)
+        PtexStream::open_config_in(path, ColorSpace::GAMMA22, config)
     }
 
     /// [`PtexStream::open_config`], decoding the stored samples as `space`.
@@ -416,7 +419,7 @@ impl PtexStream {
         cap: Option<i8>,
         mip: bool,
     ) -> Result<Self, AssetError> {
-        PtexStream::open_in(path, ColorSpace::Gamma22, budget_bytes, micro_max, cap, mip)
+        PtexStream::open_in(path, ColorSpace::GAMMA22, budget_bytes, micro_max, cap, mip)
     }
 
     /// [`PtexStream::open_with`], decoding the stored samples as `space`.
@@ -458,6 +461,7 @@ impl PtexStream {
             space,
             triangle: reader.mesh_type() == ptex::MeshType::Triangle,
             lut,
+            gamut: ptex_space(space).gamut(),
             cap,
             mip,
             micro_max,
@@ -509,7 +513,7 @@ impl PtexStream {
     /// Anything else reads a level the file reduced in its own encoding, and
     /// under the default policy is preloaded instead — see [`MipSpace`].
     pub fn chain_is_exact(&self) -> bool {
-        if !self.mip || matches!(self.space, ColorSpace::Raw | ColorSpace::Auto) {
+        if !self.mip || matches!(self.space, ColorSpace::RAW | ColorSpace::AUTO) {
             return true;
         }
         self.reader
@@ -678,10 +682,13 @@ impl PtexStream {
         // preloading path applies.
         let c = |ch: usize| if ch < self.n_chan { ch } else { 0 };
         match &self.lut {
-            Some(t) => Vec3A::new(
-                t[src[c(0)] as usize],
-                t[src[c(1)] as usize],
-                t[src[c(2)] as usize],
+            Some(t) => crust_core::color::apply_gamut(
+                self.gamut.as_ref(),
+                Vec3A::new(
+                    t[src[c(0)] as usize],
+                    t[src[c(1)] as usize],
+                    t[src[c(2)] as usize],
+                ),
             ),
             // One decode per texel, all three channels together: the curve
             // is an OCIO processor, whose per-call cost is per pixel.
@@ -759,11 +766,12 @@ impl MipSource for StreamFace<'_> {
     }
 }
 
-/// One raw sample, scaled and decoded as `space` (see
+/// One raw sample, scaled and put through `space`'s curve (see
 /// [`crate::ptex_texture::decode_ptex_slice`]): an entry of the `u8` table.
-/// The per-texel decode scales and decodes the same way, three at a time.
+/// The table is per channel, so it holds the curve alone; the change of
+/// primaries follows per texel, as it does for the preloaded backend.
 fn decode_sample(raw: f32, scale: f32, space: ColorSpace) -> f32 {
-    decode_ptex_rgb(Vec3A::splat(raw * scale), space).x
+    ptex_space(space).decode_curve(raw * scale)
 }
 
 impl PtexTexture for PtexStream {
@@ -852,13 +860,13 @@ mod tests {
         // that test a tolerance check without saying so.
         let scale = ptex::DataType::UInt8.one_value_inv();
         for i in 0..256u32 {
-            let table = decode_sample(i as f32, scale, ColorSpace::Gamma22);
+            let table = decode_sample(i as f32, scale, ColorSpace::GAMMA22);
             let scalar = (read_channel(&[i as u8], ptex::DataType::UInt8) * scale)
                 .max(0.0)
                 .powf(2.2);
             assert_eq!(table.to_bits(), scalar.to_bits(), "entry {i}");
             // Raw is the scaled sample itself: no curve, no clamp.
-            let raw = decode_sample(i as f32, scale, ColorSpace::Raw);
+            let raw = decode_sample(i as f32, scale, ColorSpace::RAW);
             assert_eq!(raw.to_bits(), (i as f32 * scale).to_bits(), "raw entry {i}");
         }
     }

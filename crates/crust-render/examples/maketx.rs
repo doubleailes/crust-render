@@ -81,13 +81,18 @@ fn main() {
         std::process::exit(2);
     }
     let input = args[0].clone();
-    let space = ColorSpace::from_mtlx(args.get(1).map(String::as_str));
-    if args.len() > 1 && matches!(space, ColorSpace::Raw) && args[1] != "raw" {
-        // `from_mtlx` maps anything it does not know to `Raw`, which is the
-        // right default for an absent attribute but a poor one for a typo.
+    let space = ColorSpace::from_mtlx(
+        args.get(1).map(String::as_str),
+        crust_core::color::Space::LIN_REC709,
+    );
+    if args.len() > 1 && crust_core::color::Space::named(&args[1]).is_none() && args[1] != "srgb" {
+        // `from_mtlx` maps a name the OCIO config does not know to raw, which
+        // is the right default for an absent attribute but a poor one for a
+        // typo.
         eprintln!(
-            "warning: '{}' is not a colour space crust decodes — treating it as raw. \
-             Expected one of: srgb_texture, g22_rec709, g18_rec709, raw",
+            "warning: '{}' is not a colour space of the OCIO config — treating it as raw. \
+             Expected srgb_texture, g22_rec709, g18_rec709, raw, or any other name or alias \
+             the config defines",
             args[1]
         );
     }

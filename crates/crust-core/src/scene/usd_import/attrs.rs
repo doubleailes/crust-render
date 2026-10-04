@@ -7,6 +7,7 @@ use openusd::sdf;
 use openusd::usd::Prim;
 use tracing::warn;
 
+use crate::color::Space;
 use crate::ray::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
 
 use super::time::eval_time;
@@ -207,6 +208,47 @@ pub(super) fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
         sdf::Value::Vec3f(c) => Some(Vec3A::new(c.x, c.y, c.z)),
         sdf::Value::Vec3d(c) => Some(Vec3A::new(c.x as f32, c.y as f32, c.z as f32)),
         _ => None,
+    }
+}
+
+/// A colour attribute in the working space: [`custom_color3`], converted
+/// from the space its `colorSpace` metadatum names (see [`in_working`]).
+pub(super) fn custom_color(prim: &Prim, name: &str, working: Space) -> Option<Vec3A> {
+    custom_color3(prim, name).map(|c| in_working(&prim.attribute(name), c, working))
+}
+
+/// The colour space an attribute's `colorSpace` metadatum names, through the
+/// OCIO config. `None` when it names none; a name the config does not know
+/// is refused with a warning, and is `None` too.
+pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
+    let name = match attr.get_metadata::<sdf::Value>("colorSpace").ok()?? {
+        sdf::Value::Token(t) => t.as_str().to_owned(),
+        sdf::Value::String(s) => s,
+        _ => return None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let space = Space::named(&name);
+    if space.is_none() {
+        warn!(
+            "{}: colorSpace `{name}` is not defined by the OCIO config — the value is used as \
+             authored",
+            attr.path()
+        );
+    }
+    space
+}
+
+/// An authored colour in the working space. A value whose attribute names
+/// its space with `colorSpace` metadata is converted from it; one that names
+/// none is taken as already in the working space — UsdLux's "in the rendering
+/// color space", and the rule every unmanaged input follows
+/// ([`crate::color`]).
+pub(super) fn in_working(attr: &openusd::usd::Attribute, rgb: Vec3A, working: Space) -> Vec3A {
+    match attr_color_space(attr) {
+        Some(space) => crate::color::convert(rgb, space, working),
+        None => rgb,
     }
 }
 

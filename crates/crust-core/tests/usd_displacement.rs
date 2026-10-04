@@ -208,7 +208,11 @@ struct RampAssets {
     ptex_requested: Mutex<Vec<(PathBuf, ColorSpace)>>,
 }
 impl AssetLoader for RampAssets {
-    fn load_environment(&self, _path: &Path) -> Option<EnvironmentMap> {
+    fn load_environment(
+        &self,
+        _path: &Path,
+        _space: crust_core::ColorSpace,
+    ) -> Option<EnvironmentMap> {
         None
     }
     fn load_texture(&self, path: &Path, space: ColorSpace) -> Option<Arc<dyn Texture2D>> {
@@ -264,7 +268,7 @@ fn a_textured_preview_displacement_reads_scale_and_bias() {
     }
     let requested = assets.requested.lock().unwrap();
     assert!(
-        requested.iter().all(|(_, s)| *s == ColorSpace::Raw),
+        requested.iter().all(|(_, s)| *s == ColorSpace::RAW),
         "a displacement map is read raw: {requested:?}"
     );
     assert!((scene.stats.displacement.max_offset - 0.1).abs() < 1e-6);
@@ -382,7 +386,7 @@ fn only_meshes_open_displacement_maps() {
     );
     let requested = assets.ptex_requested.lock().unwrap();
     assert_eq!(requested.len(), 1, "{requested:?}");
-    assert_eq!(requested[0].1, ColorSpace::Raw);
+    assert_eq!(requested[0].1, ColorSpace::RAW);
 }
 
 /// A displacement connected to a `UsdUVTexture` that names no file keeps the

@@ -132,6 +132,36 @@ fn streamed_and_preloaded_agree_texel_for_texel() {
     }
 }
 
+/// The same off the working primaries: colour Ptex bound into ACEScg. Both
+/// backends put the texel through the same curve and then the same matrix
+/// (`crust_core::color::apply_gamut`), so they still agree bit for bit.
+#[test]
+fn streamed_and_preloaded_agree_in_acescg() {
+    let aces = crust_core::color::working_space("acescg").expect("ACEScg");
+    let space = crust_core::ColorSpace::new(crust_core::color::Space::G22_REC709, aces);
+    for &(name, cap) in FIXTURES {
+        let path = fixture(name);
+        let pre = PtexColor::open_in(&path, space, true, cap).expect(name);
+        let stream =
+            PtexStream::open_in(&path, space, 8 << 20, micro_max(8 << 20), Some(cap), true)
+                .expect(name);
+        let rec709 = PtexColor::open_with(&path, true, cap).expect(name);
+        let mut moved = false;
+        for face in 0..PtexTexture::num_faces(&pre) as u32 {
+            for &(u, v) in &grid() {
+                let (a, b) = (pre.eval(face, u, v, 0.0), stream.eval(face, u, v, 0.0));
+                assert_eq!(
+                    bits(a),
+                    bits(b),
+                    "{name} face {face} at ({u}, {v}): {a:?} {b:?}"
+                );
+                moved |= a != rec709.eval(face, u, v, 0.0);
+            }
+        }
+        assert!(moved, "{name}: ACEScg changed nothing");
+    }
+}
+
 /// The same, with a cap low enough that the reader has to *reduce* to reach
 /// it rather than read a stored level.
 ///
@@ -928,17 +958,17 @@ fn raw_ptex_skips_the_colour_curve_on_both_backends() {
     for name in ["quad_u8", "quad_tiled"] {
         let path = fixture(name);
         let cap = 10;
-        let raw_pre = PtexColor::open_in(&path, ColorSpace::Raw, false, cap).expect(name);
+        let raw_pre = PtexColor::open_in(&path, ColorSpace::RAW, false, cap).expect(name);
         let raw_stream = PtexStream::open_in(
             &path,
-            ColorSpace::Raw,
+            ColorSpace::RAW,
             8 << 20,
             micro_max(8 << 20),
             Some(cap),
             false,
         )
         .expect(name);
-        let col_pre = PtexColor::open_in(&path, ColorSpace::Gamma22, false, cap).expect(name);
+        let col_pre = PtexColor::open_in(&path, ColorSpace::GAMMA22, false, cap).expect(name);
 
         let mut reader = ptex::PtexReader::open(&path).expect(name);
         let n_chan = reader.num_channels();
@@ -985,10 +1015,10 @@ fn streamed_and_preloaded_agree_when_raw() {
     use crust_core::ColorSpace;
     for &(name, cap) in FIXTURES {
         let path = fixture(name);
-        let pre = PtexColor::open_in(&path, ColorSpace::Raw, true, cap).expect(name);
+        let pre = PtexColor::open_in(&path, ColorSpace::RAW, true, cap).expect(name);
         let stream = PtexStream::open_in(
             &path,
-            ColorSpace::Raw,
+            ColorSpace::RAW,
             8 << 20,
             micro_max(8 << 20),
             Some(cap),

@@ -91,6 +91,11 @@ pub struct UvTexture {
     /// The colour space the texels were decoded under, resolved against the
     /// file.
     space: ResolvedColorSpace,
+    /// The change of primaries into the working space, applied once per
+    /// lookup after filtering. Bytes keep the file's own primaries — the
+    /// decode table is the curve alone — so a `u8` texture carries the matrix;
+    /// an `f32` one was converted whole at load and carries `None`.
+    gamut: Option<crust_core::Mat3A>,
     /// Representative tile size, for the load message.
     width: usize,
     height: usize,
@@ -241,6 +246,7 @@ impl UvTexture {
         Ok(UvTexture {
             storage: Storage::U8(tiles),
             to_linear,
+            gamut: space.gamut(),
             space,
             width,
             height,
@@ -300,7 +306,8 @@ impl UvTexture {
         let (width, height) = (tiles[0].levels[0].width, tiles[0].levels[0].height);
         Ok(UvTexture {
             storage: Storage::F32(tiles),
-            to_linear: ResolvedColorSpace::Raw.to_linear_table(),
+            to_linear: ResolvedColorSpace::RAW.to_linear_table(),
+            gamut: None,
             space,
             width,
             height,
@@ -459,7 +466,9 @@ impl Texture2D for UvTexture {
         // propagate a NaN into a level index.
         let width = if width.is_finite() { width } else { 0.0 };
         match &self.storage {
-            Storage::U8(tiles) => self.eval_tiles(tiles, u, v, width),
+            Storage::U8(tiles) => {
+                crate::to_working(self.gamut.as_ref(), self.eval_tiles(tiles, u, v, width))
+            }
             Storage::F32(tiles) => self.eval_tiles(tiles, u, v, width),
         }
     }

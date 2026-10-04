@@ -28,12 +28,12 @@ fn png(path: &Path, rgb: [u8; 3]) {
 fn decoy_tx(dir: &Path, tx: &Path, rgb: [u8; 3]) {
     let other = dir.join("decoy_src.png");
     png(&other, rgb);
-    make_tx(&other, tx, ColorSpace::Raw, TxFormat::Tiff).expect("convert decoy");
+    make_tx(&other, tx, ColorSpace::RAW, TxFormat::Tiff).expect("convert decoy");
     std::fs::remove_file(&other).unwrap();
 }
 
 fn red_at(assets: &FileAssets, path: &Path, u: f32) -> f32 {
-    let tex = assets.load_texture(path, ColorSpace::Raw).expect("loads");
+    let tex = assets.load_texture(path, ColorSpace::RAW).expect("loads");
     tex.eval(u, 0.5, 0.0)[0]
 }
 
@@ -69,7 +69,7 @@ fn a_config_passed_in_decides_the_backend() {
         tex: false,
         ..Default::default()
     });
-    assert!(declined.load_texture(&src, ColorSpace::Raw).is_none());
+    assert!(declined.load_texture(&src, ColorSpace::RAW).is_none());
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn auto_tx_converts_missing_tiles_beside_their_sources_and_streams_them() {
     png(&dir.join("c.1002.png"), [0, 255, 0]);
     let assets = FileAssets::new().with_auto_tx(true);
     let tex = assets
-        .load_texture(&dir.join("c.<UDIM>.png"), ColorSpace::Raw)
+        .load_texture(&dir.join("c.<UDIM>.png"), ColorSpace::RAW)
         .expect("loads");
     assert!(dir.join("c.1001.tx").exists() && dir.join("c.1002.tx").exists());
     assert_eq!(tex.eval(0.5, 0.5, 0.0)[..3], [1.0, 0.0, 0.0]);
@@ -103,7 +103,7 @@ fn auto_tx_converts_missing_tiles_beside_their_sources_and_streams_them() {
     // A second render finds them current and converts nothing.
     let again = FileAssets::new().with_auto_tx(true);
     again
-        .load_texture(&dir.join("c.<UDIM>.png"), ColorSpace::Raw)
+        .load_texture(&dir.join("c.<UDIM>.png"), ColorSpace::RAW)
         .expect("loads");
     assert_eq!(again.tx_report().0, 0);
 }
@@ -138,7 +138,7 @@ fn auto_tx_never_converts_or_reads_a_tx_beside_a_ptex() {
 
     let assets = FileAssets::new().with_auto_tx(true);
     assert!(
-        assets.load_texture(&ptx, ColorSpace::Raw).is_none(),
+        assets.load_texture(&ptx, ColorSpace::RAW).is_none(),
         "neither the stray .tx nor a conversion stands in for a .ptx"
     );
     assert_eq!(
@@ -161,7 +161,7 @@ fn auto_tx_leaves_a_source_that_already_streams_alone() {
     let src_png = dir.join("seed.png");
     png(&src_png, [255, 0, 0]);
     let tiled = dir.join("albedo.exr");
-    make_tx(&src_png, &tiled, ColorSpace::Raw, TxFormat::Exr).expect("tiled exr");
+    make_tx(&src_png, &tiled, ColorSpace::RAW, TxFormat::Exr).expect("tiled exr");
     std::fs::remove_file(&src_png).unwrap();
 
     let assets = FileAssets::new().with_auto_tx(true);

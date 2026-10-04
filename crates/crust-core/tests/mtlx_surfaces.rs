@@ -35,7 +35,7 @@ fn try_load(tag: &str, surface: &str) -> Result<Loaded, crust_core::mtlx::MtlxEr
         ),
     )
     .unwrap();
-    let loaded = materialx::load(&path, None, &|_, _| None);
+    let loaded = materialx::load(&path, None, &crust_core::mtlx::Host::new(&|_, _| None));
     let _ = std::fs::remove_dir_all(&dir);
     loaded
 }
@@ -1136,7 +1136,12 @@ fn every_fixture_material_is_bounded_in_a_white_furnace() {
         "mtlx_openpbr_bumped_coat",
     ];
     for name in names {
-        let loaded = materialx::load(&path, Some(name), &|_, _| None).expect("loads");
+        let loaded = materialx::load(
+            &path,
+            Some(name),
+            &crust_core::mtlx::Host::new(&|_, _| None),
+        )
+        .expect("loads");
         for (offset, mean) in FURNACE_OFFSETS.into_iter().zip(furnace(&loaded)) {
             assert!(
                 mean.max_element() <= 1.02 && mean.min_element() >= 0.0,
@@ -1230,7 +1235,12 @@ fn a_masked_coverage_keeps_what_lies_beneath_it() {
 fn subsurface_fixture(name: &str) -> Loaded {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../samples/materialx_subsurface.mtlx");
-    materialx::load(&path, Some(name), &|_, _| None).expect("loads")
+    materialx::load(
+        &path,
+        Some(name),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .expect("loads")
 }
 
 /// `(color, radius, anisotropy, ior, alpha)` of the one random-walk leaf.

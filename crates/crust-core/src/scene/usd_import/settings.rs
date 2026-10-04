@@ -6,6 +6,7 @@ use openusd::usd::Stage;
 use openusd_schemas::render::{RenderSettings as UsdRenderSettings, RenderSettingsBase};
 use tracing::{debug, warn};
 
+use crate::color::Space;
 use crate::filter::PixelFilter;
 use crate::light::LightSelection;
 use crate::tracer::{RenderSettings, SamplingStrategy};
@@ -108,6 +109,26 @@ pub(super) fn render_settings_subdiv_level(stage: &Stage) -> Option<i32> {
 pub(super) fn render_settings_subdiv_edge_length(stage: &Stage) -> Option<f32> {
     let prim = prim_at(stage, render_settings_path(stage)?);
     custom_f32(&prim, "crust:subdivisionEdgeLength")
+}
+
+/// The working colour space the stage asks for: `renderingColorSpace` on the
+/// `RenderSettings` prim, resolved through the OCIO config ([`crate::color`]).
+/// Unauthored or empty is `lin_rec709`; a name the config does not know, or a
+/// space that is not scene-linear, is refused with a warning and is
+/// `lin_rec709` too.
+pub(super) fn render_settings_color_space(stage: &Stage) -> Space {
+    let Some(path) = render_settings_path(stage) else {
+        return Space::LIN_REC709;
+    };
+    match custom_token(&prim_at(stage, path.clone()), "renderingColorSpace") {
+        Some(name) if !name.is_empty() => {
+            crate::color::working_space(&name).unwrap_or_else(|why| {
+                warn!("{path}: renderingColorSpace refused ({why}); rendering in lin_rec709");
+                Space::LIN_REC709
+            })
+        }
+        _ => Space::LIN_REC709,
+    }
 }
 
 pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {

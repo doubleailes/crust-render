@@ -227,8 +227,12 @@ fn resolve_matches_per_query_shading_for_every_material() {
         ("materialx_subsurface.mtlx", "mtlx_standard_marble"),
         ("materialx_subsurface.mtlx", "mtlx_bare_jade"),
     ] {
-        let loaded = materialx::load(&sample(file), Some(node), &decline)
-            .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));
+        let loaded = materialx::load(
+            &sample(file),
+            Some(node),
+            &crust_core::mtlx::Host::new(&decline),
+        )
+        .unwrap_or_else(|e| panic!("{node} compiles: {e:?}"));
         materials.push((format!("MaterialX {node}"), loaded.material));
     }
 

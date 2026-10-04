@@ -16,7 +16,7 @@ fn load_inline(name: &str, body: &str) -> Result<Loaded, MtlxError> {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("m.mtlx");
     std::fs::write(&path, format!("<materialx>{body}</materialx>")).unwrap();
-    let loaded = load(&path, None, &|_, _| None);
+    let loaded = load(&path, None, &crust_mtlx::Host::new(&|_, _| None));
     let _ = std::fs::remove_dir_all(&dir);
     loaded
 }

@@ -107,11 +107,14 @@ pub(crate) fn mip_space_tag(space: ResolvedColorSpace) -> String {
     format!("crust:mipspace={}", space_name(space))
 }
 
-/// The stable spelling of a colour space in a `.tx`: its OCIO name, which
-/// [`ResolvedColorSpace::ocio_name`] matches on the variant, so a new space is
-/// a compile error there rather than a silently unlabelled file here.
+/// The stable spelling of a colour space in a `.tx`: the space the stored
+/// values are encoded in, by its [`label`](crust_core::color::Space::label)
+/// (`srgb_texture`, `g22_rec709`, `raw`, … or the OCIO config's own name for
+/// any other). Only the source is recorded: the levels were reduced through
+/// its curve, and the working space the file is later bound into changes no
+/// stored value, only the matrix applied after a lookup.
 pub(crate) fn space_name(space: ResolvedColorSpace) -> &'static str {
-    space.ocio_name()
+    space.source().label()
 }
 
 /// One mip level as one IFD: every tile's compressed bytes, then the tags that

@@ -11,7 +11,7 @@
 //! ```
 
 use crust_jit::JitProgram;
-use crust_mtlx::{Compiled, Doc, ShadeCtx, Texture, TextureRef, Val, compile};
+use crust_mtlx::{Compiled, Doc, Host, ShadeCtx, Texture, TextureRef, Val, compile};
 use glam::Vec3A;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ fn main() {
         let path = std::path::Path::new(&path);
         let doc = Doc::open(path).expect("parse");
         for node in doc.by_category("surfacematerial") {
-            let mut c: Compiled = compile(path, Some(&node.name), &procedural).unwrap();
+            let mut c: Compiled = compile(path, Some(&node.name), &Host::new(&procedural)).unwrap();
             c.optimize();
             let p = &c.program;
             let t0 = Instant::now();

@@ -49,6 +49,10 @@ attributes.
 | [`--filter`](#filter) | name | scene / `triangle` | `crust:pixelFilter` |
 | [`--filter-radius`](#filter-radius) | pixels | per filter | `crust:pixelFilterRadius` |
 | [`--indirect-clamp`](#indirect-clamp) | number | scene / 10 | `crust:indirectClamp` |
+| [`--ocio-config`](#ocio-config) | config | builtin ACES CG config | — |
+| [`--working-space`](#working-space) | colour space | scene / `lin_rec709` | `renderingColorSpace` |
+| [`--display`](#display) | display | `sRGB - Display` | — |
+| [`--view`](#view) | view | `Un-tone-mapped` | — |
 | [`--auto-tx`](#auto-tx) | flag | off | — |
 | [`--scanline`](#scanline) | flag | off (tiles) | — |
 | [`--stats`](#stats) | flag | off | — |
@@ -281,6 +285,60 @@ the clamp off. Overrides
 The clamp removes fireflies but loses energy, so it biases the image. It is the only
 biased default. Use `--indirect-clamp 0` for reference renders and for any measurement
 that has to be unbiased.
+
+## Colour
+
+Crust Render manages colour with [OpenColorIO](https://opencolorio.org) (OCIO): every
+transfer curve, gamut conversion and colour-space name comes from one OCIO config. See
+[Texture colour spaces](@/docs/usd/materials.md#texture-colour-spaces) for what is
+converted from where.
+
+### ocio-config
+
+`--ocio-config <CONFIG>`
+
+The OCIO config to use: a `.ocio` file, an `.ocioz` archive, or a builtin URI such as
+`ocio://studio-config-latest`. The default is the builtin ACES CG config
+`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`. The config must define `raw`, `lin_rec709`,
+`srgb_texture`, `g22_rec709` and `g18_rec709`, as names or aliases; every ACES CG and
+studio config does. A config that can't be loaded, or lacks one of them, is an error.
+
+### working-space
+
+`--working-space <SPACE>`
+
+The scene-linear colour space to render in, by any name or alias of the OCIO config:
+`acescg`, `lin_rec2020`, `lin_rec709`, … Overrides the stage's
+[`renderingColorSpace`](@/docs/usd/render-settings.md#renderingcolorspace). The default,
+when neither names one, is `lin_rec709`. A space that isn't scene-linear, or that the
+config doesn't define, is an error.
+
+```bash
+crust-render -i scene.usda --working-space acescg -o beauty.exr
+```
+
+The EXR is written in the working space, and its header says which (see
+[The EXR files](@/docs/usd/aovs.md#the-exr-files)).
+
+### display
+
+`--display <DISPLAY>`
+
+The OCIO display the PNG preview is encoded for. Default: `sRGB - Display`.
+
+### view
+
+`--view <VIEW>`
+
+The OCIO view the PNG preview is encoded with. The default, `Un-tone-mapped`, clamps to
+`[0, 1]` and applies the display's curve, so the PNG is the EXR, clipped and encoded. An
+ACES output transform such as `"ACES 2.0 - SDR 100 nits (Rec.709)"` tone-maps the whole
+scene-linear range instead. A display or view the config doesn't define is an error,
+reported before the render starts. The EXR is never affected.
+
+```bash
+crust-render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nits (Rec.709)"
+```
 
 ## Textures
 

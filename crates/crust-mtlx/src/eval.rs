@@ -19,7 +19,7 @@
 //! the material.
 
 use super::parse::{Doc, Input, Node, Source};
-use super::value::{Val, arity_of};
+use super::value::{Val, arity_of, convert_color, is_color_type};
 use crate::texture::TextureRef;
 use glam::Vec3A;
 
@@ -1005,23 +1005,25 @@ pub struct Compiler<'a> {
     /// compiled now is displaced by — zero except while `heighttonormal`
     /// compiles the shifted copies of its input.
     uv_shift: [f32; 2],
-    /// What the loader answered per `(file, colorspace)`, so the shifted
-    /// copies of an `image` share the one sampler rather than asking the host
-    /// again.
+    /// What the loader answered per `(file, colorspace)` — the space as
+    /// handed to it — so the shifted copies of an `image`, and two images of
+    /// one file in one effective space, share the one sampler rather than
+    /// asking the host again.
     images: std::collections::HashMap<(String, Option<String>), Option<TextureRef>>,
     /// Nodes currently being compiled, so a cyclic document — which a
     /// hand-edited `.mtlx` can be — terminates as a constant rather than
     /// recursing until the stack runs out.
     active: Vec<String>,
-    /// Resolves an `image` node's `file` input to a sampler.
-    loader: crate::TextureLoader<'a>,
+    /// Resolves an `image` node's `file` input to a sampler, and converts
+    /// authored colours into the working space.
+    host: crate::Host<'a>,
     /// Node categories met that this compiler has no operator for, for one
     /// summary warning instead of one per occurrence.
     pub unsupported: std::collections::BTreeSet<String>,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(doc: &'a Doc, loader: crate::TextureLoader<'a>) -> Compiler<'a> {
+    pub fn new(doc: &'a Doc, host: &crate::Host<'a>) -> Compiler<'a> {
         Compiler {
             doc,
             program: Program::default(),
@@ -1029,7 +1031,7 @@ impl<'a> Compiler<'a> {
             uv_shift: [0.0, 0.0],
             images: std::collections::HashMap::new(),
             active: Vec::new(),
-            loader,
+            host: *host,
             unsupported: Default::default(),
         }
     }
@@ -1133,12 +1135,11 @@ impl<'a> Compiler<'a> {
         let scope = node.graph.clone().unwrap_or_default();
         match &input.source {
             Source::Value(v) => {
-                // Re-arity against the *input's* declared type: a literal
-                // "0.5" on a color3 input must broadcast, which the parser
-                // already arranged, but a literal parsed at another width
-                // should not silently narrow the operator.
-                let _ = arity_of(&input.type_name);
-                self.constant(*v)
+                // A literal "0.5" on a color3 input broadcasts, which the
+                // parser already arranged; a colour is then taken into the
+                // working space.
+                let v = self.managed(node, input, *v);
+                self.constant(v)
             }
             Source::Node { name, output } => self.compile_named(&scope, name, output.as_deref()),
             Source::Graph { graph, output } => match self.doc.graph_output(graph, output) {
@@ -1512,22 +1513,24 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_image(&mut self, node: &Node, arity: u8) -> u32 {
-        let file = node.input("file").and_then(|i| i.text.clone());
-        let space = node.input("file").and_then(|i| i.colorspace.clone());
-        let tex = file.and_then(|f| {
-            let loader = self.loader;
+        let file = node.input("file");
+        // The texels' colour space: the `file` input's effective one, for a
+        // colour image only. A `float` or `vector3` image is data — a mask,
+        // a height, a normal map — whatever the document's default says.
+        let space = file
+            .filter(|_| is_color_type(&node.type_name))
+            .and_then(|f| self.doc.colorspace_of(node, f))
+            .map(str::to_string);
+        let tex = file.and_then(|i| i.text.clone()).and_then(|f| {
+            let loader = self.host.load_texture;
             self.images
                 .entry((f, space))
                 .or_insert_with_key(|(f, s)| loader(f, s.as_deref()))
                 .clone()
         });
-        let fallback = node
-            .input("default")
-            .map(|i| match i.source {
-                Source::Value(v) => v,
-                _ => Val::float(0.5),
-            })
-            .unwrap_or(Val::float(0.5));
+        // The authored `default` is a literal like any other: a colour one is
+        // converted from its own effective space.
+        let fallback = self.literal_of(node, "default").unwrap_or(Val::float(0.5));
         // `tiledimage` scales and offsets the chart before the lookup;
         // `image` samples it as authored.
         let (scale, offset) = if node.category == "tiledimage" {
@@ -1585,15 +1588,41 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// An input's authored literal, when it is one (not a connection).
 impl Compiler<'_> {
+    /// An authored literal `v` of `input` as the program holds it: a
+    /// `color3` / `color4` with an effective colour space converted into the
+    /// working space by the host, anything else as authored.
+    fn managed(&self, node: &Node, input: &Input, v: Val) -> Val {
+        if !is_color_type(&input.type_name) {
+            return v;
+        }
+        match self.doc.colorspace_of(node, input) {
+            Some(space) => convert_color(v, &input.type_name, |rgb| {
+                (self.host.convert_color)(space, rgb)
+            }),
+            None => v,
+        }
+    }
+
+    /// `node`'s input `name` when it is an authored literal (not a
+    /// connection), with the value the program holds for it — converted, for
+    /// a colour. What literal-driven pruning reads, so that it tests exactly
+    /// the value every shading point would have computed.
+    pub(crate) fn literal_of(&self, node: &Node, name: &str) -> Option<Val> {
+        let input = node.input(name)?;
+        match input.source {
+            Source::Value(v) => Some(self.managed(node, input, v)),
+            _ => None,
+        }
+    }
+
     /// An input the lookup needs as a compile-time constant: the literal, or
     /// a connection that folds to one (`convert(8.0)` is how documents feed a
     /// `tiledimage`'s `uvtiling`). One that varies over the surface cannot be
     /// baked into the texture op, so it takes `default` and is reported —
     /// never silently.
     fn static_input(&mut self, node: &Node, name: &str, default: Val) -> Val {
-        if let Some(v) = literal_of(node, name) {
+        if let Some(v) = self.literal_of(node, name) {
             return v;
         }
         if node.input(name).is_none() {
@@ -1623,16 +1652,10 @@ fn is_default_chart(node: &Node) -> bool {
     }
 }
 
-fn literal_of(node: &Node, name: &str) -> Option<Val> {
-    match node.input(name)?.source {
-        Source::Value(v) => Some(v),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Host;
 
     fn no_textures(_: &str, _: Option<&str>) -> Option<TextureRef> {
         None
@@ -1641,7 +1664,7 @@ mod tests {
     fn run(doc_text: &str, node: &str) -> Val {
         let doc = Doc::parse(doc_text).unwrap();
         let loader = no_textures;
-        let mut c = Compiler::new(&doc, &loader);
+        let mut c = Compiler::new(&doc, &Host::new(&loader));
         let slot = c.compile_named("", node, None);
         let mut slots = Vec::new();
         c.program.eval(
@@ -1913,7 +1936,7 @@ mod tests {
         let loader = move |_: &str, _: Option<&str>| {
             Some(TextureRef(std::sync::Arc::new(Ramp { slope_u, slope_v })))
         };
-        let mut c = Compiler::new(&doc, &loader);
+        let mut c = Compiler::new(&doc, &Host::new(&loader));
         let slot = c.compile_named("", node, None);
         let mut slots = Vec::new();
         let ctx = ShadeCtx {
@@ -1971,7 +1994,7 @@ mod tests {
         let doc = Doc::parse(doc).unwrap();
         let loader =
             move |_: &str, _: Option<&str>| Some(TextureRef(std::sync::Arc::new(tex.clone())));
-        let mut c = Compiler::new(&doc, &loader);
+        let mut c = Compiler::new(&doc, &Host::new(&loader));
         let slot = c.compile_named("", node, None);
         let mut slots = Vec::new();
         let ctx = ShadeCtx {
@@ -2130,7 +2153,7 @@ mod tests {
                 slope_v: 0.0,
             })))
         };
-        let mut c = Compiler::new(&doc, &loader);
+        let mut c = Compiler::new(&doc, &Host::new(&loader));
         c.compile_named("", "n", None);
         c.compile_named("", "h", None);
         assert_eq!(calls.get(), 1);

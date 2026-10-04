@@ -41,10 +41,10 @@ fn renderman_displacement_offsets_are_disp_amount_times_the_texel() {
     assert_eq!(scene.stats.displacement.at_cage, 1);
 
     let tex = assets
-        .load_ptex(&root.join("textures/quad_f32.ptx"), ColorSpace::Raw)
+        .load_ptex(&root.join("textures/quad_f32.ptx"), ColorSpace::RAW)
         .expect("the fixture opens");
     let colour = assets
-        .load_ptex(&root.join("textures/quad_f32.ptx"), ColorSpace::Gamma22)
+        .load_ptex(&root.join("textures/quad_f32.ptx"), ColorSpace::GAMMA22)
         .expect("the fixture opens");
     // (x, z) of each cage vertex, its owner face and corner in that face.
     let vertices = [
@@ -210,10 +210,10 @@ fn a_pxr_blend_multiply_of_two_ptex_maps_displaces() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/textures");
     let top = assets
-        .load_ptex(&root.join("quad_f32.ptx"), ColorSpace::Raw)
+        .load_ptex(&root.join("quad_f32.ptx"), ColorSpace::RAW)
         .unwrap();
     let mask = assets
-        .load_ptex(&root.join("quad_u8.ptx"), ColorSpace::Raw)
+        .load_ptex(&root.join("quad_u8.ptx"), ColorSpace::RAW)
         .unwrap();
     let remap = DispRemap::DepthHeight {
         center: 0.5,

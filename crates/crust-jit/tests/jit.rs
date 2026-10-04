@@ -3,7 +3,7 @@
 
 use crust_jit::JitProgram;
 use crust_mtlx::{
-    BinOp, Compiled, Doc, Op, Program, ShadeCtx, Texture, TextureRef, UnOp, Val, compile,
+    BinOp, Compiled, Doc, Host, Op, Program, ShadeCtx, Texture, TextureRef, UnOp, Val, compile,
 };
 use glam::Vec3A;
 use std::path::{Path, PathBuf};
@@ -74,9 +74,9 @@ fn same(program: &Program, what: &str) -> (usize, usize) {
 fn check_file(path: &Path) {
     let doc = Doc::open(path).unwrap();
     for node in doc.by_category("surfacematerial") {
-        let c: Compiled = compile(path, Some(&node.name), &procedural).unwrap();
+        let c: Compiled = compile(path, Some(&node.name), &Host::new(&procedural)).unwrap();
         same(&c.program, &format!("{} (compiled)", node.name));
-        let mut o: Compiled = compile(path, Some(&node.name), &procedural).unwrap();
+        let mut o: Compiled = compile(path, Some(&node.name), &Host::new(&procedural)).unwrap();
         o.optimize();
         let (inline, host) = same(&o.program, &format!("{} (optimised)", node.name));
         assert_eq!(inline + host, o.program.ops.len());
@@ -280,7 +280,7 @@ fn programs_can_be_built_and_dropped_repeatedly() {
     // Each program owns and frees its code; a survivor must keep working
     // while others are compiled and freed around it.
     let path = repo().join("samples/materialx_basic.mtlx");
-    let mut c: Compiled = compile(&path, None, &procedural).unwrap();
+    let mut c: Compiled = compile(&path, None, &Host::new(&procedural)).unwrap();
     c.optimize();
     let survivor = JitProgram::new(&c.program).unwrap();
     let ctx = shading_points()[11];

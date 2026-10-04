@@ -201,9 +201,14 @@ than fits. Production renderers stream behind a bounded cache, so memory tracks 
 
 **Decision.** Every colour input is converted to linear light once, at import or load
 time, and the colour space each input is assumed to be in is documented. The conversions
-are OpenColorIO's: Crust Render works in `lin_rec709`, and every transfer curve and
-colour-space name comes from the builtin ACES CG config
-(`cg-config-v4.0.0_aces-v2.0_ocio-v2.5`), read by a pure-Rust port of OpenColorIO. When Crust Render
+are OpenColorIO's: every transfer curve, gamut conversion and colour-space name comes from
+one OCIO config (the builtin ACES CG config unless
+[`--ocio-config`](@/docs/reference/command-line.md#ocio-config) names another), read by a
+pure-Rust port of OpenColorIO. Crust Render renders in a scene-linear working space —
+`lin_rec709` by default, ACEScg or another wide gamut when
+[`renderingColorSpace`](@/docs/usd/render-settings.md#renderingcolorspace) asks — and a
+colour that names its space is converted into it, while one that names none is taken as
+already in it. When Crust Render
 can't do something correctly, it refuses it and says so, rather than rendering something
 plausible but wrong:
 

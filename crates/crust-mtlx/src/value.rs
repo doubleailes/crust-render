@@ -211,6 +211,36 @@ pub fn arity_of(type_name: &str) -> u8 {
     }
 }
 
+/// Whether MaterialX colour-manages a value of `type_name`. Only colours
+/// are: a `colorspace` reaching a `float` or `vector*` is ignored, which is
+/// what keeps a roughness map or a normal map from being "converted".
+pub fn is_color_type(type_name: &str) -> bool {
+    matches!(type_name, "color3" | "color4")
+}
+
+/// `v`, a `color3` / `color4` literal of `type_name`, with its RGB taken
+/// through `convert`; alpha is never converted. A broadcast scalar (`"0.5"`
+/// on a colour input) widens to the type's lanes only if the conversion
+/// actually changed it — an RGB the converter hands back unchanged returns
+/// `v` itself, so an identity conversion is exact to the bit and the width.
+pub fn convert_color(v: Val, type_name: &str, convert: impl FnOnce([f32; 3]) -> [f32; 3]) -> Val {
+    let rgb = v.rgb().to_array();
+    let out = convert(rgb);
+    if out == rgb {
+        return v;
+    }
+    Val {
+        // A broadcast's lanes all hold the scalar, so `v[3]` is its alpha
+        // either way.
+        v: [out[0], out[1], out[2], v.v[3]],
+        arity: if v.arity == 1 {
+            arity_of(type_name)
+        } else {
+            v.arity
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -109,14 +109,6 @@ pub(super) fn import_render_products(stage: &Stage) -> RenderProducts {
         };
     }
     warn_unhonoured(&prim_at(stage, path.clone()));
-    if let Some(space) = custom_token(&prim_at(stage, path.clone()), "renderingColorSpace")
-        && !is_rec709_linear(&space)
-    {
-        warn!(
-            "{path}: renderingColorSpace = {space:?} is not honoured: crust renders in \
-             linear Rec.709 and tags its EXRs lin_rec709_scene"
-        );
-    }
 
     let mut out = RenderProducts {
         request: AovRequest::default(),
@@ -248,12 +240,6 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
         || "the default resolution".to_owned(),
         |(w, h)| format!("{w}x{h}"),
     )
-}
-
-/// Whether a `renderingColorSpace` names crust's own rendering space.
-fn is_rec709_linear(space: &str) -> bool {
-    let s = space.to_ascii_lowercase();
-    s.is_empty() || (s.contains("lin") && (s.contains("rec709") || s.contains("srgb")))
 }
 
 /// `RenderSettingsBase` attributes crust does not honour, warned about only

@@ -207,6 +207,24 @@
   and crust-core evaluates what it describes: `closure/` collapses the tree at
   a vertex and shades its leaves, `materialx.rs` is the `Material` and the
   importer-facing `load()`.
+  - **Colour spaces follow the specification.** crust-mtlx resolves each
+    input's effective `colorspace` (input → node → nodegraph → document; an
+    explicit empty value means "no conversion", as MaterialX's
+    `getActiveColorSpace` does) and manages only `color3` / `color4` values.
+    An `image` / `tiledimage` with a colour output hands its `file`'s effective
+    space to the host's texture loader; a data image (`float`, `vector*`) is
+    handed `None` whatever the document declares, so masks, heights and normal
+    maps are never converted. Every authored colour literal — an image's
+    authored colour `default` included — goes once, at compile time, through
+    the host's `ColorConverter` (`crust_mtlx::Host::convert_color`), which
+    crust-core implements with OCIO into the working space; RGB is converted,
+    alpha kept. Nodedef defaults, and colours no scope declares a space for,
+    are taken as already in the working space. Literal-zero pruning tests the
+    *converted* value, so it stays exact under any conversion; `authored_away`
+    still compares the authored value with the nodedef default, since it asks
+    whether the author changed it. A document whose root declares
+    `colorspace="lin_rec709"` (the Material Fidelity suite's) converts nothing
+    in a `lin_rec709` render. See `docs/color_management.md`.
   - **Compiled once, not walked per hit.** A look-dev graph must be evaluated
     per shading point — its textures and masks are the point — but the teapot's
     ceramic graph is ~50 nodes run at every path vertex (once, since

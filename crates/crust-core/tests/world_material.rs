@@ -989,8 +989,12 @@ fn material_node_of_takes_the_path_leaf() {
 
 #[test]
 fn loading_the_sample_builds_a_material_that_shades() {
-    let loaded =
-        materialx::load(&sample_mtlx(), Some("mtlx_ceramic"), &|_, _| None).expect("loads");
+    let loaded = materialx::load(
+        &sample_mtlx(),
+        Some("mtlx_ceramic"),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .expect("loads");
     assert_eq!(loaded.material.name, "mtlx_ceramic");
     assert_eq!(loaded.textures, 0);
     assert!(loaded.unsupported.is_empty());
@@ -1033,7 +1037,12 @@ fn loading_the_sample_builds_a_material_that_shades() {
 
 #[test]
 fn the_sample_metal_has_a_live_conductor_leaf() {
-    let loaded = materialx::load(&sample_mtlx(), Some("mtlx_metal"), &|_, _| None).expect("loads");
+    let loaded = materialx::load(
+        &sample_mtlx(),
+        Some("mtlx_metal"),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .expect("loads");
     let (r_in, rec) = upward_hit();
     let probe = loaded.material.probe(&r_in, &rec);
     let metal = probe
@@ -1051,11 +1060,22 @@ fn the_sample_metal_has_a_live_conductor_leaf() {
 
 #[test]
 fn a_missing_mtlx_material_is_an_error() {
-    let err = materialx::load(&sample_mtlx(), Some("nothing_here"), &|_, _| None)
-        .err()
-        .expect("error");
+    let err = materialx::load(
+        &sample_mtlx(),
+        Some("nothing_here"),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .err()
+    .expect("error");
     assert!(err.to_string().contains("nothing_here"));
-    assert!(materialx::load(std::path::Path::new("/no/such.mtlx"), None, &|_, _| None).is_err());
+    assert!(
+        materialx::load(
+            std::path::Path::new("/no/such.mtlx"),
+            None,
+            &crust_core::mtlx::Host::new(&|_, _| None)
+        )
+        .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,10 +1268,9 @@ fn an_hdr_texture_drives_emission_above_one() {
            </surface>"#,
     );
     let hdr = Vec3A::new(16.0, 8.0, 4.0);
-    let loaded = materialx::load(&path, Some("emitter"), &|_, _| {
-        Some(crust_core::TextureRef(Arc::new(HdrTexture(hdr))))
-    })
-    .expect("loads");
+    let load = |_: &str, _: Option<&str>| Some(crust_core::TextureRef(Arc::new(HdrTexture(hdr))));
+    let loaded = materialx::load(&path, Some("emitter"), &crust_core::mtlx::Host::new(&load))
+        .expect("loads");
     assert_eq!(loaded.textures, 1);
     assert!(loaded.unsupported.is_empty(), "{:?}", loaded.unsupported);
 
@@ -1285,7 +1304,12 @@ fn a_materialx_emitter_is_not_a_light_list_radiance() {
              <input name="edf" type="EDF" nodename="e" />
            </surface>"#,
     );
-    let loaded = materialx::load(&path, Some("emitter"), &|_, _| None).expect("loads");
+    let loaded = materialx::load(
+        &path,
+        Some("emitter"),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .expect("loads");
     let (r_in, rec) = upward_hit();
     assert_eq!(loaded.material.emitted(), Vec3A::ZERO);
     assert!((loaded.material.emitted_at(&r_in, &rec, 1.0) - Vec3A::splat(5.0)).length() < 1e-5);
@@ -1298,8 +1322,12 @@ fn a_materialx_emitter_is_not_a_light_list_radiance() {
 /// surface hit, on every render, to be told the answer is nothing.
 #[test]
 fn a_non_emissive_mtlx_material_emits_nothing_at_a_hit() {
-    let loaded =
-        materialx::load(&sample_mtlx(), Some("mtlx_ceramic"), &|_, _| None).expect("loads");
+    let loaded = materialx::load(
+        &sample_mtlx(),
+        Some("mtlx_ceramic"),
+        &crust_core::mtlx::Host::new(&|_, _| None),
+    )
+    .expect("loads");
     let (r_in, rec) = upward_hit();
     assert_eq!(loaded.material.emitted_at(&r_in, &rec, 1.0), Vec3A::ZERO);
     assert!(loaded.summary.contains("0 emission"));

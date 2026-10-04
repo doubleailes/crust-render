@@ -11,14 +11,17 @@ value-dependent, the error is not a brightness offset but a nonlinear
 redistribution that no exposure correction can undo.
 
 This document records, per input, what colour space it is assumed to be
-authored in and what conversion is actually applied. It exists because the
-answer is currently **not uniform** and not enforced anywhere — see
-[Known gaps](#known-gaps).
+authored in, what conversion is actually applied, and how the result reaches
+the working space the renderer does its arithmetic in. The rule is uniform
+(see [What is converted](#what-is-converted-one-rule)); what it does not yet
+enforce is listed under [Known gaps](#known-gaps).
 
 ## The invariant
 
-> Every colour-valued input is converted to linear at **import or asset-load
-> time**, once, before it reaches any shading, lighting, or transport code.
+> Every colour-valued input is converted to linear light in the **working
+> space** at **import or asset-load time**, once — or, for a byte texture, its
+> curve at load and its change of primaries once per lookup — before it
+> reaches any shading, lighting, or transport code.
 > Scalar (non-colour) inputs are never transfer-converted. The only
 > re-encoding happens on output, when writing the preview PNG.
 
@@ -35,42 +38,124 @@ in the host (`crates/crust-assets`), reached through `AssetLoader`. The
 `eval` are linear, not
 display-encoded, so the host must have decoded them already.
 
-## OpenColorIO supplies every curve
+## OpenColorIO and the working space
 
-Every transfer curve and every colour-space name comes from one OpenColorIO
-config, through [`ocio`](https://github.com/doubleailes/ocio-rs) — a pure-Rust
-port of OpenColorIO, with no `unsafe` — in `crust-core/src/color.rs`:
+Every transfer curve, every gamut conversion and every colour-space name comes
+from one OpenColorIO config, through [`ocio`](https://github.com/doubleailes/ocio-rs)
+— a pure-Rust port of OpenColorIO, with no `unsafe` — in `crust-core/src/color.rs`:
 
 - **The config** is the builtin ACES CG config, named by its full version
-  (`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`, `color::CONFIG_URI`) so an
-  `ocio` bump that ships a newer one cannot move a render on its own.
-- **The working space** is `lin_rec709` (`color::WORKING_SPACE`). A decode is
-  the OCIO processor from the authored space to it; an encode is the inverse.
-- **Names resolve through the config's aliases**, case-insensitively, so a
-  MaterialX `colorspace` may name a space by any of them —
-  `Utility - sRGB - Texture`, `srgb_rec709_scene`, `g22_rec709_tx` — and still
-  get the same curve (`ResolvedColorSpace::from_ocio_name`). `srgb`, which
-  older documents use and the config does not list, is kept as a spelling of
-  `srgb_texture`.
-- **Byte-stored textures never run a processor per texel.** They meet the
-  curve through two tables built once per open from the processor: the
-  256-entry decode table and the 255 code steps that re-encode a mip level
-  (`TransferCurve` in `crust-assets/src/lib.rs`). Everything else converts in
-  batches (`decode_slice`), which costs about what the `powf` it replaced did.
+  (`ocio://cg-config-v4.0.0_aces-v2.0_ocio-v2.5`, `color::DEFAULT_CONFIG`) so an
+  `ocio` bump that ships a newer one cannot move a render on its own. The host
+  may install another before the first colour is converted (`--ocio-config`,
+  `color::use_config`); it must define `raw`, `lin_rec709`, `srgb_texture`,
+  `g22_rec709` and `g18_rec709` (the five well-known `Space`s), which every
+  ACES config does as aliases.
+- **The working space** is the scene-linear space light transport happens in:
+  `lin_rec709` unless `RenderSettings.renderingColorSpace` or the host
+  (`--working-space`, `UsdImportOptions::working_space`) names another —
+  ACEScg, linear Rec.2020, … It is not a global: every texture request
+  (`ColorSpace`) carries the working space it converts *to*, the importer
+  holds it in `ImportCaches::working`, and the `Scene` reports it
+  (`Scene::working_space`) for the outputs.
+- **Spaces are interned** (`color::Space`, `Copy` and hashable): any name or
+  alias, in any case, of one space is one id. `srgb`, which older MaterialX
+  documents use and the config does not list, is kept as `srgb_texture`.
 
-Two choices are crust's, not the config's:
+### What is converted: one rule
 
-- **Only four spaces bind a texture**: `srgb_texture`, `g22_rec709`,
-  `g18_rec709` and `raw` (`ResolvedColorSpace`). Each is a per-channel curve
-  on Rec.709 primaries, which is what a one-byte-per-channel texture decoded
-  through a table can express. A name the config knows on *other* primaries
-  (`acescg`, `g22_ap1`, `adobergb`, …) still binds raw, as it did before OCIO
-  resolved the names: converting its gamut needs texels stored after the
-  conversion, not a per-channel table.
-- **Encoded values below zero decode to zero.** The config's power-law spaces
-  pass negatives through (`style: pass_thru`); crust has always clamped them,
-  since a display-encoded value below black means nothing and an albedo must
-  not go negative. Raw data is never clamped — a height may be negative.
+> A value that **names** its colour space is converted from it into the
+> working space. A value that names **none** is taken as already in the
+> working space. **Data** (the config's `Raw`) is never converted.
+
+That is what MaterialX specifies for a document with no `colorspace`, what
+UsdLux says of `inputs:color` ("in the rendering color space"), and what Karma
+and other OCIO renderers do. The places a value names its space:
+
+| Source | Named by |
+| --- | --- |
+| MaterialX `color3` / `color4` literal, and an `image` with a colour output | the effective `colorspace`: input, else node, else node graph, else document (crust-mtlx, `Doc::colorspace_of`); a data image (`float`, `vector*`) is never converted |
+| USD colour attribute (light `inputs:color`, `focusTint`, preview `diffuseColor` / `emissiveColor`, `crust:openpbr` colours, `crust:volume:*`) | the attribute's `colorSpace` metadatum (`usd_import/attrs.rs`, `in_working`) |
+| `UsdUVTexture` | `colorSpace` on `inputs:file`, else `sourceColorSpace` (`sRGB` → `srgb_texture`, `auto` → the format rule) |
+| Dome / `RectLight` image | `colorSpace` on `texture:file`, else `auto`: an 8-bit image is `srgb_texture`, a float one already in the working space |
+| `PxrDisneyBsdf.baseColor`, colour Ptex | `g22_rec709`, the island convention (below), unless metadata says otherwise |
+| Colour temperature | the blackbody is computed in `lin_rec709` and converted |
+
+A `lin_rec709` render of a scene that names nothing but sRGB textures is
+therefore exactly what it was before the working space existed: every
+conversion it meets is a curve on its own primaries.
+
+### A conversion is a curve and a matrix
+
+Every texture space an OCIO config defines is a per-channel transfer curve
+followed by a 3x3 change of primaries, and the *optimised* OCIO processor says
+so: a run of per-channel ops (`Exponent`, `ExponentWithLinear`, `LogCamera`,
+…) and at most one trailing `Matrix`. `color::Conversion` keeps the two apart
+(`color::build`): the matrix is taken exactly, in `f64`, from the processor's
+group transform, and the curve is an OCIO processor of the remaining ops,
+checked to have no channel crosstalk. A conversion of any other shape — a 3D
+LUT, a matrix *before* the curve — is refused once, with a warning, and the
+values are used as stored. `curve_then_matrix_is_the_ocio_processor` pins the
+split against the whole processor for every texture space of the ACES config,
+into both `lin_rec709` and ACEScg.
+
+The split is what lets a **byte texture keep its byte storage**. The 256-entry
+decode table is the curve alone, in the file's own primaries; the matrix is
+applied once per lookup, *after* filtering — a linear map commutes with the
+area-weighted average, so a mip level reduced in the source's linear light is
+the same light in any working space. So:
+
+| Payload | Curve | Matrix |
+| --- | --- | --- |
+| preloaded `u8` UV texture | decode table | per lookup (`UvTexture::gamut`) |
+| streamed `.tx`, TIFF (`u8`) or EXR (`half`) backing | table / at conversion | per lookup (`StreamingTexture::gamut`) |
+| preloaded float UV texture (EXR) | at load | at load — stored in the working space |
+| Ptex, preloaded | at load | at load, per texel |
+| Ptex, streamed | table (`u8`) / per texel | per texel |
+| environment map, `RectLight` image | at load | at load |
+| constant colour | at import | at import |
+
+Every path applies the matrix through one function,
+`color::apply_gamut` (`crust_assets::to_working` for an RGBA lookup), so the
+pinned equalities hold off the working primaries too: streamed and preloaded
+`.tx` agree bit for bit in ACEScg (`a_streamed_tx_matches_the_preloaded_texture_in_acescg`),
+and so do streamed and preloaded Ptex (`streamed_and_preloaded_agree_in_acescg`).
+A `.tx` records only its *source* space (`crust:mipspace=`), since its levels
+depend on the curve and not on the working space it is later bound into.
+
+**Byte textures never run a processor per texel.** Besides the decode table,
+the mip re-encode is a table too: the 255 code steps (`TransferCurve`, in
+`crust-assets/src/lib.rs`). Everything else converts in batches
+(`decode_rgb_slice`), which costs about what the `powf` it replaced did.
+
+### crust's two clamps
+
+- **Encoded values below zero decode to zero** before a curve. The config's
+  power-law spaces pass negatives through (`style: pass_thru`); crust has
+  always clamped them, since a display-encoded value below black means
+  nothing. Raw data is never clamped — a height may be negative — and a curve
+  is free to produce a negative (ACEScct's lowest codes do).
+- **A change of primaries clamps its result at zero.** A colour outside the
+  working gamut — saturated AP1 red rendered in Rec.709 — comes out with a
+  negative component, which as a reflectance or an emission is not a colour.
+  A conversion with no matrix is untouched by this clamp.
+
+### The outputs
+
+The `Buffer` is in the working space, and the outputs say so:
+
+- **EXR** — every RenderProduct carries `colorInteropID`, the working space's
+  ASWF Color Interop ID (`lin_rec709_scene`, `lin_ap1_scene`, …;
+  `color::Space::interop_id`). Off Rec.709 it also carries `chromaticities`,
+  looked up by that ID (`color::chromaticities`), and so does the single
+  beauty EXR written without products. An EXR without `chromaticities` *is*
+  Rec.709 by the format's definition, which is why a `lin_rec709` beauty is
+  still byte-identical to the one `write_rgb_file` wrote.
+- **PNG** — encoded through the config's display / view
+  (`color::encode_preview`): `sRGB - Display` / `Un-tone-mapped` by default,
+  a clamp to `[0, 1]` and the display's curve, so the preview is the EXR
+  clipped. `--display` / `--view` pick another; an ACES output transform
+  (`ACES 2.0 - SDR 100 nits (Rec.709)`) maps the whole scene-linear range.
 
 ## Three transfer curves, deliberately
 
@@ -79,7 +164,7 @@ There are three decode curves in use, and they are not interchangeable:
 | Curve | OCIO space | Formula | Where |
 | --- | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `srgb_texture` | `c ≤ 0.03929 ? c/12.923 : ((c+0.055)/1.055)^2.4` | LDR environment images and `RectLight` textures (`crust-assets/src/environment.rs`, `decode_image_pixels`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `g22_rec709` | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice` / `decode_ptex_rgb` under `ColorSpace::Gamma22`, shared by both Ptex backends); UV textures tagged `g22_rec709` |
+| **Flat gamma 2.2** | `g22_rec709` | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice` / `decode_ptex_rgb` under `Space::G22_REC709`, shared by both Ptex backends); UV textures tagged `g22_rec709` |
 | **Flat gamma 1.8** | `g18_rec709` | `max(c,0)^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/lib.rs`, `TransferCurve::to_linear_table`) |
 
 OCIO's sRGB toe differs from IEC 61966-2-1's rounded constants: it derives the
@@ -142,30 +227,31 @@ takes the texture's `sourceColorSpace` instead (see the textures table).
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `UsdPreviewSurface.diffuseColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** | ⚠️ **bug** — see [Known gaps](#known-gaps) |
-| `UsdPreviewSurface.emissiveColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** | ⚠️ **bug** — same |
-| `PxrDisneyBsdf.baseColor` | `usd_import/materials.rs`, `disney_to_openpbr` | flat 2.2 | ✅ intentional (island `PxrColorCorrect`) |
-| `crust:openpbr` — all 7 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** | ✅ intentional — native format is linear-authored |
+| `UsdPreviewSurface.diffuseColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | **none** unless `colorSpace` metadata names a space | ⚠️ see [Known gaps](#known-gaps) #1 |
+| `UsdPreviewSurface.emissiveColor` | `usd_import/preview.rs`, `preview_surface_openpbr` | same | ⚠️ same |
+| `PxrDisneyBsdf.baseColor` | `usd_import/materials.rs`, `disney_to_openpbr` | `g22_rec709` → working (or its `colorSpace`) | ✅ intentional (island `PxrColorCorrect`) |
+| `crust:openpbr` — all 8 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** unless `colorSpace` metadata names a space | ✅ intentional — native format is authored in the working space |
+| `crust:openpbr` `subsurfaceRadiusScale` | same | never — a per-channel radius multiplier, not a colour | ✅ |
 | MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_walk` | whatever the feeding node declares | ✅ correct per MaterialX |
-| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/surface.rs` / `bsdf.rs`, through the compiler | **none**: the value as authored | ⚠️ correct only for `lin_rec709` documents — see [Known gaps](#known-gaps) #4 |
-| same, fed by an `image` | `crust-assets/src/uv_texture/` | the `image`'s own `colorspace`, as for any texture | ✅ correct per MaterialX |
+| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/eval.rs`, at compile time through `Host::convert_color` | the effective `colorspace` → working; none when no scope declares one | ✅ correct per MaterialX |
+| same, fed by an `image` | `crust-assets/src/uv_texture/` | the `file`'s effective `colorspace` → working, as for any texture | ✅ correct per MaterialX |
 
-[^1]: `baseColor`, `specularColor`, `transmissionColor`, `subsurfaceColor`,
-`fuzzColor`, `coatColor`, `emissionColor` — all via the `c` closure at
-the top of `decode_crust_openpbr` (`usd_import/materials.rs`), which assigns every field.
+[^1]: `baseColor`, `specularColor`, `transmissionColor`, `transmissionScatter`,
+`subsurfaceColor`, `fuzzColor`, `coatColor`, `emissionColor` — all via the `c`
+closure at the top of `decode_crust_openpbr` (`usd_import/materials.rs`), which
+converts through `in_working`; the one non-colour vector goes through `v`.
 
 `crust:openpbr` is crust's own lossless 1:1 mirror of the `OpenPBR` struct, so
-values are authored in the renderer's working space by definition. That makes
-"no conversion" correct — but note it is achieved by *not calling anything*,
-not by a stated decision.
+values are authored in the renderer's working space by definition, and "no
+conversion" is the rule's answer for an attribute that names no space.
 
 **MaterialX emission is a radiance, and the evaluation is colour-space neutral.**
 An `edf`'s colour is light leaving the surface, not a reflectance swatch, so the
 curve question is answered entirely by whatever feeds it: a literal is authored
 in the working space, and an `image` node carries its own `colorspace`
 attribute through `ColorSpace::from_mtlx` exactly as `base_color`'s does — with
-an absent tag meaning **raw**, which is the right answer for the scene-linear
-float file an emission texture usually is. `samples/materialx_emissive.mtlx`
+an absent tag meaning **already in the working space**, which is the right
+answer for the scene-linear float file an emission texture usually is. `samples/materialx_emissive.mtlx`
 leaves it absent on purpose; tagging a Radiance `.hdr` `srgb_texture` would put
 a transfer curve on light. The evaluation itself adds nothing: `MtlxMaterial`
 sums the weighted terms (each factor sanitised per channel, a
@@ -179,15 +265,18 @@ clamp, correctly.
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `inputs:color` (all four lux types[^2]) | `usd_import/lights.rs`, `lux_params`, via `attrs::attr_color3f` | **none** | ✅ correct — see below |
+| `inputs:color` (all lux types[^2]) | `usd_import/lights.rs`, `lux_params`, via `attrs::in_working` | **none** unless `colorSpace` metadata names a space | ✅ correct — see below |
+| colour temperature | `usd_import/lights.rs`, `lux_params` | `blackbody_rgb` (linear Rec.709) → working | ✅ |
+| `inputs:shaping:focusTint` | `usd_import/lights.rs`, `lux_shaping`, via `attrs::custom_color` | as `inputs:color` | ✅ |
 
 [^2]: `UsdLuxDistantLight`, `UsdLuxDomeLight`, `UsdLuxSphereLight`,
 `UsdLuxRectLight` — all four share the one `lux_emission` helper, so there is a
 single place where a light's colour is read.
 
 `UsdLuxLightAPI`'s own schema documentation specifies `inputs:color` as being
-"**in the rendering color space**." For a linear-light-transport renderer that
-*is* linear, so no conversion is the right answer — not an oversight. It is
+"**in the rendering color space**" — crust's working space — so no conversion
+is the right answer, unless the attribute's `colorSpace` metadatum says
+otherwise. It is
 multiplied by `intensity × 2^exposure` (both pure scalars, no colour-space
 implication) into the emission value handed to `DistantLight`/`DomeLight`/
 `Emissive`.
@@ -201,41 +290,51 @@ already-linear tint.
 
 | Input | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| `crust:volume:sigmaS` | `usd_import/volume.rs`, `emit_volume`, via `attrs::custom_color3` | **none** | ✅ correct |
-| `crust:volume:sigmaA` | `usd_import/volume.rs`, `emit_volume` | **none** | ✅ correct |
-| `crust:volume:emission` | `usd_import/volume.rs`, `emit_volume` | **none** | ✅ correct |
+| `crust:volume:sigmaS` | `usd_import/volume.rs`, `emit_volume`, via `attrs::custom_color` | **none** unless `colorSpace` metadata names a space | ✅ correct |
+| `crust:volume:sigmaA` | `usd_import/volume.rs`, `emit_volume` | same | ✅ correct |
+| `crust:volume:emission` | `usd_import/volume.rs`, `emit_volume` | same | ✅ correct |
 
 These are crust-custom attributes (no upstream schema to defer to) holding
 *physical quantities* — scattering and absorption cross-sections, and emitted
 radiance. They are authored directly as numbers, never picked from a colour
 swatch, so there is no display encoding to undo. Same reasoning as
-`crust:openpbr`.
+`crust:openpbr`. They are per-channel quantities all the same, so a
+`colorSpace` metadatum converts them like a colour (and the gamut clamp keeps
+a converted cross-section non-negative).
 
 ### Textures and environment maps
 
+Every row converts into the working space after its curve (the table in
+[A conversion is a curve and a matrix](#a-conversion-is-a-curve-and-a-matrix)
+says where the matrix is applied); in `lin_rec709` every curve below is on the
+working primaries, so there is no matrix.
+
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
-| Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` (`decode_ptex_slice`), requested `Gamma22` by `usd_import/materials.rs` (`material_ptex`) | flat 2.2 | ✅ intentional (island convention) |
+| Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` (`decode_ptex_slice`), requested `g22_rec709` by `usd_import/materials.rs` (`material_ptex`) | flat 2.2 | ✅ intentional (island convention) |
 | Ptex `.ptx` displacement texels (`PxrDisplace` → `PxrPtexture`, `PxrBlend` multiply) | `usd_import/materials.rs` (`pxr_displacement`) requests `Raw` → `crust-assets/src/ptex_texture.rs` / `ptex_stream.rs` (`decode_ptex_slice` / `decode_ptex_rgb`) | none (identity; no clamp, so a float height may be negative) | ✅ correct — a height is data, and `PxrPtexture.linearize` defaults to 0 |
 | UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`TransferCurve::to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |
-| UV texture, any other tag or none | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — normals, roughness and masks are data |
+| UV texture tagged any other OCIO space (`acescg`, `g22_ap1`, `lin_rec2020`, `srgb_displayp3`, …) | `crust-assets/src/uv_texture/` | that space's curve, then its primaries → working | ✅ correct per MaterialX |
+| UV texture, untagged, or a MaterialX data image (`float`, `vector*`) | `crust-assets/src/uv_texture/` | none (pass-through) | ✅ correct — already in the working space, or data (normals, roughness, masks) |
+| `UsdUVTexture` whose `inputs:file` carries `colorSpace` metadata | `usd_import/preview.rs` (`preview_uv_input`) | that space, over `sourceColorSpace` | ✅ the file names its space outright |
 | `UsdUVTexture`, `sourceColorSpace = "sRGB"` | `usd_import/preview.rs` (`preview_uv_input`) → `uv_texture/` | piecewise sRGB | ✅ correct per the node set |
 | `UsdUVTexture`, `sourceColorSpace = "raw"` | same | none (pass-through) | ✅ correct per the node set |
 | `UsdUVTexture`, `auto` or unauthored | same, resolved by `ColorSpace::resolve_auto` at open | piecewise sRGB for 8-bit RGB/RGBA, none otherwise | ✅ the UsdUVTexture rule (Hydra's) — note the default is `auto`, **not** raw as in MaterialX |
 | `UsdUVTexture` feeding `UsdPreviewSurface.inputs:displacement`, `auto` or unauthored | `usd_import/preview.rs` (`preview_displacement` → `preview_uv_input` with `data`) | none (requested `Raw`) | ✅ a height is data, so the 8-bit-RGB-is-sRGB rule does not apply; an explicit `sRGB` still wins |
-| Preloaded `.exr` UV texture | `crust-assets/src/uv_texture/` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit curve is applied once, in `f32`, at load | ✅ stored as linear `f32` — no table, no clip |
+| Preloaded `.exr` UV texture | `crust-assets/src/uv_texture/` (`decode_exr_tile`) | none under `auto`/`raw`; an explicit space is converted once, curve and primaries, in `f32`, at load | ✅ stored as working-space `f32` — no table, no clip |
 | MaterialX emission `image`, untagged | `crust-assets/src/uv_texture/` / `tiled/` | none (pass-through) | ✅ correct — an EDF's colour is radiance, and a float file is scene-linear |
-| LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` (`decode_image_pixels`) | piecewise sRGB | ✅ correct per format |
+| LDR env image (PNG/JPG/…) | `crust-assets/src/environment.rs` (`decode_pixels`) | piecewise sRGB (`auto`) | ✅ correct per format |
 | `.hdr` env image | `crust-assets/src/environment.rs` (`is_hdr`) | none (pass-through) | ✅ correct — HDR is scene-linear |
 | `.exr` env map | `crust-assets/src/environment.rs` | none (pass-through) | ✅ correct — EXR is linear |
+| any env / `RectLight` image whose `texture:file` carries `colorSpace` metadata | `usd_import/lights.rs` (`texture_color_space`) → `decode_pixels` | that space | ✅ |
 | LDR `RectLight` `texture:file` (PNG/JPG/…) | `crust-assets/src/lib.rs` (`load_light_texture` → `read_rgb_image`) | piecewise sRGB | ✅ same decoder as an LDR env image |
 | `.hdr` / `.exr` `RectLight` `texture:file` | same | none (pass-through) | ✅ correct — kept as authored, never narrowed to 8 bits |
 | Streamed `.tx`, TIFF backing (`u8` tiles) | `crust-assets/src/tiled/cache.rs` (`Tile::rgb`) | the tagged curve, per lookup | ✅ same table as the preload path, by construction |
-| Streamed `.tx`, EXR backing (`half` tiles) | — | none (decoded once at conversion) | ✅ correct — the file stores linear samples and records which space they came from |
+| Streamed `.tx`, EXR backing (`half` tiles) | — | none (the curve was applied once at conversion; the primaries are the source's, converted per lookup) | ✅ correct — the file stores linear samples and records which space they came from |
 
-The `is_hdr` branch in `load_image_environment` exists because `image`'s `to_rgb32f`
+The `is_hdr` flag in `decode_image_pixels` exists because `image`'s `to_rgb32f`
 rescales integer formats into `0..1` *without* removing their transfer curve,
 while leaving true HDR values as authored — so the decode must be conditional
 on the format, not applied blanket. Pinned by
@@ -311,11 +410,10 @@ a table too: [`TransferCurve::code_steps`][enc] holds, for each byte, the
 linear value at which the next one begins — OCIO's decode of `(k + 0.5)/255` —
 and `quantize` bisects it. Rounding the inverse curve's output to the nearest
 byte picks the same code wherever it is not on a half-code boundary, and the
-curve never runs per texel (`quantize_is_the_rounded_encode`). The OCIO name of
-each space comes from `ResolvedColorSpace::ocio_name`, matched on the variant,
-so adding a colour space is a compile error there instead of a silent
-fall-through to `Raw`. Every curve takes a `ResolvedColorSpace`, which has no
-`Auto`: `ColorSpace::resolve_auto` is the only way from the requested space to
+curve never runs per texel (`quantize_is_the_rounded_encode`). Both tables are
+the curve alone, so the stored levels are in the file's own primaries whatever
+the working space. Every curve takes a `ResolvedColorSpace`, which has no
+`auto`: `ColorSpace::resolve_auto` is the only way from the requested space to
 one a decoder can apply.
 
 [enc]: ../crates/crust-assets/src/lib.rs
@@ -334,18 +432,20 @@ unenforced, and is exactly how the `UsdPreviewSurface` gap below arose.
 
 ## The output side
 
-The engine produces a linear `Buffer`. The CLI writes it two ways
-(`crust-render/src/main.rs`, the one place that still touches pixels):
+The engine produces a linear `Buffer` in the working space. The CLI writes it
+two ways (`crust-render/src/main.rs`, the one place that still touches pixels;
+[The outputs](#the-outputs) above says how each records its space):
 
 - **`.exr`** — the linear values, unmodified. This is the render output.
-- **`.png`** — tone-mapped: clamp to `[0,1]`, then encode through the OCIO
-  config's `sRGB - Display` with the `Un-tone-mapped` view
-  (`color::encode_preview`, called from `tone_map` in `main.rs`) — the
-  piecewise sRGB curve and nothing else. A preview, not a deliverable.
+- **`.png`** — through the OCIO config's display / view
+  (`color::encode_preview`, called from `tone_map` in `main.rs`): by default
+  `sRGB - Display` with `Un-tone-mapped`, a clamp to `[0,1]` and the piecewise
+  sRGB curve and nothing else. A preview, not a deliverable.
 
-`tone_map` is the *inverse* of the LDR-image decode above: the same curve in
-the forward direction (to within a matrix round trip through the config's
-reference spaces; no 8-bit code differs from `lin_rec709 → srgb_texture`). Comparing renders numerically should
+With the default view, `tone_map` is the *inverse* of the LDR-image decode
+above: the same curve in the forward direction (to within a matrix round trip
+through the config's reference spaces; no 8-bit code differs from
+`lin_rec709 → srgb_texture`). Comparing renders numerically should
 always use the EXR (`examples/exr_diff`), never the PNG, since the PNG has both
 clamped and re-encoded.
 
@@ -367,51 +467,52 @@ and 1 dB in the highlights are different amounts of light.
 
 ## Known gaps
 
-**1. `UsdPreviewSurface` colours are not decoded.** `diffuseColor` and
-`emissiveColor` land in `OpenPBR` raw (`usd_import/preview.rs`, `preview_surface_openpbr`). Values
-authored as DCC colour-picker swatches — the normal case for this schema — are
-therefore used as if already linear, overshooting albedo substantially. Note
-for honesty: the `UsdPreviewSurface` spec itself does **not** mandate a colour
-space for these inputs (its only explicit colour-space note concerns normal
-maps), so treating them as sRGB is a defensible convention rather than a
-standards requirement — but "no conversion at all" is not a defensible reading
-of any convention.
+**1. `UsdPreviewSurface` colours are taken as authored in the working space.**
+`diffuseColor` and `emissiveColor` land in `OpenPBR` unconverted unless their
+attribute carries `colorSpace` metadata (`usd_import/preview.rs`,
+`preview_surface_openpbr`). That is the working-space rule, and USD's own colour
+management agrees with it; but values picked from a DCC swatch without
+metadata — the common case for this schema — are display-encoded, and render
+too bright. The `UsdPreviewSurface` spec does **not** mandate a colour space for
+these inputs, so decoding them as sRGB by default would be a convention, not a
+standards requirement. The OpenSpec change
+`openspec/changes/add-material-color-management/` proposes it.
 
-**2. The abstraction covers assets only, so USD attributes enforce nothing.**
-`ColorSpace` (`crust-core/src/texture.rs`) does exist, and every UV texture
-crossing the `AssetLoader` seam names its space — that is what makes
-`srgb_texture` / `g22_rec709` / `g18_rec709` three distinct decodes. Since the
-move to OpenColorIO there is also only one implementation of each curve
-(`crust-core/src/color.rs`), which USD attribute reads call too
-(`disney_to_openpbr` decodes through `ResolvedColorSpace::Gamma22`). But
-nothing forces a newly added colour attribute to state its source space; the
-default behaviour of adding one is to get gap #1 again, silently.
+**2. Nothing forces a new colour attribute to name its space.** There is one
+implementation of every conversion (`crust-core/src/color.rs`), and the
+importer's colour reads go through `attrs::in_working` / `custom_color`, but a
+newly added colour attribute read through `custom_color3` gets no conversion
+and no compile error. The `RawColor3` newtype of
+`openspec/changes/add-material-color-management/` would make it one.
 
-**3. Per-attribute colour-space authoring is unsupported.** A USD attribute
-carrying an explicit `colorSpace` metadatum is ignored; the curve is chosen by
-shader family, not by what the asset declares. The OCIO config already knows
-USD's names (`lin_rec709_scene`, `srgb_rec709_scene`, `lin_ap1_scene`, … are
-aliases in it), so what is missing is reading the metadatum, and — for a
-space on other primaries — a gamut conversion for constant colours, which
-unlike a texture's needs no change to storage.
+**3. `UsdColorSpaceAPI` is not read.** An attribute's own `colorSpace`
+metadatum is honoured; a colour space *applied to a prim* (`colorSpace:name`)
+and inherited by its descendants' attributes is not. Reading it means walking
+the prim's ancestors per colour attribute, once, at import.
 
-**4. A MaterialX document's `colorspace` is not applied to literal colours.**
-The compiler honours `colorspace` only where it crosses into a texture decode
-(an `image`'s `file`). A literal `color3` value on a surface node, a BSDF leaf
-or a pattern node is used as authored, whatever the document, node-graph or
-input `colorspace` says. The surface-shader builders inherit this unchanged
-(`openspec/changes/add-mtlx-surface-shaders/`), since they read every input
-through the same compiler. It is invisible to the Material Fidelity suite, whose
-documents are `lin_rec709` throughout, so no suite result can catch a mistake
-here; a document authored `colorspace="srgb_texture"` at the root would shade
-too bright.
+**4. Sampling heuristics weigh colours as Rec.709 luminance in every working
+space.** `utils::luminance` hard-codes Rec.709 luma for the hot path (pinned to
+the default config's luma coefficients). Light and lobe selection, Russian
+roulette's companions, the guiding training signal, adaptive sampling and the
+`variance` AOV all use it. In another working space the image stays unbiased —
+every pdf pairs with its own estimate — but noise is distributed by the wrong
+weights, and the `variance` AOV is a Rec.709-weighted statistic of
+working-space colours. Making the weights the working space's means threading
+them through every call site, or a per-render global on the hot path; neither
+is done. `blackbody_rgb`'s own normalisation (`REC709_LUMA`) is computed before
+the conversion and is unaffected.
 
-Gaps #1 and #2 are addressed by the OpenSpec change
-`openspec/changes/add-material-color-management/`, which introduces a
-`ColorSpace { Linear, Srgb, Gamma(f32) }` enum plus a `RawColor3` newtype at
-each of the three attribute-reading primitives (`shader_input_vec3`,
-`attr_color3f`, `custom_color3`) so that *every* colour call site must name its
-space — including the ones whose answer is `Linear`. **Not yet implemented.**
+**5. A conversion that is not a curve and a matrix is refused.** A space whose
+optimised OCIO processor contains a 3D LUT, or a matrix before its curve, is
+used as stored, with one warning per pair. Every texture space of the ACES
+configs has the supported shape; a custom config with LUT-based input
+transforms does not.
+
+**6. A `.tx` is matched to its binding by source space name.** A `.tx`
+converted under `raw` and one converted under `lin_rec709` hold identical
+levels — neither has a curve — but their `crust:mipspace` markers differ, so
+binding one under the other's space declines streaming and preloads instead.
+Safe, not optimal.
 
 ## Diagnosing a suspected colour-space bug
 
