@@ -41,6 +41,7 @@ opensubdiv-rs = { git = "https://github.com/doubleailes/OpenSubdiv-rs", tag = "0
 # The standalone MaterialX reader; `material/materialx.rs` adapts its compiled
 # graphs onto `Material` / `OpenPBR`.
 crust-mtlx = { path = "../crust-mtlx" }
+ocio.workspace = true
 crust-jit = { path = "../crust-jit", optional = true }
 
 [dev-dependencies]

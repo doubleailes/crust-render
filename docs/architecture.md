@@ -23,6 +23,7 @@ graph TD
     usd["openusd + openusd-schemas"]
     ptex["ptex-rs"]
     osd["opensubdiv-rs"]
+    ocio["ocio<br/><i>OpenColorIO port</i>"]
 
     render --> core
     render --> assets
@@ -36,6 +37,7 @@ graph TD
     core --> oqmc
     core --> usd
     core --> osd
+    core --> ocio
 ```
 
 | crate | owns | knows nothing about |
@@ -43,7 +45,7 @@ graph TD
 | `crust-rt` | geometry, SBVH build → BVH4, `intersect` / `occluded`, instancing, motion blur | materials, lights, USD |
 | `crust-mtlx` | `.mtlx` parsing, graph → slot-indexed `Program`, the BSDF closure tree and EDF terms, surface-shader nodes expanded into their nodegraphs | crust types (it defines the `Texture` trait it consumes) |
 | `crust-jit` | compiling a `Program` to machine code, bit-identical to the interpreter | everything but `crust-mtlx` |
-| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, stats/profile | image, texture and IES decoding; UI |
+| `crust-core` | USD import, `Scene`, `Renderer`, integrator, materials, lights, volumes, guiding, colour management (the OCIO config, every transfer curve), stats/profile | image, texture and IES decoding; UI |
 | `crust-assets` | every file decoder (EXR, PNG/HDR, Ptex, IES, `.tx`), the tile caches, `maketx` | the integrator |
 | `crust-render` | argument parsing, logging, progress bar, writing EXR + PNG | decoding anything |
 | `utils` | stateless math: warps, `power_heuristic`, `luminance`, `align_to_normal` | everything |
@@ -126,7 +128,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | lights | `light/` (`shape.rs` and `rect.rs` surfaces, `area.rs`, `infinite.rs` distant + dome, `list.rs` `LightList` and selection), `light_cache.rs` (learned selection), `lux.rs` (UsdLux units, shaping, IES), `environment.rs` (dome map importance sampling) |
 | media | `medium.rs` (carried media: glass/subsurface interiors), `volume.rs` (free-standing volume regions), `subsurface.rs` (MaterialX `subsurface_bsdf` random walk: Chiang remap, channel MIS, Dwivedi guiding, the exit Lambertian) |
 | guiding | `guiding/` — `sdtree.rs`, `dtree.rs`, `field.rs` (Practical Path Guiding) |
-| textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`) |
+| textures | `texture.rs` (`ColorSpace`, texture refs, `PtexTexture`), `color.rs` (the OpenColorIO config, every transfer curve, the preview encode — `docs/color_management.md`) |
 | reporting | `stats.rs` (`--stats`), `profile.rs` (`--profile`), `error.rs` |
 
 ## Invariants that span modules
@@ -161,7 +163,10 @@ other. The pairs:
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.
 - **Colour spaces.** Every colour input states its space; the per-input
-  inventory is `docs/color_management.md`.
+  inventory is `docs/color_management.md`. Every curve is the OCIO config's
+  (`crust-core/src/color.rs`), and the hard-coded Rec.709 weights of the hot
+  `utils::luminance` must equal the config's luma coefficients
+  (`utils_luminance_uses_the_config_luma_coefficients`).
 - **AOVs observe; they never steer.** `trace_path::<_, AOV>` and
   `advance_pixel::<_, AOV>` must return the same radiance and take the same
   draws with `AOV` on and off (`the_beauty_is_bit_identical_with_and_without_aovs`),

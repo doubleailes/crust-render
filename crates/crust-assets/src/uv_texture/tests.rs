@@ -200,7 +200,7 @@ fn reds(level: &[u8]) -> Vec<u8> {
     level.iter().step_by(3).copied().collect()
 }
 
-/// Reduces one row under `Raw`, where the decode table and `encode` are
+/// Reduces one row under `Raw`, where the decode table and the code steps are
 /// the identity and a level is its own u8 values back.
 fn reduce_row(values: &[u8]) -> Vec<u8> {
     let table = ResolvedColorSpace::Raw.to_linear_table();
@@ -209,7 +209,7 @@ fn reduce_row(values: &[u8]) -> Vec<u8> {
         values.len(),
         1,
         &table,
-        ResolvedColorSpace::Raw.encode_fn(),
+        &ResolvedColorSpace::Raw.code_steps(),
     );
     assert_eq!((w, h), (values.len().div_ceil(2), 1));
     reds(&out)
@@ -273,8 +273,8 @@ fn an_even_axis_reduces_exactly_as_it_did() {
     let (sw, sh) = (8usize, 6usize);
     let src: Vec<u8> = (0..sw * sh * 3).map(|i| (i * 7 % 251) as u8).collect();
     let table = ResolvedColorSpace::Srgb.to_linear_table();
-    let encode = ResolvedColorSpace::Srgb.encode_fn();
-    let (got, w, h) = reduce_half(&src, sw, sh, &table, encode);
+    let encode = |l: f32| ResolvedColorSpace::Srgb.encode(l);
+    let (got, w, h) = reduce_half(&src, sw, sh, &table, &ResolvedColorSpace::Srgb.code_steps());
     assert_eq!((w, h), (4, 3));
     for y in 0..h {
         for x in 0..w {
@@ -310,7 +310,7 @@ fn the_two_reducers_agree_on_an_odd_level() {
         sw,
         sh,
         &ResolvedColorSpace::Raw.to_linear_table(),
-        ResolvedColorSpace::Raw.encode_fn(),
+        &ResolvedColorSpace::Raw.code_steps(),
     );
     let (from_f32, lw, lh) = reduce_half_linear(&floats, sw, sh);
     assert_eq!((w, h), (lw, lh), "the two disagree on level size");
@@ -392,7 +392,7 @@ fn an_explicit_curve_on_an_exr_is_applied_once_at_load() {
     let p = dir.join("enc.exr");
     write_exr(&p, 1, 1, |_, _| (0.5, 0.5, 0.5));
     let tex = UvTexture::open_with(&p, ColorSpace::Srgb, false).expect("loads");
-    let want = crate::srgb_to_linear(0.5);
+    let want = ResolvedColorSpace::Srgb.decode(0.5);
     assert!((tex.eval(0.5, 0.5, 0.0)[0] - want).abs() < 1e-6);
 }
 
@@ -447,7 +447,9 @@ fn auto_decodes_an_rgb_png_and_leaves_a_grey_one_raw() {
 
     let t = UvTexture::open(&rgb, ColorSpace::Auto).expect("loads");
     assert_eq!(t.color_space(), ResolvedColorSpace::Srgb);
-    assert!((t.eval(0.5, 0.5, 0.0)[0] - crate::srgb_to_linear(128.0 / 255.0)).abs() < 1e-6);
+    assert!(
+        (t.eval(0.5, 0.5, 0.0)[0] - ResolvedColorSpace::Srgb.decode(128.0 / 255.0)).abs() < 1e-6
+    );
 
     let t = UvTexture::open(&grey, ColorSpace::Auto).expect("loads");
     assert_eq!(t.color_space(), ResolvedColorSpace::Raw);
@@ -528,4 +530,33 @@ fn channel_base_names_match_case_insensitively() {
     );
     let tex = UvTexture::open(&p, ColorSpace::Raw).expect("loads");
     assert_eq!(tex.eval(0.5, 0.5, 0.0), [0.1, 0.2, 0.3, 1.0]);
+}
+
+/// `quantize` over `code_steps` is the re-encode a mip level used to run per
+/// texel — round `encode(mean)` to the nearest byte — as a table. The two
+/// may disagree only where `encode(mean)` sits on a half-code boundary, to
+/// within the round trip of OCIO's forward and inverse curves.
+#[test]
+fn quantize_is_the_rounded_encode() {
+    for space in ResolvedColorSpace::ALL {
+        let steps = space.code_steps();
+        assert!(
+            steps.windows(2).all(|w| w[0] < w[1]),
+            "{space:?} steps rise"
+        );
+        for i in 0..=12_000 {
+            let mean = i as f32 / 10_000.0;
+            let scaled = space.encode(mean) * 255.0;
+            let rounded = (scaled + 0.5).clamp(0.0, 255.0) as u8;
+            let got = crate::quantize(&steps, mean);
+            let on_boundary = (scaled - scaled.floor() - 0.5).abs() < 1e-3;
+            assert!(
+                got == rounded || on_boundary,
+                "{space:?} mean {mean}: {got} vs {rounded}"
+            );
+        }
+        assert_eq!(crate::quantize(&steps, -1.0), 0);
+        assert_eq!(crate::quantize(&steps, f32::NAN), 0);
+        assert_eq!(crate::quantize(&steps, 2.0), 255);
+    }
 }

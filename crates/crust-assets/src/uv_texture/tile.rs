@@ -90,7 +90,8 @@ impl Tile<u8> {
     ///
     /// Each level is a box average of its parent over each new texel's own
     /// footprint — a plain 2x2 whenever both axes are even — computed in
-    /// **linear light** and re-encoded to `u8` through `encode`; averaging
+    /// **linear light** and re-encoded to `u8` through `steps` (see
+    /// [`crate::TransferCurve::code_steps`]); averaging
     /// display-encoded values is not averaging light, and a mip chain built
     /// that way drifts darker at every level. (The `CRUST_TEX_MAX` reduction
     /// in `decode_tile` deliberately does average in the file's encoding, to
@@ -104,14 +105,14 @@ impl Tile<u8> {
     /// domain. Flooring an odd axis drops its last half-texel and the level's
     /// domain slips against level 0's, which shows up as a crawl across mip
     /// transitions on a slow camera move.
-    pub(super) fn build_pyramid(&mut self, to_linear: &[f32; 256], encode: fn(f32) -> f32) {
+    pub(super) fn build_pyramid(&mut self, to_linear: &[f32; 256], steps: &[f32; 255]) {
         loop {
             let src = self.levels.last().expect("a tile always has level 0");
             if src.width <= 1 && src.height <= 1 {
                 break;
             }
             let (pixels, width, height) =
-                reduce_half(&src.pixels, src.width, src.height, to_linear, encode);
+                reduce_half(&src.pixels, src.width, src.height, to_linear, steps);
             self.levels.push(Level {
                 pixels,
                 width,

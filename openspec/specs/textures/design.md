@@ -15,7 +15,8 @@
   `parse_ies` / `load_ies` (IES LM-63 → `crust_core::IesProfile`),
   `PtexColor` (+ `read_channel`, `max_log2_from_env`), `PtexStream` (the
   tile-paging backend behind `CRUST_PTEX_STREAM`), `UvTexture` (UDIM sets,
-  the `CRUST_TEX_MAX` cap) and one `srgb_to_linear`. Everything that knows a
+  the `CRUST_TEX_MAX` cap) and the decode / re-encode tables built from the
+  OCIO curves in `crust_core::color` (`TransferCurve`). Everything that knows a
   file format lives here, so the probe examples decode a texture *exactly* the
   way the renderer does instead of carrying copies (`read_channel` used to
   exist three times). Owns the `CRUST_PTEX`, `CRUST_TEX`, `CRUST_PTEX_MAX_LOG2`,

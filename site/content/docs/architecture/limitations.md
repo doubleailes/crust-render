@@ -72,6 +72,9 @@ render.
   [`CRUST_PTEX_STREAM_MIPSPACE=file`](@/docs/reference/environment-variables.md#crust-ptex-stream-mipspace)
   accepts the file's own, slightly darker, levels. Displacement Ptex is read raw, so its
   stored levels are already correct and it streams.
+- **Texture gamuts aren't converted.** A texture whose colour space has other primaries
+  than Rec.709, such as `acescg` or `g22_ap1`, is read as stored. See
+  [texture colour spaces](@/docs/usd/materials.md#texture-colour-spaces).
 - **Colour Ptex is always decoded by gamma 2.2.** There is no way to declare a colour
   `.ptx` linear, so linear colour Ptex data renders too dark. Ptex read as a displacement
   map is read raw.

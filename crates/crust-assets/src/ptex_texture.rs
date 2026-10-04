@@ -23,7 +23,7 @@
 
 use crate::error::AssetError;
 use crate::mip_filter::{MipSource, Taps, trilinear};
-use crust_core::{ColorSpace, PtexTexture, Vec3A};
+use crust_core::{ColorSpace, PtexTexture, ResolvedColorSpace, Vec3A};
 use std::path::Path;
 
 /// Default per-face resolution cap, as a log2 edge length: 32×32 texels.
@@ -225,12 +225,12 @@ impl PtexColor {
                     // A single-channel (displacement-style) file feeds channel
                     // 0 to all three, so it reads as greyscale rather than red.
                     let c = if ch < n_chan { ch } else { 0 };
-                    let v = read_channel(&src[c * dt.size()..], dt) * scale;
-                    // Done once here rather than per lookup; see
-                    // `decode_ptex` for why colour is decoded by 2.2.
-                    out[i * 3 + ch] = decode_ptex(v, space);
+                    out[i * 3 + ch] = read_channel(&src[c * dt.size()..], dt) * scale;
                 }
             }
+            // Done once here rather than per lookup, a face at a time; see
+            // `decode_ptex_slice` for why colour is decoded by 2.2.
+            decode_ptex_slice(&mut out[..w * h * 3], space);
             // Reduce in memory from the level just decoded, rather than
             // asking the reader for each coarser resolution. The reader takes
             // `&mut self` per read and caches no pixels, so every extra level
@@ -485,15 +485,23 @@ fn reduce_triangle(
 /// colour request asks for ([`ColorSpace::Gamma22`]). A displacement map is
 /// data and asks for [`ColorSpace::Raw`]: no curve and no clamp, since a
 /// `half` / `float` height may be negative. One function for both backends,
-/// so the preloaded and streamed paths cannot drift.
+/// so the preloaded and streamed paths cannot drift. The curve is OCIO's
+/// ([`ResolvedColorSpace::decode_slice`]), which clamps below black for every
+/// space but raw.
+pub(crate) fn decode_ptex_slice(values: &mut [f32], space: ColorSpace) {
+    ptex_space(space).decode_slice(values);
+}
+
+/// [`decode_ptex_slice`] for one texel.
 #[inline]
-pub(crate) fn decode_ptex(v: f32, space: ColorSpace) -> f32 {
-    match space {
-        ColorSpace::Gamma22 => v.max(0.0).powf(2.2),
-        ColorSpace::Gamma18 => v.max(0.0).powf(1.8),
-        ColorSpace::Srgb => crate::srgb_to_linear(v.max(0.0)),
-        ColorSpace::Raw | ColorSpace::Auto => v,
-    }
+pub(crate) fn decode_ptex_rgb(v: Vec3A, space: ColorSpace) -> Vec3A {
+    ptex_space(space).decode_rgb(v)
+}
+
+/// The space a Ptex request decodes from: `Auto` has no file format to
+/// resolve against, so it means raw, as everywhere it goes unresolved.
+fn ptex_space(space: ColorSpace) -> ResolvedColorSpace {
+    space.resolved().unwrap_or(ResolvedColorSpace::Raw)
 }
 
 /// Reads one channel of Ptex data as an unnormalized float.

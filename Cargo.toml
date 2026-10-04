@@ -66,6 +66,13 @@ flate2 = "1.1"
 # payload's size *is* the residency policy. Already in the lock via `exr`
 # (and `ptex-rs`), so naming it here adds no package.
 half = "2.7"
+# Every transfer curve and colour-space name, from a pure-Rust port of
+# OpenColorIO (no `unsafe` in the crate). crust works in `lin_rec709`; the
+# builtin ACES CG config resolves MaterialX / USD colour-space names through
+# its aliases and supplies the curves. Not on crates.io and untagged
+# (doubleailes/ocio-rs#2), so pinned by commit:
+# the committed `Cargo.lock` records it, and a bump is a lock diff in review.
+ocio = { git = "https://github.com/doubleailes/ocio-rs", rev = "c083676e0eae9c5a31e0da2346dae01d050dda7a" }
 
 # The hot loops are spread across crates: the integrator in `crust-core`
 # calls the kernel in `crust-rt`, which calls `glam`'s SIMD vector ops.

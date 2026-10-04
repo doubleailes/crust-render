@@ -252,11 +252,14 @@ fn get_logger_level(level: LoggerLevel) -> Level {
     }
 }
 
-/// Compress a linear f32 into [0,1] and encode it as an sRGB byte, through
-/// the same transfer function the texture decoders invert.
-fn tone_map(linear: f32) -> u8 {
-    let srgb = crust_assets::linear_to_srgb(linear.clamp(0.0, 1.0));
-    (srgb * 255.0 + 0.5).floor() as u8
+/// Compress linear RGB into [0,1] and encode it as sRGB bytes, through OCIO's
+/// sRGB display and un-tone-mapped view ([`crust_core::color::encode_preview`]):
+/// the same piecewise curve the texture decoders invert.
+fn tone_map(rgb: &mut [f32]) -> Vec<u8> {
+    crust_core::color::encode_preview(rgb);
+    rgb.iter()
+        .map(|&c| (c * 255.0 + 0.5).floor() as u8)
+        .collect()
 }
 
 /// Tone-map the render buffer to an sRGB PNG at `path`.
@@ -266,16 +269,18 @@ fn write_png(
     height: usize,
     path: &Path,
 ) -> std::result::Result<(), image::ImageError> {
-    let mut img = image::RgbaImage::new(width as u32, height as u32);
+    let mut rgb = Vec::with_capacity(width * height * 3);
     for y in 0..height {
         for x in 0..width {
             let (r, g, b) = buffer.get_rgb(x, y);
-            img.put_pixel(
-                x as u32,
-                y as u32,
-                image::Rgba([tone_map(r), tone_map(g), tone_map(b), 255]),
-            );
+            rgb.extend_from_slice(&[r, g, b]);
         }
+    }
+    let bytes = tone_map(&mut rgb);
+    let mut img = image::RgbaImage::new(width as u32, height as u32);
+    for (i, &[r, g, b]) in bytes.as_chunks::<3>().0.iter().enumerate() {
+        let (x, y) = (i % width, i / width);
+        img.put_pixel(x as u32, y as u32, image::Rgba([r, g, b, 255]));
     }
     img.save(path)
 }
@@ -888,30 +893,35 @@ mod tests {
         ));
     }
 
+    /// One channel through [`tone_map`].
+    fn tone_map1(linear: f32) -> u8 {
+        tone_map(&mut [linear; 3])[0]
+    }
+
     #[test]
     fn tone_map_anchors_black_and_white() {
-        assert_eq!(tone_map(0.0), 0);
-        assert_eq!(tone_map(1.0), 255);
+        assert_eq!(tone_map1(0.0), 0);
+        assert_eq!(tone_map1(1.0), 255);
         // Out-of-range input clamps rather than wrapping.
-        assert_eq!(tone_map(-3.0), 0);
-        assert_eq!(tone_map(50.0), 255);
-        assert_eq!(tone_map(f32::INFINITY), 255);
+        assert_eq!(tone_map1(-3.0), 0);
+        assert_eq!(tone_map1(50.0), 255);
+        assert_eq!(tone_map1(f32::INFINITY), 255);
     }
 
     #[test]
     fn tone_map_applies_the_srgb_curve() {
         // Linear 0.5 is display 188; linear 0.214 is display ~128.
-        assert_eq!(tone_map(0.5), 188);
-        assert!((tone_map(0.214) as i32 - 128).abs() <= 1);
+        assert_eq!(tone_map1(0.5), 188);
+        assert!((tone_map1(0.214) as i32 - 128).abs() <= 1);
         // The linear toe: 0.001 linear → 12.92 · 0.001 · 255 ≈ 3.3 → 3.
-        assert_eq!(tone_map(0.001), 3);
+        assert_eq!(tone_map1(0.001), 3);
     }
 
     #[test]
     fn tone_map_is_monotone() {
         let mut prev = 0u8;
         for i in 0..=1000 {
-            let v = tone_map(i as f32 / 1000.0);
+            let v = tone_map1(i as f32 / 1000.0);
             assert!(v >= prev, "not monotone at {i}");
             prev = v;
         }

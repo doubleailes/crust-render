@@ -122,12 +122,19 @@ impl ColorSpace {
     /// gamma 1.8 the whole curve is wrong, not just the toe. The primaries in
     /// those names are Rec.709, which is what crust works in already, so only
     /// the curve differs.
+    ///
+    /// Names resolve through the OCIO config ([`crate::color`]), so every
+    /// alias it lists for the three curves is accepted too —
+    /// `Utility - sRGB - Texture`, `g22_rec709_tx`, `srgb_rec709_scene`, … —
+    /// case-insensitively. `srgb`, which older MaterialX documents use and the
+    /// config does not list, is kept as a spelling of `srgb_texture`.
     pub fn from_mtlx(name: Option<&str>) -> ColorSpace {
-        match name.map(str::to_ascii_lowercase).as_deref() {
-            Some("srgb_texture" | "srgb" | "srgb_tx") => ColorSpace::Srgb,
-            Some("g22_rec709") => ColorSpace::Gamma22,
-            Some("g18_rec709") => ColorSpace::Gamma18,
-            _ => ColorSpace::Raw,
+        match name {
+            Some(n) if n.eq_ignore_ascii_case("srgb") => ColorSpace::Srgb,
+            Some(n) => {
+                ResolvedColorSpace::from_ocio_name(n).map_or(ColorSpace::Raw, ColorSpace::from)
+            }
+            None => ColorSpace::Raw,
         }
     }
 

@@ -139,7 +139,7 @@ pub(crate) fn reduce_half(
     sw: usize,
     sh: usize,
     to_linear: &[f32; 256],
-    encode: fn(f32) -> f32,
+    steps: &[f32; 255],
 ) -> (Vec<u8>, usize, usize) {
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
     let (cols, xsum) = axis_taps(sw, w);
@@ -154,7 +154,7 @@ pub(crate) fn reduce_half(
             for k in 0..3 {
                 let at = |xi: usize, yi: usize| to_linear[src[(yi * sw + xi) * 3 + k] as usize];
                 let mean = weighted(row, col, total, at);
-                pixels[o + k] = (encode(mean) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+                pixels[o + k] = crate::quantize(steps, mean);
             }
         }
     }

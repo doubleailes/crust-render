@@ -15,6 +15,7 @@ mod aabb;
 pub mod aov;
 mod buffer;
 mod camera;
+pub mod color;
 pub mod config;
 mod environment;
 mod error;
