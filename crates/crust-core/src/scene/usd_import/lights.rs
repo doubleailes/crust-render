@@ -24,7 +24,7 @@ use crate::material::Emissive;
 use crate::rt_world::WorldBuilder;
 
 use super::attrs::{
-    attr_bool, attr_color_space, attr_color3f, attr_f32, custom_bool, custom_color, custom_f32,
+    attr_bool, attr_color3f, attr_f32, attr_own_color_space, custom_bool, custom_color, custom_f32,
     custom_token, in_working, infinite_light_escape_mask, light_ray_mask,
 };
 use super::materials::asset_value_path;
@@ -465,11 +465,18 @@ pub(super) fn emit_cylinder_light(
     );
 }
 
-/// The colour space a light's image file is decoded from: the space its
-/// `colorSpace` metadatum names, else `auto` — sRGB for an 8-bit image, the
-/// working space for a float one.
+/// The colour space a light's image file is decoded from: the space its own
+/// `colorSpace` metadatum names (not a scope's `colorSpace:name`, which
+/// describes colour values — see `attr_own_color_space`), else `auto` — sRGB
+/// for an 8-bit image, the working space for a float one.
+///
+/// A light's image is radiance, never data, so a `raw` tag means "used as
+/// stored" — already in the working space — and keeps that space: the
+/// environment's importance sampling weighs its texels by the working
+/// space's luminance, which `ColorSpace::RAW` would lose.
 fn texture_color_space(file: &openusd::usd::Attribute, working: Space) -> crate::ColorSpace {
-    match attr_color_space(file) {
+    match attr_own_color_space(file) {
+        Some(space) if space.is_data() => crate::ColorSpace::new(working, working),
         Some(space) => crate::ColorSpace::new(space, working),
         None => crate::ColorSpace::AUTO.into_working(working),
     }

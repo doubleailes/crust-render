@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use crate::color::Space;
 use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
 
-use super::attrs::{attr_color_space, custom_f32, in_working};
+use super::attrs::{attr_own_color_space, custom_f32, in_working};
 use super::preview::{preview_displacement, preview_surface_material};
 use super::time::eval_time;
 use super::{ImportCaches, prim_at};
@@ -650,10 +650,12 @@ fn disney_to_openpbr(
     // `g22_rec709` — the plain power law, not the piecewise sRGB curve: it is
     // what that node applies, and matching the island's reference render
     // matters more here than matching the standard. A `colorSpace` metadatum
-    // on the input names another space instead.
+    // on the input itself names another space instead; a scope's
+    // `colorSpace:name` does not, since it describes linear colour values and
+    // this one is display-encoded by convention.
     if let Some(rgb) = c("inputs:baseColor") {
         let source =
-            attr_color_space(&prim.attribute("inputs:baseColor")).unwrap_or(Space::G22_REC709);
+            attr_own_color_space(&prim.attribute("inputs:baseColor")).unwrap_or(Space::G22_REC709);
         o.base_color = crate::color::convert(rgb, source, caches.working);
     }
     if let Some(v) = f("inputs:metallic") {

@@ -310,6 +310,26 @@ impl Backend for ExrFile {
 /// backing has to do it.
 pub(crate) const MIP_SPACE_KEY: &str = "crust:mipspace";
 
+/// The space an EXR's `crust:mipspace` attribute records, read from its header
+/// alone — for the preload path, which must bind a marked file exactly as the
+/// streaming path does (see `resolve_auto_space`). `None` when the file has
+/// no marker or its header cannot be read; the pixel read then reports why.
+pub(crate) fn exr_mip_space(path: &Path) -> Option<String> {
+    let mut file = BufReader::new(File::open(path).ok()?);
+    let meta = MetaData::read_from_buffered(&mut file, false).ok()?;
+    let header = meta.headers.first()?;
+    header
+        .own_attributes
+        .other
+        .iter()
+        .chain(header.shared_attributes.other.iter())
+        .find(|(k, _)| *k == MIP_SPACE_KEY)
+        .and_then(|(_, v)| match v {
+            AttributeValue::Text(t) => Some(t.to_string()),
+            _ => None,
+        })
+}
+
 /// Which entries of the channel list carry R, G and B.
 ///
 /// Matched on the channel's **base name**, the part after the last `.`: a

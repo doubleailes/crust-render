@@ -648,6 +648,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A marked tiled EXR binds the same preloaded as streamed: under `auto`
+    /// both read its `crust:mipspace` marker, take its values as already
+    /// linear on that space's primaries, and apply the change into the working
+    /// space after filtering. Off Rec.709 a preload that ignored the marker
+    /// would leave the values on the wrong primaries.
+    #[test]
+    fn a_marked_exr_binds_the_same_preloaded_and_streamed() {
+        let dir = std::env::temp_dir().join("crust_stream_exr_marked");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let exr = dir.join("marked.exr");
+        let (w, h) = (32usize, 32usize);
+        let src: Vec<f32> = (0..w * h)
+            .flat_map(|i| [(i % 7) as f32 / 6.0, (i % 5) as f32 / 4.0, 0.25])
+            .collect();
+        crate::tiled::write_tx_exr(&exr, &src, w, h, crust_core::ResolvedColorSpace::SRGB)
+            .expect("write");
+
+        let acescg = crust_core::color::working_space("acescg").expect("acescg");
+        let auto = crust_core::ColorSpace::AUTO.into_working(acescg);
+        let pre = UvTexture::open_with(&exr, auto, false).expect("preload");
+        let cache = Arc::new(TileCache::new(4 * 1024 * 1024));
+        let stream = StreamingTexture::open(&exr, auto, cache, |_, _| None).expect("stream");
+        let gamut =
+            crust_core::ResolvedColorSpace::new(crust_core::color::Space::SRGB_TEXTURE, acescg)
+                .gamut()
+                .expect("Rec.709 to ACEScg is a change of primaries");
+
+        for &(u, v) in &[(0.1, 0.2), (0.5, 0.5), (0.73, 0.31), (0.9, 0.95)] {
+            let p = pre.eval(u, v, 0.0);
+            let s = stream.eval(u, v, 0.0);
+            for k in 0..3 {
+                assert!(
+                    (p[k] - s[k]).abs() <= 1e-5,
+                    "({u}, {v}) channel {k}: preloaded {p:?} against streamed {s:?}"
+                );
+            }
+            // And the matrix really was applied: the stored value is on
+            // Rec.709 primaries.
+            let raw = UvTexture::open_with(&exr, crust_core::ColorSpace::RAW, false)
+                .expect("raw")
+                .eval(u, v, 0.0);
+            let want = crust_core::color::apply_gamut(
+                Some(&gamut),
+                crust_core::Vec3A::new(raw[0], raw[1], raw[2]),
+            );
+            assert!(
+                (crust_core::Vec3A::new(p[0], p[1], p[2]) - want)
+                    .abs()
+                    .max_element()
+                    <= 1e-5,
+                "({u}, {v}): {p:?} against {want}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A `.tx` whose mip chain was reduced in one colour space must not be
     /// read as another.
     ///

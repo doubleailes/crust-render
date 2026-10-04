@@ -211,6 +211,13 @@ pub enum Target {
 }
 
 impl Target {
+    /// Whether the input is a colour, converted into the working space with
+    /// its primaries, rather than a value whose texture decodes by its curve
+    /// alone.
+    pub fn is_colour(self) -> bool {
+        matches!(self, Target::DiffuseColor | Target::EmissiveColor)
+    }
+
     /// The surface input's base name, as authored (`inputs:<name>`).
     pub fn input_name(self) -> &'static str {
         match self {

@@ -205,7 +205,7 @@ There are three decode curves in use, and they are not interchangeable:
 | Curve | OCIO space | Formula | Where |
 | --- | --- | --- | --- |
 | **Piecewise sRGB EOTF** | `srgb_texture` | `c ≤ 0.03929 ? c/12.923 : ((c+0.055)/1.055)^2.4` | LDR environment images and `RectLight` textures (`crust-assets/src/environment.rs`, `decode_image_pixels`); UV textures tagged `srgb_texture` |
-| **Flat gamma 2.2** | `g22_rec709` | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice` / `decode_ptex_rgb` under `Space::G22_REC709`, shared by both Ptex backends); UV textures tagged `g22_rec709` |
+| **Flat gamma 2.2** | `g22_rec709` | `max(c,0)^2.2` | `PxrDisneyBsdf.baseColor` (`usd_import/materials.rs`, `disney_to_openpbr`), Ptex colour texels (`crust-assets/src/ptex_texture.rs`, `decode_ptex_slice`, and in `ptex_stream.rs` the conversion resolved once per file, under `Space::G22_REC709`); UV textures tagged `g22_rec709` |
 | **Flat gamma 1.8** | `g18_rec709` | `max(c,0)^1.8` | UV textures tagged `g18_rec709` (`crust-assets/src/lib.rs`, `TransferCurve::to_linear_table`) |
 
 OCIO's sRGB toe differs from IEC 61966-2-1's rounded constants: it derives the
@@ -353,7 +353,7 @@ working primaries, so there is no matrix.
 | Asset | Read at | Curve applied | Verdict |
 | --- | --- | --- | --- |
 | Ptex `.ptx` colour texels | `crust-assets/src/ptex_texture.rs` (`decode_ptex_slice`), requested `g22_rec709` by `usd_import/materials.rs` (`material_ptex`) | flat 2.2 | ✅ intentional (island convention) |
-| Ptex `.ptx` displacement texels (`PxrDisplace` → `PxrPtexture`, `PxrBlend` multiply) | `usd_import/materials.rs` (`pxr_displacement`) requests `Raw` → `crust-assets/src/ptex_texture.rs` / `ptex_stream.rs` (`decode_ptex_slice` / `decode_ptex_rgb`) | none (identity; no clamp, so a float height may be negative) | ✅ correct — a height is data, and `PxrPtexture.linearize` defaults to 0 |
+| Ptex `.ptx` displacement texels (`PxrDisplace` → `PxrPtexture`, `PxrBlend` multiply) | `usd_import/materials.rs` (`pxr_displacement`) requests `Raw` → `crust-assets/src/ptex_texture.rs` / `ptex_stream.rs` (`decode_ptex_slice`, and the streamed conversion resolved per file) | none (identity; no clamp, so a float height may be negative) | ✅ correct — a height is data, and `PxrPtexture.linearize` defaults to 0 |
 | UV texture tagged `srgb_texture` | `crust-assets/src/uv_texture/` (`TransferCurve::to_linear_table`) | piecewise sRGB | ✅ correct per MaterialX |
 | UV texture tagged `g22_rec709` | `crust-assets/src/uv_texture/` | flat 2.2 | ✅ correct per MaterialX |
 | UV texture tagged `g18_rec709` | `crust-assets/src/uv_texture/` | flat 1.8 | ✅ correct per MaterialX |

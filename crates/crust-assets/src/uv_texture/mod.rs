@@ -94,7 +94,9 @@ pub struct UvTexture {
     /// The change of primaries into the working space, applied once per
     /// lookup after filtering. Bytes keep the file's own primaries — the
     /// decode table is the curve alone — so a `u8` texture carries the matrix;
-    /// an `f32` one was converted whole at load and carries `None`.
+    /// an `f32` one was converted whole at load and carries `None`, except a
+    /// marked `.tx` EXR, whose values are already linear on the source's
+    /// primaries and which carries the matrix as its streamed twin does.
     gamut: Option<crust_core::Mat3A>,
     /// Representative tile size, for the load message.
     width: usize,
@@ -257,11 +259,16 @@ impl UvTexture {
     /// The EXR half of [`UvTexture::open_with`]: the same sweep, into `f32`
     /// tiles.
     ///
-    /// `Auto` resolves to raw — an EXR is float, and the UsdUVTexture rule
-    /// marks only 8-bit images as sRGB. An *explicit* curve is still honoured
-    /// (a float file of display-encoded values is unusual, not invalid), and
-    /// applied here in `f32`, so a stored tile is linear whatever was asked
-    /// for and the lookup needs no table.
+    /// `Auto` resolves as the streaming path resolves it, so a file binds the
+    /// same whether it is streamed or preloaded: a `crust:mipspace` marker (a
+    /// `.tx` EXR crust converted) names the source's space, and its values are
+    /// already linear on that space's primaries, so only the change of
+    /// primaries remains — applied per lookup, after filtering, as streaming
+    /// applies it. Unmarked, `auto` is raw: an EXR is float, and the
+    /// UsdUVTexture rule marks only 8-bit images as sRGB. An *explicit* curve
+    /// is still honoured (a float file of display-encoded values is unusual,
+    /// not invalid), and applied here in `f32`, so a stored tile is linear
+    /// whatever was asked for and the lookup needs no table.
     fn open_exr(
         path: &Path,
         token: Option<TileToken>,
@@ -269,21 +276,44 @@ impl UvTexture {
         mip: bool,
         max_edge: NonZeroUsize,
     ) -> Result<UvTexture, AssetError> {
-        let space = space.resolve_auto(false, 3);
+        let name = path.to_string_lossy().into_owned();
+        let name = name.as_str();
+        let candidates = |token: TileToken| {
+            (0..10u32)
+                .flat_map(move |v| (0..10u32).map(move |u| (u, v)))
+                .filter_map(move |(u, v)| {
+                    let candidate = token.expand(name, u, v);
+                    Path::new(&candidate)
+                        .exists()
+                        .then(|| (u, v, std::path::PathBuf::from(candidate)))
+                })
+        };
+        // Settled by the first file, as `StreamingTexture::open` settles it.
+        let first = match token {
+            Some(token) => candidates(token).next().map(|(_, _, p)| p),
+            None => Some(path.to_path_buf()),
+        };
+        let marked = match space.resolved() {
+            Some(_) => None,
+            None => first
+                .as_deref()
+                .and_then(crate::tiled::exr_mip_space)
+                .and_then(|m| crust_core::color::Space::named(&m))
+                .map(|s| ResolvedColorSpace::new(s, space.working())),
+        };
+        let (space, decode, gamut) = match marked {
+            Some(marked) => (marked, ResolvedColorSpace::RAW, marked.gamut()),
+            None => {
+                let space = space.resolve_auto(false, 3);
+                (space, space, None)
+            }
+        };
         let mut tiles = Vec::new();
         if let Some(token) = token {
-            let name = path.to_string_lossy().into_owned();
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    let candidate = token.expand(&name, u, v);
-                    let p = Path::new(&candidate);
-                    if !p.exists() {
-                        continue;
-                    }
-                    match decode_exr_tile(p, udim_number(u, v), max_edge, space) {
-                        Ok(t) => tiles.push(t),
-                        Err(e) => warn!("{e} — skipping that UDIM tile"),
-                    }
+            for (u, v, p) in candidates(token) {
+                match decode_exr_tile(&p, udim_number(u, v), max_edge, decode) {
+                    Ok(t) => tiles.push(t),
+                    Err(e) => warn!("{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {
@@ -296,7 +326,7 @@ impl UvTexture {
                 ));
             }
         } else {
-            tiles.push(decode_exr_tile(path, udim_number(0, 0), max_edge, space)?);
+            tiles.push(decode_exr_tile(path, udim_number(0, 0), max_edge, decode)?);
         }
         if mip {
             for t in &mut tiles {
@@ -307,7 +337,7 @@ impl UvTexture {
         Ok(UvTexture {
             storage: Storage::F32(tiles),
             to_linear: ResolvedColorSpace::RAW.to_linear_table(),
-            gamut: None,
+            gamut,
             space,
             width,
             height,
@@ -469,7 +499,9 @@ impl Texture2D for UvTexture {
             Storage::U8(tiles) => {
                 crate::to_working(self.gamut.as_ref(), self.eval_tiles(tiles, u, v, width))
             }
-            Storage::F32(tiles) => self.eval_tiles(tiles, u, v, width),
+            Storage::F32(tiles) => {
+                crate::to_working(self.gamut.as_ref(), self.eval_tiles(tiles, u, v, width))
+            }
         }
     }
 }

@@ -15,7 +15,7 @@ use crate::color::Space;
 use crate::material::{Displacement, DisplacementValue, Material, OpenPBR};
 
 use super::ImportCaches;
-use super::attrs::{attr_color_space, in_working};
+use super::attrs::{attr_own_color_space, in_working};
 use super::materials::{attribute_asset_path, load_uv_texture, material_ptex, shader_info_id};
 use super::time::eval_time;
 
@@ -75,15 +75,25 @@ pub(super) fn preview_surface_material(
     };
     for (target, is_textured) in textured {
         if is_textured
-            && let Some((input, varname)) =
-                preview_uv_input(stage, mat_path, shader, target.input_name(), false, caches)
+            && let Some((input, varname)) = preview_uv_input(
+                stage,
+                mat_path,
+                shader,
+                target.input_name(),
+                if target.is_colour() {
+                    TexRole::Colour
+                } else {
+                    TexRole::Value
+                },
+                caches,
+            )
         {
             note(varname);
             inputs.push((target, input));
         }
     }
     let normal = if ps.normal.texture().is_some() {
-        preview_uv_input(stage, mat_path, shader, "normal", false, caches).map(
+        preview_uv_input(stage, mat_path, shader, "normal", TexRole::Value, caches).map(
             |(input, varname)| {
                 note(varname);
                 input
@@ -96,7 +106,7 @@ pub(super) fn preview_surface_material(
     // per hit. (A constant one is already thresholded into
     // `geometry_opacity`.)
     let cutout = if !opacity_transmission(&ps) && ps.opacity.texture().is_some() {
-        preview_uv_input(stage, mat_path, shader, "opacity", false, caches).map(
+        preview_uv_input(stage, mat_path, shader, "opacity", TexRole::Value, caches).map(
             |(input, varname)| {
                 note(varname);
                 let threshold = ps.opacity_threshold.value().copied().unwrap_or(0.0);
@@ -136,6 +146,24 @@ pub(super) fn preview_surface_material(
     Arc::new(m)
 }
 
+/// What a UsdUVTexture feeding a surface input holds, which decides how it
+/// is decoded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TexRole {
+    /// A colour (`diffuseColor`, `emissiveColor`): its file's own
+    /// `colorSpace` metadatum, else `sourceColorSpace`, converted into the
+    /// working space, primaries included.
+    Colour,
+    /// A value that is not a colour — normal, roughness, metallic, opacity,
+    /// IOR, clearcoat: `sourceColorSpace`'s curve alone, `auto` decided by the
+    /// file-format rule as UsdUVTexture specifies.
+    Value,
+    /// A displacement height: as [`TexRole::Value`], but `auto` is raw, so an
+    /// 8-bit RGB height map is not decoded as sRGB. An authored `sRGB` still
+    /// wins.
+    Data,
+}
+
 /// Follows one `UsdPreviewSurface` input to the `UsdUVTexture` producing it
 /// and reads that node whole: file, colour space, wrap modes, scale, bias,
 /// fallback, and the primvar reader behind its `st`.
@@ -146,16 +174,14 @@ pub(super) fn preview_surface_material(
 /// input does not resolve to a texture output crust can use; the surface then
 /// keeps that input's constant.
 ///
-/// `data` marks an input whose texture holds data rather than colour (a
-/// displacement height): its `auto` / unauthored `sourceColorSpace` is read
-/// raw instead of by the file-format rule, so an 8-bit RGB height map is not
-/// decoded as sRGB. An authored `sRGB` still wins.
+/// `role` says what the texture holds, which decides its decode (see
+/// [`TexRole`]).
 fn preview_uv_input(
     stage: &Stage,
     mat_path: &sdf::Path,
     shader: &Shader,
     name: &str,
-    data: bool,
+    role: TexRole,
     caches: &mut ImportCaches<'_>,
 ) -> Option<(crate::material::preview_surface::UvInput, Option<String>)> {
     use crate::material::preview_surface::{TexOutput, UvInput, Wrap};
@@ -219,23 +245,36 @@ fn preview_uv_input(
         );
         return None;
     };
-    // The file's own `colorSpace` metadatum, when authored, names its space
-    // outright and wins over `sourceColorSpace`, the older and coarser
-    // UsdUVTexture mechanism; data stays data whatever either says.
-    let file_space = tex
-        .input(tk::TEX_FILE)
-        .value_producing_attributes(ProducerFilter::Any)
-        .ok()
-        .and_then(|p| p.into_iter().next())
-        .and_then(|a| attr_color_space(a.attribute()));
-    let source = token(tk::TEX_SOURCE_COLOR_SPACE);
-    let space = match (
-        file_space,
-        crate::ColorSpace::from_usd(source.as_deref(), caches.working),
-    ) {
-        (Some(space), _) => crate::ColorSpace::new(space, caches.working),
-        (None, s) if data && s.resolved().is_none() => crate::ColorSpace::RAW,
-        (None, s) => s,
+    // A colour's file names its space outright with its own `colorSpace`
+    // metadatum, when authored, which wins over `sourceColorSpace`, the older
+    // and coarser UsdUVTexture mechanism. Only the attribute's own: a scope's
+    // `colorSpace:name` describes its colour values, not how an image file
+    // is encoded (see `attr_own_color_space`).
+    //
+    // A texture that is not a colour is never moved to other primaries,
+    // whatever the file or the working space: a change of primaries mixes a
+    // normal map's channels and shifts a roughness read from `.r`. It takes
+    // `sourceColorSpace` alone, into Rec.709 linear — the primaries of every
+    // curve that token can name, so the curve alone, as before colour
+    // management.
+    let source =
+        crate::ColorSpace::from_usd(token(tk::TEX_SOURCE_COLOR_SPACE).as_deref(), caches.working);
+    let space = if role != TexRole::Colour {
+        match source.resolved() {
+            None if role == TexRole::Data => crate::ColorSpace::RAW,
+            _ => source.into_working(Space::LIN_REC709),
+        }
+    } else {
+        let file_space = tex
+            .input(tk::TEX_FILE)
+            .value_producing_attributes(ProducerFilter::Any)
+            .ok()
+            .and_then(|p| p.into_iter().next())
+            .and_then(|a| attr_own_color_space(a.attribute()));
+        match file_space {
+            Some(space) => crate::ColorSpace::new(space, caches.working),
+            None => source,
+        }
     };
 
     // Which chart the texture reads. crust carries one per mesh (see
@@ -335,9 +374,14 @@ pub(super) fn preview_displacement(
         (c != 0.0 && c.is_finite()).then(|| Displacement::new(DisplacementValue::Constant(c)))
     };
     if textured {
-        let Some((uv, varname)) =
-            preview_uv_input(stage, mat_path, shader, "displacement", true, caches)
-        else {
+        let Some((uv, varname)) = preview_uv_input(
+            stage,
+            mat_path,
+            shader,
+            "displacement",
+            TexRole::Data,
+            caches,
+        ) else {
             // Already warned about; the input keeps its own constant.
             let own = input
                 .attribute()

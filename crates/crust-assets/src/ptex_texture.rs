@@ -492,13 +492,6 @@ pub(crate) fn decode_ptex_slice(values: &mut [f32], space: ColorSpace) {
     ptex_space(space).decode_rgb_slice(values);
 }
 
-/// [`decode_ptex_slice`] for one texel: the curve, then the change of
-/// primaries into the working space.
-#[inline]
-pub(crate) fn decode_ptex_rgb(v: Vec3A, space: ColorSpace) -> Vec3A {
-    ptex_space(space).decode_rgb(v)
-}
-
 /// The space a Ptex request decodes from: `Auto` has no file format to
 /// resolve against, so it means raw, as everywhere it goes unresolved.
 pub(crate) fn ptex_space(space: ColorSpace) -> ResolvedColorSpace {
