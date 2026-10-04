@@ -338,6 +338,11 @@ See `proposal.md` (Why). The parts of today's code this change has to fit:
 - **[Hot-path cost of the tangent]**
   - → D4's budget and fallback. Callgrind on `cornellbox` before and after,
     reported in the archive.
+  - **Outcome:** +0.39% (+0.34% from the hit records growing 48 → 64 bytes, and
+    +0.05% from the NEE flag query). That is over budget. The fallback does not
+    apply, because the cost is not in the instance transform. Packing `dpdu` as
+    `[f32; 3]` was measured worse (+0.67%). Accepted and recorded in the
+    intersection-kernel and materials design records.
 - **[`DemuxFloat` costs stratification in the `Np` dimension]**
   - → The same trade pbrt-v3 makes. The sampling-consistency test is the guard
     on correctness. Noise is judged on the fixture against a uniform-sphere

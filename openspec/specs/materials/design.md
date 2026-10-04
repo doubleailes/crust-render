@@ -491,6 +491,21 @@
     runs that test once under `LightOnly` and once under `BsdfOnly`, so each run
     pins one of the two rays. With either ray's flag removed, its run renders the
     strand black (mutation-checked).
+
+    **Cost, measured** (callgrind at `-s 2`, before → after the change):
+    - `cornellbox`, which has no curves: 4 207 630 659 → 4 223 960 163 instructions
+      (+0.39%). Of that, +0.34% is the kernel's hit records growing to carry the
+      tangent (intersection-kernel record), and +0.05% is the NEE shadow ray asking
+      `passes_out_of_curves`.
+    - `curves`: 58 028 309 → 58 201 388 (+0.30%).
+    - `scripts/bench_ab.sh -n 7`: `cornellbox` 6.561 / 6.884 s → 6.693 / 6.982 s,
+      min / mean (+2.0% / +1.4%), inside the run-to-run spread. `curves` renders in
+      5 ms, below what wall-clock can resolve.
+    - Every sample scene renders bit-identically (`scripts/check_images.sh`).
+
+    This is over the change's +0.3% budget, and kept: the cost is the hit record's
+    size, not the instance transform the budget's fallback would have moved, and
+    the one packing that keeps 48 bytes costs more.
   - **Throughput tables are ported, not regenerated.** The dielectric throughput
     is BSDL's `DielectricReflFront` filter `1 − E_R(cosθo)`
     (`closure/bsdl_tables.rs`, 32 IOR × 16 roughness × 16 cosines, BSD-3-Clause),

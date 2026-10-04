@@ -188,7 +188,7 @@
   - `cargo deny --locked check`;
   - the pinned-nightly clippy and `bvh8` legs from `CLAUDE.md`.
   Verify: all pass.
-- [ ] 6.2 Run `scripts/bench_ab.sh -a <binary A from 1.1> -b target/release/crust-render`
+- [x] 6.2 Run `scripts/bench_ab.sh -a <binary A from 1.1> -b target/release/crust-render`
   on `samples/curves.usda` and `samples/cornellbox.usda`, and redo 1.5's
   callgrind count.
   Verify: both are recorded, min and mean, in the materials design record.
