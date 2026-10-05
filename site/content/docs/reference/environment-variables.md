@@ -311,7 +311,7 @@ values makes the coarser levels too dark. The full-resolution level is always co
 the error only shows where a texture is seen from far away.
 
 `file` is what production Ptex caches do. It cut the Moana Island's Ptex memory from
-5.98 GiB to 0.61 GiB. Choosing it accepts that bias in exchange for the memory.
+7.34 GiB to 0.61 GiB, and its peak memory from 31.6 GiB to 23.9 GiB. Choosing it accepts that bias in exchange for the memory.
 
 ```bash
 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust-render -i island.usda
