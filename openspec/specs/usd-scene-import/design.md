@@ -141,7 +141,7 @@ Schema mapping:
   Non-invertible transforms still bake immediately, and a mesh authoring
   `crust:motion:translate` always instances (a baked mesh has no transform left to lerp).
   `UsdGeomSphere` → analytic `Sphere` geometry.
-- **Subdivision surfaces** (`scene/subdiv.rs`, via the pure-Rust
+- **Subdivision surfaces** (`scene/subdiv/`, via the pure-Rust
   [`opensubdiv-rs`](https://github.com/doubleailes/OpenSubdiv-rs) port of OpenSubdiv's
   Far/Sdc layers — zero dependencies, `forbid(unsafe_code)`, pinned to its `0.5.0` release tag,
   whose commit the committed `Cargo.lock` records). Read from USD, never from a crust

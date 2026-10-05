@@ -18,7 +18,7 @@ pub(crate) use path::surface_visibility;
 mod route;
 mod settings;
 
-use path::{K_CAMERA, K_TIME, ray_cones_enabled, trace_path};
+use path::{K_CAMERA, K_TIME, PathContext, ray_cones_enabled, trace_path};
 
 pub use path::ray_color;
 pub use settings::{
@@ -886,6 +886,15 @@ impl Renderer {
                 .pixel_span(self.settings.width, self.settings.height)
         });
 
+        let path_cx = PathContext {
+            world: &self.world,
+            lights: &self.lights,
+            volumes: &self.volumes,
+            depth: self.settings.max_depth as i32,
+            strategy: self.settings.sampling_strategy,
+            indirect_clamp: self.settings.indirect_clamp,
+            guiding: gctx,
+        };
         for sample in state.taken..target {
             let primary = profile::scope_if::<PROFILE>(Section::GeneratePrimary);
             let root = PathSampler::new(i as i32, j as i32, cfg.seed as i32, sample as i32)
@@ -928,14 +937,8 @@ impl Renderer {
             unit.rays.camera_rays += 1;
             let color = trace_path::<PROFILE, AOV>(
                 &r,
-                &self.world,
-                &self.lights,
-                &self.volumes,
-                self.settings.max_depth as i32,
-                self.settings.sampling_strategy,
-                self.settings.indirect_clamp,
+                &path_cx,
                 root,
-                gctx,
                 &mut unit.samples,
                 scratch,
                 &mut unit.rays,

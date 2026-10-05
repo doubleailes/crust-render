@@ -1024,7 +1024,6 @@ fn alphas(v: Val) -> (f32, f32) {
 /// leaf, whose throughput is 0.
 fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared, Option<Vec3A>) {
     let s = |i: u32| w.slots[i as usize];
-    let rgb = |i: u32| sanitize(s(i).rgb());
     let n = leaf
         .normal
         .map(|i| s(i).rgb())
@@ -1043,133 +1042,23 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
     }
     let v = frame.to_local(w.v_world);
     let nv = v.z.clamp(1e-6, 1.0);
-    let film = |tf: &Option<crust_mtlx::ThinFilm>| {
-        tf.map(|t| (s(t.thickness).x().max(0.0), s(t.ior).x().max(1.0)))
-            .filter(|(d, _)| *d > 0.0)
-    };
+    let cx = LeafInputs { w, iface, nv, v };
     let (lobe, select, throughput) = match &leaf.bsdf {
         Bsdf::Diffuse {
             model,
             color,
             roughness,
-        } => {
-            let color = rgb(*color);
-            let r = s(*roughness).x().clamp(0.0, 1.0);
-            let albedo = match model {
-                DiffuseModel::Eon => mx::eon_dir_albedo(nv, r, color),
-                DiffuseModel::OrenNayar => color * mx::oren_nayar_dir_albedo(nv, r),
-                DiffuseModel::Burley => color * mx::burley_dir_albedo(nv, r),
-            };
-            (
-                Lobe::Diffuse {
-                    model: *model,
-                    color,
-                    roughness: r,
-                },
-                w.luma.of(albedo).max(0.02),
-                None,
-            )
-        }
+        } => prepare_diffuse(&cx, model, color, roughness),
         Bsdf::Subsurface {
             color,
             radius,
             anisotropy,
-        } => {
-            let color = rgb(*color).min(Vec3A::ONE);
-            // `radius` is a vector3; a float broadcasts.
-            let r = s(*radius);
-            let radius = sanitize(if r.arity >= 3 {
-                r.rgb()
-            } else {
-                Vec3A::splat(r.x())
-            });
-            let lobe = if radius.max_element() > 0.0 {
-                let anisotropy = s(*anisotropy).x();
-                Lobe::Subsurface {
-                    color,
-                    radius,
-                    anisotropy: if anisotropy.is_finite() {
-                        anisotropy.clamp(-0.99, 0.99)
-                    } else {
-                        0.0
-                    },
-                    ior: iface.ior,
-                    alpha: iface.alpha,
-                }
-            } else {
-                // A zero mean free path exits where it entered: a diffuse in
-                // the subsurface colour, which is also what MaterialX's GLSL
-                // renders it as.
-                Lobe::Diffuse {
-                    model: DiffuseModel::OrenNayar,
-                    color,
-                    roughness: 0.0,
-                }
-            };
-            (lobe, w.luma.of(color).max(0.02), None)
-        }
-        Bsdf::Hair {
-            tint_r,
-            tint_tt,
-            tint_trt,
-            ior,
-            roughness_r,
-            roughness_tt,
-            roughness_trt,
-            cuticle_angle,
-            absorption,
-        } => {
-            // A `vector2` (variance, scale); a `float` broadcasts.
-            let pair = |i: u32| {
-                let r = s(i);
-                if r.arity >= 2 {
-                    (r.v[0], r.v[1])
-                } else {
-                    (r.x(), r.x())
-                }
-            };
-            let hair = hair::Hair::new(
-                &hair::HairParams {
-                    tint: [rgb(*tint_r), rgb(*tint_tt), rgb(*tint_trt)],
-                    ior: s(*ior).x(),
-                    roughness: [
-                        pair(*roughness_r),
-                        pair(*roughness_tt),
-                        pair(*roughness_trt),
-                    ],
-                    cuticle_angle: s(*cuticle_angle).x(),
-                    absorption: rgb(*absorption),
-                },
-                v.normalize_or_zero(),
-                |c| w.luma.of(c),
-            );
-            let albedo = hair.albedo();
-            // Over a base, a fibre passes on what it does not scatter.
-            (Lobe::Hair(hair), w.luma.of(albedo).max(0.02), Some(albedo))
-        }
-        Bsdf::Translucent { color } => {
-            let color = rgb(*color);
-            (
-                Lobe::Translucent { color },
-                w.luma.of(color).max(0.02),
-                None,
-            )
-        }
+        } => prepare_subsurface(&cx, color, radius, anisotropy),
+        Bsdf::Hair { .. } => prepare_hair(&cx, &leaf.bsdf),
+        Bsdf::Translucent { color } => prepare_translucent(&cx, color),
         Bsdf::Sheen {
             color, roughness, ..
-        } => {
-            let color = rgb(*color);
-            let r = s(*roughness).x().clamp(0.0, 1.0);
-            let e = mx::imageworks_sheen_dir_albedo(nv, r);
-            (
-                Lobe::Sheen {
-                    color,
-                    roughness: r,
-                },
-                (w.luma.of(color) * e).max(0.02),
-                Some(Vec3A::splat(e)),
-            )
-        }
+        } => prepare_sheen(&cx, color, roughness),
         Bsdf::Dielectric {
             tint,
             ior,
@@ -1177,123 +1066,14 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             mode,
             thin_film,
             ..
-        } => {
-            let ior = s(*ior).x();
-            let ior = if ior.is_finite() && ior > 0.0 {
-                ior
-            } else {
-                1.5
-            };
-            let (ax, ay) = alphas(s(*roughness));
-            let tint = rgb(*tint);
-            // In the ray-facing frame: entering the interior from the front,
-            // leaving it from the back.
-            let eta = if w.rec.front_face { ior } else { 1.0 / ior };
-            let fresnel = Fresnel {
-                model: FresnelModel::Dielectric { ior: eta },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            // MaterialX's throughput for every dielectric mode: `1 − E_R·w`,
-            // the reflection albedo alone. BSDL's table where it applies (no
-            // film); MaterialX's Fresnel-weighted fit with a film.
-            let e_r = if fresnel.thin_film.is_some() {
-                let f = fresnel.eval(nv);
-                fresnel.dir_albedo(nv, avg) * mx::ggx_energy_compensation(nv, avg, f)
-            } else {
-                Vec3A::splat(1.0 - dielectric_refl_filter(nv, avg.sqrt(), ior))
-            };
-            let e = w.luma.of(e_r);
-            let select = match mode {
-                ScatterMode::R => e,
-                ScatterMode::T => (1.0 - e) * w.luma.of(tint),
-                ScatterMode::RT => e + (1.0 - e) * w.luma.of(tint),
-            };
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint,
-                    ax,
-                    ay,
-                    mode: *mode,
-                    eta,
-                    thin_walled: w.thin_walled,
-                },
-                select.max(0.02),
-                Some(e_r),
-            )
-        }
+        } => prepare_dielectric(&cx, tint, ior, roughness, mode, thin_film),
         Bsdf::Conductor {
             ior,
             extinction,
             roughness,
             thin_film,
-        } => {
-            let (ax, ay) = alphas(s(*roughness));
-            let fresnel = Fresnel {
-                model: FresnelModel::Conductor {
-                    n: rgb(*ior),
-                    k: rgb(*extinction),
-                },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            let e = fresnel.dir_albedo(nv, avg)
-                * mx::ggx_energy_compensation(nv, avg, fresnel.eval(nv));
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint: Vec3A::ONE,
-                    ax,
-                    ay,
-                    mode: ScatterMode::R,
-                    eta: 1.0,
-                    thin_walled: false,
-                },
-                w.luma.of(e).max(0.02),
-                // MaterialX: a conductor is opaque.
-                None,
-            )
-        }
-        Bsdf::Schlick {
-            color0,
-            color82,
-            color90,
-            exponent,
-            roughness,
-            mode,
-            thin_film,
-        } => {
-            let (ax, ay) = alphas(s(*roughness));
-            let f0 = rgb(*color0);
-            let fresnel = Fresnel {
-                model: FresnelModel::Schlick {
-                    f0,
-                    f82: rgb(*color82),
-                    f90: rgb(*color90),
-                    exponent: s(*exponent).x().max(0.0),
-                },
-                thin_film: film(thin_film),
-            };
-            let avg = mx::average_alpha(ax, ay);
-            let e = fresnel.dir_albedo(nv, avg)
-                * mx::ggx_energy_compensation(nv, avg, fresnel.eval(nv));
-            let e_avg = (e.x + e.y + e.z) / 3.0;
-            let eta = mx::f0_to_ior(Vec3A::splat((f0.x + f0.y + f0.z) / 3.0)).x;
-            (
-                Lobe::Specular {
-                    fresnel,
-                    tint: Vec3A::ONE,
-                    ax,
-                    ay,
-                    mode: *mode,
-                    eta: if w.rec.front_face { eta } else { 1.0 / eta },
-                    thin_walled: w.thin_walled,
-                },
-                e_avg.max(0.02),
-                Some(Vec3A::splat(e_avg)),
-            )
-        }
+        } => prepare_conductor(&cx, ior, extinction, roughness, thin_film),
+        Bsdf::Schlick { .. } => prepare_schlick(&cx, &leaf.bsdf),
     };
     (
         Prepared {
@@ -1306,6 +1086,315 @@ fn prepare(leaf: &crust_mtlx::Leaf, iface: Interface, w: &Walk<'_>) -> (Prepared
             coat: false,
         },
         throughput,
+    )
+}
+
+/// A leaf's lobe, its selection weight (floored at 0.02), and the directional
+/// albedo its throughput is `1 − E·weight` of (`None`: opaque) — what each
+/// `prepare_*` builds.
+type Built = (Lobe, f32, Option<Vec3A>);
+
+/// What every `prepare_*` reads: the walk's slots and hit, the interface a
+/// subsurface leaf is entered through, and the view direction in the leaf's
+/// frame with its clamped cosine.
+struct LeafInputs<'a> {
+    w: &'a Walk<'a>,
+    iface: Interface,
+    nv: f32,
+    v: Vec3A,
+}
+
+impl LeafInputs<'_> {
+    fn s(&self, i: u32) -> Val {
+        self.w.slots[i as usize]
+    }
+
+    fn rgb(&self, i: u32) -> Vec3A {
+        sanitize(self.s(i).rgb())
+    }
+
+    /// A thin film's `(thickness, ior)`, when it has any thickness.
+    fn film(&self, tf: &Option<crust_mtlx::ThinFilm>) -> Option<(f32, f32)> {
+        tf.map(|t| (self.s(t.thickness).x().max(0.0), self.s(t.ior).x().max(1.0)))
+            .filter(|(d, _)| *d > 0.0)
+    }
+}
+
+/// [`prepare`] for a `Diffuse` leaf.
+#[inline(always)]
+fn prepare_diffuse(
+    cx: &LeafInputs<'_>,
+    model: &DiffuseModel,
+    color: &u32,
+    roughness: &u32,
+) -> Built {
+    let color = cx.rgb(*color);
+    let r = cx.s(*roughness).x().clamp(0.0, 1.0);
+    let albedo = match model {
+        DiffuseModel::Eon => mx::eon_dir_albedo(cx.nv, r, color),
+        DiffuseModel::OrenNayar => color * mx::oren_nayar_dir_albedo(cx.nv, r),
+        DiffuseModel::Burley => color * mx::burley_dir_albedo(cx.nv, r),
+    };
+    (
+        Lobe::Diffuse {
+            model: *model,
+            color,
+            roughness: r,
+        },
+        cx.w.luma.of(albedo).max(0.02),
+        None,
+    )
+}
+
+/// [`prepare`] for a `Subsurface` leaf.
+#[inline(always)]
+fn prepare_subsurface(cx: &LeafInputs<'_>, color: &u32, radius: &u32, anisotropy: &u32) -> Built {
+    let color = cx.rgb(*color).min(Vec3A::ONE);
+    // `radius` is a vector3; a float broadcasts.
+    let r = cx.s(*radius);
+    let radius = sanitize(if r.arity >= 3 {
+        r.rgb()
+    } else {
+        Vec3A::splat(r.x())
+    });
+    let lobe = if radius.max_element() > 0.0 {
+        let anisotropy = cx.s(*anisotropy).x();
+        Lobe::Subsurface {
+            color,
+            radius,
+            anisotropy: if anisotropy.is_finite() {
+                anisotropy.clamp(-0.99, 0.99)
+            } else {
+                0.0
+            },
+            ior: cx.iface.ior,
+            alpha: cx.iface.alpha,
+        }
+    } else {
+        // A zero mean free path exits where it entered: a diffuse in
+        // the subsurface colour, which is also what MaterialX's GLSL
+        // renders it as.
+        Lobe::Diffuse {
+            model: DiffuseModel::OrenNayar,
+            color,
+            roughness: 0.0,
+        }
+    };
+    (lobe, cx.w.luma.of(color).max(0.02), None)
+}
+
+/// [`prepare`] for a `Hair` leaf.
+#[inline(always)]
+fn prepare_hair(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
+    let Bsdf::Hair {
+        tint_r,
+        tint_tt,
+        tint_trt,
+        ior,
+        roughness_r,
+        roughness_tt,
+        roughness_trt,
+        cuticle_angle,
+        absorption,
+    } = bsdf
+    else {
+        unreachable!("prepare_hair is handed a Hair leaf")
+    };
+    // A `vector2` (variance, scale); a `float` broadcasts.
+    let pair = |i: u32| {
+        let r = cx.s(i);
+        if r.arity >= 2 {
+            (r.v[0], r.v[1])
+        } else {
+            (r.x(), r.x())
+        }
+    };
+    let hair = hair::Hair::new(
+        &hair::HairParams {
+            tint: [cx.rgb(*tint_r), cx.rgb(*tint_tt), cx.rgb(*tint_trt)],
+            ior: cx.s(*ior).x(),
+            roughness: [
+                pair(*roughness_r),
+                pair(*roughness_tt),
+                pair(*roughness_trt),
+            ],
+            cuticle_angle: cx.s(*cuticle_angle).x(),
+            absorption: cx.rgb(*absorption),
+        },
+        cx.v.normalize_or_zero(),
+        |c| cx.w.luma.of(c),
+    );
+    let albedo = hair.albedo();
+    // Over a base, a fibre passes on what it does not scatter.
+    (
+        Lobe::Hair(hair),
+        cx.w.luma.of(albedo).max(0.02),
+        Some(albedo),
+    )
+}
+
+/// [`prepare`] for a `Translucent` leaf.
+#[inline(always)]
+fn prepare_translucent(cx: &LeafInputs<'_>, color: &u32) -> Built {
+    let color = cx.rgb(*color);
+    (
+        Lobe::Translucent { color },
+        cx.w.luma.of(color).max(0.02),
+        None,
+    )
+}
+
+/// [`prepare`] for a `Sheen` leaf.
+#[inline(always)]
+fn prepare_sheen(cx: &LeafInputs<'_>, color: &u32, roughness: &u32) -> Built {
+    let color = cx.rgb(*color);
+    let r = cx.s(*roughness).x().clamp(0.0, 1.0);
+    let e = mx::imageworks_sheen_dir_albedo(cx.nv, r);
+    (
+        Lobe::Sheen {
+            color,
+            roughness: r,
+        },
+        (cx.w.luma.of(color) * e).max(0.02),
+        Some(Vec3A::splat(e)),
+    )
+}
+
+/// [`prepare`] for a `Dielectric` leaf.
+#[inline(always)]
+fn prepare_dielectric(
+    cx: &LeafInputs<'_>,
+    tint: &u32,
+    ior: &u32,
+    roughness: &u32,
+    mode: &ScatterMode,
+    thin_film: &Option<crust_mtlx::ThinFilm>,
+) -> Built {
+    let ior = cx.s(*ior).x();
+    let ior = if ior.is_finite() && ior > 0.0 {
+        ior
+    } else {
+        1.5
+    };
+    let (ax, ay) = alphas(cx.s(*roughness));
+    let tint = cx.rgb(*tint);
+    // In the ray-facing frame: entering the interior from the front,
+    // leaving it from the back.
+    let eta = if cx.w.rec.front_face { ior } else { 1.0 / ior };
+    let fresnel = Fresnel {
+        model: FresnelModel::Dielectric { ior: eta },
+        thin_film: cx.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    // MaterialX's throughput for every dielectric mode: `1 − E_R·w`,
+    // the reflection albedo alone. BSDL's table where it applies (no
+    // film); MaterialX's Fresnel-weighted fit with a film.
+    let e_r = if fresnel.thin_film.is_some() {
+        let f = fresnel.eval(cx.nv);
+        fresnel.dir_albedo(cx.nv, avg) * mx::ggx_energy_compensation(cx.nv, avg, f)
+    } else {
+        Vec3A::splat(1.0 - dielectric_refl_filter(cx.nv, avg.sqrt(), ior))
+    };
+    let e = cx.w.luma.of(e_r);
+    let select = match mode {
+        ScatterMode::R => e,
+        ScatterMode::T => (1.0 - e) * cx.w.luma.of(tint),
+        ScatterMode::RT => e + (1.0 - e) * cx.w.luma.of(tint),
+    };
+    (
+        Lobe::Specular {
+            fresnel,
+            tint,
+            ax,
+            ay,
+            mode: *mode,
+            eta,
+            thin_walled: cx.w.thin_walled,
+        },
+        select.max(0.02),
+        Some(e_r),
+    )
+}
+
+/// [`prepare`] for a `Conductor` leaf.
+#[inline(always)]
+fn prepare_conductor(
+    cx: &LeafInputs<'_>,
+    ior: &u32,
+    extinction: &u32,
+    roughness: &u32,
+    thin_film: &Option<crust_mtlx::ThinFilm>,
+) -> Built {
+    let (ax, ay) = alphas(cx.s(*roughness));
+    let fresnel = Fresnel {
+        model: FresnelModel::Conductor {
+            n: cx.rgb(*ior),
+            k: cx.rgb(*extinction),
+        },
+        thin_film: cx.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    let e = fresnel.dir_albedo(cx.nv, avg)
+        * mx::ggx_energy_compensation(cx.nv, avg, fresnel.eval(cx.nv));
+    (
+        Lobe::Specular {
+            fresnel,
+            tint: Vec3A::ONE,
+            ax,
+            ay,
+            mode: ScatterMode::R,
+            eta: 1.0,
+            thin_walled: false,
+        },
+        cx.w.luma.of(e).max(0.02),
+        // MaterialX: a conductor is opaque.
+        None,
+    )
+}
+
+/// [`prepare`] for a `Schlick` leaf.
+#[inline(always)]
+fn prepare_schlick(cx: &LeafInputs<'_>, bsdf: &Bsdf) -> Built {
+    let Bsdf::Schlick {
+        color0,
+        color82,
+        color90,
+        exponent,
+        roughness,
+        mode,
+        thin_film,
+    } = bsdf
+    else {
+        unreachable!("prepare_schlick is handed a Schlick leaf")
+    };
+    let (ax, ay) = alphas(cx.s(*roughness));
+    let f0 = cx.rgb(*color0);
+    let fresnel = Fresnel {
+        model: FresnelModel::Schlick {
+            f0,
+            f82: cx.rgb(*color82),
+            f90: cx.rgb(*color90),
+            exponent: cx.s(*exponent).x().max(0.0),
+        },
+        thin_film: cx.film(thin_film),
+    };
+    let avg = mx::average_alpha(ax, ay);
+    let e = fresnel.dir_albedo(cx.nv, avg)
+        * mx::ggx_energy_compensation(cx.nv, avg, fresnel.eval(cx.nv));
+    let e_avg = (e.x + e.y + e.z) / 3.0;
+    let eta = mx::f0_to_ior(Vec3A::splat((f0.x + f0.y + f0.z) / 3.0)).x;
+    (
+        Lobe::Specular {
+            fresnel,
+            tint: Vec3A::ONE,
+            ax,
+            ay,
+            mode: *mode,
+            eta: if cx.w.rec.front_face { eta } else { 1.0 / eta },
+            thin_walled: cx.w.thin_walled,
+        },
+        e_avg.max(0.02),
+        Some(Vec3A::splat(e_avg)),
     )
 }
 

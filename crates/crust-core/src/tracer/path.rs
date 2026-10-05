@@ -88,6 +88,31 @@ fn russian_roulette(
     Some(p_survive)
 }
 
+/// What every path of a render traces against: the scene, and the render
+/// settings the integrator reads per path. Fixed for the whole render (a
+/// guided pass's field included), so the renderer builds one per pixel and
+/// every sample borrows it.
+///
+/// Consumed only by the inlined `trace_path`, which destructures it on entry.
+/// Never hand `&PathContext` on to a function LLVM keeps out of line: its
+/// address then escapes, the struct must stay in memory, and every field is
+/// reloaded after every opaque call — passing it to `volume_nee` and
+/// `mixed_hair_shadow` cost cornellbox 0.08% of its instructions, and passing
+/// it by value 0.23% (callgrind, 2 spp). Pass those helpers the fields.
+#[derive(Clone, Copy)]
+pub(super) struct PathContext<'a> {
+    pub(super) world: &'a World,
+    pub(super) lights: &'a LightList,
+    pub(super) volumes: &'a Volumes,
+    /// The longest path, in vertices.
+    pub(super) depth: i32,
+    pub(super) strategy: SamplingStrategy,
+    /// The firefly clamp on indirect light, `None` when off.
+    pub(super) indirect_clamp: Option<f32>,
+    /// The guiding field and whether this pass trains it.
+    pub(super) guiding: Option<&'a GuidingContext<'a>>,
+}
+
 pub fn ray_color(
     r: &Ray,
     world: &World,
@@ -102,20 +127,16 @@ pub fn ray_color(
     // The one-shot entry point (benches and tests), so a scratch per call is
     // the right trade — the renderer's own paths reuse one per work unit.
     let mut scratch = PathScratch::new(depth.max(0) as usize);
-    trace_path::<false, false>(
-        r,
+    let cx = PathContext {
         world,
         lights,
         volumes,
         depth,
         strategy,
-        None,
-        sampler,
-        None,
-        &mut no_training,
-        &mut scratch,
-        &mut stats,
-    )
+        indirect_clamp: None,
+        guiding: None,
+    };
+    trace_path::<false, false>(r, &cx, sampler, &mut no_training, &mut scratch, &mut stats)
 }
 
 /// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
@@ -924,22 +945,24 @@ fn volume_nee<const PROFILE: bool>(
 /// draw, no weight — so both instantiations return the same radiance, and
 /// with `AOV = false` every `if AOV` block compiles away, leaving the
 /// function the beauty-only render has always run.
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     r: &Ray,
-    world: &World,
-    lights: &LightList,
-    volumes: &Volumes,
-    depth: i32,
-    strategy: SamplingStrategy,
-    indirect_clamp: Option<f32>,
+    cx: &PathContext<'_>,
     sampler: PathSampler,
-    guiding: Option<&GuidingContext>,
     train_out: &mut Vec<SampleData>,
     scratch: &mut PathScratch,
     stats: &mut RayStats,
 ) -> Vec3A {
+    let PathContext {
+        world,
+        lights,
+        volumes,
+        depth,
+        strategy,
+        indirect_clamp,
+        guiding,
+    } = *cx;
     let training = guiding.is_some_and(|g| g.training);
     // The bounce subtree; each vertex derives its own domain off this by depth.
     let path = sampler.new_domain(K_PATH);

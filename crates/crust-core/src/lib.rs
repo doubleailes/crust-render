@@ -97,6 +97,8 @@ pub use ray::{
 pub use rt_world::{FaceMap, FanSlice, SubFace, UvMap, World, WorldBuilder, WorldHit, tangent_of};
 pub use scene::Scene;
 pub use scene::{AssetLoader, NoAssets, UsdImportOptions};
+#[cfg(feature = "traversal-stats")]
+pub use stats::traversal_report;
 pub use stats::{
     DisplacementCounters, ImageCounters, MemorySample, Phase, PrimitiveCounts, PtexCacheStats,
     RayStats, RenderStats, SceneCounters, SubdivisionCounters, TextureCacheStats,

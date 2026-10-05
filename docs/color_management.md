@@ -274,7 +274,7 @@ takes the texture's `sourceColorSpace` instead (see the textures table).
 | `crust:openpbr` — all 8 colour fields[^1] | `usd_import/materials.rs`, `decode_crust_openpbr` | **none** unless `colorSpace` metadata names a space | ✅ intentional — native format is authored in the working space |
 | `crust:openpbr` `subsurfaceRadiusScale` | same | never — a per-channel radius multiplier, not a colour | ✅ |
 | MaterialX `uniform_edf.color` | `crust-mtlx/src/bsdf.rs`, `edf_walk` | whatever the feeding node declares | ✅ correct per MaterialX |
-| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/eval.rs`, at compile time through `Host::convert_color` | the effective `colorspace` → working; none when no scope declares one | ✅ correct per MaterialX |
+| MaterialX surface-node colours (`base_color`, `specular_color`, `coat_color`, …) and leaf colours, **literal** | `crust-mtlx/src/eval/compile.rs`, at compile time through `Host::convert_color` | the effective `colorspace` → working; none when no scope declares one | ✅ correct per MaterialX |
 | same, fed by an `image` | `crust-assets/src/uv_texture/` | the `file`'s effective `colorspace` → working, as for any texture | ✅ correct per MaterialX |
 
 [^1]: `baseColor`, `specularColor`, `transmissionColor`, `transmissionScatter`,

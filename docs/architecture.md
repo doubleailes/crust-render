@@ -86,7 +86,7 @@ crust-render::main
  │         backward gather: MIS-weighted radiance, guiding training samples
  │         AOV instantiation only: the first hit → the unit's AOV planes
  └─ write EXR (linear) + PNG (tone-mapped) — crust-render only
-       no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, `mod products`)
+       no products: write_rgb_file at -o; products: one scanline EXR each (main.rs, products.rs)
 ```
 
 Path guiding (`render_guided`) and adaptive sampling wrap the same per-pixel
@@ -106,7 +106,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 
 | seam | defined in | implemented by | contract in one line |
 |------|-----------|----------------|----------------------|
-| `crust_rt::Geometry`, `SceneBuilder`, `Scene` | `crust-rt/src/scene.rs` | the kernel | Embree-shaped: attach, `commit()`, `intersect` / `occluded`; hits are `(geom_id, prim_id)` only |
+| `crust_rt::Geometry`, `SceneBuilder`, `Scene` | `crust-rt/src/scene/` | the kernel | Embree-shaped: attach, `commit()`, `intersect` / `occluded`; hits are `(geom_id, prim_id)` only |
 | `WorldBuilder` / `World` | `crust-core/src/rt_world.rs` | — | pairs each `geom_id` with its material and per-triangle side tables (Ptex faces, UVs, density) |
 | `AssetLoader` | `crust-core/src/scene.rs` | `crust_assets::FileAssets`, `NoAssets` | the host decodes; returning `None` means "fall back", never an error |
 | `Texture2D` (= `crust_mtlx::Texture`), `PtexTexture` | `crust-mtlx/src/texture.rs`, `crust-core/src/texture.rs` | `UvTexture`, `StreamingTexture`, `PtexColor`, `PtexStream` | linear values out; unwrapped UVs in (UDIM addressing is the host's) |
@@ -120,7 +120,7 @@ both sides must keep; the contract lives in the doc comment at the definition.
 | area | modules |
 |------|---------|
 | scene description | `scene.rs` (`Scene`, `AssetLoader`, `UsdImportOptions`), `camera.rs`, `world.rs` (procedural fallback scene) |
-| USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv.rs` (OpenSubdiv refinement); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
+| USD import | `scene/usd_import/` — module map in its `mod.rs`; `scene/subdiv/` (OpenSubdiv refinement: `uniform`, per-face `adaptive`, `topology`, `normals`); `scene/displace.rs` (scalar displacement of tessellated meshes, once per distinct mesh) |
 | geometry bridge | `rt_world.rs` (`World`, side tables), `hittable.rs` (`HitRecord`), `ray.rs` (`Ray`, `RayCone`, ray masks), `aabb.rs` (re-export of the kernel's) |
 | AOVs | `aov.rs` (the source vocabulary, `AovRequest`, the per-unit planes and the full-frame `AovFilm`); products resolved in `scene/usd_import/products.rs`; `lpe/` (OSL light path expressions: parser, one DFA per render); `tracer/route.rs` (routing a path's light into the expressions, and the albedo) |
 | integrator | `tracer/` — `mod.rs` (`Renderer`: passes, tiles, guiding schedule), `path.rs` (`trace_path`, NEE, MIS weights, QMC domain keys), `settings.rs` (`RenderSettings`, `SamplingStrategy`); `filter.rs` (pixel filter importance sampling), `buffer.rs` |
@@ -323,9 +323,10 @@ Still open, roughly in order of payoff:
    the kernel's type.
 2. **Test files over 1 500 lines** (`usd_scene.rs`, `usd_inline.rs`,
    `crust-mtlx/tests/graph.rs`) would split naturally by schema family, the
-   way the importer now does. The largest source files left are
-   `crust-rt/src/scene.rs` (1 350), `stats.rs` (1 360), `materialx.rs`
-   (1 430) and `usd_import/mesh.rs` (1 410); none is urgent.
+   way the importer now does. `subdiv`, `crust-mtlx`'s `eval` and `surface`,
+   and `crust-rt`'s `scene` are directories now, their tests in their own
+   files; the largest source files left are `usd_import/mesh.rs`,
+   `tracer/path.rs` and `stats.rs`; none is urgent.
 3. **Hot-path splits need a callgrind, not an eye.** Any further move inside
    `tracer/path.rs` or `bvh/mod.rs` should repeat the per-function
    instruction comparison above: the integrator is monomorphised on
