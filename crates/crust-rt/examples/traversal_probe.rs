@@ -12,42 +12,15 @@
 //! Trust the counts from this build, not its timings: the counters are
 //! global atomics and contend across threads.
 
+#[path = "../fixtures/mod.rs"]
+mod fixtures;
+
 use crust_rt::{Geometry, Ray, SceneBuilder};
 use glam::Vec3A;
 
-/// A UV sphere, as a stand-in for real mesh geometry at a chosen size.
+/// A unit UV sphere at the origin.
 fn uv_sphere(segs: usize, rings: usize) -> Geometry {
-    let mut vertices = Vec::new();
-    for r in 0..=rings {
-        let phi = (r as f32 / rings as f32) * std::f32::consts::PI;
-        for s in 0..=segs {
-            let th = (s as f32 / segs as f32) * std::f32::consts::TAU;
-            vertices.push(Vec3A::new(
-                phi.sin() * th.cos(),
-                phi.cos(),
-                phi.sin() * th.sin(),
-            ));
-        }
-    }
-    let row = segs + 1;
-    let mut indices = Vec::new();
-    for r in 0..rings {
-        for s in 0..segs {
-            let (a, b, c, d) = (
-                (r * row + s) as u32,
-                (r * row + s + 1) as u32,
-                ((r + 1) * row + s + 1) as u32,
-                ((r + 1) * row + s) as u32,
-            );
-            indices.push([a, b, c]);
-            indices.push([a, c, d]);
-        }
-    }
-    Geometry::TriangleMesh {
-        vertices: vertices.iter().map(|v: &Vec3A| v.to_array()).collect(),
-        indices,
-        normals: None,
-    }
+    fixtures::uv_sphere(Vec3A::ZERO, 1.0, segs, rings)
 }
 
 fn probe(label: &str, geom: Geometry) {
@@ -70,7 +43,10 @@ fn probe(label: &str, geom: Geometry) {
             // node test and hide the real traversal depth.
             let dir = Vec3A::new(0.28 * x as f32 / N as f32, 0.28 * y as f32 / N as f32, 1.0);
             let ray = Ray::new(Vec3A::new(0.0, 0.0, -4.0), dir);
-            if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
+            if scene
+                .intersect(&ray, fixtures::T_MIN, f32::INFINITY)
+                .is_some()
+            {
                 hits += 1;
             }
         }
@@ -181,7 +157,10 @@ fn probe_instanced(label: &str, copies: usize, segs: usize, rings: usize) {
                 1.0,
             );
             let ray = Ray::new(Vec3A::new(0.0, 0.0, -dist), dir);
-            if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
+            if scene
+                .intersect(&ray, fixtures::T_MIN, f32::INFINITY)
+                .is_some()
+            {
                 hits += 1;
             }
         }
@@ -267,7 +246,10 @@ fn probe_nested(label: &str, groups: usize, per_group: usize, segs: usize, rings
                 1.0,
             );
             let ray = Ray::new(Vec3A::new(0.0, 0.0, -dist), dir);
-            if scene.intersect(&ray, 0.001, f32::INFINITY).is_some() {
+            if scene
+                .intersect(&ray, fixtures::T_MIN, f32::INFINITY)
+                .is_some()
+            {
                 hits += 1;
             }
         }

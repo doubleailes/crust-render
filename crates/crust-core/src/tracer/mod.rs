@@ -14,7 +14,7 @@ use crate::volume::Volumes;
 use crate::{LightList, LightSelection, PathSampler};
 
 mod path;
-pub(crate) use path::{cutout_through, shadow_t_max};
+pub(crate) use path::surface_visibility;
 mod route;
 mod settings;
 

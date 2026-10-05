@@ -344,9 +344,10 @@ fn eval_sensitivity(opd: f32, shift: Vec3A) -> Vec3A {
     let pos = Vec3A::new(1.6810e+06, 1.7953e+06, 2.2084e+06);
     let var = Vec3A::new(4.3278e+09, 9.3046e+09, 6.6121e+09);
     let cos = |v: Vec3A| Vec3A::new(v.x.cos(), v.y.cos(), v.z.cos());
-    let exp = |v: Vec3A| Vec3A::new(v.x.exp(), v.y.exp(), v.z.exp());
-    let mut xyz =
-        val * (2.0 * PI * var).powf(0.5) * cos(pos * phase + shift) * exp(-var * phase * phase);
+    let mut xyz = val
+        * (2.0 * PI * var).powf(0.5)
+        * cos(pos * phase + shift)
+        * utils::exp3(-var * phase * phase);
     xyz.x += 9.7470e-14
         * (2.0 * PI * 4.5282e+09f32).sqrt()
         * (2.2399e+06 * phase + shift.x).cos()

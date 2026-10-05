@@ -28,8 +28,8 @@
 
 use crust_assets::FileAssets;
 use crust_core::{
-    Light, LightSelection, MASK_SHADOW, Material, Ray, Renderer, ShadingPoint, UsdImportOptions,
-    Vec3A, World,
+    Light, LightSelection, MASK_SHADOW, Material, Ray, Renderer, ShadingPoint, TRACE_T_MIN,
+    UsdImportOptions, Vec3A, World,
 };
 use std::path::PathBuf;
 
@@ -116,10 +116,10 @@ fn transmissive(mat: &dyn Material, ray: &Ray, hit: &crust_core::HitRecord) -> b
 /// transmissive" covers only the ones it saw.
 fn walk(world: &World, from: Vec3A, dir: Vec3A, dist: f32) -> (usize, bool, f32, f32, bool) {
     let ray = Ray::new(from, dir).with_mask(MASK_SHADOW);
-    let (mut t0, mut n, mut glass) = (0.001f32, 0, true);
+    let (mut t0, mut n, mut glass) = (TRACE_T_MIN, 0, true);
     let (mut first, mut last) = (f32::NAN, f32::NAN);
     while n < MAX_CROSSINGS {
-        let Some(h) = world.intersect(&ray, t0, dist - 0.001) else {
+        let Some(h) = world.intersect(&ray, t0, dist - TRACE_T_MIN) else {
             break;
         };
         if n == 0 {
@@ -132,7 +132,7 @@ fn walk(world: &World, from: Vec3A, dir: Vec3A, dist: f32) -> (usize, bool, f32,
         // again by rounding.
         t0 = h.rec.t + 1e-4 * (1.0 + h.rec.t);
     }
-    let truncated = n == MAX_CROSSINGS && world.intersect(&ray, t0, dist - 0.001).is_some();
+    let truncated = n == MAX_CROSSINGS && world.intersect(&ray, t0, dist - TRACE_T_MIN).is_some();
     (n, glass, first, last, truncated)
 }
 
@@ -221,7 +221,7 @@ fn main() {
         for i in 0..gw {
             let (u, v) = ((i as f32 + 0.5) / gw as f32, (j as f32 + 0.5) / gh as f32);
             let ray = r.camera.get_ray(u, v, [0.5, 0.5], 0.0);
-            let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) else {
+            let Some(hit) = world.intersect(&ray, TRACE_T_MIN, f32::INFINITY) else {
                 continue;
             };
             receivers += 1;
@@ -246,7 +246,11 @@ fn main() {
                             let shadow = Ray::new(p, ls.direction).with_mask(MASK_SHADOW);
                             if !carries {
                                 Outcome::BelowHorizon
-                            } else if !world.occluded(&shadow, 0.001, ls.distance - 0.001) {
+                            } else if !world.occluded(
+                                &shadow,
+                                TRACE_T_MIN,
+                                ls.distance - TRACE_T_MIN,
+                            ) {
                                 Outcome::Visible
                             } else {
                                 // A light at infinity is walked to a far bound,
