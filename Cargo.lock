@@ -528,7 +528,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crust-assets"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "crust-core",
  "exr",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "crust-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "crust-jit",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "crust-jit"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "crust-mtlx"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "glam",
  "roxmltree",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "crust-render"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "clap",
  "crust-assets",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "crust-rt"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "criterion",
  "glam",
