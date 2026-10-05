@@ -38,7 +38,7 @@
   own step, `Program::apply_op`. `tests/jit.rs` compares every slot bitwise.
   **Not `forbid(unsafe_code)`** but `deny`, as `crust-core` is too (for its
   one test-only `GlobalAlloc`); it is the only crate with `unsafe` in
-  production code, in four audited blocks (the code-pointer transmute, the two host callbacks' raw
+  production code, in five audited blocks (the code-pointer transmute, the call into the generated code, the two host callbacks' raw
   pointers, and freeing the code in `Drop`). A `JitProgram` owns its
   `JITModule` (in a `Mutex`, since the module is `Send` but not `Sync`) and
   frees it on drop — cranelift-jit would otherwise leak the code, which a host
