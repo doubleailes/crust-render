@@ -25,7 +25,6 @@ use crust_rt::{
     Geometry, InstanceHitId, RayMask, Scene as RtScene, SceneBuilder as RtSceneBuilder,
 };
 use glam::{Affine3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::gf::Vec3f;
 use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::geom::{
@@ -37,13 +36,14 @@ use tracing::{debug, warn};
 use crate::material::Material;
 use crate::rt_world::{FaceMap, UvMap, WorldBuilder};
 
-use super::attrs::{custom_token, prim_ray_mask};
+use super::attrs::{
+    custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
+};
 use super::materials::{resolve_bound, resolve_material};
 use super::mesh::{MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
-use super::time::eval_time;
-use super::xform::{local_matrix_at, resets_xform_stack_at};
-use super::{ImportCaches, is_invisible, non_render_purpose, prim_at};
+use super::xform::compose_with_parent;
+use super::{ImportCaches, WalkScope, prim_at, prune_reason};
 
 /// How deep prototypes may nest before the importer gives up. USD forbids
 /// an instancing cycle, but a malformed stage can still describe one, and
@@ -309,41 +309,19 @@ pub(super) fn collect_proto_parts(
 }
 
 /// Whether the prototype walk leaves `prim` and its subtree out: the same
-/// pruning as the top-level traversal (inactive, a non-render purpose,
-/// invisible), plus a native instance nested inside the prototype, which
+/// pruning as the top-level traversal ([`prune_reason`], abstractness
+/// aside), plus a native instance nested inside the prototype, which
 /// openusd cannot read. `report` logs why; the placement count's walk passes `false`,
 /// so a skipped prim is reported once.
 fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
-    // Same pruning as the top-level traversal: an inactive prim (and
-    // its subtree) is absent from the composed scene, prototype or not.
-    if !prim.is_active().unwrap_or(true) {
-        if report {
-            debug!(
-                "Skipping inactive prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-        }
-        return true;
-    }
-    if let Some(purpose) = non_render_purpose(prim) {
-        if report {
-            debug!(
-                "Skipping {purpose}-purpose prim {} (prototype {})",
-                prim.path(),
-                root.path()
-            );
-        }
-        return true;
-    }
     // Visibility counts from the prototype root down, as UsdImaging
     // computes it for a prototype: an invisible part of a prototype is
     // missing from every instance. No camera is taken from a prototype,
-    // so here the subtree is simply pruned.
-    if is_invisible(prim) {
+    // so here an invisible subtree is simply pruned.
+    if let Some(reason) = prune_reason(prim, WalkScope::Prototype) {
         if report {
             debug!(
-                "Skipping invisible prim {} (prototype {})",
+                "Skipping {reason} prim {} (prototype {})",
                 prim.path(),
                 root.path()
             );
@@ -391,10 +369,8 @@ fn prototype_prunes(prim: &Prim, root: &Prim, report: bool) -> bool {
 fn part_local(stage: &Stage, prim: &Prim, root: &Prim, parent_local: GMat4) -> GMat4 {
     if prim.path() == root.path() {
         GMat4::IDENTITY
-    } else if resets_xform_stack_at(stage, prim) {
-        local_matrix_at(stage, prim)
     } else {
-        parent_local * local_matrix_at(stage, prim)
+        compose_with_parent(stage, prim, parent_local)
     }
 }
 
@@ -802,9 +778,7 @@ fn read_instancer(
         }
     };
 
-    let Ok(Some(sdf::Value::IntVec(proto_indices))) = instancer
-        .proto_indices_attr()
-        .get_at::<sdf::Value>(eval_time())
+    let Some(proto_indices) = value_at(&instancer.proto_indices_attr()).and_then(decode_i32_array)
     else {
         if report {
             warn!(
@@ -815,20 +789,16 @@ fn read_instancer(
         return None;
     };
 
-    let positions = value_vec3f_array(&instancer.positions_attr()).unwrap_or_default();
-    let scales = value_vec3f_array(&instancer.scales_attr());
+    let positions = value_at(&instancer.positions_attr())
+        .and_then(decode_vec3f_array)
+        .unwrap_or_default();
+    let scales = value_at(&instancer.scales_attr()).and_then(decode_vec3f_array);
     let orientations = instance_orientations(instancer);
-    let ids = match instancer.ids_attr().get_at::<sdf::Value>(eval_time()) {
-        Ok(Some(sdf::Value::Int64Vec(v))) => Some(v),
-        _ => None,
-    };
-    let invisible: std::collections::HashSet<i64> = match instancer
-        .invisible_ids_attr()
-        .get_at::<sdf::Value>(eval_time())
-    {
-        Ok(Some(sdf::Value::Int64Vec(v))) => v.into_iter().collect(),
-        _ => Default::default(),
-    };
+    let ids = value_at(&instancer.ids_attr()).and_then(decode_i64_array);
+    let invisible: std::collections::HashSet<i64> = value_at(&instancer.invisible_ids_attr())
+        .and_then(decode_i64_array)
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default();
 
     if positions.len() < proto_indices.len() && report {
         warn!(
@@ -1102,29 +1072,15 @@ pub(super) fn emit_point_instancer(
     );
 }
 
-/// A `point3f[]` / `float3[]` attribute as a plain vector.
-fn value_vec3f_array(attr: &openusd::usd::Attribute) -> Option<Vec<Vec3f>> {
-    match attr.get_at::<sdf::Value>(eval_time()) {
-        Ok(Some(sdf::Value::Vec3fVec(v))) => Some(v),
-        _ => None,
-    }
-}
-
 /// Per-instance rotations, preferring single-precision `orientationsf`
 /// over half-precision `orientations` as USD specifies.
 fn instance_orientations(instancer: &PointInstancer) -> Option<Vec<glam::Quat>> {
     let quat = |w: f32, x: f32, y: f32, z: f32| glam::Quat::from_xyzw(x, y, z, w).normalize();
-    if let Ok(Some(sdf::Value::QuatfVec(v))) = instancer
-        .orientationsf_attr()
-        .get_at::<sdf::Value>(eval_time())
-    {
+    if let Some(sdf::Value::QuatfVec(v)) = value_at(&instancer.orientationsf_attr()) {
         return Some(v.iter().map(|q| quat(q.w, q.x, q.y, q.z)).collect());
     }
-    match instancer
-        .orientations_attr()
-        .get_at::<sdf::Value>(eval_time())
-    {
-        Ok(Some(sdf::Value::QuathVec(v))) => Some(
+    match value_at(&instancer.orientations_attr()) {
+        Some(sdf::Value::QuathVec(v)) => Some(
             v.iter()
                 .map(|q| quat(q.w.to_f32(), q.x.to_f32(), q.y.to_f32(), q.z.to_f32()))
                 .collect(),

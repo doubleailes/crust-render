@@ -3,8 +3,9 @@
 //! schema-attribute value decoding. Every read resolves at [`eval_time`].
 
 use glam::{Vec3, Vec3A};
+use openusd::gf::Vec3f;
 use openusd::sdf;
-use openusd::usd::Prim;
+use openusd::usd::{Attribute, Prim};
 use tracing::warn;
 
 use crate::color::Space;
@@ -151,34 +152,53 @@ pub(super) fn resolve_adaptive_max_level(host: Option<u32>, authored: Option<i32
     resolve_subdiv_level(host, authored)
 }
 
-pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+// -----------------------------------------------------------------------
+// Value reads and decoders
+// -----------------------------------------------------------------------
+//
+// Every attribute read in the importer goes through [`value_at`] and one of
+// the `decode_*` functions below, so that two readers of the same kind of
+// value cannot disagree about which authored types they accept.
+
+/// `attr`'s value at [`eval_time`], or `None` when it is unauthored, blocked
+/// or unreadable.
+pub(super) fn value_at(attr: &Attribute) -> Option<sdf::Value> {
+    attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
+}
+
+/// The value of `prim`'s attribute `name` at [`eval_time`] — [`value_at`] by
+/// name.
+pub(super) fn prim_value(prim: &Prim, name: &str) -> Option<sdf::Value> {
+    value_at(&prim.attribute(name))
+}
+
+/// A scalar float, whatever precision it was authored in.
+pub(super) fn decode_f32(v: sdf::Value) -> Option<f32> {
+    match v {
+        sdf::Value::Float(f) => Some(f),
+        sdf::Value::Double(d) => Some(d as f32),
+        sdf::Value::Half(h) => Some(h.to_f32()),
+        _ => None,
+    }
+}
+
+/// A number where hand-written files author integers as often as floats
+/// (`clearValue`, MaterialX-style shader inputs): [`decode_f32`] plus `int`.
+pub(super) fn decode_number(v: sdf::Value) -> Option<f32> {
+    match v {
+        sdf::Value::Int(i) => Some(i as f32),
+        v => decode_f32(v),
+    }
+}
+
+pub(super) fn decode_i32(v: sdf::Value) -> Option<i32> {
     match v {
         sdf::Value::Int(i) => Some(i),
         _ => None,
     }
 }
 
-pub(super) fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        _ => None,
-    }
-}
-
-pub(super) fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+pub(super) fn decode_bool(v: sdf::Value) -> Option<bool> {
     match v {
         sdf::Value::Bool(b) => Some(b),
         // Authoring tools sometimes write bools as ints.
@@ -187,11 +207,8 @@ pub(super) fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
     }
 }
 
-pub(super) fn custom_token(prim: &Prim, name: &str) -> Option<String> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A token or a string — exporters write either for the same attribute.
+pub(super) fn decode_text(v: sdf::Value) -> Option<String> {
     match v {
         sdf::Value::Token(t) => Some(t.as_str().to_owned()),
         sdf::Value::String(s) => Some(s),
@@ -199,16 +216,81 @@ pub(super) fn custom_token(prim: &Prim, name: &str) -> Option<String> {
     }
 }
 
-pub(super) fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
+/// A three-vector (`color3f`, `float3`, `vector3d`, …) in any precision.
+/// USD has no dedicated colour variant: `color3f` is a `Vec3f`.
+pub(super) fn decode_vec3(v: sdf::Value) -> Option<Vec3A> {
     match v {
         sdf::Value::Vec3f(c) => Some(Vec3A::new(c.x, c.y, c.z)),
         sdf::Value::Vec3d(c) => Some(Vec3A::new(c.x as f32, c.y as f32, c.z as f32)),
+        sdf::Value::Vec3h(c) => Some(Vec3A::new(c.x.to_f32(), c.y.to_f32(), c.z.to_f32())),
         _ => None,
     }
+}
+
+/// A shading value widened to four channels, the shape `UsdUVTexture`'s
+/// `scale`/`bias`/`fallback` have: a `float4` as authored, a colour with
+/// alpha 1, a scalar in every channel.
+pub(super) fn decode_float4(v: sdf::Value) -> Option<[f32; 4]> {
+    match v {
+        sdf::Value::Vec4f(v) => Some([v.x, v.y, v.z, v.w]),
+        sdf::Value::Vec4d(v) => Some([v.x as f32, v.y as f32, v.z as f32, v.w as f32]),
+        sdf::Value::Vec4h(v) => Some([v.x.to_f32(), v.y.to_f32(), v.z.to_f32(), v.w.to_f32()]),
+        v @ (sdf::Value::Vec3f(_) | sdf::Value::Vec3d(_) | sdf::Value::Vec3h(_)) => {
+            decode_vec3(v).map(|c| c.extend(1.0).to_array())
+        }
+        v => decode_f32(v).map(|f| [f; 4]),
+    }
+}
+
+pub(super) fn decode_f32_array(v: sdf::Value) -> Option<Vec<f32>> {
+    match v {
+        sdf::Value::FloatVec(v) => Some(v),
+        sdf::Value::DoubleVec(v) => Some(v.into_iter().map(|d| d as f32).collect()),
+        sdf::Value::HalfVec(v) => Some(v.into_iter().map(|h| h.to_f32()).collect()),
+        _ => None,
+    }
+}
+
+pub(super) fn decode_i32_array(v: sdf::Value) -> Option<Vec<i32>> {
+    match v {
+        sdf::Value::IntVec(v) => Some(v),
+        _ => None,
+    }
+}
+
+pub(super) fn decode_i64_array(v: sdf::Value) -> Option<Vec<i64>> {
+    match v {
+        sdf::Value::Int64Vec(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// A `point3f[]` / `float3[]` array as authored.
+pub(super) fn decode_vec3f_array(v: sdf::Value) -> Option<Vec<Vec3f>> {
+    match v {
+        sdf::Value::Vec3fVec(v) => Some(v),
+        _ => None,
+    }
+}
+
+pub(super) fn custom_i32(prim: &Prim, name: &str) -> Option<i32> {
+    prim_value(prim, name).and_then(decode_i32)
+}
+
+pub(super) fn custom_f32(prim: &Prim, name: &str) -> Option<f32> {
+    prim_value(prim, name).and_then(decode_f32)
+}
+
+pub(super) fn custom_bool(prim: &Prim, name: &str) -> Option<bool> {
+    prim_value(prim, name).and_then(decode_bool)
+}
+
+pub(super) fn custom_token(prim: &Prim, name: &str) -> Option<String> {
+    prim_value(prim, name).and_then(decode_text)
+}
+
+pub(super) fn custom_color3(prim: &Prim, name: &str) -> Option<Vec3A> {
+    prim_value(prim, name).and_then(decode_vec3)
 }
 
 /// A colour attribute in the working space: [`custom_color3`], converted
@@ -225,17 +307,13 @@ pub(super) fn custom_color(prim: &Prim, name: &str, working: Space) -> Option<Ve
 /// own fallback, `lin_rec709_scene`, is deliberately not applied — see
 /// `docs/color_management.md`). A name the config does not know is refused
 /// with a warning, and is `None` too.
-pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
+pub(super) fn attr_color_space(attr: &Attribute) -> Option<Space> {
     let name = own_color_space_name(attr).or_else(|| {
         let stage = attr.stage();
         let mut path = Some(attr.path().prim_path());
         while let Some(p) = path.filter(|p| !p.is_abs_root()) {
-            let named = super::prim_at(stage, p.clone())
-                .attribute("colorSpace:name")
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-                .and_then(token_text)
+            let named = prim_value(&super::prim_at(stage, p.clone()), "colorSpace:name")
+                .and_then(decode_text)
                 .filter(|n| !n.is_empty());
             if named.is_some() {
                 return named;
@@ -255,29 +333,21 @@ pub(super) fn attr_color_space(attr: &openusd::usd::Attribute) -> Option<Space> 
 /// A scope's `colorSpace:name = "acescg"` says its *linear colour values* are
 /// ACEScg; applied to an sRGB albedo file it would read it as linear, and to
 /// a displacement map it would mix its channels.
-pub(super) fn attr_own_color_space(attr: &openusd::usd::Attribute) -> Option<Space> {
+pub(super) fn attr_own_color_space(attr: &Attribute) -> Option<Space> {
     let name = own_color_space_name(attr)?;
     named_space(attr, &name)
 }
 
-fn token_text(v: sdf::Value) -> Option<String> {
-    match v {
-        sdf::Value::Token(t) => Some(t.as_str().to_owned()),
-        sdf::Value::String(s) => Some(s),
-        _ => None,
-    }
-}
-
-fn own_color_space_name(attr: &openusd::usd::Attribute) -> Option<String> {
+fn own_color_space_name(attr: &Attribute) -> Option<String> {
     attr.get_metadata::<sdf::Value>("colorSpace")
         .ok()
         .flatten()
-        .and_then(token_text)
+        .and_then(decode_text)
         .filter(|n| !n.is_empty())
 }
 
 /// `name` through the OCIO config, warning when it does not know it.
-fn named_space(attr: &openusd::usd::Attribute, name: &str) -> Option<Space> {
+fn named_space(attr: &Attribute, name: &str) -> Option<Space> {
     let space = Space::named(name);
     if space.is_none() {
         warn!(
@@ -294,7 +364,7 @@ fn named_space(attr: &openusd::usd::Attribute, name: &str) -> Option<Space> {
 /// none is taken as already in the working space — UsdLux's "in the rendering
 /// color space", and the rule every unmanaged input follows
 /// ([`crate::color`]).
-pub(super) fn in_working(attr: &openusd::usd::Attribute, rgb: Vec3A, working: Space) -> Vec3A {
+pub(super) fn in_working(attr: &Attribute, rgb: Vec3A, working: Space) -> Vec3A {
     match attr_color_space(attr) {
         Some(space) => crate::color::convert(rgb, space, working),
         None => rgb,
@@ -302,55 +372,23 @@ pub(super) fn in_working(attr: &openusd::usd::Attribute, rgb: Vec3A, working: Sp
 }
 
 pub(super) fn custom_f32_array(prim: &Prim, name: &str) -> Option<Vec<f32>> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::FloatVec(v) => Some(v),
-        sdf::Value::DoubleVec(v) => Some(v.into_iter().map(|d| d as f32).collect()),
-        _ => None,
-    }
+    prim_value(prim, name).and_then(decode_f32_array)
 }
 
 pub(super) fn custom_i32_array(prim: &Prim, name: &str) -> Option<Vec<i32>> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::IntVec(v) => Some(v),
-        _ => None,
-    }
+    prim_value(prim, name).and_then(decode_i32_array)
 }
 
-// -----------------------------------------------------------------------
-// Attribute helpers
-// -----------------------------------------------------------------------
-
-pub(super) fn attr_f32(attr: &openusd::usd::Attribute) -> Option<f32> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        _ => None,
-    }
+pub(super) fn attr_f32(attr: &Attribute) -> Option<f32> {
+    value_at(attr).and_then(decode_f32)
 }
 
-pub(super) fn attr_bool(attr: &openusd::usd::Attribute) -> Option<bool> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        sdf::Value::Bool(b) => Some(b),
-        // Authoring tools sometimes write bools as ints.
-        sdf::Value::Int(i) => Some(i != 0),
-        _ => None,
-    }
+pub(super) fn attr_bool(attr: &Attribute) -> Option<bool> {
+    value_at(attr).and_then(decode_bool)
 }
 
-pub(super) fn attr_color3f(attr: &openusd::usd::Attribute) -> Option<[f32; 3]> {
-    match attr.get_at::<sdf::Value>(eval_time()).ok()?? {
-        // color3f is stored as Vec3f in sdf::Value
-        sdf::Value::Vec3f(v) => Some([v.x, v.y, v.z]),
-        _ => None,
-    }
+pub(super) fn attr_vec3(attr: &Attribute) -> Option<Vec3A> {
+    value_at(attr).and_then(decode_vec3)
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@
 //! returns `None` for the caller to turn into a fallback colour.
 
 use super::{TileReader, TiledFile};
+use crate::texture_cache::{Ways, mib_to_bytes};
 use half::f16;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,7 +124,7 @@ fn thread_stripe() -> usize {
 }
 
 /// Default cache budget, matching OIIO's own 1 GB.
-pub const DEFAULT_BUDGET_BYTES: u64 = crust_core::config::DEFAULT_CACHE_MB as u64 * 1024 * 1024;
+pub const DEFAULT_BUDGET_BYTES: u64 = mib_to_bytes(crust_core::config::DEFAULT_CACHE_MB as u64);
 
 /// Which tile, of which level, of which file.
 ///
@@ -427,21 +428,16 @@ impl TileCache {
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             files: Mutex::new(Vec::new()),
             resident: AtomicU64::new(0),
-            budget: budget_bytes.max(1024 * 1024),
+            budget: budget_bytes.max(mib_to_bytes(1)),
             sweeping: Mutex::new(0),
             stats: CacheStats::default(),
         }
     }
 
-    /// The budget from `CRUST_TEX_CACHE_MB` as parsed into
-    /// [`crust_core::config()`], or [`DEFAULT_BUDGET_BYTES`].
-    pub fn budget_from_env() -> u64 {
-        Self::budget_of(crust_core::config())
-    }
-
-    /// The tile cache budget `config` asks for, in bytes.
+    /// The tile cache budget `config` asks for (`CRUST_TEX_CACHE_MB`), in
+    /// bytes.
     pub fn budget_of(config: &crust_core::Config) -> u64 {
-        config.tex_cache_mb.get() * 1024 * 1024
+        mib_to_bytes(config.tex_cache_mb.get())
     }
 
     pub fn budget(&self) -> u64 {
@@ -720,12 +716,11 @@ const MICRO_SETS: usize = 16;
 /// a tile edge doubles that.
 const MICRO_WAYS: usize = 4;
 
-type MicroSlot = Option<((u32, TileId), Arc<Tile>)>;
-const EMPTY_WAYS: [MicroSlot; MICRO_WAYS] = [const { None }; MICRO_WAYS];
+type MicroSet = Ways<(u32, TileId), Arc<Tile>, MICRO_WAYS>;
 /// The per-thread microcache: `MICRO_SETS` sets of `MICRO_WAYS` `(key, tile)`
 /// pairs, newest first within a set, keyed by the owning cache's
 /// [`TileCache::id`] as well as the tile.
-type MicroSlots = [[MicroSlot; MICRO_WAYS]; MICRO_SETS];
+type MicroSlots = [MicroSet; MICRO_SETS];
 
 thread_local! {
     /// The most recently used tiles, per thread and per texture.
@@ -748,7 +743,7 @@ thread_local! {
     /// MICRO_WAYS` = 64 tiles a thread, 1.5 MiB of `half` 64x64 tiles, so
     /// 108 MiB on 72 threads against the 1 GiB default (half that for `u8`).
     static MICRO: std::cell::RefCell<MicroSlots> =
-        const { std::cell::RefCell::new([EMPTY_WAYS; MICRO_SETS]) };
+        const { std::cell::RefCell::new([MicroSet::EMPTY; MICRO_SETS]) };
 }
 
 /// The microcache set a key lives in. Files are interned with consecutive
@@ -785,11 +780,7 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     let set = micro_set(&key);
     let hit = MICRO.with(|m| {
         let slots = m.borrow();
-        let ways = &slots[set];
-        let idx = ways
-            .iter()
-            .position(|s| matches!(s, Some((k, _)) if *k == key))?;
-        let (_, tile) = ways[idx].as_ref()?;
+        let tile = slots[set].get(&key)?;
         Some(f.take()?(tile))
     });
     if let Some(r) = hit {
@@ -800,14 +791,9 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
     // decode and must not run under a thread-local borrow.
     let tile = cache.get(id)?;
     let r = f.take()?(&tile);
-    MICRO.with(|m| {
-        let mut slots = m.borrow_mut();
-        // Newest in front; the oldest way falls off the end. FIFO rather than
-        // LRU: promoting on a hit would make every hit a write.
-        let ways = &mut slots[set];
-        ways.rotate_right(1);
-        ways[0] = Some((key, tile));
-    });
+    // Newest in front; the oldest way falls off the end (see `Ways`).
+    let evicted = MICRO.with(|m| m.borrow_mut()[set].push(key, tile));
+    drop(evicted);
     Some(r)
 }
 
@@ -817,7 +803,7 @@ pub fn with_tile<R>(cache: &TileCache, id: TileId, f: impl FnOnce(&Tile) -> R) -
 /// is about to drop, and a stale hit would answer from the wrong cache.
 #[cfg(test)]
 pub fn clear_microcache() {
-    MICRO.with(|m| *m.borrow_mut() = [EMPTY_WAYS; MICRO_SETS]);
+    MICRO.with(|m| *m.borrow_mut() = [MicroSet::EMPTY; MICRO_SETS]);
 }
 
 #[cfg(test)]

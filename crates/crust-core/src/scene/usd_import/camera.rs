@@ -10,7 +10,57 @@ use crate::tracer::RenderSettings;
 
 use super::attrs::attr_f32;
 use super::prim_at;
-use super::xform::{local_matrix_at, resets_xform_stack_at};
+use super::xform::compose_with_parent;
+
+/// One `UsdGeomCamera` as both its readers see it: [`build_camera`], which
+/// builds the render camera, and [`screen_projection`], which adaptive
+/// subdivision reads before the traversal. Both derive from this one read, so
+/// they cannot describe two different cameras.
+struct CameraFrame {
+    /// The camera's position and its view direction and up, in world space.
+    /// USD's camera looks down local −Z with +Y up.
+    eye: Vec3,
+    forward: Vec3,
+    up: Vec3,
+    /// The focal length and the vertical aperture, in the same units: the
+    /// vertical aperture defaults to the horizontal one over the image's
+    /// aspect ratio.
+    focal_length: f32,
+    vert_aperture: f32,
+    /// The image size the aperture default and the field of view assume.
+    width: f32,
+    height: f32,
+}
+
+impl CameraFrame {
+    fn read(cam: &UsdCamera, stage: &Stage, prim: &Prim, settings: &RenderSettings) -> Self {
+        let world = local_to_world(stage, prim);
+        let focal_length = attr_f32(&cam.focal_length_attr()).unwrap_or(50.0);
+        let horiz_aperture = attr_f32(&cam.horizontal_aperture_attr()).unwrap_or(20.955);
+        let (w, h) = settings.get_dimensions();
+        let (width, height) = (w as f32, h as f32);
+        let vert_aperture =
+            attr_f32(&cam.vertical_aperture_attr()).unwrap_or(horiz_aperture * height / width);
+        CameraFrame {
+            eye: world.transform_point3(Vec3::ZERO),
+            forward: world.transform_vector3(Vec3::NEG_Z).normalize(),
+            up: world.transform_vector3(Vec3::Y).normalize(),
+            focal_length,
+            vert_aperture,
+            width,
+            height,
+        }
+    }
+
+    /// Tangent of the half vertical field of view.
+    fn tan_half_vfov(&self) -> f32 {
+        self.vert_aperture / (2.0 * self.focal_length)
+    }
+
+    fn aspect(&self) -> f32 {
+        self.width / self.height
+    }
+}
 
 pub(super) fn build_camera(
     stage: &Stage,
@@ -18,32 +68,20 @@ pub(super) fn build_camera(
     settings: &RenderSettings,
 ) -> Option<Camera> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let world = local_to_world(stage, prim);
-
-    // USD camera looks down -Z with +Y up in local space.
-    let lookfrom_v = world.transform_point3(Vec3::ZERO);
-    let forward_v = world.transform_vector3(Vec3::NEG_Z).normalize();
-    let up_v = world.transform_vector3(Vec3::Y).normalize();
-
-    let (focal_length, vert_aperture) = lens(&cam, settings);
+    let frame = CameraFrame::read(&cam, stage, prim, settings);
     let f_stop = attr_f32(&cam.f_stop_attr()).unwrap_or(0.0);
     let focus_distance = attr_f32(&cam.focus_distance_attr()).unwrap_or(10.0);
 
-    let (w, h) = settings.get_dimensions();
-    let (w_f, h_f) = (w as f32, h as f32);
-
-    let vfov_deg = 2.0 * (vert_aperture / (2.0 * focal_length)).atan().to_degrees();
+    let vfov_deg = 2.0 * frame.tan_half_vfov().atan().to_degrees();
     let aperture = if f_stop > 0.0 {
-        focal_length / f_stop
+        frame.focal_length / f_stop
     } else {
         0.0
     };
-
-    let aspect = w_f / h_f;
-    let lookfrom = Vec3A::new(lookfrom_v.x, lookfrom_v.y, lookfrom_v.z);
-    let lookat_v = lookfrom_v + forward_v * focus_distance;
-    let lookat = Vec3A::new(lookat_v.x, lookat_v.y, lookat_v.z);
-    let vup = Vec3A::new(up_v.x, up_v.y, up_v.z);
+    let aspect = frame.aspect();
+    let lookfrom = Vec3A::from(frame.eye);
+    let lookat = Vec3A::from(frame.eye + frame.forward * focus_distance);
+    let vup = Vec3A::from(frame.up);
 
     debug!(
         "USD camera: lookfrom={:?} lookat={:?} vup={:?} vfov={} aspect={} aperture={} focus={}",
@@ -61,45 +99,29 @@ pub(super) fn build_camera(
     ))
 }
 
-/// The focal length and the vertical aperture, in the same units: the vertical
-/// aperture defaults to the horizontal one over the image's aspect ratio.
-fn lens(cam: &UsdCamera, settings: &RenderSettings) -> (f32, f32) {
-    let focal_length = attr_f32(&cam.focal_length_attr()).unwrap_or(50.0);
-    let horiz_aperture = attr_f32(&cam.horizontal_aperture_attr()).unwrap_or(20.955);
-    let (w, h) = settings.get_dimensions();
-    let vert_aperture =
-        attr_f32(&cam.vertical_aperture_attr()).unwrap_or(horiz_aperture * h as f32 / w as f32);
-    (focal_length, vert_aperture)
-}
-
 /// What adaptive subdivision needs of the render camera, read before the
 /// traversal builds it: the position and the pixels per world unit at unit
 /// distance, `image height / (2 tan(vfov / 2))` = `height · focal / aperture`.
-/// From the same attributes and the same [`lens`] as [`build_camera`], so the
-/// two describe one camera. `None` when `prim` is not a camera on `stage`.
+/// The same [`CameraFrame`] as [`build_camera`]'s. `None` when `prim` is not a
+/// camera on `stage`.
 pub(super) fn screen_projection(
     stage: &Stage,
     prim: &Prim,
     settings: &RenderSettings,
 ) -> Option<ScreenProjection> {
     let cam = UsdCamera::get(stage, prim.path().clone()).ok().flatten()?;
-    let world = local_to_world(stage, prim);
-    let eye = world.transform_point3(Vec3::ZERO);
-    let (focal_length, vert_aperture) = lens(&cam, settings);
-    let (w, h) = settings.get_dimensions();
-    let f_px = h as f32 * focal_length / vert_aperture;
+    let frame = CameraFrame::read(&cam, stage, prim, settings);
+    let f_px = frame.height * frame.focal_length / frame.vert_aperture;
     // The view pyramid, as `build_camera` builds it: the vertical field of
     // view from the lens, the horizontal one from the image's aspect ratio.
-    let tan_v = vert_aperture / (2.0 * focal_length);
-    let forward = world.transform_vector3(Vec3::NEG_Z).normalize();
-    let up = world.transform_vector3(Vec3::Y).normalize();
+    let tan_v = frame.tan_half_vfov();
     (f_px.is_finite() && f_px > 0.0).then_some(ScreenProjection {
-        eye,
+        eye: frame.eye,
         f_px,
-        forward,
-        up,
+        forward: frame.forward,
+        up: frame.up,
         tan_v,
-        tan_h: tan_v * w as f32 / h as f32,
+        tan_h: tan_v * frame.width / frame.height,
     })
 }
 
@@ -130,11 +152,7 @@ fn local_to_world(stage: &Stage, prim: &Prim) -> GMat4 {
         }
     }
     ancestors.reverse();
-    let mut acc = GMat4::IDENTITY;
-    for p in &ancestors {
-        let local = local_matrix_at(stage, p);
-        let resets = resets_xform_stack_at(stage, p);
-        acc = if resets { local } else { acc * local };
-    }
-    acc
+    ancestors
+        .iter()
+        .fold(GMat4::IDENTITY, |acc, p| compose_with_parent(stage, p, acc))
 }

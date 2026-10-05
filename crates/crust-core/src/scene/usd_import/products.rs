@@ -28,10 +28,9 @@ use tracing::{debug, warn};
 
 use crate::aov::{Accumulation, AovProduct, AovRequest, AovSource, AovVar, Precision};
 
-use super::attrs::{custom_bool, custom_token};
+use super::attrs::{custom_bool, custom_token, decode_number, prim_value, value_at};
 use super::prim_at;
 use super::settings::render_settings_path;
-use super::time::eval_time;
 
 const DRIVER_PARAMETERS: &str = "driver:parameters:";
 
@@ -58,11 +57,7 @@ struct Base {
 }
 
 fn read_resolution(view: &impl RenderSettingsBase) -> Option<(usize, usize)> {
-    let v = view
-        .resolution_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    let v = v.try_as_vec_2i()?;
+    let v = value_at(&view.resolution_attr())?.try_as_vec_2i()?;
     (v.x > 0 && v.y > 0).then_some((v.x as usize, v.y as usize))
 }
 
@@ -247,12 +242,7 @@ fn describe_resolution(resolution: Option<(usize, usize)>) -> String {
 /// every one of them at its fallback, and those need no word.
 fn warn_unhonoured(prim: &Prim) {
     let mut ignored = Vec::new();
-    let value = |name: &str| {
-        prim.attribute(name)
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
-    };
+    let value = |name: &str| prim_value(prim, name);
     if let Some(sdf::Value::Float(a)) = value("pixelAspectRatio")
         && a != 1.0
     {
@@ -312,17 +302,7 @@ fn driver_attributes(prim: &Prim) -> Vec<(String, String)> {
 /// A float attribute authored as any numeric type — Houdini writes
 /// `clearValue` as a float, hand-written files as an int.
 fn custom_number(prim: &Prim, name: &str) -> Option<f32> {
-    match prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??
-    {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        sdf::Value::Half(h) => Some(h.to_f32()),
-        sdf::Value::Int(i) => Some(i as f32),
-        _ => None,
-    }
+    prim_value(prim, name).and_then(decode_number)
 }
 
 /// Components and precision of an Sdf type name or a Houdini

@@ -41,9 +41,8 @@ use crate::ray::{MASK_CAMERA, MASK_SHADOW, RayMask};
 use crate::rt_world::WorldBuilder;
 use crate::volume::VolumeRegion;
 
-use super::attrs::custom_bool;
+use super::attrs::{custom_bool, custom_token, prim_value};
 use super::prim_at;
-use super::time::eval_time;
 
 /// The mask bits that carry shadow classes (design D3): 3–30 for the most
 /// populated classes, 31 shared by the rest.
@@ -62,20 +61,13 @@ const ALLOCATED: usize = 28;
 /// when `includeRoot` is not authored the pseudo-root is added to the rule map
 /// here, unless an opinion on `/` is already there.
 pub(super) fn link_query(stage: &Stage, prim: &Prim, name: &str) -> Option<MembershipQuery> {
-    let prop = |suffix: &str| format!("collection:{name}:{suffix}");
-    let targets = |suffix: &str| {
-        prim.relationship(prop(suffix))
-            .targets()
-            .unwrap_or_default()
-    };
-    let (includes, excludes) = (targets("includes"), targets("excludes"));
-    let include_root = custom_bool(prim, &prop("includeRoot"));
-    let expression = prim
-        .attribute(prop("membershipExpression"))
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .is_some();
+    let Opinions {
+        includes,
+        excludes,
+        include_root,
+        expression,
+        ..
+    } = opinions(prim, name);
     if expression {
         warn!(
             "{}: collection:{name} authors membershipExpression, which crust does not \
@@ -153,13 +145,8 @@ fn opinions(prim: &Prim, name: &str) -> Opinions {
         includes: targets("includes"),
         excludes: targets("excludes"),
         include_root: custom_bool(prim, &prop("includeRoot")),
-        expansion_rule: super::attrs::custom_token(prim, &prop("expansionRule")),
-        expression: prim
-            .attribute(prop("membershipExpression"))
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
-            .is_some(),
+        expansion_rule: custom_token(prim, &prop("expansionRule")),
+        expression: prim_value(prim, &prop("membershipExpression")).is_some(),
     }
 }
 

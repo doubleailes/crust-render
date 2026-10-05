@@ -15,9 +15,9 @@ use crate::color::Space;
 use crate::material::{Displacement, DisplacementValue, Material, OpenPBR};
 
 use super::ImportCaches;
-use super::attrs::{attr_own_color_space, in_working};
-use super::materials::{attribute_asset_path, load_uv_texture, material_ptex, shader_info_id};
-use super::time::eval_time;
+use super::assets::{asset_path, load_uv_texture};
+use super::attrs::{attr_own_color_space, decode_float4, in_working, value_at};
+use super::materials::{material_ptex, shader_info_id};
 
 /// A `UsdPreviewSurface` material: its constants as an [`OpenPBR`], wrapped in
 /// a [`crate::PreviewSurface`] when any input is driven by a `UsdUVTexture`.
@@ -222,22 +222,17 @@ fn preview_uv_input(
     // The value an input carries, connection followed.
     let value = |input: &shade::Input| -> Option<sdf::Value> {
         let produced = input.value_producing_attributes(ProducerFilter::Any).ok()?;
-        produced
-            .first()?
-            .attribute()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
+        value_at(produced.first()?.attribute())
     };
     let token = |input: &str| value(&tex.input(input)).and_then(|v| v.as_str().map(str::to_owned));
-    let float4 = |input: &str| value(&tex.input(input)).and_then(|v| sdf_float4(&v));
+    let float4 = |input: &str| value(&tex.input(input)).and_then(decode_float4);
 
     let file = tex
         .input(tk::TEX_FILE)
         .value_producing_attributes(ProducerFilter::Any)
         .ok()
         .and_then(|p| p.into_iter().next())
-        .and_then(|a| attribute_asset_path(a.attribute(), caches.stage_path));
+        .and_then(|a| asset_path(a.attribute(), caches.stage_path));
     let Some(file) = file else {
         warn!(
             "UsdUVTexture {}: no inputs:file — {name} keeps its constant",
@@ -312,14 +307,7 @@ fn preview_uv_input(
     // roughness map the dataset does not ship, and roughness 0 turned it into
     // a mirror where the schema's 0.5 is an ordinary surface.
     let fallback = float4(tk::TEX_FALLBACK)
-        .or_else(|| {
-            surface_input
-                .attribute()
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-                .and_then(|v| sdf_float4(&v))
-        })
+        .or_else(|| value_at(surface_input.attribute()).and_then(decode_float4))
         .or_else(|| preview_surface_default(name))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
     let loaded = load_uv_texture(&file, space, caches).map(crate::TextureRef);
@@ -383,12 +371,7 @@ pub(super) fn preview_displacement(
             caches,
         ) else {
             // Already warned about; the input keeps its own constant.
-            let own = input
-                .attribute()
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-                .and_then(|v| sdf_float4(&v))?;
+            let own = value_at(input.attribute()).and_then(decode_float4)?;
             return constant(own[0]);
         };
         if uv.tex.is_none() {
@@ -400,19 +383,14 @@ pub(super) fn preview_displacement(
         .value_producing_attributes(ProducerFilter::Any)
         .ok()
         .and_then(|p| p.into_iter().next())
-        .and_then(|a| {
-            a.attribute()
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-        })
-        .and_then(|v| sdf_float4(&v))?;
+        .and_then(|a| value_at(a.attribute()))
+        .and_then(decode_float4)?;
     let c = value[0];
     (c != 0.0 && c.is_finite()).then(|| Displacement::new(DisplacementValue::Constant(c)))
 }
 
 /// A `UsdPreviewSurface` input's schema default, widened to four channels the
-/// way [`sdf_float4`] widens an authored value — what the input reads when a
+/// way [`decode_float4`] widens an authored value — what the input reads when a
 /// texture drives it, the texture fails, and nothing else was authored.
 /// Values from the UsdPreviewSurface specification.
 fn preview_surface_default(input: &str) -> Option<[f32; 4]> {
@@ -431,22 +409,6 @@ fn preview_surface_default(input: &str) -> Option<[f32; 4]> {
         "ior" => v(1.5),
         "occlusion" => v(1.0),
         "displacement" => v(0.0),
-        _ => return None,
-    })
-}
-
-/// A shading value widened to four channels, the shape `UsdUVTexture`'s
-/// `scale`/`bias`/`fallback` have: a `float4` as authored, a colour with
-/// alpha 1, a scalar in every channel.
-fn sdf_float4(v: &sdf::Value) -> Option<[f32; 4]> {
-    Some(match v {
-        sdf::Value::Vec4f(v) => [v.x, v.y, v.z, v.w],
-        sdf::Value::Vec4d(v) => [v.x as f32, v.y as f32, v.z as f32, v.w as f32],
-        sdf::Value::Vec4h(v) => [v.x.to_f32(), v.y.to_f32(), v.z.to_f32(), v.w.to_f32()],
-        sdf::Value::Vec3f(v) => [v.x, v.y, v.z, 1.0],
-        sdf::Value::Vec3d(v) => [v.x as f32, v.y as f32, v.z as f32, 1.0],
-        sdf::Value::Float(f) => [*f; 4],
-        sdf::Value::Double(d) => [*d as f32; 4],
         _ => return None,
     })
 }

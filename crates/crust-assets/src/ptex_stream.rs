@@ -38,6 +38,8 @@ use crate::ptex_texture::ptex_space;
 use crate::read_channel;
 use crust_core::{ColorSpace, PtexTexture, Vec3A};
 use std::path::Path;
+
+use crate::texture_cache::{Ways, mib_to_bytes};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Default cache budget, in MiB.
@@ -49,20 +51,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// working set is the frame rather than a locality window.
 pub const DEFAULT_CACHE_MB: usize = crust_core::config::DEFAULT_CACHE_MB;
 
-/// `CRUST_PTEX_CACHE_MB` as parsed into [`crust_core::config()`], as a byte
-/// count.
-pub fn cache_budget_from_env() -> usize {
-    budget_bytes(crust_core::config())
-}
-
-/// [`cache_budget_from_env`] for a given configuration.
+/// The render's whole Ptex budget `config` asks for (`CRUST_PTEX_CACHE_MB`),
+/// in bytes.
 pub fn budget_bytes(config: &crust_core::Config) -> usize {
-    config.ptex_cache_mb.get() * 1024 * 1024
-}
-
-/// Is the streaming backend on? `CRUST_PTEX_STREAM=1` turns it on.
-pub fn stream_enabled() -> bool {
-    crust_core::config().ptex_stream
+    mib_to_bytes(config.ptex_cache_mb.get() as u64) as usize
 }
 
 /// Default admission threshold: a texture streams only if **preloading** it
@@ -96,22 +88,16 @@ pub fn stream_enabled() -> bool {
 /// what reproduces the even-split behaviour for comparison.
 pub const DEFAULT_STREAM_MIN_MB: usize = crust_core::config::DEFAULT_PTEX_STREAM_MIN_MB;
 
-/// `CRUST_PTEX_STREAM_MIN_MB` as parsed into [`crust_core::config()`], as a
-/// byte count. See [`DEFAULT_STREAM_MIN_MB`].
-pub fn stream_min_bytes_from_env() -> usize {
-    crust_core::config().ptex_stream_min_mb * 1024 * 1024
+/// The admission threshold `config` asks for (`CRUST_PTEX_STREAM_MIN_MB`), in
+/// bytes. See [`DEFAULT_STREAM_MIN_MB`].
+pub(crate) fn stream_min_bytes(config: &crust_core::Config) -> usize {
+    mib_to_bytes(config.ptex_stream_min_mb as u64) as usize
 }
 
 /// Which mip chain a streamed texture is allowed to read — the reasoning is
 /// on [`crust_core::PtexMipSpace`], which `CRUST_PTEX_STREAM_MIPSPACE` parses
 /// into.
 pub use crust_core::PtexMipSpace as MipSpace;
-
-/// `CRUST_PTEX_STREAM_MIPSPACE` as parsed into [`crust_core::config()`]. See
-/// [`MipSpace`].
-pub fn mip_space_from_env() -> MipSpace {
-    crust_core::config().ptex_mip_space
-}
 
 /// Mip levels a face of resolution `res` holds, halving each axis to a floor
 /// of one texel.
@@ -190,7 +176,7 @@ struct TileId {
 /// and leave the interior at 0.999, for one extra `Option` pair per thread
 /// and a linear scan that finds its hit at index 0 either way. Pinned by
 /// `the_microcache_absorbs_most_taps`.
-type MicroSlots = [Option<(TileId, ptex::PixelData)>; MICRO_SLOTS];
+type MicroSlots = Ways<TileId, ptex::PixelData, MICRO_SLOTS>;
 
 /// See [`MicroSlots`]: four is the corner case's tap count, not a round
 /// number. Dropping it to two is what the 0.000 above measures.
@@ -277,18 +263,12 @@ pub fn micro_retained_bytes() -> u64 {
 /// same time — another test in the same binary, for one — moves it too. A
 /// check on what one sequence of lookups retained has to read this instead.
 pub fn micro_thread_bytes() -> u64 {
-    MICRO.with(|m| {
-        m.borrow()
-            .iter()
-            .flatten()
-            .map(|(_, data)| data.len() as u64)
-            .sum()
-    })
+    MICRO.with(|m| m.borrow().values().map(|data| data.len() as u64).sum())
 }
 
 thread_local! {
     static MICRO: std::cell::RefCell<MicroSlots> =
-        const { std::cell::RefCell::new([const { None }; MICRO_SLOTS]) };
+        const { std::cell::RefCell::new(MicroSlots::EMPTY) };
 }
 
 /// Distinguishes textures in [`TileId`]. Wraps only after 4 billion `.ptx`
@@ -630,10 +610,7 @@ impl PtexStream {
         let mut f = Some(f);
         let hit = MICRO.with(|m| {
             let slots = m.borrow();
-            let idx = slots
-                .iter()
-                .position(|s| matches!(s, Some((k, _)) if *k == id))?;
-            let (_, data) = slots[idx].as_ref()?;
+            let data = slots.get(&id)?;
             Some(f.take()?(data))
         });
         if let Some(r) = hit {
@@ -658,18 +635,11 @@ impl PtexStream {
         if data.len() > self.micro_max {
             return Some(r);
         }
-        MICRO.with(|m| {
-            let mut slots = m.borrow_mut();
-            // Take the entry about to fall off the end *before* rotating, so
-            // its bytes leave the accounting with it; `rotate_right` then
-            // puts that hole in front for the new tile.
-            if let Some((_, old)) = slots[MICRO_SLOTS - 1].take() {
-                MICRO_BYTES.sub(old.len() as u64);
-            }
-            slots.rotate_right(1);
-            MICRO_BYTES.add(data.len() as u64);
-            slots[0] = Some((id, data));
-        });
+        // The entry that falls off the end leaves the accounting with it.
+        MICRO_BYTES.add(data.len() as u64);
+        if let Some((_, old)) = MICRO.with(|m| m.borrow_mut().push(id, data)) {
+            MICRO_BYTES.sub(old.len() as u64);
+        }
         Some(r)
     }
 
@@ -882,10 +852,9 @@ mod tests {
     }
 
     #[test]
-    fn a_budget_is_read_from_the_environment_and_a_bad_one_falls_back() {
-        // No env mutation: `cache_budget_from_env` is the wrapper, and the
-        // policy it wraps is what matters. Kept as a compile-time check that
-        // the default is stated in one place and in MiB.
+    fn the_default_budget_is_stated_once_and_in_mib() {
+        // A compile-time check that the default is stated in one place and in
+        // MiB.
         assert_eq!(DEFAULT_CACHE_MB * 1024 * 1024, 1024 * 1024 * 1024);
     }
 }

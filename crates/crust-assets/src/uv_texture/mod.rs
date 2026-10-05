@@ -70,7 +70,7 @@ pub(crate) use udim::udim_number;
 use crate::mip_filter::{MipSource, Taps, lerp_rgba, trilinear};
 
 pub(crate) use mip::{reduce_half, reduce_half_linear};
-pub(crate) use udim::expand_token;
+pub(crate) use udim::existing_tiles;
 
 /// The decoded tiles, in whichever sample type the file warranted.
 enum Storage {
@@ -205,21 +205,10 @@ impl UvTexture {
             Ok::<_, AssetError>(tile)
         };
         if let Some(token) = token {
-            // Only tiles that exist on disk are opened, so a chart with holes
-            // costs nothing for the tiles it does not use. 10x10 covers the
-            // 1001..1100 range every DCC writes — and is what bounds the
-            // `<UVTILE>` sweep too, since the two tokens name the same grid.
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    let candidate = token.expand(&name, u, v);
-                    let p = Path::new(&candidate);
-                    if !p.exists() {
-                        continue;
-                    }
-                    match decode(p, udim_number(u, v)) {
-                        Ok(t) => tiles.push(t),
-                        Err(e) => warn!("{e} — skipping that UDIM tile"),
-                    }
+            for tile in existing_tiles(&name) {
+                match decode(&tile.path, tile.number) {
+                    Ok(t) => tiles.push(t),
+                    Err(e) => warn!("{e} — skipping that UDIM tile"),
                 }
             }
             if tiles.is_empty() {
@@ -276,21 +265,10 @@ impl UvTexture {
         mip: bool,
         max_edge: NonZeroUsize,
     ) -> Result<UvTexture, AssetError> {
-        let name = path.to_string_lossy().into_owned();
-        let name = name.as_str();
-        let candidates = |token: TileToken| {
-            (0..10u32)
-                .flat_map(move |v| (0..10u32).map(move |u| (u, v)))
-                .filter_map(move |(u, v)| {
-                    let candidate = token.expand(name, u, v);
-                    Path::new(&candidate)
-                        .exists()
-                        .then(|| (u, v, std::path::PathBuf::from(candidate)))
-                })
-        };
+        let found = existing_tiles(&path.to_string_lossy());
         // Settled by the first file, as `StreamingTexture::open` settles it.
         let first = match token {
-            Some(token) => candidates(token).next().map(|(_, _, p)| p),
+            Some(_) => found.first().map(|t| t.path.clone()),
             None => Some(path.to_path_buf()),
         };
         let marked = match space.resolved() {
@@ -310,8 +288,8 @@ impl UvTexture {
         };
         let mut tiles = Vec::new();
         if let Some(token) = token {
-            for (u, v, p) in candidates(token) {
-                match decode_exr_tile(&p, udim_number(u, v), max_edge, decode) {
+            for tile in &found {
+                match decode_exr_tile(&tile.path, tile.number, max_edge, decode) {
                     Ok(t) => tiles.push(t),
                     Err(e) => warn!("{e} — skipping that UDIM tile"),
                 }
