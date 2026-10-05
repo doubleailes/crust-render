@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(name = "crust", version, about, long_about = None)]
 struct Cli {
     /// Input scene path — .usda / .usdc / .usdz.
     /// When absent, falls back to a hard-coded procedural scene.
@@ -44,7 +44,7 @@ struct Cli {
     #[arg(short, long, default_value = "info")]
     level: LoggerLevel,
     /// Also write the log to a file named for the time the run started
-    /// (`crust-render-<UTC timestamp>.log`). Bare, it writes into the
+    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
     /// current directory; given a directory, it writes there and creates it
     /// if needed. The file receives the same events as the terminal, so
     /// `-l debug --log-file` is how a full record of a render is kept.
@@ -688,20 +688,20 @@ mod tests {
     #[test]
     fn log_file_flag_is_optional_and_takes_an_optional_directory() {
         // Absent: no file.
-        let c = Cli::try_parse_from(["crust-render"]).unwrap();
+        let c = Cli::try_parse_from(["crust"]).unwrap();
         assert_eq!(c.log_file, None);
         // Bare: the current directory.
-        let c = Cli::try_parse_from(["crust-render", "--log-file"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "--log-file"]).unwrap();
         assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
         // With a directory.
-        let c = Cli::try_parse_from(["crust-render", "--log-file", "renders/logs"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "--log-file", "renders/logs"]).unwrap();
         assert_eq!(
             c.log_file.as_deref(),
             Some(std::path::Path::new("renders/logs"))
         );
         // Bare, followed by another flag: the flag must not be eaten as the
         // directory, which is what `num_args = 0..=1` is there to guarantee.
-        let c = Cli::try_parse_from(["crust-render", "--log-file", "--bucket"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "--log-file", "--bucket"]).unwrap();
         assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
         assert!(c.bucket);
     }
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn cli_names_are_the_engine_names() {
         let parse = |flag: &str, value: &str| {
-            Cli::try_parse_from(["crust-render", flag, value]).expect("a known name")
+            Cli::try_parse_from(["crust", flag, value]).expect("a known name")
         };
         for &(value, name, _) in SamplingStrategy::CHOICES {
             assert_eq!(parse("--strategy", name).strategy, Some(value));
@@ -791,16 +791,16 @@ mod tests {
             parse("--light-selection", "uniform").light_selection,
             Some(LightSelection::Uniform)
         );
-        let cli = Cli::try_parse_from(["crust-render"]).unwrap();
+        let cli = Cli::try_parse_from(["crust"]).unwrap();
         assert!(cli.light_selection.is_none());
     }
 
     #[test]
     fn cli_indirect_clamp_defaults_to_ten_and_zero_disables() {
-        let cli = Cli::try_parse_from(["crust-render", "--indirect-clamp", "10"]).unwrap();
+        let cli = Cli::try_parse_from(["crust", "--indirect-clamp", "10"]).unwrap();
         assert_eq!(cli.indirect_clamp, Some(10.0));
         assert!(
-            Cli::try_parse_from(["crust-render"])
+            Cli::try_parse_from(["crust"])
                 .unwrap()
                 .indirect_clamp
                 .is_none()
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
         let filter = |name: &str| {
-            Cli::try_parse_from(["crust-render", "--filter", name])
+            Cli::try_parse_from(["crust", "--filter", name])
                 .unwrap()
                 .filter
         };
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn cli_parses_its_flags() {
         let cli = Cli::try_parse_from([
-            "crust-render",
+            "crust",
             "-i",
             "scene.usda",
             "-o",
@@ -900,13 +900,13 @@ mod tests {
         assert!(cli.stats);
         assert!(cli.profile);
         assert!(matches!(cli.level, LoggerLevel::Debug));
-        let scan = Cli::try_parse_from(["crust-render", "--scanline"]).expect("valid flags");
+        let scan = Cli::try_parse_from(["crust", "--scanline"]).expect("valid flags");
         assert!(scan.scanline);
     }
 
     #[test]
     fn cli_defaults_when_nothing_is_given() {
-        let cli = Cli::try_parse_from(["crust-render"]).expect("no flags is valid");
+        let cli = Cli::try_parse_from(["crust"]).expect("no flags is valid");
         assert!(cli.input.is_none());
         // No default here: `output.exr` applies only when the stage authors
         // no RenderProduct, which the CLI cannot know until it has loaded it.
@@ -928,30 +928,28 @@ mod tests {
 
     #[test]
     fn cli_subdiv_level_overrides_the_scene() {
-        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "0"]).expect("valid");
+        let cli = Cli::try_parse_from(["crust", "--subdiv-level", "0"]).expect("valid");
         assert_eq!(cli.subdiv_level, Some(0));
-        let cli = Cli::try_parse_from(["crust-render", "--subdiv-level", "3"]).expect("valid");
+        let cli = Cli::try_parse_from(["crust", "--subdiv-level", "3"]).expect("valid");
         assert_eq!(cli.subdiv_level, Some(3));
         assert!(
-            Cli::try_parse_from(["crust-render", "--subdiv-level", "-1"]).is_err(),
+            Cli::try_parse_from(["crust", "--subdiv-level", "-1"]).is_err(),
             "a level is a count"
         );
     }
 
     #[test]
     fn cli_subdiv_edge_length_is_a_positive_pixel_length() {
-        let cli =
-            Cli::try_parse_from(["crust-render", "--subdiv-edge-length", "2"]).expect("valid");
+        let cli = Cli::try_parse_from(["crust", "--subdiv-edge-length", "2"]).expect("valid");
         assert_eq!(cli.subdiv_edge_length, Some(2.0));
         assert!(
-            Cli::try_parse_from(["crust-render"])
+            Cli::try_parse_from(["crust"])
                 .unwrap()
                 .subdiv_edge_length
                 .is_none()
         );
         for bad in ["0", "-1", "inf", "NaN", "fast"] {
-            let Err(err) = Cli::try_parse_from(["crust-render", "--subdiv-edge-length", bad])
-            else {
+            let Err(err) = Cli::try_parse_from(["crust", "--subdiv-edge-length", bad]) else {
                 panic!("{bad} parsed as an edge length");
             };
             let err = err.to_string();
@@ -963,7 +961,7 @@ mod tests {
     fn cli_accepts_a_negative_frame() {
         // Shots routinely start before 0 (handles, pre-roll), and clap
         // would otherwise read `-5` as an unknown short flag.
-        let cli = Cli::try_parse_from(["crust-render", "-f", "-5"]).expect("negative frame");
+        let cli = Cli::try_parse_from(["crust", "-f", "-5"]).expect("negative frame");
         assert_eq!(cli.frame, Some(-5.0));
     }
 
@@ -971,35 +969,29 @@ mod tests {
     fn cli_rejects_a_non_finite_frame() {
         for bad in ["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"] {
             assert!(
-                Cli::try_parse_from(["crust-render", "--frame", bad]).is_err(),
+                Cli::try_parse_from(["crust", "--frame", bad]).is_err(),
                 "--frame {bad} must be rejected"
             );
         }
-        assert!(Cli::try_parse_from(["crust-render", "--frame", "twelve"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "--frame", "twelve"]).is_err());
     }
 
     #[test]
     fn cli_rejects_a_radius_or_clamp_that_is_no_number_the_engine_uses() {
         for bad in ["-1", "nan", "inf", "0"] {
             assert!(
-                Cli::try_parse_from(["crust-render", "--filter-radius", bad]).is_err(),
+                Cli::try_parse_from(["crust", "--filter-radius", bad]).is_err(),
                 "--filter-radius {bad}"
             );
         }
         for bad in ["-1", "nan", "inf"] {
             assert!(
-                Cli::try_parse_from(["crust-render", "--indirect-clamp", bad]).is_err(),
+                Cli::try_parse_from(["crust", "--indirect-clamp", bad]).is_err(),
                 "--indirect-clamp {bad}"
             );
         }
-        let ok = Cli::try_parse_from([
-            "crust-render",
-            "--indirect-clamp",
-            "0",
-            "--filter-radius",
-            "1.5",
-        ])
-        .unwrap();
+        let ok = Cli::try_parse_from(["crust", "--indirect-clamp", "0", "--filter-radius", "1.5"])
+            .unwrap();
         assert_eq!(
             (ok.indirect_clamp, ok.filter_radius),
             (Some(0.0), Some(1.5))
@@ -1008,10 +1000,10 @@ mod tests {
 
     #[test]
     fn cli_rejects_unknown_enum_values() {
-        assert!(Cli::try_parse_from(["crust-render", "--strategy", "random"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "--filter", "lanczos"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "--light-selection", "bvh"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "-l", "loud"]).is_err());
-        assert!(Cli::try_parse_from(["crust-render", "-s", "many"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "--strategy", "random"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "--filter", "lanczos"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "--light-selection", "bvh"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "-l", "loud"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "-s", "many"]).is_err());
     }
 }

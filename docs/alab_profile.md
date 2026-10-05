@@ -482,7 +482,7 @@ RAYON_NUM_THREADS=8 cargo run --release -- -i samples/ALab/entry.usda -f 1004 --
 # light and shadow links, and why a light left the list:
 cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 1 -l debug 2>&1 | grep light_links
 # stack snapshots during the render phase of the first:
-eu-stack -p "$(pgrep -f crust-render)" > stacks.txt
+eu-stack -p "$(pgrep -x crust)" > stacks.txt
 ```
 
 Each run peaks at about 29 GiB, so run them one at a time.

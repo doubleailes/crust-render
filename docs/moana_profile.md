@@ -696,6 +696,6 @@ scripts/bench_ab.sh -a bin_before -b bin_after -n 2 -p Render \
     -x "--camera /island/cam/shotCam -s 4" $ISLAND
 # level 1 in either packet layout, Ptex streamed (peak ~51 GiB gathered, ~42 indexed)
 CRUST_TRI_PACKETS=indexed CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file \
-    target/release/crust-render -i $ISLAND --camera /island/cam/shotCam \
+    target/release/crust -i $ISLAND --camera /island/cam/shotCam \
     --subdiv-level 1 -s 16 --stats
 ```

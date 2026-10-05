@@ -138,7 +138,7 @@ pub(crate) fn utc_stamp(t: std::time::SystemTime) -> String {
 /// produced no file would be discovered only after the render it was meant to
 /// record. The error is the message to print.
 fn open_log_file(dir: &Path) -> std::result::Result<std::fs::File, String> {
-    let path = dir.join(format!("crust-render-{}.log", utc_stamp(SystemTime::now())));
+    let path = dir.join(format!("crust-{}.log", utc_stamp(SystemTime::now())));
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)

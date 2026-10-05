@@ -97,7 +97,7 @@ now"):
 
 ```bash
 RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
-    target/release/crust-render -i samples/materialx_lion.usda -o /tmp/x.exr -s 2
+    target/release/crust -i samples/materialx_lion.usda -o /tmp/x.exr -s 2
 callgrind_annotate --inclusive=yes callgrind.out.<pid>
 ```
 

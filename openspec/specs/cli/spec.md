@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The command-line entry point (`crust-render` binary, `main.rs`). It parses
+The command-line entry point (the `crust` binary of the `crust-render` crate, `main.rs`). It parses
 arguments, builds a `Scene` from USD or a procedural fallback, runs the renderer,
 and writes the output image. This is the only user-facing surface of the tool.
 ## Requirements

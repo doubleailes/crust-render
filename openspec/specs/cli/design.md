@@ -24,7 +24,7 @@ cargo run --release                 # no -i → hard-coded procedural fallback (
 cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles are the default)
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), --scanline
+# --log-file [DIR] (tee the log to crust-<UTC stamp>.log), --scanline
 #   (row order instead of the default 16x16 tiles; -b/--bucket is accepted and ignored),
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf), --light-selection (uniform|power|learned),
@@ -67,8 +67,8 @@ cargo run --release -- -i samples/curves.usda --stats
 # 104 -> 79 B/triangle on the grid for 13% less throughput, 30% less on an
 # out-of-cache soup), `auto` the measured default, gathered.
 python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
-CRUST_TRI_PACKETS=gathered target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
-CRUST_TRI_PACKETS=indexed  target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
+CRUST_TRI_PACKETS=gathered target/release/crust -i /tmp/subdiv_stress.usda --stats -l error
+CRUST_TRI_PACKETS=indexed  target/release/crust -i /tmp/subdiv_stress.usda --stats -l error
 # ...and inside the render: Trace vs EvalBsdfs vs Texture vs SurfaceLighting,
 # flat / by category / by execution tree. Costs render time (~15-20%, printed
 # with the report), so never take a Render time from a --profile run.
@@ -274,7 +274,7 @@ line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel
 sample — the finest granularity in the engine is per *pass* (`render_pass`), which is one
 line on an ordinary render and a handful on a guided one.
 
-`--log-file` tees the same stream to `crust-render-<YYYYMMDDTHHMMSSZ>.log`. Four
+`--log-file` tees the same stream to `crust-<YYYYMMDDTHHMMSSZ>.log`. Four
 details are load-bearing. It is **two `fmt` layers over a registry**, not one writer
 teed into both sinks, because ANSI is a per-layer setting — a single writer would
 either fill the file with escape codes or strip the colour from the terminal; the
