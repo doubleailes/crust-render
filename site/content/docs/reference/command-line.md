@@ -23,10 +23,11 @@ crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materi
 
 | command | what it does |
 |---------|--------------|
-| `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` and `--log-file` belongs to it. |
+| `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` belongs to it. |
 | [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line. |
 
-`-l, --level` and `--log-file` apply to every command, and can go before or after it.
+`-l, --level` applies to every command, and can go before or after it. `--log-file` belongs to
+`render`: its directory is optional, so anywhere else it could take the next word as one.
 
 From a source checkout, put `cargo run --release --` in front of the command:
 
@@ -464,7 +465,7 @@ order. `KIND` is one of:
 | kind | lists |
 |------|-------|
 | `camera` | the cameras a render can go through: the paths `--camera` accepts |
-| `light` | the lights that light the render (sphere, rect, disk, cylinder, distant, dome) |
+| `light` | the lights the render reads (sphere, rect, disk, cylinder, distant, dome) |
 | `material` | the `Material` prims a binding can reach, whether or not anything binds them |
 
 The plurals (`cameras`, `lights`, `materials`) work too.
@@ -485,6 +486,10 @@ the list is what a render would use:
   uses it.
 - Under an invisible ancestor, a camera is listed (its visibility only hides it in a
   viewport) and a light is not (it lights nothing).
+- A light is listed whatever its values. One the render then refuses, such as a sphere
+  light of radius 0 or one whose transform scales it to nothing, is skipped with a
+  warning when you render: whether a light is usable depends on the frame, and `ls`
+  reads none.
 - A material is listed wherever a binding can reach it: only one inside an instance's
   prototype is left out.
 

@@ -157,9 +157,12 @@ pub enum ListKind {
     /// invisible ancestor included, as a hidden camera still renders.
     Camera,
     /// The UsdLux lights the import reads (sphere, rect, disk, cylinder,
-    /// distant, dome) that light the render: pruned like geometry, so an
-    /// invisible light, and a light inside a prototype or beneath a
-    /// `PointInstancer`, is not listed.
+    /// distant, dome): pruned like geometry, so an invisible light, and a
+    /// light inside a prototype or beneath a `PointInstancer`, is not listed.
+    /// Whether the import then accepts one is a property of its values at
+    /// the rendered time code and its composed transform — a zero radius or
+    /// size, a transform that collapses it — which a listing evaluates at no
+    /// frame; such a light is listed, and the render skips it with a warning.
     Light,
     /// `UsdShadeMaterial` prims a binding can reach: all but those under an
     /// inactive ancestor or inside an instance's prototype, whether or not

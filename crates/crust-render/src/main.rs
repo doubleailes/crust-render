@@ -34,19 +34,6 @@ struct Cli {
     /// Verbose level
     #[arg(short, long, default_value = "info", global = true)]
     level: LoggerLevel,
-    /// Also write the log to a file named for the time the run started
-    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
-    /// current directory; given a directory, it writes there and creates it
-    /// if needed. The file receives the same events as the terminal, so
-    /// `-l debug --log-file` is how a full record of a render is kept.
-    #[arg(
-        long,
-        value_name = "DIR",
-        num_args = 0..=1,
-        default_missing_value = ".",
-        global = true
-    )]
-    log_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -77,7 +64,7 @@ enum LsKind {
     /// included).
     #[value(alias = "cameras")]
     Camera,
-    /// The lights that light the render (invisible ones left out).
+    /// The lights the render reads (invisible ones left out).
     #[value(alias = "lights")]
     Light,
     /// Material prims a binding can reach, bound or not.
@@ -108,6 +95,17 @@ struct RenderArgs {
     /// husk's `-o` does; the other products keep theirs.
     #[arg(short, long)]
     output: Option<String>,
+    /// Also write the log to a file named for the time the run started
+    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
+    /// current directory; given a directory, it writes there and creates it
+    /// if needed. The file receives the same events as the terminal, so
+    /// `-l debug --log-file` is how a full record of a render is kept.
+    // A render flag, not a global one: its directory is optional, so before
+    // a subcommand or a positional (`crust --log-file render`, `crust ls
+    // --log-file camera`) it would take that word as the directory.
+    // `render` has no positional for it to swallow.
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+    log_file: Option<std::path::PathBuf>,
     /// Render by scanlines — a row is the work unit, rows in parallel, each
     /// written into the image in place — instead of the default 16x16 tiles.
     /// The image is bit-identical; kept as the A/B and for a progress bar in
@@ -530,11 +528,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     // A listing's stdout is its result, so its log goes to stderr; a
     // render's log stays where it always was.
-    let log_to = match cli.command {
-        Command::Render(_) => logging::Terminal::Stdout,
-        Command::Ls { .. } => logging::Terminal::Stderr,
+    let (log_to, log_file) = match &cli.command {
+        Command::Render(args) => (logging::Terminal::Stdout, args.log_file.as_deref()),
+        Command::Ls { .. } => (logging::Terminal::Stderr, None),
     };
-    if let Err(e) = logging::init(cli.level, cli.log_file.as_deref(), log_to) {
+    if let Err(e) = logging::init(cli.level, log_file, log_to) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -788,30 +786,31 @@ mod tests {
     #[test]
     fn log_file_flag_is_optional_and_takes_an_optional_directory() {
         // Absent: no file.
-        let c = Cli::try_parse_from(["crust", "render"]).unwrap();
-        assert_eq!(c.log_file, None);
+        assert_eq!(render([]).unwrap().log_file, None);
         // Bare: the current directory.
-        let c = Cli::try_parse_from(["crust", "render", "--log-file"]).unwrap();
-        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        // With a directory, before the subcommand as after it.
-        for args in [
-            ["crust", "render", "--log-file", "renders/logs"],
-            ["crust", "--log-file", "renders/logs", "render"],
-        ] {
-            let c = Cli::try_parse_from(args).unwrap();
-            assert_eq!(
-                c.log_file.as_deref(),
-                Some(std::path::Path::new("renders/logs"))
-            );
-        }
+        let r = render(["--log-file"]).unwrap();
+        assert_eq!(r.log_file.as_deref(), Some(std::path::Path::new(".")));
+        // With a directory.
+        let r = render(["--log-file", "renders/logs"]).unwrap();
+        assert_eq!(
+            r.log_file.as_deref(),
+            Some(std::path::Path::new("renders/logs"))
+        );
         // Bare, followed by another flag: the flag must not be eaten as the
         // directory, which is what `num_args = 0..=1` is there to guarantee.
-        let c = Cli::try_parse_from(["crust", "render", "--log-file", "--bucket"]).unwrap();
-        assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        let Command::Render(r) = c.command else {
-            panic!("render")
-        };
+        let r = render(["--log-file", "--bucket"]).unwrap();
+        assert_eq!(r.log_file.as_deref(), Some(std::path::Path::new(".")));
         assert!(r.bucket);
+        // It is render's alone: before the subcommand it would take the
+        // subcommand's name as its directory, and `ls` has a positional it
+        // would take the same way. Both are refused, not misread.
+        assert!(Cli::try_parse_from(["crust", "--log-file", "render"]).is_err());
+        assert!(
+            Cli::try_parse_from(["crust", "ls", "--log-file", "camera", "-i", "s.usda"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["crust", "ls", "camera", "-i", "s.usda", "--log-file"]).is_err()
+        );
     }
 
     /// The default outputs: `lin_rec709`, previewed un-tone-mapped on sRGB.
