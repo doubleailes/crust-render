@@ -721,18 +721,18 @@ thing that made the island possible.)
 `CRUST_PTEX_STREAM_MIPSPACE=file`** — every island `.ptx` is mipmapped, so the default
 policy declines them all and the switch alone reproduces the preloaded column exactly;
 see `docs/ptex_streaming.md`).
-Measured at 640x360 / 8 spp against the same build preloading, one sequential run
-each rather than an interleaved `bench_ab.sh` A/B — the memory and residency figures
-are deterministic, but treat the timings as indicative (the `Render` +1.2% is within
-noise, and the decode and load deltas are large enough to survive it): Ptex residency **5.98 ->
-0.61 GiB** (39 textures streamed, 3 579 preloaded under the size threshold), Ptex decode
-**84.8 s -> 14.0 s** so `Load assets` falls 01:40.7 -> 27.3 s, `Traverse prims` RSS
-**47.34 -> 41.48 GiB**, peak RSS **51.28 -> 47.08 GiB**, and `Render` costs **+1.2%** —
-nothing like the 2.8x the deliberately texture-bound sample scene shows, because the
-island is traversal-bound. The whole run finished 69 s sooner. Peak falls by less than
-residency does because peak lands at `Commit acceleration structure`, the SBVH build
-transient; the figure this feature moves is the traverse RSS.
-The cache held **3.28 MiB of a 2 GiB budget with zero evictions**: at this framing the
+Measured 2026-10-05 at 640x360 / 8 spp against the same build preloading, two runs
+per side alternating (the memory and residency figures are deterministic): Ptex
+residency **7.34 -> 0.61 GiB** (53 textures streamed, 3 579 preloaded under the size
+threshold; the 14 displacement maps are among the 3 632), `Load assets` **1:33 ->
+28 s**, `Traverse prims` RSS **28.7 -> 21.1 GiB**, peak RSS **31.6 -> 23.9 GiB**, and
+`Render` +1.8% / +3.2% (min / mean), within noise — nothing like the 2.8x the
+deliberately texture-bound sample scene shows, because the island is traversal-bound.
+The whole run finishes 67 s sooner, a quarter of it. The commit's transient is now
+small on either side, so peak falls by the full traverse saving. (The first
+measurement, 2026-09-27, before the island's traversal was fixed: 5.98 -> 0.61 GiB,
+`Load assets` 1:40.7 -> 27.3 s, peak 51.28 -> 47.08 GiB, `Render` +1.2%.)
+The cache held **7.6 MiB of a 2 GiB budget with zero evictions**: at this framing the
 ray cone asks for coarse levels, and a coarse level of a face is a few texels — reading
 only the resolution the frame resolves is exactly what preloading cannot do. The budget
 is a ceiling, not an allocation, so do not lower it on that number; a closer camera or a
@@ -745,7 +745,9 @@ nested instancers were grouped per (prototype, part). That gave 64 724 top-level
 instances whose boxes all spanned the dune field, and a ray entered ~12 500 instances
 per query. Grouping per prototype (see "Nesting" under instancing) took the 4 spp render
 from **312.6 s to 1.195 s** (`bench_ab.sh`, min of 2; −99.6%), Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
-33.92 GiB and peak RSS from 51.5 to 46.2 GiB.
+33.92 GiB and peak RSS from 51.5 to 46.2 GiB. Re-profiled 2026-10-05 at the defaults
+(128 spp, displacement on): the render takes 29.3 s of a 5:42 run, peaks at 31.6 GiB,
+and is still 90% traversal, at 17.7 µs per closest hit.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and both
 textures decode, since `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB.
@@ -881,16 +883,19 @@ resolution, which moves cage vertices only and warns once.
 - **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
   (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
-  imports and animates under `-f`. Frame 1004, measured 2026-09-27: 13 302 geometries,
-  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 47 lights,
-  ~3:00 to parse (see "Where import time goes"), 33.2 GiB peak, and 3:20 to render at
-  the importer defaults (640x360, 128 spp). **`docs/alab_profile.md` is the
-  `--profile` of that render**: streamed texture lookups take 89% of render thread
-  time, and the cause was contention, not work. A shared counter was bumped on every
-  lookup, and the 2-slot microcache missed 25% once a material interleaved ~5
-  textures, so 72 threads rendered an estimated ~1.25x faster than 8 (extrapolated
-  from two `--profile` runs at different spp, not a `bench_ab.sh` A/B). Both causes
-  are fixed since; see "Streaming textures" in `openspec/specs/textures/design.md`. The earlier "~38 s at
+  imports and animates under `-f`. Frame 1004, measured 2026-10-05: 13 302 geometries,
+  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 43 lights
+  (the four `lgt_screenLights` link to no receiver and are dropped), ~2:57 to parse
+  (see "Where import time goes"), 28.7 GiB peak, and 23.4 s to render at the importer
+  defaults (640x360, 128 spp), so the import is 88% of the frame.
+  **`docs/alab_profile.md` is the `--profile` of that render**: texture lookups are
+  43% of render thread time and tracing 40%, and 72 threads render ~5.4x faster than 8.
+  Its first profile (2026-09-27) found the lookups at 89% and 3:20 to render, from
+  contention rather than work: a shared counter bumped on every lookup, and a 2-slot
+  microcache that missed 25% once a material interleaved ~5 textures, so 72 threads
+  rendered only ~1.25x faster than 8 (extrapolated from two `--profile` runs at
+  different spp, not a `bench_ab.sh` A/B). Both causes are fixed; see "Streaming
+  textures" in `openspec/specs/textures/design.md`. The earlier "~38 s at
   1280x720 / 64 spp" figure predates textured materials. Two download facts come
   first. The **Asset Structure** package ships every
   geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte

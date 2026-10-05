@@ -1,13 +1,22 @@
 # Profiling ALab: where a production frame spends its time
 
-The first `--profile` run on a production-scale stage. The subject is Netflix
-Animation Studios' ALab 2.2, shot mk020_0281, frame 1004. This document records
-what the render costs and what the profile says about it. The main finding is
-that **streamed texture lookups take 89% of render thread time, and the cost is
-contention, not work.** On this machine, 72 threads render only about 1.25×
-faster than 8.
+`--profile` on a production-scale stage. The subject is Netflix Animation
+Studios' ALab 2.2, shot mk020_0281, frame 1004. This document records what the
+frame costs today, then keeps the first profile (2026-09-27) and the fixes it
+led to as history.
 
-Measured 2026-09-27 at `bd07ea2`.
+Measured 2026-10-05 at `4143c58` (0.5.0). The main findings:
+
+- **The render is no longer the frame.** Rendering takes 23.4 s, down from
+  3:20.7 in the first profile (−88%). It is now 12% of a 3:20 run. The other
+  88% is USD composition during the prim traversal.
+- **Texture lookups are still the largest render section, at 43% of thread
+  time.** That is 1.57 µs per `eval`, against 21.55 µs before the cache fix.
+  Ray tracing is next at 40%, so the frame is now close to the even split a
+  healthy render shows.
+- **The render scales with threads.** 72 threads render 5.4× faster than 8,
+  against 1.25× in the first profile. Some contention remains: a texture call
+  is 1.8× slower at 72 threads than at 8.
 
 ## Setup
 
@@ -18,17 +27,180 @@ cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM --profil
 ```
 
 - **Machine:** a 72-vCPU VM (`Intel Xeon E5-2699 v4`, reported as one socket
-  of 72 cores with no SMT, 16 MiB L3, 61 GiB RAM). A physical E5-2699 v4 has 22
+  of 72 cores with no SMT, 16 MiB L3, 93 GiB RAM). A physical E5-2699 v4 has 22
   cores, so these vCPUs span several physical sockets. That makes cache-line
   traffic between threads expensive, and it is what this profile is sensitive to.
 - **Settings:** the stage authors no `crust:` render settings, so the importer
   defaults apply: 640×360, 128 spp, depth 32, adaptive (min 32), power MIS, power
-  light selection, triangle filter, indirect clamp 10.
+  light selection, triangle filter, indirect clamp 10, bucket order.
 - **Assets:** the techvar assets are merged over `fragment/` (see "Known gaps: ALab" in
   `openspec/specs/usd-scene-import/design.md`). Every ALab texture is a tiled mip EXR, so all 5 722 of them
   stream through the `.tx` cache and none is preloaded.
+- **Runs:** one unprofiled `--stats` run for wall times and memory, then one
+  `--profile` run for section shares, run one after the other. The profiled
+  run's traversal was 22 s faster (2:30.2 against 2:52.8), because the page
+  cache was warm. Take wall times from the unprofiled run and shares from the
+  profiled one. The profiler's own overhead is estimated at 3.1% of thread time.
 
 ## The run
+
+| phase | wall | RSS at end | peak | first profile |
+|---|---|---|---|---|
+| Parse USD stage | 2:56.8 | 28.37 GiB | 28.37 GiB | 3:01.6 |
+| · Open stage | 0.004 s | 8.02 MiB | 8.02 MiB | 0.020 s |
+| · Traverse prims | 2:52.8 | 28.01 GiB | 28.01 GiB | 2:56.3 |
+| · Load assets | 2.6 s | 28.01 GiB | 28.01 GiB | 3.1 s |
+| · Commit acceleration structure | 1.4 s | 28.37 GiB | 28.37 GiB | 2.1 s |
+| Render | **23.4 s** | 28.64 GiB | 28.64 GiB | 3:20.7 |
+| Write output | 0.047 s | | | 0.036 s |
+| **total** | **3:20.3** | | **28.65 GiB** | 6:22.4, 33.20 GiB |
+
+The import is now 88% of the run, and nearly all of that is openusd composition
+during the traversal (see "Where import time goes" in
+`openspec/specs/usd-scene-import/design.md`). It has barely moved since the
+first profile, so it is now the lever for the frame as a whole. Peak memory is
+reached during the traversal, and the render adds only 0.3 GiB on top.
+
+### What the scene holds
+
+| | |
+|---|---|
+| geometries | 13 302 |
+| top-level BVH primitives | 1 991 360 (1 979 504 triangles, 11 819 instances, 37 analytic light shapes) |
+| primitives in memory | 30 597 852 (21 166 922 triangles, 9 418 288 cubic curve spans, 12 605 instances) |
+| allocated materials | 1 794: 1 749 textured `UsdPreviewSurface`, 45 `Emissive` |
+| lights | 43: 23 sphere, 13 cylinder, 4 rect, 1 disk, 1 distant, 1 dome |
+| kernel memory | 3.82 GiB (1.40 triangle packets, 0.86 curve spans, 0.67 BVH nodes, 0.48 triangle records, 0.18 leaves, 0.12 vertices, 0.11 normals) |
+| packet lanes filled | 82.7%; 193.6 bytes per triangle |
+
+- **Kernel memory fell from 9.16 to 3.82 GiB**, because each triangle is now
+  stored once, with shared vertex and normal tables
+  (`openspec/specs/intersection-kernel/design.md`).
+- **The rest of the 28.65 GiB peak, about 24.8 GiB, is the composed USD
+  stage.** A single-stage import keeps it allocated (`skip_stage_teardown`).
+- **Four fewer lights than the first profile**, because of light links (below).
+
+## Render profile
+
+Thread time over the whole render: 28:56 across 72 threads, which is 95.2% of
+72 × wall.
+
+| section | glob. | thread time | calls | per call | first profile |
+|---|---|---|---|---|---|
+| **Texture** | **43.0%** | 12:25.7 | 480 977 911 | **1.57 µs** | 88.6%, 21.55 µs |
+| Trace | 33.7% | 9:44.3 | 99 758 594 | 5.86 µs | 6.5%, 7.60 µs |
+| Occlusion | 6.3% | 1:49.1 | 41 157 683 | 2.65 µs | 1.5%, 3.94 µs |
+| EvalBsdfs (local) | 5.4% | 1:34.4 | 99 745 233 | 0.95 µs local, 8.49 µs incl. textures | 1.0% |
+| SurfaceLighting (local) | 4.9% | 1:24.5 | 99 745 233 | 0.85 µs local | 1.2% |
+| MainLoop | 3.3% | 56.7 s | 1 828 312 | | 0.6% |
+| Bounce | 2.5% | 43.6 s | 99 745 233 | 437 ns | 0.5%, 597 ns |
+| GeneratePrimary | 0.4% | 7.6 s | 29 278 681 | 258 ns | 0.1% |
+| TextureLoad | 0.4% | 7.1 s | 51 399 | 139 µs | 0.1% |
+| Contributions | 0.2% | 3.0 s | 29 278 681 | 104 ns | 0.0% |
+
+By category: **Shading 48.4%, Raytrace 39.9%, Integrator 11.3%**, IO 0.4%. The
+first profile measured 89.5 / 8.0 / 2.4. Guerilla's documentation calls a
+roughly even split between Raytrace, Shading and Integrator the healthy shape.
+The frame is now near it, with shading still the largest share.
+
+The execution tree is the same shape as before: `MainLoop → EvalBsdfs →
+Texture`. Of EvalBsdfs' 14:07 total, 12:33 is inside `Texture`.
+`TextureLoad`, which pages a tile in from disk, is only 7 s of that. Shading a
+point without its textures costs under 1 µs. The texture path is still what a
+shading point costs.
+
+### Texture lookups
+
+| | now | first profile |
+|---|---|---|
+| texture `eval`s per shading point | 4.82 | 4.8 |
+| texel lookups per `eval` | 6.59 | 6.5 |
+| lookups | 3.17 G | 3.28 G |
+| thread microcache hits | 85.3% | 74.9% |
+| shard-cache hits | 14.7% | 25.1% |
+| loaded | 597.8 MiB in 51 617 tiles, nothing evicted, 1 GiB budget | 503 MiB in 45 968 tiles |
+| concurrent double fills | 641 | 353 |
+
+The microcache hit rate is the one the cache fix reached, so 15% of lookups
+still take a shard mutex. The textures would total 44.95 GiB with every level
+resident. Streaming holds the frame under 0.6 GiB.
+
+## Thread scaling
+
+The same frame, varying only the thread count (profiled runs; per-call times
+are what matter):
+
+| threads | spp | Render | Texture µs/call | Trace µs/call | EvalBsdfs µs/call (incl. textures) |
+|---|---|---|---|---|---|
+| 72 | 32 | 6.43 s | 1.60 | 5.95 | 8.67 |
+| 8 | 8 | 8.74 s | 0.895 | 4.15 | 4.87 |
+| *first profile, 72* | *32* | *48.0 s* | *23.38* | *7.90* | *113.7* |
+| *first profile, 8* | *8* | *15.1 s* | *2.26* | *4.46* | *11.4* |
+
+- **72 threads buy 5.4× over 8**, against 1.25× before. Normalised to the same
+  32 spp, 8 threads would take about 35 s, and 72 take 6.4 s. The ideal is 9×.
+- **The gap is still texture contention.** At 9× the threads, a texture call is
+  1.8× slower (it was 10× slower). Trace slows 1.4×, consistent with shared
+  cache and memory traffic.
+- **At 8 threads the frame is ray-bound**: Trace 37.6% against Texture 35.9%.
+  So the texture path is no longer expensive in itself. What it still costs is
+  contention between threads.
+
+## Other findings
+
+- **Light and shadow links are read now.** The import splits the scene into 3
+  occluder classes. `lgt_env_dome` ignores 1 class, `lgt_sun_distant` ignores
+  2, and `lgt_sun_area_01` and `_02` ignore 1 each. A light that ignores an
+  occluder class is sampled by NEE alone at non-delta vertices (the history
+  section "Shadow links" has the rig's exclusions).
+- **The four `lgt_screenLights` rect lights are dropped.** Their
+  `collection:lightLink` has `includeRoot = 0`, and its `includes` name
+  `/root/electronics_ham_equipment03/GEO/…/screen0N_M_geo`. That path matches
+  no receiver in the composed stage, where the placed assets live under
+  `/root/alab_set01/…/electronics_ham_equipment03_000N`. A light that
+  illuminates nothing leaves the light list (DEBUG:
+  `collection:lightLink includes no receiver`). The first profile warned
+  about the link, ignored it, and let these lights illuminate everything. It
+  has not been checked whether the targets are an authoring quirk or a path
+  openusd should have remapped through the reference.
+- **NEE wastes less, but most shadow rays still miss.** Of 99.7 M light
+  samples, 41.3% were worth a shadow ray, and 81.7% of the 41.2 M shadow rays
+  cast were occluded, against 96.0% before. So about 7.6% of light samples now
+  deliver light, against 1.7%. This comparison has three causes, and they are
+  not separated here: the louvered windows no longer block the sun lights, the
+  screen lights are gone, and the adaptive sampler has changed. Power selection
+  is still the default; `--light-selection learned` is the remedy measured
+  under "Outcome: NEE's misses".
+- **Paths end by absorption or roulette, almost never by escaping.** Absorbed:
+  58.0%. Roulette: 42.0% (76.0% of roulette tests kill). Escaped: 0.04%. Depth
+  cap: 919 paths. The mean path length is 3.41 vertices.
+- **Adaptive sampling barely engages.** 1.2% of pixels stopped early (0.6%
+  more were held back by a neighbour), and the average is 127.1 of 128 spp.
+
+## What is left, in order of what it would buy
+
+1. **The import.** At 2:53 of a 3:20 frame, composition is now where a
+   single frame's time goes. The render could halve again and the frame would
+   be 6% faster.
+2. **Texture contention.** 15% of lookups still reach the shard mutexes, and a
+   lookup is 1.8× slower at 72 threads than at 8. Closing that gap would bring
+   the render near the ideal 9× over 8 threads. Consecutive shading points on
+   one thread are often different materials, which no per-thread cache
+   absorbs.
+3. **Traversal.** Trace is now a third of render thread time, at 5.9 µs per
+   closest-hit query on this VM.
+4. **Light selection.** 82% of shadow rays are still occluded under power
+   selection.
+
+## History: the first profile (2026-09-27, `bd07ea2`)
+
+The first `--profile` run on a production-scale stage. Its main finding was
+that **streamed texture lookups took 89% of render thread time, and the cost was
+contention, not work.** On this machine, 72 threads rendered only about 1.25×
+faster than 8. The machine reported 61 GiB of RAM at the time. Everything
+below is as measured then.
+
+### The run
 
 | phase | wall | RSS at end | peak |
 |---|---|---|---|
@@ -53,7 +225,7 @@ machine noise. It is not the profiler. As "Measuring a change" says, sequential
 runs are not an A/B. Take section *shares* from the profiled run and wall times
 from the unprofiled one.
 
-### What the scene holds
+#### What the scene holds
 
 | | |
 |---|---|
@@ -67,7 +239,7 @@ from the unprofiled one.
 Kernel memory is 9.16 GiB of the 33.2 GiB peak. Most of the rest is the composed
 USD stage, which a single-stage import keeps allocated (`skip_stage_teardown`).
 
-## Render profile
+### Render profile
 
 Thread time over the whole render: 203:43 across 72 threads, which is 98.2% of
 72 × wall. The workers are busy all the time; the question is what with.
@@ -96,9 +268,9 @@ tile in from disk) is only 8 s of that. **The texture time is not I/O.** The
 profiler's own overhead is estimated at 0.5% of thread time, so it does not
 distort these shares.
 
-## Diagnosis: the texture cache serialises the render
+### Diagnosis: the texture cache serialises the render
 
-### It scales with the thread count, not the work
+#### It scales with the thread count, not the work
 
 The same frame at the same settings, varying only the thread count (profiled
 runs; per-call times are what matter here):
@@ -116,7 +288,7 @@ everything else. Trace also slows, from 4.46 to 7.90 µs, which is consistent
 with the texture traffic saturating the shared cache and memory bus that
 traversal needs too.
 
-### Where the workers are
+#### Where the workers are
 
 Three `eu-stack` snapshots of the 72-thread render, taken 4 s apart (`perf` is
 not installed). Top frames, sample 2:
@@ -133,7 +305,7 @@ not installed). Top frames, sample 2:
 The other two samples agree: 39–46 threads in `texel` and 18–28 in or waiting on
 `TileCache::get`, against 3–4 tracing rays.
 
-### Why: two things shared by all 72 threads on every lookup
+#### Why: two things shared by all 72 threads on every lookup
 
 The texture path does about **31 texel lookups per shading point**: 4.8
 texture `eval`s per shading point (502.8 M / 104.5 M) times 6.5 lookups per
@@ -168,7 +340,7 @@ The miss path accounts for the threads parked in `lock_contended`. The counter
 accounts for the threads that stay inside `texel`, where the stack shows no lock
 at all.
 
-## Other findings
+### Other findings
 
 - **NEE mostly misses.** Of 104.5 M light samples, only 43.5% were worth a
   shadow ray. The rest were refused by the cheap tests, zero radiance first,
@@ -195,7 +367,7 @@ at all.
   its shadow ray. There is little to gain in the BSDF or integrator code until
   the texture path is fixed.
 
-## What to do about it, in order
+### What to do about it, in order
 
 1. **Take the shared counters off the lookup path.** Count per thread and sum
    when the report is built, or count only on the miss path. This is the
@@ -216,7 +388,7 @@ The streaming *design* (bounded budget, clock eviction, three tiers) is not what
 is wrong. The top tier was sized for a workload with one texture per shading
 point, and its bookkeeping writes to memory shared by all threads.
 
-## Outcome: fixes 1–3 landed
+### Outcome: fixes 1–3 landed
 
 The first three fixes above landed together (`tex-cache-contention`):
 - per-lookup counters are `StripedCounter`s, one cache line per thread;
@@ -245,7 +417,7 @@ What remains: 15% of lookups still reach the shard mutexes, and consecutive
 shading points on one thread are often different materials, which no per-thread
 cache absorbs.
 
-## Outcome: NEE's misses
+### Outcome: NEE's misses
 
 `examples/light_occlusion` settled the NEE finding above. It was selection, not
 glass: power sent 49% of the picks to two exterior lights that are visible from
@@ -260,11 +432,12 @@ light traverse the whole BVH. At equal time that leaves about 3.6× on direct
 lighting and about 1.1× on the full image. The rest of the full image's noise is
 indirect light from the windows, which selection cannot reach.
 
-## Shadow links: the louvered windows block the key
+### Shadow links: the louvered windows block the key
 
 Measured 2026-09-29. The light rig
 (`fragment/lightrig/lighting/mk020_0281_export/base/placement/…_placement.usda`)
-authors `collection:shadowLink` on its exterior lights, and crust reads none of it:
+authors `collection:shadowLink` on its exterior lights, and crust read none of it
+at the time (it does now; see "Light and shadow links" above):
 - **`lgt_env_dome`** excludes `/root/dmp_skydome_alab01`, the matte-painting sphere
   (radius 350 000) around the set that carries the same sky texture as the dome.
 - **`lgt_sun_distant`** excludes the skydome and the two
@@ -306,6 +479,10 @@ not a render.
 CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
 cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
 RAYON_NUM_THREADS=8 cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 8 --profile
+# light and shadow links, and why a light left the list:
+cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 1 -l debug 2>&1 | grep light_links
 # stack snapshots during the render phase of the first:
 eu-stack -p "$(pgrep -f crust-render)" > stacks.txt
 ```
+
+Each run peaks at about 29 GiB, so run them one at a time.
