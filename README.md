@@ -92,8 +92,9 @@ cargo run --release -- render -i samples/cornellbox.usda -o cornell.exr
 # run with no scene → hard-coded procedural fallback
 cargo run --release -- render
 
-# list the cameras a stage can be rendered through (`--camera`)
+# list a stage's cameras (the `--camera` paths), lights or materials
 cargo run --release -- ls camera -i samples/cornellbox.usda
+cargo run --release -- ls light -i samples/cornellbox.usda
 ```
 
 ### 📐 Geometry & acceleration
@@ -457,7 +458,7 @@ cargo run --release -- render -i scene.usda   # input USD scene (.usda/.usdc/.us
     -l debug                                  # log level
     --log-file renders/logs                   # tee the log to a timestamped file
 
-cargo run --release -- ls camera -i scene.usda   # the stage's cameras, one prim path per line
+cargo run --release -- ls camera -i scene.usda   # camera | light | material, one prim path per line
 ```
 
 `CRUST_*` environment variables switch individual optimizations off for A/B

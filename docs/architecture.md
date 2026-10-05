@@ -67,7 +67,7 @@ Two properties of this graph are deliberate and worth keeping:
 ## A render, end to end
 
 ```
-crust-render::main → render  (`crust render`; `crust ls camera` is Scene::usd_cameras)
+crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
@@ -162,12 +162,13 @@ other. The pairs:
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.
-- **Camera listing.** `crust ls camera` (`Scene::usd_cameras`,
-  `usd_import/listing.rs`) walks the stage apart from `traverse_into`, and must
-  meet exactly the cameras it meets: the same chunks, `prune_reason`, invisible
-  subtrees walked, instances and `PointInstancer`s not entered. Pinned by
-  `usd_cameras_lists_the_cameras_a_render_can_use`, which renders through
-  every path it lists.
+- **Stage listing.** `crust ls` (`Scene::list_usd`, `usd_import/listing.rs`)
+  walks the stage apart from `traverse_into`, and must meet exactly the
+  cameras and lights it meets: the same chunks, `prune_reason` (invisible
+  subtrees walked for cameras only), instances and `PointInstancer`s not
+  entered. A light type the import learns must join `listing::is_kind`.
+  Pinned by `list_usd_lists_what_a_render_uses`, which renders through every
+  camera listed and counts the lights against the import's light list.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`. Every curve is the OCIO config's
   (`crust-core/src/color.rs`). Every heuristic weighs a colour by the working
