@@ -24,7 +24,7 @@
 //! | [`materials`]  | binding resolution, the material cache, shader dispatch      |
 //! | [`preview`]    | `UsdPreviewSurface` + `UsdUVTexture` networks                |
 //! | [`volume`]     | `crust:volume:*` regions                                     |
-//! | [`listing`]    | what a stage holds, without importing it (its cameras)       |
+//! | [`listing`]    | what a stage holds, without importing it (`crust ls`)        |
 //!
 //! Submodules expose what their siblings need as `pub(super)` and import
 //! each other explicitly, so a file's `use super::…` block is its real
@@ -88,7 +88,7 @@ use lights::{
     emit_cylinder_light, emit_disk_light, emit_distant_light, emit_dome_light, emit_rect_light,
     emit_sphere_light,
 };
-pub(crate) use listing::list_cameras;
+pub(crate) use listing::list_prims;
 use materials::{MaterialCache, resolve_bound, resolve_material};
 use mesh::{MeshArena, MeshPlacement, SubdivPolicy, emit_mesh, flush_meshes};
 use products::import_render_products;

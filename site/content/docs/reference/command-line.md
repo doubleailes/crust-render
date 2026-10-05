@@ -18,13 +18,13 @@ top = false
 
 ```bash
 crust render [OPTIONS]              # render a scene
-crust ls camera -i <SCENE>          # list the scene's cameras
+crust ls <KIND> -i <SCENE>          # list the scene's cameras, lights or materials
 ```
 
 | command | what it does |
 |---------|--------------|
 | `render` | renders a USD stage, or the procedural scene without `-i`. Every flag below except `-l` and `--log-file` belongs to it. |
-| [`ls camera`](#ls-camera) | prints the stage's cameras, one prim path per line. `ls cameras` works too. |
+| [`ls`](#ls) | prints the stage's cameras, lights or materials, one prim path per line. |
 
 `-l, --level` and `--log-file` apply to every command, and can go before or after it.
 
@@ -168,7 +168,7 @@ The two cases fail differently. If the `--camera` path isn't a camera on the sta
 render stops with an error. If the `RenderSettings` camera is missing, the render logs a
 warning and falls back to the first camera.
 
-[`crust ls camera`](#ls-camera) lists the paths `--camera` accepts.
+[`crust ls camera`](#ls) lists the paths `--camera` accepts.
 
 ## Geometry
 
@@ -454,23 +454,39 @@ crust render -i scene.usda -l debug --log-file logs
 
 If the file can't be created, the run stops before loading the scene.
 
-## ls camera
+## ls
 
-`crust ls camera -i <SCENE>`
+`crust ls <KIND> -i <SCENE>`
 
-Prints the stage's cameras, one absolute prim path per line, in namespace order: the
-paths `--camera` accepts.
+Prints the stage's prims of one kind, one absolute prim path per line, in namespace
+order. `KIND` is one of:
+
+| kind | lists |
+|------|-------|
+| `camera` | the cameras a render can go through: the paths `--camera` accepts |
+| `light` | the lights that light the render (sphere, rect, disk, cylinder, distant, dome) |
+| `material` | the `Material` prims a binding can reach, whether or not anything binds them |
+
+The plurals (`cameras`, `lights`, `materials`) work too.
 
 ```bash
 $ crust ls camera -i samples/cornellbox.usda
 /scene/camera1
+$ crust ls light -i samples/cornellbox.usda
+/scene/Sky
 ```
 
-The cameras are found the way the render finds them, without importing anything else. A
-camera under an inactive, `class`, or proxy- or guide-purpose ancestor, inside an
-instance's prototype, or beneath a `PointInstancer` is not listed, since a render never
-goes through it. A camera under an invisible ancestor is listed: its visibility only
-hides it in a viewport.
+The prims are found the way the render finds them, without importing anything else, so
+the list is what a render would use:
+
+- Nothing under an inactive ancestor is listed, of any kind.
+- A camera or light under a `class` or proxy- or guide-purpose ancestor, inside an
+  instance's prototype, or beneath a `PointInstancer` is not listed, since a render never
+  uses it.
+- Under an invisible ancestor, a camera is listed (its visibility only hides it in a
+  viewport) and a light is not (it lights nothing).
+- A material is listed wherever a binding can reach it: only one inside an instance's
+  prototype is left out.
 
 The log goes to stderr, so stdout holds only the list and can be piped:
 
@@ -480,8 +496,8 @@ for cam in $(crust ls camera -i shot.usda); do
 done
 ```
 
-A stage without a camera prints nothing and logs a warning. A stage that can't be opened
-is an error.
+A stage with nothing of that kind prints nothing and logs a warning. A stage that can't
+be opened is an error.
 
 ## Exit status
 

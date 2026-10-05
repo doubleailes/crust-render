@@ -9,7 +9,7 @@ mod products;
 
 use logging::{LoggerLevel, STATS_TARGET};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use crust_assets::FileAssets;
 use crust_core::Buffer;
 use crust_core::LightSelection;
@@ -55,29 +55,44 @@ enum Command {
     ///
     /// Without -i, renders the hard-coded procedural fallback scene.
     Render(Box<RenderArgs>),
-    /// List what a USD stage holds, one entry per line on stdout.
+    /// List a USD stage's cameras, lights or materials, one prim path per
+    /// line on stdout.
     ///
-    /// The log goes to stderr, so stdout is only the listing.
+    /// What is listed is what a render would use: a camera listed is a path
+    /// `crust render --camera` accepts. The log goes to stderr, so stdout is
+    /// only the listing.
     Ls {
-        #[command(subcommand)]
-        what: LsCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum LsCommand {
-    /// The stage's cameras, one prim path per line.
-    ///
-    /// The paths are the ones `crust render --camera` accepts, in namespace
-    /// order. A camera the render never goes through —
-    /// under an inactive, `class` or proxy / guide-purpose ancestor, inside
-    /// an instance's prototype or beneath a PointInstancer — is not listed.
-    #[command(visible_alias = "cameras")]
-    Camera {
+        /// What to list.
+        kind: LsKind,
         /// Input scene path — .usda / .usdc / .usdz.
         #[arg(short, long)]
         input: std::path::PathBuf,
     },
+}
+
+/// `crust ls`'s kinds, each the engine's [`crust_core::ListKind`].
+#[derive(Clone, Copy, ValueEnum)]
+enum LsKind {
+    /// Cameras the render can go through (those under an invisible ancestor
+    /// included).
+    #[value(alias = "cameras")]
+    Camera,
+    /// The lights that light the render (invisible ones left out).
+    #[value(alias = "lights")]
+    Light,
+    /// Material prims a binding can reach, bound or not.
+    #[value(alias = "materials")]
+    Material,
+}
+
+impl From<LsKind> for crust_core::ListKind {
+    fn from(kind: LsKind) -> Self {
+        match kind {
+            LsKind::Camera => crust_core::ListKind::Camera,
+            LsKind::Light => crust_core::ListKind::Light,
+            LsKind::Material => crust_core::ListKind::Material,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -525,28 +540,27 @@ fn main() -> ExitCode {
     }
     match &cli.command {
         Command::Render(args) => render(args),
-        Command::Ls { what } => ls(what),
+        Command::Ls { kind, input } => ls(*kind, input),
     }
 }
 
-/// `crust ls`: print what the stage holds, one entry per line.
-fn ls(what: &LsCommand) -> ExitCode {
-    match what {
-        LsCommand::Camera { input } => match Scene::usd_cameras(input) {
-            Ok(cameras) => {
-                if cameras.is_empty() {
-                    warn!("{} has no camera", input.display());
-                }
-                for camera in cameras {
-                    println!("{camera}");
-                }
-                ExitCode::SUCCESS
+/// `crust ls`: print the stage's `kind` prims, one path per line.
+fn ls(kind: LsKind, input: &Path) -> ExitCode {
+    match Scene::list_usd(input, kind.into()) {
+        Ok(prims) => {
+            if prims.is_empty() {
+                let name = kind.to_possible_value().expect("no skipped variant");
+                warn!("{} has no {}", input.display(), name.get_name());
             }
-            Err(e) => {
-                error!("Failed to read USD scene: {e}");
-                ExitCode::FAILURE
+            for prim in prims {
+                println!("{prim}");
             }
-        },
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!("Failed to read USD scene: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -1085,7 +1099,7 @@ mod tests {
     }
 
     /// The subcommands: `render` takes the flags the bare binary used to,
-    /// `ls camera` (or `cameras`) needs a stage, and a subcommand is required.
+    /// `ls <kind>` needs a kind and a stage, and a subcommand is required.
     #[test]
     fn cli_subcommands() {
         assert!(
@@ -1096,24 +1110,32 @@ mod tests {
             Cli::try_parse_from(["crust", "-i", "scene.usda"]).is_err(),
             "render flags belong to render"
         );
-        for name in ["camera", "cameras"] {
+        for (name, want) in [
+            ("camera", crust_core::ListKind::Camera),
+            ("cameras", crust_core::ListKind::Camera),
+            ("light", crust_core::ListKind::Light),
+            ("lights", crust_core::ListKind::Light),
+            ("material", crust_core::ListKind::Material),
+            ("materials", crust_core::ListKind::Material),
+        ] {
             let c = Cli::try_parse_from(["crust", "ls", name, "-i", "scene.usda", "-l", "warn"])
                 .expect("valid");
             assert!(matches!(c.level, LoggerLevel::Warn));
-            let Command::Ls {
-                what: LsCommand::Camera { input },
-            } = c.command
-            else {
-                panic!("ls camera")
+            let Command::Ls { kind, input } = c.command else {
+                panic!("ls")
             };
+            assert_eq!(crust_core::ListKind::from(kind), want, "{name}");
             assert_eq!(input, std::path::Path::new("scene.usda"));
         }
         assert!(
             Cli::try_parse_from(["crust", "ls", "camera"]).is_err(),
-            "ls camera needs -i"
+            "ls needs -i"
         );
-        assert!(Cli::try_parse_from(["crust", "ls"]).is_err());
-        assert!(Cli::try_parse_from(["crust", "ls", "lights", "-i", "s.usda"]).is_err());
+        assert!(
+            Cli::try_parse_from(["crust", "ls", "-i", "s.usda"]).is_err(),
+            "and a kind"
+        );
+        assert!(Cli::try_parse_from(["crust", "ls", "meshes", "-i", "s.usda"]).is_err());
     }
 
     #[test]

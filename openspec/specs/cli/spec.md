@@ -18,19 +18,33 @@ lists. The render flags SHALL belong to `render`; `-l/--level` and
 - **WHEN** the user runs `crust -i scene.usda`
 - **THEN** the arguments are refused as a usage error and nothing is loaded
 
-### Requirement: Listing a stage's cameras
+### Requirement: Listing what a stage holds
 
-`crust ls camera -i <scene>` (alias `ls cameras`) SHALL print the stage's
-camera prims, one absolute path per line on stdout, in namespace order. It
-SHALL list exactly the cameras the render's traversal can render through:
-none under an inactive, abstract or proxy- / guide-purpose ancestor, inside an
-instance's prototype or beneath a `PointInstancer`; those under an invisible
-ancestor included. Its log SHALL go to stderr, so stdout holds only the list.
+`crust ls <kind> -i <scene>` SHALL print the stage's prims of `kind`, one
+absolute path per line on stdout, in namespace order, found by the render's
+own walk so that the list is what a render would use. `kind` SHALL be one of
+`camera`, `light` or `material`, each also accepted in the plural:
+
+- `camera`: exactly the cameras the render can go through — none under an
+  inactive, abstract or proxy- / guide-purpose ancestor, inside an instance's
+  prototype or beneath a `PointInstancer`; those under an invisible ancestor
+  included.
+- `light`: the UsdLux lights the import reads (sphere, rect, disk, cylinder,
+  distant, dome), pruned as geometry is, invisibility included.
+- `material`: every `UsdShadeMaterial` a binding can reach — all but those
+  under an inactive ancestor or inside an instance's prototype.
+
+Its log SHALL go to stderr, so stdout holds only the list.
 
 #### Scenario: Listing the cameras of a stage
 
 - **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda`
 - **THEN** stdout is `/scene/camera1` and the exit status is 0
+
+#### Scenario: An unknown kind
+
+- **WHEN** the user runs `crust ls mesh -i scene.usda`
+- **THEN** the arguments are refused as a usage error naming the valid kinds
 
 #### Scenario: A stage that cannot be opened
 

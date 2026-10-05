@@ -23,10 +23,11 @@ cargo run --release -- render -i samples/usdpreview_textured.usda # UsdPreviewSu
 cargo run --release -- render       # no -i → hard-coded procedural fallback (world::simple_scene)
 cargo run --release -- render --scanline -i samples/cornellbox.usda # row order (tiles are the default)
 cargo run --release -- ls camera -i samples/cornellbox.usda # the --camera paths, one per line (log on stderr)
+cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; plurals accepted
 
 # Subcommands: `render` takes every flag below except -l and --log-file, which are
-# global (before or after the subcommand); `ls camera` (alias `cameras`) lists the
-# cameras through `Scene::usd_cameras`, the import's own walk and pruning
+# global (before or after the subcommand); `ls <camera|light|material>` lists through
+# `Scene::list_usd(path, ListKind)`, the import's own walk and pruning per kind
 # (`usd_import/listing.rs`) — keep the two walks agreeing when either changes.
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),

@@ -3325,43 +3325,58 @@ fn skipping_stage_teardown_leaves_the_render_unchanged() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `Scene::usd_cameras` lists what `UsdImportOptions::camera` accepts, in
-/// namespace order: a camera under an invisible ancestor is listed (it is
-/// still rendered through), while one the render never meets — inactive,
-/// abstract, proxy-purpose, inside a prototype or beneath a PointInstancer —
-/// is not. Both import modes: two top-level subtrees import as one stage, and
-/// the Cornell box's many streams.
+/// `Scene::list_usd` lists what the render would use of each kind, in
+/// namespace order. Cameras: one under an invisible ancestor is listed (it is
+/// still rendered through), one the render never meets — inactive, abstract,
+/// proxy-purpose, inside a prototype or beneath a PointInstancer — is not, and
+/// every listed path is one `UsdImportOptions::camera` accepts. Lights: an
+/// invisible one is pruned too, as it lights nothing. Materials: everything a
+/// binding can reach, bound or not. Both import modes: two top-level subtrees
+/// import as one stage, and the Cornell box's many stream.
 #[test]
-fn usd_cameras_lists_the_cameras_a_render_can_use() {
-    use crust_core::UsdImportOptions;
+fn list_usd_lists_what_a_render_uses() {
+    use crust_core::{ListKind, UsdImportOptions};
 
-    let dir = std::env::temp_dir().join("crust_list_cameras");
+    let dir = std::env::temp_dir().join("crust_list_usd");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("cameras.usda");
+    let path = dir.join("listing.usda");
     std::fs::write(
         &path,
         r#"#usda 1.0
 class Xform "Proto"
 {
     def Camera "InClass" {}
+    def SphereLight "ClassLight" {}
+    def Material "ClassLook" {}
 }
 def Xform "W"
 {
     def Camera "Main" {}
+    def RectLight "Key" {}
+    def Scope "Looks"
+    {
+        def Material "Bound" {}
+        def Material "Unbound" {}
+    }
     def Xform "Hidden"
     {
         token visibility = "invisible"
         def Camera "Witness" {}
+        def DistantLight "Parked" {}
+        def Material "HiddenLook" {}
         def Xform "HiddenInst" (instanceable = true references = </Proto>) {}
     }
     def Xform "Off" (active = false)
     {
         def Camera "Disabled" {}
+        def DomeLight "Off" {}
+        def Material "OffLook" {}
     }
     def Xform "Proxy"
     {
         uniform token purpose = "proxy"
         def Camera "ProxyCam" {}
+        def DiskLight "ProxyLight" {}
     }
     def Xform "Inst" (instanceable = true references = </Proto>) {}
     def PointInstancer "Scatter"
@@ -3372,17 +3387,20 @@ def Xform "W"
         def Xform "P"
         {
             def Camera "InInstancer" {}
+            def CylinderLight "InInstancer" {}
         }
     }
     def Camera "Last" {}
+    def DomeLight "Sky" {}
 }
 "#,
     )
     .expect("write stage");
 
-    let cameras = Scene::usd_cameras(&path).expect("lists");
+    let list = |kind| Scene::list_usd(&path, kind).expect("lists");
+    let cameras = list(ListKind::Camera);
     assert_eq!(cameras, ["/W/Main", "/W/Hidden/Witness", "/W/Last"]);
-    // Every listed path is one the import renders through.
+    // Every listed camera is one the import renders through.
     for camera in &cameras {
         Scene::from_usd_with_options(
             &path,
@@ -3394,13 +3412,32 @@ def Xform "W"
         )
         .unwrap_or_else(|e| panic!("{camera}: {e}"));
     }
-
+    let lights = list(ListKind::Light);
+    assert_eq!(lights, ["/W/Key", "/W/Sky"]);
+    // As many as the import puts in the light list.
+    let scene = Scene::from_usd(&path).expect("loads");
+    assert_eq!(scene.lights.count(), lights.len());
     assert_eq!(
-        Scene::usd_cameras(&sample("cornellbox.usda")).expect("lists"),
+        list(ListKind::Material),
+        [
+            "/Proto/ClassLook",
+            "/W/Looks/Bound",
+            "/W/Looks/Unbound",
+            "/W/Hidden/HiddenLook",
+        ]
+    );
+
+    let cornell = sample("cornellbox.usda");
+    assert_eq!(
+        Scene::list_usd(&cornell, ListKind::Camera).expect("lists"),
         ["/scene/camera1"]
     );
+    assert_eq!(
+        Scene::list_usd(&cornell, ListKind::Light).expect("lists"),
+        ["/scene/Sky"]
+    );
     assert!(matches!(
-        Scene::usd_cameras(&dir.join("missing.usda")),
+        Scene::list_usd(&dir.join("missing.usda"), ListKind::Camera),
         Err(crust_core::Error::UsdOpen { .. })
     ));
 }
