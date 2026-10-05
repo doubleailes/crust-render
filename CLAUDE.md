@@ -37,13 +37,14 @@ record rather than appending history here.
 ## Commands
 
 ```bash
-cargo run --release -- -i samples/cornellbox.usda -o out.exr   # EXR + tone-mapped PNG beside it
-cargo run --release                                             # no -i: procedural fallback scene
-cargo run --release -- -i scene.usda -f 5 --camera /cam -s 16   # frame, camera, spp override
-cargo run --release -- -i scene.usda --stats                    # per-phase time/memory + scene stats
-cargo run --release -- -i scene.usda --profile                  # + per-section render profile (~15-20% slower)
-cargo run --release -- -i scene.usda -l debug --log-file logs   # tee the log to a timestamped file
-cargo run --release -- --help                                   # every flag
+cargo run --release -- render -i samples/cornellbox.usda -o out.exr    # EXR + tone-mapped PNG beside it
+cargo run --release -- render                                          # no -i: procedural fallback scene
+cargo run --release -- render -i scene.usda -f 5 --camera /cam -s 16   # frame, camera, spp override
+cargo run --release -- render -i scene.usda --stats                    # per-phase time/memory + scene stats
+cargo run --release -- render -i scene.usda --profile                  # + per-section render profile (~15-20% slower)
+cargo run --release -- render -i scene.usda -l debug --log-file logs   # tee the log to a timestamped file
+cargo run --release -- render --help                                   # every render flag
+cargo run --release -- ls camera -i scene.usda                         # the stage's cameras, one path per line
 
 cargo test                                          # integration tests load samples/*.usda
 cargo test -p crust-core loads_cornellbox_usda      # one test by name
@@ -182,7 +183,7 @@ tooling above exists to work around each.
 
    ```bash
    RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
-       target/release/crust -i samples/cornellbox.usda -o /tmp/x.exr -s 2
+       target/release/crust render -i samples/cornellbox.usda -o /tmp/x.exr -s 2
    callgrind_annotate --inclusive=no callgrind.out.<pid>
    ```
 

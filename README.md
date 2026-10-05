@@ -86,11 +86,14 @@ materials, and render settings all live in the USD stage.
 
 ```bash
 # render a bundled sample
-cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
-cargo run --release -- -i samples/cornellbox.usda -o cornell.exr
+cargo run --release -- render -i samples/openpbr_showcase.usda -o out.exr
+cargo run --release -- render -i samples/cornellbox.usda -o cornell.exr
 
 # run with no scene → hard-coded procedural fallback
-cargo run --release
+cargo run --release -- render
+
+# list the cameras a stage can be rendered through (`--camera`)
+cargo run --release -- ls camera -i samples/cornellbox.usda
 ```
 
 ### 📐 Geometry & acceleration
@@ -319,7 +322,7 @@ light behind a shroud so all transport is multi-bounce, and guiding cuts MSE
 against a converged reference by ~20% at equal final spp:
 
 ```bash
-cargo run --release -- -i samples/cornellbox_guided.usda
+cargo run --release -- render -i samples/cornellbox_guided.usda
 ```
 
 Every continuous lobe is guided — including refraction: thick glass uses a
@@ -360,9 +363,9 @@ exist to visualize what MIS balances between, after
 ```bash
 # four glossy plates (roughness 0.01 → 0.25) × four sphere lights of equal
 # power (radius 0.05 → 1.35) — render one strategy at a time and compare
-cargo run --release -- -i samples/veach_mis.usda -o veach_light.exr --strategy light
-cargo run --release -- -i samples/veach_mis.usda -o veach_bsdf.exr  --strategy bsdf
-cargo run --release -- -i samples/veach_mis.usda -o veach_mis.exr   --strategy power
+cargo run --release -- render -i samples/veach_mis.usda -o veach_light.exr --strategy light
+cargo run --release -- render -i samples/veach_mis.usda -o veach_bsdf.exr  --strategy bsdf
+cargo run --release -- render -i samples/veach_mis.usda -o veach_mis.exr   --strategy power
 ```
 
 Light-only renders the rough plates cleanly but leaves the smooth plates'
@@ -411,7 +414,7 @@ Measured numbers from that import (see `openspec/specs/usd-scene-import/design.m
 
   ```bash
   CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_CACHE_MB=2048 \
-      cargo run --release -- -i usd/island.usda --stats
+      cargo run --release -- render -i usd/island.usda --stats
   ```
 
   `CRUST_PTEX_STREAM_MIPSPACE=file` is the one that is easy to miss, and without it
@@ -437,22 +440,24 @@ without special-casing it.
 ### CLI
 
 ```bash
-cargo run --release -- -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
-    -o out.exr                         # output EXR (+ tone-mapped PNG next to it)
-    -s 256                             # override samples per pixel
-    -f 1012                            # USD time code (frame) to render
-    --strategy power                   # power | balance | light | bsdf
-    --filter gaussian                  # box | triangle | gaussian | blackman | mitchell
-    --filter-radius 1.5                # filter radius in pixels
-    --light-selection power            # uniform | power | learned
-    --indirect-clamp 10                # firefly clamp on indirect light (0 = off, unbiased)
-    --camera /path/to/cam              # render through this camera prim
-    --scanline                         # row order instead of the default 16×16 tiles
-    --stats                            # per-phase timings, memory and scene statistics
-    --profile                          # --stats plus a per-section render profile (slower)
-    --auto-tx                          # convert UV textures to streamable .tx on first use
-    -l debug                           # log level
-    --log-file renders/logs            # tee the log to a timestamped file
+cargo run --release -- render -i scene.usda   # input USD scene (.usda/.usdc/.usdz)
+    -o out.exr                                # output EXR (+ tone-mapped PNG next to it)
+    -s 256                                    # override samples per pixel
+    -f 1012                                   # USD time code (frame) to render
+    --strategy power                          # power | balance | light | bsdf
+    --filter gaussian                         # box | triangle | gaussian | blackman | mitchell
+    --filter-radius 1.5                       # filter radius in pixels
+    --light-selection power                   # uniform | power | learned
+    --indirect-clamp 10                       # firefly clamp on indirect light (0 = off, unbiased)
+    --camera /path/to/cam                     # render through this camera prim
+    --scanline                                # row order instead of the default 16×16 tiles
+    --stats                                   # per-phase timings, memory and scene statistics
+    --profile                                 # --stats plus a per-section render profile (slower)
+    --auto-tx                                 # convert UV textures to streamable .tx on first use
+    -l debug                                  # log level
+    --log-file renders/logs                   # tee the log to a timestamped file
+
+cargo run --release -- ls camera -i scene.usda   # the stage's cameras, one prim path per line
 ```
 
 `CRUST_*` environment variables switch individual optimizations off for A/B

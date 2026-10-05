@@ -4,11 +4,42 @@
 
 The command-line entry point (the `crust` binary of the `crust-render` crate, `main.rs`). It parses
 arguments, builds a `Scene` from USD or a procedural fallback, runs the renderer,
-and writes the output image. This is the only user-facing surface of the tool.
+and writes the output image (`crust render`), or lists what a stage holds
+(`crust ls`). This is the only user-facing surface of the tool.
 ## Requirements
+### Requirement: Subcommands
+
+The CLI SHALL require a subcommand: `render`, which renders, or `ls`, which
+lists. The render flags SHALL belong to `render`; `-l/--level` and
+`--log-file` SHALL be accepted by every subcommand, before or after its name.
+
+#### Scenario: No subcommand
+
+- **WHEN** the user runs `crust -i scene.usda`
+- **THEN** the arguments are refused as a usage error and nothing is loaded
+
+### Requirement: Listing a stage's cameras
+
+`crust ls camera -i <scene>` (alias `ls cameras`) SHALL print the stage's
+camera prims, one absolute path per line on stdout, in namespace order. It
+SHALL list exactly the cameras the render's traversal can render through:
+none under an inactive, abstract or proxy- / guide-purpose ancestor, inside an
+instance's prototype or beneath a `PointInstancer`; those under an invisible
+ancestor included. Its log SHALL go to stderr, so stdout holds only the list.
+
+#### Scenario: Listing the cameras of a stage
+
+- **WHEN** the user runs `crust ls camera -i samples/cornellbox.usda`
+- **THEN** stdout is `/scene/camera1` and the exit status is 0
+
+#### Scenario: A stage that cannot be opened
+
+- **WHEN** the input does not exist
+- **THEN** an error is logged and the exit status is non-zero
+
 ### Requirement: Command-line argument parsing
 
-The CLI SHALL accept the following flags:
+`crust render` SHALL accept the following flags:
 
 - `-i/--input`: the USD scene path.
 - `-o/--output`: the output path. When the stage authors RenderProducts, this
@@ -27,7 +58,7 @@ lines, and SHALL have no effect.
 
 #### Scenario: Rendering a scene file
 
-- **WHEN** the user runs the binary with `-i <scene.usda>`
+- **WHEN** the user runs `crust render -i <scene.usda>`
 - **THEN** the scene is loaded from that USD file and rendered
 
 #### Scenario: Tiled rendering is the default

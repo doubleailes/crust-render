@@ -107,7 +107,7 @@ def render_one(mtlx, args, shots):
         # `pool.map` before results.json is written.
         try:
             proc = subprocess.run(
-                [str(args.binary), "-i", str(shot), "-o", str(exr), "-l", "warn"],
+                [str(args.binary), "render", "-i", str(shot), "-o", str(exr), "-l", "warn"],
                 capture_output=True, text=True, env=env, timeout=args.timeout,
             )
         except subprocess.TimeoutExpired:

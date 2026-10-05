@@ -7,7 +7,7 @@
     quarter turn — over a grey floor, under the sky and a small key light, so
     the card's holes and the ghost cast their shadows too.
 
-      cargo run --release -- -i samples/materialx_cutout.usda -o cutout.exr --stats
+      cargo run --release -- render -i samples/materialx_cutout.usda -o cutout.exr --stats
 
     `--stats` reports the extra ray queries cutouts cost and how many hits
     paths passed straight through.

@@ -75,7 +75,7 @@ def render(argv):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, **({"RAYON_NUM_THREADS": str(args.threads)} if args.threads else {}))
     tiled = args.output.with_name(args.output.stem + ".tiled.exr")
-    proc = subprocess.run([str(args.binary), "-i", str(args.usd), "-o", str(tiled), "-l", "warn"], env=env)
+    proc = subprocess.run([str(args.binary), "render", "-i", str(args.usd), "-o", str(tiled), "-l", "warn"], env=env)
     if proc.returncode != 0:
         return proc.returncode
     suite.write_exr_rgb(args.output, suite.read_exr_rgb(tiled))

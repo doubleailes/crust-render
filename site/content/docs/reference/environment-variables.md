@@ -35,11 +35,11 @@ Typical uses:
 
 ```bash
 # render without any UV or Ptex texture
-CRUST_TEX=0 CRUST_PTEX=0 crust -i scene.usda -o untextured.exr
+CRUST_TEX=0 CRUST_PTEX=0 crust render -i scene.usda -o untextured.exr
 
 # stream Ptex with a 2 GiB budget
 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file CRUST_PTEX_CACHE_MB=2048 \
-    crust -i island.usda --stats
+    crust render -i island.usda --stats
 ```
 
 On Windows PowerShell, set a variable with `$env:CRUST_TEX = "0"` before running
@@ -303,7 +303,7 @@ the error only shows where a texture is seen from far away.
 7.34 GiB to 0.61 GiB, and its peak memory from 31.6 GiB to 23.9 GiB. Choosing it accepts that bias in exchange for the memory.
 
 ```bash
-CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust -i island.usda
+CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file crust render -i island.usda
 ```
 
 ## Other variables
@@ -318,7 +318,7 @@ loaded, or lacks a space Crust Render needs, stops the render with an error nami
 `$OCIO`.
 
 ```bash
-OCIO=/studio/config.ocio crust -i scene.usda --working-space acescg
+OCIO=/studio/config.ocio crust render -i scene.usda --working-space acescg
 ```
 
 ### RAYON_NUM_THREADS
@@ -327,5 +327,5 @@ Read by the [rayon](https://docs.rs/rayon) thread pool, not by Crust Render itse
 sets the number of render threads. Unset, every core is used.
 
 ```bash
-RAYON_NUM_THREADS=8 crust -i scene.usda
+RAYON_NUM_THREADS=8 crust render -i scene.usda
 ```
