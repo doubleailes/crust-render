@@ -1,30 +1,178 @@
-# Profiling the Moana island: where a ray spends 6 ms
+# Profiling the Moana island: where a frame spends its time
 
-The first `--profile` run of the full Moana island (`usd/island.usda`, `shotCam`).
-The main finding is that **99.9% of render thread time is ray traversal, at
-5.97 ms per closest-hit query**, about 800× ALab's 7.6 µs. Shading, textures and
-the integrator do not register. The cause is not the kernel. It is how the
-importer lays out one element, **isDunesB**. Deactivating that element made the
-same render about 62× faster in single runs, 323.9 s → 5.2 s. Grouping its
-prototypes instead (the fix, "Outcome" below) makes it **262× faster** in an
-interleaved `bench_ab.sh` comparison, 312.6 s → 1.195 s (min of 2).
+`--profile` on the full Moana island (`usd/island.usda`, `shotCam`). This
+document records what the frame costs today, keeps the first profile
+(2026-09-27) and the fix it led to as history, and ends with the dated
+measurements made since (the sky rig, memory, packet layouts, adaptive
+subdivision).
 
-Measured 2026-09-27 at `abae004`, on the same machine as `docs/alab_profile.md`
-(72 vCPUs, 61 GiB).
+Measured 2026-10-05 at `4143c58` (0.5.0), on the same machine as
+`docs/alab_profile.md` (72 vCPUs, 93 GiB). The main findings:
+
+- **The full default frame renders in 29.3 s at 128 spp.** The first profile
+  took 5:24 at 4 spp and estimated three hours at 128. The render is now 8.6%
+  of a 5:42 run; the import is the other 91%.
+- **The render is still traversal.** Trace and Occlusion are 90% of render
+  thread time, at 17.7 µs per closest-hit query and 8.3 µs per shadow ray.
+  That is about 3× ALab's 5.9 µs, and the first profile's 5.97 ms is gone.
+  Shading and textures are 1.2%.
+- **Peak memory is 31.6 GiB**, against 51.5 GiB in the first profile, with
+  displacement now read.
 
 ## Setup
+
+```bash
+ISLAND=~/Workspace/samples/island/usd/island.usda
+cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --stats    # timings
+cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --profile  # sections
+```
+
+- **Settings:** the stage authors no `crust:` settings, so the importer
+  defaults apply: 640×360, **128 spp**, depth 32, adaptive (min 32), power MIS
+  and light selection, triangle filter, indirect clamp 10, bucket order. The
+  first profile used `-s 4`; the default is affordable now.
+- **Subdivision:** the island authors `subdivisionScheme = "catmullClark"` in
+  189 of its 213 mesh-bearing files, and at the default level 0 the cages stay
+  unrefined, shaded with smooth cage normals. Refined levels are measured in
+  "Adaptive subdivision" below.
+- **Ptex:** preloaded at the default 32×32 cap (`CRUST_PTEX_STREAM` is off).
+- **Displacement:** read, which is the default since `add-mesh-displacement`.
+  The island's `PxrDisplace` networks move 47 meshes, 151 169 cage vertices,
+  in 41 ms (max |offset| 6.25). All 47 are displaced at cage resolution, and
+  the import warns about it once. `CRUST_DISPLACE=0` turns it off.
+- **Runs:** one unprofiled `--stats` run for wall times and memory, then one
+  `--profile` run for section shares. The profiled run's import was 22 s
+  faster, from a warm page cache, so wall times come from the first run. The
+  profiler's overhead is estimated at 1.1% of thread time.
+
+## The run
+
+| phase | wall | RSS at end | peak | first profile |
+|---|---|---|---|---|
+| Parse USD stage | 5:13.1 | 31.05 GiB | 31.56 GiB | 5:44.8 |
+| · Traverse prims | 3:01.6 | 28.69 GiB | 29.09 GiB | 3:33.8 |
+| · Load assets (Ptex) | 1:52.0 | 28.69 GiB | 29.09 GiB | 1:41.5 |
+| · Commit acceleration structure | 19.1 s | 31.05 GiB | 31.56 GiB | 29.4 s |
+| Render | **29.3 s** (128 spp) | 30.17 GiB | 31.56 GiB | 5:23.9 (4 spp) |
+| **total** | **5:42.5** | | **31.56 GiB** | 11:08.8, 51.51 GiB |
+
+The render takes 29 s of a 5:42 run. Of the import, the traversal is 3:02 and
+the Ptex preload 1:52. Streaming Ptex measured 25 s for `Load assets` on
+2026-10-01 ("Benchmark" below); making it the default is the open change
+`stream-ptex-by-default`.
+
+### What the scene holds
+
+| | |
+|---|---|
+| geometries | 3 151 850 |
+| top-level BVH primitives | 21 678 093 (18 765 854 triangles, 2 912 239 instances) |
+| primitives in memory | 107 964 949 (60.9 M triangles, 19.3 M cubic curve spans, 27.7 M instances) |
+| materials | 17 265 (17 244 OpenPBR, 21 Emissive) |
+| lights | 22 (21 rect, 1 dome), plus `sky_dome_cam_llc` as a camera-only backdrop |
+| kernel memory | 13.54 GiB (3.65 triangle packets, 2.48 instances, 2.45 BVH nodes, 1.73 curve spans, 1.36 triangle records, 0.65 leaves, 0.73 vertices + normals) |
+| packet lanes filled | 81.2%; 238.8 bytes per triangle |
+| Ptex | 3 632 textures, 2 671 206 faces, 7.34 GiB resident |
+
+- **Kernel memory fell from 39.31 to 13.54 GiB.** Three changes did it:
+  grouping per prototype ("Outcome" below), storing each triangle once, and
+  storing instances and curve spans inline ("Memory" below).
+- **Ptex is 7.34 GiB, up from 6.02.** The 14 displacement maps are now read,
+  and so are their faces.
+- **The rest of the peak, about 10.7 GiB, is the composed stage and import
+  state.**
+
+## Render profile
+
+Thread time over the render: 32:14 across 72 threads, which is 89.3% of 72 ×
+wall. The missing 10.7% is probably the same load imbalance the first profile
+found (16.6%, threads waiting on the last expensive tiles). No stack snapshot
+was taken this time.
+
+| section | glob. | thread time | calls | per call |
+|---|---|---|---|---|
+| **Trace** | **75.5%** | 24:19.5 | 82 492 231 | **17.69 µs** |
+| **Occlusion** | **14.9%** | 4:47.8 | 34 813 796 | **8.27 µs** |
+| SurfaceLighting (local) | 3.2% | 1:02.7 | 69 578 693 | |
+| MainLoop | 3.1% | 1:00.0 | 1 589 145 | |
+| Bounce | 1.7% | 32.7 s | 69 578 693 | 471 ns |
+| EvalBsdfs (local) | 0.7% | 14.4 s | 69 578 693 | 346 ns incl. textures |
+| Texture | 0.5% | 9.7 s | 15 714 262 | 617 ns |
+| GeneratePrimary | 0.2% | 4.8 s | 26 004 253 | 184 ns |
+| Contributions | 0.1% | 2.7 s | 26 004 253 | 103 ns |
+
+By category: **Raytrace 90.3%**, Integrator 8.4%, Shading 1.2%. The first
+profile measured 99.9% raytrace at 5.97 ms per closest hit. The grouping fix
+brought that to 22.3 µs (at 4 spp). Today's 17.7 µs is the same order, at a
+different sample count. Shading costs nothing here: the island's materials are
+plain OpenPBR with Ptex colour, 0.35 µs per shading point.
+
+### Rays and paths
+
+| | now | first profile |
+|---|---|---|
+| ray queries | 117.3 M (4.00 Mray/s) | 3.85 M |
+| shadow rays occluded | 62.2% | 80.8% |
+| light samples worth a shadow ray | 53.4% | |
+| paths escaping | 49.7% | 56.0% |
+| roulette / absorbed | 43.8% / 6.5% (89.5% of roulette tests kill) | |
+| mean path length | 2.68 | 2.35 |
+| adaptive: stopped early | 15.9% of pixels, mean 112.9 of 128 spp | (4 spp, no adaptive stop) |
+
+The drop in occluded shadow rays fits the 2026-10-02 far-light fix: the sun
+stopped shadowing itself ("The sky rig" below). Displacement and the light
+links changed between the two profiles as well, so the drop is not
+attributed to the fix alone.
+
+## Other findings
+
+- **The light links resolve as the rig intends.** `sky_dome_cam_llc` includes
+  no receiver and becomes a camera-only backdrop. `sky_dome_env_llc`
+  illuminates both receiver classes. Each of the three `distantPalm_key`
+  lights illuminates 1 of 2 classes, so they no longer light the whole island.
+- **35 prototypes contribute no geometry, as they already did on 2026-10-02.**
+  They are archive prototypes of `xgShells`, `xgShellsSmall`, `xgSeaweed`,
+  `xgFibers` and `xgPalmDebris`. This is not the placeholder-layer gap in
+  `openspec/specs/usd-scene-import/design.md` § ALab gaps. The same shell
+  archive (`archiveShell0004_geo`) builds a part under `xgGroundCover` and
+  contributes nothing under `xgShellsSmall` and `xgShells`. Not investigated.
+
+## What is left, in order of what it would buy
+
+1. **The import.** It is 91% of the frame. The traversal takes 3:02, and the
+   Ptex preload 1:52, which streaming would cut to about 25 s
+   (`stream-ptex-by-default`).
+2. **Traversal.** It is 90% of render thread time. Closest-hit queries cost 3×
+   ALab's. No per-instance attribution has been run since the grouping fix
+   (`--features traversal-stats`, "Tooling" below).
+3. **Load balance.** 10.7% of thread time is idle.
+4. **The sky-rig colour comparison** predates both the far-light fix and the
+   light links being read, and needs re-measuring.
+
+## History: the first profile (2026-09-27, `abae004`)
+
+The first `--profile` run of the full island. **99.9% of render thread time
+was ray traversal, at 5.97 ms per closest-hit query**, about 800× ALab's 7.6 µs
+at the time. The cause was how the importer laid out one element, isDunesB.
+Deactivating it made the render about 62× faster in single runs, 323.9 s →
+5.2 s. Grouping its prototypes instead (the fix, "Outcome" below) made it
+**262× faster** in an interleaved `bench_ab.sh` comparison, 312.6 s → 1.195 s
+(min of 2). The machine reported 61 GiB of RAM at the time. Everything in this
+section is as measured then.
+
+### Setup
 
 ```bash
 ISLAND=~/Workspace/samples/island/usd/island.usda
 cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
 ```
 
-Every measurement on this page is of the island's **unrefined cages**. The island
+Every measurement in this section is of the island's **unrefined cages**. The island
 authors `subdivisionScheme = "catmullClark"` in 189 of its 213 mesh-bearing files, and
 since `usd-driven-subdivision` they stay unrefined at the default level 0, only shaded
 with smooth cage normals (so the images differ slightly; the triangle counts do not).
 `--subdiv-level 1` would cost 4× their triangles on a scene already holding 60.9 M
-triangles in 39 GiB of kernel memory; that has not been measured here.
+triangles in 39 GiB of kernel memory; it was not measured then (see "Benchmark" below).
 
 - **Settings:** the stage authors no `crust:` settings, so the importer defaults
   apply (640×360, depth 32, power MIS and light selection, triangle filter,
@@ -40,7 +188,7 @@ triangles in 39 GiB of kernel memory; that has not been measured here.
   vertices at level 0. isDunesA's `soil`, whose map is a `PxrBlend` multiply of two Ptex,
   is read too. `CRUST_DISPLACE=0` reproduces the setup measured here.
 
-## The run
+### The run
 
 | phase | wall | RSS at end | peak |
 |---|---|---|---|
@@ -51,7 +199,7 @@ triangles in 39 GiB of kernel memory; that has not been measured here.
 | Render (4 spp) | 5:23.9 | 50.79 GiB | 51.51 GiB |
 | **total** | **11:08.8** | | **51.51 GiB** |
 
-### What the scene holds
+#### What the scene holds
 
 | | |
 |---|---|
@@ -62,7 +210,7 @@ triangles in 39 GiB of kernel memory; that has not been measured here.
 | lights | 23 (21 rect, 2 dome) |
 | kernel memory | 39.31 GiB (14.32 primitive nodes, 10.65 boxed prims, 7.01 BVH nodes, 5.71 packets) |
 
-## Render profile
+### Render profile
 
 Thread time is 324:01, which is 83.4% of 72 × wall. The missing 16.6% is load
 imbalance: a snapshot near the end found 34 of 72 threads idle, waiting on the
@@ -80,9 +228,9 @@ By category, Raytrace is 99.9%. The ray statistics are unremarkable. 56.0% of
 paths escape to the sky, the mean path length is 2.35, and 80.8% of shadow rays
 are occluded. There are just not many rays: 3.85 M queries in 5:24.
 
-## Diagnosis: 64 724 instances that all cover the same dunes
+### Diagnosis: 64 724 instances that all cover the same dunes
 
-### The top level does not cull
+#### The top level does not cull
 
 A `--features traversal-stats` build counts traversal work per camera ray (1 spp,
 the same frame):
@@ -103,7 +251,7 @@ The debug line `top-level extents` did not catch this. It reports a mean
 primitive diagonal of 0.0001 of the scene, which is dominated by 18.8 M small
 triangles. A mean hides a tail of 65 k huge boxes.
 
-### Which instances
+#### Which instances
 
 The same build now also counts descents per top-level `geom_id`, and the
 importer's DEBUG lines print each instancer's `geom ids a..b` range. Together
@@ -138,7 +286,7 @@ counts (1.7–4 descents per camera ray, i.e. every query) are isMountainA/B's
 nested-instancer parts, the ocean and the coastline. Each spans its whole
 element, but there are only ~2 400 of them.
 
-### Confirmed by knocking it out
+#### Confirmed by knocking it out
 
 The same render with only `over "isDunesB" (active = false)` changed:
 
@@ -160,7 +308,7 @@ The element costs memory as well as time, for the same reason. Grouping per
 part stores every branch placement as its own inner instance: 679 trees ×
 16 181 parts is 11 M boxed `InstancePrim`s, where 679 per variant would do.
 
-## What to do about it
+### What to do about it
 
 1. **Group a nested instancer's output per prototype, not per part.** Commit
    each prototype's parts into *one* scene and place that scene M times. Every
@@ -190,7 +338,7 @@ part stores every branch placement as its own inner instance: 679 trees ×
    phases matter again: the import is 5:45, of which Ptex preload is ~1:40, and
    isDunesB's own prototype build took 60 s of the traversal.
 
-## Outcome: grouped per prototype
+### Outcome: grouped per prototype
 
 Fixes 1 and 2 landed together. The kernel gained `InstanceHitId` in place of
 an id stack. It is one id per hit, composed on the way out: a member instance
@@ -292,7 +440,9 @@ RenderMan JPEG, measured the same way.
 
 What is left is not the sky rig. Candidates, none measured yet:
 - The three `distantPalm_key` lights link to `isPalmRig` only (`includes`).
-  They are warned about and light everything.
+  At the time they were warned about and lit everything. They are read now
+  (each illuminates 1 of 2 receiver classes, as of 2026-10-05), so this
+  candidate is retired, but the colours have not been re-measured since.
 - The cyan `palm_bounce` rect lights. `islandPrman.usda` drops them to exposure
   0.05; `island.usda` keeps them at 1.
 - The per-channel clip tone map, against the reference's grade.
@@ -532,8 +682,10 @@ and faces out of view, keep their cage; patches are built only for the refined f
 
 ```bash
 ISLAND=~/Workspace/samples/island/usd/island.usda
-# profile
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
+# profile, at the defaults (128 spp)
+cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --profile
+# light links, and which prototypes contribute nothing
+cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 1 -l debug 2>&1 | grep -E 'light_links|contributed no geometry'
 # traversal counts + per-instance attribution (slow; see above)
 cargo build --release -p crust-render --features traversal-stats --target-dir target/tstats
 target/tstats/release/crust-render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
