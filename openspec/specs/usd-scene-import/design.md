@@ -745,7 +745,9 @@ nested instancers were grouped per (prototype, part). That gave 64 724 top-level
 instances whose boxes all spanned the dune field, and a ray entered ~12 500 instances
 per query. Grouping per prototype (see "Nesting" under instancing) took the 4 spp render
 from **312.6 s to 1.195 s** (`bench_ab.sh`, min of 2; −99.6%), Trace from 5.97 ms to 22 µs, kernel memory from 39.31 to
-33.92 GiB and peak RSS from 51.5 to 46.2 GiB.
+33.92 GiB and peak RSS from 51.5 to 46.2 GiB. Re-profiled 2026-10-05 at the defaults
+(128 spp, displacement on): the render takes 29.3 s of a 5:42 run, peaks at 31.6 GiB,
+and is still 90% traversal, at 17.7 µs per closest hit.
 
 Two costs specific to the full rig: `island.usda` authors *two* `DomeLight`s, and both
 textures decode, since `islandsunVIS.png` is 16384x8192 and the pair peaks at ~11 GiB.
