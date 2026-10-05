@@ -2,7 +2,7 @@
 //! program run, per material, for the unoptimised and optimised programs.
 //!
 //! What a render spends on a MaterialX surface is dominated, after the
-//! shade-once split, by one [`Program::eval`] per path vertex — so an
+//! shade-once split, by one [`crust_mtlx::Program::eval`] per path vertex — so an
 //! interpreter change is measured here, in seconds, rather than through a
 //! ten-minute callgrind of the lion. Textures are a cheap procedural stand-in,
 //! which makes the interpreter's share larger than in a render: compare
@@ -15,98 +15,29 @@
 //!
 //! Every file given is benchmarked for every `surfacematerial` it holds.
 
-use crust_mtlx::{Compiled, Doc, Host, Program, ShadeCtx, Texture, TextureRef, Val, compile};
-use glam::Vec3A;
-use std::hint::black_box;
-use std::sync::Arc;
-use std::time::Instant;
+#[path = "bench_common/mod.rs"]
+mod bench_common;
 
-struct Procedural;
-impl Texture for Procedural {
-    fn eval(&self, u: f32, v: f32, width: f32) -> [f32; 4] {
-        [u.fract().abs(), v.fract().abs(), 0.5, 0.5 + width]
-    }
-}
-
-fn procedural(_: &str, _: Option<&str>) -> Option<TextureRef> {
-    Some(TextureRef(Arc::new(Procedural)))
-}
-
-const POINTS: usize = 4096;
-const REPEATS: usize = 15;
-
-fn points() -> Vec<ShadeCtx> {
-    (0..POINTS)
-        .map(|i| {
-            let t = i as f32 / POINTS as f32;
-            ShadeCtx {
-                uv: (t * 2.0, (t * 17.0).fract()),
-                normal: Vec3A::new((t * 7.0).sin(), (t * 5.0).cos(), 1.0).normalize(),
-                tangent: Vec3A::X,
-                view: -Vec3A::new(0.2, (t * 3.0).sin(), 1.0).normalize(),
-                position: Vec3A::new(t, 1.0 - t, t * t),
-                uv_width: t * 0.01,
-            }
-        })
-        .collect()
-}
-
-/// Min-of-N nanoseconds per run for two evaluators, **interleaved**: each
-/// repeat times both, alternating which goes first, so load or a frequency
-/// change lands on both rather than on whichever phase it happened to hit
-/// (the in-process version of `scripts/bench_ab.sh`).
-fn time_ab(
-    pts: &[ShadeCtx],
-    mut a: impl FnMut(&ShadeCtx, &mut Vec<Val>),
-    mut b: impl FnMut(&ShadeCtx, &mut Vec<Val>),
-) -> (f64, f64) {
-    let mut slots = Vec::new();
-    let once = |run: &mut dyn FnMut(&ShadeCtx, &mut Vec<Val>), slots: &mut Vec<Val>| {
-        let t = Instant::now();
-        for p in pts {
-            run(black_box(p), slots);
-            black_box(&*slots);
-        }
-        t.elapsed().as_nanos() as f64 / pts.len() as f64
-    };
-    let (mut best_a, mut best_b) = (f64::INFINITY, f64::INFINITY);
-    for rep in 0..REPEATS {
-        if rep % 2 == 0 {
-            best_a = best_a.min(once(&mut a, &mut slots));
-            best_b = best_b.min(once(&mut b, &mut slots));
-        } else {
-            best_b = best_b.min(once(&mut b, &mut slots));
-            best_a = best_a.min(once(&mut a, &mut slots));
-        }
-    }
-    (best_a, best_b)
-}
+use bench_common::{for_each_material, time_ab};
 
 fn main() {
-    let pts = points();
     println!(
         "{:<40} {:>6} {:>6} {:>10} {:>10}",
         "material", "ops", "opt", "ns/run", "ns/opt"
     );
-    for path in std::env::args().skip(1) {
-        let path = std::path::Path::new(&path);
-        let doc = Doc::open(path).expect("parse");
-        for node in doc.by_category("surfacematerial") {
-            let reference: Compiled =
-                compile(path, Some(&node.name), &Host::new(&procedural)).unwrap();
-            let mut optimized: Compiled =
-                compile(path, Some(&node.name), &Host::new(&procedural)).unwrap();
-            optimized.optimize();
-            let (p, o): (&Program, &Program) = (&reference.program, &optimized.program);
-            let (t_ref, t_opt) = time_ab(&pts, |c, s| p.eval(c, s), |c, s| o.eval(c, s));
-            println!(
-                "{:<40} {:>6} {:>6} {:>10.1} {:>10.1}",
-                node.name,
-                p.len(),
-                o.ops.len(),
-                t_ref,
-                t_opt
-            );
-        }
-    }
+    for_each_material(|name, compile, pts| {
+        let reference = compile();
+        let mut optimized = compile();
+        optimized.optimize();
+        let (p, o) = (&reference.program, &optimized.program);
+        let (t_ref, t_opt) = time_ab(pts, |c, s| p.eval(c, s), |c, s| o.eval(c, s));
+        println!(
+            "{:<40} {:>6} {:>6} {:>10.1} {:>10.1}",
+            name,
+            p.len(),
+            o.ops.len(),
+            t_ref,
+            t_opt
+        );
+    });
 }

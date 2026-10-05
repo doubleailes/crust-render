@@ -543,7 +543,7 @@ impl Volumes {
             let mut tr = Vec3A::ONE;
             for &(i, a, b) in &spans {
                 let e = self.regions[i].sigma_t_at_density(1.0) * (b - a);
-                tr *= Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp());
+                tr *= utils::exp3(-e);
             }
             return tr;
         }

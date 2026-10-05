@@ -3,6 +3,17 @@ use glam::Vec3A;
 
 pub use crust_rt::{MASK_ALL, MASK_CAMERA, MASK_INDIRECT, MASK_SHADOW, RayMask};
 
+/// The near bound every trace in the renderer asks for: `(TRACE_T_MIN, ∞)`
+/// for a closest hit, `(TRACE_T_MIN, t_max)` for a shadow ray — the offset
+/// that keeps a ray from re-hitting the surface it leaves.
+///
+/// A constant, not a parameter, on purpose. With every caller passing it,
+/// LLVM propagates it into the kernel; one caller passing a variable was
+/// enough to lose that, and cornellbox ran 0.3% more instructions in the
+/// triangle test. A ray that must start elsewhere (the subsurface walk, a
+/// segment restarted past a cutout) moves its origin instead.
+pub const TRACE_T_MIN: f32 = 0.001;
+
 /// The ray's texture-filtering footprint, as a cone about its axis.
 ///
 /// This is the renderer's answer to "how much texture does this ray cover",

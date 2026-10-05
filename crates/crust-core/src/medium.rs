@@ -124,7 +124,7 @@ impl Medium {
     /// Beer–Lambert transmittance across a segment of length `t`.
     pub fn transmittance(&self, t: f32) -> Vec3A {
         let e = (self.sigma_a + self.sigma_s) * t;
-        Vec3A::new((-e.x).exp(), (-e.y).exp(), (-e.z).exp())
+        utils::exp3(-e)
     }
 
     /// True when the medium scatters (subsurface, participating volumes).

@@ -5,6 +5,7 @@
 //! `escaped_emission`); change both or neither.
 
 use glam::Vec3A;
+use utils::exp3;
 
 use crate::aov::FirstHit;
 use crate::guiding::SampleData;
@@ -13,7 +14,7 @@ use crate::material::{Material, ScatterSample, ShadingPoint};
 use crate::medium::sample_henyey_greenstein;
 use crate::pdf::PdfSolidAngle;
 use crate::profile::Section;
-use crate::ray::{Ray, RayMask};
+use crate::ray::{Ray, RayMask, TRACE_T_MIN};
 use crate::rt_world::{World, WorldHit};
 use crate::stats::RayStats;
 use crate::subsurface::{ExitLambertian, WalkCost, random_walk};
@@ -55,6 +56,37 @@ const TRAIN_RADIANCE_CLAMP: f32 = 1e3;
 /// throughput but never drops below the floor, so weights stay bounded.
 const RR_START_BOUNCE: usize = 3;
 const RR_MIN_PROB: f32 = 0.05;
+
+/// Russian roulette at vertex `depth`. Past [`RR_START_BOUNCE`] the path
+/// survives with a probability tracking its throughput `beta`, floored at
+/// [`RR_MIN_PROB`], and a survivor's `beta` and continuation `factor` are
+/// divided by it. Returns that probability — 1 when the vertex is not tested
+/// or survival is certain — or `None` when the path is killed, leaving both
+/// untouched. The one roulette every vertex kind (surface bounce, region
+/// phase scatter, carried-medium scatter) applies.
+#[inline(always)]
+fn russian_roulette(
+    depth: usize,
+    v: PathSampler,
+    beta: &mut Vec3A,
+    factor: &mut Vec3A,
+    stats: &mut RayStats,
+) -> Option<f32> {
+    if depth < RR_START_BOUNCE {
+        return Some(1.0);
+    }
+    stats.rr_tested += 1;
+    let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
+    if p_survive < 1.0 {
+        if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
+            stats.rr_killed += 1;
+            return None;
+        }
+        *factor /= p_survive;
+        *beta /= p_survive;
+    }
+    Some(p_survive)
+}
 
 pub fn ray_color(
     r: &Ray,
@@ -604,21 +636,53 @@ fn shadow_transmittance<const PROFILE: bool>(
     // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    if world.occluded(shadow_ray, 0.001, shadow_t_max(distance)) {
-        // Blocked — unless only cutouts block it, which the any-hit query
-        // cannot tell apart. An open segment crosses no cutout either, so it
-        // keeps the fast answer.
-        if !world.has_cutouts() {
-            stats.shadow_occluded += 1;
-            return Vec3A::ZERO;
-        }
-        return cutout_shadow(world, volumes, shadow_ray, distance, vertex, stats);
+    let through = surface_visibility(world, shadow_ray, distance, stats);
+    if through == 0.0 {
+        stats.shadow_occluded += 1;
+        return Vec3A::ZERO;
     }
     if volumes.is_empty() {
-        return Vec3A::ONE;
+        return Vec3A::splat(through);
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    volumes.transmittance(shadow_ray, 0.001, distance - 0.001, &mut rng)
+    through * volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
+}
+
+/// How much of a shadow ray toward a light sample `distance` away surfaces
+/// let through: 1 when nothing blocks it, 0 when an opaque surface does, and
+/// `Π (1 − opacity)` over the cutouts it crosses otherwise ([`cutout_through`],
+/// deterministic where the bounce side is stochastic — [`pass_cutouts`] — so
+/// the product is the lower-variance estimate of the same visibility).
+///
+/// The one answer to "does this light reach here" that NEE
+/// ([`shadow_transmittance`]) and the learned light cache's training share:
+/// the cache must train on the visibility the integrator renders with.
+#[inline]
+pub(crate) fn surface_visibility(
+    world: &World,
+    ray: &Ray,
+    distance: f32,
+    stats: &mut RayStats,
+) -> f32 {
+    let t_max = shadow_t_max(distance);
+    if !world.occluded(ray, TRACE_T_MIN, t_max) {
+        return 1.0;
+    }
+    // Blocked — unless only cutouts block it, which the any-hit query cannot
+    // tell apart. An open segment crosses no cutout either, so it keeps the
+    // fast answer.
+    if !world.has_cutouts() {
+        return 0.0;
+    }
+    cutout_visibility(world, ray, t_max, stats)
+}
+
+/// [`cutout_through`] out of line: only a blocked shadow ray in a world with
+/// cutouts reaches it.
+#[cold]
+#[inline(never)]
+fn cutout_visibility(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
+    cutout_through(world, ray, t_max, stats)
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -657,7 +721,7 @@ fn restarted(ray: &Ray, t: f32) -> Ray {
 /// so a far hit is not met again through rounding.
 #[inline]
 fn resume_before(t: f32) -> f32 {
-    t - 0.001 + t.abs().max(1.0) * 1e-5
+    t - TRACE_T_MIN + t.abs().max(1.0) * 1e-5
 }
 
 /// Where a shadow ray toward a light sample `distance` away stops: short of
@@ -674,37 +738,8 @@ fn resume_before(t: f32) -> f32 {
 /// Surfaces only: volume transmittance has no light surface to stop short of
 /// and keeps `distance − 0.001`, which reaches the light at any distance.
 #[inline]
-pub(crate) fn shadow_t_max(distance: f32) -> f32 {
-    (distance - 0.001).min(distance * (1.0 - 1e-6))
-}
-
-/// [`shadow_transmittance`] for a shadow ray the any-hit query found blocked
-/// in a world with cutouts: `Π (1 − opacity)` over every hit up to the light,
-/// or zero at the first hit on a material without a cutout, times the volume
-/// transmittance. Deterministic where the bounce side is stochastic
-/// ([`pass_cutouts`]): both estimate the same visibility, and the product is
-/// the lower-variance of the two.
-#[cold]
-#[inline(never)]
-fn cutout_shadow(
-    world: &World,
-    volumes: &Volumes,
-    ray: &Ray,
-    distance: f32,
-    vertex: PathSampler,
-    stats: &mut RayStats,
-) -> Vec3A {
-    let t_max = shadow_t_max(distance);
-    let through = cutout_through(world, ray, t_max, stats);
-    if through == 0.0 {
-        stats.shadow_occluded += 1;
-        return Vec3A::ZERO;
-    }
-    if volumes.is_empty() {
-        return Vec3A::splat(through);
-    }
-    let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
-    through * volumes.transmittance(ray, 0.001, distance - 0.001, &mut rng)
+fn shadow_t_max(distance: f32) -> f32 {
+    (distance - TRACE_T_MIN).min(distance * (1.0 - 1e-6))
 }
 
 /// The fraction of the segment `(0.001, t_max)` of `ray` that cutouts let
@@ -714,14 +749,13 @@ fn cutout_shadow(
 /// [`pass_cutouts`] keeps, which treats the hit past its last crossing as
 /// present, so a stack exactly that deep is clear on both sides.
 ///
-/// Shared by NEE ([`cutout_shadow`]) and the learned light cache's training,
-/// whose shadow rays must see the visibility the integrator does.
-pub(crate) fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
+/// Reached through [`surface_visibility`].
+fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = 1.0;
     for crossing in 0..=MAX_CUTOUT_CROSSINGS {
         stats.cutout_rays += 1;
-        let hit = world.intersect(&segment, 0.001, f32::INFINITY);
+        let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
         let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
             return kept;
         };
@@ -796,7 +830,7 @@ fn pass_cutouts<'w>(
         stats.cutout_rays += 1;
         let t = resume_before(h.rec.t);
         *hit = world
-            .intersect(&restarted(ray, t), 0.001, f32::INFINITY)
+            .intersect(&restarted(ray, t), TRACE_T_MIN, f32::INFINITY)
             .map(|mut next| {
                 next.rec.t += t;
                 next
@@ -964,7 +998,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 stats.closest_hit += 1;
                 let mut hit = {
                     let _p = profile::scope_if::<PROFILE>(Section::Trace);
-                    world.intersect(&ray, 0.001, f32::INFINITY)
+                    world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
                 };
                 let cut0 = stats.cutout_passes;
                 if world.has_cutouts() {
@@ -982,7 +1016,8 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                         }
                         if !volumes.is_empty() {
                             let mut rng = v.new_domain(K_VOLUME).rng();
-                            emitted *= volumes.transmittance(&ray, 0.001, hit.rec.t, &mut rng);
+                            emitted *=
+                                volumes.transmittance(&ray, TRACE_T_MIN, hit.rec.t, &mut rng);
                         }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
@@ -1003,7 +1038,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         } else {
             stats.closest_hit += 1;
             let _p = profile::scope_if::<PROFILE>(Section::Trace);
-            world.intersect(&ray, 0.001, f32::INFINITY)
+            world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
         };
         // Patched in place, on the cold side only: an `if` that yields the
         // hit from either arm copies all of it at every vertex (+0.8% of
@@ -1048,7 +1083,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         } else {
             let _p = profile::scope_if::<PROFILE>(Section::Volume);
             let mut rng = v.new_domain(K_VOLUME).rng();
-            volumes.sample_interaction(&ray, 0.001, t_lim, &mut rng)
+            volumes.sample_interaction(&ray, TRACE_T_MIN, t_lim, &mut rng)
         };
 
         let (vol_tr, vol_emit) = match event {
@@ -1099,20 +1134,11 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     train: None,
                 };
                 beta *= weight;
-                let mut survived = true;
-                if records.len() >= RR_START_BOUNCE {
-                    stats.rr_tested += 1;
-                    let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                    if p_survive < 1.0 {
-                        if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                            survived = false;
-                            stats.rr_killed += 1;
-                            vrec.factor = Vec3A::ZERO;
-                        } else {
-                            vrec.factor /= p_survive;
-                            beta /= p_survive;
-                        }
-                    }
+                let survived =
+                    russian_roulette(records.len(), v, &mut beta, &mut vrec.factor, stats)
+                        .is_some();
+                if !survived {
+                    vrec.factor = Vec3A::ZERO;
                 }
                 if let Some(ctx) = routing {
                     // `V`, then the light NEE picked — the same draw
@@ -1188,7 +1214,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // old code's `factor = albedo` with an extra Beer-Lambert on
             // top double-counted extinction.
             let e = (Vec3A::splat(sigma_bar) - (medium.sigma_a + medium.sigma_s)) * t_med;
-            let factor = medium.sigma_s / sigma_bar * Vec3A::new(e.x.exp(), e.y.exp(), e.z.exp());
+            let factor = medium.sigma_s / sigma_bar * exp3(e);
             // Subsurface vertices run no NEE (their shadow rays are
             // blocked by the enclosing surface), so `prev = None` keeps
             // the next hit's emission at full weight — the pairing that
@@ -1204,20 +1230,10 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                 train: None,
             };
             beta *= vol_tr * factor;
-            let mut survived = true;
-            if records.len() >= RR_START_BOUNCE {
-                stats.rr_tested += 1;
-                let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                if p_survive < 1.0 {
-                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                        survived = false;
-                        stats.rr_killed += 1;
-                        vrec.factor = Vec3A::ZERO;
-                    } else {
-                        vrec.factor /= p_survive;
-                        beta /= p_survive;
-                    }
-                }
+            let survived =
+                russian_roulette(records.len(), v, &mut beta, &mut vrec.factor, stats).is_some();
+            if !survived {
+                vrec.factor = Vec3A::ZERO;
             }
             if let Some(ctx) = routing {
                 // A medium scatter is a `V` event; it runs no NEE.
@@ -1313,7 +1329,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             Some(m) if m.is_scattering() => {
                 let sigma_bar = m.sigma_t_max().max(1e-4);
                 let e = (Vec3A::splat(sigma_bar) - (m.sigma_a + m.sigma_s)) * rec.t;
-                Vec3A::new(e.x.exp(), e.y.exp(), e.z.exp())
+                exp3(e)
             }
             Some(m) => m.transmittance(rec.t),
             None => Vec3A::ONE,
@@ -1598,22 +1614,9 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // tracking the throughput, dividing it out on survival. Applies
             // to the whole continuation (bounce-hit emission included).
             beta *= atten * factor;
-            let mut survived = true;
-            let mut rr_survive = 1.0f32;
-            if records.len() >= RR_START_BOUNCE {
-                stats.rr_tested += 1;
-                let p_survive = beta.max_element().clamp(RR_MIN_PROB, 1.0);
-                if p_survive < 1.0 {
-                    if v.new_domain(K_RR).draw_rnd_f32::<1>()[0] >= p_survive {
-                        survived = false;
-                        stats.rr_killed += 1;
-                    } else {
-                        factor /= p_survive;
-                        beta /= p_survive;
-                        rr_survive = p_survive;
-                    }
-                }
-            }
+            let roulette = russian_roulette(records.len(), v, &mut beta, &mut factor, stats);
+            let survived = roulette.is_some();
+            let rr_survive = roulette.unwrap_or(1.0);
 
             if survived {
                 // Training samples cover continuous surface bounces only —

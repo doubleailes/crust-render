@@ -198,7 +198,8 @@ pub(crate) fn train(
                 }
                 let mut ray = camera.get_ray(u, v, [cam[2], cam[3]], 0.0);
                 for depth in 0..=TRAIN_BOUNCES {
-                    let Some(hit) = world.intersect(&ray, 0.001, f32::INFINITY) else {
+                    let Some(hit) = world.intersect(&ray, crate::ray::TRACE_T_MIN, f32::INFINITY)
+                    else {
                         break;
                     };
                     let vertex = root.new_domain(1 + depth as i32);
@@ -243,22 +244,14 @@ pub(crate) fn train(
                                 // The integrator's visibility, cutouts included:
                                 // a light seen through a leaf card is trained at
                                 // the share the card lets through.
-                                let t_max = crate::tracer::shadow_t_max(ls.distance);
-                                let mut through = 1.0;
-                                if world.occluded(&shadow, 0.001, t_max) {
-                                    through = if world.has_cutouts() {
-                                        crate::tracer::cutout_through(
-                                            world,
-                                            &shadow,
-                                            t_max,
-                                            &mut crate::stats::RayStats::default(),
-                                        )
-                                    } else {
-                                        0.0
-                                    };
-                                    if through == 0.0 {
-                                        continue;
-                                    }
+                                let through = crate::tracer::surface_visibility(
+                                    world,
+                                    &shadow,
+                                    ls.distance,
+                                    &mut crate::stats::RayStats::default(),
+                                );
+                                if through == 0.0 {
+                                    continue;
                                 }
                                 let e = through * lights.luma().of(c) / ls.pdf.get();
                                 if e.is_finite() {

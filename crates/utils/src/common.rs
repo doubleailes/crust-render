@@ -1,6 +1,13 @@
 use glam::Vec3A;
 use std::f32::consts::PI;
 
+/// `e^v` per component — Beer–Lambert transmittance `exp3(-σ·t)` and its
+/// kin, wherever a colour is exponentiated.
+#[inline]
+pub fn exp3(v: Vec3A) -> Vec3A {
+    Vec3A::new(v.x.exp(), v.y.exp(), v.z.exp())
+}
+
 pub fn degrees_to_radians(degrees: f32) -> f32 {
     degrees * PI / 180.0
 }
