@@ -721,18 +721,18 @@ thing that made the island possible.)
 `CRUST_PTEX_STREAM_MIPSPACE=file`** — every island `.ptx` is mipmapped, so the default
 policy declines them all and the switch alone reproduces the preloaded column exactly;
 see `docs/ptex_streaming.md`).
-Measured at 640x360 / 8 spp against the same build preloading, one sequential run
-each rather than an interleaved `bench_ab.sh` A/B — the memory and residency figures
-are deterministic, but treat the timings as indicative (the `Render` +1.2% is within
-noise, and the decode and load deltas are large enough to survive it): Ptex residency **5.98 ->
-0.61 GiB** (39 textures streamed, 3 579 preloaded under the size threshold), Ptex decode
-**84.8 s -> 14.0 s** so `Load assets` falls 01:40.7 -> 27.3 s, `Traverse prims` RSS
-**47.34 -> 41.48 GiB**, peak RSS **51.28 -> 47.08 GiB**, and `Render` costs **+1.2%** —
-nothing like the 2.8x the deliberately texture-bound sample scene shows, because the
-island is traversal-bound. The whole run finished 69 s sooner. Peak falls by less than
-residency does because peak lands at `Commit acceleration structure`, the SBVH build
-transient; the figure this feature moves is the traverse RSS.
-The cache held **3.28 MiB of a 2 GiB budget with zero evictions**: at this framing the
+Measured 2026-10-05 at 640x360 / 8 spp against the same build preloading, two runs
+per side alternating (the memory and residency figures are deterministic): Ptex
+residency **7.34 -> 0.61 GiB** (53 textures streamed, 3 579 preloaded under the size
+threshold; the 14 displacement maps are among the 3 632), `Load assets` **1:33 ->
+28 s**, `Traverse prims` RSS **28.7 -> 21.1 GiB**, peak RSS **31.6 -> 23.9 GiB**, and
+`Render` +1.8% / +3.2% (min / mean), within noise — nothing like the 2.8x the
+deliberately texture-bound sample scene shows, because the island is traversal-bound.
+The whole run finishes 67 s sooner, a quarter of it. The commit's transient is now
+small on either side, so peak falls by the full traverse saving. (The first
+measurement, 2026-09-27, before the island's traversal was fixed: 5.98 -> 0.61 GiB,
+`Load assets` 1:40.7 -> 27.3 s, peak 51.28 -> 47.08 GiB, `Render` +1.2%.)
+The cache held **7.6 MiB of a 2 GiB budget with zero evictions**: at this framing the
 ray cone asks for coarse levels, and a coarse level of a face is a few texels — reading
 only the resolution the frame resolves is exactly what preloading cannot do. The budget
 is a ceiling, not an allocation, so do not lower it on that number; a closer camera or a

@@ -374,8 +374,10 @@ preloaded one differ by the Ptex residency buried inside a much larger figure.
 ## Measured on the Moana island
 
 Everything above is fixtures and a synthetic scene. This is the asset the
-feature was built for: `island.usda` at 640x360, 8 spp, `CRUST_PTEX_STREAM=1`
-with a 2 GiB budget, against the same build preloading.
+feature was built for: `island.usda` at `shotCam`, 640x360, 8 spp,
+`CRUST_PTEX_STREAM=1` with a 2 GiB budget, against the same build preloading.
+Measured 2026-10-05 at `4143c58`, two runs per side, alternating, on the
+72-vCPU machine of `docs/moana_profile.md`.
 
 **These numbers are the `CRUST_PTEX_STREAM_MIPSPACE=file` ones**, which is
 what the default now declines — the island's `.ptx` files are all mipmapped,
@@ -383,53 +385,66 @@ so `CRUST_PTEX_STREAM=1` on its own reproduces the preloaded column exactly.
 The table is therefore what the opt-in buys, and the 0.147 mip-chain bias
 above is what it costs. Reading them together is the point of recording both.
 
-| | preloaded | streamed | |
+| | preloaded (min / mean) | streamed (min / mean) | |
 | --- | --- | --- | --- |
-| Ptex resident | **5.98 GiB** | **0.61 GiB** | **9.8x less** |
-| textures | 3 618 preloaded | 39 streamed + 3 579 preloaded | |
-| faces | 2 564 203 | 949 554 streamed, 1 614 649 preloaded | |
-| Ptex decode | 84.8 s | 13.8 s + 0.2 s to open | **-71 s** |
-| `Load assets` | 01:40.7 | **27.3 s** | |
-| `Traverse prims` RSS | 47.34 GiB | **41.48 GiB** | **-5.86 GiB** |
-| peak RSS | 51.28 GiB | **47.08 GiB** | **-4.20 GiB** |
-| `Render` | 13:57.0 | 14:06.8 | **+1.2%** |
-| total | 20:07.4 | 18:58.7 | |
+| Ptex resident | **7.34 GiB** | **0.60 GiB** preloaded + 7.6 MiB streamed | **12x less** |
+| textures | 3 632 preloaded | 53 streamed + 3 579 preloaded under the 8 MiB threshold | |
+| `Load assets` | 1:33.0 / 1:34.3 | **27.6 / 27.7 s** | **-67 s** |
+| `Traverse prims` RSS | 28.69 / 28.74 GiB | **21.06 / 21.07 GiB** | **-7.6 GiB** |
+| peak RSS | 31.57 / 31.58 GiB | **23.86 / 23.93 GiB** | **-7.7 GiB** |
+| `Render` | 1.834 / 1.871 s | 1.867 / 1.930 s | +1.8% / +3.2% |
+| total | 4:42.4 / 4:45.7 | **3:35.5 / 3:38.0** | **-67 s** |
+
+The 3 632 textures include the 14 displacement maps the importer reads since
+`add-mesh-displacement`; those 14 are also why 53 files stream rather than 39.
+Each side's two runs are bit-identical. Streamed against preloaded differs on
+36.8% of pixels, at relMSE 2.5e-3 (trimmed 1.5e-3): that is the file's mip
+chain, the bias described above, not noise.
+
+An earlier measurement (2026-09-27, before the island's traversal was fixed;
+see `docs/moana_profile.md`) found the same shape at a different scale:
+5.98 → 0.61 GiB resident, `Load assets` 1:40.7 → 27.3 s, peak 51.28 → 47.08
+GiB, and a render of 13:57 against 14:06.8 (+1.2%).
 
 Three things worth taking from that.
 
-**The render cost is +1.2%, not the 2.8x the sample scene shows.** That scene
-is two textured planes filling frame at depth 3, built to be the worst case;
-the island is traversal-bound, so the fetch cost disappears into it. Both
-numbers are honest and the gap between them is the point — the sample scene
-bounds the cost, the island shows what it is in practice.
+**The render cost is within noise, not the 2.8x the sample scene shows.**
+That scene is two textured planes filling frame at depth 3, built to be the
+worst case. On the island, texture work is 0.5% of render thread time
+(`docs/moana_profile.md`): the render is traversal-bound, and the fetch cost
+disappears into it. The +1.8% / +3.2% here is below this machine's run-to-run
+spread, and both runs of each side overlap within 4%. Both numbers are
+honest, and the gap between them is the point. The sample scene bounds the
+cost; the island shows what it is in practice.
 
-**Streaming also made the render *start* faster.** Preloading 5.98 GiB means
-decoding 2.5 M faces, 84.8 s of it; streaming opens 39 headers in 0.2 s and
-decodes only the 0.54 GiB it declines to stream. `Load assets` fell from
-01:40.7 to 27.3 s, which is most of why the whole run finished 69 s sooner
-despite the render being slightly slower.
+**Streaming makes the whole run 67 s faster.** Preloading 7.34 GiB means
+decoding 2.7 M faces at the cap. Streaming opens the 53 large files' headers
+and decodes only the 0.60 GiB of small files it declines to stream.
+`Load assets` falls from 1:33 to 28 s, which is a quarter of the whole run.
+The render is 2 s of a 3:36 run either way.
 
-**Peak RSS fell less than residency did (-4.20 against -5.37 GiB), and that is
-expected.** Peak lands at `Commit acceleration structure`, the SBVH build
-transient, not at texture load — so the last word on the island's memory is
-still the build, and Ptex residency is only what it builds on top of. The
-figure to watch for this feature is the `Traverse prims` RSS, which fell by
-the full amount.
+**Peak RSS fell by the full residency now.** The first measurement saw peak
+fall less than residency, because peak landed at the commit's SBVH transient
+on top of a 47 GiB traversal. With the kernel's storage since slimmed, the
+commit adds about 2.8 GiB on either side. So the `Traverse prims` saving
+(-7.6 GiB) carries through to the peak (-7.7 GiB). That is a little more than
+the 6.7 GiB of residency, which suggests the preload also leaves decode
+buffers behind. That has not been measured.
 
 ### The cache barely filled, and that is the mechanism working
 
-`streamed resident / budget` read **3.28 MiB / 2.00 GiB**, with **0 evictions**
-and 18 026 disk reads against 4 496 112 texel fetches (90.2% absorbed by the
-thread microcache).
+`streamed resident / budget` read **7.61 MiB / 1.93 GiB** (the budget less
+the 72 MiB thread-tile reserve), with **0 evictions** and 45 887 disk reads
+against 4 035 764 texel fetches (84.6% absorbed by the thread microcache).
 
-Three megabytes, from textures that preload to gigabytes. The reason is the
+Eight megabytes, from textures that preload to gigabytes. The reason is the
 ray cone: at 640x360 a tree trunk covers a handful of pixels, so the footprint
 asks for a *coarse* level of each face, and a coarse level is a few texels.
 Streaming reads only the resolution the framing resolves. **Preloading
 structurally cannot do that** — it decodes every face at the cap whether or not
-the camera ever sees it, which is what the 5.98 GiB is.
+the camera ever sees it, which is what the 7.34 GiB is.
 
-So the budget was ~600x oversized for this framing, and that costs nothing: it
+So the budget was ~260x oversized for this framing, and that costs nothing: it
 is a ceiling, not an allocation. Do not "optimise" it downward on the strength
 of this number — a closer camera or a 4K frame walks up the same faces at
 finer levels and will use it. The number that says the budget is too small is
