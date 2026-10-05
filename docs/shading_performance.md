@@ -1,21 +1,33 @@
-# Shading performance: a plan
+# Shading performance: a plan and its record
 
-Arnold and RenderMan are much faster than crust, and the working bet is that
-shading is where much of the gap lies. This document records what the shading
-path does today, where its cost multiplies, and an ordered plan for reducing it.
-The plan runs from the cheapest, output-preserving changes up to a JIT. Step 1
-(the profile) and step 2 are done; their measurements are recorded under each
-step, and the call counts below were confirmed by them.
+Arnold and RenderMan are much faster than crust, and the working bet was that
+shading is where much of the gap lies. This document set out an ordered plan
+for reducing shading cost, from the cheapest output-preserving changes up to a
+JIT, and records what each step measured. **The plan is complete**:
 
-## What a shading call costs today
+| Step | Outcome |
+|---|---|
+| 1. Profile | done; shading was 39–68% of render on textured scenes |
+| 2. No `eval` for a yes/no question | done; bit-identical, −18 to −22% instructions |
+| 3. Shade once per hit | done (`Material::resolve`, `ShadingPoint`); bit-identical |
+| 4. Faster interpreter | optimisation passes kept; closure compilation measured slower, dropped |
+| 5. JIT | done on request (`crust-jit`), ~5% on the lion |
+| 6. Batched shading | tried on a branch, slower; its by-product made tiles the default |
+
+The steps below are kept as written, each followed by its measurements, so the
+reasoning behind the current shape stays readable. Paths, sample counts and
+figures inside a step are as of that step. "Where it stands now" at the end is
+the current state.
+
+## What a shading call cost when the plan started
 
 Two materials evaluate a pattern network at every hit:
 
-- **`MtlxMaterial`** (`material/materialx.rs`). It runs the compiled
-  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then collapses the document's
-  closure tree into a `ResolvedClosure` that answers the query (at the time of
-  this plan it pooled the lobes onto an `OpenPBR` instead; the closure tree's
-  cost is recorded in `openspec/specs/materials/design.md` § MaterialX). The `Program` is already a linear, slot-indexed instruction list with a
+- **`MtlxMaterial`** (`material/materialx.rs`). It ran the compiled
+  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then `reduce` pooled the
+  document's lobes onto an `OpenPBR`. (That reduction has since been replaced
+  by a closure tree collapsed into a `ResolvedClosure`; see "Where it stands
+  now".) The `Program` was already a linear, slot-indexed instruction list with a
   thread-local value buffer. It does no name hashing and allocates nothing.
   Each instruction is still one `match` arm over `Op`, and each operand read is a
   bounds-checked `slots.get()`. `Val` is always four lanes plus an arity tag, so
@@ -24,13 +36,13 @@ Two materials evaluate a pattern network at every hit:
   connected `UsdUVTexture` and writes the results over its `OpenPBR` fields. It
   has almost no arithmetic: its cost is texture fetches.
 
-Both do this work on **every** `Material` call. The comment on
-`MtlxMaterial::shade` states why: `Material`'s methods take `&self` and a
+Both did this work on **every** `Material` call. The comment on
+`MtlxMaterial::shade` stated why: `Material`'s methods take `&self` and a
 `&HitRecord`, and there is nowhere to keep the result between calls.
 
 ### How many times a vertex is shaded
 
-At one vertex of an unguided path (`tracer/`):
+At one vertex of an unguided path (`tracer/`), before step 2:
 
 | Call | Site | Graph runs |
 |---|---|---|
@@ -44,7 +56,7 @@ A guided render adds one or two more `eval` calls in `sample_bounce_direction`:
 the guide branch evaluates the BSDF at the guided direction, and the BSDF branch
 calls `eval(..).is_some()` to decide whether to mix densities.
 
-So a textured surface's network runs **3–5 times per vertex**. Every run
+So a textured surface's network ran **3–5 times per vertex**. Every run
 evaluates every graph instruction, fetches every texture and repeats the
 reduction.
 
@@ -79,7 +91,9 @@ Measure before changing anything. Scenes:
 - `samples/usdpreview_textured.usda`, and one ALab frame if it is available
   (`PreviewSurface`-dominated).
 
-Use callgrind, per "Measuring a change" in `CLAUDE.md`:
+Use callgrind, per "Measuring a change" in `CLAUDE.md` (today `--profile`
+gives the same split in wall time without valgrind; see "Where it stands
+now"):
 
 ```bash
 RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
@@ -304,8 +318,9 @@ checked-in `.mtlx` fixtures at many `(u, v)` points, as `examples/mtlx_shade`
 does by hand.
 
 **Re-profiled after step 3** (callgrind, `-s 1`, shares of `render_pixel`).
-The graph run — interpreter and `reduce`, inlined together into
-`MtlxMaterial::run`, textures excluded — is **22.5% of render on the lion**
+The graph run — interpreter and `reduce`, inlined together into what was then
+`MtlxMaterial::run` (now the free function `run` in `material/materialx.rs`),
+textures excluded — is **22.5% of render on the lion**
 (1.83 G of 8.14 G) and 12.7% on the teapot, against 13.9% and 10.8% for the
 texture fetches. That is about 9 500 instructions per run on the lion for 134
 ops, so per-op overhead is worth attacking. A census of the compiled programs
@@ -422,8 +437,13 @@ program to machine code.
 **Done anyway, on request** (the gate above was not met, and the result is
 the size the gate predicted). `crates/crust-jit`, behind crust-core's `jit`
 feature — on by default in `crust-render`, `--no-default-features` without it —
-and `CRUST_SHADER_JIT=0` at run time; the only crate that is not
-`forbid(unsafe_code)`, with two audited blocks.
+and `CRUST_SHADER_JIT=0` at run time. It is `deny(unsafe_code)` rather than
+`forbid`, as `crust-core` is for its test-only allocator, and is the only crate
+with `unsafe` in production code: five audited blocks (the code-pointer
+transmute, the call into generated code, the raw-pointer accesses in the two
+host callbacks, and freeing the code memory in `Drop`). Every program a
+MaterialX material owns is compiled: the surface program, the opacity slice
+behind a cutout, and a displacement program.
 
 *How it stays bit-identical.* Not by trusting Cranelift to agree with LLVM,
 but by splitting the instruction set:
@@ -510,7 +530,7 @@ only pays when something *consumes* the group — material evaluation over a
 batch in SIMD lanes, a batched texture fetch, coherent ray packets — and none
 of those exists. Reordering alone only adds bookkeeping. Revisit this together
 with such a consumer (the BSDF in SIMD lanes would be the first candidate, as
-`OpenPBR` evaluation is now the largest shading cost), not before; the branch
+BSDF evaluation is now the largest shading cost), not before; the branch
 keeps both stages.
 
 **What the attempt found instead.** The per-row barrier that sank the scanline
@@ -520,6 +540,61 @@ materialx_basic −25.1%, usdpreview_textured −22.1%, teapot −18.5%, veach_m
 −14.8%, usdlux −13.2%, ptex_quads −47.7%; min, interleaved). Tiles are now the
 CLI's default (`--scanline` for rows), which is a larger win than steps 4 and
 5 together.
+
+## Where it stands now
+
+Measured 2026-10-05 on `main` (0.5.0), `--profile`, `-s 4 --indirect-clamp 0`,
+72 threads, JIT on. Shares are of profiled thread time. `EvalBsdfs` is
+`Material::resolve`, the once-per-vertex step 3 built. Its `RunShader` child is
+the MaterialX program (JIT or interpreter), and `Texture` is nested inside that.
+BSDF sampling and evaluation are not under `EvalBsdfs`: they are charged to
+`SurfaceLighting` (NEE) and `Bounce`. Profiling overhead is ~11% of thread time
+and is charged to parents, which inflates `MainLoop` most on the small scenes.
+
+| Scene | `EvalBsdfs` total | `RunShader` total | `Texture` | resolve, own | `Trace` + `Occlusion` |
+|---|---|---|---|---|---|
+| `materialx_lion` | 33.1% | 22.0% | 13.6% | 11.0% | 28.2% |
+| `materialx_teapot` | 23.5% | 15.7% | 9.6% | 7.8% | 29.9% |
+| `materialx_basic` | 27.3% | 13.2% | 6.1% | 14.1% | 16.5% |
+| `usdpreview_textured` | 14.8% | — | 5.5% | 9.3% | 18.7% |
+
+A per-hit MaterialX surface now works in three stages:
+
+1. **The program runs once per vertex.** `MtlxMaterial::resolve` runs the
+   optimised `Program`, through the JIT when there is one, into the per-thread
+   slot buffer. On the lion that is 3.4 µs per run, textures included. With
+   textures taken out, the program itself (interpreter plus JIT) is 8.4% of
+   render, against the ~14% the interpreter alone was after step 4.
+2. **The closure tree collapses, once per vertex.** `PooledClosure::resolve`
+   walks the tree to at most eight weighted leaves, each with its own frame,
+   instead of pooling them onto one `OpenPBR`. The leaves are boxed and
+   recycled through a per-thread pool, so `ShadingPoint` stays at 464 bytes. On
+   `materialx_basic` this cost +2.2% instructions over the reduction it
+   replaced (`openspec/specs/materials/design.md` § MaterialX).
+3. **NEE and the bounce query the collapsed leaves.** That includes
+   `make_ray` for a transmitting direction. None of them re-runs the program.
+
+What still runs a program outside `resolve`:
+
+- **Cutouts.** `Material::opacity` is asked before a hit is shaded, at every
+  shadow-ray crossing and at every hit a path may pass through. So a MaterialX
+  cutout runs its own optimised *slice* of the program (`Presence`): only the
+  ops the opacity reads, never the whole graph.
+- **The terminal vertex.** A path that reaches its depth limit still takes
+  the emission where its last ray lands, but does not scatter there, so it
+  calls `emitted_at` directly rather than resolving. For a MaterialX material
+  that is one program run, and only when the graph can emit (`can_emit`).
+- **`scatter_importance` and `eval` on `MtlxMaterial` itself** still run the
+  program per call. They are the per-query reference that `tests/resolve.rs`
+  pins `resolve` against. The integrator calls them only from the debug-build
+  assertions step 2 added.
+
+The ranking has changed since step 1. Texture fetches are now the largest
+single shading section on the textured MaterialX scenes. Next come the
+per-vertex leaf collapse (`EvalBsdfs`' own time) and the BSDF queries inside
+`SurfaceLighting` and `Bounce`. A JIT does not help any of these. The levers
+left are the ones step 6 names: batched texture fetches, or BSDF evaluation in
+SIMD lanes, each of which needs hits queued by material before it can pay.
 
 ## Validation for every step
 
