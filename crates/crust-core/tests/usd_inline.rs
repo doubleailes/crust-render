@@ -1971,8 +1971,10 @@ fn a_subdivided_mesh_keeps_its_uv_chart() {
         for (x, y) in [(1.0, 1.0), (0.5, 1.5), (1.7, 0.3), (0.1, 0.1)] {
             let r = Ray::new(Vec3A::new(x, y, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
             let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
-            assert!(hit.rec.has_uv, "{what}: no chart at ({x}, {y})");
-            let (u, v) = hit.rec.uv;
+            let (u, v) = hit
+                .rec
+                .uv
+                .unwrap_or_else(|| panic!("{what}: no chart at ({x}, {y})"));
             assert!(
                 (u - x / 2.0).abs() < 1e-4 && (v - y / 2.0).abs() < 1e-4,
                 "{what}: ({x}, {y}) reads ({u}, {v})"
@@ -2033,8 +2035,7 @@ fn every_face_varying_rule_is_read() {
         );
         let r = Ray::new(Vec3A::new(1.001, 1.001, 5.0), -Vec3A::Z).with_mask(MASK_CAMERA);
         let hit = scene.world.intersect(&r, 1e-3, f32::INFINITY).unwrap();
-        assert!(hit.rec.has_uv, "{rule}: no chart");
-        hit.rec.uv
+        hit.rec.uv.unwrap_or_else(|| panic!("{rule}: no chart"))
     };
     let rules = [
         "none",
@@ -2270,7 +2271,10 @@ fn non_finite_shaping_inputs_fall_back() {
 /// How many of the stage's lights at infinity a ray of category `mask`
 /// sees on escaping.
 fn infinite_seen(scene: &Scene, mask: crust_core::RayMask) -> usize {
-    scene.lights.infinite_seen_by(Vec3A::ZERO, mask).count()
+    scene
+        .lights
+        .infinite_indexed_seen_by(Vec3A::ZERO, mask)
+        .count()
 }
 
 fn camera_hits(scene: &Scene) -> bool {

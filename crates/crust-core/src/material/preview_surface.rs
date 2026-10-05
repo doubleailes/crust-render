@@ -148,7 +148,7 @@ impl UvInput {
     /// The four output channels at a hit, `scale`/`bias` applied.
     #[inline]
     fn sample(&self, rec: &HitRecord) -> [f32; 4] {
-        self.sample_at(rec.has_uv.then_some(rec.uv), rec.uv_width)
+        self.sample_at(rec.uv, rec.uv_width)
     }
 
     /// The four output channels at chart point `uv` over a footprint `width`
@@ -534,8 +534,7 @@ mod tests {
         HitRecord {
             normal: Vec3A::Z,
             tangent: Vec3A::X,
-            uv: (u, 0.5),
-            has_uv: true,
+            uv: Some((u, 0.5)),
             ..HitRecord::default()
         }
     }

@@ -5,12 +5,12 @@
 //! update not carried over — would make every document that leaves an input
 //! unauthored shade with the wrong value, and render plausibly.
 
-use crust_mtlx::hair::{
+use crust_mtlx::parse_literal;
+use crust_mtlx::{
     CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
     DEON_HAIR_ABSORPTION_FROM_MELANIN,
 };
-use crust_mtlx::surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
-use crust_mtlx::value::parse_literal;
+use crust_mtlx::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 use std::path::Path;
 
 /// `(name, type, value)` of every input of `nodedef` in `file`, with an

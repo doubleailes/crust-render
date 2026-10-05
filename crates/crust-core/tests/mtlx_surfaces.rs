@@ -47,9 +47,8 @@ fn hit(u: f32, v: f32) -> HitRecord {
         t: 1.0,
         front_face: true,
         face: None,
-        uv: (u, v),
+        uv: Some((u, v)),
         tangent: Vec3A::X,
-        has_uv: true,
         uv_width: 0.0,
         face_width: 0.0,
     }

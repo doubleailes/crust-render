@@ -4,7 +4,7 @@
 //! an environment map — landing on the same numbers.
 
 use crust_assets::FileAssets;
-use crust_assets::tiled::{TxFormat, make_tx};
+use crust_assets::{TxFormat, make_tx};
 use crust_core::color::{Space, convert, working_space};
 use crust_core::{AssetLoader, ColorSpace, Vec3A};
 use std::path::{Path, PathBuf};

@@ -49,12 +49,15 @@ fn an_untrained_field_has_nothing_to_sample() {
     for _ in 0..20 {
         let p = Vec3A::new(rng.next_f32(), rng.next_f32(), rng.next_f32());
         assert!(!f.trained_at(p));
-        assert!(f.sample(p, rng.next_2d()).is_none());
+        assert!(f.sample(p, &mut rng).is_none());
         assert_eq!(f.pdf(p, Vec3A::Z), 0.0);
     }
     // Points outside the bounds are handled, not panicked on.
     assert!(!f.trained_at(Vec3A::splat(5.0)));
-    assert!(f.sample(Vec3A::splat(-5.0), [0.5, 0.5]).is_none());
+    assert!(
+        f.sample(Vec3A::splat(-5.0), &mut openqmc::pcg::Rng::new(1))
+            .is_none()
+    );
 }
 
 #[test]
@@ -65,7 +68,7 @@ fn training_makes_the_field_sampleable() {
     let p = Vec3A::splat(0.5);
     assert!(f.trained_at(p));
     for _ in 0..50 {
-        let (d, pdf) = f.sample(p, rng.next_2d()).expect("trained");
+        let (d, pdf) = f.sample(p, &mut rng).expect("trained");
         assert!((d.length() - 1.0).abs() < 1e-3, "{d}");
         assert!(pdf > 0.0 && pdf.is_finite());
     }
@@ -83,7 +86,7 @@ fn a_trained_field_concentrates_on_the_taught_direction() {
     let p = Vec3A::splat(0.5);
     let aligned_after = |f: &GuidingField, rng: &mut Rng| {
         (0..500)
-            .filter(|_| f.sample(p, rng.next_2d()).unwrap().0.dot(target) > 0.5)
+            .filter(|_| f.sample(p, rng).unwrap().0.dot(target) > 0.5)
             .count()
     };
     f.update(&samples_toward(target, 4000, 1.0), 1);
@@ -120,7 +123,7 @@ fn sample_and_pdf_agree() {
     f.update(&data, 1);
     let p = Vec3A::splat(0.5);
     for _ in 0..200 {
-        let (d, pdf) = f.sample(p, rng.next_2d()).unwrap();
+        let (d, pdf) = f.sample(p, &mut rng).unwrap();
         let again = f.pdf(p, d);
         assert!(
             (again - pdf).abs() < 1e-3 * pdf.max(1.0),
@@ -204,7 +207,10 @@ fn zero_radiance_samples_do_not_train() {
     let mut f = GuidingField::new(unit_bounds(), GuidingConfig::default());
     f.update(&samples_toward(Vec3A::Y, 500, 0.0), 1);
     assert!(!f.trained_at(Vec3A::splat(0.5)));
-    assert!(f.sample(Vec3A::splat(0.5), [0.3, 0.3]).is_none());
+    assert!(
+        f.sample(Vec3A::splat(0.5), &mut openqmc::pcg::Rng::new(1))
+            .is_none()
+    );
 }
 
 #[test]
@@ -246,5 +252,8 @@ fn degenerate_bounds_are_padded() {
         .collect();
     f.update(&data, 1);
     assert!(f.trained_at(Vec3A::new(0.5, 0.0, 0.5)));
-    assert!(f.sample(Vec3A::new(0.5, 0.0, 0.5), [0.2, 0.7]).is_some());
+    assert!(
+        f.sample(Vec3A::new(0.5, 0.0, 0.5), &mut openqmc::pcg::Rng::new(1))
+            .is_some()
+    );
 }

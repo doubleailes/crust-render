@@ -29,9 +29,10 @@ pub struct HitRecord {
     /// set addresses its tiles by the integer part, so clamping here would
     /// collapse fourteen 4K tiles onto one.
     ///
-    /// Left at `(0, 0)` — with `has_uv` false — for geometry carrying no `st`
-    /// primvar, or whose material asks for no UV texture.
-    pub uv: (f32, f32),
+    /// `None` for geometry carrying no `st` primvar, or whose material asks
+    /// for no UV texture — never a sentinel value, since the origin of the
+    /// chart is a perfectly ordinary texel.
+    pub uv: Option<(f32, f32)>,
     /// World-space surface tangent along increasing `u`, already
     /// orthogonalised against `normal` and unit length. The frame a
     /// tangent-space normal map is expressed in; the bitangent is
@@ -42,11 +43,6 @@ pub struct HitRecord {
     /// The importer can only build one for *baked* (single-placement)
     /// geometry — see [`crate::UvMap::tangents`].
     pub tangent: Vec3A,
-    /// Whether `uv` carries a real texture coordinate.
-    ///
-    /// Distinct from `uv != (0, 0)`: the origin of the chart is a perfectly
-    /// ordinary texel, so a sentinel value would alias onto valid data.
-    pub has_uv: bool,
     /// Width of the ray's texture footprint at this hit, in the *chart's* UV
     /// units — the filter width a UV texture should read `uv` with.
     ///
@@ -87,9 +83,8 @@ impl Default for HitRecord {
             t: 0.0,
             front_face: false,
             face: None,
-            uv: (0.0, 0.0),
+            uv: None,
             tangent: Vec3A::ZERO,
-            has_uv: false,
             uv_width: 0.0,
             face_width: 0.0,
         }

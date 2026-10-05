@@ -94,7 +94,7 @@
   visible) when the crust attribute is not authored, an authored `crust:rayMask` wins
   outright, and shadow/indirect rays always see it) —
   the `AreaLight` records the geometry's `geom_id`, which is how the integrator
-  attributes a bounce-hit emissive surface to its light (`LightList::find_by_geom`).
+  attributes a bounce-hit emissive surface to its light (`LightList::find_index_by_geom_at`).
   **NEE samples one light per vertex**, picked by the `LightList`'s selection,
   `crust:lightSelection` / `--light-selection`, built in `Renderer::new` from the
   settings.
@@ -121,8 +121,8 @@
     traverse the whole BVH. So at equal time it is ~3.6× on ALab's direct
     lighting and only ~1.1× on its full image, which is mostly indirect. Four
     details are load-bearing:
-    - **MIS.** Both sides go through `LightList::pick_at` / `pmf_at` /
-      `find_by_geom_at` / `iter_at`, keyed by the vertex NEE sampled from. The
+    - **MIS.** Both sides go through `LightList::pick_index_at` / `pmf_at` /
+      `find_index_by_geom_at` / `infinite_at`, keyed by the vertex NEE sampled from. The
       bounce side passes `prev.pos`. Route a new pmf read through the `*_at`
       form or emission is double-counted.
     - **Robust grid bounds.** The grid spans the receivers' 2–98% quantiles.
@@ -152,7 +152,7 @@
     - time within noise.
 
   The light strategy's MIS density is `light.pdf · pmf`, computed by
-  `LightList::density` on **both** sides. `pick`, `find_by_geom` and `iter` all hand
+  `LightList::density` on **both** sides. `pick`, `find_index_by_geom_at` and `iter` all hand
   back the same `pmf` for the same light. Under uniform, `density` is the historical
   division `pdf / n`, not `pdf · (1/n)`, which rounds differently when n is not a power
   of two; that is what keeps the A/B exact. A light with `pmf = 0` keeps its bounce

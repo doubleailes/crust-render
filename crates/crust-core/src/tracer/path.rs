@@ -35,7 +35,7 @@ pub(super) const K_TIME: i32 = 2; // off root: shutter time for motion blur
 const K_NEE: i32 = 0; // off vertex: light pick (0) + area uv (1,2)
 const K_NEE_SHADOW: i32 = 1; // off vertex: shadow-ray volume transmittance
 const K_BSDF: i32 = 2; // off vertex: material scatter block
-const K_GUIDE: i32 = 3; // off vertex: guide coin (0) + guide seed (1,2)
+const K_GUIDE: i32 = 3; // off vertex: guide coin (0) + its rng() for the descent
 const K_PHASE: i32 = 4; // off vertex: phase lobe (0) + HG uv (1,2)
 const K_RR: i32 = 5; // off vertex: Russian-roulette survival
 const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
@@ -118,6 +118,15 @@ pub fn ray_color(
     )
 }
 
+/// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
+/// footprint to zero, which makes every texture point-sample its finest level
+/// — the A/B that separates "the mip pyramids changed the image" from "the
+/// footprints did". Consulted per camera ray, so it reads the parsed
+/// [`crate::config()`], never the environment.
+pub(super) fn ray_cones_enabled() -> bool {
+    crate::config().ray_cones
+}
+
 /// Choose the bounce direction and the pdf its contribution is divided by.
 ///
 /// With guiding this is one-sample MIS between the guiding distribution and
@@ -129,15 +138,7 @@ pub fn ray_color(
 /// guide can never produce: they keep their placeholder pdf, are never mixed
 /// with a continuous density, and their value is divided by `1-α` to
 /// compensate for the coin reducing the delta lobe's selection probability.
-/// Are texture-filtering ray cones on? `CRUST_RAY_CONES=0` forces every
-/// footprint to zero, which makes every texture point-sample its finest level
-/// — the A/B that separates "the mip pyramids changed the image" from "the
-/// footprints did". Consulted per camera ray, so it reads the parsed
-/// [`crate::config()`], never the environment.
-pub(super) fn ray_cones_enabled() -> bool {
-    crate::config().ray_cones
-}
-
+//
 // `inline(always)`, as is `escaped_emission`: each is called once per
 // `trace_path` instance, and once the integrator was monomorphised on the
 // profiler switch LLVM stopped inlining them into either copy — +1.1%
@@ -160,19 +161,21 @@ fn sample_bounce_direction<const AOV: bool>(
         None => sp.scatter_importance(r, dom),
     };
     // Distinct sub-domains: the BSDF scatter block, and the guide block whose
-    // first dimension is the α-coin and next two are the guide-sampling seed.
+    // first dimension is the α-coin and whose incidental stream drives the
+    // quadtree descent.
     let bsdf_dom = sampler.new_domain(K_BSDF);
     let g = match guiding {
         Some(g) if g.field.trained_at(rec.p) => g,
         _ => return scatter(bsdf_dom),
     };
     let alpha = g.field.config().guide_prob;
-    let gs = sampler.new_domain(K_GUIDE).draw_sample_f32::<4>();
+    let guide_dom = sampler.new_domain(K_GUIDE);
+    let gs = guide_dom.draw_sample_f32::<1>();
 
     if gs[0] < alpha {
         // Guide branch: draw from the field; the material's continuous
         // component supplies the value and the BSDF side of the mixture pdf.
-        if let Some((wi, p_guide)) = g.field.sample(rec.p, [gs[1], gs[2]])
+        if let Some((wi, p_guide)) = g.field.sample(rec.p, &mut guide_dom.rng())
             && let Some((value, p_bsdf)) = sp.eval(r, wi)
         {
             if AOV && let Some(out) = split {
@@ -1362,7 +1365,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             *first = FirstHit::Surface {
                 p: rec.p,
                 n: sp.normal(),
-                uv: rec.has_uv.then_some(rec.uv),
+                uv: rec.uv,
             };
         }
         let emitted = sp.emitted();

@@ -330,15 +330,15 @@ fn find_by_geom_matches_by_id() {
         7,
     ));
 
-    assert!(lights.find_by_geom(7).is_some());
-    assert!(lights.find_by_geom(8).is_none());
+    assert!(lights.index_of_geom(7).is_some());
+    assert!(lights.index_of_geom(8).is_none());
 }
 
 /// An escaping ray asks only the lights at infinity, and must get exactly
 /// what asking every light would: the same lights with the same pick
 /// probabilities, in list order, under both uniform and power selection.
 #[test]
-fn infinite_at_is_iter_at_filtered_to_escaped() {
+fn infinite_at_is_every_escaping_light() {
     let mat = Arc::new(Emissive::new(Vec3A::splat(1.0)));
     let mut lights = LightList::new();
     let area = |c: f32, id: u32| {
@@ -359,11 +359,9 @@ fn infinite_at_is_iter_at_filtered_to_escaped() {
         lights.select_by(selection);
         let from = Vec3A::new(0.0, 5.0, 0.0);
         let dir = Vec3A::Y;
-        let every: Vec<(usize, f32)> = lights
-            .iter_at(from)
-            .enumerate()
-            .filter(|(_, (l, _))| l.escaped(from, dir).is_some())
-            .map(|(i, (_, pmf))| (i, pmf))
+        let every: Vec<(usize, f32)> = (0..lights.count())
+            .filter(|&i| lights.light(i).escaped(from, dir).is_some())
+            .map(|i| (i, lights.pmf_at(from, i)))
             .collect();
         let infinite: Vec<f32> = lights.infinite_at(from).map(|(_, pmf)| pmf).collect();
         assert_eq!(every.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [1, 3]);
@@ -444,14 +442,14 @@ fn remove_is_as_if_never_added() {
         l.select_by(LightSelection::Power);
     }
     assert_eq!(removed.count(), never.count());
-    assert!(removed.find_by_geom(0).is_none());
+    assert!(removed.index_of_geom(0).is_none());
     assert_eq!(
-        removed.find_by_geom(1).map(|(_, p)| p.to_bits()),
-        never.find_by_geom(1).map(|(_, p)| p.to_bits())
+        removed.index_of_geom(1).map(|i| removed.pmf(i).to_bits()),
+        never.index_of_geom(1).map(|i| never.pmf(i).to_bits())
     );
     let seen = |l: &LightList| {
-        l.infinite_seen_by(Vec3A::ZERO, MASK_CAMERA)
-            .map(|(_, p)| p.to_bits())
+        l.infinite_indexed_seen_by(Vec3A::ZERO, MASK_CAMERA)
+            .map(|(_, _, p)| p.to_bits())
             .collect::<Vec<_>>()
     };
     assert_eq!(seen(&removed), seen(&never));

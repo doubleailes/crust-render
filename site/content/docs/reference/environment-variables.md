@@ -71,7 +71,6 @@ then the default is used. A typo never stops a render, so read the warnings.
 | [`CRUST_DISPLACE`](#crust-displace) | on | USD import |
 | [`CRUST_ADAPTIVE_PER_FACE`](#crust-adaptive-per-face) | on | USD import |
 | [`CRUST_ADAPTIVE_FRUSTUM`](#crust-adaptive-frustum) | on | USD import |
-| [`CRUST_BVH_PACKET_SAH`](#crust-bvh-packet-sah) | on | ray tracing |
 | [`CRUST_TRI_PACKETS`](#crust-tri-packets) | `auto` | ray tracing |
 | [`CRUST_MTLX_OPT`](#crust-mtlx-opt) | on | shading |
 | [`CRUST_SHADER_JIT`](#crust-shader-jit) | on | shading |
@@ -153,16 +152,6 @@ Boolean, default **on**. Only with
 reflections and shadows keep their detail, at the cost of memory.
 
 ## Ray tracing
-
-### CRUST_BVH_PACKET_SAH
-
-Boolean, default **on**.
-
-On, the BVH builder sizes its leaves by how many SIMD packets of triangles they hold. `0`
-uses the older per-triangle leaf cost.
-
-The trees have different shapes, so ties between exactly equal hits can resolve
-differently. The difference is noise, not bias.
 
 ### CRUST_TRI_PACKETS
 

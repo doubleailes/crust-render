@@ -167,10 +167,6 @@ pub struct Config {
     /// `CRUST_TRI_PACKETS`: the kernel's triangle packet layout
     /// (`gathered` | `indexed` | `auto`; bit-identical either way).
     pub tri_packets: TriPackets,
-    /// `CRUST_BVH_PACKET_SAH`: size all-triangle BVH leaves by SIMD packet
-    /// tests (`false`: the per-triangle leaf cost before the switch; the
-    /// trees differ in shape, so renders can differ on exact-tie hits).
-    pub bvh_packet_sah: bool,
     /// `CRUST_MTLX_OPT`: fold, hoist and prune MaterialX programs (`false`:
     /// run them as compiled; bit-identical).
     pub mtlx_opt: bool,
@@ -240,7 +236,6 @@ impl Default for Config {
             adaptive_per_face: true,
             adaptive_frustum: true,
             tri_packets: TriPackets::Auto,
-            bvh_packet_sah: true,
             mtlx_opt: true,
             shader_jit: true,
             ray_cones: true,
@@ -286,7 +281,6 @@ impl Config {
                 d.tri_packets,
                 "`gathered`, `indexed` or `auto`",
             ),
-            bvh_packet_sah: flag("CRUST_BVH_PACKET_SAH", d.bvh_packet_sah),
             mtlx_opt: flag("CRUST_MTLX_OPT", d.mtlx_opt),
             shader_jit: flag("CRUST_SHADER_JIT", d.shader_jit),
             ray_cones: flag("CRUST_RAY_CONES", d.ray_cones),

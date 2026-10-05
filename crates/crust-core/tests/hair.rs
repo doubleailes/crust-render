@@ -273,9 +273,8 @@ fn a_mixed_fibre_keeps_both_leaves() {
         t: 1.0,
         front_face: true,
         face: None,
-        uv: (0.0, 0.0),
+        uv: None,
         tangent: Vec3A::X,
-        has_uv: false,
         uv_width: 0.0,
         face_width: 0.0,
     };

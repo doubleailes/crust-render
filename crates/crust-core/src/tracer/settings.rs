@@ -159,25 +159,22 @@ pub struct RenderSettings {
     // 0). Validated at construction: `Some` is always finite and positive.
     pub(super) indirect_clamp: Option<f32>,
 }
-impl RenderSettings {
-    pub fn new(
-        samples_per_pixel: u32,
-        max_depth: u32,
-        width: usize,
-        height: usize,
-        min_samples_per_pixel: u32,
-        variance_threshold: f32,
-        frame: isize,
-    ) -> Self {
+/// The settings a stage that authors none renders with: 640×360 at 128 spp,
+/// paths up to 32 vertices, adaptive sampling stopping no earlier than 32
+/// samples at a 5% relative standard error, frame 0. Every other field is
+/// changed by name through a `with_*` builder, so no call site passes a row
+/// of bare numbers whose order only the signature knows.
+impl Default for RenderSettings {
+    fn default() -> Self {
         RenderSettings {
-            samples_per_pixel,
-            max_depth,
-            width,
-            height,
-            min_samples_per_pixel,
-            variance_threshold,
+            samples_per_pixel: 128,
+            max_depth: 32,
+            width: 640,
+            height: 360,
+            min_samples_per_pixel: 32,
+            variance_threshold: 0.05,
             adaptive_neighbour_tolerance: DEFAULT_ADAPTIVE_NEIGHBOUR_TOLERANCE,
-            frame,
+            frame: 0,
             guiding: false,
             guiding_train_iterations: 4,
             guiding_prob: 0.5,
@@ -187,12 +184,32 @@ impl RenderSettings {
             indirect_clamp: Some(DEFAULT_INDIRECT_CLAMP),
         }
     }
+}
 
-    /// Override the image resolution — the first `RenderProduct`'s, when it
-    /// authors its own.
-    pub(crate) fn with_resolution(mut self, width: usize, height: usize) -> Self {
+impl RenderSettings {
+    /// Set the image resolution, in pixels.
+    pub fn with_resolution(mut self, width: usize, height: usize) -> Self {
         self.width = width;
         self.height = height;
+        self
+    }
+
+    /// Set the longest path, in vertices.
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Set adaptive sampling: a pixel may stop once it has taken at least
+    /// `min_samples_per_pixel` samples and the relative standard error of its
+    /// mean is below `variance_threshold` (`0` never stops early).
+    pub fn with_adaptive_sampling(
+        mut self,
+        min_samples_per_pixel: u32,
+        variance_threshold: f32,
+    ) -> Self {
+        self.min_samples_per_pixel = min_samples_per_pixel;
+        self.variance_threshold = variance_threshold;
         self
     }
 

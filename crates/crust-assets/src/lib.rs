@@ -32,7 +32,7 @@ mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
 mod texture_cache;
-pub mod tiled;
+mod tiled;
 mod uv_texture;
 
 pub use environment::{load_exr_environment, load_image_environment, read_exr_rgb, read_rgb_image};
@@ -48,6 +48,8 @@ pub use ptex_stream::{
 pub use ptex_texture::{
     DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
 };
+/// Offline `.tx` conversion: what `maketx` and `--auto-tx` write.
+pub use tiled::{MadeTx, TxFormat, make_tx, make_tx_atomic};
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
 
 /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on

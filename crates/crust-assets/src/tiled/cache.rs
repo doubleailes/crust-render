@@ -123,9 +123,6 @@ fn thread_stripe() -> usize {
     })
 }
 
-/// Default cache budget, matching OIIO's own 1 GB.
-pub const DEFAULT_BUDGET_BYTES: u64 = mib_to_bytes(crust_core::config::DEFAULT_CACHE_MB as u64);
-
 /// Which tile, of which level, of which file.
 ///
 /// The file is an interned index, not a path: a key is compared and hashed on
@@ -209,10 +206,6 @@ impl TileData {
             TileKind::U8 => self.bytes.len(),
             TileKind::Half => self.bytes.len() / 2,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -364,21 +357,6 @@ pub struct CacheCounters {
     pub total_bytes: u64,
 }
 
-impl CacheCounters {
-    pub fn is_empty(&self) -> bool {
-        self.micro_hits == 0 && self.hits == 0 && self.misses == 0
-    }
-
-    /// Fraction of lookups answered without touching the disk.
-    pub fn hit_rate(&self) -> f64 {
-        let total = self.micro_hits + self.hits + self.misses;
-        if total == 0 {
-            return 0.0;
-        }
-        (self.micro_hits + self.hits) as f64 / total as f64
-    }
-}
-
 /// One file's geometry plus the decoders that read it.
 struct FileSlot {
     file: TiledFile,
@@ -440,10 +418,6 @@ impl TileCache {
         mib_to_bytes(config.tex_cache_mb.get())
     }
 
-    pub fn budget(&self) -> u64 {
-        self.budget
-    }
-
     pub fn resident(&self) -> u64 {
         self.resident.load(Ordering::Relaxed)
     }
@@ -458,11 +432,6 @@ impl TileCache {
             seen: Mutex::new(std::collections::HashSet::new()),
         }));
         Some(id)
-    }
-
-    pub fn file(&self, id: u32) -> Option<TiledFile> {
-        let files = lock(&self.files)?;
-        files.get(id as usize).map(|s| s.file.clone())
     }
 
     pub fn counters(&self) -> CacheCounters {

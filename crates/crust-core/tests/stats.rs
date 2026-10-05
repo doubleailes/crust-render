@@ -112,7 +112,11 @@ fn report_sorts_the_time_view_largest_first() {
 
 #[test]
 fn image_counters_come_from_render_settings() {
-    let settings = RenderSettings::new(24, 9, 300, 200, 8, 0.05, 0);
+    let settings = RenderSettings::default()
+        .with_resolution(300, 200)
+        .with_samples_per_pixel(24)
+        .with_max_depth(9)
+        .with_adaptive_sampling(8, 0.05);
     let img: ImageCounters = (&settings).into();
     assert_eq!((img.width, img.height), (300, 200));
     assert_eq!(img.samples_per_pixel, 24);

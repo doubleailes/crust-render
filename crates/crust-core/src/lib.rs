@@ -41,7 +41,7 @@ mod scene;
 /// crate, re-exported below as [`mtlx`].
 pub use material::materialx;
 mod stats;
-pub mod subsurface;
+mod subsurface;
 mod texture;
 mod tracer;
 mod volume;
@@ -66,13 +66,11 @@ pub use buffer::Buffer;
 pub use camera::Camera;
 pub use config::{Config, PtexMipSpace, TriPackets, config};
 
-/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` and
-/// `CRUST_BVH_PACKET_SAH` switches, read once.
-pub fn commit_options() -> crust_rt::CommitOptions {
-    let c = config();
+/// What every kernel scene commits with — the `CRUST_TRI_PACKETS` switch,
+/// read once.
+pub(crate) fn commit_options() -> crust_rt::CommitOptions {
     crust_rt::CommitOptions {
-        layout: c.tri_packets.into(),
-        packet_sah: c.bvh_packet_sah,
+        layout: config().tri_packets.into(),
     }
 }
 pub use environment::EnvironmentMap;

@@ -136,7 +136,7 @@ pub enum Lobe {
     },
     /// `subsurface_bsdf`: no value toward any direction (as in Typhoon, the
     /// leaf does no NEE); selecting it enters a random walk
-    /// ([`crate::subsurface`]) through the interface above it.
+    /// (`crust_core`'s `subsurface` module) through the interface above it.
     Subsurface {
         color: Vec3A,
         radius: Vec3A,

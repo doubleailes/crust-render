@@ -140,8 +140,9 @@
   4.38 → 3.82 GiB; every sample, the Kitchen_set pair and the island and ALab frames
   bit-identical, in both packet layouts; callgrind −0.7% (cornellbox) and −0.6%
   (nested_instancing) instructions overall, `Scene::occluded` −4.8% / −3.4%.
-  **Leaves are sized by packet rounds** (`CommitOptions::packet_sah`, the
-  `CRUST_BVH_PACKET_SAH` switch, default on). The SAH leaf decision used to charge one
+  **Leaves are sized by packet rounds** (once the `CRUST_BVH_PACKET_SAH` A/B, retired
+  when the measurements below settled it; the per-triangle cost survives only for
+  ranges holding a non-triangle). The SAH leaf decision used to charge one
   unit per triangle with no node cost, so a range of five to eight overlapping
   triangles always split into two half-empty packets — on ALab and the Moana island
   packet lanes were 48% full, and every half-empty packet is 192 resident bytes, a
@@ -279,7 +280,7 @@ model).
   Current practice says target AVX2 instead, so the reasons not to are recorded: merely
   *enabling* AVX2 codegen is worth 2–4% (LLVM cannot widen a 4-lane algorithm), and
   8-wide leaf packets used to buy exactly nothing because no leaf held more than 4
-  triangles; with packet-sized leaves (`CommitOptions::packet_sah`, below) a leaf holds
+  triangles; with packet-sized leaves (below) a leaf holds
   up to two packets, and an 8-wide packet would merge those pairs — 31.6% fewer
   rounds on the test sphere mesh, measured and bounded by
   `eight_wide_packets_would_save_at_most_the_two_packet_leaves` — which changes the

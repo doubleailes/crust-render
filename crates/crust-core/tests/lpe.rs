@@ -181,7 +181,11 @@ fn scene(o: &Opts) -> Renderer {
         0.0,
         5.0,
     );
-    let settings = RenderSettings::new(o.spp, o.depth, W, H, o.spp, 0.0, 0)
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(o.spp)
+        .with_max_depth(o.depth)
+        .with_adaptive_sampling(o.spp, 0.0)
         .with_indirect_clamp(o.clamp)
         .with_sampling_strategy(o.strategy)
         .with_guiding(o.guiding, 1, 0.5)
@@ -645,7 +649,12 @@ fn checker_scene(spp: u32) -> Renderer {
         0.0,
         5.0,
     );
-    let settings = RenderSettings::new(spp, 1, W, H, spp, 0.0, 0).with_indirect_clamp(0.0);
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(1)
+        .with_adaptive_sampling(spp, 0.0)
+        .with_indirect_clamp(0.0);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 

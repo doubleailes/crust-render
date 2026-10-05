@@ -1106,7 +1106,7 @@ fn empty_light_list_picks_nothing() {
     assert_eq!(l.count(), 0);
     assert!(l.pick(0.0).is_none());
     assert!(l.pick(0.99).is_none());
-    assert!(l.find_by_geom(0).is_none());
+    assert!(l.index_of_geom(0).is_none());
     let d = LightList::default();
     assert_eq!(d.count(), 0);
 }
@@ -1229,8 +1229,8 @@ fn power_selection_picks_by_power_defensively() {
         );
     }
     for i in [0u32, 1, 2] {
-        let (_, found) = l.find_by_geom(10 + i).unwrap();
-        assert_eq!(found, l.pmf(i as usize), "find_by_geom disagrees with pmf");
+        let index = l.index_of_geom(10 + i).unwrap();
+        assert_eq!(index, i as usize, "index_of_geom disagrees with the list");
     }
     let pmfs: Vec<f32> = l.iter().map(|(_, p)| p).collect();
     assert_eq!(pmfs, (0..4).map(|i| l.pmf(i)).collect::<Vec<_>>());
@@ -1311,13 +1311,13 @@ fn light_list_finds_lights_by_geometry_id() {
     l.add(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 12));
     l.add(DistantLight::new(-Vec3A::Y, Vec3A::ONE, 1.0));
     l.add(sphere_light(Vec3A::ZERO, 1.0, Vec3A::ONE, 40));
-    assert!(l.find_by_geom(12).is_some());
-    assert!(l.find_by_geom(40).is_some());
+    assert!(l.index_of_geom(12).is_some());
+    assert!(l.index_of_geom(40).is_some());
     assert!(
-        l.find_by_geom(13).is_none(),
+        l.index_of_geom(13).is_none(),
         "an unrelated geometry is not a light"
     );
-    assert_eq!(l.find_by_geom(40).unwrap().0.geom_id(), Some(40));
+    assert_eq!(l.light(l.index_of_geom(40).unwrap()).geom_id(), Some(40));
 }
 
 #[test]

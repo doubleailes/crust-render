@@ -71,7 +71,7 @@ four triangles, because the SAH was free to split anything above
 `MIN_LEAF_PACKED`, and a `Tri8` packet would have run the *same number* of
 vector rounds with half the lanes idle. The retune the old test warned about
 has happened — `compact-triangle-storage` sizes all-triangle leaves by packet
-tests (`CommitOptions::packet_sah`, `CRUST_BVH_PACKET_SAH`), so five to eight
+tests (the `CRUST_BVH_PACKET_SAH` A/B, since retired), so five to eight
 overlapping triangles now stay one leaf of two full packets instead of two
 half-empty ones. On the same sphere mesh 607 of 1 316 leaves hold two
 packets, and an 8-wide packet would merge those pairs: 1 923 → 1 316 rounds,

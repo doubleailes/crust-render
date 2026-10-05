@@ -171,7 +171,6 @@ static LAYOUT: std::sync::OnceLock<PacketLayout> = std::sync::OnceLock::new();
 fn commit(b: SceneBuilder) -> Scene {
     b.commit_with(CommitOptions {
         layout: *LAYOUT.get().unwrap_or(&PacketLayout::Auto),
-        ..Default::default()
     })
 }
 

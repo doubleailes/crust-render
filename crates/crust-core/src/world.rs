@@ -124,7 +124,11 @@ pub fn get_settings() -> (Camera, RenderSettings) {
         aperture,
         dist_to_focus,
     );
-    let render_settings = RenderSettings::new(64, 32, IMAGE_WIDTH, IMAGE_HEIGHT, 32, 0.05, 0);
+    let render_settings = RenderSettings::default()
+        .with_resolution(IMAGE_WIDTH, IMAGE_HEIGHT)
+        .with_samples_per_pixel(64)
+        .with_max_depth(32)
+        .with_adaptive_sampling(32, 0.05);
 
     (cam, render_settings)
 }
