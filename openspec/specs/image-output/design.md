@@ -11,8 +11,7 @@ the `aovs` capability's.
   beside it. This is the path every sample, golden and test without products
   takes, and it is kept exactly as it was before products existed, so their
   output did not move.
-- **Products authored.** `mod products`, inline in `crust-render/src/main.rs`
-  (the CLI crate keeps one source file): one EXR per accepted
+- **Products authored.** `crust-render/src/products.rs`: one EXR per accepted
   product, at its `productName` (or `-o` for the first), then the PNG from the
   first product's beauty, beside that product.
 

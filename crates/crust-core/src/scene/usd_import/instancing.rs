@@ -40,7 +40,7 @@ use super::attrs::{
     custom_token, decode_i32_array, decode_i64_array, decode_vec3f_array, prim_ray_mask, value_at,
 };
 use super::materials::{resolve_bound, resolve_material};
-use super::mesh::{MeshPlace, mesh_source, placement_scale};
+use super::mesh::{MeshNeeds, MeshPlace, mesh_source, placement_scale};
 use super::shapes::{curve_segments, sphere_radius};
 use super::xform::compose_with_parent;
 use super::{ImportCaches, WalkScope, prim_at, prune_reason};
@@ -200,10 +200,7 @@ pub(super) fn collect_proto_parts(
             if let Some(src) = mesh_source(
                 &prim,
                 &mesh,
-                material.face_texture().is_some(),
-                material.uses_uv(),
-                material.uv_primvar(),
-                displacement,
+                MeshNeeds::of(&*material, displacement),
                 &mut caches.meshes.subdiv,
                 part_world
                     .as_ref()

@@ -24,7 +24,7 @@ the current state.
 Two materials evaluate a pattern network at every hit:
 
 - **`MtlxMaterial`** (`material/materialx.rs`). It ran the compiled
-  MaterialX `Program` (`crust-mtlx/src/eval.rs`), then `reduce` pooled the
+  MaterialX `Program` (`crust-mtlx/src/eval/`), then `reduce` pooled the
   document's lobes onto an `OpenPBR`. (That reduction has since been replaced
   by a closure tree collapsed into a `ResolvedClosure`; see "Where it stands
   now".) The `Program` was already a linear, slot-indexed instruction list with a

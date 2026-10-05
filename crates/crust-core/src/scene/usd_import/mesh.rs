@@ -233,6 +233,22 @@ impl SubdivPolicy {
         }
     }
 
+    /// Counts a per-face tessellation into the load's statistics.
+    fn record_tessellation(&mut self, t: &subdiv::TessellatedMesh) {
+        self.per_face_meshes += 1;
+        for (into, from) in self.quality.iter_mut().zip(&t.quality) {
+            for (i, f) in into.iter_mut().zip(from) {
+                *i += f;
+            }
+        }
+        for (b, &n) in t.rate_bins.iter().enumerate() {
+            if self.rate_bins.len() <= b {
+                self.rate_bins.resize(b + 1, 0);
+            }
+            self.rate_bins[b] += n;
+        }
+    }
+
     /// The level a subdivision mesh with this cage is refined to, read for
     /// `place`.
     fn level_for(
@@ -563,15 +579,12 @@ pub(super) fn emit_mesh(
         displacement,
     } = bound;
     let displacement = prim_displacement(prim, displacement);
-    let want_faces = material.face_texture().is_some();
-    let want_uvs = material.uses_uv();
+    let needs = MeshNeeds::of(&*material, displacement.as_deref());
+    let (want_faces, want_uvs) = (needs.faces, needs.uvs);
     let Some(src) = mesh_source(
         prim,
         mesh,
-        want_faces,
-        want_uvs,
-        material.uv_primvar(),
-        displacement.as_deref(),
+        needs,
         &mut meshes.subdiv,
         MeshPlace::World(&world_xf),
     ) else {
@@ -987,17 +1000,19 @@ pub(super) enum RefinedFaces {
 ///
 /// `None` when the required attributes are missing (matching
 /// [`mesh_arrays`]); any subdivision problem warns and degrades to the cage.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn mesh_source(
     prim: &Prim,
     mesh: &UsdMesh,
-    want_faces: bool,
-    want_uvs: bool,
-    uv_primvar: Option<&str>,
-    displacement: Option<&Displacement>,
+    needs: MeshNeeds<'_>,
     policy: &mut SubdivPolicy,
     place: MeshPlace<'_>,
 ) -> Option<MeshSource> {
+    let MeshNeeds {
+        faces: want_faces,
+        uvs: want_uvs,
+        uv_primvar,
+        displacement,
+    } = needs;
     // A displacement reads its own chart, whether or not the surface does.
     let want_faces = want_faces || displacement.is_some_and(Displacement::needs_ptex);
     let want_uvs = want_uvs || displacement.is_some_and(Displacement::needs_uv);
@@ -1027,33 +1042,7 @@ pub(super) fn mesh_source(
         );
     }
 
-    let mut usd_scheme = subdivision_scheme(mesh);
-    // A displaced `none` mesh is diced bilinearly, so the displacement has
-    // vertices to move: its faces keep their flat shape until displaced.
-    // Under `CRUST_SUBDIV=0` it stays the faceted cage, as everything does.
-    //
-    // Except when its displacement reads Ptex and it has a face that is not a
-    // quad: refinement splits a triangle or an n-gon into quads no Ptex face
-    // addresses here, so those children would read no map at all. Its cage
-    // keeps every triangle addressable, so it stays the cage.
-    if let Some(d) = displacement
-        && usd_scheme == SubdivisionScheme::None
-        && policy.enabled
-    {
-        if d.needs_ptex() && counts.iter().any(|&c| c != 4) {
-            if !policy.ptex_cage_warned {
-                policy.ptex_cage_warned = true;
-                warn!(
-                    "Mesh at {} (and possibly others): subdivisionScheme = none with a Ptex \
-                     displacement and non-quad faces is displaced at its cage — refining it \
-                     would leave the children of its triangles with no Ptex face",
-                    prim.path()
-                );
-            }
-        } else {
-            usd_scheme = SubdivisionScheme::Bilinear;
-        }
-    }
+    let usd_scheme = effective_scheme(prim, mesh, &counts, displacement, policy);
     if !policy.enabled || usd_scheme == SubdivisionScheme::None {
         return Some(cage(points, counts, indices, uvs));
     }
@@ -1122,73 +1111,20 @@ pub(super) fn mesh_source(
         SubdivisionScheme::None => return Some(cage(points, counts, indices, uvs)),
     };
 
-    let boundary = match mesh
-        .interpolate_boundary_attr()
-        .get_at::<InterpolateBoundary>(eval_time())
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-    {
-        InterpolateBoundary::None => opensubdiv_rs::sdc::VtxBoundaryInterpolation::None,
-        InterpolateBoundary::EdgeOnly => opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeOnly,
-        InterpolateBoundary::EdgeAndCorner => {
-            opensubdiv_rs::sdc::VtxBoundaryInterpolation::EdgeAndCorner
-        }
-    };
+    let boundary = vtx_boundary(mesh);
+    let sharpness = SharpnessArrays::read(mesh);
 
-    let int_array = |attr| {
-        value_at(&attr)
-            .and_then(decode_i32_array)
-            .unwrap_or_default()
-    };
-    let float_array = |attr| {
-        value_at(&attr)
-            .and_then(decode_f32_array)
-            .unwrap_or_default()
-    };
-    let crease_indices = int_array(mesh.crease_indices_attr());
-    let crease_lengths = int_array(mesh.crease_lengths_attr());
-    let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());
-    let corner_indices = int_array(mesh.corner_indices_attr());
-    let corner_sharpnesses = float_array(mesh.corner_sharpnesses_attr());
-
-    // The chart the refiner carries. One it cannot index (a negative or
-    // out-of-range entry) is dropped rather than refined into garbage: the
-    // surface then renders on the material's constant inputs, as every
-    // subdivided mesh did before charts were refined.
-    let chart = uvs.as_ref().and_then(|uv| {
-        let channel = subdiv::UvChannel {
-            values: &uv.values,
-            indices: uv.indices.as_deref(),
-            face_varying: uv.face_varying,
-            linear: face_varying_linear(mesh),
-        };
-        let n_entries = if uv.face_varying {
-            indices.len()
-        } else {
-            points.len()
-        };
-        if channel.is_well_formed(n_entries) {
-            Some(channel)
-        } else {
-            warn!(
-                "Mesh at {}: texture coordinates do not index cleanly into their \
-                 values — the subdivided surface renders without them",
-                prim.path()
-            );
-            None
-        }
-    });
+    let chart = refinable_chart(prim, mesh, uvs.as_ref(), points.len(), indices.len());
 
     let req = subdiv::SubdivRequest {
         scheme,
         level,
         boundary,
-        crease_indices: &crease_indices,
-        crease_lengths: &crease_lengths,
-        crease_sharpnesses: &crease_sharpnesses,
-        corner_indices: &corner_indices,
-        corner_sharpnesses: &corner_sharpnesses,
+        crease_indices: &sharpness.crease_indices,
+        crease_lengths: &sharpness.crease_lengths,
+        crease_sharpnesses: &sharpness.crease_sharpnesses,
+        corner_indices: &sharpness.corner_indices,
+        corner_sharpnesses: &sharpness.corner_sharpnesses,
         want_face_uvs: want_faces,
         uvs: chart,
     };
@@ -1199,18 +1135,7 @@ pub(super) fn mesh_source(
         let segment = |pts: &[[f32; 3]]| rate.segment_culled(xf, pts, cull);
         match subdiv::tessellate_adaptive(&points, &counts, &indices, &req, rate.max, &segment) {
             Ok(t) => {
-                policy.per_face_meshes += 1;
-                for (into, from) in policy.quality.iter_mut().zip(&t.quality) {
-                    for (i, f) in into.iter_mut().zip(from) {
-                        *i += f;
-                    }
-                }
-                for (b, &n) in t.rate_bins.iter().enumerate() {
-                    if policy.rate_bins.len() <= b {
-                        policy.rate_bins.resize(b + 1, 0);
-                    }
-                    policy.rate_bins[b] += n;
-                }
+                policy.record_tessellation(&t);
                 debug!(
                     "Mesh at {}: tessellated per face ({} Ptex faces -> {} triangles, edge rates {}..={})",
                     prim.path(),
@@ -1219,29 +1144,7 @@ pub(super) fn mesh_source(
                     t.rate_range.0,
                     t.rate_range.1
                 );
-                let n_tris = t.indices.len() / 3;
-                return Some(MeshSource {
-                    points: t.points,
-                    counts: vec![3; n_tris],
-                    indices: t.indices,
-                    normals: Some(t.normals),
-                    subdiv_faces: t.faces.map(RefinedFaces::PerFace),
-                    base_face_count,
-                    refined: true,
-                    uvs: match (t.uvs, t.face_varying_uvs) {
-                        (Some(values), _) => Some(UvSource {
-                            values,
-                            indices: None,
-                            face_varying: false,
-                        }),
-                        (None, Some((values, corners))) => Some(UvSource {
-                            values,
-                            indices: Some(corners),
-                            face_varying: true,
-                        }),
-                        (None, None) => None,
-                    },
-                });
+                return Some(MeshSource::tessellated(t, base_face_count));
             }
             Err(e) => {
                 warn!(
@@ -1260,20 +1163,7 @@ pub(super) fn mesh_source(
                 base_face_count,
                 refined.counts.len()
             );
-            Some(MeshSource {
-                points: refined.points,
-                counts: refined.counts,
-                indices: refined.indices,
-                normals: Some(refined.normals),
-                subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
-                base_face_count,
-                refined: true,
-                uvs: refined.uvs.map(|uv| UvSource {
-                    values: uv.values,
-                    indices: uv.indices,
-                    face_varying: uv.face_varying,
-                }),
-            })
+            Some(MeshSource::subdivided(refined, base_face_count))
         }
         Err(e) => {
             warn!(
@@ -1283,6 +1173,201 @@ pub(super) fn mesh_source(
             // The cage fallback recovers the chart: unrefined triangles
             // index it exactly as authored.
             Some(cage(points, counts, indices, uvs))
+        }
+    }
+}
+
+/// What a mesh's material asks of its geometry beyond positions.
+#[derive(Clone, Copy, Default)]
+pub(super) struct MeshNeeds<'a> {
+    /// A per-face (Ptex) texture: keep the cage's face ids through refinement.
+    pub(super) faces: bool,
+    /// A UV texture: read, and refine with the surface, the texture chart.
+    pub(super) uvs: bool,
+    /// The chart's primvar, when the material's network names one
+    /// ([`Material::uv_primvar`]).
+    pub(super) uv_primvar: Option<&'a str>,
+    /// The displacement the prim applies, which reads its own chart.
+    pub(super) displacement: Option<&'a Displacement>,
+}
+
+impl<'a> MeshNeeds<'a> {
+    /// What `material` reads, with the displacement the prim applies.
+    pub(super) fn of(material: &'a dyn Material, displacement: Option<&'a Displacement>) -> Self {
+        MeshNeeds {
+            faces: material.face_texture().is_some(),
+            uvs: material.uses_uv(),
+            uv_primvar: material.uv_primvar(),
+            displacement,
+        }
+    }
+}
+
+/// The scheme a mesh is refined under: its `subdivisionScheme`, except that a
+/// displaced `none` mesh is diced bilinearly, so the displacement has vertices
+/// to move — its faces keep their flat shape until displaced. Under
+/// `CRUST_SUBDIV=0` it stays the faceted cage, as everything does.
+///
+/// Except when its displacement reads Ptex and it has a face that is not a
+/// quad: refinement splits a triangle or an n-gon into quads no Ptex face
+/// addresses here, so those children would read no map at all. Its cage keeps
+/// every triangle addressable, so it stays the cage.
+fn effective_scheme(
+    prim: &Prim,
+    mesh: &UsdMesh,
+    counts: &[i32],
+    displacement: Option<&Displacement>,
+    policy: &mut SubdivPolicy,
+) -> SubdivisionScheme {
+    let scheme = subdivision_scheme(mesh);
+    let Some(d) = displacement else {
+        return scheme;
+    };
+    if scheme != SubdivisionScheme::None || !policy.enabled {
+        return scheme;
+    }
+    if d.needs_ptex() && counts.iter().any(|&c| c != 4) {
+        if !policy.ptex_cage_warned {
+            policy.ptex_cage_warned = true;
+            warn!(
+                "Mesh at {} (and possibly others): subdivisionScheme = none with a Ptex \
+                 displacement and non-quad faces is displaced at its cage — refining it \
+                 would leave the children of its triangles with no Ptex face",
+                prim.path()
+            );
+        }
+        scheme
+    } else {
+        SubdivisionScheme::Bilinear
+    }
+}
+
+/// The mesh's `interpolateBoundary`, mapped one to one.
+fn vtx_boundary(mesh: &UsdMesh) -> opensubdiv_rs::sdc::VtxBoundaryInterpolation {
+    use opensubdiv_rs::sdc::VtxBoundaryInterpolation as B;
+    match mesh
+        .interpolate_boundary_attr()
+        .get_at::<InterpolateBoundary>(eval_time())
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
+        InterpolateBoundary::None => B::None,
+        InterpolateBoundary::EdgeOnly => B::EdgeOnly,
+        InterpolateBoundary::EdgeAndCorner => B::EdgeAndCorner,
+    }
+}
+
+/// A mesh's authored creases and corners, as the refiner reads them; an
+/// unauthored array is empty.
+struct SharpnessArrays {
+    crease_indices: Vec<i32>,
+    crease_lengths: Vec<i32>,
+    crease_sharpnesses: Vec<f32>,
+    corner_indices: Vec<i32>,
+    corner_sharpnesses: Vec<f32>,
+}
+
+impl SharpnessArrays {
+    fn read(mesh: &UsdMesh) -> Self {
+        let ints = |attr| {
+            value_at(&attr)
+                .and_then(decode_i32_array)
+                .unwrap_or_default()
+        };
+        let floats = |attr| {
+            value_at(&attr)
+                .and_then(decode_f32_array)
+                .unwrap_or_default()
+        };
+        SharpnessArrays {
+            crease_indices: ints(mesh.crease_indices_attr()),
+            crease_lengths: ints(mesh.crease_lengths_attr()),
+            crease_sharpnesses: floats(mesh.crease_sharpnesses_attr()),
+            corner_indices: ints(mesh.corner_indices_attr()),
+            corner_sharpnesses: floats(mesh.corner_sharpnesses_attr()),
+        }
+    }
+}
+
+/// The chart the refiner carries. One it cannot index (a negative or
+/// out-of-range entry) is dropped rather than refined into garbage: the surface
+/// then renders on the material's constant inputs, as every subdivided mesh did
+/// before charts were refined.
+fn refinable_chart<'a>(
+    prim: &Prim,
+    mesh: &UsdMesh,
+    uvs: Option<&'a UvSource>,
+    n_points: usize,
+    n_face_vertices: usize,
+) -> Option<subdiv::UvChannel<'a>> {
+    let uv = uvs?;
+    let channel = subdiv::UvChannel {
+        values: &uv.values,
+        indices: uv.indices.as_deref(),
+        face_varying: uv.face_varying,
+        linear: face_varying_linear(mesh),
+    };
+    let n_entries = if uv.face_varying {
+        n_face_vertices
+    } else {
+        n_points
+    };
+    if channel.is_well_formed(n_entries) {
+        Some(channel)
+    } else {
+        warn!(
+            "Mesh at {}: texture coordinates do not index cleanly into their \
+             values — the subdivided surface renders without them",
+            prim.path()
+        );
+        None
+    }
+}
+
+impl MeshSource {
+    /// A per-face tessellation, all triangles.
+    fn tessellated(t: subdiv::TessellatedMesh, base_face_count: usize) -> Self {
+        let n_tris = t.indices.len() / 3;
+        MeshSource {
+            points: t.points,
+            counts: vec![3; n_tris],
+            indices: t.indices,
+            normals: Some(t.normals),
+            subdiv_faces: t.faces.map(RefinedFaces::PerFace),
+            base_face_count,
+            refined: true,
+            uvs: match (t.uvs, t.face_varying_uvs) {
+                (Some(values), _) => Some(UvSource {
+                    values,
+                    indices: None,
+                    face_varying: false,
+                }),
+                (None, Some((values, corners))) => Some(UvSource {
+                    values,
+                    indices: Some(corners),
+                    face_varying: true,
+                }),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// A uniform refinement.
+    fn subdivided(refined: subdiv::SubdividedMesh, base_face_count: usize) -> Self {
+        MeshSource {
+            points: refined.points,
+            counts: refined.counts,
+            indices: refined.indices,
+            normals: Some(refined.normals),
+            subdiv_faces: refined.faces.map(RefinedFaces::Uniform),
+            base_face_count,
+            refined: true,
+            uvs: refined.uvs.map(|uv| UvSource {
+                values: uv.values,
+                indices: uv.indices,
+                face_varying: uv.face_varying,
+            }),
         }
     }
 }
@@ -2083,10 +2168,7 @@ mod subdiv_policy_tests {
             let src = mesh_source(
                 &prim,
                 &mesh,
-                false,
-                false,
-                None,
-                None,
+                MeshNeeds::default(),
                 &mut policy,
                 MeshPlace::World(&GMat4::IDENTITY),
             )
@@ -2143,10 +2225,12 @@ mod subdiv_policy_tests {
             let src = mesh_source(
                 &prim,
                 &mesh,
-                false,
-                false,
-                None,
-                Some(&d),
+                MeshNeeds {
+                    faces: false,
+                    uvs: false,
+                    uv_primvar: None,
+                    displacement: Some(&d),
+                },
                 &mut policy,
                 MeshPlace::World(&eye),
             )
@@ -2256,10 +2340,12 @@ mod displacement_tests {
         let src = mesh_source(
             &prim,
             &mesh,
-            false,
-            false,
-            None,
-            Some(d),
+            MeshNeeds {
+                faces: false,
+                uvs: false,
+                uv_primvar: None,
+                displacement: Some(d),
+            },
             &mut arena.subdiv,
             MeshPlace::World(&eye),
         )
@@ -2466,10 +2552,12 @@ def Mesh "G"
         let src = mesh_source(
             &prim,
             &mesh,
-            false,
-            false,
-            None,
-            Some(&d),
+            MeshNeeds {
+                faces: false,
+                uvs: false,
+                uv_primvar: None,
+                displacement: Some(&d),
+            },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
         )
@@ -2516,10 +2604,12 @@ def Mesh "T"
         let src = mesh_source(
             &prim,
             &mesh,
-            false,
-            false,
-            None,
-            Some(&d),
+            MeshNeeds {
+                faces: false,
+                uvs: false,
+                uv_primvar: None,
+                displacement: Some(&d),
+            },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
         )
@@ -2536,10 +2626,12 @@ def Mesh "T"
         let src = mesh_source(
             &prim,
             &mesh,
-            false,
-            false,
-            None,
-            Some(&uv),
+            MeshNeeds {
+                faces: false,
+                uvs: false,
+                uv_primvar: None,
+                displacement: Some(&uv),
+            },
             &mut arena.subdiv,
             MeshPlace::World(&GMat4::IDENTITY),
         )

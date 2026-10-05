@@ -43,7 +43,7 @@ use crate::light::LightList;
 use crate::rt_world::WorldBuilder;
 use crate::scene::AssetLoader;
 use crate::scene::Scene;
-use crate::stats::{ImageCounters, MemorySample, RenderStats, SceneCounters, SubdivisionCounters};
+use crate::stats::{MemorySample, RenderStats, SceneCounters, SubdivisionCounters};
 use crate::tracer::RenderSettings;
 use crate::volume::VolumeRegion;
 
@@ -567,36 +567,206 @@ fn open_stage(path: &Path, path_str: &str, mask: Option<sdf::Path>) -> Result<St
     Ok(stage)
 }
 
+/// The host's [`UsdImportOptions`](crate::UsdImportOptions) checked before
+/// the stage is opened: a bad frame, camera path or working space is refused
+/// here, not discovered after a four-minute traversal.
+struct ValidOptions {
+    time: Option<f64>,
+    camera: Option<sdf::Path>,
+    working: Option<crate::color::Space>,
+}
+
+impl ValidOptions {
+    fn check(options: &crate::UsdImportOptions) -> Result<Self, crate::Error> {
+        let time = options.frame;
+        // The authoritative check: every host reaches the importer through here,
+        // and nothing past this point expects a non-finite time.
+        if let Some(t) = time
+            && !t.is_finite()
+        {
+            return Err(crate::Error::InvalidFrame(t));
+        }
+        // Same for the camera: a malformed path is refused before the stage is
+        // opened, not discovered after a four-minute traversal.
+        let requested_camera = match &options.camera {
+            Some(c) => Some(
+                sdf::path(c)
+                    .ok()
+                    .filter(|p| p.is_abs() && p.is_prim_path() && !p.is_abs_root())
+                    .ok_or_else(|| crate::Error::InvalidCameraPath(c.clone()))?,
+            ),
+            None => None,
+        };
+        // A working space the host names is refused here, before the stage is
+        // opened, like a bad camera path.
+        let host_working = match &options.working_space {
+            Some(name) => Some(crate::color::working_space(name)?),
+            None => None,
+        };
+        Ok(ValidOptions {
+            time,
+            camera: requested_camera,
+            working: host_working,
+        })
+    }
+}
+
+/// Walks the stage into `ctx`: in one pass when it is small or flat, else one
+/// masked stage per top-level subtree (`chunks`), each dropped before the next
+/// is composed — the memory bound the streaming import exists for.
+fn traverse_stage(
+    path: &Path,
+    path_str: &str,
+    chunks: &[sdf::Path],
+    skip_stage_teardown: bool,
+    ctx: &mut ImportCtx,
+) -> Result<(), crate::Error> {
+    if chunks.is_empty() {
+        // Small or flat stage: one pass, exactly as before.
+        debug!(
+            "Single-stage import (fewer than {MIN_STREAM_CHUNKS} subtrees, or \
+             CRUST_STREAM_IMPORT=0)"
+        );
+        let stage = open_stage(path, path_str, None)?;
+        if ctx.caches.meshes.subdiv.adaptive.is_some() {
+            count_placements(&stage, &mut ctx.caches);
+        }
+        traverse_into(
+            &stage,
+            prim_at(&stage, sdf::Path::abs_root()),
+            GMat4::IDENTITY,
+            ctx,
+        );
+        release_stage(stage, skip_stage_teardown);
+    } else {
+        debug!("Streaming import over {} subtrees", chunks.len());
+        for (n, chunk) in chunks.iter().enumerate() {
+            // Per chunk rather than per prim: this is the loop whose memory
+            // high-water mark the streaming import exists to bound, so the
+            // running totals are what say whether it is doing its job.
+            let chunk_start = Instant::now();
+            debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
+            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
+            if ctx.caches.meshes.subdiv.adaptive.is_some() {
+                count_placements(&stage, &mut ctx.caches);
+            }
+            // Traverse from the root, not from `chunk`: a mask keeps the
+            // masked path's *ancestors* populated, so starting at the
+            // root picks up their transforms exactly as a full traversal
+            // would, while everything outside the chunk stays absent.
+            traverse_into(
+                &stage,
+                prim_at(&stage, sdf::Path::abs_root()),
+                GMat4::IDENTITY,
+                ctx,
+            );
+            // Always dropped, the last chunk included: that is the memory
+            // bound streaming exists for, and a streamed import's peak often
+            // comes *after* the traversal — at the top-level BVH commit, on
+            // the island — where a kept stage would stack on top of it.
+            release_stage(stage, false);
+            // Separate this stage's prototypes from the next stage's —
+            // see ImportCaches::epoch. Deliberately not a clear: the
+            // mesh cache keys materials by Arc address, so nothing may
+            // be freed while it is live.
+            ctx.caches.epoch += 1;
+            ctx.caches.materials.epoch = ctx.caches.epoch;
+            debug!(
+                "Chunk {}/{} done in {:?} — running totals: {} geometries, {} light(s), \
+                 {} volume region(s), {} mesh placement(s) pending",
+                n + 1,
+                chunks.len(),
+                chunk_start.elapsed(),
+                ctx.world.count(),
+                ctx.lights.count(),
+                ctx.volumes.len(),
+                ctx.pending_meshes.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The camera the traversal settled on: the one asked for, else — when the
+/// stage's `RenderSettings.camera` names one that is not there — the first
+/// camera met, else the procedural fallback's. A camera the host asked for by
+/// path and the stage does not have is an error naming the alternatives.
+fn resolve_camera(ctx: &mut ImportCtx) -> Result<Camera, crate::Error> {
+    let camera = match (
+        ctx.camera.take(),
+        ctx.wanted_camera.take(),
+        ctx.first_camera.take(),
+    ) {
+        (Some(c), _, _) => c,
+        (None, Some(CameraChoice::Requested(p)), _) => {
+            return Err(crate::Error::CameraNotFound {
+                path: p.to_string(),
+                available: ctx.cameras_seen.iter().map(ToString::to_string).collect(),
+            });
+        }
+        (None, Some(CameraChoice::Settings(p)), Some((c, first))) => {
+            warn!(
+                "RenderSettings.camera targets {p}, which is not a camera on this stage — \
+                 rendering through {first} instead"
+            );
+            c
+        }
+        (None, _, _) => {
+            warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
+            crate::world::get_settings().0
+        }
+    };
+    Ok(camera)
+}
+
+/// The subdivision and displacement counters the traversal accumulated, into
+/// `--stats`.
+fn record_geometry_counters(meshes: &MeshArena, camera: &Camera, stats: &mut RenderStats) {
+    if meshes.subdiv.adaptive.is_some() {
+        let [interior, stitched] = meshes.subdiv.quality;
+        debug!(
+            "Per-face triangle shapes (4√3·area / Σ edge², bins ≥0.9 · ≥0.5 · ≥0.1 · ≥0.01 · \
+             <0.01): interior {interior:?}, stitched {stitched:?}"
+        );
+    }
+    if let Some(rate) = meshes.subdiv.adaptive {
+        // Both reads derive from one `CameraFrame`, but adaptive subdivision
+        // may read it off a different stage (the unloaded index while
+        // streaming); the two must still agree, or every level was chosen for
+        // a viewpoint the render does not use.
+        debug_assert!(
+            (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
+            "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
+            rate.eye,
+            camera.origin()
+        );
+        stats.subdivision = SubdivisionCounters {
+            adaptive: Some((rate.target, rate.max)),
+            levels: meshes.subdiv.levels.clone(),
+            shared_meshes: meshes.subdiv.shared_meshes,
+            shared_level: meshes.subdiv.level,
+            per_face_meshes: meshes.subdiv.per_face_meshes,
+            per_face_fallbacks: meshes.subdiv.per_face_fallbacks,
+            rate_bins: meshes.subdiv.rate_bins.clone(),
+        };
+    }
+
+    stats.displacement = crate::stats::DisplacementCounters {
+        frustum_skipped: meshes.subdiv.frustum_skipped,
+        ..meshes.displaced.clone()
+    };
+}
+
 pub(crate) fn load_scene(
     path: &Path,
     assets: &dyn AssetLoader,
     options: &crate::UsdImportOptions,
 ) -> Result<Scene, crate::Error> {
-    let time = options.frame;
-    // The authoritative check: every host reaches the importer through here,
-    // and nothing past this point expects a non-finite time.
-    if let Some(t) = time
-        && !t.is_finite()
-    {
-        return Err(crate::Error::InvalidFrame(t));
-    }
-    // Same for the camera: a malformed path is refused before the stage is
-    // opened, not discovered after a four-minute traversal.
-    let requested_camera = match &options.camera {
-        Some(c) => Some(
-            sdf::path(c)
-                .ok()
-                .filter(|p| p.is_abs() && p.is_prim_path() && !p.is_abs_root())
-                .ok_or_else(|| crate::Error::InvalidCameraPath(c.clone()))?,
-        ),
-        None => None,
-    };
-    // A working space the host names is refused here, before the stage is
-    // opened, like a bad camera path.
-    let host_working = match &options.working_space {
-        Some(name) => Some(crate::color::working_space(name)?),
-        None => None,
-    };
+    let ValidOptions {
+        time,
+        camera: requested_camera,
+        working: host_working,
+    } = ValidOptions::check(options)?;
     let _time_scope = EvalTimeScope::enter(time);
     let import_start = Instant::now();
     let mut stats = RenderStats::new();
@@ -722,69 +892,13 @@ pub(crate) fn load_scene(
     };
 
     let traverse_start = Instant::now();
-    if chunks.is_empty() {
-        // Small or flat stage: one pass, exactly as before.
-        debug!(
-            "Single-stage import (fewer than {MIN_STREAM_CHUNKS} subtrees, or \
-             CRUST_STREAM_IMPORT=0)"
-        );
-        let stage = open_stage(path, path_str, None)?;
-        if ctx.caches.meshes.subdiv.adaptive.is_some() {
-            count_placements(&stage, &mut ctx.caches);
-        }
-        traverse_into(
-            &stage,
-            prim_at(&stage, sdf::Path::abs_root()),
-            GMat4::IDENTITY,
-            &mut ctx,
-        );
-        release_stage(stage, options.skip_stage_teardown);
-    } else {
-        debug!("Streaming import over {} subtrees", chunks.len());
-        for (n, chunk) in chunks.iter().enumerate() {
-            // Per chunk rather than per prim: this is the loop whose memory
-            // high-water mark the streaming import exists to bound, so the
-            // running totals are what say whether it is doing its job.
-            let chunk_start = Instant::now();
-            debug!("Chunk {}/{}: {}", n + 1, chunks.len(), chunk);
-            let stage = open_stage(path, path_str, Some(chunk.clone()))?;
-            if ctx.caches.meshes.subdiv.adaptive.is_some() {
-                count_placements(&stage, &mut ctx.caches);
-            }
-            // Traverse from the root, not from `chunk`: a mask keeps the
-            // masked path's *ancestors* populated, so starting at the
-            // root picks up their transforms exactly as a full traversal
-            // would, while everything outside the chunk stays absent.
-            traverse_into(
-                &stage,
-                prim_at(&stage, sdf::Path::abs_root()),
-                GMat4::IDENTITY,
-                &mut ctx,
-            );
-            // Always dropped, the last chunk included: that is the memory
-            // bound streaming exists for, and a streamed import's peak often
-            // comes *after* the traversal — at the top-level BVH commit, on
-            // the island — where a kept stage would stack on top of it.
-            release_stage(stage, false);
-            // Separate this stage's prototypes from the next stage's —
-            // see ImportCaches::epoch. Deliberately not a clear: the
-            // mesh cache keys materials by Arc address, so nothing may
-            // be freed while it is live.
-            ctx.caches.epoch += 1;
-            ctx.caches.materials.epoch = ctx.caches.epoch;
-            debug!(
-                "Chunk {}/{} done in {:?} — running totals: {} geometries, {} light(s), \
-                 {} volume region(s), {} mesh placement(s) pending",
-                n + 1,
-                chunks.len(),
-                chunk_start.elapsed(),
-                ctx.world.count(),
-                ctx.lights.count(),
-                ctx.volumes.len(),
-                ctx.pending_meshes.len()
-            );
-        }
-    }
+    traverse_stage(
+        path,
+        path_str,
+        &chunks,
+        options.skip_stage_teardown,
+        &mut ctx,
+    )?;
 
     // The traverse also builds each mesh's and prototype's kernel scene,
     // so its own BVH work is inside this figure; the separate "Commit
@@ -804,30 +918,7 @@ pub(crate) fn load_scene(
         ctx.volumes.len()
     );
 
-    let camera = match (
-        ctx.camera.take(),
-        ctx.wanted_camera.take(),
-        ctx.first_camera.take(),
-    ) {
-        (Some(c), _, _) => c,
-        (None, Some(CameraChoice::Requested(p)), _) => {
-            return Err(crate::Error::CameraNotFound {
-                path: p.to_string(),
-                available: ctx.cameras_seen.iter().map(ToString::to_string).collect(),
-            });
-        }
-        (None, Some(CameraChoice::Settings(p)), Some((c, first))) => {
-            warn!(
-                "RenderSettings.camera targets {p}, which is not a camera on this stage — \
-                 rendering through {first} instead"
-            );
-            c
-        }
-        (None, _, _) => {
-            warn!("USD stage has no UsdGeomCamera — falling back to world::get_settings camera");
-            crate::world::get_settings().0
-        }
-    };
+    let camera = resolve_camera(&mut ctx)?;
 
     // Every chunk has been walked, so each mesh's placement count is final
     // and the deferred instance-vs-bake decisions can be made. Must happen
@@ -843,39 +934,7 @@ pub(crate) fn load_scene(
         ctx.lights.hide_infinite_from_camera();
     }
 
-    if ctx.caches.meshes.subdiv.adaptive.is_some() {
-        let [interior, stitched] = ctx.caches.meshes.subdiv.quality;
-        debug!(
-            "Per-face triangle shapes (4√3·area / Σ edge², bins ≥0.9 · ≥0.5 · ≥0.1 · ≥0.01 · \
-             <0.01): interior {interior:?}, stitched {stitched:?}"
-        );
-    }
-    if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
-        // Both reads derive from one `CameraFrame`, but adaptive subdivision
-        // may read it off a different stage (the unloaded index while
-        // streaming); the two must still agree, or every level was chosen for
-        // a viewpoint the render does not use.
-        debug_assert!(
-            (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
-            "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
-            rate.eye,
-            camera.origin()
-        );
-        stats.subdivision = SubdivisionCounters {
-            adaptive: Some((rate.target, rate.max)),
-            levels: ctx.caches.meshes.subdiv.levels.clone(),
-            shared_meshes: ctx.caches.meshes.subdiv.shared_meshes,
-            shared_level: ctx.caches.meshes.subdiv.level,
-            per_face_meshes: ctx.caches.meshes.subdiv.per_face_meshes,
-            per_face_fallbacks: ctx.caches.meshes.subdiv.per_face_fallbacks,
-            rate_bins: ctx.caches.meshes.subdiv.rate_bins.clone(),
-        };
-    }
-
-    stats.displacement = crate::stats::DisplacementCounters {
-        frustum_skipped: ctx.caches.meshes.subdiv.frustum_skipped,
-        ..ctx.caches.meshes.displaced.clone()
-    };
+    record_geometry_counters(&ctx.caches.meshes, &camera, &mut stats);
 
     let pending = std::mem::take(&mut ctx.pending_meshes);
     flush_meshes(&mut ctx.world, &mut ctx.caches.meshes, pending);
@@ -910,13 +969,7 @@ pub(crate) fn load_scene(
         lights: ctx.lights.count(),
         volumes: ctx.volumes.len(),
     };
-    let (w, h) = settings.get_dimensions();
-    stats.image = ImageCounters {
-        width: w,
-        height: h,
-        samples_per_pixel: settings.samples_per_pixel(),
-        max_depth: settings.max_depth(),
-    };
+    stats.image = (&settings).into();
 
     let mut scene = Scene::new(camera, committed, ctx.lights, settings).with_volumes(ctx.volumes);
     scene.stats = stats;

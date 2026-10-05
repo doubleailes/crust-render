@@ -87,7 +87,8 @@ Seven crates under `crates/` (ownership table in `docs/architecture.md`):
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-core`
 (the engine library: import, integrator, materials, lights, volumes, guiding, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI; `main.rs` only writes images) and `utils` (stateless math:
+`crust-render` (the CLI; it only drives a render and writes images: `main.rs`,
+`products.rs`, `logging.rs`) and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
 `opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
 re-exports the public surface.

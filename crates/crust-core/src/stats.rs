@@ -754,23 +754,9 @@ pub(crate) fn human_duration(d: Duration) -> String {
     }
 }
 
-impl fmt::Display for RenderStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Wide enough that the longest phase name ("Commit acceleration
-        // structure", nested one level) still clears the time column.
-        const WIDTH: usize = 84;
-        const NAME: usize = 36;
-        let rule = "-".repeat(WIDTH);
-        let total = self.total();
-        let total_secs = total.as_secs_f64();
-        let pct = |d: Duration| {
-            if total_secs > 0.0 {
-                100.0 * d.as_secs_f64() / total_secs
-            } else {
-                0.0
-            }
-        };
-
+impl RenderStats {
+    /// The header, the image and the scene inventory: geometry, materials, lights, subdivision, displacement, volumes, kernel memory.
+    fn write_scene(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         writeln!(f, "{rule}")?;
         writeln!(f, "Render Statistics")?;
         writeln!(f, "{rule}")?;
@@ -975,7 +961,11 @@ impl fmt::Display for RenderStats {
         if let Some(peak) = peak_memory_bytes() {
             writeln!(f, "  {:<28} {}", "peak memory (RSS)", human_bytes(peak))?;
         }
+        Ok(())
+    }
 
+    /// `Ray Statistics`, when anything was traced.
+    fn write_rays(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Ray statistics -------------------------------------------
         let r = &self.rays;
         if !r.is_empty() {
@@ -1146,7 +1136,11 @@ impl fmt::Display for RenderStats {
                 )?;
             }
         }
+        Ok(())
+    }
 
+    /// The `.tx` / preloaded texture section, when any texture was used.
+    fn write_textures(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Textures --------------------------------------------------
         let t = &self.textures;
         if !t.is_empty() {
@@ -1259,7 +1253,11 @@ impl fmt::Display for RenderStats {
                 writeln!(f, "  {:<28} {}", "tile read errors", count(t.errors))?;
             }
         }
+        Ok(())
+    }
 
+    /// The Ptex section, when any Ptex texture was used.
+    fn write_ptex(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
         // -- Ptex ------------------------------------------------------
         let p = &self.ptex;
         if !p.is_empty() {
@@ -1404,11 +1402,21 @@ impl fmt::Display for RenderStats {
                 )?;
             }
         }
+        Ok(())
+    }
 
-        if self.phases.is_empty() {
-            return Ok(());
-        }
-
+    /// The phases, by execution tree and by time; percentages are of the top-level total.
+    fn write_phases(&self, f: &mut fmt::Formatter<'_>, rule: &str) -> fmt::Result {
+        const NAME: usize = REPORT_NAME;
+        let total = self.total();
+        let total_secs = total.as_secs_f64();
+        let pct = |d: Duration| {
+            if total_secs > 0.0 {
+                100.0 * d.as_secs_f64() / total_secs
+            } else {
+                0.0
+            }
+        };
         // -- Phases by execution tree ----------------------------------
         writeln!(f, "{rule}")?;
         writeln!(f, "Phases by execution tree (wall clock)")?;
@@ -1461,7 +1469,123 @@ impl fmt::Display for RenderStats {
                 width = NAME - 3
             )?;
         }
+        Ok(())
+    }
+}
 
+/// The kernel's BVH traversal counters, per camera ray, as the `--stats`
+/// section a `traversal-stats` build adds: queries, nodes, leaves and packets
+/// per tree level, then which top-level instances the descents went into.
+///
+/// One string rather than lines, so the caller can emit it as a single event:
+/// a `println!` per row would leave these lines out of `--log-file`, and one
+/// event per row would stamp each of them with a timestamp the table has no
+/// column for.
+#[cfg(feature = "traversal-stats")]
+pub fn traversal_report(world: &crate::World, camera_rays: u64) -> String {
+    use crate::rt::traversal_stats as ts;
+    use std::fmt::Write as _;
+    let rays = camera_rays.max(1) as f64;
+    let per = |n: u64| n as f64 / rays;
+    let rule = "-".repeat(REPORT_WIDTH);
+    let mut out = String::new();
+    // Infallible: `write!` into a String only fails if the formatter
+    // does, and none of these arguments can.
+    let _ = write!(out, "\n{rule}\nBVH Traversal (per camera ray)\n{rule}");
+    for (level, name) in [(0usize, "top-level"), (1, "instanced")] {
+        let (q, nodes, leaves, packets, scalars) = ts::read_level(level);
+        if q == 0 {
+            continue;
+        }
+        let _ = write!(
+            out,
+            "\n  {name:<12} queries {:>8.2}  nodes {:>9.2}  leaves {:>8.2}  packets {:>7.2}  scalar {:>8.2}",
+            per(q),
+            per(nodes),
+            per(leaves),
+            per(packets),
+            per(scalars),
+        );
+    }
+    // Which top-level instances the descents went into. A top level that
+    // culls well spreads them thinly; one that does not concentrates them
+    // on whatever geometry every ray's path overlaps. The importer's
+    // DEBUG lines give each instancer's `geom ids a..b` range, which is
+    // how an id here is traced back to a prim.
+    let descents = ts::top_level_descents();
+    let total: u64 = descents.iter().map(|d| d.1).sum();
+    if total > 0 {
+        let mut acc = 0u64;
+        let mut marks = vec![];
+        for (i, d) in descents.iter().enumerate() {
+            acc += d.1;
+            for f in [0.5, 0.9, 0.99] {
+                if (acc as f64) >= f * total as f64 && !marks.iter().any(|&(g, _)| g == f) {
+                    marks.push((f, i + 1));
+                }
+            }
+        }
+        let _ = write!(
+            out,
+            "\n  top-level instances entered: {} of them, {:.1} descents per camera ray \
+             (closest-hit and shadow rays; the rows above count closest-hit only)",
+            descents.len(),
+            per(total)
+        );
+        for (f, n) in marks {
+            let _ = write!(
+                out,
+                "\n    {:.0}% of descents go to {n} instances",
+                f * 100.0
+            );
+        }
+        let top: Vec<_> = descents.iter().take(40).collect();
+        let ids: std::collections::HashSet<u32> = top.iter().map(|d| d.0).collect();
+        let info: std::collections::HashMap<u32, _> = world
+            .describe_instances(&ids)
+            .into_iter()
+            .map(|(id, b, n, shared)| (id, (b, n, shared)))
+            .collect();
+        let _ = write!(
+            out,
+            "\n  {:>9} {:>7} {:>9} {:>8} {:>9}  bounds",
+            "geom_id", "share", "per ray", "prims", "shared by"
+        );
+        for &&(id, n) in &top {
+            let (b, prims, shared) = info[&id];
+            let _ = write!(
+                out,
+                "\n  {id:>9} {:>6.2}% {:>9.2} {prims:>8} {shared:>9}  [{:.0} {:.0} {:.0}]..[{:.0} {:.0} {:.0}]",
+                100.0 * n as f64 / total as f64,
+                per(n),
+                b.minimum.x,
+                b.minimum.y,
+                b.minimum.z,
+                b.maximum.x,
+                b.maximum.y,
+                b.maximum.z,
+            );
+        }
+    }
+    out
+}
+
+/// Report column widths. Wide enough that the longest phase name ("Commit
+/// acceleration structure", nested one level) still clears the time column.
+const REPORT_WIDTH: usize = 84;
+const REPORT_NAME: usize = 36;
+
+impl fmt::Display for RenderStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rule = "-".repeat(REPORT_WIDTH);
+        self.write_scene(f, &rule)?;
+        self.write_rays(f, &rule)?;
+        self.write_textures(f, &rule)?;
+        self.write_ptex(f, &rule)?;
+        if self.phases.is_empty() {
+            return Ok(());
+        }
+        self.write_phases(f, &rule)?;
         // -- Render profile (`--profile`) --------------------------------
         // After the phases, because it zooms into one of them: every figure
         // below is thread time inside the Render row above.
