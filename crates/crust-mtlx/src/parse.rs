@@ -257,7 +257,7 @@ impl Doc {
     /// Answered whatever the input's type. Only `color3` / `color4` values —
     /// and the `file` of an image whose output is one — are colour-managed;
     /// deciding that is the caller's half (see
-    /// [`crate::value::is_color_type`]).
+    /// `is_color_type`).
     pub fn colorspace_of<'a>(&'a self, node: &'a Node, input: &'a Input) -> Option<&'a str> {
         input
             .colorspace

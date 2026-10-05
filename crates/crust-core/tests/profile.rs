@@ -12,7 +12,11 @@ fn renderer() -> Renderer {
     let (world, lights) = simple_scene();
     let (camera, _) = get_settings();
     // Adaptive stop off, so both renders take exactly the same samples.
-    let settings = RenderSettings::new(4, 4, W, H, 4, 0.0, 0);
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(4)
+        .with_max_depth(4)
+        .with_adaptive_sampling(4, 0.0);
     Renderer::new(camera, world, lights, settings)
 }
 

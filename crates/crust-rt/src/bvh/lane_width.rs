@@ -39,7 +39,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
 
 /// Records what 8-wide packets would buy, now that leaves can hold two.
 ///
-/// Until the packet-aware leaf cost (`CommitOptions::packet_sah`) no leaf on
+/// Until the packet-aware leaf cost (packet-sized leaves) no leaf on
 /// a dense mesh held more than four triangles, so an 8-wide leaf intersector
 /// (AVX2) would have run exactly as many vector rounds as the 4-wide one with
 /// half its lanes idle — the equality this test used to pin. Leaves of five to
@@ -51,7 +51,7 @@ fn uv_sphere_prims(segs: usize, rings: usize) -> Primitives {
 /// slower) are unchanged by it.
 #[test]
 fn eight_wide_packets_would_save_at_most_the_two_packet_leaves() {
-    let bvh = Bvh::new(uv_sphere_prims(80, 40), Layout::Gathered, true);
+    let bvh = Bvh::new(uv_sphere_prims(80, 40), Layout::Gathered);
     let per_leaf: Vec<usize> = bvh
         .leaves
         .iter()

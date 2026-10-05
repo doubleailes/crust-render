@@ -69,11 +69,6 @@ cargo run --release -- -i samples/curves.usda --stats
 python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
 CRUST_TRI_PACKETS=gathered target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
 CRUST_TRI_PACKETS=indexed  target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
-# ...and the leaf rule: CRUST_BVH_PACKET_SAH=0 is the per-triangle SAH leaf cost
-# that left production scenes' packet lanes 48% full; on (the default) sizes
-# all-triangle leaves by packet rounds. Different tree, so compare its images
-# by the 1/sqrt(N) rule, not bit for bit.
-CRUST_BVH_PACKET_SAH=0 target/release/crust-render -i samples/cornellbox.usda --stats -l error
 # ...and inside the render: Trace vs EvalBsdfs vs Texture vs SurfaceLighting,
 # flat / by category / by execution tree. Costs render time (~15-20%, printed
 # with the report), so never take a Render time from a --profile run.

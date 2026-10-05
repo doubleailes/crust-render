@@ -407,7 +407,7 @@ contiguous slice of that dimension, as under uniform picking.
 **Tests.**
 - Probabilities and pick frequencies match the rule, with a dark light never
   picked.
-- `find_by_geom`, `iter` and `pick` agree.
+- `find_index_by_geom_at`, `iter` and `pick` agree.
 - The uniform density is the historical division.
 - End to end, a bright and a dim sphere, a sun and a dome estimate the same
   radiance under power and uniform selection, with MIS and with light sampling
@@ -694,7 +694,8 @@ none of the rest: power, distance and orientation cannot see a wall.
   quantile bounds, sized for about 16 receivers per occupied cell.
 - **Per-cell tables.** A cell with at least 2 receivers and any light seen gets
   `p = 0.7 · E/ΣE + 0.3 / n_live`; every other point uses the power table.
-- **MIS.** `LightList::pick_at` / `pmf_at` / `find_by_geom_at` / `iter_at` serve
+- **MIS.** `LightList::pick_index_at` / `pmf_at` / `find_index_by_geom_at` /
+  `infinite_at` serve
   both MIS sides from the same stored `f32`, at the vertex NEE sampled from. The
   bounce side reads it at `prev.pos`, which is that vertex.
 - **Unbiased.** The defensive share gives every light that emits at least
@@ -1374,7 +1375,7 @@ tracking.
 - `LightList::select_by` builds a CDF (not an alias table, to keep the pick
   dimension's stratification) over `Light::power`.
 - `LightList::density(pdf, pmf)` replaces `pdf / n_lights` at all four sites.
-- `find_by_geom` is an O(1) `geom_id → index` map.
+- `index_of_geom` (behind `find_index_by_geom_at`) is an O(1) `geom_id → index` map.
 - Infinite lights get their uniform share, and half the finite lights' rays are
   spread evenly, because the pure form measured worse (§3.8).
 

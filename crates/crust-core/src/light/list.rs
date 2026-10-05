@@ -90,7 +90,7 @@ pub struct LightLinks {
 ///
 /// The pick's probability is half of the light strategy's MIS density (the
 /// other half is the light's own `sample_li` pdf), so whatever
-/// [`LightList::pick`] reports, [`LightList::find_by_geom`] and
+/// [`LightList::pick`] reports, [`LightList::find_index_by_geom_at`] and
 /// [`LightList::iter`] report the same number for the same light: the bounce
 /// side weights emission it found by chance with it, and the two sides must
 /// describe one strategy or emission is double-counted.
@@ -375,7 +375,7 @@ impl LightList {
     }
 
     /// The light strategy's solid-angle density for a light chosen with
-    /// probability `pmf` (from [`LightList::pick`], [`LightList::find_by_geom`]
+    /// probability `pmf` (from [`LightList::pick`], [`LightList::find_index_by_geom_at`]
     /// or [`LightList::iter`]) whose own `sample_li` density is `light_pdf`:
     /// their product. Both MIS halves route through here, so they cannot
     /// disagree on it. Under uniform selection it is the division
@@ -414,24 +414,9 @@ impl LightList {
         Some((index, self.pmf(index)))
     }
 
-    /// Finds the light whose scene geometry has world id `geom_id`, with its
-    /// selection probability. Used by the integrator to attribute a
-    /// bounce-hit emissive surface to its light for MIS; emissive geometry
-    /// with no light-list entry returns `None`.
-    pub fn find_by_geom(&self, geom_id: u32) -> Option<(&LightKind, f32)> {
-        let &index = self.by_geom.get(&geom_id)?;
-        Some((&self.lights[index], self.pmf(index)))
-    }
-
-    /// [`LightList::pick`] for a vertex at `p`: under a learned selection, from
-    /// the distribution of the cell holding `p`; otherwise exactly `pick`.
-    #[inline]
-    pub fn pick_at(&self, p: Vec3A, u: f32) -> Option<(&LightKind, f32)> {
-        self.pick_index_at(p, u)
-            .map(|(index, pmf)| (&self.lights[index], pmf))
-    }
-
-    /// [`LightList::pick_at`] as an index into [`LightList::lights`].
+    /// [`LightList::pick`] for a vertex at `p`, as an index into
+    /// [`LightList::lights`]: under a learned selection, from the distribution
+    /// of the cell holding `p`; otherwise exactly `pick_index`.
     ///
     /// Forced inline: it sits on every NEE pick, and LLVM's own threshold
     /// outlined it once `trace_path` grew by a few instructions elsewhere,
@@ -447,7 +432,7 @@ impl LightList {
         }
     }
 
-    /// The probability [`LightList::pick_at`] at `p` picks light `index` —
+    /// The probability [`LightList::pick_index_at`] at `p` picks light `index` —
     /// what the bounce side weights emission found from a vertex at `p` with.
     #[inline]
     pub fn pmf_at(&self, p: Vec3A, index: usize) -> f32 {
@@ -457,35 +442,17 @@ impl LightList {
         }
     }
 
-    /// [`LightList::find_by_geom`] with the pick probability of a vertex at
-    /// `p`: the bounce-side half of [`LightList::pick_at`].
-    pub fn find_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(&LightKind, f32)> {
-        self.find_index_by_geom_at(geom_id, p)
-            .map(|(index, pmf)| (&self.lights[index], pmf))
-    }
-
-    /// [`LightList::find_by_geom_at`] as an index into [`LightList::lights`].
+    /// The light whose scene geometry has world id `geom_id`, as an index into
+    /// [`LightList::lights`], with the pick probability of a vertex at `p`: the
+    /// bounce-side half of [`LightList::pick_index_at`]. Emissive geometry with
+    /// no light-list entry returns `None`.
     pub fn find_index_by_geom_at(&self, geom_id: u32, p: Vec3A) -> Option<(usize, f32)> {
         let &index = self.by_geom.get(&geom_id)?;
         Some((index, self.pmf_at(p, index)))
     }
 
-    /// [`LightList::iter`] with the pick probabilities of a vertex at `p`.
-    pub fn iter_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
-        let table = self.cache.as_ref().and_then(|c| c.lookup(p)).map(|t| t.0);
-        self.lights.iter().enumerate().map(move |(index, light)| {
-            (
-                light,
-                match table {
-                    Some(pmf) => pmf[index],
-                    None => self.pmf(index),
-                },
-            )
-        })
-    }
-
-    /// [`LightList::iter_at`] restricted to the lights at infinity, in the
-    /// same order: what an escaping ray needs. A finite light's
+    /// The lights at infinity with the pick probabilities of a vertex at `p`,
+    /// in list order: what an escaping ray needs. A finite light's
     /// [`Light::escaped`] is `None` by contract, so skipping it changes
     /// nothing but the number of virtual calls.
     pub fn infinite_at(&self, p: Vec3A) -> impl Iterator<Item = (&LightKind, f32)> {
@@ -506,19 +473,8 @@ impl LightList {
         })
     }
 
-    /// [`LightList::infinite_at`] restricted to the lights an escaping ray
-    /// of category `mask` sees.
-    pub fn infinite_seen_by(
-        &self,
-        p: Vec3A,
-        mask: RayMask,
-    ) -> impl Iterator<Item = (&LightKind, f32)> {
-        self.infinite_indexed_seen_by(p, mask)
-            .map(|(_, light, pmf)| (light, pmf))
-    }
-
-    /// [`LightList::infinite_seen_by`] with each light's index into
-    /// [`LightList::lights`].
+    /// [`LightList::infinite_at`] restricted to the lights an escaping ray of
+    /// category `mask` sees, with each light's index into [`LightList::lights`].
     pub fn infinite_indexed_seen_by(
         &self,
         p: Vec3A,

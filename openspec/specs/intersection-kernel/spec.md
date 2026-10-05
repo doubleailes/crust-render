@@ -153,20 +153,16 @@ behaviour before this change.
 
 ### Requirement: Leaves are sized for packets
 
-With `CRUST_BVH_PACKET_SAH` on (the default), the builder SHALL charge an all-triangle
-range one intersection cost per packet of four rather than per triangle when deciding
-whether to make it a leaf, so that leaves fill their packet lanes. With it off, the
-builder SHALL use the per-primitive cost it used before this change. Either setting
-SHALL build deterministically. The two settings MAY differ in which of two triangles
-at exactly the same hit distance is reported, and in nothing else; the difference
-between their renders SHALL fall as 1/√N with the sample count.
+The builder SHALL charge an all-triangle range one intersection cost per packet of four
+rather than per triangle when deciding whether to make it a leaf, so that leaves fill
+their packet lanes, and SHALL build deterministically. A range holding any other
+primitive SHALL keep the per-primitive cost.
 
 #### Scenario: Overlapping triangles
 
-- **WHEN** six overlapping triangles that no split separates well are committed with the
-  switch on
-- **THEN** they form one leaf of two packets, the second with two inactive lanes; with
-  it off they form more than one leaf
+- **WHEN** six overlapping triangles that no split separates well are committed
+- **THEN** they form one leaf of two packets, the second with two inactive lanes, where
+  the per-triangle cost would have split them
 
 #### Scenario: Lane fill is reported
 

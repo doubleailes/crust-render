@@ -95,7 +95,7 @@ pub enum Op {
         offset: [f32; 2],
         arity: u8,
         /// Where to look up relative to the shading point, in footprint
-        /// widths (see [`shifted_uv`]). Zero everywhere except the copies of
+        /// widths (see `shifted_uv`). Zero everywhere except the copies of
         /// a subgraph `heighttonormal` differentiates.
         shift: [f32; 2],
         /// The slot holding an authored `texcoord` connection, when the
@@ -375,7 +375,7 @@ impl Program {
     ///
     /// - **Constant folding.** An op whose operands are all constant, and
     ///   which reads neither the shading point nor a texture, is evaluated
-    ///   here — by [`apply`], the function the interpreter runs, so the value
+    ///   here — by `apply`, the function the interpreter runs, so the value
     ///   is the one every hit would have computed, bit for bit.
     /// - **Constant hoisting and deduplication.** Constants move into
     ///   [`Program::consts`], copied in with one `memcpy` per evaluation
@@ -919,12 +919,12 @@ fn normal_map(encoded: Val, scale: Val, ctx: &ShadeCtx) -> Vec3A {
 /// Rotates a **decoded** tangent-space normal (`z` along `normal`) into world
 /// space, against `tangent` re-orthogonalised to `normal`.
 ///
-/// The half of [`normal_map`] that knows nothing about MaterialX's `[0,1]`
+/// The half of `normal_map` that knows nothing about MaterialX's `[0,1]`
 /// encoding, public so a host with its own decode — UsdPreviewSurface's
 /// `normal` input arrives already in `[-1,1]`, its UsdUVTexture's
 /// `scale`/`bias` having done the decode — rotates it identically. Returns
 /// `normal` unchanged when `tangent` is zero (no chart frame) or parallel to
-/// it, for the reason [`normal_map`] gives.
+/// it, for the reason `normal_map` gives.
 pub fn perturb_normal(local: Vec3A, normal: Vec3A, tangent: Vec3A) -> Vec3A {
     if tangent.length_squared() < 1e-20 {
         return normal;

@@ -1496,6 +1496,10 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
     }
 }
 
+/// The triangle list, plus the per-face and per-triangle-UV side tables
+/// when the material asked for them.
+type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
+
 /// Fan-triangulates the faces into an index-triple list; `None` if
 /// nothing survives.
 ///
@@ -1505,11 +1509,6 @@ fn check_face_count(prim: &Prim, n_base_faces: usize, material: &dyn Material) {
 /// outputs are index-parallel by construction: every `push` to one pushes to
 /// the other in the same statement, so the skip paths cannot desynchronise
 /// them.
-///
-/// The triangle list, plus the per-face and per-triangle-UV side tables
-/// when the material asked for them.
-type Triangulated = (Vec<[u32; 3]>, Option<FaceMap>, Option<UvMap>);
-
 fn triangulate(
     counts: &[i32],
     indices: &[i32],

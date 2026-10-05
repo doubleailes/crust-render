@@ -272,7 +272,7 @@ fn run<R>(
     f: impl FnOnce(&[Val]) -> R,
 ) -> R {
     let ctx = ShadeCtx {
-        uv: if rec.has_uv { rec.uv } else { (0.0, 0.0) },
+        uv: rec.uv.unwrap_or((0.0, 0.0)),
         normal: rec.normal,
         tangent: rec.tangent,
         view: r_in.direction(),

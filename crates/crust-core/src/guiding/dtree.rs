@@ -14,18 +14,6 @@ use std::f32::consts::{PI, TAU};
 const NO_CHILD: u32 = u32::MAX;
 const ONE_MINUS_EPS: f32 = 1.0 - f32::EPSILON;
 
-/// PCG32 step producing a uniform f32 in [0, 1).
-#[inline]
-fn pcg_f32(state: &mut u64) -> f32 {
-    *state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    let xorshifted = (((*state >> 18) ^ *state) >> 27) as u32;
-    let rot = (*state >> 59) as u32;
-    let bits = xorshifted.rotate_right(rot);
-    (bits >> 8) as f32 * (1.0 / (1u32 << 24) as f32)
-}
-
 /// Cylindrical equal-area map from a unit direction to the canonical square.
 pub fn dir_to_canonical(d: Vec3A) -> [f32; 2] {
     let d = d.normalize();
@@ -153,20 +141,17 @@ impl DTree {
     /// Draw a canonical position proportional to the stored flux, returning
     /// it with its solid-angle pdf. `None` if the tree holds no flux yet.
     ///
-    /// Takes a single 2D `seed` (one QMC domain draw); it seeds a PCG stream
-    /// that supplies fresh uniforms per tree level. Rescaling a single 2D
-    /// sample down the tree (the textbook trick) loses entropy on sharp
-    /// distributions until deep cells are no longer sampled uniformly, and
-    /// drawing per-level from the QMC sampler burns through its dimension
-    /// window; the hashed stream avoids both while keeping the sampler's
-    /// dimension usage fixed.
+    /// Takes an incidental stream (the vertex domain's `rng()`) that supplies
+    /// fresh uniforms per tree level. Rescaling a single 2D sample down the
+    /// tree (the textbook trick) loses entropy on sharp distributions until
+    /// deep cells are no longer sampled uniformly, and drawing per-level from
+    /// the QMC sampler burns through its dimension window; the stream avoids
+    /// both while keeping the sampler's dimension usage fixed.
     #[must_use]
-    pub fn sample(&self, seed: [f32; 2]) -> Option<([f32; 2], f32)> {
+    pub fn sample(&self, rng: &mut openqmc::pcg::Rng) -> Option<([f32; 2], f32)> {
         if self.total_flux() <= 0.0 {
             return None;
         }
-        let mut rng_state: u64 =
-            ((seed[0].to_bits() as u64) << 32 | seed[1].to_bits() as u64) ^ 0x9E37_79B9_7F4A_7C15;
         let mut node = 0usize;
         let mut base = [0.0f32; 2];
         let mut scale = 1.0f32;
@@ -178,7 +163,7 @@ impl DTree {
                 // No information below this node: uniform within its domain.
                 break;
             }
-            let u = [pcg_f32(&mut rng_state), pcg_f32(&mut rng_state)];
+            let u = rng.next_2d();
 
             // Pick the column proportional to column flux.
             let p_left = (n.sums[0] + n.sums[2]) / total;
@@ -211,7 +196,7 @@ impl DTree {
             node = c as usize;
         }
         // Uniform position within the reached cell.
-        let u = [pcg_f32(&mut rng_state), pcg_f32(&mut rng_state)];
+        let u = rng.next_2d();
         let p = [
             (base[0] + u[0] * scale).clamp(0.0, ONE_MINUS_EPS),
             (base[1] + u[1] * scale).clamp(0.0, ONE_MINUS_EPS),
@@ -372,7 +357,7 @@ mod tests {
         let tree = trained_tree();
         let mut s = Rng::new(0xC0FFEE);
         for _ in 0..1000 {
-            let (p, pdf) = tree.sample(s.next_2d()).expect("trained tree samples");
+            let (p, pdf) = tree.sample(&mut s).expect("trained tree samples");
             let lookup = tree.pdf(p);
             assert!(
                 (pdf - lookup).abs() < 1e-3 * (1.0 + pdf),
@@ -393,7 +378,7 @@ mod tests {
         }
         let tree = tree.refine(0.01, 20);
         for _ in 0..1000 {
-            let (p, _) = tree.sample(s.next_2d()).unwrap();
+            let (p, _) = tree.sample(&mut s).unwrap();
             let d = canonical_to_dir(p);
             assert!(d.z > -1e-3, "sampled below the trained hemisphere: {d}");
         }
@@ -428,7 +413,7 @@ mod tests {
         let n = 400_000;
         let mut counts = [0u64; 8];
         for _ in 0..n {
-            let (p, _) = tree.sample(s.next_2d()).unwrap();
+            let (p, _) = tree.sample(&mut s).unwrap();
             let d = canonical_to_dir(p);
             let oct =
                 (d.x >= 0.0) as usize + 2 * ((d.y >= 0.0) as usize) + 4 * ((d.z >= 0.0) as usize);
@@ -466,7 +451,7 @@ mod tests {
     fn untrained_tree_declines_to_sample() {
         let tree = DTree::new();
         let mut s = Rng::new(0xC0FFEE);
-        assert!(tree.sample(s.next_2d()).is_none());
+        assert!(tree.sample(&mut s).is_none());
         assert_eq!(tree.pdf([0.3, 0.7]), 0.0);
     }
 }

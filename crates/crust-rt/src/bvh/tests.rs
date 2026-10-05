@@ -203,7 +203,7 @@ fn linear_scan(prims: &Primitives, ray: &Ray, t_min: f32, t_max: f32) -> Option<
 }
 
 fn assert_matches_linear(objects: impl Fn() -> Primitives) {
-    let bvh = Bvh::new(objects(), Layout::Gathered, true);
+    let bvh = Bvh::new(objects(), Layout::Gathered);
     let reference = objects();
 
     let origins = [
@@ -264,7 +264,7 @@ fn spatial_splits_match_linear_scan() {
 /// two places now: packed SIMD lanes and the scalar `indices` list.
 #[test]
 fn spatial_splits_duplicate_references() {
-    let bvh = Bvh::new(diagonal_shards(64), Layout::Gathered, true);
+    let bvh = Bvh::new(diagonal_shards(64), Layout::Gathered);
     let refs = bvh.leaf_ref_count();
     assert!(
         refs > bvh.prim_count(),
@@ -277,7 +277,7 @@ fn spatial_splits_duplicate_references() {
 /// triangle must be packed rather than left on the scalar path.
 #[test]
 fn triangles_are_packed_into_simd_lanes() {
-    let bvh = Bvh::new(diagonal_shards(64), Layout::Gathered, true);
+    let bvh = Bvh::new(diagonal_shards(64), Layout::Gathered);
     assert!(
         !bvh.packets.is_empty(),
         "no packets built for a triangle scene"
@@ -289,14 +289,14 @@ fn triangles_are_packed_into_simd_lanes() {
     );
 
     // Spheres are not packable and must stay on the scalar path.
-    let bvh = Bvh::new(sphere_grid(4), Layout::Gathered, true);
+    let bvh = Bvh::new(sphere_grid(4), Layout::Gathered);
     assert!(bvh.packets.is_empty(), "spheres must not be packed");
     assert_eq!(bvh.indices.len(), bvh.leaf_ref_count());
 
     // Mixed leaves must place each primitive on exactly one path.
     let mut mixed = diagonal_shards(16);
     mixed.append(sphere_grid(2));
-    let bvh = Bvh::new(mixed, Layout::Gathered, true);
+    let bvh = Bvh::new(mixed, Layout::Gathered);
     assert!(!bvh.packets.is_empty() && !bvh.indices.is_empty());
     assert!(bvh.leaf_ref_count() >= bvh.prim_count());
 }
@@ -327,31 +327,16 @@ fn packet_aware_leaves_keep_overlapping_triangles_together() {
             MASK_ALL,
         );
     }
-    let packed = Bvh::new(
-        Primitives {
-            tris: prims.tris.clone(),
-            vertices: prims.vertices.clone(),
-            normals: Vec::new(),
-            geoms: prims.geoms.clone(),
-            ..Default::default()
-        },
-        Layout::Gathered,
-        true,
-    );
-    let per_tri = Bvh::new(prims, Layout::Gathered, false);
+    let packed = Bvh::new(prims, Layout::Gathered);
     assert_eq!(packed.leaves.len(), 1, "one leaf of two packets");
     assert_eq!(packed.packets.len(), 2);
-    assert!(
-        per_tri.leaves.len() > 1,
-        "the per-triangle cost splits them"
-    );
 }
 
 /// Packet lanes must average close to 4 on a dense mesh — a packing
 /// that mostly emitted 1-lane packets would be SIMD in name only.
 #[test]
 fn packets_are_well_filled() {
-    let bvh = Bvh::new(diagonal_shards(256), Layout::Gathered, true);
+    let bvh = Bvh::new(diagonal_shards(256), Layout::Gathered);
     let lanes: u32 = bvh
         .packets
         .iter()
@@ -367,7 +352,7 @@ fn packets_are_well_filled() {
 /// `hit_any` must agree with `hit(..).is_some()` for every ray and range.
 #[test]
 fn hit_any_matches_hit() {
-    let bvh = Bvh::new(sphere_grid(4), Layout::Gathered, true);
+    let bvh = Bvh::new(sphere_grid(4), Layout::Gathered);
     let origins = [
         Vec3A::new(-5.0, 4.5, 4.5),
         Vec3A::new(20.0, 3.0, 3.0),
@@ -458,8 +443,8 @@ fn wide8_node_is_four_cache_lines() {
 /// always produces byte-identical topology.
 #[test]
 fn build_is_deterministic() {
-    let a = Bvh::new(sphere_grid(6), Layout::Gathered, true);
-    let b = Bvh::new(sphere_grid(6), Layout::Gathered, true);
+    let a = Bvh::new(sphere_grid(6), Layout::Gathered);
+    let b = Bvh::new(sphere_grid(6), Layout::Gathered);
     assert_eq!(a.wide.len(), b.wide.len());
     assert_eq!(a.indices, b.indices);
     assert_eq!(a.packets.len(), b.packets.len());
@@ -480,7 +465,7 @@ fn build_is_deterministic() {
 /// fewer wide nodes than a binary tree would need.
 #[test]
 fn collapse_widens_the_tree() {
-    let bvh = Bvh::new(sphere_grid(6), Layout::Gathered, true); // 216 prims
+    let bvh = Bvh::new(sphere_grid(6), Layout::Gathered); // 216 prims
     let n_leaf_slots: usize = bvh
         .wide
         .iter()
@@ -513,7 +498,7 @@ fn collapsed_tables_hold_no_spare_capacity() {
             .map(|i| PrimRef::new(prims.bbox(i).expect("no degenerate records here"), i))
             .collect();
         let root = union_all(&refs);
-        let subtree = build_subtree(&prims, refs, 0, surface_area(&root), true);
+        let subtree = build_subtree(&prims, refs, 0, surface_area(&root));
         let (wide, collected) =
             collapse(&subtree.nodes, &subtree.indices, &prims, Layout::Gathered);
         assert_eq!(wide.capacity(), wide.len());
@@ -525,7 +510,7 @@ fn collapsed_tables_hold_no_spare_capacity() {
 
 #[test]
 fn empty_bvh_misses() {
-    let bvh = Bvh::new(Primitives::default(), Layout::Gathered, true);
+    let bvh = Bvh::new(Primitives::default(), Layout::Gathered);
     let ray = Ray::new(Vec3A::ZERO, Vec3A::X);
     assert!(bvh.hit(&ray, 0.001, f32::INFINITY).is_none());
     assert!(bvh.bounds().is_none());
@@ -533,7 +518,7 @@ fn empty_bvh_misses() {
 
 #[test]
 fn bounds_cover_all_prims() {
-    let bvh = Bvh::new(sphere_grid(3), Layout::Gathered, true);
+    let bvh = Bvh::new(sphere_grid(3), Layout::Gathered);
     let bbox = bvh.bounds().expect("grid is fully bounded");
     assert!(bbox.minimum.cmple(Vec3A::splat(-0.5)).all());
     assert!(bbox.maximum.cmpge(Vec3A::splat(6.5)).all());

@@ -52,23 +52,12 @@ pub enum PacketLayout {
 pub struct CommitOptions {
     /// The triangle packet layout.
     pub layout: PacketLayout,
-    /// Size all-triangle leaves by packet tests rather than triangle tests:
-    /// a range of four or fewer triangles is one SIMD round whatever its
-    /// count, so the SAH leaf decision charges `ceil(n / 4)` per side plus
-    /// one node test for the split, and a range of five to eight triangles
-    /// whose children overlap stays one leaf of two full packets instead of
-    /// splitting into two half-empty ones. `false` is the per-triangle
-    /// leaf cost before this option existed. Either way the build is
-    /// deterministic; the two trees differ in shape, so their renders can
-    /// differ on exact-tie hits only.
-    pub packet_sah: bool,
 }
 
 impl Default for CommitOptions {
     fn default() -> Self {
         CommitOptions {
             layout: PacketLayout::Auto,
-            packet_sah: true,
         }
     }
 }
@@ -661,7 +650,7 @@ impl SceneBuilder {
             PacketLayout::Indexed => crate::bvh::Layout::Indexed,
         };
         Scene {
-            bvh: Bvh::new(input, layout, options.packet_sah),
+            bvh: Bvh::new(input, layout),
             n_geoms,
             has_motion,
             max_hit_id,

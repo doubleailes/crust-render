@@ -51,7 +51,11 @@ fn emissive_ball_scene(l: f32, w: usize, h: usize, spp: u32) -> Renderer {
         0.0,
         5.0,
     );
-    let settings = RenderSettings::new(spp, 4, w, h, spp, 0.0, 0);
+    let settings = RenderSettings::default()
+        .with_resolution(w, h)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(4)
+        .with_adaptive_sampling(spp, 0.0);
     Renderer::new(camera, world.commit(), LightList::new(), settings)
 }
 
@@ -61,7 +65,12 @@ fn emissive_ball_scene(l: f32, w: usize, h: usize, spp: u32) -> Renderer {
 
 #[test]
 fn render_settings_report_what_they_were_given() {
-    let s = RenderSettings::new(16, 7, 320, 200, 4, 0.02, 3);
+    let s = RenderSettings::default()
+        .with_resolution(320, 200)
+        .with_samples_per_pixel(16)
+        .with_max_depth(7)
+        .with_adaptive_sampling(4, 0.02)
+        .with_frame(3);
     assert_eq!(s.get_dimensions(), (320, 200));
     assert_eq!(s.samples_per_pixel(), 16);
     assert_eq!(s.max_depth(), 7);
@@ -77,7 +86,11 @@ fn render_settings_report_what_they_were_given() {
 
 #[test]
 fn samples_per_pixel_override_is_floored_at_one() {
-    let s = RenderSettings::new(16, 7, 8, 8, 4, 0.02, 0);
+    let s = RenderSettings::default()
+        .with_resolution(8, 8)
+        .with_samples_per_pixel(16)
+        .with_max_depth(7)
+        .with_adaptive_sampling(4, 0.02);
     assert_eq!(s.with_samples_per_pixel(0).samples_per_pixel(), 1);
     assert_eq!(s.with_samples_per_pixel(9).samples_per_pixel(), 9);
     // Unrelated fields are untouched.
@@ -86,7 +99,11 @@ fn samples_per_pixel_override_is_floored_at_one() {
 
 #[test]
 fn strategy_and_filter_builders_replace_their_field() {
-    let s = RenderSettings::new(1, 1, 8, 8, 1, 0.0, 0)
+    let s = RenderSettings::default()
+        .with_resolution(8, 8)
+        .with_samples_per_pixel(1)
+        .with_max_depth(1)
+        .with_adaptive_sampling(1, 0.0)
         .with_sampling_strategy(SamplingStrategy::LightOnly)
         .with_pixel_filter(PixelFilter::Mitchell { radius: 2.0 });
     assert_eq!(s.sampling_strategy(), SamplingStrategy::LightOnly);
@@ -100,7 +117,11 @@ fn strategy_and_filter_builders_replace_their_field() {
 fn guiding_builder_clamps_its_probability() {
     // Guiding has no getter, so the clamp is observable only through a
     // render completing — but the builder must at least accept edge values.
-    let s = RenderSettings::new(2, 2, 4, 4, 2, 0.0, 0);
+    let s = RenderSettings::default()
+        .with_resolution(4, 4)
+        .with_samples_per_pixel(2)
+        .with_max_depth(2)
+        .with_adaptive_sampling(2, 0.0);
     let _ = s.with_guiding(true, 0, 0.0);
     let _ = s.with_guiding(true, 100, 1.0);
     let off = s.with_guiding(false, 3, 0.5);
@@ -203,7 +224,12 @@ fn a_different_frame_changes_the_noise_but_not_the_mean_much() {
             camera,
             b.commit(),
             lights,
-            RenderSettings::new(16, 3, w, h, 16, 0.0, frame),
+            RenderSettings::default()
+                .with_resolution(w, h)
+                .with_samples_per_pixel(16)
+                .with_max_depth(3)
+                .with_adaptive_sampling(16, 0.0)
+                .with_frame(frame),
         )
     };
     let a = mk(0).render();
@@ -306,7 +332,11 @@ fn adaptive_sampling_takes_fewer_camera_rays_on_a_flat_image() {
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
     // 64 spp allowed, minimum 4, and a zero-variance image: every pixel
     // stops at the first check past the minimum.
-    let settings = RenderSettings::new(64, 2, w, h, 4, 0.01, 0);
+    let settings = RenderSettings::default()
+        .with_resolution(w, h)
+        .with_samples_per_pixel(64)
+        .with_max_depth(2)
+        .with_adaptive_sampling(4, 0.01);
     let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
     let (buf, stats) = r.render_with_stats(false, &|_, _| {});
     assert!(
@@ -344,7 +374,11 @@ fn scene_new_and_with_volumes_assemble_a_renderer() {
         camera,
         world.commit(),
         LightList::new(),
-        RenderSettings::new(1, 2, 4, 4, 1, 0.0, 0),
+        RenderSettings::default()
+            .with_resolution(4, 4)
+            .with_samples_per_pixel(1)
+            .with_max_depth(2)
+            .with_adaptive_sampling(1, 0.0),
     )
     .with_volumes(Vec::new());
     assert!(scene.volumes.is_empty());
@@ -600,7 +634,12 @@ fn clamp_scene(bounce_wall: bool, clamp: f32) -> Renderer {
     );
     // Adaptive stopping off, so every setting takes the same samples and the
     // renders differ by the clamp alone.
-    let settings = RenderSettings::new(16, 6, 32, 24, 16, 0.0, 0).with_indirect_clamp(clamp);
+    let settings = RenderSettings::default()
+        .with_resolution(32, 24)
+        .with_samples_per_pixel(16)
+        .with_max_depth(6)
+        .with_adaptive_sampling(16, 0.0)
+        .with_indirect_clamp(clamp);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 
@@ -783,7 +822,11 @@ fn light_geometry_hidden_from_camera_rays_still_lights_the_scene() {
         camera,
         world.commit(),
         lights,
-        RenderSettings::new(8, 3, w, h, 8, 0.0, 0),
+        RenderSettings::default()
+            .with_resolution(w, h)
+            .with_samples_per_pixel(8)
+            .with_max_depth(3)
+            .with_adaptive_sampling(8, 0.0),
     );
     let buf = r.render();
     let centre = buf.get_pixel(3, 3);
@@ -813,8 +856,12 @@ fn flat_adaptive_scene(l: f32, w: usize, h: usize, spp: u32, min: u32, t: f32) -
         Arc::new(Emissive::new(Vec3A::splat(l))),
     );
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
-    let settings =
-        RenderSettings::new(spp, 2, w, h, min, 0.01, 0).with_adaptive_neighbour_tolerance(t);
+    let settings = RenderSettings::default()
+        .with_resolution(w, h)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(2)
+        .with_adaptive_sampling(min, 0.01)
+        .with_adaptive_neighbour_tolerance(t);
     Renderer::new(camera, world.commit(), LightList::new(), settings)
 }
 
@@ -826,7 +873,11 @@ fn adaptive_sampling_never_stops_a_pixel_that_has_seen_no_light() {
     let (w, h, spp) = (6, 5, 64);
     let world = WorldBuilder::new();
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
-    let settings = RenderSettings::new(spp, 2, w, h, 4, 0.01, 0);
+    let settings = RenderSettings::default()
+        .with_resolution(w, h)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(2)
+        .with_adaptive_sampling(4, 0.01);
     let r = Renderer::new(camera, world.commit(), LightList::new(), settings);
     let (buf, stats) = r.render_with_stats(false, &|_, _| {});
     assert_eq!(buffer_sum(&buf, w, h), 0.0, "an empty world is black");
@@ -869,7 +920,11 @@ fn one_noisy_pixel_scene(w: usize, h: usize, spp: u32, t: f32) -> Renderer {
         Arc::new(Emissive::new(Vec3A::splat(400.0))),
     );
     let camera = Camera::new(Vec3A::ZERO, -Vec3A::Z, Vec3A::Y, 40.0, 1.0, 0.0, 5.0);
-    let settings = RenderSettings::new(spp, 2, w, h, 4, 0.01, 0)
+    let settings = RenderSettings::default()
+        .with_resolution(w, h)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(2)
+        .with_adaptive_sampling(4, 0.01)
         .with_pixel_filter(PixelFilter::BoxFilter { radius: 0.5 })
         .with_adaptive_neighbour_tolerance(t);
     Renderer::new(camera, world.commit(), LightList::new(), settings)

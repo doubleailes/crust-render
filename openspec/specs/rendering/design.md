@@ -195,7 +195,12 @@ consumed as ordinary dependencies:
    the training budget is not discarded. Delta/transmissive
    materials (`Material::eval` → `None`) and untrained regions fall back to pure BSDF
    sampling. The NEE weight competes against the same mixture pdf — keep the two sides
-   consistent or emission gets double-counted.
+   consistent or emission gets double-counted. The quadtree descent draws a fresh pair
+   per level from the `K_GUIDE` domain's `rng()`; it used to hash the guide seed into a
+   hand-rolled PCG32 outside `openqmc`. Switching streams changed `cornellbox_guided`'s
+   noise only: against the old stream, relmse 3.1e-2 / 2.1e-2 / 7.6e-3 at 16 / 64 /
+   256 spp (`--indirect-clamp 0`), no plateau, and both stand exactly as far from an
+   unguided 256-spp reference.
    The training passes double as a **guiding efficiency estimate** (Li et al. 2026,
    "Path Guiding in Disney's Zootopia 2"): efficiency `E = 1/(wall-clock cost × MRSE)`,
    comparing the first pass (field untrained → effectively unguided) against the last
@@ -398,7 +403,7 @@ domain, and hands the root to `trace_path`. Each path vertex derives `path.new_d
 and each sampling event a further keyed sub-domain (`K_NEE`, `K_BSDF`, `K_GUIDE`, `K_PHASE`,
 …, keys defined atop `tracer/path.rs`); materials draw one 4D block from the `SobolSampler` domain
 they are handed. Unbounded/incidental draws — Russian roulette, volume delta-tracking,
-carried-medium free flight — use `draw_rnd` or a `pcg::Rng` seeded from a domain
+carried-medium free flight, the guide's quadtree descent — use `draw_rnd` or a `pcg::Rng` seeded from a domain
 (`domain.rng()`), matching OpenQMC's `drawSample` vs `drawRnd` split. Tests that just need
 randomness use `openqmc::pcg::Rng`.
 

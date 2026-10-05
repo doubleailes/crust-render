@@ -303,7 +303,6 @@ pub(super) fn build_subtree(
     mut refs: Vec<PrimRef>,
     depth: usize,
     root_area: f32,
-    packet_sah: bool,
 ) -> Subtree {
     let bbox = union_all(&refs);
     let count = refs.len();
@@ -322,10 +321,7 @@ pub(super) fn build_subtree(
     // By packet cost a small all-triangle range whose object split does
     // not pay is a leaf before any spatial split is weighed: chopping it
     // would only duplicate references into packets that are half empty.
-    // (The per-triangle rule never leafed on this path; keeping that is
-    // what makes `packet_sah = false` the behaviour it replaces.)
-    if packet_sah
-        && all_triangles
+    if all_triangles
         && count <= MAX_LEAF
         && let Some(o) = &object
         && !splitting_pays(o, &bbox, count, true)
@@ -392,18 +388,14 @@ pub(super) fn build_subtree(
         if left.is_empty() || right.is_empty() {
             let mut refs: Vec<PrimRef> = left;
             refs.extend(right);
-            return object_partition_or_leaf(
-                prims, refs, bbox, object, depth, root_area, packet_sah,
-            );
+            return object_partition_or_leaf(prims, refs, bbox, object, depth, root_area);
         }
         (left, right)
     } else {
         match object {
             Some(o) => {
                 // Leaf when splitting costs more than intersecting through.
-                if count <= MAX_LEAF
-                    && !splitting_pays(&o, &bbox, count, all_triangles && packet_sah)
-                {
+                if count <= MAX_LEAF && !splitting_pays(&o, &bbox, count, all_triangles) {
                     return leaf(bbox, &refs);
                 }
                 // By value: the parent's buffer is freed here rather than
@@ -422,13 +414,13 @@ pub(super) fn build_subtree(
     let parallel = left_refs.len().max(right_refs.len()) > PARALLEL_THRESHOLD;
     let (l, r) = if parallel {
         rayon::join(
-            || build_subtree(prims, left_refs, depth + 1, root_area, packet_sah),
-            || build_subtree(prims, right_refs, depth + 1, root_area, packet_sah),
+            || build_subtree(prims, left_refs, depth + 1, root_area),
+            || build_subtree(prims, right_refs, depth + 1, root_area),
         )
     } else {
         (
-            build_subtree(prims, left_refs, depth + 1, root_area, packet_sah),
-            build_subtree(prims, right_refs, depth + 1, root_area, packet_sah),
+            build_subtree(prims, left_refs, depth + 1, root_area),
+            build_subtree(prims, right_refs, depth + 1, root_area),
         )
     };
     merge(bbox, l, r)
@@ -436,10 +428,11 @@ pub(super) fn build_subtree(
 
 /// Whether the object split beats keeping the range as one leaf.
 ///
-/// Per triangle (`packets` false, the rule before `CommitOptions::packet_sah`):
-/// the split's `Σ area · count` against the leaf's `area · count`, with no
-/// node cost, so a range only stays a leaf when its children are nearly as
-/// large as it is.
+/// Per primitive (`packets` false, any range holding a non-triangle): the
+/// split's `Σ area · count` against the leaf's `area · count`, with no node
+/// cost, so a range only stays a leaf when its children are nearly as large
+/// as it is. All-triangle ranges used this rule too until packet-sized
+/// leaves (the retired `CRUST_BVH_PACKET_SAH` A/B).
 ///
 /// Per packet (`packets` true, all-triangle ranges only): a leaf of `n`
 /// triangles costs `ceil(n / 4)` SIMD rounds, the split the same per side
@@ -462,7 +455,6 @@ fn splitting_pays(o: &ObjSplit, bbox: &AABB, count: usize, packets: bool) -> boo
 
 /// The non-spatial tail of `build_subtree`, reused by the degenerate-chop
 /// fallback: object-partition when possible, else leaf.
-#[allow(clippy::too_many_arguments)]
 fn object_partition_or_leaf(
     prims: &Primitives,
     refs: Vec<PrimRef>,
@@ -470,7 +462,6 @@ fn object_partition_or_leaf(
     object: Option<ObjSplit>,
     depth: usize,
     root_area: f32,
-    packet_sah: bool,
 ) -> Subtree {
     let count = refs.len();
     match object {
@@ -481,8 +472,8 @@ fn object_partition_or_leaf(
                 all.extend(r);
                 return leaf(bbox, &all);
             }
-            let left = build_subtree(prims, l, depth + 1, root_area, packet_sah);
-            let right = build_subtree(prims, r, depth + 1, root_area, packet_sah);
+            let left = build_subtree(prims, l, depth + 1, root_area);
+            let right = build_subtree(prims, r, depth + 1, root_area);
             merge(bbox, left, right)
         }
         _ => leaf(bbox, &refs),

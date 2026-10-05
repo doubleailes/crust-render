@@ -10,15 +10,15 @@
 //!
 //! The pipeline is three modules:
 //!
-//! - [`parse`] — XML → a flat, name-addressable node graph.
-//! - [`eval`] — that graph compiled once into a slot-indexed [`Program`],
+//! - `parse` — XML → a flat, name-addressable node graph ([`Doc`]).
+//! - `eval` — that graph compiled once into a slot-indexed [`Program`],
 //!   evaluated per shading point with no name lookups and no allocation.
-//! - [`bsdf`] — the closure half of the graph read as the tree MaterialX
+//! - `bsdf` — the closure half of the graph read as the tree MaterialX
 //!   defines: BSDF leaves combined by `layer` / `mix` / `add` / `multiply`
 //!   ([`Closures`]), with the EDF terms and the interior volume beside it.
 //!   The three surface-shader nodes (`open_pbr_surface`, `standard_surface`,
 //!   `gltf_pbr`) expand into the tree of their MaterialX nodegraphs
-//!   ([`surface`]).
+//!   (`surface`).
 //!
 //! [`compile`] runs all three for one material node. The crate decodes *no
 //! pixels* and knows no colour space: both are the [`Host`]'s. An `image`
@@ -42,13 +42,14 @@
 //! streaming parser partly to keep it that way.
 #![forbid(unsafe_code)]
 
-pub mod bsdf;
-pub mod eval;
-pub mod hair;
-pub mod parse;
-pub mod surface;
+// Private modules: every public item has exactly one path, at the crate root.
+mod bsdf;
+mod eval;
+mod hair;
+mod parse;
+mod surface;
 mod texture;
-pub mod value;
+mod value;
 
 pub use bsdf::{
     Bsdf, Closure, Closures, DiffuseModel, Emission, Leaf, NodeId, ScatterMode, SheenMode, Slot,
@@ -57,9 +58,17 @@ pub use bsdf::{
 pub use eval::{
     BinOp, Compiler, Op, Program, ShadeCtx, UnOp, perturb_normal, reflectivity_from_ior,
 };
+/// The nodedef input tables the hair nodes and the surface-shader expansions
+/// are built from, transcribed from MaterialX's own `stdlib` / `pbrlib`
+/// definitions (pinned against them by `tests/nodedefs.rs`).
+pub use hair::{
+    CHIANG_HAIR_ABSORPTION_FROM_COLOR, CHIANG_HAIR_BSDF, CHIANG_HAIR_ROUGHNESS,
+    DEON_HAIR_ABSORPTION_FROM_MELANIN,
+};
 pub use parse::{Doc, Input, MtlxError, Node, Source};
+pub use surface::{GLTF_PBR, InputDef, OPEN_PBR_SURFACE, STANDARD_SURFACE};
 pub use texture::{Texture, TextureRef};
-pub use value::Val;
+pub use value::{Val, arity_of, parse_literal};
 
 /// Resolves an `image` node's `file` input — as authored, relative to the
 /// document — into a sampler. The second argument is the colour space the

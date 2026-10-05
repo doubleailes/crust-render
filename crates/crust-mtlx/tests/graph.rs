@@ -252,7 +252,7 @@ fn val_from_vec3a() {
 
 #[test]
 fn parse_literal_handles_edge_cases() {
-    use crust_mtlx::value::{arity_of, parse_literal};
+    use crust_mtlx::{arity_of, parse_literal};
     assert!(parse_literal("", "float").is_none());
     assert!(parse_literal("abc", "float").is_none());
     assert!(parse_literal("1, x", "vector2").is_none());

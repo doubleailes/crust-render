@@ -39,15 +39,11 @@ fn bench_simple_world(c: &mut Criterion) {
                 aperture,
                 dist_to_focus,
             );
-            let render_settings = RenderSettings::new(
-                10,
-                20,
-                IMAGE_WIDTH,
-                IMAGE_HEIGHT,
-                MIN_SAMPLES,
-                VARIANCE_THRESHOLD,
-                0,
-            );
+            let render_settings = RenderSettings::default()
+                .with_resolution(IMAGE_WIDTH, IMAGE_HEIGHT)
+                .with_samples_per_pixel(10)
+                .with_max_depth(20)
+                .with_adaptive_sampling(MIN_SAMPLES, VARIANCE_THRESHOLD);
             let renderer = Renderer::new(cam, world, lights, render_settings);
             let _ = renderer.render();
         })
@@ -73,16 +69,12 @@ fn bench_simple_world_guided(c: &mut Criterion) {
                 aperture,
                 dist_to_focus,
             );
-            let render_settings = RenderSettings::new(
-                10,
-                20,
-                IMAGE_WIDTH,
-                IMAGE_HEIGHT,
-                MIN_SAMPLES,
-                VARIANCE_THRESHOLD,
-                0,
-            )
-            .with_guiding(true, 2, 0.5);
+            let render_settings = RenderSettings::default()
+                .with_resolution(IMAGE_WIDTH, IMAGE_HEIGHT)
+                .with_samples_per_pixel(10)
+                .with_max_depth(20)
+                .with_adaptive_sampling(MIN_SAMPLES, VARIANCE_THRESHOLD)
+                .with_guiding(true, 2, 0.5);
             let renderer = Renderer::new(cam, world, lights, render_settings);
             let _ = renderer.render();
         })

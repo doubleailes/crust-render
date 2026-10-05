@@ -7,7 +7,7 @@
 //! colour a lookup returns says which file answered.
 
 use crust_assets::FileAssets;
-use crust_assets::tiled::{TxFormat, make_tx};
+use crust_assets::{TxFormat, make_tx};
 use crust_core::{AssetLoader, ColorSpace};
 use std::path::{Path, PathBuf};
 

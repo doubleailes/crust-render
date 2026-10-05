@@ -77,7 +77,12 @@ fn scene(selection: LightSelection, spp: u32) -> (Renderer, LightList) {
         0.0,
         8.0,
     );
-    let settings = RenderSettings::new(spp, 4, W, H, spp, 0.0, 0).with_light_selection(selection);
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(4)
+        .with_adaptive_sampling(spp, 0.0)
+        .with_light_selection(selection);
     (
         Renderer::new(camera, world.commit(), lights, settings),
         by_power,
@@ -101,28 +106,20 @@ fn a_sealed_light_is_learned_down_to_the_defensive_share() {
     // The bounce side reads the same numbers the pick reports.
     for index in 0..2 {
         let geom = r.lights.lights()[index].geom_id().unwrap();
-        let (_, pmf) = r.lights.find_by_geom_at(geom, p).unwrap();
+        let (found, pmf) = r.lights.find_index_by_geom_at(geom, p).unwrap();
+        assert_eq!(found, index);
         assert_eq!(pmf, r.lights.pmf_at(p, index));
-        let (_, it) = r.lights.iter_at(p).nth(index).unwrap();
-        assert_eq!(it, pmf);
     }
     // And the pick lands on each light as often as its pmf says.
     let n = 10_000;
     let picked_sealed = (0..n)
         .filter(|&i| {
-            let (light, pmf) = r.lights.pick_at(p, (i as f32 + 0.5) / n as f32).unwrap();
-            assert_eq!(
-                pmf,
-                r.lights.pmf_at(
-                    p,
-                    if std::ptr::eq(light, &r.lights.lights()[0]) {
-                        0
-                    } else {
-                        1
-                    }
-                )
-            );
-            std::ptr::eq(light, &r.lights.lights()[1])
+            let (index, pmf) = r
+                .lights
+                .pick_index_at(p, (i as f32 + 0.5) / n as f32)
+                .unwrap();
+            assert_eq!(pmf, r.lights.pmf_at(p, index));
+            index == 1
         })
         .count();
     assert!((picked_sealed as f32 / n as f32 - sealed).abs() < 1e-3);
@@ -232,8 +229,12 @@ fn one_light_learns_nothing() {
         0.0,
         8.0,
     );
-    let settings =
-        RenderSettings::new(1, 2, 8, 8, 1, 0.0, 0).with_light_selection(LightSelection::Learned);
+    let settings = RenderSettings::default()
+        .with_resolution(8, 8)
+        .with_samples_per_pixel(1)
+        .with_max_depth(2)
+        .with_adaptive_sampling(1, 0.0)
+        .with_light_selection(LightSelection::Learned);
     let r = Renderer::new(camera, world.commit(), lights, settings);
     assert_eq!(r.lights.selection(), LightSelection::Power);
 }

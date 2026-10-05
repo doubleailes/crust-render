@@ -95,8 +95,12 @@ fn scene(spp: u32, variance: f32, guiding: bool, wall: bool) -> Renderer {
     // One training iteration: with two or more, whether the final pass is
     // guided depends on their wall-clock efficiency (`ΔEff`), and a render
     // is not repeatable at all — let alone comparable with another one.
-    let settings =
-        RenderSettings::new(spp, 4, W, H, spp.min(8), variance, 0).with_guiding(guiding, 1, 0.5);
+    let settings = RenderSettings::default()
+        .with_resolution(W, H)
+        .with_samples_per_pixel(spp)
+        .with_max_depth(4)
+        .with_adaptive_sampling(spp.min(8), variance)
+        .with_guiding(guiding, 1, 0.5);
     Renderer::new(camera, world.commit(), lights, settings)
 }
 

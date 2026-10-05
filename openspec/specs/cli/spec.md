@@ -120,13 +120,12 @@ triangle, and the kernel bytes per resident triangle.
   `triangle packets (gathered)` or `(indexed)`, `lanes filled` as a percentage and
   `bytes per triangle`, and the rows sum to `kernel memory`
 
-### Requirement: Two geometry-layout switches
+### Requirement: A geometry-layout switch
 
 `CRUST_TRI_PACKETS` (`gathered` | `indexed` | `auto`, default `auto`) SHALL force the
-packet layout on every tree, and `CRUST_BVH_PACKET_SAH` (boolean, default on) SHALL
-select the packet-aware leaf cost; both SHALL be parsed once into `Config`, warn once
-on a bad value, and be listed in `docs/architecture.md` with the behaviour before this
-change as their off side (`gathered`, off).
+packet layout on every tree; it SHALL be parsed once into `Config`, warn once on a bad
+value, and be listed in `docs/architecture.md` with the behaviour before indexed
+packets as its off side (`gathered`).
 
 #### Scenario: A bad value
 

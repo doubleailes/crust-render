@@ -14,13 +14,6 @@ use crate::tracer::{RenderSettings, SamplingStrategy};
 use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, value_at};
 use super::prim_at;
 
-const DEFAULT_SPP: u32 = 128;
-const DEFAULT_MAX_DEPTH: u32 = 32;
-const DEFAULT_WIDTH: usize = 640;
-const DEFAULT_HEIGHT: usize = 360;
-const DEFAULT_MIN_SPP: u32 = 32;
-const DEFAULT_VARIANCE: f32 = 0.05;
-const DEFAULT_FRAME: isize = 0;
 const DEFAULT_GUIDING_TRAIN_ITERATIONS: u32 = 4;
 const DEFAULT_GUIDING_PROB: f32 = 0.5;
 /// Hydra's default for `domeLightCameraVisibility`: the camera sees domes.
@@ -146,7 +139,8 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
         }
     };
 
-    let (mut w, mut h) = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    let d = RenderSettings::default();
+    let (mut w, mut h) = d.get_dimensions();
     if let Some(v2) = value_at(&s.resolution_attr()).and_then(|v| v.try_as_vec_2i()) {
         w = v2.x as usize;
         h = v2.y as usize;
@@ -154,20 +148,22 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
 
     // Custom `crust:*` attrs. We look them up on the RenderSettings prim.
     let prim = prim_at(stage, path);
-    let spp = custom_i32(&prim, "crust:samplesPerPixel").unwrap_or(DEFAULT_SPP as i32) as u32;
-    let max_depth = custom_i32(&prim, "crust:maxDepth").unwrap_or(DEFAULT_MAX_DEPTH as i32) as u32;
+    let spp =
+        custom_i32(&prim, "crust:samplesPerPixel").map_or(d.samples_per_pixel(), |n| n as u32);
+    let max_depth = custom_i32(&prim, "crust:maxDepth").map_or(d.max_depth(), |n| n as u32);
     // A negative minimum is refused rather than cast: `-1 as u32` is
     // `u32::MAX`, which would overflow the first check point.
     let min_spp = match custom_i32(&prim, "crust:minSamplesPerPixel") {
         Some(n) if n < 0 => {
-            warn!("crust:minSamplesPerPixel = {n} is negative — using {DEFAULT_MIN_SPP}");
-            DEFAULT_MIN_SPP
+            let fallback = d.min_samples_per_pixel();
+            warn!("crust:minSamplesPerPixel = {n} is negative — using {fallback}");
+            fallback
         }
         Some(n) => n as u32,
-        None => DEFAULT_MIN_SPP,
+        None => d.min_samples_per_pixel(),
     };
-    let variance = custom_f32(&prim, "crust:varianceThreshold").unwrap_or(DEFAULT_VARIANCE);
-    let frame = custom_i32(&prim, "crust:frame").unwrap_or(DEFAULT_FRAME as i32) as isize;
+    let variance = custom_f32(&prim, "crust:varianceThreshold").unwrap_or(d.variance_threshold());
+    let frame = custom_i32(&prim, "crust:frame").map_or(d.frame(), |n| n as isize);
 
     // Path guiding (opt-in).
     let guiding = custom_bool(&prim, "crust:pathGuiding").unwrap_or(false);
@@ -250,7 +246,11 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
             "off".to_string()
         }
     );
-    RenderSettings::new(spp, max_depth, w, h, min_spp, variance, frame)
+    d.with_resolution(w, h)
+        .with_max_depth(max_depth)
+        .with_adaptive_sampling(min_spp, variance)
+        .with_frame(frame)
+        .with_samples_per_pixel(spp)
         .with_guiding(guiding, guiding_iters, guiding_prob)
         .with_sampling_strategy(strategy)
         .with_light_selection(light_selection)
@@ -281,13 +281,5 @@ pub(super) fn check_time_range(stage: &Stage, time: f64) {
 }
 
 fn default_settings() -> RenderSettings {
-    RenderSettings::new(
-        DEFAULT_SPP,
-        DEFAULT_MAX_DEPTH,
-        DEFAULT_WIDTH,
-        DEFAULT_HEIGHT,
-        DEFAULT_MIN_SPP,
-        DEFAULT_VARIANCE,
-        DEFAULT_FRAME,
-    )
+    RenderSettings::default()
 }

@@ -98,10 +98,11 @@ impl GuidingField {
 
     /// Draw a world-space direction from the local guiding distribution with
     /// its solid-angle pdf. `None` while the local distribution is untrained.
-    /// `seed` is a single 2D QMC domain draw (see [`crate::guiding::DTree::sample`]).
+    /// `rng` is the vertex domain's incidental stream; the quadtree descent
+    /// draws a fresh pair per level from it.
     #[must_use]
-    pub fn sample(&self, pos: Vec3A, seed: [f32; 2]) -> Option<(Vec3A, f32)> {
-        let (canonical, pdf) = self.tree.dtree_at(pos).sample(seed)?;
+    pub fn sample(&self, pos: Vec3A, rng: &mut openqmc::pcg::Rng) -> Option<(Vec3A, f32)> {
+        let (canonical, pdf) = self.tree.dtree_at(pos).sample(rng)?;
         Some((canonical_to_dir(canonical), pdf))
     }
 
@@ -143,7 +144,7 @@ mod tests {
         let mut field = GuidingField::new(bounds, GuidingConfig::default());
         let mut s = openqmc::pcg::Rng::new(1);
         assert!(!field.trained_at(Vec3A::splat(0.5)));
-        assert!(field.sample(Vec3A::splat(0.5), s.next_2d()).is_none());
+        assert!(field.sample(Vec3A::splat(0.5), &mut s).is_none());
 
         let samples: Vec<SampleData> = (0..1000)
             .map(|i| SampleData {
@@ -155,7 +156,7 @@ mod tests {
         field.update(&samples, 1);
 
         assert!(field.trained_at(Vec3A::splat(0.5)));
-        let (dir, pdf) = field.sample(Vec3A::splat(0.5), s.next_2d()).unwrap();
+        let (dir, pdf) = field.sample(Vec3A::splat(0.5), &mut s).unwrap();
         assert!(pdf > 0.0);
         assert!(dir.z > 0.0, "trained on +z but sampled {dir}");
         assert!(field.pdf(Vec3A::splat(0.5), dir) > 0.0);

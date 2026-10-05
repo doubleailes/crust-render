@@ -249,11 +249,11 @@ fn probe_ptex(path: &str) {
     println!("texels sampled {count}");
     println!("mean raw (as stored, 0..1)          = {mean:.4}");
     println!(
-        "  -> if file is sRGB, linear mean   = {:.4}",
+        "  -> if file is gamma 2.2, linear mean = {:.4}",
         mean.powf(2.2)
     );
     println!(
-        "  -> if file is linear, sRGB mean   = {:.4}",
+        "  -> if file is linear, gamma 2.2 mean = {:.4}",
         mean.powf(1.0 / 2.2)
     );
     print!("decile histogram:");
