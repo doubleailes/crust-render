@@ -39,7 +39,7 @@ your `PATH`.
 
 ```bash
 git clone https://github.com/doubleailes/crust-render.git
-cd crust
+cd crust-render
 cargo build --release
 # the binary is target/release/crust
 ```
@@ -62,10 +62,10 @@ The repository includes sample scenes in `samples/`:
 
 ```bash
 # render the Cornell box: writes cornell.exr and cornell.png
-cargo run --release -- -i samples/cornellbox.usda -o cornell.exr
+cargo run --release -- render -i samples/cornellbox.usda -o cornell.exr
 
 # or, with an installed binary
-crust -i samples/cornellbox.usda -o cornell.exr
+crust render -i samples/cornellbox.usda -o cornell.exr
 ```
 
 The run prints four `INFO` lines: the resolution and sample count, the render time, and
@@ -76,26 +76,26 @@ Without `-i`, Crust Render draws a built-in procedural scene. This is useful to 
 the binary works:
 
 ```bash
-crust
+crust render
 ```
 
 ## Common variations
 
 ```bash
 # fewer samples for a quick preview
-crust -i scene.usda -s 16
+crust render -i scene.usda -s 16
 
 # a given frame through a given camera
-crust -i shot.usda -f 1012 --camera /shot/cam/renderCam
+crust render -i shot.usda -f 1012 --camera /shot/cam/renderCam
 
 # subdivide every subdivision-surface mesh twice
-crust -i character.usda --subdiv-level 2
+crust render -i character.usda --subdiv-level 2
 
 # print timings, memory use and scene statistics at the end
-crust -i scene.usda --stats
+crust render -i scene.usda --stats
 
 # keep a full debug log of the run in ./logs/
-crust -i scene.usda -l debug --log-file logs
+crust render -i scene.usda -l debug --log-file logs
 ```
 
 [Command line](@/docs/reference/command-line.md) describes every flag.
@@ -124,7 +124,7 @@ crust -i scene.usda -l debug --log-file logs
 Crust Render reads any USD stage, so you can export from a DCC (Maya, Houdini, Blender,
 …) or write `.usda` by hand. A minimal scene needs a camera, some geometry and a light.
 This one adds a material and a `RenderSettings` prim that sets the resolution and sample
-count. Save it as `first.usda` and run `crust -i first.usda -o first.exr`:
+count. Save it as `first.usda` and run `crust render -i first.usda -o first.exr`:
 
 ```usda
 #usda 1.0

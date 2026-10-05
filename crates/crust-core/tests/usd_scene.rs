@@ -3324,3 +3324,83 @@ fn skipping_stage_teardown_leaves_the_render_unchanged() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `Scene::usd_cameras` lists what `UsdImportOptions::camera` accepts, in
+/// namespace order: a camera under an invisible ancestor is listed (it is
+/// still rendered through), while one the render never meets — inactive,
+/// abstract, proxy-purpose, inside a prototype or beneath a PointInstancer —
+/// is not. Both import modes: two top-level subtrees import as one stage, and
+/// the Cornell box's many streams.
+#[test]
+fn usd_cameras_lists_the_cameras_a_render_can_use() {
+    use crust_core::UsdImportOptions;
+
+    let dir = std::env::temp_dir().join("crust_list_cameras");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("cameras.usda");
+    std::fs::write(
+        &path,
+        r#"#usda 1.0
+class Xform "Proto"
+{
+    def Camera "InClass" {}
+}
+def Xform "W"
+{
+    def Camera "Main" {}
+    def Xform "Hidden"
+    {
+        token visibility = "invisible"
+        def Camera "Witness" {}
+        def Xform "HiddenInst" (instanceable = true references = </Proto>) {}
+    }
+    def Xform "Off" (active = false)
+    {
+        def Camera "Disabled" {}
+    }
+    def Xform "Proxy"
+    {
+        uniform token purpose = "proxy"
+        def Camera "ProxyCam" {}
+    }
+    def Xform "Inst" (instanceable = true references = </Proto>) {}
+    def PointInstancer "Scatter"
+    {
+        rel prototypes = [</W/Scatter/P>]
+        int[] protoIndices = [0]
+        point3f[] positions = [(0, 0, 0)]
+        def Xform "P"
+        {
+            def Camera "InInstancer" {}
+        }
+    }
+    def Camera "Last" {}
+}
+"#,
+    )
+    .expect("write stage");
+
+    let cameras = Scene::usd_cameras(&path).expect("lists");
+    assert_eq!(cameras, ["/W/Main", "/W/Hidden/Witness", "/W/Last"]);
+    // Every listed path is one the import renders through.
+    for camera in &cameras {
+        Scene::from_usd_with_options(
+            &path,
+            &crust_core::NoAssets,
+            &UsdImportOptions {
+                camera: Some(camera.clone()),
+                ..UsdImportOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{camera}: {e}"));
+    }
+
+    assert_eq!(
+        Scene::usd_cameras(&sample("cornellbox.usda")).expect("lists"),
+        ["/scene/camera1"]
+    );
+    assert!(matches!(
+        Scene::usd_cameras(&dir.join("missing.usda")),
+        Err(crust_core::Error::UsdOpen { .. })
+    ));
+}

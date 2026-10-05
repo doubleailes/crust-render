@@ -25,7 +25,7 @@
 
       cargo run --release -p crust-render --example maketx -- \\
           samples/textures/mtlx_emission.hdr raw
-      cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr
+      cargo run --release -- render -i samples/materialx_emissive.usda -o ldr.exr
       CRUST_TEX_STREAM=1 cargo run --release -- \\
           -i samples/materialx_emissive.usda -o hdr.exr
       cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr

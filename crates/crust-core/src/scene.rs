@@ -135,6 +135,18 @@ impl Scene {
     ) -> Result<Scene, crate::Error> {
         usd_import::load_scene(path, assets, options)
     }
+
+    /// The cameras of the USD stage at `path` — the prim paths
+    /// [`UsdImportOptions::camera`] accepts — in namespace order, without
+    /// importing anything else.
+    ///
+    /// They are found by the import's own walk: a camera under an inactive,
+    /// abstract (`class`), proxy- or guide-purpose ancestor, inside an
+    /// instance's prototype or beneath a `PointInstancer` is never rendered
+    /// through and is not listed; one under an invisible ancestor is.
+    pub fn usd_cameras(path: &std::path::Path) -> Result<Vec<String>, crate::Error> {
+        usd_import::list_cameras(path)
+    }
 }
 
 /// Choices a host makes about how a USD stage is imported.

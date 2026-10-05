@@ -9,7 +9,7 @@ mod products;
 
 use logging::{LoggerLevel, STATS_TARGET};
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use crust_assets::FileAssets;
 use crust_core::Buffer;
 use crust_core::LightSelection;
@@ -29,6 +29,59 @@ use tracing::{debug, error, info, warn};
 #[derive(Parser)]
 #[command(name = "crust", version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+    /// Verbose level
+    #[arg(short, long, default_value = "info", global = true)]
+    level: LoggerLevel,
+    /// Also write the log to a file named for the time the run started
+    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
+    /// current directory; given a directory, it writes there and creates it
+    /// if needed. The file receives the same events as the terminal, so
+    /// `-l debug --log-file` is how a full record of a render is kept.
+    #[arg(
+        long,
+        value_name = "DIR",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        global = true
+    )]
+    log_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Render a USD stage to a linear EXR and a tone-mapped PNG preview.
+    ///
+    /// Without -i, renders the hard-coded procedural fallback scene.
+    Render(Box<RenderArgs>),
+    /// List what a USD stage holds, one entry per line on stdout.
+    ///
+    /// The log goes to stderr, so stdout is only the listing.
+    Ls {
+        #[command(subcommand)]
+        what: LsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LsCommand {
+    /// The stage's cameras, one prim path per line.
+    ///
+    /// The paths are the ones `crust render --camera` accepts, in namespace
+    /// order. A camera the render never goes through —
+    /// under an inactive, `class` or proxy / guide-purpose ancestor, inside
+    /// an instance's prototype or beneath a PointInstancer — is not listed.
+    #[command(visible_alias = "cameras")]
+    Camera {
+        /// Input scene path — .usda / .usdc / .usdz.
+        #[arg(short, long)]
+        input: std::path::PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct RenderArgs {
     /// Input scene path — .usda / .usdc / .usdz.
     /// When absent, falls back to a hard-coded procedural scene.
     #[arg(short, long)]
@@ -40,16 +93,6 @@ struct Cli {
     /// husk's `-o` does; the other products keep theirs.
     #[arg(short, long)]
     output: Option<String>,
-    /// Verbose level
-    #[arg(short, long, default_value = "info")]
-    level: LoggerLevel,
-    /// Also write the log to a file named for the time the run started
-    /// (`crust-<UTC timestamp>.log`). Bare, it writes into the
-    /// current directory; given a directory, it writes there and creates it
-    /// if needed. The file receives the same events as the terminal, so
-    /// `-l debug --log-file` is how a full record of a render is kept.
-    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
-    log_file: Option<std::path::PathBuf>,
     /// Render by scanlines — a row is the work unit, rows in parallel, each
     /// written into the image in place — instead of the default 16x16 tiles.
     /// The image is bit-identical; kept as the A/B and for a progress bar in
@@ -352,7 +395,7 @@ fn write_beauty(
 /// The scene to render: the USD stage `-i` names, imported under the CLI's
 /// options, or the procedural fallback without one. A failure is already
 /// logged; the error is the exit code.
-fn load_scene(cli: &Cli, assets: &FileAssets) -> std::result::Result<Scene, ExitCode> {
+fn load_scene(cli: &RenderArgs, assets: &FileAssets) -> std::result::Result<Scene, ExitCode> {
     let scene = if let Some(t) = &cli.input {
         let input_path = std::path::Path::new(&t);
         debug!("Loading USD scene from {}", input_path.display());
@@ -397,7 +440,7 @@ fn load_scene(cli: &Cli, assets: &FileAssets) -> std::result::Result<Scene, Exit
 }
 
 /// The scene's render settings with the CLI's overrides applied.
-fn apply_overrides(cli: &Cli, settings: RenderSettings) -> RenderSettings {
+fn apply_overrides(cli: &RenderArgs, settings: RenderSettings) -> RenderSettings {
     let mut settings = match cli.samples {
         Some(spp) => {
             debug!("--samples {spp} overrides the scene's crust:samplesPerPixel");
@@ -469,12 +512,46 @@ fn select_products(aovs: &mut AovRequest, output: Option<&str>) {
 /// Every failure returns through here rather than `std::process::exit`, so
 /// the stack unwinds normally and every destructor runs on the way out.
 fn main() -> ExitCode {
-    // CLI
     let cli = Cli::parse();
-    if let Err(e) = logging::init(cli.level, cli.log_file.as_deref()) {
+    // A listing's stdout is its result, so its log goes to stderr; a
+    // render's log stays where it always was.
+    let log_to = match cli.command {
+        Command::Render(_) => logging::Terminal::Stdout,
+        Command::Ls { .. } => logging::Terminal::Stderr,
+    };
+    if let Err(e) = logging::init(cli.level, cli.log_file.as_deref(), log_to) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
+    match &cli.command {
+        Command::Render(args) => render(args),
+        Command::Ls { what } => ls(what),
+    }
+}
+
+/// `crust ls`: print what the stage holds, one entry per line.
+fn ls(what: &LsCommand) -> ExitCode {
+    match what {
+        LsCommand::Camera { input } => match Scene::usd_cameras(input) {
+            Ok(cameras) => {
+                if cameras.is_empty() {
+                    warn!("{} has no camera", input.display());
+                }
+                for camera in cameras {
+                    println!("{camera}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                error!("Failed to read USD scene: {e}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+/// `crust render`: build the scene, render it, write the images.
+fn render(cli: &RenderArgs) -> ExitCode {
     let output = cli.output.clone();
     // Built before the scene and kept until after the render: it owns the
     // streaming tile cache, whose counters the `--stats` report reads once the
@@ -495,7 +572,7 @@ fn main() -> ExitCode {
     }
     let assets = FileAssets::new().with_auto_tx(cli.auto_tx);
     let load_start = Instant::now();
-    let scene = match load_scene(&cli, &assets) {
+    let scene = match load_scene(cli, &assets) {
         Ok(scene) => scene,
         Err(code) => return code,
     };
@@ -527,7 +604,7 @@ fn main() -> ExitCode {
     // Import phases and scene counts come from the loader; render and
     // output are timed here.
     let mut stats = scene.stats;
-    let settings = apply_overrides(&cli, scene.settings);
+    let settings = apply_overrides(cli, scene.settings);
     // A BVH can only cull primitives whose bounds are small against the
     // whole scene. Report the ratio so a scene whose instance boxes all
     // span everything -- where no split can help -- is visible.
@@ -685,25 +762,42 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// `crust render <args>`, parsed down to the render's own arguments.
+    fn render<const N: usize>(args: [&str; N]) -> std::result::Result<RenderArgs, clap::Error> {
+        let cli = Cli::try_parse_from(["crust", "render"].into_iter().chain(args))?;
+        match cli.command {
+            Command::Render(args) => Ok(*args),
+            Command::Ls { .. } => unreachable!("parsed as render"),
+        }
+    }
+
     #[test]
     fn log_file_flag_is_optional_and_takes_an_optional_directory() {
         // Absent: no file.
-        let c = Cli::try_parse_from(["crust"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "render"]).unwrap();
         assert_eq!(c.log_file, None);
         // Bare: the current directory.
-        let c = Cli::try_parse_from(["crust", "--log-file"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "render", "--log-file"]).unwrap();
         assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        // With a directory.
-        let c = Cli::try_parse_from(["crust", "--log-file", "renders/logs"]).unwrap();
-        assert_eq!(
-            c.log_file.as_deref(),
-            Some(std::path::Path::new("renders/logs"))
-        );
+        // With a directory, before the subcommand as after it.
+        for args in [
+            ["crust", "render", "--log-file", "renders/logs"],
+            ["crust", "--log-file", "renders/logs", "render"],
+        ] {
+            let c = Cli::try_parse_from(args).unwrap();
+            assert_eq!(
+                c.log_file.as_deref(),
+                Some(std::path::Path::new("renders/logs"))
+            );
+        }
         // Bare, followed by another flag: the flag must not be eaten as the
         // directory, which is what `num_args = 0..=1` is there to guarantee.
-        let c = Cli::try_parse_from(["crust", "--log-file", "--bucket"]).unwrap();
+        let c = Cli::try_parse_from(["crust", "render", "--log-file", "--bucket"]).unwrap();
         assert_eq!(c.log_file.as_deref(), Some(std::path::Path::new(".")));
-        assert!(c.bucket);
+        let Command::Render(r) = c.command else {
+            panic!("render")
+        };
+        assert!(r.bucket);
     }
 
     /// The default outputs: `lin_rec709`, previewed un-tone-mapped on sRGB.
@@ -768,9 +862,7 @@ mod tests {
     /// the value the engine means by it.
     #[test]
     fn cli_names_are_the_engine_names() {
-        let parse = |flag: &str, value: &str| {
-            Cli::try_parse_from(["crust", flag, value]).expect("a known name")
-        };
+        let parse = |flag: &str, value: &str| render([flag, value]).expect("a known name");
         for &(value, name, _) in SamplingStrategy::CHOICES {
             assert_eq!(parse("--strategy", name).strategy, Some(value));
         }
@@ -791,20 +883,15 @@ mod tests {
             parse("--light-selection", "uniform").light_selection,
             Some(LightSelection::Uniform)
         );
-        let cli = Cli::try_parse_from(["crust"]).unwrap();
+        let cli = render([]).unwrap();
         assert!(cli.light_selection.is_none());
     }
 
     #[test]
     fn cli_indirect_clamp_defaults_to_ten_and_zero_disables() {
-        let cli = Cli::try_parse_from(["crust", "--indirect-clamp", "10"]).unwrap();
+        let cli = render(["--indirect-clamp", "10"]).unwrap();
         assert_eq!(cli.indirect_clamp, Some(10.0));
-        assert!(
-            Cli::try_parse_from(["crust"])
-                .unwrap()
-                .indirect_clamp
-                .is_none()
-        );
+        assert!(render([]).unwrap().indirect_clamp.is_none());
         let (_, base) = crust_core::get_settings();
         assert_eq!(
             base.indirect_clamp(),
@@ -820,11 +907,7 @@ mod tests {
 
     #[test]
     fn cli_filter_names_map_onto_the_engine_filters_at_their_default_radius() {
-        let filter = |name: &str| {
-            Cli::try_parse_from(["crust", "--filter", name])
-                .unwrap()
-                .filter
-        };
+        let filter = |name: &str| render(["--filter", name]).unwrap().filter;
         assert_eq!(filter("box"), Some(PixelFilter::BoxFilter { radius: 0.5 }));
         assert_eq!(
             filter("triangle"),
@@ -865,8 +948,7 @@ mod tests {
 
     #[test]
     fn cli_parses_its_flags() {
-        let cli = Cli::try_parse_from([
-            "crust",
+        let cli = render([
             "-i",
             "scene.usda",
             "-o",
@@ -882,8 +964,6 @@ mod tests {
             "1.75",
             "--stats",
             "--profile",
-            "-l",
-            "debug",
             "--frame",
             "1012.5",
         ])
@@ -899,14 +979,15 @@ mod tests {
         assert_eq!(cli.filter_radius, Some(1.75));
         assert!(cli.stats);
         assert!(cli.profile);
-        assert!(matches!(cli.level, LoggerLevel::Debug));
-        let scan = Cli::try_parse_from(["crust", "--scanline"]).expect("valid flags");
+        let c = Cli::try_parse_from(["crust", "render", "-l", "debug"]).unwrap();
+        assert!(matches!(c.level, LoggerLevel::Debug));
+        let scan = render(["--scanline"]).expect("valid flags");
         assert!(scan.scanline);
     }
 
     #[test]
     fn cli_defaults_when_nothing_is_given() {
-        let cli = Cli::try_parse_from(["crust"]).expect("no flags is valid");
+        let cli = render([]).expect("no flags is valid");
         assert!(cli.input.is_none());
         // No default here: `output.exr` applies only when the stage authors
         // no RenderProduct, which the CLI cannot know until it has loaded it.
@@ -923,33 +1004,29 @@ mod tests {
         );
         assert!(!cli.stats);
         assert!(!cli.profile);
-        assert!(matches!(cli.level, LoggerLevel::Info));
+        let c = Cli::try_parse_from(["crust", "render"]).unwrap();
+        assert!(matches!(c.level, LoggerLevel::Info));
     }
 
     #[test]
     fn cli_subdiv_level_overrides_the_scene() {
-        let cli = Cli::try_parse_from(["crust", "--subdiv-level", "0"]).expect("valid");
+        let cli = render(["--subdiv-level", "0"]).expect("valid");
         assert_eq!(cli.subdiv_level, Some(0));
-        let cli = Cli::try_parse_from(["crust", "--subdiv-level", "3"]).expect("valid");
+        let cli = render(["--subdiv-level", "3"]).expect("valid");
         assert_eq!(cli.subdiv_level, Some(3));
         assert!(
-            Cli::try_parse_from(["crust", "--subdiv-level", "-1"]).is_err(),
+            render(["--subdiv-level", "-1"]).is_err(),
             "a level is a count"
         );
     }
 
     #[test]
     fn cli_subdiv_edge_length_is_a_positive_pixel_length() {
-        let cli = Cli::try_parse_from(["crust", "--subdiv-edge-length", "2"]).expect("valid");
+        let cli = render(["--subdiv-edge-length", "2"]).expect("valid");
         assert_eq!(cli.subdiv_edge_length, Some(2.0));
-        assert!(
-            Cli::try_parse_from(["crust"])
-                .unwrap()
-                .subdiv_edge_length
-                .is_none()
-        );
+        assert!(render([]).unwrap().subdiv_edge_length.is_none());
         for bad in ["0", "-1", "inf", "NaN", "fast"] {
-            let Err(err) = Cli::try_parse_from(["crust", "--subdiv-edge-length", bad]) else {
+            let Err(err) = render(["--subdiv-edge-length", bad]) else {
                 panic!("{bad} parsed as an edge length");
             };
             let err = err.to_string();
@@ -961,7 +1038,7 @@ mod tests {
     fn cli_accepts_a_negative_frame() {
         // Shots routinely start before 0 (handles, pre-roll), and clap
         // would otherwise read `-5` as an unknown short flag.
-        let cli = Cli::try_parse_from(["crust", "-f", "-5"]).expect("negative frame");
+        let cli = render(["-f", "-5"]).expect("negative frame");
         assert_eq!(cli.frame, Some(-5.0));
     }
 
@@ -969,29 +1046,28 @@ mod tests {
     fn cli_rejects_a_non_finite_frame() {
         for bad in ["nan", "NaN", "inf", "-inf", "infinity", "-Infinity"] {
             assert!(
-                Cli::try_parse_from(["crust", "--frame", bad]).is_err(),
+                render(["--frame", bad]).is_err(),
                 "--frame {bad} must be rejected"
             );
         }
-        assert!(Cli::try_parse_from(["crust", "--frame", "twelve"]).is_err());
+        assert!(render(["--frame", "twelve"]).is_err());
     }
 
     #[test]
     fn cli_rejects_a_radius_or_clamp_that_is_no_number_the_engine_uses() {
         for bad in ["-1", "nan", "inf", "0"] {
             assert!(
-                Cli::try_parse_from(["crust", "--filter-radius", bad]).is_err(),
+                render(["--filter-radius", bad]).is_err(),
                 "--filter-radius {bad}"
             );
         }
         for bad in ["-1", "nan", "inf"] {
             assert!(
-                Cli::try_parse_from(["crust", "--indirect-clamp", bad]).is_err(),
+                render(["--indirect-clamp", bad]).is_err(),
                 "--indirect-clamp {bad}"
             );
         }
-        let ok = Cli::try_parse_from(["crust", "--indirect-clamp", "0", "--filter-radius", "1.5"])
-            .unwrap();
+        let ok = render(["--indirect-clamp", "0", "--filter-radius", "1.5"]).unwrap();
         assert_eq!(
             (ok.indirect_clamp, ok.filter_radius),
             (Some(0.0), Some(1.5))
@@ -1000,10 +1076,49 @@ mod tests {
 
     #[test]
     fn cli_rejects_unknown_enum_values() {
-        assert!(Cli::try_parse_from(["crust", "--strategy", "random"]).is_err());
-        assert!(Cli::try_parse_from(["crust", "--filter", "lanczos"]).is_err());
-        assert!(Cli::try_parse_from(["crust", "--light-selection", "bvh"]).is_err());
-        assert!(Cli::try_parse_from(["crust", "-l", "loud"]).is_err());
-        assert!(Cli::try_parse_from(["crust", "-s", "many"]).is_err());
+        assert!(render(["--strategy", "random"]).is_err());
+        assert!(render(["--filter", "lanczos"]).is_err());
+        assert!(render(["--light-selection", "bvh"]).is_err());
+        assert!(render(["-l", "loud"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "render", "--camera"]).is_err());
+        assert!(render(["-s", "many"]).is_err());
+    }
+
+    /// The subcommands: `render` takes the flags the bare binary used to,
+    /// `ls camera` (or `cameras`) needs a stage, and a subcommand is required.
+    #[test]
+    fn cli_subcommands() {
+        assert!(
+            Cli::try_parse_from(["crust"]).is_err(),
+            "a subcommand is required"
+        );
+        assert!(
+            Cli::try_parse_from(["crust", "-i", "scene.usda"]).is_err(),
+            "render flags belong to render"
+        );
+        for name in ["camera", "cameras"] {
+            let c = Cli::try_parse_from(["crust", "ls", name, "-i", "scene.usda", "-l", "warn"])
+                .expect("valid");
+            assert!(matches!(c.level, LoggerLevel::Warn));
+            let Command::Ls {
+                what: LsCommand::Camera { input },
+            } = c.command
+            else {
+                panic!("ls camera")
+            };
+            assert_eq!(input, std::path::Path::new("scene.usda"));
+        }
+        assert!(
+            Cli::try_parse_from(["crust", "ls", "camera"]).is_err(),
+            "ls camera needs -i"
+        );
+        assert!(Cli::try_parse_from(["crust", "ls"]).is_err());
+        assert!(Cli::try_parse_from(["crust", "ls", "lights", "-i", "s.usda"]).is_err());
+    }
+
+    #[test]
+    fn clap_definition_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }
