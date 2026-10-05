@@ -10,7 +10,8 @@ use openusd_schemas::geom::{
 use openusd_schemas::lux::{RectLight, SphereLight};
 use tracing::warn;
 
-use super::time::{eval_time, xform_time};
+use super::attrs::{decode_f32, decode_vec3, prim_value};
+use super::time::xform_time;
 
 /// USD authors 4x4 matrices as row-vector row-major (translation in the
 /// last row, indices 12..15). glam::Mat4 is column-major with the
@@ -50,7 +51,7 @@ fn usd_mat_to_glam(m: Matrix4d) -> GMat4 {
 /// floating objects against sky. Stacks with an op we cannot decode fall
 /// back to openusd's composition with a warning, so unusual scenes behave
 /// no worse than before.
-pub(super) fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
+fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
     match compose_xform_ops(prim) {
         Some(m) => m,
         None => {
@@ -76,12 +77,9 @@ pub(super) fn local_matrix_at(stage: &Stage, prim: &Prim) -> GMat4 {
 ///
 /// Returns `None` if any op token or value cannot be decoded.
 fn compose_xform_ops(prim: &Prim) -> Option<GMat4> {
-    let order = match prim
-        .attribute("xformOpOrder")
-        .get_at::<sdf::Value>(eval_time())
-    {
-        Ok(Some(sdf::Value::TokenVec(order))) => order,
-        Ok(Some(_)) => return None,
+    let order = match prim_value(prim, "xformOpOrder") {
+        Some(sdf::Value::TokenVec(order)) => order,
+        Some(_) => return None,
         // No order authored: authored xformOp attrs (if any) do not apply.
         _ => return Some(GMat4::IDENTITY),
     };
@@ -113,15 +111,13 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
     // Suffixes name op instances (`xformOp:translate:pivot`); the kind is
     // the first segment.
     let kind = kind.split(':').next().unwrap_or(kind);
-    let value = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
+    let value = prim_value(prim, name)?;
+    let vec3 = |v: sdf::Value| decode_vec3(v).map(Vec3::from);
+    let degrees = |v: sdf::Value| decode_f32(v).map(f32::to_radians);
 
     match kind {
-        "translate" => Some(GMat4::from_translation(value_as_vec3(&value)?)),
-        "scale" => Some(GMat4::from_scale(value_as_vec3(&value)?)),
+        "translate" => Some(GMat4::from_translation(vec3(value)?)),
+        "scale" => Some(GMat4::from_scale(vec3(value)?)),
         "transform" => match value {
             sdf::Value::Matrix4d(m) => Some(usd_mat_to_glam(m)),
             _ => None,
@@ -135,14 +131,14 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
             )),
             _ => None,
         },
-        "rotateX" => Some(GMat4::from_rotation_x(value_as_f32(&value)?.to_radians())),
-        "rotateY" => Some(GMat4::from_rotation_y(value_as_f32(&value)?.to_radians())),
-        "rotateZ" => Some(GMat4::from_rotation_z(value_as_f32(&value)?.to_radians())),
+        "rotateX" => Some(GMat4::from_rotation_x(degrees(value)?)),
+        "rotateY" => Some(GMat4::from_rotation_y(degrees(value)?)),
+        "rotateZ" => Some(GMat4::from_rotation_z(degrees(value)?)),
         // Euler triples: the vector components are always the X/Y/Z-axis
         // angles in degrees; the op name gives the application order, first
         // named axis applied to the point first (so it sits rightmost).
         "rotateXYZ" | "rotateXZY" | "rotateYXZ" | "rotateYZX" | "rotateZXY" | "rotateZYX" => {
-            let v = value_as_vec3(&value)?;
+            let v = vec3(value)?;
             let rx = GMat4::from_rotation_x(v.x.to_radians());
             let ry = GMat4::from_rotation_y(v.y.to_radians());
             let rz = GMat4::from_rotation_z(v.z.to_radians());
@@ -155,24 +151,6 @@ fn xform_op_matrix(prim: &Prim, name: &str) -> Option<GMat4> {
                 _ => rx * ry * rz, // rotateZYX
             })
         }
-        _ => None,
-    }
-}
-
-fn value_as_vec3(value: &sdf::Value) -> Option<Vec3> {
-    match value {
-        sdf::Value::Vec3f(v) => Some(Vec3::new(v.x, v.y, v.z)),
-        sdf::Value::Vec3d(v) => Some(Vec3::new(v.x as f32, v.y as f32, v.z as f32)),
-        sdf::Value::Vec3h(v) => Some(Vec3::new(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
-        _ => None,
-    }
-}
-
-fn value_as_f32(value: &sdf::Value) -> Option<f32> {
-    match value {
-        sdf::Value::Float(v) => Some(*v),
-        sdf::Value::Double(v) => Some(*v as f32),
-        sdf::Value::Half(v) => Some(v.to_f32()),
         _ => None,
     }
 }
@@ -214,7 +192,20 @@ fn local_matrix_via_openusd(stage: &Stage, prim: &Prim) -> GMat4 {
     GMat4::IDENTITY
 }
 
-pub(super) fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
+/// `prim`'s transform given its parent's: `parent · local`, or `local` alone
+/// when the prim authors `!resetXformStack!` — the one composition rule every
+/// walk (the traversal, the placement count, the prototype walk, a camera's
+/// ancestor chain) applies.
+pub(super) fn compose_with_parent(stage: &Stage, prim: &Prim, parent: GMat4) -> GMat4 {
+    let local = local_matrix_at(stage, prim);
+    if resets_xform_stack_at(stage, prim) {
+        local
+    } else {
+        parent * local
+    }
+}
+
+fn resets_xform_stack_at(stage: &Stage, prim: &Prim) -> bool {
     if let Ok(Some(x)) = Xform::get(stage, prim.path().clone()) {
         return x.resets_xform_stack().unwrap_or(false);
     }

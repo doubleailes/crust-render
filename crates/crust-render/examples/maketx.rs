@@ -99,17 +99,7 @@ fn main() {
 
     let mut jobs: Vec<PathBuf> = Vec::new();
     if input.contains("<UDIM>") || input.contains("<UVTILE>") {
-        for v in 0..10u32 {
-            for u in 0..10u32 {
-                let name = input
-                    .replace("<UDIM>", &(1001 + u + 10 * v).to_string())
-                    .replace("<UVTILE>", &format!("u{}_v{}", u + 1, v + 1));
-                let p = PathBuf::from(&name);
-                if p.exists() {
-                    jobs.push(p);
-                }
-            }
-        }
+        jobs = crust_assets::texture_files(Path::new(&input));
         if jobs.is_empty() {
             eprintln!("no tiles of {input} found on disk");
             std::process::exit(1);

@@ -24,7 +24,10 @@ use crate::scene::displace::{self, VertexChart};
 use crate::scene::subdiv;
 
 use super::adaptive::{self, Aabb, Cull, ScreenRate};
-use super::attrs::{custom_f32, custom_i32, prim_motion_translate, prim_ray_mask};
+use super::attrs::{
+    custom_f32, custom_i32, custom_i32_array, decode_f32_array, decode_i32_array,
+    decode_vec3f_array, prim_motion_translate, prim_ray_mask, prim_value, value_at,
+};
 use super::materials::BoundMaterial;
 use super::time::eval_time;
 
@@ -847,31 +850,9 @@ fn bake_indices(mut tris: Vec<[u32; 3]>, l2w: &Affine3A) -> Vec<[u32; 3]> {
 /// Reads a mesh prim's authored arrays. `None` when any of the three
 /// required attributes is missing.
 pub(super) fn mesh_arrays(mesh: &UsdMesh) -> Option<(Vec<Vec3f>, Vec<i32>, Vec<i32>)> {
-    let int_vec = |v: sdf::Value| match v {
-        sdf::Value::IntVec(v) => Some(v),
-        _ => None,
-    };
-    let points = match mesh
-        .points_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?
-    {
-        sdf::Value::Vec3fVec(v) => v,
-        _ => return None,
-    };
-    let counts = int_vec(
-        mesh.face_vertex_counts_attr()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()?,
-    )?;
-    let indices = int_vec(
-        mesh.face_vertex_indices_attr()
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()?,
-    )?;
+    let points = value_at(&mesh.points_attr()).and_then(decode_vec3f_array)?;
+    let counts = value_at(&mesh.face_vertex_counts_attr()).and_then(decode_i32_array)?;
+    let indices = value_at(&mesh.face_vertex_indices_attr()).and_then(decode_i32_array)?;
     Some((points, counts, indices))
 }
 
@@ -924,12 +905,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
         "primvars:st0",
         "primvars:UVMap",
     ]) {
-        let value = prim
-            .attribute(name)
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten();
-        let values = match value {
+        let values = match prim_value(prim, name) {
             // `texCoord2f[]` and `float2[]` are the same bits; which one an
             // exporter writes is a matter of taste.
             Some(sdf::Value::Vec2fVec(v)) => v.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
@@ -938,15 +914,7 @@ pub(super) fn mesh_uvs(prim: &Prim, preferred: Option<&str>) -> Option<UvSource>
         if values.is_empty() {
             continue;
         }
-        let indices = match prim
-            .attribute(format!("{name}:indices"))
-            .get_at::<sdf::Value>(eval_time())
-            .ok()
-            .flatten()
-        {
-            Some(sdf::Value::IntVec(v)) => Some(v),
-            _ => None,
-        };
+        let indices = custom_i32_array(prim, &format!("{name}:indices"));
         // USD's fallback interpolation for a primvar is `constant`, but for
         // `st` in practice it is always authored; treating an unauthored
         // metadatum as faceVarying would mis-index a vertex-interpolated
@@ -1168,18 +1136,16 @@ pub(super) fn mesh_source(
         }
     };
 
-    let int_array =
-        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
-        {
-            Some(sdf::Value::IntVec(v)) => v,
-            _ => Vec::new(),
-        };
-    let float_array =
-        |attr: openusd::usd::Attribute| match attr.get_at::<sdf::Value>(eval_time()).ok().flatten()
-        {
-            Some(sdf::Value::FloatVec(v)) => v,
-            _ => Vec::new(),
-        };
+    let int_array = |attr| {
+        value_at(&attr)
+            .and_then(decode_i32_array)
+            .unwrap_or_default()
+    };
+    let float_array = |attr| {
+        value_at(&attr)
+            .and_then(decode_f32_array)
+            .unwrap_or_default()
+    };
     let crease_indices = int_array(mesh.crease_indices_attr());
     let crease_lengths = int_array(mesh.crease_lengths_attr());
     let crease_sharpnesses = float_array(mesh.crease_sharpnesses_attr());

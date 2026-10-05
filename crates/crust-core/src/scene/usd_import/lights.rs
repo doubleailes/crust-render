@@ -1,12 +1,9 @@
 //! UsdLux lights → [`LightList`] entries (and their emissive scene geometry).
 
-use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crust_rt::Geometry;
 use glam::{Affine3A, Mat3A, Mat4 as GMat4, Vec3, Vec3A};
-use openusd::sdf;
 use openusd::usd::{Prim, Stage};
 use openusd_schemas::lux::{
     CylinderLight, DiskLight, DistantLight as UsdDistantLight, DomeLight, Light as UsdLight,
@@ -23,12 +20,11 @@ use crate::lux::{IesShaping, Shaping, distant_illuminance, distant_size_factor};
 use crate::material::Emissive;
 use crate::rt_world::WorldBuilder;
 
+use super::assets::{asset_path, cached_asset, timed_asset};
 use super::attrs::{
-    attr_bool, attr_color3f, attr_f32, attr_own_color_space, custom_bool, custom_color, custom_f32,
-    custom_token, in_working, infinite_light_escape_mask, light_ray_mask,
+    attr_bool, attr_f32, attr_own_color_space, attr_vec3, custom_bool, custom_color, custom_f32,
+    custom_token, decode_text, in_working, infinite_light_escape_mask, light_ray_mask, value_at,
 };
-use super::materials::asset_value_path;
-use super::time::eval_time;
 use super::{ImportCaches, ImportCtx};
 
 /// The `LightAPI` quantities every UsdLux light shares.
@@ -60,17 +56,18 @@ fn lux_params(prim: &Prim, light: &impl UsdLight, working: Space) -> LuxParams {
     };
     let intensity = finite("intensity", attr_f32(&light.intensity_attr()), 1.0);
     let exposure = finite("exposure", attr_f32(&light.exposure_attr()), 0.0);
-    let color = match attr_color3f(&light.color_attr()) {
-        Some(c) if c.iter().any(|x| !x.is_finite()) => {
+    let color = match attr_vec3(&light.color_attr()) {
+        Some(c) if !c.is_finite() => {
             warn!(
-                "{}: inputs:color = {c:?} is not finite — using its fallback (1, 1, 1)",
-                prim.path()
+                "{}: inputs:color = {:?} is not finite — using its fallback (1, 1, 1)",
+                prim.path(),
+                c.to_array()
             );
-            [1.0; 3]
+            Vec3A::ONE
         }
-        c => c.unwrap_or([1.0; 3]),
+        c => c.unwrap_or(Vec3A::ONE),
     };
-    let color = in_working(&light.color_attr(), Vec3A::from_array(color), working);
+    let color = in_working(&light.color_attr(), color, working);
     let gain = intensity * 2f32.powf(exposure);
     let mut emission = color * gain;
 
@@ -173,31 +170,23 @@ fn lux_shaping(
     )
     .unwrap_or(0.0);
 
-    let ies_file = prim
-        .attribute("inputs:shaping:ies:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| asset_value_path(&v, caches.stage_path));
+    let ies_file = asset_path(
+        &prim.attribute("inputs:shaping:ies:file"),
+        caches.stage_path,
+    );
     if let Some(path) = ies_file {
-        let profile = match caches.ies.get(&path) {
-            Some(cached) => cached.clone(),
-            None => {
-                let started = Instant::now();
-                let loaded = caches.assets.load_ies(&path);
-                caches.asset_time += started.elapsed();
-                if loaded.is_none() {
-                    warn!(
-                        "{}: could not load IES profile {} — the light renders \
-                         without it",
-                        prim.path(),
-                        path.display()
-                    );
-                }
-                caches.ies.insert(path, loaded.clone());
-                loaded
+        let assets = caches.assets;
+        let profile = cached_asset(&mut caches.ies, &mut caches.asset_time, path, |path| {
+            let loaded = assets.load_ies(path);
+            if loaded.is_none() {
+                warn!(
+                    "{}: could not load IES profile {} — the light renders without it",
+                    prim.path(),
+                    path.display()
+                );
             }
-        };
+            loaded
+        });
         shaping.ies = profile.map(|profile| IesShaping {
             profile,
             angle_scale: finite(
@@ -485,38 +474,34 @@ fn texture_color_space(file: &openusd::usd::Attribute, working: Space) -> crate:
 /// `RectLight`'s `inputs:texture:file`, decoded by the host. Cached by
 /// resolved path: a rig commonly reuses one card texture on many lights.
 fn rect_light_texture(prim: &Prim, caches: &mut ImportCaches) -> Option<Arc<crate::LightTexture>> {
-    let value = prim
-        .attribute("inputs:texture:file")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    let path = asset_value_path(&value, caches.stage_path)?;
-    let space = texture_color_space(&prim.attribute("inputs:texture:file"), caches.working);
-    let key = (path, space);
-    if let Some(cached) = caches.light_textures.get(&key) {
-        return cached.clone();
-    }
-    let path = &key.0;
-    let started = Instant::now();
-    let loaded = caches.assets.load_light_texture(path, space);
-    caches.asset_time += started.elapsed();
-    match &loaded {
-        Some(t) => debug!(
-            "RectLight {}: texture {} ({}x{})",
-            prim.path(),
-            path.display(),
-            t.width(),
-            t.height()
-        ),
-        None => warn!(
-            "RectLight at {}: could not load inputs:texture:file {} — the light \
-             emits its uniform colour",
-            prim.path(),
-            path.display()
-        ),
-    }
-    caches.light_textures.insert(key, loaded.clone());
-    loaded
+    let file = prim.attribute("inputs:texture:file");
+    let path = asset_path(&file, caches.stage_path)?;
+    let space = texture_color_space(&file, caches.working);
+    let assets = caches.assets;
+    cached_asset(
+        &mut caches.light_textures,
+        &mut caches.asset_time,
+        (path, space),
+        |(path, space)| {
+            let loaded = assets.load_light_texture(path, *space);
+            match &loaded {
+                Some(t) => debug!(
+                    "RectLight {}: texture {} ({}x{})",
+                    prim.path(),
+                    path.display(),
+                    t.width(),
+                    t.height()
+                ),
+                None => warn!(
+                    "RectLight at {}: could not load inputs:texture:file {} — the light \
+                     emits its uniform colour",
+                    prim.path(),
+                    path.display()
+                ),
+            }
+            loaded
+        },
+    )
 }
 
 /// `UsdLuxRectLight`: a `width × height` rectangle (1 × 1) in the local XY
@@ -717,24 +702,17 @@ pub(super) fn emit_dome_light(
     // `normalize` does not apply to a dome (its sizeFactor is 1).
     let tint = lux_params(prim, light, working).emission;
 
-    let format = light
-        .texture_format_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            sdf::Value::Token(t) => Some(t.to_string()),
-            _ => None,
-        });
-    let map = match dome_texture_path(light, stage_path) {
+    let format = value_at(&light.texture_format_attr()).and_then(decode_text);
+    // The authoring layer anchors the path, not the root layer: the Moana
+    // island's lights author `../textures/islandsun.exr` relative to
+    // `usd/island.usda` (see `asset_path`).
+    let map = match asset_path(&light.texture_file_attr(), stage_path) {
         Some(texture) => match format.as_deref() {
             // `automatic` infers from the image; for the equirectangular
             // images a dome light normally carries that means latlong.
             None | Some("latlong") | Some("automatic") => {
-                let started = Instant::now();
                 let space = texture_color_space(&light.texture_file_attr(), working);
-                let loaded = assets.load_environment(&texture, space);
-                *asset_time += started.elapsed();
+                let loaded = timed_asset(asset_time, || assets.load_environment(&texture, space));
                 if loaded.is_none() {
                     warn!(
                         "DomeLight at {}: could not load {} — falling back to \
@@ -791,21 +769,4 @@ fn tag_last(lights: &mut LightList, prim: &Prim) {
         let index = lights.count() - 1;
         lights.set_lpe_tag(index, Some(&tag));
     }
-}
-
-/// The dome's `inputs:texture:file` as a filesystem path.
-///
-/// Goes through [`asset_value_path`], which prefers openusd's `resolved_path()`
-/// — anchored against the layer that *authored* the path, not the root layer.
-/// That distinction only shows up once a stage has depth: the Moana island's
-/// lights author `../textures/islandsun.exr` relative to `usd/island.usda`, so
-/// a root layer sitting anywhere else would otherwise resolve it against the
-/// wrong directory and silently fall back to the dome's uniform colour.
-fn dome_texture_path(light: &DomeLight, stage_path: &Path) -> Option<std::path::PathBuf> {
-    let value = light
-        .texture_file_attr()
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    asset_value_path(&value, stage_path)
 }

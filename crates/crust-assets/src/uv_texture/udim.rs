@@ -1,6 +1,8 @@
 //! Tile-set addressing: the `<UDIM>` / `<UVTILE>` filename tokens and the
 //! UDIM numbering every tile is keyed by.
 
+use std::path::PathBuf;
+
 /// The filename token that addresses a tile set, and how it spells a tile.
 ///
 /// Two spellings, one grid: a document may use either, and both index the
@@ -48,14 +50,37 @@ impl TileToken {
     }
 }
 
-/// Expands a `<UDIM>` / `<UVTILE>` token in `name` for chart coordinates
-/// `(u, v)`, or `None` when the name carries no token.
+/// One tile of a `<UDIM>` / `<UVTILE>` set that exists on disk.
+pub(crate) struct TileFile {
+    /// Its UDIM number ([`udim_number`]), whichever token named the file.
+    pub(crate) number: u32,
+    pub(crate) path: PathBuf,
+}
+
+/// Every tile of the set `name` addresses that exists on disk, in UDIM order
+/// (row by row) — or nothing when `name` carries no token.
 ///
-/// Shared with the streaming path so the two discover the same set of tiles:
-/// a sweep that disagreed about which files exist would make the two texture
-/// backends cover different parts of the chart.
-pub(crate) fn expand_token(name: &str, u: u32, v: u32) -> Option<String> {
-    TileToken::detect(name).map(|t| t.expand(name, u, v))
+/// The one sweep every reader of a tile set takes — the preload path, the
+/// streaming path, the `.tx` conversion — so they discover the same set: a
+/// sweep that disagreed about which files exist would make two texture
+/// backends cover different parts of the chart. Only tiles present on disk
+/// are returned, so a chart with holes costs nothing for the tiles it does
+/// not use. 10x10 covers the 1001..1100 range every DCC writes, and is what
+/// bounds the `<UVTILE>` sweep too, since the two tokens name the same grid.
+pub(crate) fn existing_tiles(name: &str) -> Vec<TileFile> {
+    let Some(token) = TileToken::detect(name) else {
+        return Vec::new();
+    };
+    (0..10u32)
+        .flat_map(|v| (0..10u32).map(move |u| (u, v)))
+        .filter_map(|(u, v)| {
+            let path = PathBuf::from(token.expand(name, u, v));
+            path.exists().then(|| TileFile {
+                number: udim_number(u, v),
+                path,
+            })
+        })
+        .collect()
 }
 
 /// The UDIM number of the tile at zero-based chart coordinates.

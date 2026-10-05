@@ -11,9 +11,8 @@ use crate::filter::PixelFilter;
 use crate::light::LightSelection;
 use crate::tracer::{RenderSettings, SamplingStrategy};
 
-use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token};
+use super::attrs::{custom_bool, custom_f32, custom_i32, custom_token, value_at};
 use super::prim_at;
-use super::time::eval_time;
 
 const DEFAULT_SPP: u32 = 128;
 const DEFAULT_MAX_DEPTH: u32 = 32;
@@ -148,9 +147,7 @@ pub(super) fn import_render_settings(stage: &Stage) -> RenderSettings {
     };
 
     let (mut w, mut h) = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    if let Ok(Some(v)) = s.resolution_attr().get_at::<sdf::Value>(eval_time())
-        && let Some(v2) = v.try_as_vec_2i()
-    {
+    if let Some(v2) = value_at(&s.resolution_attr()).and_then(|v| v.try_as_vec_2i()) {
         w = v2.x as usize;
         h = v2.y as usize;
     }

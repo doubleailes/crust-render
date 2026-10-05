@@ -1,9 +1,8 @@
 //! Material binding and dispatch: `MaterialBindingAPI` resolution, the
 //! per-stage material cache, and the decoders for `crust:openpbr`,
-//! `PxrDisneyBsdf`, MaterialX references and asset paths.
+//! `PxrDisneyBsdf` and MaterialX references.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,9 +18,12 @@ use tracing::{debug, warn};
 use crate::color::Space;
 use crate::material::{DispRemap, Displacement, DisplacementValue, Material, OpenPBR};
 
-use super::attrs::{attr_own_color_space, custom_f32, in_working};
+use super::assets::{asset_path, load_ptex, load_uv_texture};
+use super::attrs::{
+    attr_bool, attr_f32, attr_own_color_space, attr_vec3, custom_color3, custom_f32, custom_token,
+    decode_number, decode_text, in_working, value_at,
+};
 use super::preview::{preview_displacement, preview_surface_material};
-use super::time::eval_time;
 use super::{ImportCaches, prim_at};
 
 /// Memoizes resolved materials by binding path (and shares one default),
@@ -264,13 +266,9 @@ fn resolve_displacement(
 fn child_shader(stage: &Stage, mat_path: &sdf::Path, id: &str) -> Option<Shader> {
     let children = prim_at(stage, mat_path.clone()).children().ok()?;
     // A token or a string, as `has_shader_id` accepts.
-    let child = children.iter().find(|c| {
-        match c.attribute("info:id").get_at::<sdf::Value>(eval_time()) {
-            Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
-            Ok(Some(sdf::Value::String(t))) => t == id,
-            _ => false,
-        }
-    })?;
+    let child = children
+        .iter()
+        .find(|c| custom_token(c, "info:id").as_deref() == Some(id))?;
     Shader::get(stage, child.path().clone()).ok().flatten()
 }
 
@@ -282,21 +280,11 @@ fn input_value(shader: &Shader, name: &str) -> Option<sdf::Value> {
         .value_producing_attributes(ProducerFilter::Any)
         .ok()?
         .into_iter()
-        .find_map(|a| {
-            a.attribute()
-                .get_at::<sdf::Value>(eval_time())
-                .ok()
-                .flatten()
-        })
+        .find_map(|a| value_at(a.attribute()))
 }
 
 fn input_f32(shader: &Shader, name: &str) -> Option<f32> {
-    match input_value(shader, name)? {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        sdf::Value::Int(i) => Some(i as f32),
-        _ => None,
-    }
+    input_value(shader, name).and_then(decode_number)
 }
 
 /// The shader whose output drives `shader.inputs:<name>`, if one does.
@@ -410,7 +398,7 @@ fn pxr_displacement(
             .value_producing_attributes(ProducerFilter::Any)
             .ok()?
             .into_iter()
-            .find_map(|a| attribute_asset_path(a.attribute(), caches.stage_path))?;
+            .find_map(|a| asset_path(a.attribute(), caches.stage_path))?;
         maps.push(crate::PtexRef(load_ptex(
             &file,
             crate::ColorSpace::RAW,
@@ -574,18 +562,7 @@ pub(super) fn shader_info_id(shader: &Shader) -> Option<String> {
     }
     // Fallback for older openusd revisions or shaders that author info:id
     // via a raw attribute rather than the schema helper.
-    shader
-        .attribute("info:id")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
-        .and_then(|v| match v {
-            // `Token` carries an interned `tf::Token`, `String` a plain
-            // `String`, so the two arms cannot bind the same name.
-            sdf::Value::Token(t) => Some(t.as_str().to_owned()),
-            sdf::Value::String(t) => Some(t),
-            _ => None,
-        })
+    value_at(&shader.attribute("info:id")).and_then(decode_text)
 }
 
 /// Whether the material has a child `Shader` prim with this `info:id`.
@@ -598,13 +575,9 @@ fn has_shader_id(stage: &Stage, mat_path: &sdf::Path, id: &str) -> bool {
     let Ok(children) = prim_at(stage, mat_path.clone()).children() else {
         return false;
     };
-    children.iter().any(
-        |c| match c.attribute("info:id").get_at::<sdf::Value>(eval_time()) {
-            Ok(Some(sdf::Value::Token(t))) => t.as_str() == id,
-            Ok(Some(sdf::Value::String(t))) => t == id,
-            _ => false,
-        },
-    )
+    children
+        .iter()
+        .any(|c| custom_token(c, "info:id").as_deref() == Some(id))
 }
 
 /// Maps RenderMan's `PxrDisneyBsdf` onto [`OpenPBR`].
@@ -637,7 +610,7 @@ fn disney_to_openpbr(
     // Called with the whole attribute name, `inputs:` included: a literal, so
     // reading an input allocates no name.
     let f = |n: &str| custom_f32(&prim, n);
-    let c = |n: &str| custom_vec3(&prim, n);
+    let c = |n: &str| custom_color3(&prim, n);
 
     let mut o = OpenPBR {
         luma: caches.luma,
@@ -758,7 +731,7 @@ fn mtlx_reference(stage: &Stage, mat_path: &sdf::Path) -> Option<(std::path::Pat
                     continue;
                 }
                 // Anchored against the *authoring layer's* directory, the same
-                // rule `asset_value_path` follows for textures and for the
+                // rule `asset_path` follows for textures and for the
                 // same reason: `Looks/teapot_ceramic_ldX.mtlx` is relative to
                 // `teapot.usda`, which need not be the stage root.
                 let base = std::path::Path::new(&id).parent()?.to_path_buf();
@@ -864,34 +837,6 @@ fn load_mtlx_material(
     }
 }
 
-/// Opens a UV texture through the host, memoized by resolved path and colour
-/// space. The caller maps its own vocabulary onto the space — MaterialX's
-/// `colorspace` through [`crate::ColorSpace::from_mtlx`], UsdUVTexture's
-/// `sourceColorSpace` through [`crate::ColorSpace::from_usd`] — since the two
-/// disagree on what an absent attribute means.
-pub(super) fn load_uv_texture(
-    path: &std::path::Path,
-    space: crate::ColorSpace,
-    caches: &mut ImportCaches<'_>,
-) -> Option<Arc<dyn crate::Texture2D>> {
-    let key = (path.to_string_lossy().into_owned(), space);
-    if let Some(hit) = caches.materials.textures.get(&key) {
-        return hit.clone();
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_texture(path, space);
-    let elapsed = started.elapsed();
-    caches.asset_time += elapsed;
-    if loaded.is_none() {
-        debug!(
-            "Texture {} ({space:?}) not loadable by the host",
-            path.display()
-        );
-    }
-    caches.materials.textures.insert(key, loaded.clone());
-    loaded
-}
-
 /// The per-face colour texture a material binds, if any.
 ///
 /// `inputs:surfaceMap` is the interface input both of the island's Ptex shader
@@ -904,122 +849,10 @@ pub(super) fn material_ptex(
     caches: &mut ImportCaches<'_>,
 ) -> Option<crate::PtexRef> {
     let prim = prim_at(stage, mat_path.clone());
-    let value = prim
-        .attribute("inputs:surfaceMap")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    let path = asset_value_path(&value, caches.stage_path)?;
+    let path = asset_path(&prim.attribute("inputs:surfaceMap"), caches.stage_path)?;
 
     let space = crate::ColorSpace::new(Space::G22_REC709, caches.working);
     load_ptex(&path, space, caches).map(crate::PtexRef)
-}
-
-/// Opens a Ptex file through the host, once per `(resolved path, space)`.
-///
-/// Keyed on the resolved filesystem path, which — unlike a prototype-scoped
-/// scene path — is stable across the streaming importer's stages, so one
-/// texture is opened once however many materials or chunks reference it.
-/// The space is in the key because the decode happens at open: a file read
-/// both as colour and as displacement is two textures, which is correct and
-/// rare. Negative results are cached too: a 600 MB file that failed to open
-/// should not be retried per material.
-pub(super) fn load_ptex(
-    path: &std::path::Path,
-    space: crate::ColorSpace,
-    caches: &mut ImportCaches<'_>,
-) -> Option<Arc<dyn crate::PtexTexture>> {
-    let key = (path.to_string_lossy().into_owned(), space);
-    if let Some(hit) = caches.materials.ptex.get(&key) {
-        return hit.clone();
-    }
-    let started = Instant::now();
-    let loaded = caches.assets.load_ptex(path, space);
-    caches.asset_time += started.elapsed();
-    caches.materials.ptex.insert(key, loaded.clone());
-    loaded
-}
-
-/// An `asset`-valued attribute as a filesystem path.
-///
-/// openusd anchors default-sourced asset paths against the layer that authored
-/// them and reports the result in `resolved_path` — which is what makes a
-/// production stage's `../../../textures/foo.ptx` work at all, since the layer
-/// authoring it is nested several directories below the root. The authored
-/// string is only a fallback, anchored against the root layer.
-pub(super) fn asset_value_path(
-    value: &sdf::Value,
-    stage_path: &Path,
-) -> Option<std::path::PathBuf> {
-    let (authored, resolved) = match value {
-        sdf::Value::AssetPath(p) => (p.as_str().to_string(), p.resolved_path()),
-        sdf::Value::String(p) => (p.clone(), None),
-        _ => return None,
-    };
-    if let Some(r) = resolved
-        && !r.is_empty()
-    {
-        return Some(std::path::PathBuf::from(r));
-    }
-    if authored.is_empty() {
-        return None;
-    }
-    let candidate = std::path::Path::new(&authored);
-    if candidate.is_absolute() {
-        return Some(candidate.to_path_buf());
-    }
-    Some(
-        stage_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(candidate),
-    )
-}
-
-/// [`asset_value_path`] for an attribute, anchoring an **unresolved** relative
-/// path against the layer that authored it rather than against the root layer.
-///
-/// openusd anchors every asset value against its authoring layer, but reports
-/// the anchored path only when it names a file that exists — and a
-/// `<UDIM>`-tokened texture path never does, since it names a set. So such a
-/// value arrives with no `resolved_path` at all, and anchoring it against the
-/// root layer was wrong for any texture authored in a sublayer or reference:
-/// ALab's look layers sit five directories below `entry.usda` and author
-/// `@../../texture/…<UDIM>.exr@`, and 1 718 texture sets failed to load. The
-/// strongest spec in the attribute's property stack is the layer whose opinion
-/// supplies the value, which is exactly what USD anchors against.
-pub(super) fn attribute_asset_path(
-    attr: &openusd::usd::Attribute,
-    stage_path: &Path,
-) -> Option<std::path::PathBuf> {
-    let value = attr.get_at::<sdf::Value>(eval_time()).ok().flatten()?;
-    let resolved = matches!(&value, sdf::Value::AssetPath(p)
-        if p.resolved_path().is_some_and(|r| !r.is_empty()));
-    let authored = value.as_str().map(str::to_owned);
-    if !resolved
-        && let Some(authored) = authored.filter(|a| !a.is_empty() && Path::new(a).is_relative())
-        && let Some(layer_dir) = attr
-            .property_stack()
-            .ok()
-            .and_then(|stack| stack.into_iter().next())
-            .and_then(|site| Path::new(&site.layer).parent().map(Path::to_path_buf))
-            .filter(|d| !d.as_os_str().is_empty())
-    {
-        return Some(layer_dir.join(authored));
-    }
-    asset_value_path(&value, stage_path)
-}
-
-fn custom_vec3(prim: &Prim, name: &str) -> Option<Vec3A> {
-    let v = prim
-        .attribute(name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
-        sdf::Value::Vec3d(p) => Some(Vec3A::new(p.x as f32, p.y as f32, p.z as f32)),
-        _ => None,
-    }
 }
 
 /// Decode a `crust:openpbr` shader into the OpenPBR material. Every input
@@ -1031,15 +864,17 @@ fn decode_crust_openpbr(shader: &Shader, working: Space, luma: utils::Luma) -> A
         ..OpenPBR::default()
     };
 
-    let f = |n: &str, d: f32| shader_input_f32(shader, n).unwrap_or(d);
+    // Inputs by their whole attribute name (`inputs:roughness`): the names are
+    // literals, so none is built per read.
+    let f = |n: &str, d: f32| attr_f32(&shader.attribute(n)).unwrap_or(d);
     // Every colour is authored in the working space unless its `colorSpace`
     // metadatum names another (`in_working`); `v` reads a vector that is not
     // a colour and is never converted.
     let c = |n: &str, d: Vec3A| {
-        shader_input_vec3(shader, n).map_or(d, |v| in_working(&shader.attribute(n), v, working))
+        attr_vec3(&shader.attribute(n)).map_or(d, |v| in_working(&shader.attribute(n), v, working))
     };
-    let v = |n: &str, d: Vec3A| shader_input_vec3(shader, n).unwrap_or(d);
-    let b = |n: &str, d: bool| shader_input_bool(shader, n).unwrap_or(d);
+    let v = |n: &str, d: Vec3A| attr_vec3(&shader.attribute(n)).unwrap_or(d);
+    let b = |n: &str, d: bool| attr_bool(&shader.attribute(n)).unwrap_or(d);
 
     // Base
     o.base_weight = f("inputs:baseWeight", o.base_weight);
@@ -1115,41 +950,4 @@ fn decode_crust_openpbr(shader: &Shader, working: Space, luma: utils::Luma) -> A
     o.geometry_thin_walled = b("inputs:geometryThinWalled", o.geometry_thin_walled);
 
     Arc::new(o)
-}
-
-/// A shader input by its whole attribute name (`inputs:roughness`) — the
-/// callers pass literals, so no name is built per read.
-fn shader_input_f32(shader: &Shader, attr_name: &str) -> Option<f32> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Float(f) => Some(f),
-        sdf::Value::Double(d) => Some(d as f32),
-        _ => None,
-    }
-}
-
-fn shader_input_bool(shader: &Shader, attr_name: &str) -> Option<bool> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Bool(b) => Some(b),
-        _ => None,
-    }
-}
-
-fn shader_input_vec3(shader: &Shader, attr_name: &str) -> Option<Vec3A> {
-    let v = shader
-        .attribute(attr_name)
-        .get_at::<sdf::Value>(eval_time())
-        .ok()??;
-    match v {
-        sdf::Value::Vec3f(p) => Some(Vec3A::new(p.x, p.y, p.z)),
-        // USD encodes color3f as an sdf::Value::Vec3f — no dedicated variant.
-        _ => None,
-    }
 }

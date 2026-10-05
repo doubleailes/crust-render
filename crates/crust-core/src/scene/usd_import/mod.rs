@@ -58,6 +58,7 @@ use openusd_schemas::lux::{
 };
 
 mod adaptive;
+mod assets;
 mod attrs;
 mod camera;
 mod instancing;
@@ -75,7 +76,8 @@ mod xform;
 
 use adaptive::{Frustum, ScreenRate};
 use attrs::{
-    custom_token, resolve_adaptive_max_level, resolve_subdiv_edge_length, resolve_subdiv_level,
+    custom_token, prim_value, resolve_adaptive_max_level, resolve_subdiv_edge_length,
+    resolve_subdiv_level,
 };
 use camera::{build_camera, screen_projection};
 use instancing::{ProtoPart, emit_native_instance, emit_point_instancer};
@@ -93,9 +95,9 @@ use settings::{
     render_settings_subdiv_level,
 };
 use shapes::{emit_curves, emit_sphere};
-use time::{EvalTimeScope, eval_time};
+use time::EvalTimeScope;
 use volume::emit_volume;
-use xform::{local_matrix_at, resets_xform_stack_at};
+use xform::compose_with_parent;
 
 /// `Stage::prim` for a path that is already an `sdf::Path`.
 ///
@@ -174,26 +176,17 @@ fn subtree_roots(stage: &Stage) -> Vec<sdf::Path> {
 }
 
 /// Counts the native placements of every prototype on `stage`, per top-level
-/// subtree, into `caches.placements`: the same walk and pruning as
-/// [`traverse_into`] (abstract, inactive, non-render purpose, invisible), not
+/// subtree, into `caches.placements`: the same walk and pruning
+/// ([`prune_reason`]) as [`traverse_into`], not
 /// descending into an instance or a `PointInstancer`, whose contents the
 /// traversal does not reach directly either.
 fn count_placements(stage: &Stage, caches: &mut ImportCaches<'_>) {
     let mut stack = vec![(prim_at(stage, sdf::Path::abs_root()), GMat4::IDENTITY)];
     while let Some((prim, parent_world)) = stack.pop() {
-        if prim.is_abstract().unwrap_or(false)
-            || !prim.is_active().unwrap_or(true)
-            || non_render_purpose(&prim).is_some()
-            || is_invisible(&prim)
-        {
+        if prune_reason(&prim, WalkScope::Stage).is_some() {
             continue;
         }
-        let local = local_matrix_at(stage, &prim);
-        let world = if resets_xform_stack_at(stage, &prim) {
-            local
-        } else {
-            parent_world * local
-        };
+        let world = compose_with_parent(stage, &prim, parent_world);
         if prim.is_instance().unwrap_or(false)
             && let Ok(Some(proto)) = prim.prototype()
         {
@@ -269,30 +262,13 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
     let mut stack: Vec<(Prim, GMat4, bool)> = vec![(root, root_xf, false)];
 
     while let Some((prim, parent_world, parent_hidden)) = stack.pop() {
-        // `class` prims (and their descendants) describe geometry that
-        // exists only to be referenced or instanced — they are never
-        // rendered in their own right. Prototypes reach the same prims
-        // through `collect_proto_parts`, which deliberately does not apply
-        // this rule.
-        if prim.is_abstract().unwrap_or(false) {
-            debug!("Skipping abstract (class) prim {}", prim.path());
-            continue;
-        }
-        // USD prunes an inactive prim and its whole namespace subtree from
-        // the composed scene — the standard way a stage disables geometry
-        // (e.g. an LOD or a too-dense archive) without editing its source.
-        if !prim.is_active().unwrap_or(true) {
-            debug!("Skipping inactive prim {}", prim.path());
-            continue;
-        }
-        if let Some(purpose) = non_render_purpose(&prim) {
-            debug!("Skipping {purpose}-purpose prim {}", prim.path());
+        let pruned = prune_reason(&prim, WalkScope::Stage);
+        if let Some(reason) = pruned.filter(|&r| r != Prune::Invisible) {
+            debug!("Skipping {reason} prim {}", prim.path());
             continue;
         }
 
-        let local = local_matrix_at(stage, &prim);
-        let resets = resets_xform_stack_at(stage, &prim);
-        let this_world = if resets { local } else { parent_world * local };
+        let this_world = compose_with_parent(stage, &prim, parent_world);
 
         // An invisible subtree draws nothing and lights nothing, but is still
         // walked for cameras: a camera's own visibility only hides its gizmo
@@ -300,7 +276,7 @@ fn traverse_into(stage: &Stage, root: Prim, root_xf: GMat4, ctx: &mut ImportCtx)
         // Pruning it outright would make `--camera` fail on it and move the
         // first-camera fallback. Instances are not entered — crust never
         // takes a camera from a prototype.
-        let hidden = parent_hidden || is_invisible(&prim);
+        let hidden = parent_hidden || pruned == Some(Prune::Invisible);
         if hidden {
             if !parent_hidden {
                 debug!("Skipping invisible prim {} and its subtree", prim.path());
@@ -463,22 +439,87 @@ fn visit_camera(stage: &Stage, prim: &Prim, ctx: &mut ImportCtx) -> bool {
     true
 }
 
-/// Whether `prim` authors `visibility = "invisible"` at the evaluated time.
+/// Why a traversal leaves a prim and its whole subtree out of the render —
+/// see [`prune_reason`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Prune {
+    /// A `class` prim: it exists only to be referenced or instanced.
+    Abstract,
+    /// `active = false`.
+    Inactive,
+    /// A purpose a final render does not draw (`"proxy"` / `"guide"`).
+    Purpose(&'static str),
+    /// `visibility = "invisible"`.
+    Invisible,
+}
+
+impl std::fmt::Display for Prune {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Prune::Abstract => f.write_str("abstract (class)"),
+            Prune::Inactive => f.write_str("inactive"),
+            Prune::Purpose(p) => write!(f, "{p}-purpose"),
+            Prune::Invisible => f.write_str("invisible"),
+        }
+    }
+}
+
+/// Where a prim is met, which decides whether [`Prune::Abstract`] applies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WalkScope {
+    /// The stage's own namespace: the top-level traversal and the placement
+    /// count that must agree with it.
+    Stage,
+    /// Inside a prototype, reached through an instance. A prototype is
+    /// commonly authored under a `class` prim, so abstractness does not prune
+    /// here.
+    Prototype,
+}
+
+/// The one pruning rule every walk applies, so that the traversal, the
+/// placement count and the prototype walk cannot disagree about which prims
+/// exist.
 ///
-/// Visibility is inherited and cannot be undone below: an `invisible`
-/// ancestor hides its whole subtree whatever the descendants author (their
-/// only other value, `inherited`, defers to it), so as with `purpose` the
-/// subtree is decided where the opinion is authored (UsdGeomImageable's
-/// `ComputeVisibility`). It applies to lights as it does to geometry: an
-/// invisible light does not illuminate. ALab's rig parks three interior
-/// fills/bounces and a debug dome this way, and all four used to light the
-/// shot.
-fn is_invisible(prim: &Prim) -> bool {
-    prim.attribute("visibility")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()
+/// Each rule prunes a whole subtree, decided where the opinion is authored:
+///
+/// - **abstract** (stage scope only) — `class` prims describe geometry that
+///   is never rendered in its own right.
+/// - **inactive** — USD prunes an inactive prim and its namespace subtree
+///   from the composed scene, the standard way a stage disables geometry (an
+///   LOD, a too-dense archive) without editing its source.
+/// - **non-render purpose** — a render draws `default` and `render` purpose
+///   only (UsdGeomImageable). Purpose is inherited and a non-default one on an
+///   ancestor wins, so pruning where it is authored is exactly
+///   `ComputePurpose` for a walk from the root. Without it a production asset
+///   renders twice: ALab publishes every asset with a `GEO_PROXY` scope
+///   (`purpose = "proxy"`) next to its `GEO`, and the proxies drew as grey
+///   duplicates of 1 505 meshes.
+/// - **invisible** — visibility is inherited and cannot be undone below (the
+///   only other value, `inherited`, defers to it), as `ComputeVisibility`
+///   has it. It applies to lights as to geometry: ALab's rig parks three
+///   interior fills/bounces and a debug dome this way, and all four used to
+///   light the shot. The top-level traversal still walks an invisible
+///   subtree for cameras (see [`traverse_into`]).
+///
+/// Checked in that order, so the reason reported is the first that applies.
+pub(super) fn prune_reason(prim: &Prim, scope: WalkScope) -> Option<Prune> {
+    if scope == WalkScope::Stage && prim.is_abstract().unwrap_or(false) {
+        return Some(Prune::Abstract);
+    }
+    if !prim.is_active().unwrap_or(true) {
+        return Some(Prune::Inactive);
+    }
+    let token = |name: &str| prim_value(prim, name);
+    if let Some(v) = token("purpose") {
+        match v.as_str() {
+            Some("proxy") => return Some(Prune::Purpose("proxy")),
+            Some("guide") => return Some(Prune::Purpose("guide")),
+            _ => {}
+        }
+    }
+    token("visibility")
         .is_some_and(|v| v.as_str() == Some("invisible"))
+        .then_some(Prune::Invisible)
 }
 
 /// Drops a stage the traversal is done with, or — for a single-stage import
@@ -810,8 +851,10 @@ pub(crate) fn load_scene(
         );
     }
     if let Some(rate) = ctx.caches.meshes.subdiv.adaptive {
-        // The two reads of one camera must agree, or every level was chosen
-        // for a viewpoint the render does not use.
+        // Both reads derive from one `CameraFrame`, but adaptive subdivision
+        // may read it off a different stage (the unloaded index while
+        // streaming); the two must still agree, or every level was chosen for
+        // a viewpoint the render does not use.
         debug_assert!(
             (Vec3::from(camera.origin()) - rate.eye).length() <= 1e-4 * rate.eye.length().max(1.0),
             "adaptive subdivision read the camera at {:?}, the render camera is at {:?}",
@@ -1086,29 +1129,5 @@ impl<'a> ImportCaches<'a> {
             working,
             luma: crate::color::luma(working),
         }
-    }
-}
-
-/// `Some("proxy")` / `Some("guide")` when `prim` authors a purpose a final
-/// render does not draw.
-///
-/// A render draws `default` and `render` purpose only (UsdGeomImageable).
-/// Purpose is inherited, and a non-default purpose on an ancestor wins over
-/// whatever its descendants author, so pruning the subtree where the purpose
-/// is authored is exactly `ComputePurpose` for a traversal that descends from
-/// the root — the same shape as the `active = false` pruning beside it.
-/// Without it a production asset renders twice: ALab publishes every asset
-/// with a `GEO_PROXY` scope (`purpose = "proxy"`, bound only for `preview`)
-/// next to its `GEO`, and the proxies drew as grey duplicates of 1 505 meshes.
-fn non_render_purpose(prim: &Prim) -> Option<&'static str> {
-    let value = prim
-        .attribute("purpose")
-        .get_at::<sdf::Value>(eval_time())
-        .ok()
-        .flatten()?;
-    match value.as_str()? {
-        "proxy" => Some("proxy"),
-        "guide" => Some("guide"),
-        _ => None,
     }
 }

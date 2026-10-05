@@ -31,6 +31,7 @@ mod image_file;
 mod mip_filter;
 mod ptex_stream;
 mod ptex_texture;
+mod texture_cache;
 pub mod tiled;
 mod uv_texture;
 
@@ -40,17 +41,31 @@ pub use ies::{load_ies, parse_ies};
 pub use ptex_stream::{
     DEFAULT_CACHE_MB as PTEX_DEFAULT_CACHE_MB, DEFAULT_STREAM_MIN_MB as PTEX_DEFAULT_STREAM_MIN_MB,
     MICRO_SLOTS as PTEX_MICRO_SLOTS, MipSpace as PtexMipSpace, PtexStream,
-    StreamStats as PtexStreamStats, cache_budget_from_env as ptex_cache_budget_from_env,
-    micro_reserve as ptex_micro_reserve, micro_retained_bytes as ptex_micro_retained_bytes,
-    micro_slot_max as ptex_micro_slot_max, micro_thread_bytes as ptex_micro_thread_bytes,
-    micro_threads as ptex_micro_threads, mip_space_from_env as ptex_mip_space_from_env,
-    stream_enabled as ptex_stream_enabled,
-    stream_min_bytes_from_env as ptex_stream_min_bytes_from_env,
+    StreamStats as PtexStreamStats, micro_reserve as ptex_micro_reserve,
+    micro_retained_bytes as ptex_micro_retained_bytes, micro_slot_max as ptex_micro_slot_max,
+    micro_thread_bytes as ptex_micro_thread_bytes, micro_threads as ptex_micro_threads,
 };
 pub use ptex_texture::{
     DEFAULT_MAX_LOG2, PtexColor, max_log2_from_env, max_log2_from_env_opt, read_channel,
 };
 pub use uv_texture::{DEFAULT_MAX_EDGE, UvTexture};
+
+/// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
+/// disk (the 10x10 UDIM sweep every texture reader shares), or the one image
+/// when it exists.
+pub fn texture_files(path: &Path) -> Vec<std::path::PathBuf> {
+    let name = path.to_string_lossy();
+    if name.contains("<UDIM>") || name.contains("<UVTILE>") {
+        uv_texture::existing_tiles(&name)
+            .into_iter()
+            .map(|t| t.path)
+            .collect()
+    } else if path.exists() {
+        vec![path.to_path_buf()]
+    } else {
+        Vec::new()
+    }
+}
 
 use crust_core::{
     AssetLoader, ColorSpace, EnvironmentMap, IesProfile, LightTexture, PtexTexture,
@@ -282,7 +297,7 @@ impl FileAssets {
             debug!(
                 "Textures stream from a .tx beside them when one exists, through a {:.0} MiB \
                  tile cache (CRUST_TEX_STREAM=0 preloads everything)",
-                budget as f64 / (1024.0 * 1024.0)
+                texture_cache::bytes_to_mib(budget)
             );
         }
         let ptex_streaming = config.ptex_stream;
@@ -290,7 +305,7 @@ impl FileAssets {
         if ptex_streaming {
             info!(
                 "Streaming Ptex with a {:.0} MiB cache",
-                ptex_stream::budget_bytes(&config) as f64 / (1024.0 * 1024.0)
+                texture_cache::bytes_to_mib(ptex_stream::budget_bytes(&config) as u64)
             );
             // Said at construction rather than per texture, because under
             // the default policy it is the line that explains a render where
@@ -370,30 +385,6 @@ impl FileAssets {
         )
     }
 
-    /// The files a texture path names: every `<UDIM>` / `<UVTILE>` tile on
-    /// disk, or the one image.
-    fn tile_sources(path: &Path) -> Vec<std::path::PathBuf> {
-        let name = path.to_string_lossy();
-        if name.contains("<UDIM>") || name.contains("<UVTILE>") {
-            let mut tiles = Vec::new();
-            for v in 0..10u32 {
-                for u in 0..10u32 {
-                    if let Some(p) =
-                        uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                        && p.exists()
-                    {
-                        tiles.push(p);
-                    }
-                }
-            }
-            tiles
-        } else if path.exists() {
-            vec![path.to_path_buf()]
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Whether a complete set of `.tx` siblings stands beside `path`'s tiles,
     /// converting the missing and stale ones first under `--auto-tx`.
     ///
@@ -412,7 +403,7 @@ impl FileAssets {
         if is_tx {
             return true;
         }
-        let sources = Self::tile_sources(path);
+        let sources = texture_files(path);
         if sources.is_empty() {
             return false;
         }
@@ -687,11 +678,7 @@ impl FileAssets {
             .filter(|c| (c.as_path() == path) == (which == Candidates::Source));
         for candidate in candidates {
             let started = Instant::now();
-            let Some(tex) =
-                tiled::StreamingTexture::open(&candidate, space, self.cache.clone(), |u, v| {
-                    let name = candidate.to_string_lossy();
-                    uv_texture::expand_token(&name, u, v).map(std::path::PathBuf::from)
-                })
+            let Some(tex) = tiled::StreamingTexture::open(&candidate, space, self.cache.clone())
             else {
                 continue;
             };
@@ -906,7 +893,7 @@ impl AssetLoader for FileAssets {
                     // `DEFAULT_STREAM_MIN_MB` for the island distribution that
                     // makes this necessary rather than tidy.
                     let would = tex.preload_bytes(self.preload_max_log2());
-                    let floor = self.config.ptex_stream_min_mb * 1024 * 1024;
+                    let floor = ptex_stream::stream_min_bytes(&self.config);
                     if would < floor {
                         why = PreloadReason::TooSmall;
                         debug!(
