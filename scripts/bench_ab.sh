@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interleaved A/B of two crust-render binaries.
+# Interleaved A/B of two crust binaries.
 #
 # Why this exists rather than "run bench_scenes.sh, change the code, run it
 # again": on a shared or busy machine that method is simply wrong. Measuring
@@ -15,10 +15,10 @@
 # when load is symmetric).
 #
 # Build the two binaries with e.g.:
-#     cp target/release/crust-render /tmp/bin_before
+#     cp target/release/crust /tmp/bin_before
 #     ...make the change...
 #     cargo build --release -p crust-render
-#     cp target/release/crust-render /tmp/bin_after
+#     cp target/release/crust /tmp/bin_after
 #     scripts/bench_ab.sh -a /tmp/bin_before -b /tmp/bin_after cornellbox veach_mis
 #
 # Usage: scripts/bench_ab.sh -a <binA> -b <binB> [-n reps] [-p phase] [-x args] [scene ...]

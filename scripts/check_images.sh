@@ -29,7 +29,7 @@ if [ -z "$DIR" ]; then
     exit 2
 fi
 
-BIN=target/release/crust-render
+BIN=target/release/crust
 if [ ! -x "$BIN" ]; then
     cargo build --release -p crust-render
 fi

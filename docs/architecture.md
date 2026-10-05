@@ -12,7 +12,7 @@ the page to read first.
 
 ```mermaid
 graph TD
-    render["crust-render<br/><i>CLI binary</i>"]
+    render["crust-render<br/><i>CLI binary <code>crust</code></i>"]
     assets["crust-assets<br/><i>file decoders, texture streaming</i>"]
     core["crust-core<br/><i>engine: import, integrator, materials, lights</i>"]
     rt["crust-rt<br/><i>intersection kernel</i>"]

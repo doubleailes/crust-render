@@ -21,7 +21,7 @@
 #     are smaller than the run-to-run spread:
 #
 #       RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no \
-#           --branch-sim=no target/release/crust-render \
+#           --branch-sim=no target/release/crust \
 #           -i samples/cornellbox.usda -o /tmp/cg.exr -s 2
 #       callgrind_annotate --inclusive=no callgrind.out.<pid>
 #
@@ -63,7 +63,7 @@ if [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=("${DEFAULT_SCENES[@]}")
 fi
 
-BIN=target/release/crust-render
+BIN=target/release/crust
 if [ ! -x "$BIN" ]; then
     echo "building $BIN"
     cargo build --release -p crust-render

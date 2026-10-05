@@ -18,8 +18,8 @@ refined mesh's resident cost stand well clear of page-granularity noise:
 Measure with the --stats report, A/B'd by the kill switch:
 
     python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
-    target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
-    CRUST_SUBDIV=0 target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
+    target/release/crust -i /tmp/subdiv_stress.usda --stats -l error
+    CRUST_SUBDIV=0 target/release/crust -i /tmp/subdiv_stress.usda --stats -l error
 
 Subdivision runs during traversal, so its transient lands in the `peak`
 column of the `Traverse prims` row; the refined triangles' resident cost is

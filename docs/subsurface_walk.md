@@ -248,9 +248,9 @@ unlike the subsurface walk's free 256 steps, so a dense interior is truncated by
 ```bash
 rustup toolchain install 1.98.1
 cargo +1.98.1 build --release
-target/release/crust-render -i samples/materialx_subsurface.usda -o sss.exr --stats --profile
+target/release/crust -i samples/materialx_subsurface.usda -o sss.exr --stats --profile
 RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
-    target/release/crust-render -i samples/materialx_subsurface.usda -o /tmp/x.exr -s 2
+    target/release/crust -i samples/materialx_subsurface.usda -o /tmp/x.exr -s 2
 callgrind_annotate --inclusive=yes callgrind.out.<pid> | grep -E "walk_subsurface|World>::intersect|expf|powf|atanf"
 ```
 

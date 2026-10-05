@@ -32,16 +32,16 @@ binaries for:
 - `x86_64-apple-darwin` (macOS)
 - `x86_64-pc-windows-gnu` (Windows)
 
-Unpack the archive and put the `crust-render` binary (`crust-render.exe` on Windows) on
+Unpack the archive and put the `crust` binary (`crust.exe` on Windows) on
 your `PATH`.
 
 ### From source
 
 ```bash
 git clone https://github.com/doubleailes/crust-render.git
-cd crust-render
+cd crust
 cargo build --release
-# the binary is target/release/crust-render
+# the binary is target/release/crust
 ```
 
 Always build with `--release`. A debug build is many times slower.
@@ -65,7 +65,7 @@ The repository includes sample scenes in `samples/`:
 cargo run --release -- -i samples/cornellbox.usda -o cornell.exr
 
 # or, with an installed binary
-crust-render -i samples/cornellbox.usda -o cornell.exr
+crust -i samples/cornellbox.usda -o cornell.exr
 ```
 
 The run prints four `INFO` lines: the resolution and sample count, the render time, and
@@ -76,26 +76,26 @@ Without `-i`, Crust Render draws a built-in procedural scene. This is useful to 
 the binary works:
 
 ```bash
-crust-render
+crust
 ```
 
 ## Common variations
 
 ```bash
 # fewer samples for a quick preview
-crust-render -i scene.usda -s 16
+crust -i scene.usda -s 16
 
 # a given frame through a given camera
-crust-render -i shot.usda -f 1012 --camera /shot/cam/renderCam
+crust -i shot.usda -f 1012 --camera /shot/cam/renderCam
 
 # subdivide every subdivision-surface mesh twice
-crust-render -i character.usda --subdiv-level 2
+crust -i character.usda --subdiv-level 2
 
 # print timings, memory use and scene statistics at the end
-crust-render -i scene.usda --stats
+crust -i scene.usda --stats
 
 # keep a full debug log of the run in ./logs/
-crust-render -i scene.usda -l debug --log-file logs
+crust -i scene.usda -l debug --log-file logs
 ```
 
 [Command line](@/docs/reference/command-line.md) describes every flag.
@@ -124,7 +124,7 @@ crust-render -i scene.usda -l debug --log-file logs
 Crust Render reads any USD stage, so you can export from a DCC (Maya, Houdini, Blender,
 …) or write `.usda` by hand. A minimal scene needs a camera, some geometry and a light.
 This one adds a material and a `RenderSettings` prim that sets the resolution and sample
-count. Save it as `first.usda` and run `crust-render -i first.usda -o first.exr`:
+count. Save it as `first.usda` and run `crust -i first.usda -o first.exr`:
 
 ```usda
 #usda 1.0

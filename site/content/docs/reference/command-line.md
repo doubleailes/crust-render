@@ -1,6 +1,6 @@
 +++
 title = "Command line"
-description = "Every crust-render command-line flag."
+description = "Every crust command-line flag."
 date = 2026-10-01T08:00:00+00:00
 updated = 2026-10-01T08:00:00+00:00
 draft = false
@@ -9,7 +9,7 @@ sort_by = "weight"
 template = "docs/page.html"
 
 [extra]
-lead = 'Every <code>crust-render</code> flag: what it does, its default, and the USD attribute it overrides.'
+lead = 'Every <code>crust</code> flag: what it does, its default, and the USD attribute it overrides.'
 toc = true
 top = false
 +++
@@ -17,7 +17,7 @@ top = false
 ## Synopsis
 
 ```bash
-crust-render [OPTIONS]
+crust [OPTIONS]
 ```
 
 From a source checkout, put `cargo run --release --` in front of the flags:
@@ -26,7 +26,7 @@ From a source checkout, put `cargo run --release --` in front of the flags:
 cargo run --release -- -i samples/cornellbox.usda -o out.exr
 ```
 
-`crust-render --help` lists every flag, and `crust-render --version` prints the version.
+`crust --help` lists every flag, and `crust --version` prints the version.
 
 Many flags override a `crust:*` attribute on the stage's `RenderSettings` prim. A flag you
 pass wins over the attribute. A flag you leave out keeps the scene's value, or the default
@@ -92,10 +92,10 @@ Where to write the image. What it does depends on whether the stage authors
 With products, the PNG is made from the first product's beauty and written beside it.
 
 ```bash
-crust-render -i shot.usda -o renders/shot.0001.exr
+crust -i shot.usda -o renders/shot.0001.exr
 # without products: writes renders/shot.0001.exr and renders/shot.0001.png
 
-crust-render -i samples/aovs.usda
+crust -i samples/aovs.usda
 # writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr
 ```
 
@@ -139,8 +139,8 @@ renders: animated attributes hold their first or last time sample. `nan` and `in
 refused as usage errors.
 
 ```bash
-crust-render -i samples/animation.usda -f 12 -o anim.0012.exr
-crust-render -i shot.usda -f 1001.5 -o shot.1001_5.exr    # a subframe
+crust -i samples/animation.usda -f 12 -o anim.0012.exr
+crust -i shot.usda -f 1001.5 -o shot.1001_5.exr    # a subframe
 ```
 
 ### camera
@@ -207,7 +207,7 @@ so one mesh can be fine near the camera and coarse far away. Overrides
 The value must be a positive number. `--stats` reports how many meshes got each level.
 
 ```bash
-crust-render -i scene.usda --camera /cam --subdiv-edge-length 2
+crust -i scene.usda --camera /cam --subdiv-edge-length 2
 ```
 
 ## Light transport
@@ -270,7 +270,7 @@ finite. Overrides
 filter has its own default radius (see the table above).
 
 ```bash
-crust-render -i scene.usda --filter gaussian --filter-radius 2
+crust -i scene.usda --filter gaussian --filter-radius 2
 ```
 
 ### indirect-clamp
@@ -307,8 +307,8 @@ studio config does. A config that can't be loaded, or lacks one of them, is an e
 whether the flag or `OCIO` named it.
 
 ```bash
-crust-render -i scene.usda --ocio-config /studio/config.ocio --working-space acescg
-OCIO=/studio/config.ocio crust-render -i scene.usda --working-space acescg
+crust -i scene.usda --ocio-config /studio/config.ocio --working-space acescg
+OCIO=/studio/config.ocio crust -i scene.usda --working-space acescg
 ```
 
 ### working-space
@@ -327,7 +327,7 @@ in the builtin config and in the ACES studio configs; to render in it, name it h
 `renderingColorSpace`.
 
 ```bash
-crust-render -i scene.usda --working-space acescg -o beauty.exr
+crust -i scene.usda --working-space acescg -o beauty.exr
 ```
 
 The EXR is written in the working space, and its header says which (see
@@ -350,7 +350,7 @@ scene-linear range instead. A display or view the config doesn't define is an er
 reported before the render starts. The EXR is never affected.
 
 ```bash
-crust-render -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nits (Rec.709)"
+crust -i scene.usda --working-space acescg --view "ACES 2.0 - SDR 100 nits (Rec.709)"
 ```
 
 ## Textures
@@ -427,7 +427,7 @@ Crust Render tells you it didn't use something the scene asked for.
 `--log-file [<DIR>]`
 
 Also write the log to a file named for the time the run started,
-`crust-render-<UTC timestamp>.log`, for example `crust-render-20261001T142530Z.log`.
+`crust-<UTC timestamp>.log`, for example `crust-20261001T142530Z.log`.
 
 - Bare `--log-file` writes into the current directory.
 - `--log-file <DIR>` writes into that directory, and creates it if needed.
@@ -436,14 +436,14 @@ The file receives the same lines as the terminal, without colour codes. Combine 
 `-l debug` to keep a full record of a render:
 
 ```bash
-crust-render -i scene.usda -l debug --log-file logs
+crust -i scene.usda -l debug --log-file logs
 ```
 
 If the file can't be created, the run stops before loading the scene.
 
 ## Exit status
 
-`crust-render` exits with `0` when the images are written. It exits with a non-zero status
+`crust` exits with `0` when the images are written. It exits with a non-zero status
 when the arguments are invalid, the scene or the requested camera can't be loaded, the log
 file can't be created, or an image can't be written.
 
@@ -451,21 +451,21 @@ file can't be created, or an image can't be written.
 
 ```bash
 # quick preview
-crust-render -i scene.usda -s 16 -o preview.exr
+crust -i scene.usda -s 16 -o preview.exr
 
 # final frame of a shot, through the shot camera
-crust-render -i shot.usdc -f 1048 --camera /shot/cam/renderCam -o shot.1048.exr
+crust -i shot.usdc -f 1048 --camera /shot/cam/renderCam -o shot.1048.exr
 
 # unbiased reference
-crust-render -i scene.usda -s 4096 --indirect-clamp 0 -o reference.exr
+crust -i scene.usda -s 4096 --indirect-clamp 0 -o reference.exr
 
 # compare MIS against each strategy alone
-crust-render -i samples/veach_mis.usda --strategy light -o light.exr
-crust-render -i samples/veach_mis.usda --strategy bsdf  -o bsdf.exr
+crust -i samples/veach_mis.usda --strategy light -o light.exr
+crust -i samples/veach_mis.usda --strategy bsdf  -o bsdf.exr
 
 # many lights, mostly hidden
-crust-render -i interior.usda --light-selection learned
+crust -i interior.usda --light-selection learned
 
 # textured asset: build the .tx files once, stream them afterwards
-crust-render -i asset.usda --auto-tx --stats
+crust -i asset.usda --auto-tx --stats
 ```

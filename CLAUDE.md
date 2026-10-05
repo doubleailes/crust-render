@@ -87,7 +87,7 @@ Seven crates under `crates/` (ownership table in `docs/architecture.md`):
 deps), `crust-jit` (Cranelift JIT for `crust-mtlx` programs, feature `jit`), `crust-core`
 (the engine library: import, integrator, materials, lights, volumes, guiding, stats),
 `crust-assets` (every file decoder and texture cache, behind `crust_core::AssetLoader`),
-`crust-render` (the CLI; it only drives a render and writes images: `main.rs`,
+`crust-render` (the CLI, binary `crust`; it only drives a render and writes images: `main.rs`,
 `products.rs`, `logging.rs`) and `utils` (stateless math:
 warps, MIS heuristics, the one Rec.709 `luminance`). `openqmc-rs` (all sampling) and
 `opensubdiv-rs` / `ptex-rs` are external. Import from `crust_core::` roots; `lib.rs`
@@ -182,7 +182,7 @@ tooling above exists to work around each.
 
    ```bash
    RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
-       target/release/crust-render -i samples/cornellbox.usda -o /tmp/x.exr -s 2
+       target/release/crust -i samples/cornellbox.usda -o /tmp/x.exr -s 2
    callgrind_annotate --inclusive=no callgrind.out.<pid>
    ```
 
