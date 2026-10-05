@@ -3392,6 +3392,7 @@ def Xform "W"
     }
     def Camera "Last" {}
     def DomeLight "Sky" {}
+    def SphereLight "Degenerate" { float inputs:radius = 0 }
 }
 "#,
     )
@@ -3413,10 +3414,11 @@ def Xform "W"
         .unwrap_or_else(|e| panic!("{camera}: {e}"));
     }
     let lights = list(ListKind::Light);
-    assert_eq!(lights, ["/W/Key", "/W/Sky"]);
-    // As many as the import puts in the light list.
+    assert_eq!(lights, ["/W/Key", "/W/Sky", "/W/Degenerate"]);
+    // What the import puts in the light list, but for the light its values
+    // make it refuse: validity is evaluated at a time code, a listing at none.
     let scene = Scene::from_usd(&path).expect("loads");
-    assert_eq!(scene.lights.count(), lights.len());
+    assert_eq!(scene.lights.count(), lights.len() - 1);
     assert_eq!(
         list(ListKind::Material),
         [
@@ -3440,4 +3442,37 @@ def Xform "W"
         Scene::list_usd(&dir.join("missing.usda"), ListKind::Camera),
         Err(crust_core::Error::UsdOpen { .. })
     ));
+    // Only USD is read, by extension: a USD layer under another name is
+    // refused before a byte of it is parsed.
+    let disguised = dir.join("listing.obj");
+    std::fs::copy(&path, &disguised).expect("copy");
+    assert!(matches!(
+        Scene::list_usd(&disguised, ListKind::Camera),
+        Err(crust_core::Error::UsdOpen { .. })
+    ));
+
+    // A sole top-level prim with four children streams them as chunks, and
+    // every chunk's mask keeps it: it is walked once per chunk, and listed once.
+    let solo = dir.join("solo.usda");
+    std::fs::write(
+        &solo,
+        r#"#usda 1.0
+def Camera "Rig"
+{
+    def Xform "A" {}
+    def Xform "B" { def Material "Look" {} }
+    def Xform "C" { def Camera "Inner" {} }
+    def Xform "D" {}
+}
+"#,
+    )
+    .expect("write stage");
+    assert_eq!(
+        Scene::list_usd(&solo, ListKind::Camera).expect("lists"),
+        ["/Rig", "/Rig/C/Inner"]
+    );
+    assert_eq!(
+        Scene::list_usd(&solo, ListKind::Material).expect("lists"),
+        ["/Rig/B/Look"]
+    );
 }

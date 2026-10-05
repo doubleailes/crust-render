@@ -5,8 +5,11 @@
 //! [`prune_reason`], the same prims it does not enter — so what is listed for
 //! a kind is what the import would use of that kind, and nothing it would
 //! never meet. Nothing but the listed schema is read: no geometry is built,
-//! no material resolved, no texture or light emission decoded.
+//! no material resolved, no texture or light emission decoded — so a light
+//! the import refuses for its evaluated values (a zero radius, a transform
+//! that collapses it) is still listed; see [`ListKind::Light`].
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -42,18 +45,19 @@ pub(crate) fn list_prims(path: &Path, kind: ListKind) -> Result<Vec<String>, cra
     let chunks = stream_roots(&index);
     drop(index);
 
-    let mut prims = Vec::new();
+    let mut found = Found::default();
     if chunks.is_empty() {
         let stage = open_stage(path, path_str, None)?;
-        collect(&stage, kind, &mut prims);
+        collect(&stage, kind, &mut found);
         release_stage(stage, false);
     } else {
         for chunk in chunks {
             let stage = open_stage(path, path_str, Some(chunk))?;
-            collect(&stage, kind, &mut prims);
+            collect(&stage, kind, &mut found);
             release_stage(stage, false);
         }
     }
+    let prims = found.paths;
     debug!(
         "Found {} {kind:?} prim(s) on {} in {:?}",
         prims.len(),
@@ -71,8 +75,27 @@ enum Visit {
     Enter { hidden: bool },
 }
 
-/// The `kind` prims a walk of `stage` meets, appended to `out`.
-fn collect(stage: &Stage, kind: ListKind, out: &mut Vec<String>) {
+/// The prims listed so far, in the order first met.
+///
+/// A path can be met more than once: a chunk's population mask keeps the
+/// masked prim's ancestors, so a stage's sole top-level prim — the parent of
+/// every streamed chunk — is walked once per chunk.
+#[derive(Default)]
+struct Found {
+    paths: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl Found {
+    fn push(&mut self, path: String) {
+        if self.seen.insert(path.clone()) {
+            self.paths.push(path);
+        }
+    }
+}
+
+/// The `kind` prims a walk of `stage` meets, added to `out`.
+fn collect(stage: &Stage, kind: ListKind, out: &mut Found) {
     let mut stack: Vec<(Prim, bool)> = vec![(prim_at(stage, sdf::Path::abs_root()), false)];
     while let Some((prim, parent_hidden)) = stack.pop() {
         let Visit::Enter { hidden } = visit(stage, &prim, kind, parent_hidden) else {

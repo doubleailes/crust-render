@@ -10,8 +10,10 @@ and writes the output image (`crust render`), or lists what a stage holds
 ### Requirement: Subcommands
 
 The CLI SHALL require a subcommand: `render`, which renders, or `ls`, which
-lists. The render flags SHALL belong to `render`; `-l/--level` and
-`--log-file` SHALL be accepted by every subcommand, before or after its name.
+lists. The render flags, `--log-file` among them, SHALL belong to `render`;
+`-l/--level` SHALL be accepted by every subcommand, before or after its name.
+`--log-file`'s directory is optional, so it SHALL NOT be accepted where it
+could take a subcommand's name or a positional as that directory.
 
 #### Scenario: No subcommand
 
@@ -30,7 +32,10 @@ own walk so that the list is what a render would use. `kind` SHALL be one of
   prototype or beneath a `PointInstancer`; those under an invisible ancestor
   included.
 - `light`: the UsdLux lights the import reads (sphere, rect, disk, cylinder,
-  distant, dome), pruned as geometry is, invisibility included.
+  distant, dome), pruned as geometry is, invisibility included. A light the
+  import refuses for its evaluated values (a zero radius or size, a transform
+  that collapses it) SHALL still be listed: `ls` evaluates at no time code.
+- Each path SHALL be listed once, however many streamed chunks contain it.
 - `material`: every `UsdShadeMaterial` a binding can reach — all but those
   under an inactive ancestor or inside an instance's prototype.
 

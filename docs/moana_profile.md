@@ -688,7 +688,7 @@ cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --profile
 cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam -s 1 -l debug 2>&1 | grep -E 'light_links|contributed no geometry'
 # traversal counts + per-instance attribution (slow; see above)
 cargo build --release -p crust-render --features traversal-stats --target-dir target/tstats
-target/tstats/release/crust-render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
+target/tstats/release/crust render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
 # the knockout: a layer that sublayers island.usda and adds
 #   over "island" { over "isDunesB" ( active = false ) { } }
 # the before/after timing, interleaved (binaries built from one Cargo.lock)

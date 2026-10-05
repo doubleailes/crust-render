@@ -25,8 +25,9 @@ cargo run --release -- render --scanline -i samples/cornellbox.usda # row order 
 cargo run --release -- ls camera -i samples/cornellbox.usda # the --camera paths, one per line (log on stderr)
 cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; plurals accepted
 
-# Subcommands: `render` takes every flag below except -l and --log-file, which are
-# global (before or after the subcommand); `ls <camera|light|material>` lists through
+# Subcommands: `render` takes every flag below except -l, which is global (before or
+# after the subcommand). --log-file stays render's: an optional value before a
+# subcommand name or `ls`'s KIND would swallow it. `ls <camera|light|material>` lists through
 # `Scene::list_usd(path, ListKind)`, the import's own walk and pruning per kind
 # (`usd_import/listing.rs`) — keep the two walks agreeing when either changes.
 
