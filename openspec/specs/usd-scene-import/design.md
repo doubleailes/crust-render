@@ -881,16 +881,19 @@ resolution, which moves cage vertices only and warns once.
 - **ALab gaps** (Netflix Animation Studios' ALab 2.2, `samples/ALab/`, gitignored).
   Shot mk020_0281, frames 1004–1057. `entry.usda` sublayers the baked procedurals
   (fur and cloth as value-clipped `BasisCurves`), the trailer cameras and the shot. It
-  imports and animates under `-f`. Frame 1004, measured 2026-09-27: 13 302 geometries,
-  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 47 lights,
-  ~3:00 to parse (see "Where import time goes"), 33.2 GiB peak, and 3:20 to render at
-  the importer defaults (640x360, 128 spp). **`docs/alab_profile.md` is the
-  `--profile` of that render**: streamed texture lookups take 89% of render thread
-  time, and the cause was contention, not work. A shared counter was bumped on every
-  lookup, and the 2-slot microcache missed 25% once a material interleaved ~5
-  textures, so 72 threads rendered an estimated ~1.25x faster than 8 (extrapolated
-  from two `--profile` runs at different spp, not a `bench_ab.sh` A/B). Both causes
-  are fixed since; see "Streaming textures" in `openspec/specs/textures/design.md`. The earlier "~38 s at
+  imports and animates under `-f`. Frame 1004, measured 2026-10-05: 13 302 geometries,
+  21.2 M triangles plus 9.4 M cubic fur spans in memory, 1 794 materials, 43 lights
+  (the four `lgt_screenLights` link to no receiver and are dropped), ~2:57 to parse
+  (see "Where import time goes"), 28.7 GiB peak, and 23.4 s to render at the importer
+  defaults (640x360, 128 spp), so the import is 88% of the frame.
+  **`docs/alab_profile.md` is the `--profile` of that render**: texture lookups are
+  43% of render thread time and tracing 40%, and 72 threads render ~5.4x faster than 8.
+  Its first profile (2026-09-27) found the lookups at 89% and 3:20 to render, from
+  contention rather than work: a shared counter bumped on every lookup, and a 2-slot
+  microcache that missed 25% once a material interleaved ~5 textures, so 72 threads
+  rendered only ~1.25x faster than 8 (extrapolated from two `--profile` runs at
+  different spp, not a `bench_ab.sh` A/B). Both causes are fixed; see "Streaming
+  textures" in `openspec/specs/textures/design.md`. The earlier "~38 s at
   1280x720 / 64 spp" figure predates textured materials. Two download facts come
   first. The **Asset Structure** package ships every
   geometry, camera, layout and light-rig `.usd` under `fragment/` as a 213-byte
