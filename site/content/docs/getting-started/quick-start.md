@@ -35,6 +35,22 @@ binaries for:
 Unpack the archive and put the `crust` binary (`crust.exe` on Windows) on
 your `PATH`.
 
+### Nightly binaries
+
+The [`nightly` pre-release](https://github.com/doubleailes/crust-render/releases/tag/nightly)
+is rebuilt every day from the head of the default branch with the latest nightly Rust,
+and replaced only when the workspace's lints and tests passed on that same compiler. It carries
+binaries for:
+
+- `x86_64-unknown-linux-musl` (Linux)
+- `aarch64-apple-darwin` (macOS, Apple silicon)
+- `x86_64-apple-darwin` (macOS, Intel)
+- `x86_64-pc-windows-msvc` (Windows)
+
+with a `SHA256SUMS` file. Each archive's `BUILD-INFO.txt` names the commit and the
+compiler it was built from. Use it to try a change before it is in a numbered release;
+otherwise prefer the numbered releases above.
+
 ### From source
 
 ```bash

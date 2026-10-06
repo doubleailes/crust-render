@@ -101,7 +101,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     name: release ${{ matrix.target }}
-    if: github.event_name == 'release' && github.event.action == 'created'
+    # Never onto the rolling `nightly` pre-release: nightly.yml builds and
+    # publishes that one itself.
+    if: github.event_name == 'release' && github.event.action == 'created' && github.event.release.tag_name != 'nightly'
     needs: [fmt, clippy, test, deny]
     permissions:
       contents: write

@@ -361,6 +361,14 @@ impl std::ops::Deref for PooledClosure {
     }
 }
 
+impl std::ops::DerefMut for PooledClosure {
+    fn deref_mut(&mut self) -> &mut ResolvedClosure {
+        self.0
+            .as_deref_mut()
+            .expect("a live PooledClosure holds its box")
+    }
+}
+
 impl Drop for PooledClosure {
     // Inline, with the pool work out of line: every `ShadingPoint` has this
     // in its drop glue, and most of them hold no closure at all.
@@ -520,6 +528,90 @@ impl ResolvedClosure {
                 (m.sigma_t_max() > 1e-6).then_some(m)
             });
         }
+    }
+
+    /// An unbiased estimate of the weight this closure gives the arriving
+    /// ray continuing straight through: the summed contribution of its
+    /// thin-walled transmitting leaves, each `weight · tint · (1 − F(v·h))`
+    /// at one microfacet normal `h` drawn from the leaf's VNDF with
+    /// `sampler`, exactly as [`sample_lobe`] draws it for the delta sample.
+    ///
+    /// An estimate, not the value: a rough leaf's straight transmission is
+    /// the average of `1 − F(v·h)` over its microfacets, which has no closed
+    /// form. Its expectation is the delta lobe's, which is all the
+    /// integrator's pass-through needs. Zero when no leaf is one.
+    pub fn straight_transmittance(&self, sampler: PathSampler) -> Vec3A {
+        let mut sum = Vec3A::ZERO;
+        let mut uv = None;
+        for leaf in &self.leaves[..self.len] {
+            let Lobe::Specular {
+                fresnel,
+                tint,
+                ax,
+                ay,
+                mode,
+                thin_walled: true,
+                ..
+            } = leaf.lobe
+            else {
+                continue;
+            };
+            if !mode.transmits() {
+                continue;
+            }
+            let uv = *uv.get_or_insert_with(|| sampler.draw_sample_f32::<2>());
+            let v = leaf.v;
+            let v = Vec3A::new(v.x, v.y, v.z.max(1e-6)).normalize();
+            let h = sample_vndf_ggx_aniso_local(v, ax, ay, uv);
+            let vh = v.dot(h);
+            if vh <= 1e-6 {
+                continue;
+            }
+            sum += leaf.weight * tint * (1.0 - scalar(fresnel.eval(vh)));
+        }
+        sum
+    }
+
+    /// Whether any leaf is a thin-walled transmitting interface.
+    pub fn has_straight(&self) -> bool {
+        self.leaves[..self.len].iter().any(|leaf| {
+            matches!(leaf.lobe, Lobe::Specular { mode, thin_walled: true, .. } if mode.transmits())
+        })
+    }
+
+    /// Drops the straight transmission from this closure: the lobe set a
+    /// path meeting a thin wall it could have passed scatters through. A
+    /// transmission-only thin leaf leaves the tree; a thin leaf that also
+    /// reflects keeps its reflection, now sampled with the leaf's whole
+    /// selection mass (its density loses the `F` factor accordingly). Every
+    /// other leaf, weights included, is untouched, so the layering above
+    /// the sheet still attenuates what is left exactly as before.
+    pub(crate) fn exclude_straight(&mut self) {
+        let mut kept = 0;
+        let mut hair_leaves = 0;
+        for i in 0..self.len {
+            let mut leaf = self.leaves[i];
+            if let Lobe::Specular {
+                ref mut mode,
+                thin_walled: true,
+                ..
+            } = leaf.lobe
+            {
+                match *mode {
+                    ScatterMode::T => continue,
+                    ScatterMode::RT => *mode = ScatterMode::R,
+                    ScatterMode::R => {}
+                }
+            }
+            if self.hair_leaves & (1 << i) != 0 {
+                hair_leaves |= 1 << kept;
+            }
+            self.leaves[kept] = leaf;
+            kept += 1;
+        }
+        self.len = kept;
+        self.hair_leaves = hair_leaves;
+        self.select_total = self.leaves[..self.len].iter().map(|l| l.select).sum();
     }
 
     /// The resolved leaves, for probes.

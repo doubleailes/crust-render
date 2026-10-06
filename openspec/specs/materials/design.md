@@ -334,6 +334,14 @@
     Fresnel, the reflection layer's `1 − E_R` times the transmission's `1 − F`,
     which Typhoon's `standard_surface` shares. A thin-walled surface transmits
     straight through; a thick one hands the refracted ray the interior medium.
+    The straight transmission is the integrator's to carry, as a pass-through
+    (rendering design record, "Thin walls are pass-throughs"):
+    `ResolvedClosure::straight_transmittance` estimates it with one VNDF draw
+    (a rough leaf's `1 − F(v·h)` averaged over its microfacets has no closed
+    form, so `T` is an unbiased estimate), and `exclude_straight` leaves what a
+    path meeting the wall scatters through — the transmission-only thin leaves
+    dropped, a thin `RT` leaf sampled as `R`, every other weight untouched, so the
+    layering above the sheet still attenuates the rest as before.
   - **`subsurface_bsdf` is a random walk — Typhoon's.** The leaf
     (`Lobe::Subsurface`) has no value toward any direction, so NEE at the entry
     sees nothing of it, exactly as Typhoon's `EvalNode` returns 0 for it.
@@ -924,7 +932,10 @@
   with the sheet's internal bounces. Moving the leaf to the window model would
   take the MaterialX path away from its reference, and in a surface graph the
   reflection is a separate leaf layered above, so the leaf would count it twice.
-  The same parameters authored both ways shade differently.
+  The same parameters authored both ways shade differently, and pass shadow rays
+  differently: each path's straight transmittance `T` is its own BSDF's (the window
+  model's `(1−R)/(1+R)` natively, one interface's `1 − F` in the closure), which is
+  what keeps NEE and the bounce side in agreement on each.
 - **Capacity.** A tree with more than 8 live-reachable leaves is refused, whole.
 - **Pattern nodes.** Only document-scope and `<nodegraph>` nodes are read;
   `<nodedef>` custom node *implementations* are not, so a graph instantiating one

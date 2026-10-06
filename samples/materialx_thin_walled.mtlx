@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!--
+  Thin-walled transmissive sheets: a window pane and a lampshade film. Their
+  transmission is a delta lobe that keeps the ray's direction, which the
+  integrator passes like a cutout: shadow rays are attenuated by it rather
+  than blocked (samples/thin_window.usda).
+-->
+<materialx version="1.39">
+  <!-- A tinted window: all transmission, thin-walled, slightly rough. -->
+  <open_pbr_surface name="openpbr_window" type="surfaceshader">
+    <input name="transmission_weight" type="float" value="1" />
+    <input name="transmission_color" type="color3" value="0.95, 0.6, 0.3" />
+    <input name="specular_roughness" type="float" value="0.15" />
+    <input name="geometry_thin_walled" type="boolean" value="true" />
+  </open_pbr_surface>
+  <surfacematerial name="mtlx_openpbr_window" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="openpbr_window" />
+  </surfacematerial>
+
+  <!-- A lampshade film: part diffuse, part straight transmission. -->
+  <standard_surface name="std_film" type="surfaceshader">
+    <input name="base" type="float" value="0.4" />
+    <input name="base_color" type="color3" value="0.9, 0.85, 0.7" />
+    <input name="transmission" type="float" value="0.7" />
+    <input name="transmission_color" type="color3" value="0.5, 0.8, 0.9" />
+    <input name="specular_roughness" type="float" value="0.1" />
+    <input name="thin_walled" type="boolean" value="true" />
+  </standard_surface>
+  <surfacematerial name="mtlx_standard_film" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="std_film" />
+  </surfacematerial>
+</materialx>

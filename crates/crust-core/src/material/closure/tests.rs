@@ -1070,3 +1070,109 @@ fn only_a_transmitting_neighbour_mixes_a_fibre_vertex() {
     assert!(!with(r#"<dielectric_bsdf name="n" type="BSDF" />"#));
     assert!(!with(r#"<oren_nayar_diffuse_bsdf name="n" type="BSDF" />"#));
 }
+
+/// Thin-walled sheets as MaterialX authors them: `open_pbr_surface` and
+/// `standard_surface` with full transmission (a `T` leaf under an `R` one,
+/// rough by default), and an `RT` dielectric sheet.
+fn thin_sheets() -> Vec<(&'static str, String, &'static str)> {
+    vec![
+        (
+            "open_pbr_surface",
+            doc(r#"<open_pbr_surface name="s" type="surfaceshader">
+                 <input name="transmission_weight" type="float" value="1" />
+                 <input name="transmission_color" type="color3" value="0.9, 0.5, 0.2" />
+                 <input name="specular_roughness" type="float" value="0.3" />
+                 <input name="geometry_thin_walled" type="boolean" value="true" />
+               </open_pbr_surface>"#),
+            "s",
+        ),
+        (
+            "standard_surface",
+            doc(r#"<standard_surface name="s" type="surfaceshader">
+                 <input name="base" type="float" value="0.3" />
+                 <input name="transmission" type="float" value="0.8" />
+                 <input name="transmission_color" type="color3" value="0.4, 0.8, 0.6" />
+                 <input name="specular_roughness" type="float" value="0.1" />
+                 <input name="thin_walled" type="boolean" value="true" />
+               </standard_surface>"#),
+            "s",
+        ),
+        ("RT dielectric", GLASS.to_string(), "thin"),
+    ]
+}
+
+/// The mean of the straight-transmittance estimate plus the directional
+/// albedo of the closure without its straight leaves is the whole closure's
+/// albedo, and the reduced closure has no delta left.
+#[test]
+fn straight_transmittance_plus_the_rest_is_the_whole_closure() {
+    let n = 1 << 14;
+    for (name, body, root) in thin_sheets() {
+        for theta in [0.0f32, 0.7, 1.2] {
+            let full = resolved(&body, root, theta, true);
+            assert!(full.has_straight(), "{name}");
+            let mut rest = full.clone();
+            rest.exclude_straight();
+            assert!(!rest.has_straight(), "{name}");
+            let (r, rec) = (arriving(theta), hit(true));
+            let mut s = S(0);
+            let (mut t, mut part) = (Vec3A::ZERO, Vec3A::ZERO);
+            for _ in 0..n {
+                let k = s.next();
+                t += full.straight_transmittance(k);
+                if let Some(x) = rest.scatter(&r, &rec, k) {
+                    assert!(!x.delta, "{name}: the straight leaves were excluded");
+                    part += x.value / x.pdf;
+                }
+            }
+            let (t, part) = (t / n as f32, part / n as f32);
+            let whole = albedo(&full, theta, true, n);
+            let err = (t + part - whole).abs().max_element();
+            assert!(
+                err < 0.015,
+                "{name} at {theta}: T {t} + rest {part} vs whole {whole}"
+            );
+        }
+    }
+}
+
+/// Without its straight leaves, every sample carries the value and the
+/// density `eval` reports, and the values are the whole closure's.
+#[test]
+fn the_reduced_closure_samples_what_eval_reports() {
+    for (name, body, root) in thin_sheets() {
+        let full = resolved(&body, root, 0.5, true);
+        let mut rest = full.clone();
+        rest.exclude_straight();
+        let (r, rec) = (arriving(0.5), hit(true));
+        let mut s = S(0);
+        let mut checked = 0;
+        for _ in 0..512 {
+            let Some(x) = rest.scatter(&r, &rec, s.next()) else {
+                continue;
+            };
+            let wi = x.ray.direction();
+            let (v, pdf) = rest.eval(&r, &rec, wi).unwrap();
+            assert!((v - x.value).abs().max_element() < 1e-4 * (1.0 + v.max_element()));
+            assert!(
+                (pdf - x.pdf).abs() < 1e-4 * (1.0 + pdf),
+                "{name}: {pdf} vs {}",
+                x.pdf
+            );
+            assert_eq!(full.eval(&r, &rec, wi).unwrap().0, v, "{name}");
+            checked += 1;
+        }
+        assert!(checked > 64, "{name}: {checked}");
+    }
+}
+
+/// A thick glass has no straight leaf: excluding one changes nothing.
+#[test]
+fn a_thick_glass_has_no_straight_transmission() {
+    let c = resolved(GLASS, "thick", 0.3, true);
+    assert!(!c.has_straight());
+    assert_eq!(
+        c.straight_transmittance(PathSampler::new(0, 0, 0, 1)),
+        Vec3A::ZERO
+    );
+}
