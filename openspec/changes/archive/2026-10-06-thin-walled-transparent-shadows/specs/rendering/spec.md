@@ -66,7 +66,7 @@ straight transmittance, and SHALL NOT be blocked by it.
 - **WHEN** a thin-walled sheet with `transmission_weight = 1` and a coloured
   `transmission_color` hangs between a diffuse floor and a sphere light
 - **THEN** the power-MIS, light-only and BSDF-only estimates of the floor agree,
-  and light sampling alone no longer finds the floor unlit
+  and light sampling alone finds the light through the sheet
 
 #### Scenario: A sheet that is also a cutout
 
