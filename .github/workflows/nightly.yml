@@ -18,6 +18,13 @@ name: Nightly
 #
 # Whether any of these checks blocks a merge is decided by branch
 # protection, not here. rust.yml's release job does not depend on them.
+#
+# The scheduled run (and a manual dispatch on the default branch) also
+# publishes a nightly binary built with the latest nightly, as the rolling
+# `nightly` pre-release: see the `nightly-build` and `nightly-publish` jobs
+# at the end. It is published only when every check above, the `latest`
+# test leg included, passed in the same run; otherwise the previous nightly
+# stays up.
 
 on:
   push:
@@ -32,10 +39,12 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes the older run.
+# A newer push to the same ref supersedes the older run. Runs that publish
+# the nightly release queue in a group of their own instead, so a push to
+# the default branch can never cancel one halfway through replacing it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'release' || 'ci' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,6 +103,19 @@ jobs:
           key: ${{ matrix.channel }}
       - name: Run tests
         run: cargo test --workspace --no-fail-fast
+      # The nightly release must not ship a compiler whose tests failed, but
+      # this leg is `continue-on-error`, so whether a job that `needs` it
+      # still runs is not something to lean on. It leaves a receipt instead,
+      # and nightly-publish refuses to publish without one.
+      - name: Record the passing toolchain for the nightly release
+        if: matrix.channel == 'latest' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch))
+        run: rustc --version > tested-toolchain.txt
+      - if: matrix.channel == 'latest' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch))
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-tested
+          path: tested-toolchain.txt
+          retention-days: 1
 
   # What only nightly can build. The kernel is linted and tested with 8-wide
   # nodes (its tests pin both node layouts, and hit results against a linear
@@ -127,3 +149,156 @@ jobs:
         run: cargo test -p crust-rt --features bvh8 --no-fail-fast
       - name: Check the renderer with bvh8 forwarded
         run: cargo check -p crust-render --features bvh8
+
+  # The nightly binary: the `crust` CLI, release profile, built with the
+  # latest nightly for each target. Only the scheduled run and a manual
+  # dispatch on the default branch build it; pushes and pull requests never
+  # do. Like every `latest` job it is `continue-on-error`: a nightly
+  # compiler that cannot build or run the renderer is reported on the job,
+  # and the previous nightly release stays up.
+  #
+  # The targets follow rust.yml's releases, except Windows, which builds
+  # natively for MSVC (with a static CRT, so no redistributable is needed)
+  # rather than cross-compiling for GNU, and macOS, which adds Apple
+  # silicon. The Linux build is musl, so it runs on any distribution.
+  nightly-build:
+    name: nightly binary (${{ matrix.target }})
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+    needs: [clippy, test, bvh8]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            rustflags: -C target-feature=+crt-static
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled on the Apple silicon runner, so it is not run.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      # `--target` is always passed, so these reach the shipped binary but
+      # not the host's build scripts and proc macros.
+      RUSTFLAGS: -D warnings ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal --target ${{ matrix.target }}
+          # RUSTUP_TOOLCHAIN outranks rust-toolchain.toml (see above).
+          echo "RUSTUP_TOOLCHAIN=nightly" >> "$GITHUB_ENV"
+          RUSTUP_TOOLCHAIN=nightly rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p crust-render --target ${{ matrix.target }}
+      # A binary that builds but cannot load a USD stage and write an image
+      # (the JIT included) is not worth shipping.
+      - name: Smoke render
+        if: ${{ !matrix.cross }}
+        run: |
+          target/${{ matrix.target }}/release/crust render \
+            -i samples/cornellbox.usda -o "$RUNNER_TEMP/smoke.exr" -s 1
+          test -s "$RUNNER_TEMP/smoke.exr"
+      - name: Package
+        run: |
+          name=crust-nightly-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          case "${{ matrix.target }}" in
+            *windows*) bin=crust.exe ;;
+            *) bin=crust ;;
+          esac
+          cp "target/${{ matrix.target }}/release/$bin" README.md LICENSE "dist/$name/"
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "target: ${{ matrix.target }}"
+            rustc -vV
+          } > "dist/$name/BUILD-INFO.txt"
+          cd dist
+          case "${{ matrix.target }}" in
+            *windows*) 7z a -tzip "$name.zip" "$name" > /dev/null; archive=$name.zip ;;
+            *) tar -czf "$name.tar.gz" "$name"; archive=$name.tar.gz ;;
+          esac
+          rm -r "$name"
+          # One checksum file per archive; nightly-publish merges them.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+      # Which compiler built it, so nightly-publish can check it is the one
+      # the `latest` test leg passed on (a new nightly may land in between).
+      - name: Record the toolchain
+        run: rustc --version > "dist/toolchain-${{ matrix.target }}.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  # Replaces the rolling `nightly` pre-release with this run's binaries,
+  # all of them or none: a missing target, or a missing receipt from the
+  # `latest` test leg, leaves the previous release untouched. The release is
+  # deleted and recreated so its tag moves to the commit that was built.
+  # Creating it with GITHUB_TOKEN triggers no workflow, so rust.yml's
+  # `release: created` job does not run for it (and skips the tag anyway).
+  nightly-publish:
+    name: publish nightly release
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)) }}
+    needs: [nightly-build]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    env:
+      TARGETS: x86_64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-apple-darwin x86_64-apple-darwin
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: nightly-*
+          path: dist
+          merge-multiple: true
+      - name: Check every target against the test receipt
+        run: |
+          ls -l dist
+          test -s dist/tested-toolchain.txt || {
+            echo "::error::test (latest) did not pass in this run; not publishing"; exit 1; }
+          for t in $TARGETS; do
+            ls dist/crust-nightly-$t.* > /dev/null 2>&1 || {
+              echo "::error::no nightly binary for $t; not publishing"; exit 1; }
+            cmp -s dist/tested-toolchain.txt "dist/toolchain-$t.txt" || {
+              echo "::error::$t was built with $(cat "dist/toolchain-$t.txt"), tested with $(cat dist/tested-toolchain.txt); not publishing"
+              exit 1; }
+          done
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          date=$(date -u +%Y-%m-%d)
+          {
+            echo "Built from ${GITHUB_SHA} on ${date} with \`$(cat tested-toolchain.txt)\`,"
+            echo "the latest nightly Rust, after the workspace's tests passed on that same toolchain."
+            echo
+            echo "A nightly build is untested beyond CI. For a stable binary, take the"
+            echo "latest numbered release."
+          } > notes.md
+          gh release delete nightly --cleanup-tag --yes || true
+          # A tag left behind without its release would pin `create` to the
+          # old commit (it ignores --target for an existing tag).
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly" || true
+          gh release create nightly --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Nightly ${date}" --notes-file notes.md \
+            crust-nightly-*.tar.gz crust-nightly-*.zip SHA256SUMS
