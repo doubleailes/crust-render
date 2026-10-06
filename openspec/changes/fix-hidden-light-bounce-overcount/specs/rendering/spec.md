@@ -4,7 +4,7 @@
 
 A path segment or shadow ray that passes hidden light sources, cutouts or thin walls
 SHALL count each surface it crosses exactly once. A hit on the same primitive, from the
-same side, immediately after a crossing of it is a numerical re-hit and SHALL NOT add
+same side, within `1e-4 · t` of a crossing of it is a numerical re-hit and SHALL NOT add
 emission, opacity or transmittance a second time. Two distinct surfaces, however close,
 SHALL both be crossed.
 

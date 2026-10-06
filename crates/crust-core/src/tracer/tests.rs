@@ -333,3 +333,47 @@ fn batch_schedule_survives_a_budget_near_u32_max() {
     // A minimum past the budget schedules nothing.
     assert!(batch_schedule(64, u32::MAX).is_empty());
 }
+
+/// A pass-through walk takes a hit for the surface it just crossed, met
+/// again through rounding, when it is the same primitive from the same side
+/// within the re-hit window of the crossing — and for a new surface
+/// otherwise: the other side (an exit), another primitive, or farther along.
+#[test]
+fn a_re_hit_is_the_same_primitive_from_the_same_side_within_the_window() {
+    use super::path::{LastCrossing, RE_HIT_WINDOW};
+    use crate::hittable::HitRecord;
+    use crate::rt_world::WorldHit;
+    use crate::{OpenPBR, Vec3A};
+    let mat = OpenPBR::diffuse(Vec3A::splat(0.5));
+    let hit = |geom_id: u32, prim_id: u32, front_face: bool| WorldHit {
+        rec: HitRecord {
+            front_face,
+            ..HitRecord::new()
+        },
+        mat: &mat,
+        geom_id,
+        prim_id,
+    };
+    for t in [0.02, 0.5, 8.0, 3e4] {
+        let last = LastCrossing::of(&hit(3, 7, true), t);
+        let window = t.max(1.0) * RE_HIT_WINDOW;
+        // The re-hit a restarted segment can report lies past the restart's
+        // offset and short of the window.
+        let again = t + 0.5 * window;
+        assert!(last.repeats(&hit(3, 7, true), again), "at {t}");
+        assert!(last.repeats(&hit(3, 7, true), t + 0.99 * window), "at {t}");
+        assert!(
+            !last.repeats(&hit(3, 7, true), t + 1.01 * window),
+            "at {t}: past the window"
+        );
+        assert!(!last.repeats(&hit(3, 7, false), again), "at {t}: the exit");
+        assert!(
+            !last.repeats(&hit(3, 8, true), again),
+            "at {t}: another primitive"
+        );
+        assert!(
+            !last.repeats(&hit(4, 7, true), again),
+            "at {t}: another geometry"
+        );
+    }
+}

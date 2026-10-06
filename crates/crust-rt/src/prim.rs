@@ -188,18 +188,37 @@ impl Prim for SpherePrim {
         let a = ray.dir.length_squared();
         let half_b = oc.dot(ray.dir);
         let c = oc.length_squared() - self.radius * self.radius;
-        let discriminant = half_b * half_b - a * c;
+        // The discriminant from the ray's closest approach to the centre,
+        // `l = oc − (oc·d/a) d`: `a·(r² − |l|²)` is `half_b² − a·c` in exact
+        // arithmetic, but the textbook form subtracts two terms of order
+        // |oc|² to leave one of order r², and from 8 units away a sphere of
+        // radius 0.05 had 1e-4 of rounding on its distance — enough for a
+        // segment restarted just short of the hit to meet it again. Both
+        // terms here are of order r², so the error scales with the sphere,
+        // not its distance (Haines et al., Ray Tracing Gems ch. 7).
+        let l = oc - ray.dir * (half_b / a);
+        let discriminant = a * (self.radius * self.radius - l.length_squared());
         if discriminant < 0.0 {
             return None;
         }
-        let sqrt_d = discriminant.sqrt();
-        let mut root = (-half_b - sqrt_d) / a;
-        if root <= t_min || root >= t_max {
-            root = (-half_b + sqrt_d) / a;
-            if root <= t_min || root >= t_max {
-                return None;
-            }
+        // The stable root pair: `q` adds the square root to `half_b` rather
+        // than cancelling against it, and the other root follows from the
+        // product `c/a`. `q == 0` is a tangent through the origin, both
+        // roots at `t = 0`; comparing against `t_min` from below also
+        // rejects the NaN a zero direction produces.
+        let q = -half_b - half_b.signum() * discriminant.sqrt();
+        if q == 0.0 {
+            return None;
         }
+        let (t0, t1) = (c / q, q / a);
+        let (near, far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
+        let root = if near > t_min && near < t_max {
+            near
+        } else if far > t_min && far < t_max {
+            far
+        } else {
+            return None;
+        };
         Some(PrimHit {
             t: root,
             outward: (ray.at(root) - self.center) / self.radius,
@@ -306,13 +325,24 @@ impl Prim for CylinderPrim {
         }
         let half_b = oc_perp.dot(d_perp);
         let c = oc_perp.length_squared() - self.radius * self.radius;
-        let discriminant = half_b * half_b - a * c;
+        // The sphere's closest-approach discriminant and stable root pair,
+        // in the projected plane (see `SpherePrim::hit`): a far, thin tube
+        // had the same 1e-4 of rounding on its distance.
+        let l = oc_perp - d_perp * (half_b / a);
+        let discriminant = a * (self.radius * self.radius - l.length_squared());
         if discriminant < 0.0 {
             return None;
         }
-        let sqrt_d = discriminant.sqrt();
-        for t in [(-half_b - sqrt_d) / a, (-half_b + sqrt_d) / a] {
-            if t <= t_min || t >= t_max {
+        let q = -half_b - half_b.signum() * discriminant.sqrt();
+        if q == 0.0 {
+            return None;
+        }
+        let (t0, t1) = (c / q, q / a);
+        let (near, far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
+        for t in [near, far] {
+            // From below, so a NaN root is rejected too.
+            let in_range = t > t_min && t < t_max;
+            if !in_range {
                 continue;
             }
             let rel = oc + t * ray.dir;

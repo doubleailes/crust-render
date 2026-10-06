@@ -28,19 +28,22 @@ transmittance.
 
 ## What Changes
 
-- **Accurate analytic sphere hits.** `SpherePrim::hit` computes the discriminant from the
-  closest approach (Haines et al., *Ray Tracing Gems* ch. 7):
+- **Accurate analytic sphere and cylinder hits.** `SpherePrim::hit` computes the
+  discriminant from the closest approach (Haines et al., *Ray Tracing Gems* ch. 7):
   `disc = r² − |oc − (oc·d̂) d̂|²`. The near root is taken in the stable form. The hit
   distance becomes accurate to about 1e-7·t instead of about 1e-4 absolute.
+  `CylinderPrim::hit`, the same quadratic in the plane perpendicular to the axis, takes
+  the same form.
 - **Each surface is crossed once.** Every pass-through walk (hidden light sources,
   cutouts, thin walls, on the bounce and the shadow side) drops a hit on the same
-  geometry, from the same side, within a relative distance of the crossing it has just
-  recorded. That is a numerical re-hit, not a surface: no closed or single-sided surface
-  can be entered twice in a row from the same side. This guards every primitive, not
-  only spheres.
-- **Images:** the over-count disappears. Scenes with analytic spheres (sphere lights,
-  `Sphere` prims) change at the ulp level wherever a sphere is hit, and by noise alone
-  otherwise. Scenes without spheres and without pass-throughs stay bit-identical.
+  geometry, from the same side, within a relative distance (1e-4) of the crossing it has
+  just recorded. That is a numerical re-hit, not a surface: no closed or single-sided
+  surface can be entered twice in a row from the same side. This guards every primitive,
+  not only spheres.
+- **Images:** the over-count disappears. Scenes with analytic spheres or cylinders
+  (sphere and cylinder lights, `Sphere` prims) change at the ulp level wherever one is
+  hit, and by noise alone otherwise. Scenes without them and without pass-throughs stay
+  bit-identical.
 
 ## Capabilities
 
@@ -50,8 +53,8 @@ None.
 
 ### Modified Capabilities
 
-- `intersection-kernel`: a new requirement, "Analytic spheres report accurate hit
-  distances".
+- `intersection-kernel`: a new requirement, "Analytic spheres and cylinders report
+  accurate hit distances".
 - `rendering`: a new requirement, "A pass-through crosses each surface once".
 
 This change fixes the implementation of `camera-invisible-lights-do-not-occlude` and
@@ -59,12 +62,12 @@ should land on its branch before that change merges.
 
 ## Impact
 
-- `crates/crust-rt/src/prim.rs`: `SpherePrim::hit`. The instanced unit sphere goes through
-  the same function in local space.
+- `crates/crust-rt/src/prim.rs`: `SpherePrim::hit` and `CylinderPrim::hit`. The
+  instanced unit shapes go through the same functions in local space.
 - `crates/crust-core/src/tracer/path.rs`: `pass_cutouts`, `pass_walls`, `cutout_through`
   and the shadow-side thin-wall walk gain the one-crossing guard.
 - Tests: a kernel precision test, a re-hit test for the pass-through walk, and the
   strategy-agreement repro as an integration test.
-- Performance: the closest-approach form costs a few more flops per sphere test. The
-  guard is one comparison per crossing, and the walk runs only in worlds with
+- Performance: the closest-approach form costs a few more flops per sphere or cylinder
+  test. The guard is one comparison per crossing, and the walk runs only in worlds with
   pass-throughs.

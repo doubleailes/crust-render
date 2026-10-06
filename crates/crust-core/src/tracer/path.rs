@@ -907,6 +907,57 @@ fn resume_before(t: f32) -> f32 {
     t - TRACE_T_MIN + t.abs().max(1.0) * 1e-5
 }
 
+/// The surface a pass-through walk last crossed, and where: the one hit the
+/// restarted segment must not report again.
+///
+/// [`resume_before`]'s step assumes the kernel's `t` is accurate to better
+/// than 1e-5·t. The analytic sphere's was not — its textbook discriminant
+/// lost 1e-4 from 8 units away — and the restarted segment met the entry it
+/// had just passed, so a hidden sphere light was collected twice on a third
+/// of the bounces that crossed it (`every_strategy_agrees_on_a_small_far_hidden_light`).
+/// The kernel is fixed; this is the backstop for every primitive: a hit on
+/// the same primitive, from the same side, within [`RE_HIT_WINDOW`] of the
+/// crossing just recorded is a re-hit, since no closed or single-sided
+/// surface is entered twice in a row from the same side. The window is
+/// narrow on purpose: inside a nested prototype every placement of a leaf
+/// part reports one id (`InstanceHitId::As`), and a wider window would take
+/// a second instanced card stacked that close for a re-hit.
+#[derive(Clone, Copy)]
+pub(super) struct LastCrossing {
+    geom_id: u32,
+    prim_id: u32,
+    front_face: bool,
+    /// Along the segment's own ray.
+    t: f32,
+}
+
+/// How far past a crossing, relative to its distance (and absolute below
+/// 1, as [`resume_before`]'s step), a hit on the same surface is its
+/// rounding rather than a second surface: 100× the kernel's pinned sphere
+/// and cylinder error (`a_small_far_sphere_reports_an_accurate_distance`).
+pub(super) const RE_HIT_WINDOW: f32 = 1e-4;
+
+impl LastCrossing {
+    /// The crossing of `h`, at `t` along the segment's ray.
+    pub(super) fn of(h: &WorldHit, t: f32) -> LastCrossing {
+        LastCrossing {
+            geom_id: h.geom_id,
+            prim_id: h.prim_id,
+            front_face: h.rec.front_face,
+            t,
+        }
+    }
+
+    /// Whether `h`, at `t` along the segment's ray, is this crossing met
+    /// again.
+    pub(super) fn repeats(self, h: &WorldHit, t: f32) -> bool {
+        h.geom_id == self.geom_id
+            && h.prim_id == self.prim_id
+            && h.rec.front_face == self.front_face
+            && t <= self.t + self.t.abs().max(1.0) * RE_HIT_WINDOW
+    }
+}
+
 /// Where a shadow ray toward a light sample `distance` away stops: short of
 /// the light's own surface, which is in the shadow mask when the camera sees
 /// it (a visible source occludes other lights). The tracer's 0.001, or a relative step once that falls below the
@@ -951,12 +1002,21 @@ fn cutout_through(
     // Cutouts alone: the grey product, in the scalar the walk always kept.
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = 1.0;
-    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+    let mut last: Option<LastCrossing> = None;
+    let mut crossing = 0;
+    loop {
         stats.cutout_rays += 1;
         let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
         let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
             return Vec3A::splat(kept);
         };
+        let at = t + h.rec.t;
+        if last.is_some_and(|l| l.repeats(&h, at)) {
+            // The surface just crossed, reported again: step past it.
+            t = resume_before(at);
+            segment = restarted(ray, t);
+            continue;
+        }
         if crossing == MAX_CUTOUT_CROSSINGS || !h.mat.has_cutout() {
             return Vec3A::ZERO;
         }
@@ -964,10 +1024,11 @@ fn cutout_through(
         if kept <= 0.0 {
             return Vec3A::ZERO;
         }
-        t = resume_before(t + h.rec.t);
+        last = Some(LastCrossing::of(&h, at));
+        crossing += 1;
+        t = resume_before(at);
         segment = restarted(ray, t);
     }
-    unreachable!("the last crossing returns")
 }
 
 /// [`cutout_through`] in a world with thin walls: the same walk, with each
@@ -983,12 +1044,20 @@ fn walls_through(
 ) -> Vec3A {
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = Vec3A::ONE;
-    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+    let mut last: Option<LastCrossing> = None;
+    let mut crossing = 0;
+    loop {
         stats.cutout_rays += 1;
         let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
         let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
             return kept;
         };
+        let at = t + h.rec.t;
+        if last.is_some_and(|l| l.repeats(&h, at)) {
+            t = resume_before(at);
+            segment = restarted(ray, t);
+            continue;
+        }
         let cutout = h.mat.has_cutout();
         let straight = h.mat.has_straight_transmission();
         if crossing == MAX_CUTOUT_CROSSINGS || !(cutout || straight) {
@@ -1010,10 +1079,11 @@ fn walls_through(
         if kept.max_element() <= 0.0 {
             return Vec3A::ZERO;
         }
-        t = resume_before(t + h.rec.t);
+        last = Some(LastCrossing::of(&h, at));
+        crossing += 1;
+        t = resume_before(at);
         segment = restarted(ray, t);
     }
-    unreachable!("the last crossing returns")
 }
 
 /// `rec` with no texture footprint: opacity is point-sampled on both sides.
@@ -1080,11 +1150,25 @@ fn pass_cutouts<'w>(
     // Cutouts alone: the loop as it always was.
     let mut rng = None;
     let mut passed = 0;
-    for _ in 0..MAX_CUTOUT_CROSSINGS {
+    let mut last: Option<LastCrossing> = None;
+    let mut crossing = 0;
+    loop {
         let Some(h) = hit.as_ref() else {
             return false;
         };
+        if last.is_some_and(|l| l.repeats(h, h.rec.t)) {
+            // The surface just crossed, reported again: step past it, on
+            // the same crossing budget.
+            stats.cutout_rays += 1;
+            *hit = hit_past(world, ray, h.rec.t);
+            continue;
+        }
+        if crossing == MAX_CUTOUT_CROSSINGS {
+            break;
+        }
+        crossing += 1;
         if emitters && world.is_transparent_emitter(h.geom_id) {
+            last = Some(LastCrossing::of(h, h.rec.t));
             thin.crossed.push(Crossing::at(ray, h, passed));
             stats.cutout_rays += 1;
             *hit = hit_past(world, ray, h.rec.t);
@@ -1103,6 +1187,7 @@ fn pass_cutouts<'w>(
         if u < opacity {
             break;
         }
+        last = Some(LastCrossing::of(h, h.rec.t));
         passed += 1;
         stats.cutout_passes += 1;
         stats.cutout_rays += 1;
@@ -1137,11 +1222,23 @@ fn pass_walls<'w>(
     thin.reduced = false;
     let emitters = world.has_transparent_emitters();
     let mut rng = None;
-    for crossing in 0..MAX_CUTOUT_CROSSINGS {
-        let Some(h) = hit.as_ref() else {
+    let mut last: Option<LastCrossing> = None;
+    let mut crossing = 0;
+    while let Some(h) = hit.as_ref() {
+        if last.is_some_and(|l| l.repeats(h, h.rec.t)) {
+            stats.cutout_rays += 1;
+            *hit = hit_past(world, ray, h.rec.t);
+            continue;
+        }
+        if crossing == MAX_CUTOUT_CROSSINGS {
             break;
-        };
+        }
+        // Numbered as the walk always was, emitter crossings included: the
+        // thin-wall draws below are keyed on it.
+        let crossing_index = crossing;
+        crossing += 1;
         if emitters && world.is_transparent_emitter(h.geom_id) {
+            last = Some(LastCrossing::of(h, h.rec.t));
             thin.crossed.push(Crossing::at(ray, h, thin.kinds.len()));
             stats.cutout_rays += 1;
             *hit = hit_past(world, ray, h.rec.t);
@@ -1159,7 +1256,7 @@ fn pass_walls<'w>(
             1.0
         };
         if straight {
-            let draws = vertex.new_domain(K_THIN).new_domain(crossing as i32);
+            let draws = vertex.new_domain(K_THIN).new_domain(crossing_index as i32);
             let tr = straight_transmittance(h.mat, ray, &rec, draws.new_domain(0));
             let p = Vec3A::splat(1.0 - opacity) + opacity * tr;
             let q = p.max_element();
@@ -1188,6 +1285,7 @@ fn pass_walls<'w>(
                 break;
             }
         }
+        last = Some(LastCrossing::of(h, h.rec.t));
         thin.kinds.push(straight);
         stats.cutout_passes += 1;
         stats.cutout_rays += 1;

@@ -804,6 +804,43 @@ fn a_surface_just_behind_a_cutout_is_not_skipped() {
     }
 }
 
+/// Two distinct surfaces, however close, are both crossed. Two half-opaque
+/// black cards on different primitives, half a millimetre apart: both sides
+/// attenuate the light by `(1 − 0.5)²`. The re-hit guard that keeps a walk
+/// from crossing one surface twice (the same primitive, the same side,
+/// within 1e-4·t) must not take the second card for the first met again.
+#[test]
+fn two_cards_close_together_are_both_crossed() {
+    let pair = |w: &mut WorldBuilder| {
+        let mesh = |y: f32| {
+            let (vertices, indices) = sheets(1, y, 0.0, 50.0);
+            Geometry::TriangleMesh {
+                vertices,
+                indices,
+                normals: None,
+            }
+        };
+        let half = OpenPBR {
+            geometry_opacity: 0.5,
+            ..OpenPBR::diffuse(Vec3A::ZERO)
+        };
+        w.attach(mesh(2.5), Arc::new(half.clone()));
+        w.attach(mesh(2.5005), Arc::new(half));
+    };
+    let (_, open) = floor_under_light(|_| {}, SamplingStrategy::PowerMis, 256, RayCone::default());
+    for (s, n, tol) in [
+        (SamplingStrategy::LightOnly, 256, 1e-3),
+        (SamplingStrategy::BsdfOnly, 16_384, 0.05),
+    ] {
+        let (_, m) = floor_under_light(pair, s, n, RayCone::default());
+        let expected = 0.25 * open;
+        assert!(
+            (m - expected).abs() < tol * expected,
+            "{s:?}: {m} vs {expected} through two half cards ({open} open)"
+        );
+    }
+}
+
 /// A black sheet whose opacity depends on the texture footprint it is asked
 /// with: absent under a filtered lookup, present under a point sample.
 struct FootprintMask;
