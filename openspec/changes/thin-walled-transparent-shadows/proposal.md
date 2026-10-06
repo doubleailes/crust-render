@@ -55,8 +55,10 @@ None.
 ### Modified Capabilities
 
 - `rendering`: "Cutout surfaces are stochastic presence" is restated so shadow
-  rays are attenuated, not blocked, by thin-walled transmission. A new
-  requirement, "Thin-walled transmission is a pass-through", is added.
+  rays are attenuated, not blocked, by thin-walled transmission. Four new
+  requirements are added: "Thin walls report their straight transmittance",
+  "Shadow rays pass thin walls", "Paths pass thin walls stochastically" and
+  "Thin-wall passes keep their meaning".
 
 ## Impact
 
