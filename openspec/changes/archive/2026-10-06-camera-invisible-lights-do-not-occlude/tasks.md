@@ -12,18 +12,20 @@
 
 ## 2. Bounce side (`tracer/path.rs`)
 
-- [x] 2.1 Add `World::has_transparent_emitters()`, set when any light source was
-      attached without `MASK_SHADOW` and without `MASK_CAMERA` (design D3).
-      Verify: false on a world with only camera-visible lights.
+- [x] 2.1 Add `World::has_transparent_emitters()`, set when any geometry was
+      marked with `WorldBuilder::set_transparent_emitter`. The importer marks a
+      light source with no authored `crust:rayMask` and no camera visibility
+      (design D3). Verify: false on a world with only camera-visible lights.
 - [x] 2.2 After `pass_cutouts`, when the hit is a transparent emitter, add its
       emission with `bounce_emission_weight` to the previous record and restart
       the segment past it, sharing the cutout crossing budget (design D4). Spend
       no depth and record no vertex. Verify with a unit test: a bounce ray
       through a hidden sphere light toward a second one collects both
       emissions.
-- [x] 2.3 Extend `VertexRec` to hold one emission slot plus an inline overflow
-      (design D2). Make `eval_all` / `eval_split` and the LPE routing emit one `L`
-      event per crossed emitter. Verify: the AOV test pinning `C.*[LO]` to the
+- [x] 2.3 Extend `VertexRec` with the crossings' weighted sum (`crossed`, plus
+      `crossed_raw` for training), and record each crossing for the LPE
+      routing (`Route::cross`) so that it emits one `L` event per crossed
+      emitter (design D2). Verify: the AOV test pinning `C.*[LO]` to the
       beauty passes on a new scene where a bounce crosses two hidden lights.
 
 ## 3. Equivalence and cost
