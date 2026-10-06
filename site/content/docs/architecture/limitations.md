@@ -57,6 +57,13 @@ render.
 
 ## Materials and textures
 
+- **Thick glass casts a solid shadow.** A closed dielectric (a bottle, a glass, a jar)
+  bends the light that crosses it, so shadow rays stop at it. What lies behind or inside
+  it is lit only by light that refracts through it, which is slow to converge. A
+  thin-walled transmissive surface (a window pane, a soap film) is the exception: shadow
+  rays pass through it, tinted. Mark a pane or a sheet thin-walled
+  ([`geometryThinWalled`](@/docs/usd/materials.md#geometry)) rather than modelling it as
+  a closed slab.
 - **Native subsurface is approximate.** The `crust:openpbr` subsurface lobe is still a
   tinted diffuse. MaterialX's `subsurface_bsdf` uses a true random walk.
 - **`crust:openpbr` and MaterialX's `open_pbr_surface` don't match exactly.** The two

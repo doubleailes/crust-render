@@ -301,6 +301,23 @@ impl Material for MtlxMaterial {
         self.presence.is_some()
     }
 
+    /// A surface with an authored `thin_walled` and a transmitting
+    /// dielectric or generalized Schlick leaf: the leaves the closure walk
+    /// makes thin-walled delta transmissions when `thin_walled` is on there.
+    fn has_straight_transmission(&self) -> bool {
+        self.closures.thin_walled.is_some()
+            && self.closures.nodes.iter().any(|node| {
+                matches!(
+                    node,
+                    crust_mtlx::Closure::Leaf(leaf) if matches!(
+                        leaf.bsdf,
+                        crust_mtlx::Bsdf::Dielectric { mode, .. }
+                            | crust_mtlx::Bsdf::Schlick { mode, .. } if mode.transmits()
+                    )
+                )
+            })
+    }
+
     /// The surface's opacity, from its own slice of the program, clamped to
     /// [0, 1]; a non-finite value is opaque.
     fn opacity(&self, r_in: &Ray, rec: &HitRecord) -> f32 {

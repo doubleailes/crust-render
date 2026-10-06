@@ -1514,3 +1514,177 @@ fn the_diffuse_filter_is_the_colour_with_its_layer_weights() {
     };
     assert_eq!(metal.diffuse_filter(), Vec3A::ZERO);
 }
+
+/// Thin-walled sheets the straight-transmission tests share: clear and
+/// tinted glass, one partly diffuse under a coat, and one rough.
+fn thin_sheets() -> Vec<(&'static str, OpenPBR)> {
+    let glass = OpenPBR {
+        geometry_thin_walled: true,
+        ..OpenPBR::glass(1.5)
+    };
+    vec![
+        ("clear", glass.clone()),
+        (
+            "tinted",
+            OpenPBR {
+                transmission_color: Vec3A::new(0.9, 0.5, 0.2),
+                ..glass.clone()
+            },
+        ),
+        (
+            "coated, half diffuse",
+            OpenPBR {
+                transmission_weight: 0.5,
+                base_color: Vec3A::new(0.6, 0.3, 0.2),
+                coat_weight: 0.7,
+                ..glass.clone()
+            },
+        ),
+        (
+            "rough",
+            OpenPBR {
+                specular_roughness: 0.4,
+                transmission_color: Vec3A::new(0.3, 0.8, 0.6),
+                ..glass
+            },
+        ),
+    ]
+}
+
+fn reduced(m: &OpenPBR) -> ResolvedOpenPBR {
+    let mut r = ResolvedOpenPBR::of_plain(m);
+    r.exclude_straight();
+    r
+}
+
+/// `T` is the value a delta sample carries before its lobe-selection
+/// compensation, exactly — the weight the BSDF gives the straight line.
+#[test]
+fn straight_transmittance_is_the_delta_samples_weight() {
+    let rec = HitRecord {
+        normal: Vec3A::Z,
+        front_face: true,
+        ..HitRecord::new()
+    };
+    for (name, m) in thin_sheets() {
+        let p_select = LobePmf::selecting::<true>(&m)[Lobe::Transmission].max(1e-4);
+        for theta in [0.0f32, 0.6, 1.2] {
+            let d = Vec3A::new(theta.sin(), 0.0, -theta.cos());
+            let r_in = Ray::new(-d, d);
+            let t = m.straight_transmittance(&r_in, &rec);
+            let mut sampler = s();
+            let mut seen = 0;
+            for _ in 0..256 {
+                if let Some(x) = m.scatter_importance(&r_in, &rec, sampler.next())
+                    && x.delta
+                {
+                    let w = x.value * p_select;
+                    assert!(
+                        (w - t).abs().max_element() < 1e-5,
+                        "{name} at {theta}: {w} vs {t}"
+                    );
+                    seen += 1;
+                }
+            }
+            assert!(seen > 0, "{name} at {theta}: never transmitted");
+        }
+    }
+}
+
+/// `T` plus the directional albedo of the lobe set without it is the full
+/// lobe set's albedo: the meet scatters through exactly what the pass does
+/// not carry.
+#[test]
+fn straight_transmittance_plus_the_rest_is_the_whole_bsdf() {
+    let rec = HitRecord {
+        normal: Vec3A::Z,
+        front_face: true,
+        ..HitRecord::new()
+    };
+    let n = 1 << 14;
+    for (name, m) in thin_sheets() {
+        let rest = reduced(&m);
+        for theta in [0.0f32, 0.7, 1.3] {
+            let d = Vec3A::new(theta.sin(), 0.0, -theta.cos());
+            let r_in = Ray::new(-d, d);
+            let (mut full, mut part) = (Vec3A::ZERO, Vec3A::ZERO);
+            let mut sampler = s();
+            for _ in 0..n {
+                let k = sampler.next();
+                if let Some(x) = m.scatter_importance(&r_in, &rec, k) {
+                    full += x.value / x.pdf;
+                }
+                if let Some(x) = rest.scatter(&r_in, &rec, k) {
+                    assert!(!x.delta, "{name}: the straight lobe was excluded");
+                    part += x.value / x.pdf;
+                }
+            }
+            let (full, part) = (full / n as f32, part / n as f32);
+            let t = m.straight_transmittance(&r_in, &rec);
+            let err = (t + part - full).abs().max_element();
+            assert!(
+                err < 0.01,
+                "{name} at {theta}: T {t} + rest {part} vs full {full}"
+            );
+        }
+    }
+}
+
+/// Without its straight lobe, a thin wall's continuous samples carry the
+/// density `eval` reports — NEE at a met wall weighs against exactly the
+/// sampling the bounce does.
+#[test]
+fn the_reduced_lobe_set_samples_what_eval_reports() {
+    let rec = HitRecord {
+        normal: Vec3A::Z,
+        front_face: true,
+        ..HitRecord::new()
+    };
+    let r_in = Ray::new(
+        Vec3A::new(0.3, -0.2, 1.0),
+        Vec3A::new(-0.3, 0.2, -1.0).normalize(),
+    );
+    for (name, m) in thin_sheets() {
+        let rest = reduced(&m);
+        let mut sampler = s();
+        let mut checked = 0;
+        for _ in 0..256 {
+            let Some(x) = rest.scatter(&r_in, &rec, sampler.next()) else {
+                continue;
+            };
+            let (v, pdf) = rest.eval(&r_in, &rec, x.ray.direction()).unwrap();
+            assert!((v - x.value).abs().max_element() < 1e-3 * (1.0 + v.max_element()));
+            assert!(
+                (pdf - x.pdf).abs() < 1e-3 * (1.0 + pdf),
+                "{name}: {pdf} vs {}",
+                x.pdf
+            );
+            // The values are the full set's: a delta lobe has none to drop.
+            let (full_v, full_pdf) = m.eval(&r_in, &rec, x.ray.direction()).unwrap();
+            assert_eq!(full_v, v, "{name}");
+            assert!(pdf >= full_pdf, "{name}: renormalised over fewer lobes");
+            checked += 1;
+        }
+        assert!(checked > 16, "{name}: {checked}");
+    }
+}
+
+#[test]
+fn only_a_thin_transmissive_wall_has_straight_transmission() {
+    assert!(!OpenPBR::default().has_straight_transmission());
+    assert!(!OpenPBR::glass(1.5).has_straight_transmission());
+    assert!(
+        OpenPBR {
+            geometry_thin_walled: true,
+            ..OpenPBR::glass(1.5)
+        }
+        .has_straight_transmission()
+    );
+    assert!(
+        !OpenPBR {
+            geometry_thin_walled: true,
+            ..OpenPBR::default()
+        }
+        .has_straight_transmission()
+    );
+}

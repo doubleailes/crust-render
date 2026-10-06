@@ -76,6 +76,9 @@ struct Opts {
     wall_center: Vec3A,
     guiding: bool,
     filter: PixelFilter,
+    /// A tinted thin-walled window over the left of the frame, between the
+    /// camera and the key light on one side and the scene on the other.
+    window: bool,
 }
 
 impl Default for Opts {
@@ -100,6 +103,7 @@ impl Default for Opts {
             wall_center: Vec3A::new(-104.0, 0.0, -105.0),
             guiding: false,
             filter: PixelFilter::default(),
+            window: false,
         }
     }
 }
@@ -133,6 +137,26 @@ fn scene(o: &Opts) -> Renderer {
                 transmission_weight: 1.0,
                 specular_roughness: 0.05,
                 ..OpenPBR::default()
+            }),
+        );
+    }
+    if o.window {
+        world.attach(
+            Geometry::TriangleMesh {
+                vertices: vec![
+                    [-4.0, -3.0, 3.4],
+                    [0.2, -3.0, 3.4],
+                    [0.2, 4.0, 3.4],
+                    [-4.0, 4.0, 3.4],
+                ],
+                indices: vec![[0, 1, 2], [0, 2, 3]],
+                normals: None,
+            },
+            Arc::new(OpenPBR {
+                geometry_thin_walled: true,
+                transmission_color: Vec3A::new(0.95, 0.6, 0.3),
+                specular_roughness: 0.0,
+                ..OpenPBR::glass(1.5)
             }),
         );
     }
@@ -217,10 +241,18 @@ fn mean(plane: &[f32]) -> f64 {
 
 #[test]
 fn the_full_path_expression_is_the_beauty_bitwise() {
-    for (clamp, guiding) in [(0.0, false), (10.0, false), (0.5, false), (0.0, true)] {
+    for (clamp, guiding, window) in [
+        (0.0, false, false),
+        (10.0, false, false),
+        (0.5, false, false),
+        (0.0, true, false),
+        (0.0, false, true),
+        (10.0, false, true),
+    ] {
         let o = Opts {
             clamp,
             guiding,
+            window,
             ..Opts::default()
         };
         let all = lpe("C.*[LO]");
@@ -229,7 +261,7 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         let channel = film.var_channels(&beauty, &all);
         assert!(
             bits(&channel) == bits(&beauty_planes(&film, &beauty)),
-            "clamp {clamp}, guiding {guiding}"
+            "clamp {clamp}, guiding {guiding}, window {window}"
         );
         // Asking for expressions changes nothing in the beauty.
         let plain = scene(&o).render_with_tiles();
@@ -265,9 +297,10 @@ fn assert_sums(parts: &[Vec<Vec<f32>>], whole: &[Vec<f32>], what: &str) {
 
 #[test]
 fn a_partition_sums_to_the_beauty() {
-    for clamp in [0.0, 1.0] {
+    for (clamp, window) in [(0.0, false), (1.0, false), (0.0, true)] {
         let o = Opts {
             clamp,
+            window,
             ..Opts::default()
         };
         let vars: Vec<AovVar> = PARTITION.iter().map(|e| lpe(e)).collect();
@@ -276,7 +309,7 @@ fn a_partition_sums_to_the_beauty() {
         assert_sums(
             &parts,
             &beauty_planes(&film, &beauty),
-            &format!("clamp {clamp}"),
+            &format!("clamp {clamp}, window {window}"),
         );
         // Every part of this scene carries light somewhere.
         for (v, p) in vars.iter().zip(&parts) {
@@ -285,6 +318,33 @@ fn a_partition_sums_to_the_beauty() {
             }
         }
     }
+}
+
+/// A thin wall passed straight through is the specular transmission its
+/// delta lobe was when the wall was a vertex: what the camera sees through
+/// the window lands in `C<TS>`, and nothing else in this scene is a `TS`.
+#[test]
+fn light_through_a_window_is_a_specular_transmission() {
+    let through = lpe("C<TS>.*[LO]");
+    let first = lpe("C<RD>[LO]");
+    let mean_rgb = |o: &Opts| {
+        let (beauty, film) = render(o, &[through.clone(), first.clone()]);
+        let t = film.var_channels(&beauty, &through);
+        let d = film.var_channels(&beauty, &first);
+        (
+            mean(&t[0]) + mean(&t[1]) + mean(&t[2]),
+            mean(&d[0]) + mean(&d[1]) + mean(&d[2]),
+        )
+    };
+    let (ts_open, rd_open) = mean_rgb(&Opts::default());
+    let (ts_window, rd_window) = mean_rgb(&Opts {
+        window: true,
+        ..Opts::default()
+    });
+    assert_eq!(ts_open, 0.0, "no thin wall, no TS");
+    assert!(ts_window > 0.05, "seen through the window: {ts_window}");
+    // The window hides the left of the frame from the camera's first `RD`.
+    assert!(rd_window < rd_open, "{rd_window} vs {rd_open}");
 }
 
 #[test]

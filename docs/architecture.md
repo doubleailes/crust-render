@@ -143,12 +143,18 @@ other. The pairs:
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.
-- **Cutouts.** A hit a path passes through (`pass_cutouts`, probability
-  `1 − opacity`) and a shadow ray's `Π(1 − opacity)` (`cutout_through`, behind
-  `cutout_shadow` and the light cache's training) are one visibility: both ask
-  `Material::opacity` point-sampled, both follow at most 256 crossings, both
-  are gated on `World::has_cutouts`; change one and NEE and the bounce side
-  disagree.
+- **Pass-throughs (cutouts and thin walls).** A hit a path passes through
+  (`pass_cutouts` / `pass_walls`: probability `q = max P`, weight `P / q`, else
+  a meet weighted `α / (1 − q)` on the BSDF without its straight lobe) and a
+  shadow ray's `Π P` (`cutout_through` / `walls_through`, behind
+  `shadow_transmittance` and the light cache's training) are one visibility,
+  with `P = (1 − α) + α·T` — `α` the opacity, `T` the thin wall's straight
+  transmittance (`ShadingPoint::straight_transmittance`), so `1 − opacity` at a
+  cutout. Both ask `Material::opacity` and `T` point-sampled, both follow at
+  most 256 crossings, both are gated on `World::has_pass_throughs`; change one
+  and NEE and the bounce side disagree. The met wall's lobe set without `T`
+  (`ShadingPoint::exclude_straight`) must renormalise its sampling and `eval`'s
+  pdf together.
 - **Kernel bit-identity.** `Tri4` packets ↔ the scalar triangle test;
   indexed `Tri4i` packets ↔ gathered `Tri4` (`tri4i_matches_tri4_bitwise`,
   `packet_layouts_are_bit_identical`); JIT ↔ interpreter; streamed ↔

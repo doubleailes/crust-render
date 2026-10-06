@@ -168,6 +168,14 @@ so use a UsdLux light for a scene's main light sources.
 | `inputs:geometryOpacity` | `float` | 1.0 | 0 = fully cut out |
 | `inputs:geometryThinWalled` | `bool` | false | treat the surface as an infinitely thin sheet (leaves, paper) rather than the boundary of a solid |
 
+A thin-walled surface with `transmissionWeight` above 0 is a window: what it transmits
+goes straight through, unbent. Shadows see that. A shadow ray through the sheet is tinted
+by what it lets through instead of blocked, so a light behind a pane, a lampshade or a
+leaf is found by light sampling, and the surfaces it lights converge without fireflies.
+MaterialX surfaces with `thin_walled` (`open_pbr_surface`'s `geometry_thin_walled`,
+`standard_surface`'s `thin_walled`) work the same way. A closed, thick glass object still
+casts a solid shadow ([why](@/docs/architecture/limitations.md#materials-and-textures)).
+
 ## Hair
 
 Hair and fur are `BasisCurves` prims shaded with MaterialX's `chiang_hair_bsdf`: the fibre
