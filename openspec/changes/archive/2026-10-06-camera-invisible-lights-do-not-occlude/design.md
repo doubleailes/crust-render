@@ -66,23 +66,37 @@ current `VertexRec` holds one `(next_emit, next_emit_weight)` pair. Options:
    `next_emit_weighted += atten · w_i · e_i`.
 2. Keep a small inline list of `(emit, weight, emitter)` per record.
 
-Option 1 is the minimal change to the beauty, but the LPE AOVs replay the beauty's
-recurrence (`eval_split`, `scatter_split`) and `C.*[LO]` is pinned bitwise to the
-beauty. The routing needs each crossed emitter's own `L` event. The decision is
-**option 2 with a one-slot fast path**: the existing pair stays the first slot,
-so a segment that crosses no hidden source is bit-identical in both the beauty
-and the AOVs. Extra crossings spill to an inline overflow of fixed capacity
-(`MAX_CUTOUT_CROSSINGS` already bounds the walk). This is the implementation's
-main risk, and task 3.1 measures it with callgrind on the zero-AOV render.
+The LPE AOVs replay the beauty's recurrence and `C.*[LO]` is pinned bitwise to
+the beauty, so the routing needs each crossed emitter's own `L` event — but the
+beauty itself does not. **As built, the two are split:**
+
+- The beauty takes **option 1**. `VertexRec` gains `crossed`, the crossings'
+  weighted emission summed in crossing order, and `crossed_raw`, the same sum
+  unweighted for guiding training. The gather adds `crossed` beside
+  `next_emit · next_emit_weight`; with no crossing it adds zero, so a segment
+  that crosses no hidden source is bit-identical.
+- The per-crossing list of option 2 lives in the LPE route only:
+  `Route::cross` records each crossing's `L` symbol, weighted share and the
+  pass-through events before it. Where every crossing's `L` is accepted, the
+  gather uses the record's own `crossed` sum, so `C.*[LO]` stays the beauty bit
+  for bit.
+
+The inline overflow first planned for `VertexRec` was not needed. Task 3.1
+measured the cost on the zero-AOV render: +0.12% instructions on cornellbox.
 
 ### D3. Telling a transparent emitter at a hit
 
-A hit has to be classified cheaply. The geometry's mask already carries the
-answer: a light source without `MASK_SHADOW` and without `MASK_CAMERA` is a
-transparent emitter by construction. Since the mask is on the geometry, the
-check is `hit.geom` mask plus the existing `find_index_by_geom_at`, with no new
-material type. `World` keeps a `has_transparent_emitters()` flag next to
-`has_cutouts()`, so a world without hidden lights never enters the new branch.
+A hit has to be classified cheaply. The plan was to read the answer off the
+geometry's mask (a light source without `MASK_SHADOW` and without `MASK_CAMERA`).
+**As built, the mask cannot answer it:** an authored `crust:rayMask = 4` also
+lacks both bits, yet an authored mask must keep the source solid. So the
+importer marks a transparent emitter explicitly. `light_ray_mask` returns the
+mask together with that answer: true only with no authored mask and no camera
+visibility. `WorldBuilder::set_transparent_emitter` stores it as a sparse
+per-`geom_id` table, and `World::is_transparent_emitter(geom_id)` reads it at a
+hit. `World::has_transparent_emitters()` and `has_bounce_pass_throughs()` keep a
+world with no hidden light out of the new branch. Demoting a light that
+illuminates nothing clears its mark.
 
 ### D4. Order with cutouts
 
@@ -96,7 +110,10 @@ cutouts do today.
 `light_links.rs` assigns caster classes by clearing `MASK_SHADOW` on casters and
 setting class bits. A hidden light source must stay out of every class.
 Otherwise a restricted light's shadow rays, which carry class bits, would see
-it again. The class assignment skips geometry that is a light source.
+it again. **As built, no new skip was needed:** `encode_shadows` already gives
+no class bit to a geometry without `MASK_SHADOW`, and a hidden source has none.
+A comment there records why. A camera-visible or authored-mask source keeps its
+shadow bit and is classed like any occluder, as before.
 
 ## Risks / Trade-offs
 
