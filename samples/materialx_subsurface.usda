@@ -91,7 +91,7 @@ def Xform "World"
     {
         float inputs:intensity = 0.4
         asset inputs:texture:file = @sky_env.exr@
-        token inputs:texture:format = "latlong"
+        token inputs:texture:format = "latlong"
         # 200, not 20: authored when crust put -Z at the lat-long centre;
         # UsdLux puts +Z there, and 180 more keeps the sun where it was.
         float xformOp:rotateY = 200
