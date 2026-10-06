@@ -279,8 +279,8 @@ by cranelift) is the oldest toolchain that builds the workspace.
 `.github/workflows/nightly.yml` repeats clippy and the tests on a pinned and on the latest
 nightly, and its daily run publishes the rolling `nightly` pre-release: the CLI built with
 the latest nightly for Linux (musl), macOS (both architectures) and Windows (MSVC). Each
-binary renders the Cornell box before it ships, and the release is replaced only when the
-`latest` test leg passed on the same compiler.
+binary renders the Cornell box before it ships, and the release is replaced only when every
+`latest` leg (clippy, tests, `bvh8`) passed on the same compiler.
 
 ## Technical debt register
 

@@ -23,8 +23,8 @@ name: Nightly
 # publishes a nightly binary built with the latest nightly, as the rolling
 # `nightly` pre-release: see the `nightly-build` and `nightly-publish` jobs
 # at the end. It is published only when every check above, the `latest`
-# test leg included, passed in the same run; otherwise the previous nightly
-# stays up.
+# legs included, passed in the same run on the compiler that built it;
+# otherwise the previous nightly stays up.
 
 on:
   push:
@@ -50,6 +50,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   NIGHTLY_PINNED: nightly-2026-09-26
+  # Whether this run publishes the nightly release, for step conditions
+  # (`env` is not available to a job's `if:`, which repeats the expression).
+  PUBLISH_NIGHTLY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch) }}
 
 jobs:
   # Workspace clippy, every target, as rust.yml runs it on stable. rustfmt is
@@ -78,6 +81,16 @@ jobs:
           key: ${{ matrix.channel }}
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # See test for what the receipt is for.
+      - name: Leave a receipt for the nightly release
+        if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
+        run: rustc --version > receipt-clippy.txt
+      - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-receipt-clippy
+          path: receipt-clippy.txt
+          retention-days: 1
 
   test:
     name: test (${{ matrix.channel }})
@@ -103,18 +116,19 @@ jobs:
           key: ${{ matrix.channel }}
       - name: Run tests
         run: cargo test --workspace --no-fail-fast
-      # The nightly release must not ship a compiler whose tests failed, but
-      # this leg is `continue-on-error`, so whether a job that `needs` it
-      # still runs is not something to lean on. It leaves a receipt instead,
-      # and nightly-publish refuses to publish without one.
-      - name: Record the passing toolchain for the nightly release
-        if: matrix.channel == 'latest' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch))
-        run: rustc --version > tested-toolchain.txt
-      - if: matrix.channel == 'latest' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch))
+      # The nightly release must not ship a compiler any `latest` leg failed
+      # on, but those legs are `continue-on-error`, so whether a job that
+      # `needs` them still runs is not something to lean on. Each passing
+      # one leaves a receipt naming its compiler instead, and nightly-publish
+      # refuses to publish without all three (clippy, test, bvh8).
+      - name: Leave a receipt for the nightly release
+        if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
+        run: rustc --version > receipt-test.txt
+      - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nightly-tested
-          path: tested-toolchain.txt
+          name: nightly-receipt-test
+          path: receipt-test.txt
           retention-days: 1
 
   # What only nightly can build. The kernel is linted and tested with 8-wide
@@ -149,6 +163,16 @@ jobs:
         run: cargo test -p crust-rt --features bvh8 --no-fail-fast
       - name: Check the renderer with bvh8 forwarded
         run: cargo check -p crust-render --features bvh8
+      # See test for what the receipt is for.
+      - name: Leave a receipt for the nightly release
+        if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
+        run: rustc --version > receipt-bvh8.txt
+      - if: matrix.channel == 'latest' && env.PUBLISH_NIGHTLY == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-receipt-bvh8
+          path: receipt-bvh8.txt
+          retention-days: 1
 
   # The nightly binary: the `crust` CLI, release profile, built with the
   # latest nightly for each target. Only the scheduled run and a manual
@@ -237,7 +261,7 @@ jobs:
             shasum -a 256 "$archive" > "$archive.sha256"
           fi
       # Which compiler built it, so nightly-publish can check it is the one
-      # the `latest` test leg passed on (a new nightly may land in between).
+      # the `latest` legs passed on (a new nightly may land in between).
       - name: Record the toolchain
         run: rustc --version > "dist/toolchain-${{ matrix.target }}.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -247,10 +271,15 @@ jobs:
           retention-days: 1
 
   # Replaces the rolling `nightly` pre-release with this run's binaries,
-  # all of them or none: a missing target, or a missing receipt from the
-  # `latest` test leg, leaves the previous release untouched. The release is
-  # deleted and recreated so its tag moves to the commit that was built.
-  # Creating it with GITHUB_TOKEN triggers no workflow, so rust.yml's
+  # all of them or none. The gate runs before anything is touched: a missing
+  # archive, a bad checksum, or a missing or mismatched receipt from a
+  # `latest` leg leaves the previous release as it is. The replacement is
+  # then staged as a draft, and only once every asset is verified uploaded
+  # is the old release removed and the draft published under the `nightly`
+  # tag at the commit that was built (so the tag moves with it). That
+  # switch is three API calls with no upload in between; if publishing the
+  # draft still fails, the complete draft is left for a re-run.
+  # Releases made with GITHUB_TOKEN trigger no workflow, so rust.yml's
   # `release: created` job does not run for it (and skips the tag anyway).
   nightly-publish:
     name: publish nightly release
@@ -268,37 +297,98 @@ jobs:
           pattern: nightly-*
           path: dist
           merge-multiple: true
-      - name: Check every target against the test receipt
+      - name: Check every target against the receipts
+        working-directory: dist
         run: |
-          ls -l dist
-          test -s dist/tested-toolchain.txt || {
-            echo "::error::test (latest) did not pass in this run; not publishing"; exit 1; }
-          for t in $TARGETS; do
-            ls dist/crust-nightly-$t.* > /dev/null 2>&1 || {
-              echo "::error::no nightly binary for $t; not publishing"; exit 1; }
-            cmp -s dist/tested-toolchain.txt "dist/toolchain-$t.txt" || {
-              echo "::error::$t was built with $(cat "dist/toolchain-$t.txt"), tested with $(cat dist/tested-toolchain.txt); not publishing"
+          set -euo pipefail
+          ls -l
+          for job in clippy test bvh8; do
+            test -s "receipt-$job.txt" || {
+              echo "::error::$job (latest) did not pass in this run; not publishing"; exit 1; }
+            cmp -s receipt-test.txt "receipt-$job.txt" || {
+              echo "::error::$job (latest) ran on $(cat "receipt-$job.txt"), test (latest) on $(cat receipt-test.txt); not publishing"
               exit 1; }
           done
+          : > "$RUNNER_TEMP/assets.txt"
+          for t in $TARGETS; do
+            case "$t" in
+              *windows*) a=crust-nightly-$t.zip ;;
+              *) a=crust-nightly-$t.tar.gz ;;
+            esac
+            test -s "$a" || {
+              echo "::error::no nightly archive $a; not publishing"; exit 1; }
+            sha256sum -c "$a.sha256" || {
+              echo "::error::$a does not match its checksum; not publishing"; exit 1; }
+            cmp -s receipt-test.txt "toolchain-$t.txt" || {
+              echo "::error::$t was built with $(cat "toolchain-$t.txt"), checked with $(cat receipt-test.txt); not publishing"
+              exit 1; }
+            cat "$a.sha256" >> SHA256SUMS
+            echo "$a" >> "$RUNNER_TEMP/assets.txt"
+          done
+          echo SHA256SUMS >> "$RUNNER_TEMP/assets.txt"
       - name: Publish
+        working-directory: dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          cd dist
-          cat *.sha256 > SHA256SUMS
+          set -euo pipefail
+          mapfile -t assets < "$RUNNER_TEMP/assets.txt"
+          releases() { gh api "repos/$GH_REPO/releases?per_page=100" --jq "$1"; }
+          tag_count() {
+            gh api "repos/$GH_REPO/git/matching-refs/tags/nightly" \
+              --jq '[.[] | select(.ref == "refs/tags/nightly")] | length'
+          }
           date=$(date -u +%Y-%m-%d)
           {
-            echo "Built from ${GITHUB_SHA} on ${date} with \`$(cat tested-toolchain.txt)\`,"
-            echo "the latest nightly Rust, after the workspace's tests passed on that same toolchain."
+            echo "Built from ${GITHUB_SHA} on ${date} with \`$(cat receipt-test.txt)\`,"
+            echo "the latest nightly Rust, after the workspace's lints and tests passed on that"
+            echo "same toolchain."
             echo
             echo "A nightly build is untested beyond CI. For a stable binary, take the"
             echo "latest numbered release."
           } > notes.md
-          gh release delete nightly --cleanup-tag --yes || true
-          # A tag left behind without its release would pin `create` to the
-          # old commit (it ignores --target for an existing tag).
-          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly" || true
-          gh release create nightly --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title "Nightly ${date}" --notes-file notes.md \
-            crust-nightly-*.tar.gz crust-nightly-*.zip SHA256SUMS
+
+          # Drafts a failed run left behind are invisible to users; drop them.
+          stale=$(releases '.[] | select(.draft and (.tag_name | startswith("nightly-staging-"))) | .id')
+          for id in $stale; do gh api -X DELETE "repos/$GH_REPO/releases/$id"; done
+
+          # 1. Stage. A draft creates no tag, so the current release is untouched.
+          stage="nightly-staging-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gh release create "$stage" --draft --prerelease --latest=false \
+            --target "$GITHUB_SHA" --title "Nightly ${date}" --notes-file notes.md \
+            "${assets[@]}"
+          id=$(releases ".[] | select(.draft and .tag_name == \"$stage\") | .id")
+          test -n "$id"
+
+          # 2. Verify every asset arrived whole.
+          expected=$(for a in "${assets[@]}"; do echo "$a $(stat -c %s "$a")"; done | sort)
+          actual=$(gh api "repos/$GH_REPO/releases/$id" \
+            --jq '.assets[] | select(.state == "uploaded") | "\(.name) \(.size)"' | sort)
+          [ "$expected" = "$actual" ] || {
+            echo "::error::staged assets differ from the build:"; diff <(echo "$expected") <(echo "$actual") || true
+            exit 1; }
+
+          # 3. Switch. Remove the old release and its tag (every error stops
+          # here: a tag left in place would pin the new release to the old
+          # commit), then publish the draft as `nightly` at this commit.
+          old=$(releases '.[] | select((.draft | not) and .tag_name == "nightly") | .id')
+          for id_old in $old; do gh api -X DELETE "repos/$GH_REPO/releases/$id_old"; done
+          n=$(tag_count)
+          if [ "$n" != 0 ]; then gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly"; fi
+          n=$(tag_count)
+          [ "$n" = 0 ] || { echo "::error::the nightly tag is still there; not publishing"; exit 1; }
+          for attempt in 1 2 3; do
+            if gh api -X PATCH "repos/$GH_REPO/releases/$id" -f tag_name=nightly \
+                -f target_commitish="$GITHUB_SHA" -F draft=false -f make_latest=false > /dev/null; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::could not publish draft release $id; it is complete and can be published by hand"
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          sha=$(gh api "repos/$GH_REPO/git/ref/tags/nightly" --jq .object.sha)
+          [ "$sha" = "$GITHUB_SHA" ] || {
+            echo "::error::the nightly tag points at $sha, not $GITHUB_SHA"; exit 1; }

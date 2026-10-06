@@ -39,7 +39,7 @@ your `PATH`.
 
 The [`nightly` pre-release](https://github.com/doubleailes/crust-render/releases/tag/nightly)
 is rebuilt every day from the head of the default branch with the latest nightly Rust,
-and replaced only when the workspace's tests passed on that same compiler. It carries
+and replaced only when the workspace's lints and tests passed on that same compiler. It carries
 binaries for:
 
 - `x86_64-unknown-linux-musl` (Linux)
