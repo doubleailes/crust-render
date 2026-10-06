@@ -84,7 +84,14 @@ impl LobePmf {
     /// Fresnel-averaged energy heuristic. Not perfect, but stable and cheap
     /// — the mixture PDF gets the direction right regardless of the exact
     /// per-lobe weights we sample by.
-    pub(super) fn from_params(m: &OpenPBR) -> Self {
+    ///
+    /// Without `STRAIGHT`, the thin-walled delta transmission gets no
+    /// selection mass and the other lobes share it: the lobe set a path
+    /// scatters through when it *meets* a thin wall it could have passed (the
+    /// integrator carries the straight transmission itself, as a
+    /// pass-through). A thick transmission lobe is continuous and keeps its
+    /// share either way.
+    pub(super) fn selecting<const STRAIGHT: bool>(m: &OpenPBR) -> Self {
         let f0_diel = f0_from_ior(m.specular_ior);
         let f0_coat = f0_from_ior(m.coat_ior);
         let base_luma = m.luma.of(m.base_color).max(0.02);
@@ -134,7 +141,8 @@ impl LobePmf {
         // Transmission: dominant when weight is high. When enabled it
         // steals energy from the dielectric-specular / diffuse pathway.
         let trans_luma = m.luma.of(m.transmission_color).max(0.02);
-        let w_transmission = if m.transmission_weight > 0.0 {
+        let w_transmission = if m.transmission_weight > 0.0 && (STRAIGHT || !m.geometry_thin_walled)
+        {
             ((1.0 - m.base_metalness) * m.transmission_weight * trans_luma).max(1e-4)
         } else {
             0.0
@@ -203,7 +211,7 @@ fn eval_diffuse(m: &OpenPBR, v_local: Vec3A, l_local: Vec3A, f_avg_diel: f32) ->
     // does (`diffuse_albedo = base_color · base_weight · opaque-dielectric
     // fraction`): the multiple-scattering term is nonlinear in ρ and should
     // saturate with the *effective* albedo, not the raw color.
-    // Transmission displaces the diffuse base — see `LobePmf::from_params`.
+    // Transmission displaces the diffuse base — see `LobePmf::selecting`.
     let rho = diffuse_color * presence;
 
     // Energy left after specular reflection: `1 - F_dielectric_avg`. Using
@@ -673,10 +681,10 @@ pub(super) fn pdf_all(
     let pdf_cosine = l_local.z.max(0.0) / PI;
     let pdf_specular = pdf_vndf_ggx_aniso_local(v_local, h_local, ax, ay);
     // The coat density is *not* skippable the way `eval_coat` is: even at
-    // `coat_weight == 0`, `LobePmf::from_params` floors the coat's selection
+    // `coat_weight == 0`, `LobePmf::selecting` floors the coat's selection
     // weight at 1e-6, so `p_coat` is nonzero and this term genuinely belongs
     // in the mixture density that sampling divides by. Dropping it would
-    // change the image — see the note in `from_params`.
+    // change the image — see the note in `selecting`.
     let pdf_coat = pdf_vndf_ggx_aniso_local(v_local, h_local, ax_coat, ay_coat);
 
     pmf[Lobe::Diffuse] * pdf_cosine

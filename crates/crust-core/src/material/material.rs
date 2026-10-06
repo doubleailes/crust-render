@@ -212,6 +212,25 @@ pub trait Material: Send + Sync {
         false
     }
 
+    /// Whether a hit on this material can let a ray continue straight
+    /// through, unscattered: a thin-walled transmissive surface, whose
+    /// transmission is a delta lobe that keeps the ray's direction — known
+    /// when the material is built, never per hit.
+    ///
+    /// The world counts these at commit ([`crate::World::has_straight_transmission`])
+    /// and the integrator then treats such a surface as a pass-through, as it
+    /// does a cutout: a shadow ray is attenuated by the straight
+    /// transmittance instead of blocked, and a path passes the surface with
+    /// it or meets the rest of the BSDF ([`ShadingPoint::straight_transmittance`],
+    /// [`ShadingPoint::exclude_straight`]). Answering `true` for a material
+    /// that turns out to have none at a hit is safe — it costs a walk, not a
+    /// bias. The straight lobe itself is reported only through
+    /// [`Material::resolve`] (an `OpenPBR` or a MaterialX closure); a
+    /// material queried directly reports none.
+    fn has_straight_transmission(&self) -> bool {
+        false
+    }
+
     /// The surface's presence at a hit, in [0, 1]: MaterialX `surface`'s
     /// `opacity`. A ray meets the surface with this probability and otherwise
     /// passes through it untouched — no vertex, no depth, no change of medium
@@ -464,7 +483,7 @@ impl<'a> ShadingPoint<'a> {
     ) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Plain(m) => m.scatter_split(r_in, &self.rec, sampler, out),
-            Resolved::OpenPBR(m) => m.params().scatter_split(r_in, &self.rec, sampler, out),
+            Resolved::OpenPBR(m) => m.scatter_split(r_in, &self.rec, sampler, out),
             Resolved::Closure(c) => c.scatter_split(r_in, &self.rec, sampler, out),
             Resolved::Material(m) => {
                 let sample = m.scatter_importance(r_in, &self.rec, sampler)?;
@@ -480,6 +499,46 @@ impl<'a> ShadingPoint<'a> {
                 }
                 Some(sample)
             }
+        }
+    }
+
+    /// An unbiased estimate of the weight this BSDF gives the arriving ray
+    /// `r_in` continuing straight through it — the thin-walled delta
+    /// transmission, presence aside. Exact for an `OpenPBR` (the window
+    /// model is closed-form); one VNDF draw from `sampler` for a MaterialX
+    /// closure, whose rough thin leaf transmits the average of `1 − F(v·h)`
+    /// over its microfacets. Zero where the material has no such lobe.
+    pub fn straight_transmittance(&self, r_in: &Ray, sampler: PathSampler) -> Vec3A {
+        match &self.bsdf {
+            Resolved::Material(_) => Vec3A::ZERO,
+            Resolved::Plain(m) => m.straight_transmittance(r_in, &self.rec),
+            Resolved::OpenPBR(m) => m.straight_transmittance(r_in, &self.rec),
+            Resolved::Closure(c) => c.straight_transmittance(sampler),
+        }
+    }
+
+    /// Drops the straight transmission from every later query here: the
+    /// BSDF a path scatters through when it meets a thin wall it could have
+    /// passed, the integrator having carried the straight share itself.
+    /// Sampling and its density renormalise over the remaining lobes, so
+    /// `eval`'s pdf stays the density `scatter_importance` samples with.
+    ///
+    /// Out of line: only a path meeting a thin wall it could have passed
+    /// comes here.
+    #[cold]
+    #[inline(never)]
+    pub fn exclude_straight(&mut self) {
+        match &mut self.bsdf {
+            Resolved::Material(_) => {}
+            Resolved::Plain(m) => {
+                if m.has_straight_lobe() {
+                    let mut r = ResolvedOpenPBR::of_plain(m);
+                    r.exclude_straight();
+                    self.bsdf = Resolved::OpenPBR(r);
+                }
+            }
+            Resolved::OpenPBR(m) => m.exclude_straight(),
+            Resolved::Closure(c) => c.exclude_straight(),
         }
     }
 

@@ -700,11 +700,14 @@ impl WorldBuilder {
     #[must_use = "the committed world is the only way to intersect it"]
     pub fn commit(self) -> World {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
+        let straight = self.materials.iter().any(|m| m.has_straight_transmission());
         World {
             scene: self.rt.commit_with(crate::commit_options()),
             materials: self.materials,
             faces: self.faces,
             cutouts,
+            straight,
+            pass_throughs: cutouts || straight,
             light_classes: self.light_classes,
         }
     }
@@ -738,6 +741,11 @@ pub struct World {
     faces: Vec<SideTables>,
     /// Whether any material has a cutout ([`Material::has_cutout`]).
     cutouts: bool,
+    /// Whether any material can let a ray straight through
+    /// ([`Material::has_straight_transmission`]).
+    straight: bool,
+    /// `cutouts || straight`: whether a hit may be passed at all.
+    pass_throughs: bool,
     light_classes: Vec<u16>,
 }
 
@@ -856,6 +864,23 @@ impl World {
     #[inline]
     pub fn has_cutouts(&self) -> bool {
         self.cutouts
+    }
+
+    /// Whether any geometry's material can let a ray continue straight
+    /// through it, unscattered ([`Material::has_straight_transmission`]): a
+    /// thin-walled transmissive surface, which the integrator passes like a
+    /// cutout, attenuating rather than blocking shadow rays.
+    #[inline]
+    pub fn has_straight_transmission(&self) -> bool {
+        self.straight
+    }
+
+    /// [`World::has_cutouts`] or [`World::has_straight_transmission`]: one
+    /// flag, read on the integrator's fast paths. A world with neither ends
+    /// every segment at its closest hit and blocks a shadow ray at any hit.
+    #[inline]
+    pub fn has_pass_throughs(&self) -> bool {
+        self.pass_throughs
     }
 
     /// World bounds of all geometry; `None` for an empty world.

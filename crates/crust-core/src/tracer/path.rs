@@ -22,7 +22,7 @@ use crate::volume::{PhaseMix, VolumeEvent, Volumes};
 use crate::{EVERY_CLASS, Light, LightList, PathSampler, profile};
 
 use super::GuidingContext;
-use super::route::{NO_EVENT, Route, RouteCtx};
+use super::route::{Arrival, NO_EVENT, Route, RouteCtx};
 use super::settings::SamplingStrategy;
 use crate::lpe::LobeSplit;
 
@@ -42,6 +42,8 @@ const K_MEDIUM: i32 = 6; // off vertex: carried-medium free flight
 const K_VOLUME: i32 = 7; // off vertex: volume-region delta tracking
 const K_SSS: i32 = 8; // off vertex: the subsurface random walk (per step below)
 const K_CUTOUT: i32 = 9; // off vertex: presence at each cutout the segment meets
+const K_THIN: i32 = 10; // off vertex, per crossing: thin wall's T estimate (0) + pass coin (1)
+const K_NEE_THIN: i32 = 11; // off vertex, per crossing: a shadow ray's thin-wall T estimates
 
 /// The white Lambertian every random walk exits through.
 static SSS_EXIT: ExitLambertian = ExitLambertian;
@@ -319,6 +321,43 @@ pub(crate) struct PathScratch {
     /// render 0.28% of its instructions even though nothing read them.
     nee_split: LobeSplit,
     bounce_split: LobeSplit,
+    /// The thin walls the current segment passed and how it ended — written
+    /// by [`pass_cutouts`] in a world with straight transmission only.
+    thin: ThinWalls,
+}
+
+/// What [`pass_cutouts`] leaves for the vertex that ends a segment past thin
+/// walls (surfaces with straight transmission). Lives in [`PathScratch`] so
+/// that a world without any never touches it.
+#[derive(Default)]
+struct ThinWalls {
+    /// Each thin wall passed, in order: its `t` along the segment's ray and
+    /// the pass weight `P / q`, which everything past it carries.
+    passes: Vec<(f32, Vec3A)>,
+    /// Every pass of the segment in order, cutouts too: whether it was a
+    /// thin wall. The light path expression events (`TS` or `Ts`).
+    kinds: Vec<bool>,
+    /// `α / (1 − q)` when the segment ended meeting a thin wall it could
+    /// have passed, 1 otherwise.
+    meet: f32,
+    /// Whether it ended so: the vertex then scatters through the material
+    /// without its straight transmission, which the passes carry instead.
+    reduced: bool,
+    /// The first thin wall passed, as the camera's first hit when this is
+    /// the camera's segment: its `t` and the hit there.
+    first: Option<(f32, HitRecord)>,
+}
+
+impl ThinWalls {
+    /// The product of the pass weights before `t` along the segment.
+    ///
+    /// (`passes` is ordered by `t`: a segment meets its walls in order.)
+    fn before(&self, t: f32) -> Vec3A {
+        self.passes
+            .iter()
+            .take_while(|p| p.0 < t)
+            .fold(Vec3A::ONE, |w, p| w * p.1)
+    }
 }
 
 impl PathScratch {
@@ -332,6 +371,7 @@ impl PathScratch {
             route: Route::default(),
             nee_split: LobeSplit::default(),
             bounce_split: LobeSplit::default(),
+            thin: ThinWalls::default(),
         }
     }
 }
@@ -660,23 +700,28 @@ fn shadow_transmittance<const PROFILE: bool>(
     // early-exit traversal beats searching for the closest hit.
     let _p = profile::scope_if::<PROFILE>(Section::Occlusion);
     stats.shadow_rays += 1;
-    let through = surface_visibility(world, shadow_ray, distance, stats);
-    if through == 0.0 {
+    let Some(through) = visible(world, shadow_ray, distance, vertex, stats) else {
         stats.shadow_occluded += 1;
         return Vec3A::ZERO;
-    }
+    };
     if volumes.is_empty() {
-        return Vec3A::splat(through);
+        return through;
     }
     let mut rng = vertex.new_domain(K_NEE_SHADOW).rng();
     through * volumes.transmittance(shadow_ray, TRACE_T_MIN, distance - TRACE_T_MIN, &mut rng)
 }
 
 /// How much of a shadow ray toward a light sample `distance` away surfaces
-/// let through: 1 when nothing blocks it, 0 when an opaque surface does, and
-/// `Π (1 − opacity)` over the cutouts it crosses otherwise ([`cutout_through`],
-/// deterministic where the bounce side is stochastic — [`pass_cutouts`] — so
-/// the product is the lower-variance estimate of the same visibility).
+/// let through, per channel: 1 when nothing blocks it, 0 when an opaque
+/// surface does, and otherwise the product over the pass-throughs it crosses
+/// of `P = (1 − α) + α · T` — `1 − opacity` at a cutout, and the straight
+/// transmittance `T` at a thin wall ([`cutout_through`]). Deterministic in
+/// the presence where the bounce side is stochastic ([`pass_cutouts`]), so
+/// the product is the lower-variance estimate of the same visibility.
+///
+/// `vertex` is the domain a thin wall's `T` estimate draws from (MaterialX
+/// thin walls; see [`ShadingPoint::straight_transmittance`]), under
+/// [`K_NEE_THIN`]; nothing else reads it.
 ///
 /// The one answer to "does this light reach here" that NEE
 /// ([`shadow_transmittance`]) and the learned light cache's training share:
@@ -686,27 +731,64 @@ pub(crate) fn surface_visibility(
     world: &World,
     ray: &Ray,
     distance: f32,
+    vertex: PathSampler,
     stats: &mut RayStats,
-) -> f32 {
+) -> Vec3A {
+    visible(world, ray, distance, vertex, stats).unwrap_or(Vec3A::ZERO)
+}
+
+/// [`surface_visibility`], `None` where it is zero: NEE branches on that
+/// without comparing a colour (`Vec3A == ZERO` at every shadow ray was
+/// measurable in a world with no pass-through at all).
+#[inline(always)]
+fn visible(
+    world: &World,
+    ray: &Ray,
+    distance: f32,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Option<Vec3A> {
     let t_max = shadow_t_max(distance);
     if !world.occluded(ray, TRACE_T_MIN, t_max) {
-        return 1.0;
+        return Some(Vec3A::ONE);
     }
-    // Blocked — unless only cutouts block it, which the any-hit query cannot
-    // tell apart. An open segment crosses no cutout either, so it keeps the
-    // fast answer.
-    if !world.has_cutouts() {
-        return 0.0;
+    // Blocked — unless only pass-throughs block it, which the any-hit query
+    // cannot tell apart. An open segment crosses none either, so it keeps
+    // the fast answer.
+    if !world.has_pass_throughs() {
+        return None;
     }
-    cutout_visibility(world, ray, t_max, stats)
+    let through = cutout_visibility(world, ray, t_max, vertex, stats);
+    (through != Vec3A::ZERO).then_some(through)
 }
 
 /// [`cutout_through`] out of line: only a blocked shadow ray in a world with
-/// cutouts reaches it.
+/// pass-throughs reaches it.
 #[cold]
 #[inline(never)]
-fn cutout_visibility(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
-    cutout_through(world, ray, t_max, stats)
+fn cutout_visibility(
+    world: &World,
+    ray: &Ray,
+    t_max: f32,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    cutout_through(world, ray, t_max, vertex, stats)
+}
+
+/// `T(ω)` of the material hit at `rec` by `ray`: its straight transmittance
+/// through the [`ShadingPoint`] the hit resolves to, so it is the BSDF
+/// [`Material::resolve`] returns that answers — the one the vertex shades
+/// with when the path meets the surface instead.
+fn straight_transmittance(
+    mat: &dyn Material,
+    ray: &Ray,
+    rec: &HitRecord,
+    sampler: PathSampler,
+) -> Vec3A {
+    let cos_o = ray.direction().normalize().dot(rec.normal).abs();
+    let t = ShadingPoint::new(mat, ray, rec, cos_o).straight_transmittance(ray, sampler);
+    if t.is_finite() { t } else { Vec3A::ZERO }
 }
 
 /// How many cutouts one segment is followed through, on either side: past
@@ -766,29 +848,90 @@ fn shadow_t_max(distance: f32) -> f32 {
     (distance - TRACE_T_MIN).min(distance * (1.0 - 1e-6))
 }
 
-/// The fraction of the segment `(0.001, t_max)` of `ray` that cutouts let
-/// through: `Π (1 − opacity)` over every hit, or 0 at the first hit on a
-/// material without a cutout. It follows at most [`MAX_CUTOUT_CROSSINGS`]
-/// cutouts and then asks once more, where any hit blocks — the same bound
+/// The fraction of the segment `(0.001, t_max)` of `ray` that pass-throughs
+/// let through, per channel: `Π P` over every hit, with
+/// `P = (1 − α) + α · T` — `α` the opacity (1 without a cutout) and `T` the
+/// straight transmittance (0 without one) — or 0 at the first hit on a
+/// material with neither. It follows at most [`MAX_CUTOUT_CROSSINGS`]
+/// crossings and then asks once more, where any hit blocks — the same bound
 /// [`pass_cutouts`] keeps, which treats the hit past its last crossing as
 /// present, so a stack exactly that deep is clear on both sides.
 ///
+/// `P` is Typhoon's `_CombinePresenceAndTransmissionVisibility`. Each `T`
+/// is evaluated at the crossing, from `vertex` under [`K_NEE_THIN`].
+///
 /// Reached through [`surface_visibility`].
-fn cutout_through(world: &World, ray: &Ray, t_max: f32, stats: &mut RayStats) -> f32 {
+fn cutout_through(
+    world: &World,
+    ray: &Ray,
+    t_max: f32,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    if world.has_straight_transmission() {
+        return walls_through(world, ray, t_max, vertex, stats);
+    }
+    // Cutouts alone: the grey product, in the scalar the walk always kept.
     let (mut t, mut segment) = (0.0, ray.clone());
     let mut kept = 1.0;
     for crossing in 0..=MAX_CUTOUT_CROSSINGS {
         stats.cutout_rays += 1;
         let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
         let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
-            return kept;
+            return Vec3A::splat(kept);
         };
         if crossing == MAX_CUTOUT_CROSSINGS || !h.mat.has_cutout() {
-            return 0.0;
+            return Vec3A::ZERO;
         }
         kept *= 1.0 - h.mat.opacity(ray, &point_sampled(&h.rec));
         if kept <= 0.0 {
-            return 0.0;
+            return Vec3A::ZERO;
+        }
+        t = resume_before(t + h.rec.t);
+        segment = restarted(ray, t);
+    }
+    unreachable!("the last crossing returns")
+}
+
+/// [`cutout_through`] in a world with thin walls: the same walk, with each
+/// crossing's `P` coloured by the straight transmittance. Apart, so a world
+/// with cutouts alone walks exactly the loop it always did.
+#[inline(never)]
+fn walls_through(
+    world: &World,
+    ray: &Ray,
+    t_max: f32,
+    vertex: PathSampler,
+    stats: &mut RayStats,
+) -> Vec3A {
+    let (mut t, mut segment) = (0.0, ray.clone());
+    let mut kept = Vec3A::ONE;
+    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+        stats.cutout_rays += 1;
+        let hit = world.intersect(&segment, TRACE_T_MIN, f32::INFINITY);
+        let Some(h) = hit.filter(|h| t + h.rec.t < t_max) else {
+            return kept;
+        };
+        let cutout = h.mat.has_cutout();
+        let straight = h.mat.has_straight_transmission();
+        if crossing == MAX_CUTOUT_CROSSINGS || !(cutout || straight) {
+            return Vec3A::ZERO;
+        }
+        let rec = point_sampled(&h.rec);
+        let opacity = if cutout {
+            h.mat.opacity(ray, &rec)
+        } else {
+            1.0
+        };
+        kept *= if straight {
+            let sampler = vertex.new_domain(K_NEE_THIN).new_domain(crossing as i32);
+            let tr = straight_transmittance(h.mat, ray, &rec, sampler);
+            Vec3A::splat(1.0 - opacity) + opacity * tr
+        } else {
+            Vec3A::splat(1.0 - opacity)
+        };
+        if kept.max_element() <= 0.0 {
+            return Vec3A::ZERO;
         }
         t = resume_before(t + h.rec.t);
         segment = restarted(ray, t);
@@ -822,7 +965,18 @@ fn point_sampled(rec: &HitRecord) -> HitRecord {
 /// depth, emits nothing and leaves the previous vertex's MIS record to
 /// whatever the segment does reach.
 ///
-/// Its shadow-side twin is [`cutout_shadow`].
+/// A thin wall — a hit whose material has straight transmission — is the
+/// same rule with a coloured pass (`thin`; design record "Thin walls are
+/// pass-throughs"). Of `P = (1 − α) + α · T`, the fraction of the ray
+/// continuing straight, it passes with probability `q = max_c P_c` carrying
+/// `P / q`, and otherwise meets the wall carrying `α / (1 − q)`, to scatter
+/// through the material without its straight transmission. For a grey `P`
+/// that is exactly the cutout rule; it is kept apart all the same, so a
+/// world without thin walls draws and computes what it always did.
+/// Returns whether any of that happened — whether `thin` speaks for this
+/// segment.
+///
+/// Its shadow-side twin is [`cutout_through`].
 #[cold]
 #[inline(never)]
 fn pass_cutouts<'w>(
@@ -830,12 +984,17 @@ fn pass_cutouts<'w>(
     ray: &Ray,
     hit: &mut Option<WorldHit<'w>>,
     vertex: PathSampler,
+    thin: &mut ThinWalls,
     stats: &mut RayStats,
-) {
+) -> bool {
+    if world.has_straight_transmission() {
+        return pass_walls(world, ray, hit, vertex, thin, stats);
+    }
+    // Cutouts alone: the loop as it always was.
     let mut rng = None;
     for _ in 0..MAX_CUTOUT_CROSSINGS {
         let Some(h) = hit.as_ref() else {
-            return;
+            return false;
         };
         if !h.mat.has_cutout() {
             break;
@@ -859,6 +1018,168 @@ fn pass_cutouts<'w>(
                 next.rec.t += t;
                 next
             });
+    }
+    false
+}
+
+/// [`pass_cutouts`] in a world with thin walls: cutouts as there, and the
+/// coloured pass at each thin wall, recorded in `thin`. Apart, so a world
+/// with cutouts alone runs exactly the loop it always did (folded into one,
+/// `materialx_cutout` ran 0.7% more instructions).
+#[inline(never)]
+fn pass_walls<'w>(
+    world: &'w World,
+    ray: &Ray,
+    hit: &mut Option<WorldHit<'w>>,
+    vertex: PathSampler,
+    thin: &mut ThinWalls,
+    stats: &mut RayStats,
+) -> bool {
+    thin.passes.clear();
+    thin.kinds.clear();
+    thin.first = None;
+    thin.meet = 1.0;
+    thin.reduced = false;
+    let mut rng = None;
+    for crossing in 0..MAX_CUTOUT_CROSSINGS {
+        let Some(h) = hit.as_ref() else {
+            break;
+        };
+        let cutout = h.mat.has_cutout();
+        let straight = h.mat.has_straight_transmission();
+        if !(cutout || straight) {
+            break;
+        }
+        let rec = point_sampled(&h.rec);
+        let opacity = if cutout {
+            h.mat.opacity(ray, &rec)
+        } else {
+            1.0
+        };
+        if straight {
+            let draws = vertex.new_domain(K_THIN).new_domain(crossing as i32);
+            let tr = straight_transmittance(h.mat, ray, &rec, draws.new_domain(0));
+            let p = Vec3A::splat(1.0 - opacity) + opacity * tr;
+            let q = p.max_element();
+            let q = if q.is_finite() {
+                q.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if draws.new_domain(1).draw_rnd_f32::<1>()[0] >= q {
+                thin.meet = opacity / (1.0 - q);
+                thin.reduced = true;
+                break;
+            }
+            thin.passes.push((h.rec.t, p / q));
+            if thin.first.is_none() {
+                thin.first = Some((h.rec.t, h.rec));
+            }
+        } else {
+            if opacity >= 1.0 {
+                break;
+            }
+            let u = rng
+                .get_or_insert_with(|| vertex.new_domain(K_CUTOUT).rng())
+                .next_f32();
+            if u < opacity {
+                break;
+            }
+        }
+        thin.kinds.push(straight);
+        stats.cutout_passes += 1;
+        stats.cutout_rays += 1;
+        let t = resume_before(h.rec.t);
+        *hit = world
+            .intersect(&restarted(ray, t), TRACE_T_MIN, f32::INFINITY)
+            .map(|mut next| {
+                next.rec.t += t;
+                next
+            });
+    }
+    thin.reduced || !thin.passes.is_empty()
+}
+
+/// The camera's first hit when its segment passed a thin wall before `t`:
+/// the wall. A thin wall is glass, not a hole, so the data AOVs keep seeing
+/// it where it was a vertex before it became a pass-through — only a
+/// cutout is not a hit. The normal is the geometric one, facing the ray:
+/// the wall was never shaded.
+fn first_wall(thin: &ThinWalls, walls: bool, t: f32) -> Option<FirstHit> {
+    let (t_wall, rec) = thin.first.filter(|_| walls)?;
+    (t_wall < t).then_some(FirstHit::Surface {
+        p: rec.p,
+        n: rec.normal,
+        uv: rec.uv,
+    })
+}
+
+/// The arriving segment's volume event when it passed thin walls: the
+/// regions sampled a piece at a time between the walls, each piece's
+/// transmittance, emission and scatter weight carrying the pass weights of
+/// the walls before it — a wall past the event never mattered. With no
+/// regions, only the pass weights before `t_lim`. Delta tracking is
+/// memoryless, so sampling `(0.001, t_lim)` in pieces is the same process
+/// as sampling it whole.
+///
+/// A segment that reaches the thin wall it met (no carried-medium event
+/// first) also carries the meet weight `α / (1 − q)`
+/// in its transmittance: that vertex is the share of the wall that is not
+/// its straight transmission. Folded in here rather than applied to the
+/// vertex, which would cost every vertex of every scene a branch.
+#[cold]
+#[inline(never)]
+fn volume_event_past_walls(
+    volumes: &Volumes,
+    ray: &Ray,
+    t_surf: f32,
+    t_med: f32,
+    thin: &ThinWalls,
+    vertex: PathSampler,
+) -> VolumeEvent {
+    let t_lim = t_surf.min(t_med);
+    let meet = if t_med < t_surf { 1.0 } else { thin.meet };
+    if volumes.is_empty() {
+        return VolumeEvent::Passthrough {
+            transmittance: thin.before(t_lim) * meet,
+            emitted: Vec3A::ZERO,
+        };
+    }
+    let mut rng = vertex.new_domain(K_VOLUME).rng();
+    let (mut w, mut emitted, mut t0) = (Vec3A::ONE, Vec3A::ZERO, TRACE_T_MIN);
+    let walls = thin.passes.iter().take_while(|p| p.0 < t_lim).copied();
+    for (t1, pass) in walls.chain(std::iter::once((t_lim, Vec3A::ONE))) {
+        match volumes.sample_interaction(ray, t0, t1, &mut rng) {
+            VolumeEvent::Scatter {
+                t,
+                p,
+                weight,
+                phase,
+                emitted: e,
+                class,
+            } => {
+                return VolumeEvent::Scatter {
+                    t,
+                    p,
+                    weight: w * weight,
+                    phase,
+                    emitted: emitted + w * e,
+                    class,
+                };
+            }
+            VolumeEvent::Passthrough {
+                transmittance,
+                emitted: e,
+            } => {
+                emitted += w * e;
+                w *= transmittance * pass;
+            }
+        }
+        t0 = t1;
+    }
+    VolumeEvent::Passthrough {
+        transmittance: w * meet,
+        emitted,
     }
 }
 
@@ -1008,6 +1329,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
     }
     let split = &mut scratch.nee_split;
     let bounce_split = &mut scratch.bounce_split;
+    let thin = &mut scratch.thin;
 
     loop {
         // This vertex's domain: `records.len()` is the vertex index (nothing
@@ -1027,11 +1349,16 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                     world.intersect(&ray, TRACE_T_MIN, f32::INFINITY)
                 };
                 let cut0 = stats.cutout_passes;
-                if world.has_cutouts() {
-                    pass_cutouts(world, &ray, &mut hit, v, stats);
+                let mut walls = false;
+                if world.has_pass_throughs() {
+                    walls = pass_cutouts(world, &ray, &mut hit, v, thin, stats);
                 }
                 if AOV {
-                    route.terminal_ts((stats.cutout_passes - cut0) as u16);
+                    let a = match routing {
+                        Some(ctx) if walls => route.arrival_through(ctx, &thin.kinds),
+                        _ => Arrival::cutouts((stats.cutout_passes - cut0) as u16),
+                    };
+                    route.terminal_arrival(a);
                 }
                 if let Some(hit) = hit {
                     let cos_o = ray.direction().normalize().dot(hit.rec.normal).abs();
@@ -1044,6 +1371,9 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
                             let mut rng = v.new_domain(K_VOLUME).rng();
                             emitted *=
                                 volumes.transmittance(&ray, TRACE_T_MIN, hit.rec.t, &mut rng);
+                        }
+                        if walls {
+                            emitted *= thin.before(hit.rec.t) * thin.meet;
                         }
                         let last = records.last_mut().expect("prev implies a record");
                         last.next_emit = emitted;
@@ -1070,14 +1400,19 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // hit from either arm copies all of it at every vertex (+0.8% of
         // cornellbox's instructions, which has no cutout).
         let cut0 = stats.cutout_passes;
-        if world.has_cutouts() && !exiting {
-            pass_cutouts(world, &ray, &mut hit_opt, v, stats);
+        let mut walls = false;
+        if world.has_pass_throughs() && !exiting {
+            walls = pass_cutouts(world, &ray, &mut hit_opt, v, thin, stats);
         }
-        // Cutouts passed on the way here: `Ts` events before this vertex.
+        // Cutouts and thin walls passed on the way here: `Ts` events before
+        // this vertex.
         let arrival_ts = if AOV {
-            (stats.cutout_passes - cut0) as u16
+            match routing {
+                Some(ctx) if walls => route.arrival_through(ctx, &thin.kinds),
+                _ => Arrival::cutouts((stats.cutout_passes - cut0) as u16),
+            }
         } else {
-            0
+            Arrival::default()
         };
         let t_surf = hit_opt.as_ref().map_or(f32::INFINITY, |h| h.rec.t);
 
@@ -1099,9 +1434,15 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // the competition between the carried medium, the surface and the
         // regions is exact (superposed processes), and the `Passthrough`
         // weight is precisely the region transmittance up to the winner.
-        let t_lim = t_surf.min(t_med);
+        // Thin walls passed on the way are the delta interfaces they were as
+        // vertices: their pass weights tint the albedo found behind them.
+        if albedo_on && walls {
+            route.albedo_through(thin.before(t_surf.min(t_med)));
+        }
         // A walk's exit has no arriving segment outside the object.
-        let event = if volumes.is_empty() || exiting {
+        let event = if walls {
+            volume_event_past_walls(volumes, &ray, t_surf, t_med, thin, v)
+        } else if volumes.is_empty() || exiting {
             VolumeEvent::Passthrough {
                 transmittance: Vec3A::ONE,
                 emitted: Vec3A::ZERO,
@@ -1109,22 +1450,22 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         } else {
             let _p = profile::scope_if::<PROFILE>(Section::Volume);
             let mut rng = v.new_domain(K_VOLUME).rng();
-            volumes.sample_interaction(&ray, TRACE_T_MIN, t_lim, &mut rng)
+            volumes.sample_interaction(&ray, TRACE_T_MIN, t_surf.min(t_med), &mut rng)
         };
 
         let (vol_tr, vol_emit) = match event {
             VolumeEvent::Scatter {
+                t,
                 p,
                 weight,
                 phase,
                 emitted,
                 class,
-                ..
             } => {
                 stats.volume_scatters += 1;
                 // === Volume-region scatter vertex ===
                 if AOV && records.is_empty() {
-                    *first = FirstHit::Volume { p };
+                    *first = first_wall(thin, walls, t).unwrap_or(FirstHit::Volume { p });
                 }
                 let wi = ray.direction().normalize();
                 let ps = v.new_domain(K_PHASE).draw_sample_f32::<4>();
@@ -1224,7 +1565,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             let sigma_bar = medium.sigma_t_max().max(1e-4);
             let pos = ray.at(t_med);
             if AOV && records.is_empty() {
-                *first = FirstHit::Volume { p: pos };
+                *first = first_wall(thin, walls, t_med).unwrap_or(FirstHit::Volume { p: pos });
             }
             let phase_uv = v.new_domain(K_PHASE).draw_sample_f32::<2>();
             let dir = sample_henyey_greenstein(
@@ -1291,6 +1632,12 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
 
         let Some(hit) = hit_opt else {
             stats.ended_escaped += 1;
+            if AOV
+                && records.is_empty()
+                && let Some(wall) = first_wall(thin, walls, f32::INFINITY)
+            {
+                *first = wall;
+            }
             // === Background ===
             // A ray leaving the scene is how lights at infinity are found
             // by chance, so it is a bounce-side MIS event just like hitting
@@ -1330,7 +1677,7 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
             // volume transmittance of the final segment.
             terminal = vol_emit + vol_tr * background;
             if AOV {
-                route.terminal_ts(arrival_ts);
+                route.terminal_arrival(arrival_ts);
                 if routing.is_some() {
                     route.escape_begin(vol_emit, vol_tr, background);
                 }
@@ -1376,20 +1723,25 @@ pub(super) fn trace_path<const PROFILE: bool, const AOV: bool>(
         // for every query at this vertex: the emission here, NEE's `eval`, the
         // scatter, and guiding's `eval` / `make_ray`. Every surface vertex
         // scatters, so this is never wasted work.
-        let sp = {
+        let mut sp = {
             let _p = profile::scope_if::<PROFILE>(Section::EvalBsdfs);
             ShadingPoint::new(mat, &ray, &rec, cos_o)
         };
+        // Met a thin wall it could have passed: the straight transmission is
+        // the passes' to carry, not this vertex's.
+        if walls && thin.reduced {
+            sp.exclude_straight();
+        }
         if diffuse_filter_on && records.is_empty() {
             // The first hit's diffuse colour: the raw light AOVs' divisor.
             route.diffuse_filter = sp.diffuse_filter();
         }
         if AOV && records.is_empty() {
-            *first = FirstHit::Surface {
+            *first = first_wall(thin, walls, rec.t).unwrap_or(FirstHit::Surface {
                 p: rec.p,
                 n: sp.normal(),
                 uv: rec.uv,
-            };
+            });
         }
         let emitted = sp.emitted();
         let mut emit_here = Vec3A::ZERO;
