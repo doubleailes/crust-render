@@ -160,6 +160,62 @@ fn a_bounce_collects_every_hidden_light_it_crosses() {
     }
 }
 
+/// A small hidden light far away, crossed by a deterministic bounce: a
+/// mirror floor under one hidden sphere light at a distance-to-radius ratio
+/// of 40, 160 and 200, with the eye placed so the reflected ray passes
+/// through a random point of the sphere's disc. The bounce collects the
+/// light's emission exactly once — the same as the bounce that stops at the
+/// light made solid — for every ray.
+///
+/// The analytic sphere's textbook discriminant lost 1e-4 of distance from 8
+/// units away, more than the pass-through restart steps past, so the
+/// restarted segment met the entry again and a third of these rays
+/// collected the emission twice: a diffuse plane came out 4 %, 34 % and 64 %
+/// brighter under BSDF sampling than under light sampling at these ratios.
+#[test]
+fn every_strategy_agrees_on_a_small_far_hidden_light() {
+    let mirror = OpenPBR::metal(Vec3A::ONE, 0.0);
+    let (radius, radiance_out) = (0.05, 5.0);
+    let p = Vec3A::new(0.3, 0.0, 0.2);
+    let mut rng = openqmc::pcg::Rng::new(17);
+    for ratio in [40.0, 160.0, 200.0] {
+        let center = Vec3A::new(0.0, ratio * radius, 0.0);
+        let one = |source| {
+            let l = lamp(center, radius, radiance_out, source);
+            scene(mirror.clone(), false, &[&l])
+        };
+        let (hidden, solid) = (one(Source::Hidden), one(Source::Solid));
+        let mut doubled = 0;
+        for _ in 0..200 {
+            // The reflected ray from `p` goes through `q`, a random point of
+            // the disc the sphere presents to it: the eye is `q` mirrored
+            // about the floor, seen through `p`.
+            let r = 0.9 * radius * rng.next_f32().sqrt();
+            let phi = std::f32::consts::TAU * rng.next_f32();
+            let q = center + Vec3A::new(r * phi.cos(), 0.0, r * phi.sin());
+            let eye = Vec3A::new(2.0 * p.x - q.x, q.y, 2.0 * p.z - q.z);
+            let s = SamplingStrategy::BsdfOnly;
+            let h = radiance(&hidden, eye, p, 1, s, 1);
+            let o = radiance(&solid, eye, p, 1, s, 1);
+            assert!(
+                o.min_element() > 0.0,
+                "ratio {ratio}: the bounce misses ({o})"
+            );
+            if rel(h, 2.0 * o) < 1e-3 {
+                doubled += 1;
+            }
+            assert!(
+                rel(h, o) < 1e-4,
+                "ratio {ratio}: hidden {h} vs solid {o} through {q}"
+            );
+        }
+        assert_eq!(
+            doubled, 0,
+            "ratio {ratio}: {doubled} of 200 bounces collected twice"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Hidden lights neither shadow nor block one another
 // ---------------------------------------------------------------------------

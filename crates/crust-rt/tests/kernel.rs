@@ -461,6 +461,165 @@ fn random_spheres_agree_with_the_analytic_closest_hit() {
     assert!(hits > 100, "the probe rays should hit often: {hits}");
 }
 
+/// The two distances at which `ray` meets the sphere, in double precision:
+/// the reference the single-precision kernel is held to.
+fn sphere_roots_f64(ray: &Ray, center: Vec3A, radius: f32) -> Option<(f64, f64)> {
+    let oc = (ray.origin - center).as_dvec3();
+    let d = ray.dir.as_dvec3();
+    let a = d.length_squared();
+    let half_b = oc.dot(d);
+    let c = oc.length_squared() - (radius as f64) * (radius as f64);
+    let disc = half_b * half_b - a * c;
+    (disc >= 0.0).then(|| {
+        let sq = disc.sqrt();
+        ((-half_b - sq) / a, (-half_b + sq) / a)
+    })
+}
+
+/// Unit-direction rays from `distance` away, each aimed across a sphere of
+/// `radius` at the origin: at a random point of the disc it presents, out to
+/// 95 % of the radius, from a random direction.
+fn rays_across_a_sphere(rng: &mut Rng, radius: f32, distance: f32, n: usize) -> Vec<Ray> {
+    (0..n)
+        .map(|_| {
+            let toward = dir(rng);
+            let from = -toward * distance;
+            // A random point of the disc perpendicular to `toward`.
+            let side = toward.cross(if toward.x.abs() < 0.9 {
+                Vec3A::X
+            } else {
+                Vec3A::Y
+            });
+            let up = toward.cross(side).normalize();
+            let side = side.normalize();
+            let r = 0.95 * radius * rng.next_f32().sqrt();
+            let phi = std::f32::consts::TAU * rng.next_f32();
+            let at = side * (r * phi.cos()) + up * (r * phi.sin());
+            Ray::new(from, (at - from).normalize())
+        })
+        .collect()
+}
+
+/// The small, far spheres the pass-through walks cross: radius 0.05 seen
+/// from 8 units (a hidden sphere light over a floor) and 0.01 from 2.
+const SMALL_FAR_SPHERES: [(f32, f32); 2] = [(0.05, 8.0), (0.01, 2.0)];
+
+/// A small sphere seen from far away: the reported distance is within
+/// `1e-6 · t` of the double-precision root. The textbook discriminant
+/// `half_b² − a·c` cancels two terms of order |oc|² to leave one of order
+/// r², and from 8 units away that cost about 1e-4 on the distance.
+#[test]
+fn a_small_far_sphere_reports_an_accurate_distance() {
+    let mut rng = Rng::new(23);
+    for (radius, distance) in SMALL_FAR_SPHERES {
+        let mut b = SceneBuilder::new();
+        b.attach(sphere(Vec3A::ZERO, radius));
+        let scene = b.commit();
+        let mut worst = 0.0f64;
+        for ray in rays_across_a_sphere(&mut rng, radius, distance, 2000) {
+            let (near, far) = sphere_roots_f64(&ray, Vec3A::ZERO, radius).expect("aimed across");
+            let hit = scene.intersect(&ray, 1e-3, 100.0).expect("aimed across");
+            assert!(hit.front_face);
+            let err = (hit.t as f64 - near).abs() / near;
+            worst = worst.max(err);
+            assert!(
+                err < 1e-6,
+                "r {radius} at {distance}: t {} vs {near} (far {far}), {err:.2e} relative",
+                hit.t
+            );
+        }
+        assert!(worst > 0.0, "the probe is not exercising rounding at all");
+    }
+}
+
+/// The cylinder wall is the sphere's quadratic in the plane perpendicular to
+/// the axis, and had the same cancellation: a thin tube seen from far away
+/// reports its wall within `1e-6 · t` of the double-precision root.
+#[test]
+fn a_small_far_cylinder_reports_an_accurate_distance() {
+    let mut rng = Rng::new(31);
+    for (radius, distance) in SMALL_FAR_SPHERES {
+        // A tube along Y through the origin, long enough that rays aimed at
+        // the sphere's disc from within 30° of its equator meet its wall
+        // rather than enter an open end.
+        let axis = Vec3A::Y;
+        let length = 4.0 * radius;
+        let mut b = SceneBuilder::new();
+        b.attach(Geometry::Cylinder {
+            p0: -axis * (length / 2.0),
+            p1: axis * (length / 2.0),
+            radius,
+        });
+        let scene = b.commit();
+        let mut worst = 0.0f64;
+        let rays = rays_across_a_sphere(&mut rng, radius, distance, 3000)
+            .into_iter()
+            .filter(|r| r.dir.y.abs() < 0.5);
+        for ray in rays {
+            // The wall in double precision: the sphere's roots on the
+            // projected ray.
+            let oc = ray.origin.as_dvec3();
+            let d = ray.dir.as_dvec3();
+            let ax = axis.as_dvec3();
+            let oc_p = oc - oc.dot(ax) * ax;
+            let d_p = d - d.dot(ax) * ax;
+            let (a, half_b) = (d_p.length_squared(), oc_p.dot(d_p));
+            let c = oc_p.length_squared() - (radius as f64) * (radius as f64);
+            let disc = half_b * half_b - a * c;
+            assert!(disc > 0.0, "aimed across");
+            let near = (-half_b - disc.sqrt()) / a;
+            let hit = scene.intersect(&ray, 1e-3, 100.0).expect("aimed across");
+            assert!(hit.front_face, "the wall, from outside");
+            let err = (hit.t as f64 - near).abs() / near;
+            worst = worst.max(err);
+            assert!(
+                err < 1e-6,
+                "r {radius} at {distance}: t {} vs {near}, {err:.2e} relative",
+                hit.t
+            );
+        }
+        assert!(worst > 0.0, "the probe is not exercising rounding at all");
+    }
+}
+
+/// A ray restarted just short of its sphere hit, as the renderer's
+/// pass-through walks restart a segment (`t − 0.001 + 1e-5·t`, then asking
+/// `(0.001, ∞)` again), finds the far side — never the near side it just
+/// passed. On the textbook formula about one ray in three met the entry
+/// again, and a hidden sphere light counted twice.
+#[test]
+fn a_restart_short_of_a_sphere_hit_finds_the_far_side() {
+    let mut rng = Rng::new(29);
+    for (radius, distance) in SMALL_FAR_SPHERES {
+        let mut b = SceneBuilder::new();
+        b.attach(sphere(Vec3A::ZERO, radius));
+        let scene = b.commit();
+        let mut re_hits = 0;
+        let rays = rays_across_a_sphere(&mut rng, radius, distance, 2000);
+        for ray in &rays {
+            let (_, far) = sphere_roots_f64(ray, Vec3A::ZERO, radius).expect("aimed across");
+            let t = scene.intersect(ray, 1e-3, 100.0).expect("aimed across").t;
+            let resume = t - 1e-3 + t.abs().max(1.0) * 1e-5;
+            let restarted = Ray::new(ray.at(resume), ray.dir);
+            let next = scene
+                .intersect(&restarted, 1e-3, 100.0)
+                .expect("the far side");
+            if next.front_face {
+                re_hits += 1;
+                continue;
+            }
+            let err = ((resume + next.t) as f64 - far).abs() / far;
+            assert!(err < 1e-6, "far side at {} vs {far}", resume + next.t);
+        }
+        assert_eq!(
+            re_hits,
+            0,
+            "r {radius} at {distance}: {re_hits} of {} restarts met the entry again",
+            rays.len()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Triangles
 // ---------------------------------------------------------------------------

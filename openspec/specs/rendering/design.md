@@ -154,7 +154,9 @@ consumed as ordinary dependencies:
      (`restarted`, the subsurface walk's trick) — short of the hit by the 0.001 offset,
      since restarted *on* it that offset stepped over any surface within 0.001 behind
      a cutout and a layered card leaked light
-     (`a_surface_just_behind_a_cutout_is_not_skipped`); an `if` yielding the hit from
+     (`a_surface_just_behind_a_cutout_is_not_skipped`) — and that restart assumes the
+     kernel's `t` is accurate to better than its 1e-5·t step, which the analytic
+     sphere's was not (below); an `if` yielding the hit from
      either arm copied the whole `Option<WorldHit>` at every vertex (+0.8%), so the
      hit is patched in place; and the extra code tipped `trace_path` over LLVM's
      inline threshold (+1.4% out of line), so it is `#[inline(always)]` into
@@ -162,6 +164,31 @@ consumed as ordinary dependencies:
      against that tree with the same attribute, which on its own saved 0.4%);
      `materialx_basic` runs +0.64%, of which 0.13% is the per-leaf rotation check in
      the closure collapse walk. Every sample scene without a cutout renders bit-identically.
+   - **A pass-through crosses each surface once** (`LastCrossing`, in every walk on
+     both sides). A hidden sphere light 8 units from a diffuse plane was collected
+     twice on a third of the bounces that crossed it: the sphere's textbook
+     discriminant `half_b² − a·c` cancelled two terms of order |oc|² to leave one of
+     order r², and the reported `t` was 1e-4 to 2e-3 short of the surface — more than
+     `resume_before`'s 1e-5·t step past it — so the restarted segment met the entry
+     again, front-facing and emitting (BSDF-only 1.04×, 1.34× and 1.64× light-only at
+     distance/radius 40, 160 and 200; veach_mis's smoothest plate 16.6% bright under
+     LightTiny alone). The kernel is fixed (closest-approach discriminant for spheres
+     and cylinders, intersection-kernel design record), and the walks keep a backstop
+     for every primitive: each records the crossing it last accepted
+     `(geom_id, prim_id, side, t)`, and a hit on the same primitive, from the same
+     side, within `1e-4 · max(|t|, 1)` of it is its rounding, not a surface — no
+     closed or single-sided surface is entered twice in a row from the same side — so
+     the walk steps past it without counting it, and without spending a crossing of
+     the budget. The guard alone also covered the old sphere at these distances
+     (`every_strategy_agrees_on_a_small_far_hidden_light`, which is 2.000× without
+     either). It is not only spheres: on `materialx_showcase` (hidden rect lights, no
+     sphere) the guard skips a few dozen re-hits of a light's triangle per 16-spp
+     frame, reported 2–5e-5·t past the first hit — watertight triangles lose that much
+     at grazing incidence — and the image moves by 1e-6 on 32 of 2 M pixels. Widening
+     `resume_before` instead would re-open the skipped-surface leak above, and the
+     window is narrow for the reason in the known gaps below. Two cards
+     on different primitives half a millimetre apart are still both crossed
+     (`two_cards_close_together_are_both_crossed`, `(1 − 0.5)²` on both sides).
    - **Thin walls are pass-throughs** (`Material::has_straight_transmission`:
      `crust:openpbr` `geometryThinWalled` with `transmissionWeight > 0`, a MaterialX
      surface whose `thin_walled` reaches a transmitting dielectric or generalized
@@ -533,6 +560,14 @@ randomness use `openqmc::pcg::Rng`.
   selection weight, which changes those materials' sampling and needs its own A/B.
 - **The first-hit AOVs see a passed wall's geometric normal.** A wall passed through is
   never shaded, so a normal map on it does not reach `N`.
+- **A nested prototype's placements share a hit id under the re-hit guard.** Inside a
+  nested prototype every placement of a leaf part reports one `geom_id`
+  (`InstanceHitId::As(first)`, `usd_import/instancing.rs`), so two placements of one
+  cutout card stacked within `1e-4 · t` of each other (2 mm at t = 20), facing the same
+  way and met on the same triangle index, read to a pass-through walk as one surface
+  met twice, and the second is passed for free. That is the thickness of a coplanar
+  overlap; the window was 1e-3 in a first draft, which would have been 2 cm. The real
+  fix is a placement identity on the hit, which the kernel does not carry.
 - **Two branches per vertex remain** in a world without thin walls (+0.30% of
   cornellbox's instructions). Removing them would mean swapping a met wall's material
   for a precomputed twin without its straight lobe, which was not judged worth it.
