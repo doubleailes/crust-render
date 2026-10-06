@@ -27,8 +27,8 @@ spec's mapping exactly: `s = 0.5 − atan2(x, z) / 2π` in
   go through these two functions, so they stay one consistent density.
 - **BREAKING for textured domes.** Every textured dome is turned 180° about its
   own +Y axis relative to today. A uniform-colour dome is unchanged. Of the
-  checked-in samples, 17 carry a textured dome and their golden images change.
-  No other image changes.
+  checked-in samples, 16 carry a textured dome and their golden images change.
+  No other image changes. (`usdlux`'s texture is on a `RectLight`, not a dome.)
 - The module documentation, the unit test that pins the old convention, and the
   `lighting` design record state the spec's convention and cite it.
 
@@ -50,10 +50,18 @@ None.
 - `crates/crust-core/tests/environment.rs`:
   `minus_z_is_the_image_centre_and_plus_z_the_seam` is replaced by a test of the
   spec's convention.
-- Golden images for the 17 textured-dome samples (`samples/animation.usda`,
+- Three more tests pinned the old convention and are updated: an inline copy of the
+  mapping in `tests/environment.rs` (`bright_texels_carry_proportionally_higher_pdf`),
+  `tests/lights.rs` (`textured_dome_looks_up_the_map_by_direction`,
+  `rotating_the_dome_rotates_the_sky`) and `crust-assets`'s
+  `exr_environment_round_trips`, which pinned the pole's column.
+- The four samples whose `sky_env.exr` dome was rotated by eye (`domelight`,
+  `materialx_cutout`, `materialx_subsurface`, `materialx_surfaces`) now author
+  `rotateY = 200` instead of 20, which keeps their sun where it was.
+- Golden images for the 16 textured-dome samples (`samples/animation.usda`,
   `cornellbox`, `curves`, `displacement`, `domelight`, `hair`, `instancing`,
   `materialx_cutout`, `materialx_subsurface`, `materialx_surfaces`, `motionblur`,
   `nested_instancing`, `openpbr_showcase`, `pxr_displace`, `subdivision`,
-  `subdivision_adaptive`, `usdlux`) must be re-recorded. Any sample that authored
+  `subdivision_adaptive`) must be re-recorded. Any sample that authored
   a dome rotation to compensate for the old convention is reviewed.
 - Performance: none. The same arithmetic, with one sign and one argument swapped.

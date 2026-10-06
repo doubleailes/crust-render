@@ -1016,12 +1016,12 @@ fn two_texel_map() -> Arc<EnvironmentMap> {
 #[test]
 fn textured_dome_looks_up_the_map_by_direction() {
     let dome = DomeLight::new(Vec3A::splat(2.0), Some(two_texel_map()), Mat3A::IDENTITY);
-    // -Z is the centre of the lat-long image → the right-hand texel.
-    let (minus_z, _) = dome.escaped(Vec3A::ZERO, -Vec3A::Z).unwrap();
-    assert_eq!(minus_z, Vec3A::new(0.0, 2.0, 0.0), "tint × green");
-    // +Z wraps to the seam → the left-hand texel.
+    // +Z is the centre of the lat-long image (UsdLux) → the right-hand texel.
     let (plus_z, _) = dome.escaped(Vec3A::ZERO, Vec3A::Z).unwrap();
-    assert_eq!(plus_z, Vec3A::new(2.0, 0.0, 0.0), "tint × red");
+    assert_eq!(plus_z, Vec3A::new(0.0, 2.0, 0.0), "tint × green");
+    // -Z wraps to the seam → the left-hand texel.
+    let (minus_z, _) = dome.escaped(Vec3A::ZERO, -Vec3A::Z).unwrap();
+    assert_eq!(minus_z, Vec3A::new(2.0, 0.0, 0.0), "tint × red");
 }
 
 #[test]
@@ -1029,10 +1029,10 @@ fn rotating_the_dome_rotates_the_sky() {
     let rot = Mat3A::from_rotation_y(std::f32::consts::PI);
     let dome = DomeLight::new(Vec3A::ONE, Some(two_texel_map()), rot);
     // The 180° turn swaps what +Z and -Z see.
-    let (minus_z, _) = dome.escaped(Vec3A::ZERO, -Vec3A::Z).unwrap();
-    assert_eq!(minus_z, Vec3A::new(1.0, 0.0, 0.0));
     let (plus_z, _) = dome.escaped(Vec3A::ZERO, Vec3A::Z).unwrap();
-    assert_eq!(plus_z, Vec3A::new(0.0, 1.0, 0.0));
+    assert_eq!(plus_z, Vec3A::new(1.0, 0.0, 0.0));
+    let (minus_z, _) = dome.escaped(Vec3A::ZERO, -Vec3A::Z).unwrap();
+    assert_eq!(minus_z, Vec3A::new(0.0, 1.0, 0.0));
 }
 
 #[test]

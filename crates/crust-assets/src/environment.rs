@@ -241,12 +241,15 @@ mod tests {
         assert_eq!((map.width(), map.height()), (w, h));
 
         // Row 0 is the +Y pole by convention, so straight up must read the
-        // first row. Sampling nearest-texel, +Y lands in column 0.
+        // first row. At the pole every column is the same direction, so which
+        // column the lookup lands in is not part of the contract: any row-0
+        // value (x in 0..w) will do.
         let up = map.radiance(Vec3A::Y);
         assert!(
-            (up.x - value(0, 0).0).abs() < 1e-4 && (up.y - 2.0).abs() < 1e-4,
+            up.x < w as f32 && (0..w).any(|x| (up.x - value(x, 0).0).abs() < 1e-4),
             "top-row lookup returned {up:?}"
         );
+        assert!((up.y - 2.0).abs() < 1e-4, "top-row lookup returned {up:?}");
 
         // And a high dynamic range value survives unclamped.
         let low = map.radiance(-Vec3A::Y);
