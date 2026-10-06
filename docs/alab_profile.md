@@ -22,8 +22,8 @@ Measured 2026-10-05 at `4143c58` (0.5.0). The main findings:
 
 ```bash
 CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
-cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM --stats    # timings
-cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM --profile  # sections
+cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM --stats    # timings
+cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM --profile  # sections
 ```
 
 - **Machine:** a 72-vCPU VM (`Intel Xeon E5-2699 v4`, reported as one socket
@@ -477,12 +477,12 @@ not a render.
 
 ```bash
 CAM=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
-cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
-RAYON_NUM_THREADS=8 cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 8 --profile
+cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 32 --profile
+RAYON_NUM_THREADS=8 cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 8 --profile
 # light and shadow links, and why a light left the list:
-cargo run --release -- -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 1 -l debug 2>&1 | grep light_links
+cargo run --release -- render -i samples/ALab/entry.usda -f 1004 --camera $CAM -s 1 -l debug 2>&1 | grep light_links
 # stack snapshots during the render phase of the first:
-eu-stack -p "$(pgrep -f crust-render)" > stacks.txt
+eu-stack -p "$(pgrep -x crust)" > stacks.txt
 ```
 
 Each run peaks at about 29 GiB, so run them one at a time.

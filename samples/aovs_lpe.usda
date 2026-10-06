@@ -12,7 +12,7 @@ volume and emission layers add back up to the beauty. So do the two light
 groups, `key` and `fill` (crust:light:lpeTag), with the sky and the glowing
 ball (an emissive material, not a light: `O`).
 
-    cargo run --release -- -i samples/aovs_lpe.usda
+    cargo run --release -- render -i samples/aovs_lpe.usda
 
 writes renders/aovs_lpe.exr (+ .png)."""
     defaultPrim = "World"

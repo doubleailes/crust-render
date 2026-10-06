@@ -21,8 +21,8 @@
 #     are smaller than the run-to-run spread:
 #
 #       RAYON_NUM_THREADS=1 valgrind --tool=callgrind --cache-sim=no \
-#           --branch-sim=no target/release/crust-render \
-#           -i samples/cornellbox.usda -o /tmp/cg.exr -s 2
+#           --branch-sim=no target/release/crust \
+#           render -i samples/cornellbox.usda -o /tmp/cg.exr -s 2
 #       callgrind_annotate --inclusive=no callgrind.out.<pid>
 #
 # Usage: scripts/bench_scenes.sh [-n runs] [-o outdir] [scene ...]
@@ -63,7 +63,7 @@ if [ ${#SCENES[@]} -eq 0 ]; then
     SCENES=("${DEFAULT_SCENES[@]}")
 fi
 
-BIN=target/release/crust-render
+BIN=target/release/crust
 if [ ! -x "$BIN" ]; then
     echo "building $BIN"
     cargo build --release -p crust-render
@@ -94,7 +94,7 @@ for scene in "${SCENES[@]}"; do
     tput=""
 
     for _ in $(seq "$RUNS"); do
-        out="$("$BIN" -i "$path" -o "$WORK/$label.exr" --stats -l error 2>/dev/null)"
+        out="$("$BIN" render -i "$path" -o "$WORK/$label.exr" --stats -l error 2>/dev/null)"
         # "  Render      1.412s   96.6% ..." -> 1.412
         secs="$(printf '%s\n' "$out" | awk '/^  Render /{gsub(/s$/,"",$2); print $2; exit}')"
         [ -n "$secs" ] || continue

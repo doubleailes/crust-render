@@ -29,6 +29,13 @@ Crust Render reads these UsdLux light types with their standard `inputs:intensit
 | `DistantLight` | `inputs:angle` |
 | `DomeLight` | `inputs:texture:file`, a lat-long environment map (`inputs:texture:format` unauthored, `latlong` or `automatic`) |
 
+A lat-long dome is oriented as the UsdLux schema specifies (the OpenEXR convention): in
+the light's own frame the top row is +Y, the centre of the image faces **+Z**, a quarter
+of the way in faces +X and three quarters faces −X. The prim's transform then rotates
+that sky, so other UsdLux renderers place an HDRI's sun in the same direction. Releases
+before 0.5.2 put −Z at the image centre. A scene whose dome rotation was tuned on those
+releases needs 180° more about Y to keep its sun where it was.
+
 `inputs:color` and `inputs:shaping:focusTint` are in the
 [working colour space](@/docs/usd/render-settings.md#renderingcolorspace), as UsdLux
 specifies, unless a colour space is authored for them: `colorSpace` metadata on the

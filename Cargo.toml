@@ -12,7 +12,7 @@ edition = "2024"
 rust-version = "1.96"
 # SPDX form of LICENSE, so cargo-deny can check our own crates too.
 license = "MIT"
-version = "0.5.1"
+version = "0.6.0"
 # Nothing here goes to crates.io: crust-core and crust-assets depend on git
 # repositories, which crates.io refuses. Releases are the GitHub binaries.
 publish = false
