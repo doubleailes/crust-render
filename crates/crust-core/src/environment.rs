@@ -8,12 +8,20 @@
 //!
 //! # Conventions
 //!
-//! Y-up, matching the rest of crust. For a unit direction `d`:
+//! The UsdLux `DomeLight` schema's, which adopts the OpenEXR lat-long
+//! convention: "Pixel (dataWindow.min.x, dataWindow.min.y) has latitude +pi/2
+//! and longitude +pi; pixel (dataWindow.max.x, dataWindow.max.y) has latitude
+//! −pi/2 and longitude −pi. […] Latitude 0, longitude 0 points into positive z
+//! direction; and latitude 0, longitude pi/2 points into positive x
+//! direction." In the light's own frame (Y-up, as the rest of crust), for a
+//! unit direction `d`:
 //!
 //! - `v = acos(d.y) / π` — 0 at the +Y pole, 1 at −Y, so image row 0 is the
 //!   top of the sky (the usual storage order).
-//! - `u = 0.5 + atan2(d.x, −d.z) / 2π` — puts −Z, the direction a USD
-//!   camera looks down, at the centre of the image.
+//! - `u = 0.5 − atan2(d.x, d.z) / 2π` — longitude runs from +π at the left
+//!   edge to −π at the right, so +Z is at the centre, +X at u = ¼, −X at
+//!   u = ¾ and −Z on the seam. This is the mapping Typhoon (hdEmbree,
+//!   `domeLight.cpp`) uses, so a dome lights a scene as it does there.
 
 use glam::Vec3A;
 
@@ -161,16 +169,16 @@ impl EnvironmentMap {
     /// for the convention.
     fn direction_to_uv(d: Vec3A) -> (f32, f32) {
         let v = d.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
-        let u = 0.5 + d.x.atan2(-d.z) / std::f32::consts::TAU;
+        let u = 0.5 - d.x.atan2(d.z) / std::f32::consts::TAU;
         (u.rem_euclid(1.0), v.clamp(0.0, 1.0))
     }
 
     /// The inverse of [`Self::direction_to_uv`].
     fn uv_to_direction(u: f32, v: f32) -> Vec3A {
         let theta = v * std::f32::consts::PI;
-        let phi = (u - 0.5) * std::f32::consts::TAU;
+        let phi = (0.5 - u) * std::f32::consts::TAU;
         let sin_theta = theta.sin();
-        Vec3A::new(sin_theta * phi.sin(), theta.cos(), -sin_theta * phi.cos())
+        Vec3A::new(sin_theta * phi.sin(), theta.cos(), sin_theta * phi.cos())
     }
 
     /// Nearest-texel radiance along `direction`.
@@ -254,15 +262,32 @@ mod tests {
         }
     }
 
-    /// A USD camera looks down -Z, so -Z must land at the centre of the
-    /// image and +Y at the top row.
+    /// The UsdLux / OpenEXR lat-long convention: longitude 0 (+Z) at the
+    /// centre, longitude +π/2 (+X) a quarter in, −X three quarters in, −Z on
+    /// the seam, +Y on the top row.
     #[test]
     fn conventions_are_as_documented() {
-        let (u, v) = EnvironmentMap::direction_to_uv(-Vec3A::Z);
-        assert!((u - 0.5).abs() < 1e-5, "-Z should be at u = 0.5, got {u}");
+        let u_of = |d: Vec3A| EnvironmentMap::direction_to_uv(d).0;
+        let (u, v) = EnvironmentMap::direction_to_uv(Vec3A::Z);
+        assert!((u - 0.5).abs() < 1e-5, "+Z should be at u = 0.5, got {u}");
         assert!(
             (v - 0.5).abs() < 1e-5,
             "the horizon should be at v = 0.5, got {v}"
+        );
+        let u = u_of(Vec3A::X);
+        assert!((u - 0.25).abs() < 1e-5, "+X should be at u = 0.25, got {u}");
+        let u = u_of(-Vec3A::X);
+        assert!((u - 0.75).abs() < 1e-5, "-X should be at u = 0.75, got {u}");
+        // −Z is the seam: just off it on either side lands next to 0 or 1.
+        let u = u_of(Vec3A::new(1e-3, 0.0, -1.0).normalize());
+        assert!(
+            u < 1e-3,
+            "-Z nudged toward +X should be just right of 0, got {u}"
+        );
+        let u = u_of(Vec3A::new(-1e-3, 0.0, -1.0).normalize());
+        assert!(
+            u > 1.0 - 1e-3,
+            "-Z nudged toward -X should be just left of 1, got {u}"
         );
 
         let (_, v_top) = EnvironmentMap::direction_to_uv(Vec3A::Y);
@@ -344,6 +369,65 @@ mod tests {
             "only {:.1}% of samples found the bright texel — importance \
              sampling is not working",
             100.0 * fraction
+        );
+    }
+
+    /// The mapping agrees with Typhoon's, the OpenUSD reference delegate
+    /// (`_DirectionToLatLongUv` in hdEmbree's `renderer/lights/domeLight.cpp`,
+    /// OpenUSD `typhoon/main` 70c45e8), transcribed here in its own terms:
+    /// `s = wrap(0.5 − atan2(x, z) / 2π)`, `t = acos(clamp(y)) / π`.
+    #[test]
+    fn mapping_matches_the_reference_delegate() {
+        let typhoon = |d: Vec3A| {
+            let n = d.normalize();
+            let t = n.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+            let s = 0.5 - n.x.atan2(n.z) / (2.0 * std::f32::consts::PI);
+            (s - s.floor(), t)
+        };
+        for i in 0..24 {
+            for j in 1..12 {
+                let phi = i as f32 / 24.0 * std::f32::consts::TAU + 0.01;
+                let theta = j as f32 / 12.0 * std::f32::consts::PI;
+                let d = Vec3A::new(
+                    theta.sin() * phi.cos(),
+                    theta.cos(),
+                    theta.sin() * phi.sin(),
+                );
+                let (u, v) = EnvironmentMap::direction_to_uv(d);
+                let (s, t) = typhoon(d);
+                assert!(
+                    (u - s).abs() < 1e-6 && (v - t).abs() < 1e-6,
+                    "{d:?}: crust ({u}, {v}) vs reference ({s}, {t})"
+                );
+            }
+        }
+    }
+
+    /// Sampling follows the UsdLux orientation, not just a self-consistent
+    /// one: a bright texel a quarter of the way in on the equator (longitude
+    /// +π/2) draws samples toward +X, and each sample's reported pdf is the
+    /// one `pdf` gives back for that direction.
+    #[test]
+    fn a_bright_texel_a_quarter_in_is_sampled_toward_plus_x() {
+        let map = spotty_map(32, 16, 8, 8);
+        let mut rng = openqmc::pcg::Rng::new(17);
+        let (mut sum, mut n) = (Vec3A::ZERO, 0);
+        for _ in 0..4000 {
+            let Some((dir, _, pdf)) = map.sample(rng.next_f32(), rng.next_f32()) else {
+                continue;
+            };
+            let queried = map.pdf(dir);
+            assert!(
+                (pdf - queried).abs() <= 1e-3 * pdf.max(queried),
+                "sample {pdf} vs pdf() {queried} for {dir:?}"
+            );
+            sum += dir;
+            n += 1;
+        }
+        let mean = (sum / n as f32).normalize();
+        assert!(
+            mean.dot(Vec3A::X) > 0.95,
+            "samples should head toward +X, mean direction {mean:?}"
         );
     }
 
