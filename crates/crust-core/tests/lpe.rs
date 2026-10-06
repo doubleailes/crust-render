@@ -70,6 +70,10 @@ struct Opts {
     lights: bool,
     /// Keep the `fill` light (with `lights`).
     fill: bool,
+    /// The lights' sources are hidden — transparent emitters — and a third,
+    /// `rim`, stands between the ball and the key, so a bounce toward the
+    /// key crosses two of them.
+    hidden: bool,
     dome: bool,
     wall: bool,
     /// Where the wall (the near side of a radius-100 sphere) is centred.
@@ -98,6 +102,7 @@ impl Default for Opts {
             glow: true,
             lights: true,
             fill: true,
+            hidden: false,
             dome: true,
             wall: true,
             wall_center: Vec3A::new(-104.0, 0.0, -105.0),
@@ -173,17 +178,28 @@ fn scene(o: &Opts) -> Renderer {
         for (center, radiance, tag) in [
             (Vec3A::new(-2.0, 3.0, 4.0), 20.0, "key"),
             (Vec3A::new(3.0, 1.0, 4.0), 6.0, "fill"),
+            (Vec3A::new(-1.0, 1.6, 3.0), 10.0, "rim"),
         ] {
-            if tag == "fill" && !o.fill {
+            if tag == "fill" && !o.fill || tag == "rim" && !o.hidden {
                 continue;
             }
-            let radius = 0.6;
-            let emitter = Arc::new(Emissive::new(Vec3A::splat(radiance)));
+            let radius = if tag == "rim" { 0.45 } else { 0.6 };
+            let emitter = Arc::new(if o.hidden {
+                // One-sided, as an imported light's source is.
+                Emissive::light(Vec3A::splat(radiance), None)
+            } else {
+                Emissive::new(Vec3A::splat(radiance))
+            });
             let id = world.attach_masked(
                 Geometry::Sphere { center, radius },
                 emitter.clone(),
-                MASK_SHADOW | MASK_INDIRECT,
+                if o.hidden {
+                    MASK_INDIRECT
+                } else {
+                    MASK_SHADOW | MASK_INDIRECT
+                },
             );
+            world.set_transparent_emitter(id, o.hidden);
             lights.add(AreaLight::new(SphereShape { center, radius }, emitter, id));
             let index = lights.count() - 1;
             lights.set_lpe_tag(index, Some(tag));
@@ -241,18 +257,24 @@ fn mean(plane: &[f32]) -> f64 {
 
 #[test]
 fn the_full_path_expression_is_the_beauty_bitwise() {
-    for (clamp, guiding, window) in [
-        (0.0, false, false),
-        (10.0, false, false),
-        (0.5, false, false),
-        (0.0, true, false),
-        (0.0, false, true),
-        (10.0, false, true),
+    for (clamp, guiding, window, hidden) in [
+        (0.0, false, false, false),
+        (10.0, false, false, false),
+        (0.5, false, false, false),
+        (0.0, true, false, false),
+        (0.0, false, true, false),
+        (10.0, false, true, false),
+        // Bounces that cross hidden lights, through the window too.
+        (0.0, false, false, true),
+        (0.5, false, false, true),
+        (0.0, true, false, true),
+        (10.0, false, true, true),
     ] {
         let o = Opts {
             clamp,
             guiding,
             window,
+            hidden,
             ..Opts::default()
         };
         let all = lpe("C.*[LO]");
@@ -261,7 +283,7 @@ fn the_full_path_expression_is_the_beauty_bitwise() {
         let channel = film.var_channels(&beauty, &all);
         assert!(
             bits(&channel) == bits(&beauty_planes(&film, &beauty)),
-            "clamp {clamp}, guiding {guiding}, window {window}"
+            "clamp {clamp}, guiding {guiding}, window {window}, hidden {hidden}"
         );
         // Asking for expressions changes nothing in the beauty.
         let plain = scene(&o).render_with_tiles();
@@ -297,10 +319,17 @@ fn assert_sums(parts: &[Vec<Vec<f32>>], whole: &[Vec<f32>], what: &str) {
 
 #[test]
 fn a_partition_sums_to_the_beauty() {
-    for (clamp, window) in [(0.0, false), (1.0, false), (0.0, true)] {
+    for (clamp, window, hidden) in [
+        (0.0, false, false),
+        (1.0, false, false),
+        (0.0, true, false),
+        (0.0, false, true),
+        (1.0, true, true),
+    ] {
         let o = Opts {
             clamp,
             window,
+            hidden,
             ..Opts::default()
         };
         let vars: Vec<AovVar> = PARTITION.iter().map(|e| lpe(e)).collect();
@@ -309,7 +338,7 @@ fn a_partition_sums_to_the_beauty() {
         assert_sums(
             &parts,
             &beauty_planes(&film, &beauty),
-            &format!("clamp {clamp}, window {window}"),
+            &format!("clamp {clamp}, window {window}, hidden {hidden}"),
         );
         // Every part of this scene carries light somewhere.
         for (v, p) in vars.iter().zip(&parts) {
@@ -378,6 +407,38 @@ fn light_groups_select_their_lights() {
         (key - alone).abs() <= 0.05 * key.abs(),
         "key group {key} vs the key light alone {alone}"
     );
+}
+
+/// A bounce that crosses hidden lights routes each one by its own `L`: the
+/// light groups still partition the beauty, and each crossed light lands in
+/// its own group — `rim` stands in front of the key, so a group that took the
+/// light a crossing ray ended on would leave it empty.
+#[test]
+fn crossed_hidden_lights_route_by_their_own_tags() {
+    let vars = vec![
+        lpe("C.*<L.'key'>"),
+        lpe("C.*<L.'fill'>"),
+        lpe("C.*<L.'rim'>"),
+        lpe("C.*<L.[^'key' 'fill' 'rim']>"),
+        lpe("C.*O"),
+    ];
+    for clamp in [0.0, 1.0] {
+        let o = Opts {
+            hidden: true,
+            clamp,
+            ..Opts::default()
+        };
+        let (beauty, film) = render(&o, &vars);
+        let parts: Vec<_> = vars.iter().map(|v| film.var_channels(&beauty, v)).collect();
+        assert_sums(
+            &parts,
+            &beauty_planes(&film, &beauty),
+            &format!("hidden groups, clamp {clamp}"),
+        );
+        for (v, p) in vars.iter().zip(&parts) {
+            assert!(mean(&p[1]) > 0.0, "{} is empty", v.name);
+        }
+    }
 }
 
 /// RMS difference between two planes.
