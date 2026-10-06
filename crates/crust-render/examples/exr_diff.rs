@@ -16,9 +16,61 @@
 //! reference first). A pure performance change should report either zero
 //! differing pixels or a handful at the float epsilon (exact-tie ordering
 //! inside a BVH leaf), never a structural difference.
+//!
+//! Two options locate where a noise comparison's error lives, which the
+//! full and the trimmed relMSE only summarise:
+//!
+//! ```text
+//! exr_diff ref.exr test.exr --worst 20 --error-exr err.exr
+//! ```
+//!
+//! `--worst N` lists the N pixels with the largest relative squared error
+//! (the per-pixel term of the relMSE), with their coordinates, both values
+//! and the share of the image's summed error they carry. `--error-exr`
+//! writes that term per channel as an RGB EXR, `(a − b)² / (a² + 0.01)`, so
+//! the error's footprint can be viewed against the image.
 
 use exr::prelude::*;
 use std::collections::BTreeMap;
+
+/// Command line: the two images, and the optional error-location outputs.
+struct Args {
+    a: String,
+    b: String,
+    worst: usize,
+    error_exr: Option<String>,
+}
+
+fn parse_args() -> Args {
+    let usage = || -> ! {
+        eprintln!("usage: exr_diff <a.exr> <b.exr> [--worst N] [--error-exr err.exr]");
+        std::process::exit(2);
+    };
+    let mut paths = Vec::new();
+    let mut worst = 0;
+    let mut error_exr = None;
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--worst" => {
+                worst = it
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
+            "--error-exr" => error_exr = Some(it.next().unwrap_or_else(|| usage())),
+            _ if arg.starts_with("--") => usage(),
+            _ => paths.push(arg),
+        }
+    }
+    let [a, b] = <[String; 2]>::try_from(paths).unwrap_or_else(|_| usage());
+    Args {
+        a,
+        b,
+        worst,
+        error_exr,
+    }
+}
 
 /// One channel: its layer's size, and its samples as f32 in row order.
 struct Channel {
@@ -74,13 +126,9 @@ fn load(path: &str) -> Planes {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 2 {
-        eprintln!("usage: exr_diff <a.exr> <b.exr>");
-        std::process::exit(2);
-    }
-    let a = load(&args[0]);
-    let b = load(&args[1]);
+    let args = parse_args();
+    let a = load(&args.a);
+    let b = load(&args.b);
     if (a.width, a.height) != (b.width, b.height) {
         println!(
             "resolutions differ: {}x{} vs {}x{}",
@@ -147,11 +195,11 @@ fn main() {
                 }
             }
             (Some(_), None) => {
-                channel_lines.push(format!("  channel {name}: only in {}", args[0]));
+                channel_lines.push(format!("  channel {name}: only in {}", args.a));
                 pixel_differs.iter_mut().for_each(|d| *d = true);
             }
             (None, Some(_)) => {
-                channel_lines.push(format!("  channel {name}: only in {}", args[1]));
+                channel_lines.push(format!("  channel {name}: only in {}", args.b));
                 pixel_differs.iter_mut().for_each(|d| *d = true);
             }
             (None, None) => unreachable!("a name comes from one of the two"),
@@ -191,6 +239,12 @@ fn main() {
     // Per-pixel relative squared error (mean over channels), for the trimmed
     // relMSE below.
     let mut pixel_rel = Vec::with_capacity(total);
+    // The same term per channel, for `--error-exr`.
+    let mut channel_rel = [
+        vec![0.0f32; total],
+        vec![0.0f32; total],
+        vec![0.0f32; total],
+    ];
     for p in 0..total {
         let mut differs = false;
         let mut rel = 0.0f64;
@@ -202,6 +256,7 @@ fn main() {
             let r = (d as f64) * (d as f64) / ((x as f64) * (x as f64) + 1e-2);
             sum_rel_sq += r;
             rel += r / 3.0;
+            channel_rel[c][p] = r as f32;
             if d != 0.0 {
                 differs = true;
                 max_abs = max_abs.max(d);
@@ -241,10 +296,56 @@ fn main() {
     // fireflies -- a single one can carry an error of 1e5 -- otherwise decide
     // the mean on their own, and a change that cleans up the whole lit image
     // can read as no change at all.
+    if args.worst > 0 {
+        print_worst(&pixel_rel, &a, &b, aw, args.worst);
+    }
+    if let Some(path) = &args.error_exr {
+        write_rgb_file(path, aw, ah, |x, y| {
+            let p = y * aw + x;
+            (channel_rel[0][p], channel_rel[1][p], channel_rel[2][p])
+        })
+        .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+        println!("per-pixel relative squared error written to {path}");
+    }
     pixel_rel.sort_by(f64::total_cmp);
     let keep = total - total / 1000;
     println!(
         "relmse (trimmed 0.1%): {:e}",
         pixel_rel[..keep].iter().sum::<f64>() / keep.max(1) as f64
+    );
+}
+
+/// The `n` pixels with the largest relative squared error (the mean over
+/// channels of `(a − b)² / (a² + 0.01)`), worst first, with the share of the
+/// image's summed error each one and the list as a whole carries.
+fn print_worst(pixel_rel: &[f64], a: &[Vec<f32>; 3], b: &[Vec<f32>; 3], width: usize, n: usize) {
+    let total_err: f64 = pixel_rel.iter().sum();
+    let mut order: Vec<usize> = (0..pixel_rel.len()).collect();
+    order.sort_by(|&p, &q| pixel_rel[q].total_cmp(&pixel_rel[p]));
+    order.truncate(n);
+    let share = |e: f64| {
+        if total_err > 0.0 {
+            100.0 * e / total_err
+        } else {
+            0.0
+        }
+    };
+    println!("worst {} pixels by relative squared error:", order.len());
+    for &p in &order {
+        println!(
+            "  ({}, {}): rel sq err {:e} ({:.3}% of total)  {:?} vs {:?}",
+            p % width,
+            p / width,
+            pixel_rel[p],
+            share(pixel_rel[p]),
+            [a[0][p], a[1][p], a[2][p]],
+            [b[0][p], b[1][p], b[2][p]]
+        );
+    }
+    let listed: f64 = order.iter().map(|&p| pixel_rel[p]).sum();
+    println!(
+        "  these {} pixels carry {:.2}% of the summed relative squared error",
+        order.len(),
+        share(listed)
     );
 }
