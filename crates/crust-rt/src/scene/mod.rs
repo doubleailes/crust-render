@@ -231,6 +231,13 @@ pub struct RayHit {
     pub u: f32,
     pub v: f32,
     pub geom_id: u32,
+    /// Which instance placement the hit lies in: 0 on top-level geometry,
+    /// otherwise a value that differs between placements — including
+    /// placements of one prototype that report the same `geom_id`
+    /// ([`InstanceHitId::As`]) — and between their nesting chains. An
+    /// identity to compare, never an index to look up: two hits with equal
+    /// `geom_id`, `prim_id` and `placement` are on the same surface.
+    pub placement: u32,
     pub prim_id: u32,
 }
 
@@ -636,6 +643,7 @@ impl Expansion {
                 // carries its own committed flag, so this stays O(1) per
                 // instance however deeply they nest.
                 self.has_motion |= transform_end.is_some() || scene.has_motion();
+                let placement = geom_id + 1;
                 let (geom_id, id_offset) = match label {
                     InstanceHitId::Own => (geom_id, NO_ID_OFFSET),
                     InstanceHitId::As(id) => {
@@ -675,6 +683,7 @@ impl Expansion {
                             })
                         }),
                         geom_id,
+                        placement,
                         id_offset,
                         mask,
                     },
@@ -715,6 +724,7 @@ impl Scene {
             u: hit.u,
             v: hit.v,
             geom_id: hit.geom_id,
+            placement: hit.placement,
             prim_id: hit.prim_id,
         })
     }

@@ -47,9 +47,9 @@ lights on reports its distance to about 1e-6·t, and the guard below can be narr
 
 ### D2. One crossing per surface: a structural guard
 
-The walk records the last crossing it accepted: `(geom_id, prim id, side, t)`. A new hit
-with the same geometry and primitive, from the **same side**, within
-`t_prev + ε·max(|t_prev|, 1)` (ε = 1e-4, the same shape as `resume_before`'s step), is a
+The walk records the last crossing it accepted: `(geom_id, prim id, placement, side,
+t)`. A new hit on the same surface, from the **same side**, within
+`t_prev + ε·max(|t_prev|, 1)` (ε = 1e-3, the same shape as `resume_before`'s step), is a
 numerical re-hit and is skipped: the walk restarts past it without recording it, and
 without spending a crossing of the budget. A genuine second surface on the same geometry
 is either the other side (an exit) or farther than ε·t (a different part of a concave
@@ -57,18 +57,17 @@ mesh). This holds for every primitive, so it also covers triangles, disks and cu
 whose precision D1 does not touch. The bounce and the shadow side share the rule, so
 their visibility stays one estimate.
 
-**Why ε is 1e-4 and not wider.** The first draft used 1e-3, wide enough to cover the
-unfixed cylinder. But a hit's `(geom_id, prim id)` is not always one surface: inside a
-nested prototype every placement of a leaf part reports the same id
-(`InstanceHitId::As(first)` in `usd_import/instancing.rs`), so two placements of one
+**Why the identity carries the placement.** A hit's `(geom_id, prim id)` is not always
+one surface: inside a nested prototype every placement of a leaf part reports the same
+id (`InstanceHitId::As(first)` in `usd_import/instancing.rs`), so two placements of one
 cutout card stacked within the window, facing the same way and hit on the same triangle
-index, would read as a re-hit and the second would be skipped — a light leak in dense
-instanced foliage, 2 cm wide at t = 20 under 1e-3. With spheres *and* cylinders at
-1e-6·t, 1e-4 is still 100× the pinned error and 2 mm at t = 20, the thickness of a
-coplanar overlap. The exposure is recorded in the rendering design record's known gaps,
-with the measured cost of the narrow window: of the re-hits the walks meet in a 16-spp
-frame, 1 of 80 (`materialx_showcase`) and 2 of 39 (`openpbr_showcase`) lie past 1e-4·t
-(worst 2.5e-4·t, grazing triangle hits of hidden rect lights) and still count twice.
+index, read as a re-hit and the second was skipped — a light leak in dense instanced
+foliage. A first draft narrowed ε to 1e-4 to shrink that exposure to a coplanar overlap,
+which let a few grazing triangle re-hits through (1 of 80 on `materialx_showcase`, 2 of
+39 on `openpbr_showcase`, worst 2.5e-4·t). Instead the kernel's hit now names its
+placement (`RayHit::placement`: 0 at top level, otherwise an identity mixed from each
+instance level's slot — `PrimHit` and `InstancePrim` both had the padding), the guard
+compares it, and ε can be the 1e-3 that covers every observed re-hit.
 
 ### D3. Both, not either
 
@@ -79,12 +78,16 @@ the sphere. They are cheap and independent, so the change ships both, with separ
 ## Risks / Trade-offs
 
 - [The sphere and cylinder test changes move bits in every scene with one] → Expected
-  and bounded. `scripts/check_images.sh` lists the moving samples, and for three of them
-  the difference is shown to fall as 1/√N.
-- [The guard could skip a real surface] → Only a hit on the same primitive, from the same
-  side, within 1e-4·t. A real surface needs an exit between two entries, so this cannot
-  happen for closed or single-sided geometry with its own id. For nested-instance
-  placements sharing an id, see D2: the window is a coplanar overlap. A unit test with
-  two coplanar-close cards on *different* primitives checks both are still crossed.
+  and bounded. `scripts/check_images.sh` lists the moving samples. The difference is
+  *not* pure noise and does not fall as 1/√N: it carries the corrected sphere
+  positions, a fixed ulp-scale shift (`light_linking` relMSE flat at ~5e-10 across 16,
+  64 and 256 spp), plus a noise part that does fall (`materialx_cutout` 2.5e-5 → 5.1e-6
+  → 2.8e-6) and, on `openpbr_showcase`, the thin-walled bubble's transmittance no
+  longer squared (a 3.1e-7 trimmed floor).
+- [The guard could skip a real surface] → Only a hit on the same primitive in the same
+  placement, from the same side, within 1e-3·t. A real surface needs an exit between
+  two entries, so this cannot happen for closed or single-sided geometry. Two tests: two
+  coplanar-close cards on *different* primitives, and two stacked placements of *one*
+  card prototype that report one `geom_id`, are both crossed on both sides.
 - [`Tri4` ↔ scalar bit-identity] → Unaffected: the change touches spheres and cylinders
   only.

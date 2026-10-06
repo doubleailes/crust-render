@@ -15,8 +15,11 @@
 ## 2. One crossing per surface (`crates/crust-core/src/tracer/path.rs`)
 
 - [x] 2.1 Track the last accepted crossing `(geom_id, prim, side, t)` in `pass_cutouts`
-      and `pass_walls`, and skip a same-primitive, same-side hit within `1e-4·t` of it
-      (design D2). Verify with a unit test that feeds the walk a duplicated entry: the
+      and `pass_walls`, and skip a same-surface, same-side hit within `1e-3·t` of it
+      (design D2). *(The surface identity includes `RayHit::placement`, added to the
+      kernel so two placements of one prototype sharing a `geom_id` are two surfaces:
+      `stacked_placements_sharing_an_id_are_both_crossed` leaks one card's worth
+      without it.)* Verify with a unit test that feeds the walk a duplicated entry: the
       hidden light's emission is collected once.
 - [x] 2.2 Apply the same rule in `cutout_through` and the shadow-side thin-wall walk.
       Verify: the "two cards close together" test (`(1 − 0.5)²`) and
@@ -39,7 +42,7 @@
       before this change. Verify: samples without spheres or pass-throughs are
       bit-identical. For three samples that move, the difference falls as 1/√N across
       spp. *(19 of 38 bit-identical; the 19 that move all have a sphere or cylinder,
-      except `materialx_showcase` (32 px at 1e-6: triangle re-hits of its hidden rect
+      except `materialx_showcase` (33 px at 1e-6: triangle re-hits of its hidden rect
       lights, caught by the guard). The difference is not pure noise — it carries the
       corrected sphere positions — so it does not fall as 1/√N: `light_linking`
       relMSE 5.4e-10 / 6.5e-10 / 5.4e-10 at 16 / 64 / 256 spp (flat, max abs 2e-4);
@@ -49,18 +52,21 @@
       renders `light_linking` bit-identically to the full change.)*
 - [x] 3.4 Count instructions with callgrind (`RAYON_NUM_THREADS=1`, `-s 2`) on
       `samples/cornellbox.usda` and a sphere-heavy sample. Record the cost of the sphere
-      test change in the `intersection-kernel` design record. *(cornellbox 4 236.88 M →
-      4 236.77 M, −0.003 %; openpbr_showcase 2 361.70 M → 2 369.56 M, +0.33 %:
-      `scalar_hit` +16.2 M, `pass_walls` −18.9 M.)*
+      test change in the `intersection-kernel` design record. *(Final binary:
+      cornellbox 4 236.88 M → 4 233.35 M, −0.08 %; openpbr_showcase 2 361.70 M →
+      2 366.48 M, +0.20 % (`scalar_hit` +16.2 M, `pass_walls` −18.9 M in the
+      intermediate build). Interleaved `scripts/bench_ab.sh -n 6`, min / mean:
+      cornellbox +0.8 % / +0.4 %, openpbr_showcase +1.3 % / +0.0 %, veach_mis
+      +0.4 % / −0.7 %: inside the spread.)*
 
 ## 4. Documentation
 
 - [x] 4.1 Record the precision finding, the closest-approach form and the measurement in
       `openspec/specs/intersection-kernel/design.md`. Record the one-crossing rule, and
       why `resume_before`'s margin alone was not enough, in
-      `openspec/specs/rendering/design.md`, with the nested-instance shared-id exposure
-      as a known gap. Add the pass-through pair to `docs/architecture.md` § Invariants
-      if its wording names one walk only.
+      `openspec/specs/rendering/design.md`, and the placement identity in both. Add the
+      pass-through pair to `docs/architecture.md` § Invariants if its wording names one
+      walk only.
 - [x] 4.2 Run the CI set: `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --no-fail-fast`.

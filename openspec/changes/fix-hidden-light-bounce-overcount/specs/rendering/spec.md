@@ -4,9 +4,10 @@
 
 A path segment or shadow ray that passes hidden light sources, cutouts or thin walls
 SHALL count each surface it crosses exactly once. A hit on the same primitive, from the
-same side, within `1e-4 · t` of a crossing of it is a numerical re-hit and SHALL NOT add
+same side, within `1e-3 · t` of a crossing of it is a numerical re-hit and SHALL NOT add
 emission, opacity or transmittance a second time. Two distinct surfaces, however close,
-SHALL both be crossed.
+SHALL both be crossed — including two placements of one instanced prototype that report
+the same geometry id.
 
 #### Scenario: A small hidden light far away
 
@@ -15,6 +16,12 @@ SHALL both be crossed.
   with light sampling alone
 - **THEN** the two estimates of the plane agree within noise that falls as 1/√N, and no
   pixel's BSDF-only value is twice that of the same light made solid
+
+#### Scenario: Two stacked placements of one card
+
+- **WHEN** two placements of one half-opaque card prototype, labelled to report the same
+  geometry id, stand 0.0005 apart facing the same way between a floor and a light
+- **THEN** both are crossed, on the shadow side and the bounce side, as `(1 − 0.5)²`
 
 #### Scenario: Two cards close together
 

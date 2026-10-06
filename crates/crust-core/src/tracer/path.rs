@@ -916,16 +916,19 @@ fn resume_before(t: f32) -> f32 {
 /// had just passed, so a hidden sphere light was collected twice on a third
 /// of the bounces that crossed it (`every_strategy_agrees_on_a_small_far_hidden_light`).
 /// The kernel is fixed; this is the backstop for every primitive: a hit on
-/// the same primitive, from the same side, within [`RE_HIT_WINDOW`] of the
+/// the same surface, from the same side, within [`RE_HIT_WINDOW`] of the
 /// crossing just recorded is a re-hit, since no closed or single-sided
-/// surface is entered twice in a row from the same side. The window is
-/// narrow on purpose: inside a nested prototype every placement of a leaf
-/// part reports one id (`InstanceHitId::As`), and a wider window would take
-/// a second instanced card stacked that close for a re-hit.
+/// surface is entered twice in a row from the same side. "The same surface"
+/// is `(geom_id, prim_id, placement)`: inside a nested prototype every
+/// placement of a leaf part reports one `geom_id` (`InstanceHitId::As`),
+/// and without the placement a second instanced card stacked within the
+/// window read as a re-hit of the first
+/// (`stacked_placements_sharing_an_id_are_both_crossed`).
 #[derive(Clone, Copy)]
 pub(super) struct LastCrossing {
     geom_id: u32,
     prim_id: u32,
+    placement: u32,
     front_face: bool,
     /// Along the segment's own ray.
     t: f32,
@@ -933,9 +936,13 @@ pub(super) struct LastCrossing {
 
 /// How far past a crossing, relative to its distance (and absolute below
 /// 1, as [`resume_before`]'s step), a hit on the same surface is its
-/// rounding rather than a second surface: 100× the kernel's pinned sphere
-/// and cylinder error (`a_small_far_sphere_reports_an_accurate_distance`).
-pub(super) const RE_HIT_WINDOW: f32 = 1e-4;
+/// rounding rather than a second surface: 1000× the kernel's pinned sphere
+/// and cylinder error (`a_small_far_sphere_reports_an_accurate_distance`),
+/// and four times the worst triangle re-hit counted on the samples
+/// (2.5e-4·t, a hidden rect light crossed nearly edge-on). Safe at that
+/// width because the surface identity includes the placement: a real
+/// second surface on the same primitive is the other side.
+pub(super) const RE_HIT_WINDOW: f32 = 1e-3;
 
 impl LastCrossing {
     /// The crossing of `h`, at `t` along the segment's ray.
@@ -943,6 +950,7 @@ impl LastCrossing {
         LastCrossing {
             geom_id: h.geom_id,
             prim_id: h.prim_id,
+            placement: h.placement,
             front_face: h.rec.front_face,
             t,
         }
@@ -953,6 +961,7 @@ impl LastCrossing {
     pub(super) fn repeats(self, h: &WorldHit, t: f32) -> bool {
         h.geom_id == self.geom_id
             && h.prim_id == self.prim_id
+            && h.placement == self.placement
             && h.rec.front_face == self.front_face
             && t <= self.t + self.t.abs().max(1.0) * RE_HIT_WINDOW
     }
@@ -2569,6 +2578,7 @@ impl PendingExit {
             mat: &SSS_EXIT,
             geom_id: self.owner,
             prim_id: 0,
+            placement: 0,
         })
     }
 }

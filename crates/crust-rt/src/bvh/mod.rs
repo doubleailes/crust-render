@@ -568,6 +568,7 @@ impl Bvh {
                     u,
                     v,
                     geom_id: rec.geom_id,
+                    placement: 0,
                     prim_id: rec.prim_id,
                 }
             }
