@@ -9,8 +9,8 @@
     finds the light through the glass and the floor converges without
     fireflies.
 
-      cargo run --release -- -i samples/thin_window.usda -o window.exr --stats
-      cargo run --release -- -i samples/thin_window.usda -o light.exr --strategy light
+      cargo run --release -- render -i samples/thin_window.usda -o window.exr --stats
+      cargo run --release -- render -i samples/thin_window.usda -o light.exr --strategy light
 
     `--stats` counts the hits paths passed straight through.
     """
