@@ -53,7 +53,11 @@ geometry SHALL be invisible to camera rays by default. An authored
 
 `UsdLuxDistantLight` SHALL become a finite-cone distant light and
 `UsdLuxDomeLight` an environment light. A dome's lat-long map SHALL be
-importance-sampled by luminance × sin θ. The renderer SHALL have no built-in
+importance-sampled by luminance × sin θ, and SHALL be oriented as the UsdLux
+`DomeLight` schema specifies (the OpenEXR lat-long convention), in the light's
+own frame before its prim transform: the top row is +Y, the image centre
+(u = ½) faces +Z, u = ¼ faces +X, u = ¾ faces −X and the left and right edges
+meet at −Z. The renderer SHALL have no built-in
 sky: an escaping ray that no infinite light answers SHALL collect black,
 including in a stage with no infinite light at all.
 
@@ -115,6 +119,15 @@ any other ray.
   a stage with an HDRI dome and a backdrop dome
 - **THEN** camera rays that escape collect black, and surfaces are still lit by
   the HDRI
+
+#### Scenario: A lat-long dome is oriented as UsdLux specifies
+
+- **WHEN** an untransformed `DomeLight` carries a lat-long texture of four
+  quarter-width column bands, red, green, blue and white from left to right,
+  and escaping rays leave horizontally along (+1, 0, +1), (−1, 0, +1),
+  (+1, 0, −1) and (−1, 0, −1)
+- **THEN** they collect green, blue, red and white respectively (u = ⅜, ⅝, ⅛
+  and ⅞)
 
 ### Requirement: Light selection
 
