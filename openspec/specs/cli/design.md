@@ -12,19 +12,27 @@ Every probe and A/B recipe, with the context each needs. `CLAUDE.md` keeps the e
 
 ```bash
 # Build / render (single binary in the workspace, so bare cargo run works)
-cargo run --release -- -i samples/openpbr_showcase.usda -o out.exr
-cargo run --release -- -i samples/cornellbox.usda
-cargo run --release -- -i samples/usdlux.usda    # every UsdLux light: normalize, colour temperature, shaping, IES
-cargo run --release -- -i samples/materialx_teapot.usda    # MaterialX + UDIM (needs the DPEL download)
-cargo run --release -- -i samples/materialx_lion.usda      # the other DPEL asset: 140-op graph, sheen, 1.06 M tris
-cargo run --release -- -i samples/materialx_showcase.usda  # both, framed after the assets' overview.png (1080p)
-cargo run --release -- -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
-cargo run --release -- -i samples/usdpreview_textured.usda # UsdPreviewSurface + UsdUVTexture (UDIM, EXR, auto)
-cargo run --release                 # no -i → hard-coded procedural fallback (world::simple_scene)
-cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles are the default)
+cargo run --release -- render -i samples/openpbr_showcase.usda -o out.exr
+cargo run --release -- render -i samples/cornellbox.usda
+cargo run --release -- render -i samples/usdlux.usda    # every UsdLux light: normalize, colour temperature, shaping, IES
+cargo run --release -- render -i samples/materialx_teapot.usda    # MaterialX + UDIM (needs the DPEL download)
+cargo run --release -- render -i samples/materialx_lion.usda      # the other DPEL asset: 140-op graph, sheen, 1.06 M tris
+cargo run --release -- render -i samples/materialx_showcase.usda  # both, framed after the assets' overview.png (1080p)
+cargo run --release -- render -i samples/materialx_basic.usda     # MaterialX fixture, self-contained
+cargo run --release -- render -i samples/usdpreview_textured.usda # UsdPreviewSurface + UsdUVTexture (UDIM, EXR, auto)
+cargo run --release -- render       # no -i → hard-coded procedural fallback (world::simple_scene)
+cargo run --release -- render --scanline -i samples/cornellbox.usda # row order (tiles are the default)
+cargo run --release -- ls camera -i samples/cornellbox.usda # the --camera paths, one per line (log on stderr)
+cargo run --release -- ls light -i samples/cornellbox.usda  # also: material; plurals accepted
+
+# Subcommands: `render` takes every flag below except -l, which is global (before or
+# after the subcommand). --log-file stays render's: an optional value before a
+# subcommand name or `ls`'s KIND would swallow it. `ls <camera|light|material>` lists through
+# `Scene::list_usd(path, ListKind)`, the import's own walk and pruning per kind
+# (`usd_import/listing.rs`) — keep the two walks agreeing when either changes.
 
 # CLI flags: -i/--input, -o/--output (default output.exr), -l/--level (log level),
-# --log-file [DIR] (tee the log to crust-render-<UTC stamp>.log), --scanline
+# --log-file [DIR] (tee the log to crust-<UTC stamp>.log), --scanline
 #   (row order instead of the default 16x16 tiles; -b/--bucket is accepted and ignored),
 # -s/--samples (override spp), -f/--frame (USD time code to evaluate the stage at),
 # --strategy (power|balance|light|bsdf), --light-selection (uniform|power|learned),
@@ -47,15 +55,15 @@ cargo run --release -- --scanline -i samples/cornellbox.usda # row order (tiles 
 # Keep a full record of a render. The file gets the same events as the terminal
 # at the same -l level, so DEBUG has to be asked for; bare --log-file writes
 # into the working directory, and a directory argument is created if missing.
-cargo run --release -- -i samples/cornellbox.usda -l debug --log-file renders/logs
+cargo run --release -- render -i samples/cornellbox.usda -l debug --log-file renders/logs
 
 # Render one frame of an animated stage (time samples resolve at that code,
 # interpolated; unanimated attributes read their default). Without -f every
 # attribute reads its *default* value -- not frame 0.
-cargo run --release -- -i samples/animation.usda -f 5 -o frame.0005.exr
+cargo run --release -- render -i samples/animation.usda -f 5 -o frame.0005.exr
 
 # Where did the time and memory actually go? (parse vs build vs render vs output)
-cargo run --release -- -i samples/curves.usda --stats
+cargo run --release -- render -i samples/curves.usda --stats
 
 # The geometry layout: --stats lists what the kernel holds per table (vertices,
 # per-vertex normals, 24-byte triangle records, packets by layout, nodes), the
@@ -67,24 +75,24 @@ cargo run --release -- -i samples/curves.usda --stats
 # 104 -> 79 B/triangle on the grid for 13% less throughput, 30% less on an
 # out-of-cache soup), `auto` the measured default, gathered.
 python3 scripts/gen_subdiv_stress.py /tmp/subdiv_stress.usda
-CRUST_TRI_PACKETS=gathered target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
-CRUST_TRI_PACKETS=indexed  target/release/crust-render -i /tmp/subdiv_stress.usda --stats -l error
+CRUST_TRI_PACKETS=gathered target/release/crust render -i /tmp/subdiv_stress.usda --stats -l error
+CRUST_TRI_PACKETS=indexed  target/release/crust render -i /tmp/subdiv_stress.usda --stats -l error
 # ...and inside the render: Trace vs EvalBsdfs vs Texture vs SurfaceLighting,
 # flat / by category / by execution tree. Costs render time (~15-20%, printed
 # with the report), so never take a Render time from a --profile run.
-cargo run --release -- -i samples/materialx_basic.usda --profile
+cargo run --release -- render -i samples/materialx_basic.usda --profile
 
 # Subsurface random walks: --stats adds how many walks ran, the share that
 # found an exit (the rest were absorbed or leaked out of an open mesh), their
 # mean length in free flights, and the ray queries they cost ("subsurface walk
 # rays", counted into the total but not into "bounce rays").
-cargo run --release -- -i samples/materialx_subsurface.usda --stats
+cargo run --release -- render -i samples/materialx_subsurface.usda --stats
 
 # Cutouts: --stats adds the closest-hit queries they cost ("cutout rays": the
 # query past every hit a path passed through, plus every query of a blocked
 # shadow ray re-walked through cutouts) and how many hits were passed through.
 # A scene with no cutout material prints neither and runs the old code.
-cargo run --release -- -i samples/materialx_cutout.usda --stats
+cargo run --release -- render -i samples/materialx_cutout.usda --stats
 # ...and the numbers behind it: opacity and each leaf's tangent at a point.
 cargo run --release -p crust-render --example mtlx_shade -- samples/materialx_cutout.mtlx mtlx_gltf_card 0.05 0.05
 
@@ -160,8 +168,8 @@ cargo run --release -p crust-render --example mtlx_shade -- \
     samples/materialx_emissive.mtlx mtlx_emitter_textured 0.37 0.12   # (16 9 3)
 
 # ...and the same thing end to end, where the difference is 15.0 exactly.
-CRUST_TEX_STREAM=0 cargo run --release -- -i samples/materialx_emissive.usda -o ldr.exr -s 32
-cargo run --release -- -i samples/materialx_emissive.usda -o hdr.exr -s 32
+CRUST_TEX_STREAM=0 cargo run --release -- render -i samples/materialx_emissive.usda -o ldr.exr -s 32
+cargo run --release -- render -i samples/materialx_emissive.usda -o hdr.exr -s 32
 cargo run --release -p crust-render --example exr_diff -- ldr.exr hdr.exr
 
 # Is a Ptex file actually being addressed correctly? Neither check renders
@@ -204,8 +212,8 @@ cargo run --release -p crust-render --example maketx -- sky.exr raw            #
 cargo run --release -p crust-render --example maketx -- albedo.png srgb_texture --format=exr
 # ...or let the renderer convert on first use (missing or stale .tx only; any
 # float source keeps half tiles). The next render converts nothing.
-cargo run --release -- -i scene.usda --auto-tx
-CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
+cargo run --release -- render -i scene.usda --auto-tx
+CRUST_TEX_CACHE_MB=256 cargo run --release -- render -i scene.usda --stats
 
 # Streaming Ptex. No conversion step -- a .ptx is already a tiled per-face mip
 # pyramid, so this just turns the reader's cache on. Capping both backends
@@ -222,17 +230,17 @@ CRUST_TEX_CACHE_MB=256 cargo run --release -- -i scene.usda --stats
 #       tiled fixture) and the residency that comes with it.
 # `--stats` says `backend` either way, and names the variable that declined.
 # Both sides at -s 16, per "Measuring a change" in CLAUDE.md.
-CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr -s 16
+CRUST_PTEX_MAX_LOG2=5 cargo run --release -- render -i samples/ptex_quads.usda -o a.exr -s 16
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- -i samples/ptex_quads.usda -o b.exr -s 16
+    cargo run --release -- render -i samples/ptex_quads.usda -o b.exr -s 16
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr   # 0 pixels
 # The configuration that streams under the *default* policy: no pyramid, so no
 # chain to reduce in the wrong space. Exact and uncapped, at the cost of the
 # pyramid's anti-aliasing.
-CRUST_PTEX_STREAM=1 CRUST_PTEX_MIP=0 cargo run --release -- -i scene.usda --stats
+CRUST_PTEX_STREAM=1 CRUST_PTEX_MIP=0 cargo run --release -- render -i scene.usda --stats
 CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- -i scene.usda --stats
+    cargo run --release -- render -i scene.usda --stats
 
 # --- The optimization loop (see "Measuring a change" below) --------------
 scripts/bench_scenes.sh                        # min-of-N Render seconds + Mray/s per scene
@@ -250,6 +258,8 @@ cargo test --workspace --no-fail-fast
 ## Logging
 
 Logging uses `tracing`; set verbosity with `-l debug|info|warn|error|trace` (default `info`).
+A render logs to stdout, as it always has; `crust ls` logs to stderr, because its stdout
+is its result and is read by scripts.
 
 **The level is decided by whether the line scales with the scene, not by how interesting
 it is.** A default render prints four `INFO` lines — what is being rendered, how long it
@@ -274,7 +284,7 @@ line print a thousand times, it is `DEBUG`. Nothing is logged per ray, per pixel
 sample — the finest granularity in the engine is per *pass* (`render_pass`), which is one
 line on an ordinary render and a handful on a guided one.
 
-`--log-file` tees the same stream to `crust-render-<YYYYMMDDTHHMMSSZ>.log`. Four
+`--log-file` tees the same stream to `crust-<YYYYMMDDTHHMMSSZ>.log`. Four
 details are load-bearing. It is **two `fmt` layers over a registry**, not one writer
 teed into both sinks, because ANSI is a per-layer setting — a single writer would
 either fill the file with escape codes or strip the colour from the terminal; the

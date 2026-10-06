@@ -553,7 +553,7 @@ nothing. Two switches answer in numbers instead:
 ```bash
 # Is the surface's colour coming from the texture or the constant fallback?
 # CRUST_PTEX=0 declines every Ptex texture; surfaces fall back to baseColor.
-CRUST_PTEX=0 cargo run --release -- -i scene.usda -o out.exr
+CRUST_PTEX=0 cargo run --release -- render -i scene.usda -o out.exr
 
 # What are the actual texel values, before and after decode?
 cargo run --release -p crust-render --example tex_probe -- texture.ptx
@@ -562,8 +562,8 @@ cargo run --release -p crust-render --example tex_probe -- render.png [x0 y0 x1 
 # Is it the decode, or the mip level it is being read at? These turn off the
 # filtering without touching the decode, so a difference that survives them is
 # a colour-space question and one that does not is a filtering question.
-CRUST_TEX_MIP=0 CRUST_PTEX_MIP=0 cargo run --release -- -i scene.usda -o out.exr
-CRUST_RAY_CONES=0 cargo run --release -- -i scene.usda -o out.exr
+CRUST_TEX_MIP=0 CRUST_PTEX_MIP=0 cargo run --release -- render -i scene.usda -o out.exr
+CRUST_RAY_CONES=0 cargo run --release -- render -i scene.usda -o out.exr
 ```
 
 The two are worth separating early, because a mip level averaged in the wrong

@@ -12,7 +12,7 @@ the page to read first.
 
 ```mermaid
 graph TD
-    render["crust-render<br/><i>CLI binary</i>"]
+    render["crust-render<br/><i>CLI binary <code>crust</code></i>"]
     assets["crust-assets<br/><i>file decoders, texture streaming</i>"]
     core["crust-core<br/><i>engine: import, integrator, materials, lights</i>"]
     rt["crust-rt<br/><i>intersection kernel</i>"]
@@ -67,7 +67,7 @@ Two properties of this graph are deliberate and worth keeping:
 ## A render, end to end
 
 ```
-crust-render::main
+crust-render::main → render  (`crust render`; `crust ls <kind>` is Scene::list_usd)
  ├─ FileAssets::new()                        crust-assets: residency policy from CRUST_* env
  ├─ Scene::from_usd_with_options(path, &assets, opts)
  │   └─ scene::usd_import::load_scene        crust-core
@@ -168,6 +168,13 @@ other. The pairs:
 - **Import cache keys.** Anything keyed on a prototype path is scoped by the
   stage epoch (`ImportCaches::epoch`), because `/__Prototype_N` is renumbered
   per masked stage.
+- **Stage listing.** `crust ls` (`Scene::list_usd`, `usd_import/listing.rs`)
+  walks the stage apart from `traverse_into`, and must meet exactly the
+  cameras and lights it meets: the same chunks, `prune_reason` (invisible
+  subtrees walked for cameras only), instances and `PointInstancer`s not
+  entered. A light type the import learns must join `listing::is_kind`.
+  Pinned by `list_usd_lists_what_a_render_uses`, which renders through every
+  camera listed and counts the lights against the import's light list.
 - **Colour spaces.** Every colour input states its space; the per-input
   inventory is `docs/color_management.md`. Every curve is the OCIO config's
   (`crust-core/src/color.rs`). Every heuristic weighs a colour by the working
@@ -275,6 +282,11 @@ CI (`.github/workflows/rust.yml`) runs `cargo fmt --check`,
 toolchain is pinned in `rust-toolchain.toml`, which the `fmt` job checks against
 `RUST_VERSION`, and dependencies in the committed `Cargo.lock`. `rust-version` (1.96, set
 by cranelift) is the oldest toolchain that builds the workspace.
+`.github/workflows/nightly.yml` repeats clippy and the tests on a pinned and on the latest
+nightly, and its daily run publishes the rolling `nightly` pre-release: the CLI built with
+the latest nightly for Linux (musl), macOS (both architectures) and Windows (MSVC). Each
+binary renders the Cornell box before it ships, and the release is replaced only when every
+`latest` leg (clippy, tests, `bvh8`) passed on the same compiler.
 
 ## Technical debt register
 

@@ -478,20 +478,20 @@ agree for the wrong reason. `--stats` says which backend ran, and the
 ```bash
 # The equality. `file` here so the streamed side really streams; at a cap both
 # backends hold, the two images are bit-identical.
-CRUST_PTEX_MAX_LOG2=5 cargo run --release -- -i samples/ptex_quads.usda -o a.exr
+CRUST_PTEX_MAX_LOG2=5 cargo run --release -- render -i samples/ptex_quads.usda -o a.exr
 CRUST_PTEX_MAX_LOG2=5 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 \
     CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- -i samples/ptex_quads.usda -o b.exr
+    cargo run --release -- render -i samples/ptex_quads.usda -o b.exr
 cargo run --release -p crust-render --example exr_diff -- a.exr b.exr
 
 # The configuration that streams under the *default* policy: no pyramid, so
 # no chain to be reduced in the wrong space. Exact, uncapped, and aliasing.
 CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIN_MB=0 CRUST_PTEX_MIP=0 \
-    cargo run --release -- -i samples/ptex_quads.usda --stats -o c.exr
+    cargo run --release -- render -i samples/ptex_quads.usda --stats -o c.exr
 
 # The point: uncapped, under a budget, with the counters.
 CRUST_PTEX_STREAM=1 CRUST_PTEX_CACHE_MB=64 CRUST_PTEX_STREAM_MIPSPACE=file \
-    cargo run --release -- -i samples/ptex_quads.usda --stats -o d.exr
+    cargo run --release -- render -i samples/ptex_quads.usda --stats -o d.exr
 
 # The unit invariants.
 cargo test -p crust-assets --test ptex_stream -- --nocapture

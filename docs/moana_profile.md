@@ -23,8 +23,8 @@ Measured 2026-10-05 at `4143c58` (0.5.0), on the same machine as
 
 ```bash
 ISLAND=~/Workspace/samples/island/usd/island.usda
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --stats    # timings
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --profile  # sections
+cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --stats    # timings
+cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --profile  # sections
 ```
 
 - **Settings:** the stage authors no `crust:` settings, so the importer
@@ -164,7 +164,7 @@ section is as measured then.
 
 ```bash
 ISLAND=~/Workspace/samples/island/usd/island.usda
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
+cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam -s 4 --profile
 ```
 
 Every measurement in this section is of the island's **unrefined cages**. The island
@@ -683,12 +683,12 @@ and faces out of view, keep their cage; patches are built only for the refined f
 ```bash
 ISLAND=~/Workspace/samples/island/usd/island.usda
 # profile, at the defaults (128 spp)
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam --profile
+cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam --profile
 # light links, and which prototypes contribute nothing
-cargo run --release -- -i $ISLAND --camera /island/cam/shotCam -s 1 -l debug 2>&1 | grep -E 'light_links|contributed no geometry'
+cargo run --release -- render -i $ISLAND --camera /island/cam/shotCam -s 1 -l debug 2>&1 | grep -E 'light_links|contributed no geometry'
 # traversal counts + per-instance attribution (slow; see above)
 cargo build --release -p crust-render --features traversal-stats --target-dir target/tstats
-target/tstats/release/crust-render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
+target/tstats/release/crust render -i $ISLAND --camera /island/cam/shotCam -s 1 --stats -l debug > island.log
 # the knockout: a layer that sublayers island.usda and adds
 #   over "island" { over "isDunesB" ( active = false ) { } }
 # the before/after timing, interleaved (binaries built from one Cargo.lock)
@@ -696,6 +696,6 @@ scripts/bench_ab.sh -a bin_before -b bin_after -n 2 -p Render \
     -x "--camera /island/cam/shotCam -s 4" $ISLAND
 # level 1 in either packet layout, Ptex streamed (peak ~51 GiB gathered, ~42 indexed)
 CRUST_TRI_PACKETS=indexed CRUST_PTEX_STREAM=1 CRUST_PTEX_STREAM_MIPSPACE=file \
-    target/release/crust-render -i $ISLAND --camera /island/cam/shotCam \
+    target/release/crust render -i $ISLAND --camera /island/cam/shotCam \
     --subdiv-level 1 -s 16 --stats
 ```

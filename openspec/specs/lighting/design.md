@@ -235,7 +235,19 @@
   temperature's blackbody; `normalize` does not apply to a dome) times an optional
   lat-long `EnvironmentMap`; only `latlong`/`automatic` `texture:format` is supported and
   anything else warns and falls back to the uniform colour. The prim's *rotation* orients
-  the sky (a dome is at infinity, so its translation and scale are meaningless). The map
+  the sky (a dome is at infinity, so its translation and scale are meaningless).
+  **Orientation follows the UsdLux schema**, which adopts the OpenEXR lat-long
+  convention ("latitude 0, longitude 0 points into positive z direction; and latitude 0,
+  longitude pi/2 points into positive x direction", longitude running from +π at the left
+  edge to −π at the right): in the light's own frame +Y is the top row, **+Z the image
+  centre**, +X at u = ¼ and −X at u = ¾ (`environment.rs`, `u = ½ − atan2(x, z)/2π`). This
+  is Typhoon's `_DirectionToLatLongUv` exactly, pinned by
+  `mapping_matches_the_reference_delegate`. *History:* crust used to put −Z at the centre
+  (`u = ½ + atan2(x, −z)/2π`, reasoning that a USD camera looks down −Z). That turned every
+  textured dome 180° about its +Y. On the OpenPBR Shader Playground the HDRI's sun then
+  landed behind the room instead of shining through its window. The four samples whose
+  `sky_env.exr` dome was rotated by eye under the old convention now author
+  `rotateY = 200` instead of 20, which keeps their sun where it was. The map
   is importance-sampled by luminance × sinθ — the Jacobian matters, without it polar
   texels are over-sampled — which is what keeps a small bright sun in an HDRI from
   becoming a firefly farm.

@@ -7,7 +7,7 @@
     quarter turn — over a grey floor, under the sky and a small key light, so
     the card's holes and the ghost cast their shadows too.
 
-      cargo run --release -- -i samples/materialx_cutout.usda -o cutout.exr --stats
+      cargo run --release -- render -i samples/materialx_cutout.usda -o cutout.exr --stats
 
     `--stats` reports the extra ray queries cutouts cost and how many hits
     paths passed straight through.
@@ -98,7 +98,9 @@ def Xform "World"
         float inputs:intensity = 0.4
         asset inputs:texture:file = @sky_env.exr@
         token inputs:texture:format = "latlong"
-        float xformOp:rotateY = 20
+        # 200, not 20: authored when crust put -Z at the lat-long centre;
+        # UsdLux puts +Z there, and 180 more keeps the sun where it was.
+        float xformOp:rotateY = 200
         uniform token[] xformOpOrder = ["xformOp:rotateY"]
     }
 

@@ -8,7 +8,7 @@ world and camera position and normal, st), one of them authored with
 Houdini's driver:parameters:aov:* keys, and one var crust does not know
 (`diffuse_direct`), which is refused with a warning and gets no channel.
 
-    cargo run --release -- -i samples/aovs.usda
+    cargo run --release -- render -i samples/aovs.usda
 
 writes renders/aovs_beauty.exr (+ .png) and renders/aovs_data.exr. `-o x.exr`
 replaces the first product's path."""

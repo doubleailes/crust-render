@@ -70,24 +70,23 @@ fn row_zero_is_the_upper_pole() {
     }
 }
 
+/// The UsdLux / OpenEXR lat-long convention: longitude runs from +π at the
+/// left edge to −π at the right, longitude 0 is +Z and +π/2 is +X. On the
+/// top row, column 0 (u < ½) is red and column 1 (u ≥ ½) green.
 #[test]
-fn minus_z_is_the_image_centre_and_plus_z_the_seam() {
+fn plus_z_is_the_image_centre_and_plus_x_a_quarter_in() {
     let m = quad_map();
-    // u = 0.5 → column 1 of two.
-    let c = m.radiance(-Vec3A::Z + Vec3A::Y * 0.1);
-    assert_eq!(c, Vec3A::new(0.0, 1.0, 0.0));
-    // u wraps to 0 → column 0.
-    let c = m.radiance(Vec3A::Z + Vec3A::Y * 0.1);
-    assert_eq!(c, Vec3A::new(1.0, 0.0, 0.0));
-    // +X is at u = 0.75 (column 1), -X at u = 0.25 (column 0).
-    assert_eq!(
-        m.radiance(Vec3A::new(1.0, 0.1, 0.0)),
-        Vec3A::new(0.0, 1.0, 0.0)
-    );
-    assert_eq!(
-        m.radiance(Vec3A::new(-1.0, 0.1, 0.0)),
-        Vec3A::new(1.0, 0.0, 0.0)
-    );
+    let red = Vec3A::new(1.0, 0.0, 0.0);
+    let green = Vec3A::new(0.0, 1.0, 0.0);
+    // +X is at u = 0.25 (column 0), -X at u = 0.75 (column 1).
+    assert_eq!(m.radiance(Vec3A::new(1.0, 0.1, 0.0)), red);
+    assert_eq!(m.radiance(Vec3A::new(-1.0, 0.1, 0.0)), green);
+    // +Z is the centre: just toward +X is column 0, just toward -X column 1.
+    assert_eq!(m.radiance(Vec3A::new(0.1, 0.1, 1.0)), red);
+    assert_eq!(m.radiance(Vec3A::new(-0.1, 0.1, 1.0)), green);
+    // -Z is the seam: toward +X wraps to u ≈ 0, toward -X to u ≈ 1.
+    assert_eq!(m.radiance(Vec3A::new(0.1, 0.1, -1.0)), red);
+    assert_eq!(m.radiance(Vec3A::new(-0.1, 0.1, -1.0)), green);
 }
 
 #[test]
@@ -182,16 +181,17 @@ fn bright_texels_carry_proportionally_higher_pdf() {
     // Same row (same sin θ), one texel 10× brighter → 10× the density.
     px[2 * w + 1] = Vec3A::splat(10.0);
     let m = EnvironmentMap::new(w, h, px).unwrap();
-    // Directions at the centres of texels (1, 2) and (5, 2).
+    // Directions at the centres of texels (1, 2) and (5, 2), by the UsdLux /
+    // OpenEXR lat-long convention (`EnvironmentMap`'s module header).
     let dir_at = |x: usize, y: usize| {
         let u = (x as f32 + 0.5) / w as f32;
         let v = (y as f32 + 0.5) / h as f32;
         let theta = v * std::f32::consts::PI;
-        let phi = (u - 0.5) * std::f32::consts::TAU;
+        let phi = (0.5 - u) * std::f32::consts::TAU;
         Vec3A::new(
             theta.sin() * phi.sin(),
             theta.cos(),
-            -theta.sin() * phi.cos(),
+            theta.sin() * phi.cos(),
         )
     };
     let bright = m.pdf(dir_at(1, 2));

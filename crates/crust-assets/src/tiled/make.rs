@@ -1,7 +1,7 @@
 //! Converting an ordinary image into a `.tx` — the library half of `maketx`.
 //!
 //! Lives here rather than in the example so the renderer can do it too
-//! (`crust-render --auto-tx`, through [`crate::FileAssets::with_auto_tx`]).
+//! (`crust --auto-tx`, through [`crate::FileAssets::with_auto_tx`]).
 //! There is one conversion in the workspace, which is what keeps a `.tx` the
 //! CLI made on first use identical to one converted by hand.
 //!
