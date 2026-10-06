@@ -65,7 +65,10 @@ cutout card stacked within the window, facing the same way and hit on the same t
 index, would read as a re-hit and the second would be skipped — a light leak in dense
 instanced foliage, 2 cm wide at t = 20 under 1e-3. With spheres *and* cylinders at
 1e-6·t, 1e-4 is still 100× the pinned error and 2 mm at t = 20, the thickness of a
-coplanar overlap. The exposure is recorded in the rendering design record's known gaps.
+coplanar overlap. The exposure is recorded in the rendering design record's known gaps,
+with the measured cost of the narrow window: of the re-hits the walks meet in a 16-spp
+frame, 1 of 80 (`materialx_showcase`) and 2 of 39 (`openpbr_showcase`) lie past 1e-4·t
+(worst 2.5e-4·t, grazing triangle hits of hidden rect lights) and still count twice.
 
 ### D3. Both, not either
 

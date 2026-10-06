@@ -568,6 +568,15 @@ randomness use `openqmc::pcg::Rng`.
   met twice, and the second is passed for free. That is the thickness of a coplanar
   overlap; the window was 1e-3 in a first draft, which would have been 2 cm. The real
   fix is a placement identity on the hit, which the kernel does not carry.
+- **A few grazing triangle re-hits fall past the window.** Counting every consecutive
+  same-primitive, same-side hit within 1e-2·t (all of them re-hits, by the argument
+  above) in a 16-spp frame: `materialx_showcase` 80, of which 1 lies past 1e-4·t
+  (1.9e-4); `openpbr_showcase` 39, of which 2 (worst 2.5e-4); `usdlux` none. Those
+  are hidden rect lights crossed nearly edge-on, where the watertight triangle test's
+  `t` is ill-conditioned, and each slips through as a double count of a grazing
+  contribution — the 1e-6-level pixels in the golden diff. Widening the window to
+  cover them trades against the shared-id gap above; a precision fix for grazing
+  triangle distances would retire both.
 - **Two branches per vertex remain** in a world without thin walls (+0.30% of
   cornellbox's instructions). Removing them would mean swapping a met wall's material
   for a precomputed twin without its straight lobe, which was not judged worth it.
