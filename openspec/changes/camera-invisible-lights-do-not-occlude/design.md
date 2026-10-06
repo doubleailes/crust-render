@@ -1,8 +1,8 @@
 ## Context
 
-See `proposal.md` for the measurement. The requirement is in
-`specs/lighting/spec.md` ("Light sources hidden from the camera are transparent
-emitters").
+See `proposal.md` for the measurement. The requirements are in
+`specs/lighting/spec.md` ("Hidden light sources do not occlude", "Rays cross
+hidden light sources", "Visible and masked light sources stay solid").
 
 The code today:
 
