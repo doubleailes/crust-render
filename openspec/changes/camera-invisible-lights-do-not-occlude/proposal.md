@@ -57,8 +57,9 @@ None.
 
 ### Modified Capabilities
 
-- `lighting`: a new requirement, "Light sources hidden from the camera are
-  transparent emitters".
+- `lighting`: three new requirements, "Hidden light sources do not occlude",
+  "Rays cross hidden light sources" and "Visible and masked light sources stay
+  solid".
 
 ## Impact
 
