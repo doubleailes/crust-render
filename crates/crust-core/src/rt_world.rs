@@ -534,6 +534,9 @@ pub struct WorldBuilder {
     /// light authors a `lightLink`; empty otherwise (see
     /// [`World::light_class`]).
     light_classes: Vec<u16>,
+    /// Per `geom_id`, whether it is a transparent emitter; empty when none
+    /// is (see [`World::is_transparent_emitter`]).
+    transparent_emitters: Vec<bool>,
 }
 
 impl WorldBuilder {
@@ -701,6 +704,7 @@ impl WorldBuilder {
     pub fn commit(self) -> World {
         let cutouts = self.materials.iter().any(|m| m.has_cutout());
         let straight = self.materials.iter().any(|m| m.has_straight_transmission());
+        let emitters = self.transparent_emitters.contains(&true);
         World {
             scene: self.rt.commit_with(crate::commit_options()),
             materials: self.materials,
@@ -708,8 +712,39 @@ impl WorldBuilder {
             cutouts,
             straight,
             pass_throughs: cutouts || straight,
+            bounce_pass_throughs: cutouts || straight || emitters,
             light_classes: self.light_classes,
+            transparent_emitters: if emitters {
+                self.transparent_emitters
+            } else {
+                Vec::new()
+            },
         }
+    }
+
+    /// Marks the geometry at `id` as a light source that is a transparent
+    /// emitter (or, with `false`, no longer one) — see
+    /// [`World::is_transparent_emitter`]. Its mask must leave it invisible to
+    /// camera and shadow rays: the integrator passes it on the bounce side
+    /// only, and shadow rays must not meet it either. Its material must be a
+    /// one-sided emitter (`Emissive::light`, as every imported light's is): a
+    /// bounce through a closed source meets it twice, and the inside wall,
+    /// which NEE never samples, must give nothing.
+    ///
+    /// # Panics
+    /// If `id` was never attached or reserved.
+    pub fn set_transparent_emitter(&mut self, id: u32, transparent: bool) {
+        assert!(
+            (id as usize) < self.count(),
+            "geometry {id} was never attached"
+        );
+        if self.transparent_emitters.len() <= id as usize {
+            if !transparent {
+                return;
+            }
+            self.transparent_emitters.resize(id as usize + 1, false);
+        }
+        self.transparent_emitters[id as usize] = transparent;
     }
 
     /// Installs the per-`geom_id` light-link classes (one entry per attached
@@ -744,9 +779,14 @@ pub struct World {
     /// Whether any material can let a ray straight through
     /// ([`Material::has_straight_transmission`]).
     straight: bool,
-    /// `cutouts || straight`: whether a hit may be passed at all.
+    /// `cutouts || straight`: whether a shadow ray may pass a hit at all.
     pass_throughs: bool,
+    /// `pass_throughs`, or a transparent emitter exists: whether a bounce
+    /// segment may pass a hit at all.
+    bounce_pass_throughs: bool,
     light_classes: Vec<u16>,
+    /// Sparse, indexed by `geom_id`; empty when no geometry is one.
+    transparent_emitters: Vec<bool>,
 }
 
 impl World {
@@ -881,6 +921,34 @@ impl World {
     #[inline]
     pub fn has_pass_throughs(&self) -> bool {
         self.pass_throughs
+    }
+
+    /// Whether any geometry is a transparent emitter
+    /// ([`World::is_transparent_emitter`]).
+    #[inline]
+    pub fn has_transparent_emitters(&self) -> bool {
+        !self.transparent_emitters.is_empty()
+    }
+
+    /// Whether the geometry at `geom_id` is the source of a light the camera
+    /// does not see: an emitter and nothing else. Shadow rays do not see it
+    /// (its mask), and a bounce segment that meets it collects its emission
+    /// and continues past it, as if the source were absent.
+    #[inline]
+    pub fn is_transparent_emitter(&self, geom_id: u32) -> bool {
+        self.transparent_emitters
+            .get(geom_id as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// [`World::has_pass_throughs`] or [`World::has_transparent_emitters`]:
+    /// whether a bounce segment may end anywhere but its closest hit. Shadow
+    /// rays never meet a transparent emitter, so they keep
+    /// [`World::has_pass_throughs`].
+    #[inline]
+    pub fn has_bounce_pass_throughs(&self) -> bool {
+        self.bounce_pass_throughs
     }
 
     /// World bounds of all geometry; `None` for an empty world.

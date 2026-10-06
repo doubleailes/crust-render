@@ -140,6 +140,12 @@ other. The pairs:
   (`bounce_emission_weight`, `escaped_emission`), and both go through
   `SamplingStrategy` and `LightList::density` / the `*_at` lookups. Surface
   NEE ↔ BSDF bounce, volume NEE ↔ `PrevVertex::Phase`, guided mixture pdf ↔ NEE.
+- **Hidden light sources.** A source the camera does not see is invisible to
+  shadow rays (`light_ray_mask`) *and* crossed by bounce rays, which collect its
+  emission and continue (`World::is_transparent_emitter`, `pass_cutouts`,
+  `collect_crossings`). Change one side alone and NEE counts a light another
+  hides while the bounce stops at the nearer one: biased MIS. The crossing's
+  weight is `bounce_emission_weight_at`, its `L` event `Route::cross`.
 - **Light radiance.** `Emissive::radiance_toward` is the one answer to "what
   does this light emit toward here", read by `AreaLight::sample_li` and by
   `Material::emitted_at`.

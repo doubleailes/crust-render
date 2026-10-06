@@ -38,19 +38,33 @@ fn authored_camera_visibility(prim: &Prim) -> Option<bool> {
         .or_else(|| custom_bool(prim, RI_CAMERA_VISIBILITY))
 }
 
-/// Ray mask for a light's *source geometry*. Industry default (Arnold,
-/// RenderMan, Karma): the surface is invisible to camera rays — lights sit
-/// in frame without showing up — while shadow and indirect rays still see
-/// it, so occlusion and the bounce side of MIS are unchanged.
+/// Ray mask for a light's *source geometry*, and whether that source is a
+/// transparent emitter.
+///
+/// By default the surface is invisible to camera rays — lights sit in frame
+/// without showing up — and is then an emitter and nothing else: shadow rays
+/// do not see it, so it never occludes another light, and a bounce ray that
+/// crosses it collects its emission and goes on past it (the integrator's
+/// pass-through walk; `World::is_transparent_emitter`). That is the OpenUSD
+/// reference delegate's rule: Typhoon (hdEmbree) builds geometry for a light
+/// only when it is `visibleInPrimaryRay`.
+///
 /// `crust:light:cameraVisible = true` (or RenderMan's
 /// `primvars:ri:attributes:visibility:camera = 1`) opts the surface back in
-/// (classic Cornell-box look); an authored `crust:rayMask` wins outright.
-pub(super) fn light_ray_mask(prim: &Prim) -> RayMask {
+/// as a solid emitter that every ray category sees and that occludes, like a
+/// lamp bulb (classic Cornell-box look). An authored `crust:rayMask` wins
+/// outright and keeps the source solid on the bounce side, whatever bits it
+/// clears: it is the escape hatch for a scene that wants a hidden light to
+/// occlude.
+pub(super) fn light_ray_mask(prim: &Prim) -> (RayMask, bool) {
     if let Some(m) = custom_i32(prim, "crust:rayMask") {
-        return RayMask(m as u32);
+        return (RayMask(m as u32), false);
     }
-    let visible = authored_camera_visibility(prim).unwrap_or(false);
-    MASK_SHADOW | MASK_INDIRECT | if visible { MASK_CAMERA } else { RayMask::NONE }
+    if authored_camera_visibility(prim).unwrap_or(false) {
+        (MASK_CAMERA | MASK_SHADOW | MASK_INDIRECT, false)
+    } else {
+        (MASK_INDIRECT, true)
+    }
 }
 
 /// Which escaping rays see a light at infinity: every category, unless the

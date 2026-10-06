@@ -590,8 +590,12 @@ impl<'a> ShadingPoint<'a> {
     }
 
     /// [`Material::scatter_importance`] at this hit.
+    ///
+    /// `inline(always)`: a dispatch the integrator calls once per bounce.
+    /// LLVM inlined it on its own until `trace_path` grew the hidden-light
+    /// crossings; out of line it cost cornellbox 0.3% of its instructions.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn scatter_importance(&self, r_in: &Ray, sampler: PathSampler) -> Option<ScatterSample> {
         match &self.bsdf {
             Resolved::Material(m) => m.scatter_importance(r_in, &self.rec, sampler),

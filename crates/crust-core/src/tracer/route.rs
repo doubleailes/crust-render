@@ -175,6 +175,19 @@ impl Arrival {
     pub(crate) fn cutouts(ts: u16) -> Arrival {
         Arrival { ts, events: (0, 0) }
     }
+
+    /// The first `k` of these events: what a hidden light crossed after `k`
+    /// pass-throughs of the segment follows.
+    pub(crate) fn prefix(self, k: u16) -> Arrival {
+        if self.events.0 == self.events.1 {
+            Arrival::cutouts(k)
+        } else {
+            Arrival {
+                ts: 0,
+                events: (self.events.0, self.events.0 + k as u32),
+            }
+        }
+    }
 }
 
 /// One routed contribution: the event it passes through and its share.
@@ -200,6 +213,9 @@ struct RouteVertex {
     bounce: (u32, u32),
     /// The emission the bounce found at the next vertex (`next_emit`).
     next_emit: u16,
+    /// The hidden lights the bounce crossed on its way there (`crossed`):
+    /// a range into `Route::crossings`, each its own `L`.
+    crossed: (u32, u32),
 }
 
 /// A path's routing record, owned by the worker's `PathScratch` like the
@@ -212,6 +228,10 @@ pub(crate) struct Route {
     terminal_arrival: Arrival,
     /// The ordered pass-through events [`Arrival`]s with thin walls name.
     arrivals: Vec<u16>,
+    /// Every hidden light crossed, with its weighted share and the
+    /// pass-throughs before it on its segment.
+    crossings: Vec<Entry>,
+    crossing_arrivals: Vec<Arrival>,
     /// What the path collected beyond its last vertex, when it escaped:
     /// volume emission and transmittance on the final segment, and the
     /// lights at infinity, each with its share (summing, in order, to
@@ -238,6 +258,8 @@ pub(crate) struct Route {
     levels: Vec<Vec<u16>>,
     tables: Vec<Vec<Vec3A>>,
     masks: Vec<u64>,
+    /// Per lobe, then per crossing: where each crossed light's `L` ends.
+    cross_masks: Vec<u64>,
 }
 
 impl Route {
@@ -248,6 +270,8 @@ impl Route {
         self.terminal.clear();
         self.terminal_arrival = Arrival::default();
         self.arrivals.clear();
+        self.crossings.clear();
+        self.crossing_arrivals.clear();
         self.escaped = false;
         self.r1 = Vec3A::ZERO;
         self.albedo = Vec3A::ONE;
@@ -273,6 +297,7 @@ impl Route {
     /// Opens the record of a new vertex, reached through `arrival`.
     pub(crate) fn vertex(&mut self, arrival: Arrival) {
         let at = self.entries.len() as u32;
+        let crossed = self.crossings.len() as u32;
         self.vertices.push(RouteVertex {
             arrival,
             emit: NO_EVENT,
@@ -280,6 +305,7 @@ impl Route {
             nee: (at, at),
             bounce: (at, at),
             next_emit: NO_EVENT,
+            crossed: (crossed, crossed),
         });
     }
 
@@ -317,6 +343,18 @@ impl Route {
     pub(crate) fn next_emit(&mut self, sym: u16) {
         if let Some(v) = self.vertices.last_mut() {
             v.next_emit = sym;
+        }
+    }
+
+    /// A hidden light the last vertex's bounce crossed: its `L` symbol, its
+    /// share as the beauty's `crossed` adds it, and the pass-throughs before
+    /// it. Crossings come in order, before the next vertex opens.
+    pub(crate) fn cross(&mut self, sym: u16, value: Vec3A, arrival: Arrival) {
+        self.crossings.push(Entry { sym, value });
+        self.crossing_arrivals.push(arrival);
+        let end = self.crossings.len() as u32;
+        if let Some(v) = self.vertices.last_mut() {
+            v.crossed.1 = end;
         }
     }
 
@@ -474,6 +512,9 @@ impl Route {
                 .map_or(self.terminal_arrival, |n| n.arrival);
             let nee = &self.entries[v.nee.0 as usize..v.nee.1 as usize];
             let bounce = &self.entries[v.bounce.0 as usize..v.bounce.1 as usize];
+            let crossed = &self.crossings[v.crossed.0 as usize..v.crossed.1 as usize];
+            let crossed_at = &self.crossing_arrivals[v.crossed.0 as usize..v.crossed.1 as usize];
+            let nc = crossed.len();
             let (head, tail) = self.tables.split_at_mut(k + 1);
             let table = &mut head[k];
             let next_level = &self.levels[k + 1];
@@ -504,6 +545,8 @@ impl Route {
                 let mut targets = [0u16; MAX_SPLIT];
                 let mut rows = [None; MAX_SPLIT];
                 let mut ne_masks = [0u64; MAX_SPLIT];
+                let cross_masks = &mut self.cross_masks;
+                cross_masks.clear();
                 for (j, e) in bounce.iter().enumerate() {
                     let t = after(a, e.sym);
                     targets[j] = t;
@@ -511,7 +554,14 @@ impl Route {
                     if v.next_emit != NO_EVENT {
                         ne_masks[j] = lpe.accepts(lpe.step(arrive(t, ts_next), v.next_emit));
                     }
+                    cross_masks.extend(
+                        crossed
+                            .iter()
+                            .zip(crossed_at)
+                            .map(|(c, &at)| lpe.accepts(lpe.step(arrive(t, at), c.sym))),
+                    );
                 }
+                let cross_masks = &*cross_masks;
                 let targets = &targets[..bounce.len()];
                 // Expressions this state can no longer accept get nothing
                 // from here on: their entries stay zero.
@@ -528,6 +578,16 @@ impl Route {
                     let bit = 1u64 << i;
                     let pick = |mask: u64, x: Vec3A| if mask & bit != 0 { x } else { Vec3A::ZERO };
                     let r_next = |j: usize| rows[j].map_or(Vec3A::ZERO, |r| next_table[r * n + i]);
+                    // The hidden lights the lobe's ray crossed: the beauty's
+                    // `crossed` when they all agree, zero with none.
+                    let cross = |j: usize| {
+                        share(
+                            &cross_masks[j * nc..(j + 1) * nc],
+                            bit,
+                            rec.crossed,
+                            crossed,
+                        )
+                    };
                     let seg = pick(seg_mask, rec.segment_emit);
                     let emit = pick(emit_mask, rec.emit_here);
                     let nee_i = share(nee_masks, bit, rec.nee, nee);
@@ -536,7 +596,7 @@ impl Route {
                     let (direct, onward) = if bounce.is_empty() {
                         (Vec3A::ZERO, Vec3A::ZERO)
                     } else if agree {
-                        (pick(ne_masks[0], ne), r_next(0))
+                        (pick(ne_masks[0], ne) + cross(0), r_next(0))
                     } else {
                         (Vec3A::ZERO, Vec3A::ZERO)
                     };
@@ -546,7 +606,7 @@ impl Route {
                                 rec.factor * (direct + onward)
                             } else {
                                 bounce.iter().enumerate().fold(Vec3A::ZERO, |acc, (j, e)| {
-                                    acc + e.value * (pick(ne_masks[j], ne) + r_next(j))
+                                    acc + e.value * (pick(ne_masks[j], ne) + cross(j) + r_next(j))
                                 })
                             };
                             seg + rec.atten * (emit + nee_i + bounce_i)
@@ -562,7 +622,7 @@ impl Route {
                                     (Vec3A::ZERO, Vec3A::ZERO),
                                     |(d, o), (j, e)| {
                                         (
-                                            d + e.value * pick(ne_masks[j], ne),
+                                            d + e.value * (pick(ne_masks[j], ne) + cross(j)),
                                             o + e.value * r_next(j),
                                         )
                                     },

@@ -355,7 +355,9 @@ fn emit_round_light(
             transform_end: None,
         }
     });
-    let geom_id = world.attach_masked(geometry, material.clone(), light_ray_mask(prim));
+    let (mask, transparent) = light_ray_mask(prim);
+    let geom_id = world.attach_masked(geometry, material.clone(), mask);
+    world.set_transparent_emitter(geom_id, transparent);
 
     let shape: AreaShape = match round_sphere {
         Some(sphere) => sphere.into(),
@@ -585,6 +587,7 @@ pub(super) fn emit_rect_light(
     } else {
         vec![[0, 2, 1], [0, 3, 2]]
     };
+    let (mask, transparent) = light_ray_mask(prim);
     let geom_id = ctx.world.attach_masked(
         Geometry::TriangleMesh {
             vertices: vec![
@@ -597,8 +600,9 @@ pub(super) fn emit_rect_light(
             normals: None,
         },
         material.clone(),
-        light_ray_mask(prim),
+        mask,
     );
+    ctx.world.set_transparent_emitter(geom_id, transparent);
     ctx.lights.add(AreaLight::new(
         RectShape::new(origin, edge_u, edge_v, normal),
         material,
